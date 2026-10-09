@@ -18,6 +18,15 @@ use leviculum_core::SendError;
 use super::StdNodeCore;
 use crate::error::Error;
 
+/// Woken on every inbound packet processed by the event loop, so a sender
+/// parked on a full channel window resumes as soon as an ACK frees a slot
+/// instead of polling on a fixed timer (fork change).
+///
+/// Process-wide on purpose: it carries no data, only "re-check now". A spurious
+/// wake costs one lock acquisition; a missed one is bounded by the old 50 ms
+/// poll, which is kept as the safety timeout.
+pub(crate) static WINDOW_NOTIFY: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
 /// Async handle for a Link (send-only)
 ///
 /// `LinkHandle` provides async write operations for a link.
@@ -108,6 +117,12 @@ impl LinkHandle {
                 return Err(Error::NotRunning);
             }
 
+            // Register before checking the window, so an ACK between the
+            // commit attempt and wait is not lost. Keep upstream's
+            // reserve-before-commit dispatch path for cancellation safety.
+            let window_opened = WINDOW_NOTIFY.notified();
+            tokio::pin!(window_opened);
+            window_opened.as_mut().enable();
             let result = super::dispatch_committed(&self.action_dispatch_tx, || {
                 let mut core = self.inner.lock_recover();
                 Ok(((), core.send_on_link(&self.link_id, data)?))
@@ -124,7 +139,9 @@ impl LinkHandle {
                     }
                 }
                 Err(Error::Send(SendError::Busy)) => {
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    // Window full: wait for an inbound packet (an ACK frees a slot),
+                    // with the former fixed 50 ms as the safety net.
+                    let _ = tokio::time::timeout(std::time::Duration::from_millis(50), window_opened).await;
                 }
                 Err(other) => {
                     return Err(other);
