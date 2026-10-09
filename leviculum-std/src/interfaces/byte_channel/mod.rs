@@ -22,16 +22,46 @@ pub use handle::ByteChannelHandle;
 
 /// `HW_MTU` for a byte-channel interface, matching [`PipeInterface`](super::pipe)
 /// so the two are wire-interchangeable.
-const BYTE_CHANNEL_HW_MTU: u32 = 1064;
+pub(crate) const BYTE_CHANNEL_HW_MTU: u32 = 1064;
 
 /// Default channel buffer size (packets), matching the pipe interface.
 pub(crate) const BYTE_CHANNEL_DEFAULT_BUFFER_SIZE: usize = 64;
+
+/// Default read buffer size (bytes) used to pull data off the caller's stream.
+pub(crate) const BYTE_CHANNEL_DEFAULT_READ_BUF: usize = 1024;
+
+/// Tunables of a byte-channel interface. [`Default`] reproduces the upstream
+/// behaviour exactly (HW_MTU 1064, 64-packet channels, 1 KiB reads).
+///
+/// Fork addition (rawg tuning): the upstream values are sized for serial-like
+/// pipes and cap throughput over a fast reliable stream such as QUIC.
+#[derive(Debug, Clone, Copy)]
+pub struct ByteChannelOptions {
+    /// `HW_MTU` advertised for the interface (bounds link MTU negotiation).
+    pub hw_mtu: u32,
+    /// Capacity, in packets, of the incoming and outgoing channels.
+    pub buffer_size: usize,
+    /// Size of the buffer used for each read from the stream.
+    pub read_buf_size: usize,
+}
+
+impl Default for ByteChannelOptions {
+    fn default() -> Self {
+        Self {
+            hw_mtu: BYTE_CHANNEL_HW_MTU,
+            buffer_size: BYTE_CHANNEL_DEFAULT_BUFFER_SIZE,
+            read_buf_size: BYTE_CHANNEL_DEFAULT_READ_BUF,
+        }
+    }
+}
 
 /// Configuration for a byte-channel interface.
 pub(crate) struct ByteChannelConfig {
     pub id: InterfaceId,
     pub name: String,
     pub buffer_size: usize,
+    pub hw_mtu: u32,
+    pub read_buf_size: usize,
     /// Fires to detach the interface: the task stops and closes its channels,
     /// so the event loop removes it from routing.
     pub shutdown: Option<oneshot::Receiver<()>>,
@@ -58,6 +88,8 @@ where
     let task_counters = Arc::clone(&counters);
     let task_ready = Arc::clone(&ready);
     let shutdown = config.shutdown;
+    let hw_mtu = config.hw_mtu;
+    let read_buf_size = config.read_buf_size;
 
     tokio::spawn(async move {
         // No connect step — ready as soon as the stream is handed over.
@@ -71,6 +103,8 @@ where
             outgoing_rx,
             task_counters,
             shutdown,
+            hw_mtu,
+            read_buf_size,
         )
         .await;
     });
@@ -79,7 +113,7 @@ where
         info: InterfaceInfo {
             id,
             name: config.name,
-            hw_mtu: Some(BYTE_CHANNEL_HW_MTU),
+            hw_mtu: Some(config.hw_mtu),
             is_local_client: false,
             bitrate: None,
             announce_cap_bitrate: None,
@@ -133,6 +167,8 @@ mod tests {
                 id: InterfaceId(0),
                 name: "bc-test".into(),
                 buffer_size: BYTE_CHANNEL_DEFAULT_BUFFER_SIZE,
+                hw_mtu: BYTE_CHANNEL_HW_MTU,
+                read_buf_size: BYTE_CHANNEL_DEFAULT_READ_BUF,
                 shutdown: None,
             },
             iface_side,

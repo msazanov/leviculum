@@ -9,13 +9,9 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
 
 use super::super::{IncomingPacket, InterfaceCounters, OutgoingPacket};
-use super::BYTE_CHANNEL_HW_MTU;
 
 /// Frame buffer multiplier (accounts for HDLC escaping overhead).
 const FRAME_BUFFER_MULTIPLIER: usize = 2;
-
-/// Read buffer size for pulling bytes off the caller's stream.
-const READ_BUF_SIZE: usize = 1024;
 
 /// Await an optional shutdown signal, or pend forever when there is none.
 async fn wait_shutdown(shutdown: &mut Option<oneshot::Receiver<()>>) {
@@ -41,12 +37,14 @@ pub(super) async fn run<R, W>(
     mut outgoing_rx: mpsc::Receiver<OutgoingPacket>,
     counters: Arc<InterfaceCounters>,
     mut shutdown: Option<oneshot::Receiver<()>>,
+    hw_mtu: u32,
+    read_buf_size: usize,
 ) where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    let mut deframer = Deframer::with_max_frame(BYTE_CHANNEL_HW_MTU as usize);
-    let mut read_buf = vec![0u8; READ_BUF_SIZE];
+    let mut deframer = Deframer::with_max_frame(hw_mtu as usize);
+    let mut read_buf = vec![0u8; read_buf_size.max(256)];
     let mut frame_buf = Vec::with_capacity(MTU * FRAME_BUFFER_MULTIPLIER);
 
     loop {

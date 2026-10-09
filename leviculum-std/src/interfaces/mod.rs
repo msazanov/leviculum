@@ -16,7 +16,7 @@ pub mod auto_interface;
 #[cfg(target_os = "linux")]
 pub(crate) mod ble;
 pub(crate) mod byte_channel;
-pub use byte_channel::ByteChannelHandle;
+pub use byte_channel::{ByteChannelHandle, ByteChannelOptions};
 pub mod hdlc;
 pub(crate) mod i2p;
 pub(crate) mod inventory;

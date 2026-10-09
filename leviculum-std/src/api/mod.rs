@@ -425,6 +425,21 @@ impl Node {
         self.inner.spawn_byte_channel(name, stream)
     }
 
+    /// [`spawn_byte_channel`](Self::spawn_byte_channel) with explicit tunables
+    /// (fork addition, see [`ByteChannelOptions`](crate::interfaces::ByteChannelOptions)).
+    #[must_use = "dropping the handle immediately detaches the interface"]
+    pub fn spawn_byte_channel_with<S>(
+        &self,
+        name: &str,
+        stream: S,
+        options: crate::interfaces::ByteChannelOptions,
+    ) -> Result<crate::interfaces::ByteChannelHandle>
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
+    {
+        self.inner.spawn_byte_channel_with(name, stream, options)
+    }
+
     /// Request a path to a destination. The result arrives as a path-found event.
     pub async fn request_path(&self, dest_hash: &DestinationHash) -> Result<()> {
         self.inner.request_path(dest_hash).await
