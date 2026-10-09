@@ -995,7 +995,15 @@ impl Channel {
             return;
         }
         let base = rtt_ms / self.window as u64;
-        self.pacing_interval_ms = base.clamp(1, rtt_ms);
+        // Pacing spreads `window` sends across one RTT, i.e. rtt/window apart.
+        // The clock here ticks in whole milliseconds, so when rtt < window the
+        // intended interval is below 1 ms. Rounding that UP to 1 ms (the old
+        // `clamp(1, ..)`) made pacing up to `window` times stricter than
+        // designed and capped a fast link (QUIC/TCP, rtt 0-1 ms) at ~1000
+        // messages/s whatever the window. A sub-millisecond interval is
+        // represented as 0: no pacing, the window alone bounds the flight.
+        // Slow links (rtt >= window ms) are unchanged.
+        self.pacing_interval_ms = if base == 0 { 0 } else { base.clamp(1, rtt_ms) };
     }
 
     /// Clear all pending outbound envelopes
