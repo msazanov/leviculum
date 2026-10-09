@@ -91,3 +91,20 @@ check-embedded = "build -p leviculum-core --target thumbv7em-none-eabihf --targe
 
 [target.aarch64-unknown-linux-gnu]
 linker = "aarch64-linux-gnu-gcc"
+
+# Android / ARMv8. The aes crate only reaches for the ARMv8 AES intrinsics when
+# this cfg flag is set - there is no runtime detection on aarch64, so without
+# it every Android build encrypts in software. That is the client platform for
+# this project, so it is set here rather than left to each build script.
+#
+# Deliberately scoped to the Android triple: the comment above the arm64 musl
+# section explains why rustflags keys there are risky, and this target has no
+# other role.
+#
+# Note for cross builds: with the workspace `sha2/asm` feature enabled, building
+# this target REQUIRES the NDK clang (sha2-asm compiles assembly via $CC).
+# Without it the build fails with `failed to find tool aarch64-linux-android-clang`
+# rather than silently producing a slow binary - build Android through
+# cargo-ndk, which sets that toolchain up.
+[target.aarch64-linux-android]
+rustflags = ["--cfg", "aes_armv8"]
