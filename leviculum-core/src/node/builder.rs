@@ -5,7 +5,7 @@
 
 use alloc::vec::Vec;
 
-use crate::destination::ProofStrategy;
+use crate::destination::{ProofBinding, ProofStrategy};
 use crate::identity::Identity;
 use crate::resource::{WindowPolicy, RESOURCE_MAX_INCOMING_PER_LINK, RESOURCE_MAX_INCOMING_SIZE};
 use crate::transport::{PathChoice, TransportConfig};
@@ -40,6 +40,7 @@ use super::NodeCore;
 pub struct NodeCoreBuilder {
     identity: Option<Identity>,
     proof_strategy: ProofStrategy,
+    proof_binding: ProofBinding,
     transport_config: TransportConfig,
     respond_to_probes: bool,
     remote_management: bool,
@@ -62,6 +63,7 @@ impl NodeCoreBuilder {
         Self {
             identity: None,
             proof_strategy: ProofStrategy::None,
+            proof_binding: ProofBinding::default(),
             transport_config: TransportConfig::default(),
             respond_to_probes: false,
             remote_management: false,
@@ -99,6 +101,15 @@ impl NodeCoreBuilder {
     /// Set the default proof strategy for destinations
     pub fn proof_strategy(mut self, strategy: ProofStrategy) -> Self {
         self.proof_strategy = strategy;
+        self
+    }
+
+    /// Choose what data proofs are bound to; see
+    /// [`ProofBinding`]. `PacketHash` is the only mode that
+    /// exchanges data with vanilla Reticulum, and costs a SHA-256 pass per
+    /// packet at both ends.
+    pub fn proof_binding(mut self, binding: ProofBinding) -> Self {
+        self.proof_binding = binding;
         self
     }
 
@@ -352,6 +363,7 @@ impl NodeCoreBuilder {
             storage,
         );
         node.max_incoming_resources_per_link = self.max_incoming_resources_per_link;
+        node.set_proof_binding(self.proof_binding);
 
         if self.respond_to_probes {
             node.enable_probe_responder();
@@ -426,6 +438,7 @@ impl NodeCoreBuilder {
             storage,
         ));
         node.max_incoming_resources_per_link = self.max_incoming_resources_per_link;
+        node.set_proof_binding(self.proof_binding);
 
         if self.respond_to_probes {
             node.enable_probe_responder();

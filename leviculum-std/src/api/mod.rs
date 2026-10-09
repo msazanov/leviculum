@@ -27,7 +27,7 @@ pub use leviculum_core::node::NodeEvent;
 pub use leviculum_core::resource::ResourceStrategy;
 pub use leviculum_core::transport::InterfaceId;
 pub use leviculum_core::transport::TickOutput;
-pub use leviculum_core::{Identity, RequestPolicy};
+pub use leviculum_core::{Identity, ProofBinding, RequestPolicy};
 
 /// Generate a new random identity using the system RNG.
 ///
@@ -192,6 +192,17 @@ impl NodeBuilder {
     /// making stale/recovery observable quickly.
     pub fn link_keepalive(mut self, secs: u64) -> Self {
         self.inner = self.inner.link_keepalive(secs);
+        self
+    }
+
+    /// Choose what data proofs are bound to; see [`leviculum_core::ProofBinding`].
+    ///
+    /// `TokenTag` (the default) binds proofs to the token's HMAC tag, which is
+    /// free because encryption already computes it. `PacketHash` matches vanilla
+    /// Reticulum and interoperates with it, at the cost of a SHA-256 pass over
+    /// every payload byte at both ends. Both ends of a link must agree.
+    pub fn proof_binding(mut self, binding: ProofBinding) -> Self {
+        self.inner = self.inner.proof_binding(binding);
         self
     }
 

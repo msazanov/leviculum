@@ -252,7 +252,7 @@ use alloc::vec::Vec;
 
 use crate::announce::{AnnounceControl, AnnounceError};
 use crate::constants::{RATCHET_SIZE, TRUNCATED_HASHBYTES};
-use crate::destination::{Destination, DestinationHash, Direction, ProofStrategy};
+use crate::destination::{Destination, DestinationHash, Direction, ProofBinding, ProofStrategy};
 use crate::identity::Identity;
 use crate::link::{Link, LinkId};
 use crate::packet::packet_hash;
@@ -472,6 +472,8 @@ pub struct NodeCore<R: CryptoRngCore, C: Clock, S: Storage> {
     destinations: BTreeMap<DestinationHash, Destination>,
     /// Default proof strategy for new destinations
     default_proof_strategy: ProofStrategy,
+    /// What data proofs are bound to; see [`crate::destination::ProofBinding`]
+    proof_binding: ProofBinding,
     /// Pending events
     events: Vec<NodeEvent>,
     /// Probe destination hash (if respond_to_probes is enabled).
@@ -632,6 +634,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             channel_backpressure_last_log_ms: 0,
             destinations: BTreeMap::new(),
             default_proof_strategy: proof_strategy,
+            proof_binding: ProofBinding::default(),
             events: Vec::new(),
             probe_dest_hash: None,
             remote_mgmt_dest_hash: None,
@@ -2886,6 +2889,20 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// sized for loss on the wire, on the host's pace (748). A host that never
     /// drains fills the bounded ring and meets its loud refusal. `None` (the
     /// default) means the host's delivery cannot drop, so no limit applies.
+    /// Choose what data proofs are bound to on this node.
+    ///
+    /// Both ends of a link must use the same binding: the sender keys its
+    /// receipts by it and the receiver signs it. `TokenTag` (the default) is
+    /// cheaper because the value already exists; `PacketHash` is the only mode
+    /// that interoperates with vanilla Reticulum.
+    pub fn set_proof_binding(&mut self, binding: ProofBinding) {
+        self.proof_binding = binding;
+    }
+
+    pub fn proof_binding(&self) -> ProofBinding {
+        self.proof_binding
+    }
+
     pub fn set_channel_delivery_budget(&mut self, budget: Option<usize>) {
         self.channel_delivery_budget = budget;
     }

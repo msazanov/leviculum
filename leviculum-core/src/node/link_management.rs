@@ -13,7 +13,7 @@ use crate::constants::{
     KEEPALIVE_INITIATOR_BYTE, LINK_REQUEST_MAX_RETRIES, MODE_AES256_CBC, MS_PER_SECOND,
     PROOF_DATA_SIZE, TRAFFIC_TIMEOUT_FACTOR, TRAFFIC_TIMEOUT_MIN_MS, TRUNCATED_HASHBYTES,
 };
-use crate::destination::{DestinationHash, ProofStrategy};
+use crate::destination::{DestinationHash, ProofBinding, ProofStrategy};
 use crate::event_scalar::MsOrNone;
 use crate::hex_fmt::{HexFmt, HexShort};
 use crate::link::channel::{ChannelAction, ChannelError, Message, ReceiveOutcome};
@@ -168,8 +168,15 @@ impl Message for RawBytesMessage<'_> {
 ///
 /// Packets that carry no token fall back to the hash, so an unexpected packet
 /// degrades to the old behaviour instead of mis-binding a receipt.
-fn proof_identifier(raw: &[u8]) -> [u8; 32] {
-    crate::packet::packet_token_tag(raw).unwrap_or_else(|| packet_hash(raw))
+///
+/// `binding` selects the legacy mode explicitly; see [`crate::destination::ProofBinding`].
+fn proof_identifier(raw: &[u8], binding: ProofBinding) -> [u8; 32] {
+    match binding {
+        ProofBinding::TokenTag => {
+            crate::packet::packet_token_tag(raw).unwrap_or_else(|| packet_hash(raw))
+        }
+        ProofBinding::PacketHash => packet_hash(raw),
+    }
 }
 
 pub(super) struct ReceiptTracker {
@@ -205,11 +212,12 @@ impl ReceiptTracker {
         link_id: LinkId,
         sequence: u16,
         now_ms: u64,
+        binding: ProofBinding,
     ) {
         self.entries
             .retain(|e| !(e.link_id == link_id && e.sequence == Some(sequence)));
 
-        let full_hash = proof_identifier(packet_data);
+        let full_hash = proof_identifier(packet_data, binding);
         let mut truncated_hash = [0u8; TRUNCATED_HASHBYTES];
         truncated_hash.copy_from_slice(&full_hash[..TRUNCATED_HASHBYTES]);
 
@@ -235,8 +243,9 @@ impl ReceiptTracker {
         packet_data: &[u8],
         link_id: LinkId,
         deadline_ms: u64,
+        binding: ProofBinding,
     ) -> [u8; 32] {
-        let full_hash = proof_identifier(packet_data);
+        let full_hash = proof_identifier(packet_data, binding);
         let mut truncated_hash = [0u8; TRUNCATED_HASHBYTES];
         truncated_hash.copy_from_slice(&full_hash[..TRUNCATED_HASHBYTES]);
         self.entries.retain(|entry| entry.full_hash != full_hash);
@@ -859,7 +868,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             .map(|ch| ch.last_sent_sequence())
         {
             self.receipt_tracker
-                .register(&packet_bytes, *link_id, seq, now_ms);
+                .register(&packet_bytes, *link_id, seq, now_ms, self.proof_binding);
         }
 
         // Route via attached interface
@@ -921,7 +930,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let deadline_ms = now_ms.saturating_add(receipt_timeout_ms);
         let packet_hash = self
             .receipt_tracker
-            .register_raw(&packet_bytes, *link_id, deadline_ms);
+            .register_raw(&packet_bytes, *link_id, deadline_ms, self.proof_binding);
         self.route_link_packet(link_id, &packet_bytes);
 
         Ok((packet_hash, self.process_events_and_actions()))
@@ -1853,7 +1862,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             // Proofs bind to the token tag that `link.decrypt` just verified,
             // not to a second SHA-256 pass over the payload: see
             // `proof_identifier` for why that is not a weakening.
-            let full_packet_hash = proof_identifier(raw_packet);
+            let full_packet_hash = proof_identifier(raw_packet, self.proof_binding);
 
             let mut proofs = Vec::new();
 
@@ -2096,7 +2105,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             Ok(len) => {
                 plaintext.truncate(len);
 
-                let full_packet_hash = proof_identifier(raw_packet);
+                let full_packet_hash = proof_identifier(raw_packet, self.proof_binding);
 
                 match link.proof_strategy() {
                     ProofStrategy::All => {
@@ -4303,8 +4312,13 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
                         if let Some(packet) = packet {
                             // Register receipt for the re-encrypted packet
-                            self.receipt_tracker
-                                .register(&packet, link_id, sequence, now_ms);
+                            self.receipt_tracker.register(
+                                &packet,
+                                link_id,
+                                sequence,
+                                now_ms,
+                                self.proof_binding,
+                            );
 
                             self.events.push(NodeEvent::ChannelRetransmit {
                                 link_id,
@@ -4738,6 +4752,50 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 }
 
 #[cfg(test)]
+#[cfg(test)]
+mod proof_binding_tests {
+    use super::proof_identifier;
+    use crate::constants::{AES_BLOCK_SIZE, HMAC_SIZE};
+    use crate::destination::ProofBinding;
+    use crate::packet::packet_hash;
+
+    fn token_packet() -> alloc::vec::Vec<u8> {
+        let mut raw = alloc::vec::Vec::new();
+        raw.extend_from_slice(&[0x00, 0x00]);
+        raw.extend_from_slice(&[0x11u8; 16]);
+        raw.push(crate::packet::PacketContext::Channel.to_byte());
+        raw.extend_from_slice(&[0u8; AES_BLOCK_SIZE + AES_BLOCK_SIZE]);
+        raw.extend_from_slice(&[0xABu8; HMAC_SIZE]);
+        raw
+    }
+
+    /// The two modes must disagree on a token packet - that is the whole point
+    /// of the switch - while both stay internally consistent, which is what
+    /// lets a legacy peer find our receipts at all.
+    #[test]
+    fn bindings_differ_and_each_matches_its_own_definition() {
+        let raw = token_packet();
+        let tag = proof_identifier(&raw, ProofBinding::TokenTag);
+        let hash = proof_identifier(&raw, ProofBinding::PacketHash);
+
+        assert_eq!(tag, crate::packet::packet_token_tag(&raw).unwrap());
+        assert_eq!(hash, packet_hash(&raw));
+        assert_ne!(tag, hash);
+    }
+
+    /// Without a token there is no tag to bind to, so both modes must land on
+    /// the hash rather than one of them binding to something meaningless.
+    #[test]
+    fn packets_without_a_token_use_the_hash_in_both_modes() {
+        let mut raw = token_packet();
+        raw[2 + 16] = crate::packet::PacketContext::LinkClose.to_byte();
+        let expected = packet_hash(&raw);
+        assert_eq!(proof_identifier(&raw, ProofBinding::TokenTag), expected);
+        assert_eq!(proof_identifier(&raw, ProofBinding::PacketHash), expected);
+    }
+}
+
+#[cfg(test)]
 mod receipt_tracker_tests {
     use super::*;
 
@@ -4754,11 +4812,11 @@ mod receipt_tracker_tests {
         let data_v1 = [0x00u8; 64];
         let data_v2 = [0xFFu8; 64];
 
-        tracker.register(&data_v1, link, 1, 1000);
+        tracker.register(&data_v1, link, 1, 1000, ProofBinding::PacketHash);
         assert_eq!(tracker.len(), 1);
 
         // Re-register same (link, seq) with different data
-        tracker.register(&data_v2, link, 1, 2000);
+        tracker.register(&data_v2, link, 1, 2000, ProofBinding::PacketHash);
         assert_eq!(tracker.len(), 1);
 
         // Entry should have the new hashes
@@ -4779,7 +4837,7 @@ mod receipt_tracker_tests {
         let mut tracker = ReceiptTracker::new();
         let link = make_link_id(0xBB);
 
-        tracker.register(b"some_packet", link, 5, 1000);
+        tracker.register(b"some_packet", link, 5, 1000, ProofBinding::PacketHash);
         assert_eq!(tracker.len(), 1);
 
         let unknown = [0xFFu8; TRUNCATED_HASHBYTES];
@@ -4793,9 +4851,9 @@ mod receipt_tracker_tests {
         let link_a = make_link_id(0xAA);
         let link_b = make_link_id(0xBB);
 
-        tracker.register(b"a1", link_a, 1, 1000);
-        tracker.register(b"a2", link_a, 2, 1000);
-        tracker.register(b"b1", link_b, 1, 1000);
+        tracker.register(b"a1", link_a, 1, 1000, ProofBinding::PacketHash);
+        tracker.register(b"a2", link_a, 2, 1000, ProofBinding::PacketHash);
+        tracker.register(b"b1", link_b, 1, 1000, ProofBinding::PacketHash);
         assert_eq!(tracker.count_for_link(&link_a), 2);
         assert_eq!(tracker.count_for_link(&link_b), 1);
 
@@ -4810,8 +4868,8 @@ mod receipt_tracker_tests {
         let mut tracker = ReceiptTracker::new();
         let link = make_link_id(0xCC);
 
-        tracker.register(b"old_packet", link, 1, 1000);
-        tracker.register(b"new_packet", link, 2, 1000 + DATA_RECEIPT_TIMEOUT_MS);
+        tracker.register(b"old_packet", link, 1, 1000, ProofBinding::PacketHash);
+        tracker.register(b"new_packet", link, 2, 1000 + DATA_RECEIPT_TIMEOUT_MS, ProofBinding::PacketHash);
 
         // Advance time so only the first has expired
         let now = 1000 + DATA_RECEIPT_TIMEOUT_MS + 1;
@@ -4831,7 +4889,7 @@ mod receipt_tracker_tests {
         let link = make_link_id(0xDD);
 
         // Register, confirm delivery, register again with same sequence
-        tracker.register(b"msg_v1", link, 1, 1000);
+        tracker.register(b"msg_v1", link, 1, 1000, ProofBinding::PacketHash);
         let hash1 = packet_hash(b"msg_v1");
         let mut trunc1 = [0u8; TRUNCATED_HASHBYTES];
         trunc1.copy_from_slice(&hash1[..TRUNCATED_HASHBYTES]);
@@ -4841,7 +4899,7 @@ mod receipt_tracker_tests {
         assert_eq!(tracker.len(), 0);
 
         // Re-register same sequence (after wraparound or new message)
-        tracker.register(b"msg_v2", link, 1, 2000);
+        tracker.register(b"msg_v2", link, 1, 2000, ProofBinding::PacketHash);
         assert_eq!(tracker.len(), 1);
 
         let hash2 = packet_hash(b"msg_v2");
