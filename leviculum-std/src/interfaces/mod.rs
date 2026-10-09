@@ -19,7 +19,7 @@ pub(crate) mod ble;
 pub(crate) mod byte_channel;
 pub(crate) mod census;
 pub(crate) mod firmware_request;
-pub use byte_channel::ByteChannelHandle;
+pub use byte_channel::{ByteChannelHandle, ByteChannelOptions};
 pub use firmware_request::{
     request_firmware, request_firmware_announce, request_firmware_media_restore,
     request_firmware_media_silence, request_firmware_reset, FirmwareRequest,

@@ -2924,6 +2924,21 @@ impl ReticulumNode {
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
     {
+        self.spawn_byte_channel_with(name, stream, crate::interfaces::ByteChannelOptions::default())
+    }
+
+    /// Like [`spawn_byte_channel`](Self::spawn_byte_channel) with explicit
+    /// [`ByteChannelOptions`] (fork addition: HW_MTU, channel capacity and read
+    /// buffer size are tunables instead of pipe-sized constants).
+    pub fn spawn_byte_channel_with<S>(
+        &self,
+        name: &str,
+        stream: S,
+        options: crate::interfaces::ByteChannelOptions,
+    ) -> Result<crate::interfaces::ByteChannelHandle, Error>
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
+    {
         use std::sync::atomic::Ordering;
 
         let runtime = self.runtime.as_ref().ok_or(Error::NotRunning)?;
@@ -2939,7 +2954,9 @@ impl ReticulumNode {
                 crate::interfaces::byte_channel::ByteChannelConfig {
                     id,
                     name: name.to_string(),
-                    buffer_size: crate::interfaces::byte_channel::BYTE_CHANNEL_DEFAULT_BUFFER_SIZE,
+                    buffer_size: options.buffer_size,
+                    hw_mtu: options.hw_mtu,
+                    read_buf_size: options.read_buf_size,
                     shutdown: Some(shutdown_rx),
                 },
                 stream,
