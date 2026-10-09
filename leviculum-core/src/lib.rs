@@ -163,8 +163,8 @@ pub use announce::{
     verify_announce_packet, AnnounceControl, AnnounceError, ReceivedAnnounce,
 };
 pub use destination::{
-    Destination, DestinationError, DestinationHash, DestinationType, Direction, ProofStrategy,
-    SingleDestDecryptor,
+    Destination, DestinationError, DestinationHash, DestinationType, Direction, ProofBinding,
+    ProofStrategy, SingleDestDecryptor,
 };
 pub use identity::Identity;
 pub use link::{LinkCloseReason, LinkError, LinkId, PeerKeys};

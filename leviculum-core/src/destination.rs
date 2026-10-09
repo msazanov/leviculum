@@ -180,6 +180,31 @@ pub enum ProofStrategy {
     All = 0x23,
 }
 
+/// What a data proof is bound to.
+///
+/// Both options put exactly 32 bytes on the wire, so the proof packet is the
+/// same size either way; only the meaning of those bytes differs. The two ends
+/// must agree, so this is a node-wide setting, not a per-packet decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProofBinding {
+    /// Bind proofs to the token's HMAC tag (default).
+    ///
+    /// The tag is already computed when the packet is encrypted or verified, so
+    /// this costs no extra hashing. Binding is no weaker than the hash: the tag
+    /// is keyed with the link key and the proof is still signed with the peer's
+    /// identity key.
+    #[default]
+    TokenTag = 0,
+    /// Bind proofs to SHA-256 of the packet's hashable part.
+    ///
+    /// This is what vanilla Reticulum and unmodified leviculum expect, and it is
+    /// the only mode in which this node can exchange data with them. It costs a
+    /// full SHA-256 pass over every payload byte at both ends - measured at
+    /// 23.2 vs 27.3 MiB/s on the bench, about 17% of throughput. Use it only
+    /// when talking to a peer that speaks the old binding.
+    PacketHash = 1,
+}
+
 /// A 16-byte destination hash (truncated hash of name_hash + identity_hash)
 ///
 /// In the Reticulum protocol, destination hashes identify network endpoints.

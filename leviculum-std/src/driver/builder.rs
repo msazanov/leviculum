@@ -222,6 +222,13 @@ impl ReticulumNodeBuilder {
     }
 
     /// Set the proof strategy for the node
+    /// Choose what data proofs are bound to; see
+    /// [`leviculum_core::ProofBinding`].
+    pub fn proof_binding(mut self, binding: leviculum_core::ProofBinding) -> Self {
+        self.core_builder = self.core_builder.proof_binding(binding);
+        self
+    }
+
     pub fn proof_strategy(mut self, strategy: ProofStrategy) -> Self {
         self.core_builder = self.core_builder.proof_strategy(strategy);
         self
