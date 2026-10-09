@@ -154,6 +154,24 @@ impl Message for RawBytesMessage<'_> {
 ///
 /// Every datum exists exactly once. Lookups are linear scans, n is bounded
 /// by channel window size × active links (realistically < 100, typically < 20).
+/// The 32 bytes a data proof is bound to.
+///
+/// This used to be SHA-256 of the packet's hashable part, which meant a second
+/// full SHA-256 pass over every payload byte at both ends of every data packet.
+/// On a CPU without SHA extensions that pass was the largest single cost on the
+/// receive path (measured: removing it alone took the bench from ~13.7 to
+/// ~21.8 MiB/s). The token's HMAC tag is already computed during encrypt and
+/// verify, is the same size, covers the same payload and is keyed with the link
+/// key — so binding proofs to it drops the pass without weakening anything: the
+/// proof is still signed with the peer's identity key, and an observer that
+/// reads a tag off the wire still cannot forge a proof with it.
+///
+/// Packets that carry no token fall back to the hash, so an unexpected packet
+/// degrades to the old behaviour instead of mis-binding a receipt.
+fn proof_identifier(raw: &[u8]) -> [u8; 32] {
+    crate::packet::packet_token_tag(raw).unwrap_or_else(|| packet_hash(raw))
+}
+
 pub(super) struct ReceiptTracker {
     entries: Vec<ReceiptEntry>,
 }
@@ -191,7 +209,7 @@ impl ReceiptTracker {
         self.entries
             .retain(|e| !(e.link_id == link_id && e.sequence == Some(sequence)));
 
-        let full_hash = packet_hash(packet_data);
+        let full_hash = proof_identifier(packet_data);
         let mut truncated_hash = [0u8; TRUNCATED_HASHBYTES];
         truncated_hash.copy_from_slice(&full_hash[..TRUNCATED_HASHBYTES]);
 
@@ -218,7 +236,7 @@ impl ReceiptTracker {
         link_id: LinkId,
         deadline_ms: u64,
     ) -> [u8; 32] {
-        let full_hash = packet_hash(packet_data);
+        let full_hash = proof_identifier(packet_data);
         let mut truncated_hash = [0u8; TRUNCATED_HASHBYTES];
         truncated_hash.copy_from_slice(&full_hash[..TRUNCATED_HASHBYTES]);
         self.entries.retain(|entry| entry.full_hash != full_hash);
@@ -1832,7 +1850,10 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let proof_packets: Vec<Vec<u8>> = {
             let rtt_ms = link.rtt_ms();
             let channel = link.ensure_channel(rtt_ms);
-            let full_packet_hash = packet_hash(raw_packet);
+            // Proofs bind to the token tag that `link.decrypt` just verified,
+            // not to a second SHA-256 pass over the payload: see
+            // `proof_identifier` for why that is not a weakening.
+            let full_packet_hash = proof_identifier(raw_packet);
 
             let mut proofs = Vec::new();
 
@@ -2075,7 +2096,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             Ok(len) => {
                 plaintext.truncate(len);
 
-                let full_packet_hash = packet_hash(raw_packet);
+                let full_packet_hash = proof_identifier(raw_packet);
 
                 match link.proof_strategy() {
                     ProofStrategy::All => {

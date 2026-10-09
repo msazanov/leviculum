@@ -589,6 +589,54 @@ pub fn get_hashable_part(raw: &[u8]) -> alloc::vec::Vec<u8> {
     hashable
 }
 
+/// HMAC tag of an encrypted packet's token, i.e. its last 32 data bytes.
+///
+/// Link data packets carry `IV(16) | ciphertext | HMAC-SHA256(32)` in the data
+/// field, and the tag is produced as a by-product of the encrypt/verify step
+/// that happens anyway. Handing it to the receipt/proof machinery lets a data
+/// proof bind to a value nobody had to hash a second time.
+///
+/// Returns `None` when the packet cannot be a token packet: too short, no
+/// usable header, or a context whose data is sent in cleartext (link control,
+/// keepalive, path responses) — for those the trailing bytes are payload and
+/// must not be mistaken for a tag.
+pub fn packet_token_tag(raw: &[u8]) -> Option<[u8; 32]> {
+    use crate::constants::{AES_BLOCK_SIZE, HMAC_SIZE};
+    // Smallest possible token: IV + one AES block + tag.
+    const MIN_TOKEN_SIZE: usize = AES_BLOCK_SIZE + AES_BLOCK_SIZE + HMAC_SIZE;
+    if raw.len() < HEADER_MINSIZE {
+        return None;
+    }
+    let flags = raw[0];
+    let is_header_type_2 = (flags & FLAG_HEADER_TYPE_MASK) != 0;
+    let data_start = if is_header_type_2 {
+        2 + TRUNCATED_HASHBYTES
+    } else {
+        2
+    };
+    let header_end = data_start + TRUNCATED_HASHBYTES + 1; // dest_hash + context
+    if raw.len() < header_end {
+        return None;
+    }
+    // Only provable contexts are token-encrypted; see the link builder.
+    match PacketContext::from_byte(raw[data_start + TRUNCATED_HASHBYTES]) {
+        PacketContext::Resource
+        | PacketContext::ResourceAdv
+        | PacketContext::ResourceHmu
+        | PacketContext::ResourceRcl
+        | PacketContext::Channel => {}
+        _ => return None,
+    }
+    let data = &raw[header_end..];
+    if data.len() < MIN_TOKEN_SIZE {
+        return None;
+    }
+    let tag = &data[data.len() - HMAC_SIZE..];
+    let mut out = [0u8; HMAC_SIZE];
+    out.copy_from_slice(tag);
+    Some(out)
+}
+
 /// Compute the packet hash (matching Python Reticulum)
 ///
 /// This computes SHA256 of the hashable part of the packet. The hash is
@@ -687,6 +735,60 @@ pub fn build_proof_packet(
 
 #[cfg(test)]
 mod tests {
+    /// The token tag is what data proofs now bind to, so its boundaries matter:
+    /// a cleartext packet must never have trailing payload read as a tag, and a
+    /// real token packet must yield exactly its HMAC bytes.
+    #[test]
+    fn token_tag_is_only_read_from_token_packets() {
+        use crate::constants::{AES_BLOCK_SIZE, HMAC_SIZE};
+        let min_token = AES_BLOCK_SIZE + AES_BLOCK_SIZE + HMAC_SIZE;
+
+        // Type1 header (flags, hops, dest_hash, context) + token-shaped data.
+        let mut raw = alloc::vec::Vec::new();
+        raw.extend_from_slice(&[0x00, 0x00]);
+        raw.extend_from_slice(&[0x11u8; 16]);
+        raw.push(PacketContext::Channel.to_byte());
+        raw.extend_from_slice(&[0u8; AES_BLOCK_SIZE]); // IV
+        raw.extend_from_slice(&[0u8; AES_BLOCK_SIZE]); // ciphertext
+        let tag: [u8; 32] = core::array::from_fn(|i| 0xA0 + i as u8);
+        raw.extend_from_slice(&tag);
+        assert_eq!(packet_token_tag(&raw), Some(tag));
+
+        // Same shape, but a context that is never token-encrypted: the trailing
+        // bytes are payload and must not be taken for a tag.
+        let mut cleartext = raw[..raw.len() - HMAC_SIZE].to_vec();
+        cleartext.push(PacketContext::LinkClose.to_byte());
+        let ctx_at = 2 + 16;
+        cleartext[ctx_at] = PacketContext::LinkClose.to_byte();
+        assert_eq!(packet_token_tag(&cleartext), None);
+
+        // Truncated: below HEADER_MINSIZE, and data shorter than a token.
+        assert_eq!(packet_token_tag(&[0x00, 0x00]), None);
+        let mut tiny = raw[..raw.len() - HMAC_SIZE].to_vec();
+        tiny[ctx_at] = PacketContext::Channel.to_byte();
+        assert_eq!(packet_token_tag(&tiny), None);
+        let _ = min_token;
+    }
+
+    /// packet_hash must stay bit-for-bit equal to hashing the materialised
+    /// hashable part: the digest goes on the wire into data proofs, so a
+    /// divergence here silently breaks interop with Python Reticulum.
+    #[test]
+    fn packet_hash_matches_materialised_hashable_part() {
+        for len in [2usize, 3, 17, 18, 19, 64, 1000, 16000] {
+            for header in [0x00u8, 0x40, 0x80, 0xC0] {
+                let raw: alloc::vec::Vec<u8> = (0..len).map(|i| (i as u8).wrapping_mul(31).wrapping_add(header)).collect();
+                let expected = crate::crypto::sha256(&get_hashable_part(&raw));
+                assert_eq!(packet_hash(&raw), expected, "len={len} header={header:#x}");
+            }
+        }
+        // Too short to have any hashable part: both paths hash the empty slice.
+        for len in [0usize, 1] {
+            let raw = alloc::vec![0u8; len];
+            assert_eq!(packet_hash(&raw), crate::crypto::sha256(&get_hashable_part(&raw)), "len={len}");
+        }
+    }
+
     use super::*;
 
     /// `packet_hash` streams the hashable part instead of building it
