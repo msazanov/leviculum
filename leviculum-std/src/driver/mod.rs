@@ -4461,6 +4461,9 @@ async fn run_event_loop(
                 let now_ms = core.now_ms();
                 (output, now_ms)
             };
+            // A processed inbound packet may have been the ACK that freed a
+            // channel-window slot: wake senders parked in `LinkHandle::send`.
+            stream::WINDOW_NOTIFY.notify_waiters();
             if let Some(deadline_ms) = output.next_deadline_ms {
                 let delta = deadline_ms.saturating_sub(now_ms);
                 let wake_at = tokio::time::Instant::now() + Duration::from_millis(delta);
