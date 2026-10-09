@@ -479,7 +479,15 @@ pub const CHANNEL_WINDOW_MAX_VERY_SLOW: usize = 3;
 pub const CHANNEL_WINDOW_MAX_MEDIUM: usize = 12;
 
 /// Maximum window size for fast links
-pub const CHANNEL_WINDOW_MAX_FAST: usize = 48;
+/// Maximum window size for fast links (Python Channel.py:249 WINDOW_MAX_LIMIT_FAST = 48).
+///
+/// Raised from 48 after measuring the VPN data path: throughput there is
+/// window/RTT limited, so on a sub-millisecond RTT link the 48-packet ceiling
+/// capped in-flight data. 128 measured +11% (mean 26.34 -> 29.32 MiB/s over
+/// four interleaved pairs); 256 measured no better than 128, so the extra
+/// in-flight buffering - 128 * 16 KiB = 2 MiB of tx ring per link - buys
+/// nothing beyond that.
+pub const CHANNEL_WINDOW_MAX_FAST: usize = 128;
 
 /// Maximum rx_ring capacity (out-of-order buffer).
 /// Python's rx_ring is unbounded; we cap at 512 for embedded safety.
