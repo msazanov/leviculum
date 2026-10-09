@@ -98,7 +98,13 @@ ed25519-dalek = { version = "2", default-features = false, features = ["alloc", 
 x25519-dalek = { version = "2", default-features = false, features = ["static_secrets", "zeroize"] }
 aes = { version = "0.8", default-features = false }
 cbc = { version = "0.1", default-features = false, features = ["alloc"] }
-sha2 = { version = "0.10", default-features = false }
+# `asm` is NOT in the crate's default features, so without it SHA-256 runs the
+# portable C path even on hardware that has the instructions. It costs nothing
+# at runtime on older CPUs (the crate detects support) and is worth several
+# times the SHA-256 rate on SHA-NI x86 (Ice Lake+, Zen 3+) and on the ARMv8
+# SHA-256 instructions every current Android SoC has. Digest output is
+# identical either way - it is the same algorithm, just computed in hardware.
+sha2 = { version = "0.10", default-features = false, features = ["asm"] }
 hmac = { version = "0.12", default-features = false }
 md-5 = { version = "0.10" }
 hkdf = { version = "0.12", default-features = false }
