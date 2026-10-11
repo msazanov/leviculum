@@ -649,7 +649,7 @@ impl IncomingResource {
         // after it.
         let mut decrypted = vec![0u8; stream.len()];
         let plaintext_len = link
-            .decrypt(&stream, &mut decrypted)
+            .decrypt_resource_body(&stream, &mut decrypted)
             .map_err(|_| ResourceError::CryptoError)?;
         drop(stream);
         decrypted.truncate(plaintext_len);

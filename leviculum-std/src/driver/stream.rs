@@ -11,21 +11,12 @@ use crate::sync_ext::MutexRecover;
 
 use tokio::sync::mpsc;
 
+use leviculum_core::SendError;
 use leviculum_core::link::LinkId;
 use leviculum_core::transport::TickOutput;
-use leviculum_core::SendError;
 
 use super::StdNodeCore;
 use crate::error::Error;
-
-/// Woken on every inbound packet processed by the event loop, so a sender
-/// parked on a full channel window resumes as soon as an ACK frees a slot
-/// instead of polling on a fixed timer (fork change).
-///
-/// Process-wide on purpose: it carries no data, only "re-check now". A spurious
-/// wake costs one lock acquisition; a missed one is bounded by the old 50 ms
-/// poll, which is kept as the safety timeout.
-pub(crate) static WINDOW_NOTIFY: tokio::sync::Notify = tokio::sync::Notify::const_new();
 
 /// Async handle for a Link (send-only)
 ///
@@ -62,6 +53,8 @@ pub struct LinkHandle {
     action_dispatch_tx: mpsc::Sender<TickOutput>,
     /// Whether the handle is closed
     closed: bool,
+    window_opened: Arc<tokio::sync::Notify>,
+    completions: Arc<super::completions::CompletionRegistry>,
 }
 
 impl LinkHandle {
@@ -70,18 +63,38 @@ impl LinkHandle {
         link_id: LinkId,
         inner: Arc<Mutex<StdNodeCore>>,
         action_dispatch_tx: mpsc::Sender<TickOutput>,
+        completions: Arc<super::completions::CompletionRegistry>,
     ) -> Self {
+        let window_opened = completions.send_window(link_id);
         Self {
             link_id,
             inner,
             action_dispatch_tx,
             closed: false,
+            window_opened,
+            completions,
         }
     }
 
     /// Get the link ID
     pub fn link_id(&self) -> &LinkId {
         &self.link_id
+    }
+
+    /// Reduce the in-flight channel budget for latency-sensitive traffic.
+    pub fn set_send_window_limit(&self, limit: usize) -> Result<(), Error> {
+        self.inner
+            .lock_recover()
+            .set_link_send_window_limit(&self.link_id, limit)
+            .map_err(|_| Error::NotRunning)
+    }
+
+    /// Opt-in QUIC-underlay profile; window/retransmit reliability is retained.
+    pub fn set_send_pacing_enabled(&self, enabled: bool) -> Result<(), Error> {
+        self.inner
+            .lock_recover()
+            .set_link_send_pacing_enabled(&self.link_id, enabled)
+            .map_err(|_| Error::NotRunning)
     }
 
     /// Check if the handle is closed
@@ -122,9 +135,9 @@ impl LinkHandle {
                 return Err(Error::NotRunning);
             }
 
-            // Register for the next inbound-packet wake BEFORE checking the
+            // Register for the next delivery/close wake BEFORE checking the
             // window, so an ACK landing between the check and the wait is not lost.
-            let window_opened = WINDOW_NOTIFY.notified();
+            let window_opened = self.window_opened.notified();
             tokio::pin!(window_opened);
             window_opened.as_mut().enable();
 
@@ -149,9 +162,11 @@ impl LinkHandle {
                     }
                 }
                 Err(SendError::Busy) => {
-                    // Window full: wait for an inbound packet (an ACK frees a slot),
+                    // Window full: wait for this link's confirmed delivery/close,
                     // with the former fixed 50 ms as the safety net.
-                    let _ = tokio::time::timeout(std::time::Duration::from_millis(50), window_opened).await;
+                    let _ =
+                        tokio::time::timeout(std::time::Duration::from_millis(50), window_opened)
+                            .await;
                 }
                 Err(other) => {
                     return Err(Error::Send(other));
@@ -177,6 +192,13 @@ impl LinkHandle {
             .await
             .map_err(|_| Error::NotRunning)?;
         Ok(())
+    }
+}
+
+impl Drop for LinkHandle {
+    fn drop(&mut self) {
+        self.completions
+            .release_send_window(self.link_id, &self.window_opened);
     }
 }
 
@@ -210,7 +232,12 @@ mod tests {
         let (inner, tx, _rx, _td) = make_node_and_inner();
         let link_id = LinkId::from([0u8; 16]);
 
-        let handle = LinkHandle::new(link_id, inner, tx);
+        let handle = LinkHandle::new(
+            link_id,
+            inner,
+            tx,
+            super::super::completions::CompletionRegistry::new(),
+        );
 
         // Sending on a non-existent link should return Send(NoLink)
         let result = handle.try_send(b"hello").await;
@@ -227,7 +254,12 @@ mod tests {
         let (inner, tx, _rx, _td) = make_node_and_inner();
         let link_id = LinkId::from([0u8; 16]);
 
-        let mut handle = LinkHandle::new(link_id, inner, tx);
+        let mut handle = LinkHandle::new(
+            link_id,
+            inner,
+            tx,
+            super::super::completions::CompletionRegistry::new(),
+        );
 
         assert!(!handle.is_closed());
         // close_link on a non-existent link is harmless (returns empty output)
@@ -245,7 +277,12 @@ mod tests {
         let (inner, tx, _rx, _td) = make_node_and_inner();
         let link_id = LinkId::from([0u8; 16]);
 
-        let mut handle = LinkHandle::new(link_id, inner, tx);
+        let mut handle = LinkHandle::new(
+            link_id,
+            inner,
+            tx,
+            super::super::completions::CompletionRegistry::new(),
+        );
 
         handle.close().await.unwrap();
         // Second close is a no-op
@@ -262,7 +299,12 @@ mod tests {
         let (tx, rx) = mpsc::channel::<TickOutput>(1);
         drop(rx);
 
-        let handle = LinkHandle::new(link_id, inner, tx);
+        let handle = LinkHandle::new(
+            link_id,
+            inner,
+            tx,
+            super::super::completions::CompletionRegistry::new(),
+        );
 
         // Send fails because there's no link, so dispatch channel
         // closure is not reached, but Send(NoLink) is returned first

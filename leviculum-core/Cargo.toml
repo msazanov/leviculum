@@ -25,9 +25,11 @@ tracing = ["dep:tracing"]
 ed25519-dalek.workspace = true
 x25519-dalek.workspace = true
 aes.workspace = true
+aes-gcm = { version = "=0.10.3", default-features = false, features = ["aes"] }
 cbc.workspace = true
 sha2.workspace = true
 hmac.workspace = true
+memchr = { version = "2.7.6", default-features = false }
 hkdf.workspace = true
 rand_core.workspace = true
 tracing = { workspace = true, optional = true }

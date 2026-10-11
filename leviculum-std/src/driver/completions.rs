@@ -35,7 +35,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::task::{Context, Poll};
 
 use leviculum_core::link::{LinkCloseReason, LinkId};
@@ -334,6 +334,9 @@ impl RegistryInner {
 /// loop. See the module docs for the locking and race-freedom contracts.
 pub(crate) struct CompletionRegistry {
     inner: Mutex<RegistryInner>,
+    /// Only live LinkHandles own notifications; this node-local index holds
+    /// weak references and never retains a link or its payloads.
+    send_windows: Mutex<HashMap<LinkId, (Weak<tokio::sync::Notify>, usize)>>,
     /// Fast path for [`observe`](Self::observe): `false` means no live tap
     /// subscriber, so the tap branch is one relaxed atomic load — the
     /// zero-subscriber cost the issue requires.
@@ -343,6 +346,7 @@ pub(crate) struct CompletionRegistry {
 impl CompletionRegistry {
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
+            send_windows: Mutex::new(HashMap::new()),
             inner: Mutex::new(RegistryInner {
                 waiters: HashMap::new(),
                 established: HashSet::new(),
@@ -357,12 +361,50 @@ impl CompletionRegistry {
         })
     }
 
+    pub(crate) fn send_window(&self, link_id: LinkId) -> Arc<tokio::sync::Notify> {
+        let mut windows = self.send_windows.lock_recover();
+        if let Some((weak, handles)) = windows.get_mut(&link_id) {
+            if let Some(window) = weak.upgrade() {
+                *handles += 1;
+                return window;
+            }
+        }
+        let window = Arc::new(tokio::sync::Notify::new());
+        windows.insert(link_id, (Arc::downgrade(&window), 1));
+        window
+    }
+
+    pub(crate) fn release_send_window(&self, link_id: LinkId, window: &Arc<tokio::sync::Notify>) {
+        let mut windows = self.send_windows.lock_recover();
+        if let Some((weak, handles)) = windows.get_mut(&link_id) {
+            if weak.ptr_eq(&Arc::downgrade(window)) {
+                // Count handles, not Arc references: a concurrent wake may
+                // temporarily own an Arc when the final handle is dropped.
+                *handles -= 1;
+                if *handles == 0 {
+                    windows.remove(&link_id);
+                }
+            }
+        }
+    }
+
+    fn wake_send_window(&self, link_id: LinkId) {
+        let window = self
+            .send_windows
+            .lock_recover()
+            .get(&link_id)
+            .and_then(|(w, _)| w.upgrade());
+        if let Some(window) = window {
+            window.notify_waiters();
+        }
+    }
+
     /// The single dispatch-layer hook. Hot path: one enum-discriminant match;
     /// irrelevant variants return without locking or allocating. Relevant
-    /// variants: `LinkEstablished`, `LinkClosed`, sender-side
+    /// variants: `LinkDeliveryConfirmed`, `LinkEstablished`, `LinkClosed`, sender-side
     /// `ResourceCompleted`/`ResourceFailed`, `ResponseReceived`,
-    /// `RequestTimedOut` — all `EventClass::Control`, so the primary stream
-    /// cannot drop what this hook resolves on.
+    /// `RequestTimedOut`. Delivery notifications are observed here before
+    /// the primary data stream can drop them; other completions are control events.
     ///
     /// Waiters are resolved AFTER the registry lock is released: a oneshot
     /// send wakes the waiter's task, and that wake must not run under a lock
@@ -376,10 +418,14 @@ impl CompletionRegistry {
             self.broadcast_event(event);
         }
         match event {
+            NodeEvent::LinkDeliveryConfirmed { link_id, .. } => self.wake_send_window(*link_id),
             NodeEvent::LinkEstablished { link_id, .. } => self.on_link_established(*link_id),
             NodeEvent::LinkClosed {
                 link_id, reason, ..
-            } => self.on_link_closed(*link_id, *reason),
+            } => {
+                self.wake_send_window(*link_id);
+                self.on_link_closed(*link_id, *reason);
+            }
             NodeEvent::ResourceCompleted {
                 link_id,
                 resource_hash,
@@ -772,6 +818,15 @@ impl CompletionRegistry {
         for w in pending {
             w.tx.fail(CompletionError::NodeStopped);
         }
+        let windows: Vec<_> = self
+            .send_windows
+            .lock_recover()
+            .values()
+            .filter_map(|(w, _)| w.upgrade())
+            .collect();
+        for window in windows {
+            window.notify_waiters();
+        }
     }
 
     /// Restart support: `stop()` closes the registry when the event loop
@@ -917,6 +972,58 @@ impl FilteredEventTap {
 mod tests {
     use super::*;
     use leviculum_core::DestinationHash;
+
+    #[tokio::test]
+    async fn delivery_wakes_only_its_link_and_node_without_losing_early_wake() {
+        let registry = CompletionRegistry::new();
+        let other_node = CompletionRegistry::new();
+        let a = registry.send_window(link(1));
+        let b = registry.send_window(link(2));
+        let c = other_node.send_window(link(1));
+        let second_handle = registry.send_window(link(1));
+        assert!(Arc::ptr_eq(&a, &second_handle));
+        registry.release_send_window(link(1), &second_handle);
+        let wa = a.notified();
+        let wb = b.notified();
+        let wc = c.notified();
+        tokio::pin!(wa, wb, wc);
+        wa.as_mut().enable();
+        wb.as_mut().enable();
+        wc.as_mut().enable();
+        registry.observe(&NodeEvent::LinkDeliveryConfirmed {
+            link_id: link(1),
+            packet_hash: [0; 32],
+        });
+        tokio::time::timeout(std::time::Duration::from_millis(50), &mut wa)
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(5), &mut wb)
+                .await
+                .is_err()
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(5), &mut wc)
+                .await
+                .is_err()
+        );
+        registry.close();
+        tokio::time::timeout(std::time::Duration::from_millis(50), &mut wb)
+            .await
+            .unwrap();
+        registry.release_send_window(link(2), &b);
+        assert!(!registry.send_windows.lock_recover().contains_key(&link(2)));
+    }
+
+    #[test]
+    fn last_handle_unregisters_even_when_a_wake_temporarily_owns_the_notify() {
+        let registry = CompletionRegistry::new();
+        let handle = registry.send_window(link(1));
+        let concurrent_wake = Arc::clone(&handle);
+        registry.release_send_window(link(1), &handle);
+        assert!(registry.send_windows.lock_recover().is_empty());
+        drop(concurrent_wake);
+    }
 
     fn link(id: u8) -> LinkId {
         LinkId::new([id; 16])
@@ -1106,11 +1213,12 @@ mod tests {
         let reg = CompletionRegistry::new();
         reg.note_send_began(link(12));
         reg.note_send_began(link(12));
-        assert!(reg
-            .inner
-            .lock_recover()
-            .pending_sends
-            .contains_key(&link(12)));
+        assert!(
+            reg.inner
+                .lock_recover()
+                .pending_sends
+                .contains_key(&link(12))
+        );
         reg.observe(&closed(link(12), LinkCloseReason::Timeout));
         assert!(
             !reg.inner

@@ -229,6 +229,11 @@ impl ReticulumNodeBuilder {
         self
     }
 
+    pub fn link_cipher(mut self, cipher: leviculum_core::LinkCipher) -> Self {
+        self.core_builder = self.core_builder.link_cipher(cipher);
+        self
+    }
+
     pub fn proof_strategy(mut self, strategy: ProofStrategy) -> Self {
         self.core_builder = self.core_builder.proof_strategy(strategy);
         self

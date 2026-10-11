@@ -27,7 +27,7 @@ pub use leviculum_core::node::NodeEvent;
 pub use leviculum_core::resource::ResourceStrategy;
 pub use leviculum_core::transport::InterfaceId;
 pub use leviculum_core::transport::TickOutput;
-pub use leviculum_core::{Identity, ProofBinding, RequestPolicy};
+pub use leviculum_core::{Identity, LinkCipher, ProofBinding, RequestPolicy};
 
 /// Generate a new random identity using the system RNG.
 ///
@@ -196,6 +196,11 @@ impl NodeBuilder {
     /// every payload byte at both ends. Both ends of a link must agree.
     pub fn proof_binding(mut self, binding: ProofBinding) -> Self {
         self.inner = self.inner.proof_binding(binding);
+        self
+    }
+
+    pub fn link_cipher(mut self, cipher: LinkCipher) -> Self {
+        self.inner = self.inner.link_cipher(cipher);
         self
     }
 

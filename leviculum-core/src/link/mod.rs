@@ -100,11 +100,21 @@ pub(crate) fn decode_signaling_bytes(bytes: &[u8; SIGNALING_SIZE]) -> (u32, u8) 
 /// Only `MODE_AES256_CBC` (0x01) is enabled in the Reticulum protocol.
 /// Python's `Link.ENABLED_MODES = [MODE_AES256_CBC]` rejects all others.
 fn validate_mode(mode: u8) -> Result<(), LinkError> {
-    if mode == crate::constants::MODE_AES256_CBC {
+    if mode == crate::constants::MODE_AES256_CBC || mode == LinkCipher::Gcm as u8 {
         Ok(())
     } else {
         Err(LinkError::UnsupportedMode)
     }
+}
+
+/// Link token cipher. GCM mode 7 is a rawg-specific, explicitly signalled mode.
+/// The responder signs the mode; the initiator rejects any mode change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u8)]
+pub enum LinkCipher {
+    #[default]
+    Cbc = 1,
+    Gcm = 7,
 }
 
 /// Compute encrypted link MDU from a given link MTU.
@@ -405,6 +415,10 @@ pub struct Link {
     peer_verifying_key: Option<ed25519_dalek::VerifyingKey>,
     /// Derived link encryption key (64 bytes: 32 encrypt + 32 HMAC)
     link_key: Option<[u8; 64]>,
+    cipher: LinkCipher,
+    gcm: Option<alloc::boxed::Box<crate::crypto::link_gcm::LinkGcm>>,
+    send_window_limit: usize,
+    send_pacing_enabled: bool,
     /// Destination hash this link connects to
     destination_hash: DestinationHash,
     /// Whether we initiated this link
@@ -586,6 +600,10 @@ impl Link {
             peer_ephemeral_public: None,
             peer_verifying_key: None,
             link_key: None,
+            cipher: LinkCipher::Cbc,
+            gcm: None,
+            send_window_limit: crate::constants::CHANNEL_WINDOW_MAX_FAST,
+            send_pacing_enabled: true,
             destination_hash,
             initiator: true,
             hops: 0,
@@ -723,6 +741,17 @@ impl Link {
             peer_ephemeral_public: Some(peer_ephemeral_public),
             peer_verifying_key: Some(peer_verifying_key),
             link_key: None,
+            cipher: if request_data.len() >= LINK_REQUEST_SIGNALING_SIZE
+                && decode_signaling_bytes(&request_data[64..67].try_into().unwrap()).1
+                    == LinkCipher::Gcm as u8
+            {
+                LinkCipher::Gcm
+            } else {
+                LinkCipher::Cbc
+            },
+            gcm: None,
+            send_window_limit: crate::constants::CHANNEL_WINDOW_MAX_FAST,
+            send_pacing_enabled: true,
             destination_hash,
             initiator: false, // We are the responder
             hops: 0,
@@ -788,6 +817,9 @@ impl Link {
 
         self.require_state(LinkState::Pending)?;
         self.require_responder()?;
+        if mode != self.cipher as u8 {
+            return Err(LinkError::UnsupportedMode);
+        }
 
         // Get peer's public key (from the LINK_REQUEST)
         let peer_ephemeral_public = self
@@ -800,10 +832,13 @@ impl Link {
             .as_ref()
             .ok_or(LinkError::KeyExchangeFailed)?;
         let shared_secret = ephemeral_private.diffie_hellman(&peer_ephemeral_public);
+        if self.cipher == LinkCipher::Gcm && !shared_secret.was_contributory() {
+            return Err(LinkError::KeyExchangeFailed);
+        }
 
         // Derive link key using HKDF
         let link_key = Self::derive_link_key(shared_secret.as_bytes(), &self.id);
-        self.link_key = Some(link_key);
+        self.install_link_key(link_key);
 
         // Build signaling bytes: 21-bit MTU + 3-bit mode
         let signaling_bytes = encode_signaling_bytes(mtu, mode);
@@ -869,7 +904,8 @@ impl Link {
 
         // Decrypt the RTT data
         let mut plaintext = alloc::vec![0u8; encrypted_data.len()];
-        let plaintext_len = self.decrypt(encrypted_data, &mut plaintext)?;
+        let plaintext_len =
+            self.decrypt_for_context(encrypted_data, &mut plaintext, PacketContext::Lrrtt)?;
 
         // RTT is msgpack-encoded float64: 0xCB + 8 bytes big-endian IEEE 754
         if plaintext_len < 9 || plaintext[0] != 0xCB {
@@ -934,6 +970,9 @@ impl Link {
     /// link table and counted there.
     pub(crate) fn content_heap_bytes(&self) -> usize {
         let mut bytes = self.channel.as_ref().map_or(0, |ch| ch.heap_bytes());
+        if self.gcm.is_some() {
+            bytes += core::mem::size_of::<crate::crypto::link_gcm::LinkGcm>();
+        }
         if let Some(proof) = &self.cached_proof {
             bytes += proof.capacity();
         }
@@ -1668,6 +1707,8 @@ impl Link {
         if self.channel.is_none() {
             let mut ch = Channel::new();
             ch.update_window_for_rtt(rtt_ms);
+            ch.set_window_ceiling(self.send_window_limit);
+            ch.set_pacing_enabled(self.send_pacing_enabled);
             ch.seed_srtt(rtt_ms);
             self.channel = Some(ch);
         }
@@ -1837,7 +1878,7 @@ impl Link {
 
     #[cfg(test)]
     pub(crate) fn set_link_key_for_test(&mut self, key: [u8; 64]) {
-        self.link_key = Some(key);
+        self.install_link_key(key);
     }
 
     /// Close the link (transition to Closed state)
@@ -1984,11 +2025,27 @@ impl Link {
             .map_err(|_| LinkError::InvalidProof)?;
 
         // Perform X25519 key exchange
+        let mode = if signalling_bytes.is_empty() {
+            crate::constants::MODE_AES256_CBC
+        } else {
+            decode_signaling_bytes(
+                &signalling_bytes
+                    .try_into()
+                    .map_err(|_| LinkError::InvalidProof)?,
+            )
+            .1
+        };
+        if mode != self.cipher as u8 {
+            return Err(LinkError::UnsupportedMode);
+        }
         let ephemeral_private = self
             .ephemeral_private
             .take()
             .ok_or(LinkError::KeyExchangeFailed)?;
         let shared_secret = ephemeral_private.diffie_hellman(&peer_ephemeral_public);
+        if self.cipher == LinkCipher::Gcm && !shared_secret.was_contributory() {
+            return Err(LinkError::KeyExchangeFailed);
+        }
 
         // Derive link key using HKDF
         let link_key = Self::derive_link_key(shared_secret.as_bytes(), &self.id);
@@ -2035,7 +2092,7 @@ impl Link {
 
         // Update state
         self.peer_ephemeral_public = Some(peer_ephemeral_public);
-        self.link_key = Some(link_key);
+        self.install_link_key(link_key);
         self.state = LinkState::Active;
 
         Ok(())
@@ -2105,12 +2162,11 @@ impl Link {
     /// The raw packet bytes ready for framing/transmission.
     /// Also sets the link_id on this Link.
     pub fn build_link_request_packet(&mut self, hw_mtu: Option<u32>) -> alloc::vec::Vec<u8> {
-        use crate::constants::MODE_AES256_CBC;
         use crate::destination::DestinationType;
         use crate::packet::{HeaderType, PacketContext, PacketFlags, PacketType, TransportType};
 
         let mtu = hw_mtu.unwrap_or(MTU as u32);
-        let request_data = self.create_link_request_with_mtu(mtu, MODE_AES256_CBC);
+        let request_data = self.create_link_request_with_mtu(mtu, self.cipher as u8);
 
         // Build flags
         let flags = PacketFlags {
@@ -2186,7 +2242,6 @@ impl Link {
         hops_to_dest: u8,
         hw_mtu: Option<u32>,
     ) -> alloc::vec::Vec<u8> {
-        use crate::constants::MODE_AES256_CBC;
         use crate::destination::DestinationType;
         use crate::packet::{HeaderType, PacketContext, PacketFlags, PacketType, TransportType};
 
@@ -2196,7 +2251,7 @@ impl Link {
         };
 
         let mtu = hw_mtu.unwrap_or(MTU as u32);
-        let request_data = self.create_link_request_with_mtu(mtu, MODE_AES256_CBC);
+        let request_data = self.create_link_request_with_mtu(mtu, self.cipher as u8);
 
         // Build flags for HEADER_2 with transport routing
         // Type2=1 (bit 6), Transport=1 (bit 4), Single=1 (bits 3-2), LinkReq=2 (bits 1-0)
@@ -2239,6 +2294,42 @@ impl Link {
         self.link_key
     }
 
+    /// Must be selected before an outgoing request is built, never mid-link.
+    pub fn set_cipher(&mut self, cipher: LinkCipher) -> Result<(), LinkError> {
+        if self.state != LinkState::Pending || self.link_key.is_some() {
+            return Err(LinkError::InvalidState);
+        }
+        self.cipher = cipher;
+        Ok(())
+    }
+
+    pub fn cipher(&self) -> LinkCipher {
+        self.cipher
+    }
+
+    pub fn set_send_window_limit(&mut self, limit: usize) {
+        self.send_window_limit = limit.clamp(1, crate::constants::CHANNEL_WINDOW_MAX_FAST);
+        if let Some(channel) = self.channel.as_mut() {
+            channel.set_window_ceiling(self.send_window_limit);
+        }
+    }
+
+    pub fn set_send_pacing_enabled(&mut self, enabled: bool) {
+        self.send_pacing_enabled = enabled;
+        if let Some(channel) = self.channel.as_mut() {
+            channel.set_pacing_enabled(enabled);
+        }
+    }
+
+    fn install_link_key(&mut self, key: [u8; 64]) {
+        if self.cipher == LinkCipher::Gcm {
+            self.gcm = Some(alloc::boxed::Box::new(
+                crate::crypto::link_gcm::LinkGcm::new(&key, self.id.as_bytes(), self.initiator),
+            ));
+        }
+        self.link_key = Some(key);
+    }
+
     /// Encrypt data for transmission over this link
     ///
     /// Returns the encrypted token: \[IV (16)\]\[ciphertext\]\[HMAC (32)\]
@@ -2248,7 +2339,26 @@ impl Link {
         output: &mut [u8],
         rng: &mut impl CryptoRngCore,
     ) -> Result<usize, LinkError> {
+        self.encrypt_for_context(plaintext, output, rng, PacketContext::None)
+    }
+
+    fn encrypt_for_context(
+        &self,
+        plaintext: &[u8],
+        output: &mut [u8],
+        rng: &mut impl CryptoRngCore,
+        context: PacketContext,
+    ) -> Result<usize, LinkError> {
         use crate::crypto::encrypt_token;
+
+        if self.cipher == LinkCipher::Gcm {
+            return self
+                .gcm
+                .as_ref()
+                .ok_or(LinkError::InvalidState)?
+                .encrypt_context(plaintext, output, context.to_byte())
+                .map_err(|_| LinkError::InvalidState);
+        }
 
         let token_key = self.token_key().ok_or(LinkError::InvalidState)?;
         let mut iv = [0u8; 16];
@@ -2263,7 +2373,37 @@ impl Link {
     ///
     /// Returns the plaintext length written to output.
     pub fn decrypt(&self, token: &[u8], output: &mut [u8]) -> Result<usize, LinkError> {
+        self.decrypt_for_context(token, output, PacketContext::None)
+    }
+
+    /// Resource bodies use the existing streamed CBC token construction,
+    /// independently of the negotiated cipher of their Link control packets.
+    /// This is a specified format, not a fallback after failed GCM verification.
+    pub(crate) fn decrypt_resource_body(
+        &self,
+        token: &[u8],
+        output: &mut [u8],
+    ) -> Result<usize, LinkError> {
+        let key = self.token_key().ok_or(LinkError::InvalidState)?;
+        crate::crypto::decrypt_token(&key, token, output).map_err(|_| LinkError::InvalidProof)
+    }
+
+    pub(crate) fn decrypt_for_context(
+        &self,
+        token: &[u8],
+        output: &mut [u8],
+        context: PacketContext,
+    ) -> Result<usize, LinkError> {
         use crate::crypto::decrypt_token;
+
+        if self.cipher == LinkCipher::Gcm {
+            return self
+                .gcm
+                .as_ref()
+                .ok_or(LinkError::InvalidState)?
+                .decrypt_context(token, output, context.to_byte())
+                .map_err(|_| LinkError::InvalidProof);
+        }
 
         let token_key = self.token_key().ok_or(LinkError::InvalidState)?;
 
@@ -2355,7 +2495,7 @@ impl Link {
         // Encrypt the data
         let encrypted_len = Self::encrypted_size(plaintext.len());
         let mut encrypted = alloc::vec![0u8; encrypted_len];
-        let enc_len = self.encrypt(plaintext, &mut encrypted, rng)?;
+        let enc_len = self.encrypt_for_context(plaintext, &mut encrypted, rng, packet_context)?;
 
         // Build flags for link data packet
         let flags = PacketFlags {
@@ -2528,7 +2668,8 @@ impl Link {
         // Encrypt the RTT data
         let encrypted_len = Self::encrypted_size(rtt_data.len());
         let mut encrypted = alloc::vec![0u8; encrypted_len];
-        let enc_len = self.encrypt(&rtt_data, &mut encrypted, rng)?;
+        let enc_len =
+            self.encrypt_for_context(&rtt_data, &mut encrypted, rng, PacketContext::Lrrtt)?;
 
         // Build flags for link RTT packet
         let flags = PacketFlags {
@@ -2617,7 +2758,12 @@ impl Link {
         // Close payload is the encrypted link_id
         let encrypted_len = Self::encrypted_size(TRUNCATED_HASHBYTES);
         let mut encrypted = alloc::vec![0u8; encrypted_len];
-        let enc_len = self.encrypt(self.id.as_bytes(), &mut encrypted, rng)?;
+        let enc_len = self.encrypt_for_context(
+            self.id.as_bytes(),
+            &mut encrypted,
+            rng,
+            PacketContext::LinkClose,
+        )?;
 
         // Build flags for close packet
         let flags = PacketFlags {
@@ -2658,7 +2804,8 @@ impl Link {
 
         // Decrypt the close data
         let mut plaintext = alloc::vec![0u8; encrypted_data.len()];
-        let plaintext_len = self.decrypt(encrypted_data, &mut plaintext)?;
+        let plaintext_len =
+            self.decrypt_for_context(encrypted_data, &mut plaintext, PacketContext::LinkClose)?;
 
         // Close payload should be the link_id (16 bytes)
         if plaintext_len != TRUNCATED_HASHBYTES {
@@ -3736,7 +3883,7 @@ mod tests {
         // should_close only works for Stale state
         // With RTT of 0, timeout = stale_time (20) + RTT*4 (0) + grace (5) = 25
         assert!(!link.should_close(1020)); // Not past stale_time yet from last_inbound
-                                           // Total elapsed needs to be > stale_time + RTT*4 + grace = 20 + 0 + 5 = 25
+        // Total elapsed needs to be > stale_time + RTT*4 + grace = 20 + 0 + 5 = 25
         assert!(link.should_close(1026));
     }
 
@@ -4340,9 +4487,89 @@ mod tests {
         // MODE_AES256_GCM (0x02) is reserved
         assert_eq!(validate_mode(0x02), Err(LinkError::UnsupportedMode));
         // All other values
-        for mode in [0x03, 0x04, 0x05, 0x06, 0x07] {
+        for mode in [0x03, 0x04, 0x05, 0x06] {
             assert_eq!(validate_mode(mode), Err(LinkError::UnsupportedMode));
         }
+        assert!(validate_mode(LinkCipher::Gcm as u8).is_ok());
+    }
+
+    #[test]
+    fn gcm_handshake_rtt_and_bidirectional_data() {
+        let identity = Identity::generate(&mut OsRng);
+        let dest = DestinationHash::new([42; 16]);
+        let mut a = Link::new_outgoing(dest, &mut OsRng);
+        a.set_cipher(LinkCipher::Gcm).unwrap();
+        let request = a.build_link_request_packet_with_transport(None, 1, Some(16384));
+        let mut b =
+            Link::new_incoming(&request[19..], *a.id(), dest, &mut OsRng, Some(16384)).unwrap();
+        assert_eq!(b.cipher(), LinkCipher::Gcm);
+        let proof = b
+            .build_proof_packet(&identity, 16384, LinkCipher::Gcm as u8)
+            .unwrap();
+        a.set_destination_keys(identity.ed25519_verifying().as_bytes())
+            .unwrap();
+        let mut corrupted = proof.clone();
+        let last = corrupted.len() - 1;
+        corrupted[last] ^= 0x20;
+        assert!(a.process_proof(&corrupted[19..]).is_err());
+        a.process_proof(&proof[19..]).unwrap();
+        let rtt = a.build_rtt_packet(0.001, &mut OsRng).unwrap();
+        b.process_rtt(&rtt[19..]).unwrap();
+        let mut token = alloc::vec![0; 16100];
+        let mut out = alloc::vec![0; 16100];
+        let n = a.encrypt(&[7; 16000], &mut token, &mut OsRng).unwrap();
+        assert_eq!(n, 16028);
+        assert_eq!(b.decrypt(&token[..n], &mut out).unwrap(), 16000);
+        assert_eq!(&out[..16000], &[7; 16000]);
+        assert!(a.decrypt(&token[..n], &mut out).is_err());
+        let n = b.encrypt(b"reply", &mut token, &mut OsRng).unwrap();
+        assert_eq!(a.decrypt(&token[..n], &mut out).unwrap(), 5);
+        assert_eq!(&out[..5], b"reply");
+        assert!(a.set_cipher(LinkCipher::Cbc).is_err());
+    }
+
+    #[test]
+    fn signed_cbc_response_cannot_downgrade_a_gcm_request() {
+        let identity = Identity::generate(&mut OsRng);
+        let dest = DestinationHash::new([42; 16]);
+        let mut a = Link::new_outgoing(dest, &mut OsRng);
+        a.set_cipher(LinkCipher::Gcm).unwrap();
+        let mut request = a.build_link_request_packet_with_transport(None, 1, Some(16384));
+        let offset = request.len() - SIGNALING_SIZE;
+        request[offset..].copy_from_slice(&encode_signaling_bytes(16384, LinkCipher::Cbc as u8));
+        let mut b =
+            Link::new_incoming(&request[19..], *a.id(), dest, &mut OsRng, Some(16384)).unwrap();
+        let proof = b
+            .build_proof_packet(&identity, 16384, LinkCipher::Cbc as u8)
+            .unwrap();
+        a.set_destination_keys(identity.ed25519_verifying().as_bytes())
+            .unwrap();
+        assert_eq!(
+            a.process_proof(&proof[19..]),
+            Err(LinkError::UnsupportedMode)
+        );
+        assert!(a.gcm.is_none());
+    }
+
+    #[test]
+    fn gcm_refuses_a_noncontributory_peer_key() {
+        let identity = Identity::generate(&mut OsRng);
+        let dest = DestinationHash::new([42; 16]);
+        let a = Link::new_outgoing(dest, &mut OsRng);
+        let mut request = a.create_link_request_with_mtu(16384, LinkCipher::Gcm as u8);
+        request[..32].fill(0);
+        let mut b = Link::new_incoming(
+            &request,
+            LinkId::new([1; 16]),
+            dest,
+            &mut OsRng,
+            Some(16384),
+        )
+        .unwrap();
+        assert_eq!(
+            b.build_proof_packet(&identity, 16384, LinkCipher::Gcm as u8),
+            Err(LinkError::KeyExchangeFailed)
+        );
     }
 
     #[test]
