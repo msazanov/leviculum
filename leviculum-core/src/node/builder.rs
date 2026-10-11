@@ -41,6 +41,7 @@ pub struct NodeCoreBuilder {
     identity: Option<Identity>,
     proof_strategy: ProofStrategy,
     proof_binding: ProofBinding,
+    link_cipher: crate::LinkCipher,
     transport_config: TransportConfig,
     respond_to_probes: bool,
     remote_management: bool,
@@ -64,6 +65,7 @@ impl NodeCoreBuilder {
             identity: None,
             proof_strategy: ProofStrategy::None,
             proof_binding: ProofBinding::default(),
+            link_cipher: crate::LinkCipher::default(),
             transport_config: TransportConfig::default(),
             respond_to_probes: false,
             remote_management: false,
@@ -110,6 +112,11 @@ impl NodeCoreBuilder {
     /// packet at both ends.
     pub fn proof_binding(mut self, binding: ProofBinding) -> Self {
         self.proof_binding = binding;
+        self
+    }
+
+    pub fn link_cipher(mut self, cipher: crate::LinkCipher) -> Self {
+        self.link_cipher = cipher;
         self
     }
 
@@ -364,6 +371,8 @@ impl NodeCoreBuilder {
         );
         node.max_incoming_resources_per_link = self.max_incoming_resources_per_link;
         node.set_proof_binding(self.proof_binding);
+        node.set_link_cipher(self.link_cipher)
+            .expect("fresh node has no links");
 
         if self.respond_to_probes {
             node.enable_probe_responder();
@@ -439,6 +448,8 @@ impl NodeCoreBuilder {
         ));
         node.max_incoming_resources_per_link = self.max_incoming_resources_per_link;
         node.set_proof_binding(self.proof_binding);
+        node.set_link_cipher(self.link_cipher)
+            .expect("fresh node has no links");
 
         if self.respond_to_probes {
             node.enable_probe_responder();

@@ -120,15 +120,15 @@ pub fn frame(data: &[u8], output: &mut Vec<u8>) {
     // Start flag
     output.push(FLAG);
 
-    // Escape and write data
-    for &byte in data {
-        if needs_escape(byte) {
-            output.push(ESCAPE);
-            output.push(byte ^ ESCAPE_XOR);
-        } else {
-            output.push(byte);
-        }
+    // Copy ordinary runs in bulk; only special bytes need escaping.
+    let mut rest = data;
+    while let Some(pos) = memchr::memchr2(FLAG, ESCAPE, rest) {
+        output.extend_from_slice(&rest[..pos]);
+        output.push(ESCAPE);
+        output.push(rest[pos] ^ ESCAPE_XOR);
+        rest = &rest[pos + 1..];
     }
+    output.extend_from_slice(rest);
 
     // End flag
     output.push(FLAG);
@@ -298,9 +298,36 @@ impl Deframer {
     pub fn process(&mut self, data: &[u8]) -> Vec<DeframeResult> {
         let mut results = Vec::new();
 
-        for &byte in data {
-            if let Some(result) = self.process_byte(byte) {
-                results.push(result);
+        let mut rest = data;
+        while !rest.is_empty() {
+            if !self.in_frame {
+                // Discard noise without running the state machine per byte.
+                let Some(pos) = memchr::memchr(FLAG, rest) else {
+                    break;
+                };
+                self.process_byte(FLAG);
+                rest = &rest[pos + 1..];
+                continue;
+            }
+            if self.escape_next || needs_escape(rest[0]) {
+                if let Some(result) = self.process_byte(rest[0]) {
+                    results.push(result);
+                }
+                rest = &rest[1..];
+                continue;
+            }
+            let len = memchr::memchr2(FLAG, ESCAPE, rest).unwrap_or(rest.len());
+            let room = self.max_frame - self.buffer.len();
+            if len > room {
+                // Match the scalar path exactly: consume the first overflowing
+                // byte, discard the frame, then resynchronise at the next FLAG.
+                self.reset();
+                self.buffer.shrink_to(INITIAL_BUFFER_CAPACITY);
+                results.push(DeframeResult::Oversized);
+                rest = &rest[room + 1..];
+            } else {
+                self.buffer.extend_from_slice(&rest[..len]);
+                rest = &rest[len..];
             }
         }
 
@@ -374,6 +401,40 @@ impl Default for Deframer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bulk_deframer_matches_scalar_across_fragments_and_limits() {
+        // Arbitrary streams, including noise, escapes split across reads,
+        // consecutive flags and frames exceeding the receive ceiling.
+        for cap in [0, 1, 8, 600, 16384] {
+            for chunk in [1, 2, 7, 1024, 17000] {
+                let mut seed = 0x12345678u32;
+                let mut data = Vec::new();
+                for i in 0..40000 {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 17;
+                    seed ^= seed << 5;
+                    data.push(match i % 97 {
+                        0 => FLAG,
+                        1 | 2 => ESCAPE,
+                        _ => seed as u8,
+                    });
+                }
+                let mut bulk = Deframer::with_max_frame(cap);
+                let mut scalar = Deframer::with_max_frame(cap);
+                for part in data.chunks(chunk) {
+                    let expected: Vec<_> = part
+                        .iter()
+                        .filter_map(|&b| scalar.process_byte(b))
+                        .collect();
+                    assert_eq!(bulk.process(part), expected, "cap={cap}, chunk={chunk}");
+                    assert_eq!(bulk.buffer, scalar.buffer);
+                    assert_eq!(bulk.in_frame, scalar.in_frame);
+                    assert_eq!(bulk.escape_next, scalar.escape_next);
+                }
+            }
+        }
+    }
 
     /// Regression (Codeberg #271): a peer that opens a frame and then streams
     /// bytes containing no FLAG octet must not grow the buffer without limit.

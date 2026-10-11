@@ -167,7 +167,7 @@ pub use destination::{
     ProofStrategy, SingleDestDecryptor,
 };
 pub use identity::Identity;
-pub use link::{LinkCloseReason, LinkError, LinkId, PeerKeys};
+pub use link::{LinkCipher, LinkCloseReason, LinkError, LinkId, PeerKeys};
 pub use node::{
     DeliveryError, LinkStats, NodeCore, NodeCoreBuilder, NodeEvent, RequestError, RequestPolicy,
     SendError,

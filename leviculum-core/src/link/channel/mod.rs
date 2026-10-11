@@ -40,9 +40,9 @@ mod envelope;
 mod error;
 mod stream;
 
-pub use buffer::{max_data_len, stream_overhead, ReadResult, MAX_CHUNK_LEN};
 #[cfg(feature = "compression")]
-pub use buffer::{CompressingWriter, COMPRESSION_MIN_SIZE, COMPRESSION_TRIES, MAX_DECOMPRESS_SIZE};
+pub use buffer::{COMPRESSION_MIN_SIZE, COMPRESSION_TRIES, CompressingWriter, MAX_DECOMPRESS_SIZE};
+pub use buffer::{MAX_CHUNK_LEN, ReadResult, max_data_len, stream_overhead};
 pub use envelope::Envelope;
 pub use error::ChannelError;
 pub use stream::StreamDataMessage;
@@ -209,6 +209,8 @@ pub struct Channel {
     window_min: usize,
     /// Maximum window size
     window_max: usize,
+    window_ceiling: usize,
+    pacing_enabled: bool,
     /// Maximum transmission attempts
     max_tries: u8,
     /// Current pacing interval between sends (milliseconds).
@@ -255,6 +257,8 @@ impl Channel {
             window: CHANNEL_WINDOW_INITIAL,
             window_min: CHANNEL_WINDOW_MIN_SLOW,
             window_max: CHANNEL_WINDOW_MAX_SLOW,
+            window_ceiling: CHANNEL_WINDOW_MAX_FAST,
+            pacing_enabled: true,
             max_tries: CHANNEL_MAX_TRIES,
             pacing_interval_ms: 0,
             next_send_at_ms: 0,
@@ -482,7 +486,27 @@ impl Channel {
             crate::tracing::debug!(rtt_ms, "channel: VERY_SLOW tier (RTT >= 2s), window_max=3");
         }
         // Clamp current window to new limits
+        self.window_max = self.window_max.min(self.window_ceiling);
+        self.window_min = self.window_min.min(self.window_max);
         self.window = self.window.clamp(self.window_min, self.window_max);
+    }
+
+    /// Bound outstanding records to reduce queueing; ACK policy is unchanged.
+    pub fn set_window_ceiling(&mut self, ceiling: usize) {
+        self.window_ceiling = ceiling.clamp(1, CHANNEL_WINDOW_MAX_FAST);
+        self.window_max = self.window_max.min(self.window_ceiling);
+        self.window_min = self.window_min.min(self.window_max);
+        self.window = self.window.min(self.window_max);
+    }
+
+    /// Explicit reliable-underlay policy: retain window backpressure while
+    /// leaving transport pacing to QUIC. Default remains enabled for RNS.
+    pub fn set_pacing_enabled(&mut self, enabled: bool) {
+        self.pacing_enabled = enabled;
+        if !enabled {
+            self.pacing_interval_ms = 0;
+            self.next_send_at_ms = 0;
+        }
     }
 
     /// Get the next sequence number and increment the counter
@@ -579,7 +603,7 @@ impl Channel {
             return Err(ChannelError::Busy);
         }
         // 2. Pacing check SECOND, only when window has room
-        if now_ms < self.next_send_at_ms {
+        if self.pacing_enabled && now_ms < self.next_send_at_ms {
             self.pacing_rejections = self.pacing_rejections.saturating_add(1);
             return Err(ChannelError::PacingDelay {
                 ready_at_ms: self.next_send_at_ms,
@@ -1046,6 +1070,10 @@ impl Channel {
     /// Recalculate pacing interval from current RTT and window.
     /// Sets pacing to rtt_ms / window, clamped to [1, rtt_ms].
     fn recalculate_pacing(&mut self, rtt_ms: u64) {
+        if !self.pacing_enabled {
+            self.pacing_interval_ms = 0;
+            return;
+        }
         if self.window == 0 || rtt_ms == 0 {
             return;
         }
@@ -1084,6 +1112,43 @@ impl Channel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn send_window_ceiling_survives_rtt_updates_and_success() {
+        let mut channel = Channel::new();
+        channel.set_window_ceiling(4);
+        for _ in 0..100 {
+            channel.adjust_window(true, 1);
+            assert!(channel.window <= 4);
+            assert!(channel.window_max <= 4);
+        }
+        channel.set_window_ceiling(16);
+        channel.update_window_for_rtt(1);
+        assert_eq!(channel.window_max, 16);
+    }
+
+    #[test]
+    fn window_only_keeps_backpressure_and_retry_budget() {
+        let mut channel = Channel::new();
+        channel.update_window_for_rtt(100);
+        channel.set_window_ceiling(4);
+        channel.set_pacing_enabled(false);
+        channel.adjust_window(true, 100);
+        assert_eq!(channel.pacing_interval_ms(), 0);
+        let message = TestMessage {
+            data: alloc::vec![1],
+        };
+        for _ in 0..channel.window {
+            channel.send(&message, 500, 0, 100).unwrap();
+        }
+        assert_eq!(channel.send(&message, 500, 0, 100), Err(ChannelError::Busy));
+        channel.poll(100000, 100);
+        assert_eq!(channel.pacing_interval_ms(), 0);
+        assert_eq!(crate::constants::CHANNEL_MAX_TRIES, 8);
+        channel.set_pacing_enabled(true);
+        channel.adjust_window(true, 100);
+        assert!(channel.pacing_interval_ms() > 0);
+    }
     use crate::constants::{MDU, STREAM_DATA_HEADER_SIZE};
     use crate::link::channel::buffer::RawChannelReader;
     use alloc::vec;

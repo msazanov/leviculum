@@ -1,12 +1,12 @@
 //! AES-256-CBC encryption/decryption with PKCS7 padding
 
-use aes::cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit};
+use aes::cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit, inout::InOutBuf};
 use cbc::{Decryptor, Encryptor};
 
 pub(super) type Aes256CbcEnc = Encryptor<aes::Aes256>;
 type Aes256CbcDec = Decryptor<aes::Aes256>;
 
-use crate::constants::{AES256_KEY_SIZE, AES_BLOCK_SIZE};
+use crate::constants::{AES_BLOCK_SIZE, AES256_KEY_SIZE};
 
 /// AES-256-CBC encryption error
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,10 +125,12 @@ pub fn aes256_cbc_decrypt(
     let mut cipher =
         Aes256CbcDec::new_from_slices(key, iv).expect("key/iv lengths validated above");
 
-    // Decrypt block by block
-    for chunk in output[..ciphertext.len()].chunks_exact_mut(AES_BLOCK_SIZE) {
-        cipher.decrypt_block_mut(chunk.into());
-    }
+    // The cipher backend can decrypt independent AES blocks in parallel.
+    // Keep Reticulum's permissive unpadding below (not strict PKCS7).
+    let bytes = InOutBuf::from(&mut output[..ciphertext.len()]);
+    let (blocks, tail) = bytes.into_chunks();
+    debug_assert!(tail.is_empty());
+    cipher.decrypt_blocks_inout_mut(blocks);
 
     // Remove PKCS7 padding
     pkcs7_unpad(&output[..ciphertext.len()])

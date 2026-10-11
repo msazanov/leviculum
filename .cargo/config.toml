@@ -107,4 +107,4 @@ linker = "aarch64-linux-gnu-gcc"
 # rather than silently producing a slow binary - build Android through
 # cargo-ndk, which sets that toolchain up.
 [target.aarch64-linux-android]
-rustflags = ["--cfg", "aes_armv8"]
+rustflags = ["--cfg", "aes_armv8", "--cfg", "polyval_armv8"]

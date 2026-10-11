@@ -18,7 +18,7 @@ use crate::event_scalar::MsOrNone;
 use crate::hex_fmt::{HexFmt, HexShort};
 use crate::link::channel::{ChannelAction, ChannelError, Message, ReceiveOutcome};
 use crate::link::{Link, LinkCloseReason, LinkError, LinkId, LinkPhase, LinkState};
-use crate::packet::{packet_hash, Packet, PacketContext, PacketType};
+use crate::packet::{Packet, PacketContext, PacketType, packet_hash};
 use crate::traits::{Clock, Storage};
 use crate::transport::DropReason;
 use rand_core::CryptoRngCore;
@@ -179,8 +179,36 @@ fn proof_identifier(raw: &[u8], binding: ProofBinding) -> [u8; 32] {
     }
 }
 
+fn cipher_proof_identifier(
+    raw: &[u8],
+    binding: ProofBinding,
+    cipher: crate::LinkCipher,
+) -> [u8; 32] {
+    if binding == ProofBinding::TokenTag && cipher == crate::LinkCipher::Gcm {
+        // A signed 32-byte identifier containing the nonce and full 128-bit
+        // GCM tag. The authenticated tag binds the ciphertext, AAD and nonce.
+        let header_len = if raw.first().is_some_and(|b| b & 0x40 != 0) {
+            35
+        } else {
+            19
+        };
+        if raw.len() >= header_len + crate::crypto::link_gcm::OVERHEAD {
+            let token = &raw[header_len..];
+            let mut id = [0u8; 32];
+            // Receipt lookup truncates to 16 bytes: keep the entire GCM tag
+            // first, not a predictable counter plus a truncated tag.
+            id[..16].copy_from_slice(&token[token.len() - 16..]);
+            id[16..28].copy_from_slice(&token[..12]);
+            id[28..].copy_from_slice(b"GCM1");
+            return id;
+        }
+    }
+    proof_identifier(raw, binding)
+}
+
 pub(super) struct ReceiptTracker {
     entries: Vec<ReceiptEntry>,
+    cipher: crate::LinkCipher,
 }
 
 pub(super) struct ReceiptEntry {
@@ -196,7 +224,12 @@ impl ReceiptTracker {
     pub(super) fn new() -> Self {
         Self {
             entries: Vec::new(),
+            cipher: crate::LinkCipher::default(),
         }
+    }
+
+    pub(super) fn set_cipher(&mut self, cipher: crate::LinkCipher) {
+        self.cipher = cipher;
     }
 
     /// Estimated heap bytes of the tracker's entry spine (#388 census).
@@ -217,7 +250,7 @@ impl ReceiptTracker {
         self.entries
             .retain(|e| !(e.link_id == link_id && e.sequence == Some(sequence)));
 
-        let full_hash = proof_identifier(packet_data, binding);
+        let full_hash = cipher_proof_identifier(packet_data, binding, self.cipher);
         let mut truncated_hash = [0u8; TRUNCATED_HASHBYTES];
         truncated_hash.copy_from_slice(&full_hash[..TRUNCATED_HASHBYTES]);
 
@@ -245,7 +278,7 @@ impl ReceiptTracker {
         deadline_ms: u64,
         binding: ProofBinding,
     ) -> [u8; 32] {
-        let full_hash = proof_identifier(packet_data, binding);
+        let full_hash = cipher_proof_identifier(packet_data, binding, self.cipher);
         let mut truncated_hash = [0u8; TRUNCATED_HASHBYTES];
         truncated_hash.copy_from_slice(&full_hash[..TRUNCATED_HASHBYTES]);
         self.entries.retain(|entry| entry.full_hash != full_hash);
@@ -396,6 +429,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
         // Create new outgoing link
         let mut link = Link::new_outgoing(dest_hash, &mut self.rng);
+        link.set_cipher(self.link_cipher)?;
         link.set_keepalive_override(self.transport_config().link_keepalive_secs);
         let packet = link.build_link_request_packet_with_transport(next_hop, hops, hw_mtu);
         link.set_hops(hops);
@@ -557,7 +591,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             link.set_dest_signing_key(sk.clone());
         }
         let proof_mtu = link.negotiated_mtu();
-        let proof = link.build_proof_packet(identity, proof_mtu, MODE_AES256_CBC)?;
+        let proof = link.build_proof_packet(identity, proof_mtu, link.cipher() as u8)?;
         link.set_cached_proof(proof.clone());
         link.set_phase(LinkPhase::PendingIncoming {
             proof_sent_at_ms: now_ms,
@@ -928,9 +962,12 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             .max(TRAFFIC_TIMEOUT_MIN_MS)
             .max(crate::constants::RAW_RECEIPT_TIMEOUT_FLOOR_MS);
         let deadline_ms = now_ms.saturating_add(receipt_timeout_ms);
-        let packet_hash = self
-            .receipt_tracker
-            .register_raw(&packet_bytes, *link_id, deadline_ms, self.proof_binding);
+        let packet_hash = self.receipt_tracker.register_raw(
+            &packet_bytes,
+            *link_id,
+            deadline_ms,
+            self.proof_binding,
+        );
         self.route_link_packet(link_id, &packet_bytes);
 
         Ok((packet_hash, self.process_events_and_actions()))
@@ -1087,6 +1124,15 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
         // Create the incoming link
         let iface_hw_mtu = self.transport.interface_hw_mtu(interface_index);
+        // Reject policy mismatches before generating ephemeral keys/context.
+        let requested_mode = request_data
+            .get(64..67)
+            .map(|bytes| crate::link::decode_signaling_bytes(&bytes.try_into().unwrap()).1)
+            .unwrap_or(crate::constants::MODE_AES256_CBC);
+        if requested_mode != self.link_cipher as u8 {
+            crate::tracing::warn!("Dropped link request: cipher policy mismatch");
+            return;
+        }
         let mut link = match Link::new_incoming(
             request_data,
             link_id,
@@ -1111,6 +1157,10 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
         // Set attached interface from the receiving interface, and with it
         // what that carrier charges one frame for the next.
+        if link.cipher() != self.link_cipher {
+            crate::tracing::warn!("Dropped link request: cipher policy mismatch");
+            return;
+        }
         link.set_attached_interface(interface_index);
         link.note_frame_turnaround_ms(
             self.transport
@@ -1830,7 +1880,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let encrypted_data = packet.data.as_slice();
         let max_plaintext_len = encrypted_data.len();
         let mut plaintext = alloc::vec![0u8; max_plaintext_len];
-        let decrypted_len = match link.decrypt(encrypted_data, &mut plaintext) {
+        let decrypted_len = match link.decrypt_for_context(encrypted_data, &mut plaintext, packet.context) {
             Ok(len) => len,
             Err(_) => {
                 crate::tracing::debug!(
@@ -1862,7 +1912,8 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             // Proofs bind to the token tag that `link.decrypt` just verified,
             // not to a second SHA-256 pass over the payload: see
             // `proof_identifier` for why that is not a weakening.
-            let full_packet_hash = proof_identifier(raw_packet, self.proof_binding);
+            let full_packet_hash =
+                cipher_proof_identifier(raw_packet, self.proof_binding, self.link_cipher);
 
             let mut proofs = Vec::new();
 
@@ -2101,11 +2152,12 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let max_plaintext_len = encrypted_data.len();
         let mut plaintext = alloc::vec![0u8; max_plaintext_len];
 
-        match link.decrypt(encrypted_data, &mut plaintext) {
+        match link.decrypt_for_context(encrypted_data, &mut plaintext, packet.context) {
             Ok(len) => {
                 plaintext.truncate(len);
 
-                let full_packet_hash = proof_identifier(raw_packet, self.proof_binding);
+                let full_packet_hash =
+                    cipher_proof_identifier(raw_packet, self.proof_binding, self.link_cipher);
 
                 match link.proof_strategy() {
                     ProofStrategy::All => {
@@ -2172,16 +2224,17 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let max_plaintext_len = encrypted_data.len();
         let mut plaintext = alloc::vec![0u8; max_plaintext_len];
 
-        let plaintext_len = match link.decrypt(encrypted_data, &mut plaintext) {
-            Ok(len) => len,
-            Err(_) => {
-                crate::tracing::debug!(
-                    link = %HexShort(link_id.as_bytes()),
-                    "LinkIdentify decryption failed"
-                );
-                return;
-            }
-        };
+        let plaintext_len =
+            match link.decrypt_for_context(encrypted_data, &mut plaintext, packet.context) {
+                Ok(len) => len,
+                Err(_) => {
+                    crate::tracing::debug!(
+                        link = %HexShort(link_id.as_bytes()),
+                        "LinkIdentify decryption failed"
+                    );
+                    return;
+                }
+            };
 
         // Validate length: exactly 128 bytes (64 public_key + 64 signature)
         if plaintext_len != 128 {
@@ -2317,7 +2370,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let encrypted_data = packet.data.as_slice();
         let max_plaintext_len = encrypted_data.len();
         let mut plaintext = alloc::vec![0u8; max_plaintext_len];
-        let plaintext_len = match link.decrypt(encrypted_data, &mut plaintext) {
+        let plaintext_len = match link.decrypt_for_context(encrypted_data, &mut plaintext, packet.context) {
             Ok(len) => len,
             Err(_) => {
                 crate::tracing::debug!(
@@ -2493,16 +2546,17 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let encrypted_data = packet.data.as_slice();
         let max_plaintext_len = encrypted_data.len();
         let mut plaintext = alloc::vec![0u8; max_plaintext_len];
-        let plaintext_len = match link.decrypt(encrypted_data, &mut plaintext) {
-            Ok(len) => len,
-            Err(_) => {
-                crate::tracing::debug!(
-                    link = %HexShort(link_id.as_bytes()),
-                    "Response packet decryption failed"
-                );
-                return;
-            }
-        };
+        let plaintext_len =
+            match link.decrypt_for_context(encrypted_data, &mut plaintext, packet.context) {
+                Ok(len) => len,
+                Err(_) => {
+                    crate::tracing::debug!(
+                        link = %HexShort(link_id.as_bytes()),
+                        "Response packet decryption failed"
+                    );
+                    return;
+                }
+            };
         let plaintext = &plaintext[..plaintext_len];
 
         self.handle_response_payload(link_id, plaintext);
@@ -2822,7 +2876,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         now_ms: u64,
     ) {
         use crate::resource::{
-            incoming::IncomingResource, ResourceAdvertisement, ResourceStrategy,
+            ResourceAdvertisement, ResourceStrategy, incoming::IncomingResource,
         };
 
         let Some(link) = self.links.get_mut(&link_id) else {
@@ -2842,7 +2896,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // Decrypt the advertisement
         let encrypted_data = packet.data.as_slice();
         let mut plaintext = alloc::vec![0u8; encrypted_data.len()];
-        let len = match link.decrypt(encrypted_data, &mut plaintext) {
+        let len = match link.decrypt_for_context(encrypted_data, &mut plaintext, packet.context) {
             Ok(len) => len,
             Err(_) => {
                 crate::tracing::debug!("Resource ADV decryption failed");
@@ -3183,7 +3237,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // Decrypt REQ
         let encrypted_data = packet.data.as_slice();
         let mut plaintext = alloc::vec![0u8; encrypted_data.len()];
-        let len = match link.decrypt(encrypted_data, &mut plaintext) {
+        let len = match link.decrypt_for_context(encrypted_data, &mut plaintext, packet.context) {
             Ok(len) => len,
             Err(_) => {
                 crate::tracing::debug!("Resource REQ decryption failed");
@@ -3590,7 +3644,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // Decrypt HMU
         let encrypted_data = packet.data.as_slice();
         let mut plaintext = alloc::vec![0u8; encrypted_data.len()];
-        let len = match link.decrypt(encrypted_data, &mut plaintext) {
+        let len = match link.decrypt_for_context(encrypted_data, &mut plaintext, packet.context) {
             Ok(len) => len,
             Err(_) => {
                 crate::tracing::debug!("Resource HMU decryption failed");
@@ -4769,6 +4823,24 @@ mod proof_binding_tests {
         raw
     }
 
+    #[test]
+    fn gcm_receipt_lookup_uses_full_tag_even_for_short_records() {
+        let mut raw = alloc::vec![0u8; 19];
+        raw[18] = crate::packet::PacketContext::Channel.to_byte();
+        raw.extend_from_slice(&[3u8; 12]);
+        raw.extend_from_slice(b"echo");
+        raw.extend_from_slice(&[7u8; 16]);
+        let id =
+            super::cipher_proof_identifier(&raw, ProofBinding::TokenTag, crate::LinkCipher::Gcm);
+        assert_eq!(&id[..16], &[7u8; 16]);
+        assert_eq!(&id[16..28], &[3u8; 12]);
+        assert_eq!(&id[28..], b"GCM1");
+        assert_eq!(
+            super::cipher_proof_identifier(&raw, ProofBinding::PacketHash, crate::LinkCipher::Gcm),
+            packet_hash(&raw)
+        );
+    }
+
     /// The two modes must disagree on a token packet - that is the whole point
     /// of the switch - while both stay internally consistent, which is what
     /// lets a legacy peer find our receipts at all.
@@ -4869,7 +4941,13 @@ mod receipt_tracker_tests {
         let link = make_link_id(0xCC);
 
         tracker.register(b"old_packet", link, 1, 1000, ProofBinding::PacketHash);
-        tracker.register(b"new_packet", link, 2, 1000 + DATA_RECEIPT_TIMEOUT_MS, ProofBinding::PacketHash);
+        tracker.register(
+            b"new_packet",
+            link,
+            2,
+            1000 + DATA_RECEIPT_TIMEOUT_MS,
+            ProofBinding::PacketHash,
+        );
 
         // Advance time so only the first has expired
         let now = 1000 + DATA_RECEIPT_TIMEOUT_MS + 1;

@@ -15,6 +15,7 @@ mod hashes;
 mod hkdf_impl;
 mod hmac_impl;
 mod token;
+pub(crate) mod link_gcm;
 
 pub use aes_cbc::{aes256_cbc_decrypt, aes256_cbc_encrypt};
 pub use hashes::{full_hash, full_hash_parts, sha256, sha512, truncated_hash, StreamHasher};

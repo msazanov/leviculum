@@ -474,6 +474,7 @@ pub struct NodeCore<R: CryptoRngCore, C: Clock, S: Storage> {
     default_proof_strategy: ProofStrategy,
     /// What data proofs are bound to; see [`crate::destination::ProofBinding`]
     proof_binding: ProofBinding,
+    link_cipher: crate::LinkCipher,
     /// Pending events
     events: Vec<NodeEvent>,
     /// Probe destination hash (if respond_to_probes is enabled).
@@ -635,6 +636,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             destinations: BTreeMap::new(),
             default_proof_strategy: proof_strategy,
             proof_binding: ProofBinding::default(),
+            link_cipher: crate::LinkCipher::default(),
             events: Vec::new(),
             probe_dest_hash: None,
             remote_mgmt_dest_hash: None,
@@ -2901,6 +2903,26 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
     pub fn proof_binding(&self) -> ProofBinding {
         self.proof_binding
+    }
+
+    /// Explicit cipher policy, set before establishing links. No automatic downgrade.
+    pub fn set_link_cipher(&mut self, cipher: crate::LinkCipher) -> Result<(), crate::LinkError> {
+        if !self.links.is_empty() { return Err(crate::LinkError::InvalidState); }
+        self.link_cipher = cipher;
+        self.receipt_tracker.set_cipher(cipher);
+        Ok(())
+    }
+
+    pub fn set_link_send_window_limit(&mut self, id: &crate::LinkId, limit: usize) -> Result<(), crate::LinkError> {
+        let id = self.resolve_link_id(id);
+        self.links.get_mut(&id).ok_or(crate::LinkError::NotFound)?.set_send_window_limit(limit);
+        Ok(())
+    }
+
+    pub fn set_link_send_pacing_enabled(&mut self, id: &crate::LinkId, enabled: bool) -> Result<(), crate::LinkError> {
+        let id = self.resolve_link_id(id);
+        self.links.get_mut(&id).ok_or(crate::LinkError::NotFound)?.set_send_pacing_enabled(enabled);
+        Ok(())
     }
 
     pub fn set_channel_delivery_budget(&mut self, budget: Option<usize>) {
