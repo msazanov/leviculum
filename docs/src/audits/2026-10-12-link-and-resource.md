@@ -91,7 +91,7 @@ reference's is 360 s.** Python arms an incoming link with
 (`establishment_timeout`, `reference/Reticulum/RNS/Link.py:207`, with
 `KEEPALIVE_MAX` = 360 at `reference/Reticulum/RNS/Link.py:92`). Ours
 substitutes a 54 s bonus (`ESTABLISHMENT_RESPONDER_BONUS_MS`,
-`leviculum-core/src/constants.rs:286`, applied in
+`leviculum-core/src/constants.rs:303`, applied in
 `establishment_timeout_ms`, `leviculum-core/src/link/mod.rs:1136`),
 sized to cover our own initiator's RTT-retry budget (D3, the retry
 since removed) with margin.
@@ -113,7 +113,7 @@ duplicate-hash dedup, re-keying the link table and aliasing old ids
 (`check_timeouts`, `leviculum-core/src/node/link_management.rs:3799`,
 re-key at `:3396`), and every attempt draws a fresh +0..25 % timeout
 jitter (`MAX_ESTABLISHMENT_JITTER_PERMILLE`,
-`leviculum-core/src/constants.rs:298`). On the wire each retry is
+`leviculum-core/src/constants.rs:315`). On the wire each retry is
 indistinguishable from a new Python `RNS.Link`, and the jitter never
 reaches the air. Class: **deviation ours (deliberate), inert on the
 wire**. Pinned by the existing #66/#129 tests.
@@ -615,7 +615,7 @@ the proof policy are each end's own):
 **D18 — retry budget 8 versus the reference's 5, then teardown.**
 *Fixed in de601f92* (#664): `CHANNEL_MAX_TRIES` is 5, four retransmits
 then teardown, pinned by `test_max_tries_matches_reference`.
-`CHANNEL_MAX_TRIES` (`leviculum-core/src/constants.rs:494`) was 8;
+`CHANNEL_MAX_TRIES` (`leviculum-core/src/constants.rs:511`) was 8;
 Python's `_max_tries` is 5 (`reference/Reticulum/RNS/Channel.py:295`).
 Both tear the link down on exhaustion (ours
 `ChannelAction::TearDownLink` handled at
@@ -663,7 +663,7 @@ buffered message the host had no room for is handed over by the next
 packet or by `handle_timeout`, since no retransmit comes to wake it.)
 Our rx ring is also bounded at 512
 with a loud refusal (`CHANNEL_RX_RING_MAX`,
-`leviculum-core/src/constants.rs:488`) where Python's deque is
+`leviculum-core/src/constants.rs:505`) where Python's deque is
 unbounded, and our backward-sequence acceptance window is half the
 sequence space with a re-prove
 (`Channel::receive`, `leviculum-core/src/link/channel/mod.rs:623`)

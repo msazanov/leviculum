@@ -3168,7 +3168,32 @@ impl ReticulumNode {
     ///
     /// Sends a PATH_REQUEST. The result will arrive as a `PathFound` event
     /// and `has_path()` will return true.
+    ///
+    /// Always transmits, like the reference's application API
+    /// (`Transport.request_path`, Transport.py:2771): this is the call a
+    /// client tool or an application makes, so a second `lnprobe` or a retry
+    /// inside the transport's 20 s minimum interval still puts a request on
+    /// the wire (711). The interval paces only what the stack raises on its
+    /// own.
     pub async fn request_path(
+        &self,
+        dest_hash: &leviculum_core::DestinationHash,
+    ) -> Result<(), Error> {
+        let output = {
+            let mut inner = self.inner.lock_recover();
+            inner.request_path_unthrottled(dest_hash)
+        };
+        self.action_dispatch_tx
+            .send(output)
+            .await
+            .map_err(|_| Error::NotRunning)?;
+        Ok(())
+    }
+
+    /// [`request_path`](Self::request_path) under the transport's
+    /// per-destination minimum interval, for the repeats this driver adds on
+    /// its own.
+    async fn request_path_paced(
         &self,
         dest_hash: &leviculum_core::DestinationHash,
     ) -> Result<(), Error> {
@@ -3227,6 +3252,11 @@ impl ReticulumNode {
     /// within the interface-isolation rule. `retry_interval` may exceed
     /// `timeout` without harm now — that only means no repeat is attempted —
     /// but callers wanting a repeat should keep it well under the budget.
+    ///
+    /// The first request always leaves ([`request_path`](Self::request_path));
+    /// the repeats go through the transport's per-destination minimum
+    /// interval, so they leave at most once per
+    /// `PATH_REQUEST_MIN_INTERVAL_MS` whatever `retry_interval` says.
     pub async fn wait_for_path(
         &self,
         dest_hash: &leviculum_core::DestinationHash,
@@ -3239,6 +3269,7 @@ impl ReticulumNode {
         // wants the path, and a request withheld until the first repeat is due
         // is a request the smallest budgets never send at all.
         let mut next_request = tokio::time::Instant::now();
+        let mut first = true;
         loop {
             if self.has_path(dest_hash) {
                 return Ok(true);
@@ -3248,7 +3279,18 @@ impl ReticulumNode {
                 return Ok(false);
             }
             if now >= next_request {
-                self.request_path(dest_hash).await?;
+                // The first request is the caller's and always leaves. The
+                // repeats are ours (the reference asks once, lxmd.py:663-667)
+                // and stay under the transport's minimum interval: at the 2 s
+                // cadence some callers pass, unthrottled repeats would be a
+                // broadcast every 2 s that a shared instance forwards onto
+                // every interface, LoRa included.
+                if first {
+                    self.request_path(dest_hash).await?;
+                    first = false;
+                } else {
+                    self.request_path_paced(dest_hash).await?;
+                }
                 next_request = now + retry_interval;
             }
             tokio::time::sleep(POLL_INTERVAL).await;

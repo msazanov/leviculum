@@ -1054,7 +1054,9 @@ pub struct Reporter {
     /// Whether the owed retransmission has already asked for a path —
     /// because it had none, or because it dropped the one whose next hop
     /// did not prove ([`retry_step`]). One request per owed retry:
-    /// `request_path` is unthrottled, the telemetry tick is five-secondly,
+    /// `request_path_unthrottled` skips the transport's 20 s interval (an
+    /// application's request, as the reference's always leaves; 711), the
+    /// telemetry tick is five-secondly,
     /// and the answer (or a peer-up pull) flips `has_path` — asking again
     /// every tick would be a storm.
     ///
@@ -1364,7 +1366,7 @@ impl Reporter {
                 // the identity — that is the whole mechanism behind
                 // hash-only configuration.
                 self.last_key_request_ms = Some(now_ms);
-                actions.extend(node.request_path(&hash).actions);
+                actions.extend(node.request_path_unthrottled(&hash).actions);
                 return actions;
             }
         }
@@ -1437,7 +1439,7 @@ impl Reporter {
                 RetryStep::AskForPath => {
                     self.retry_payload = Some(payload);
                     self.retry_path_requested = true;
-                    actions.extend(node.request_path(&hash).actions);
+                    actions.extend(node.request_path_unthrottled(&hash).actions);
                     return actions;
                 }
                 RetryStep::Rediscover => {
@@ -1450,7 +1452,7 @@ impl Reporter {
                     self.retry_payload = Some(payload);
                     self.retry_path_requested = true;
                     node.remove_path(hash.as_bytes());
-                    actions.extend(node.request_path(&hash).actions);
+                    actions.extend(node.request_path_unthrottled(&hash).actions);
                     crate::log::log_fmt_critical(
                         "[INFO!] ",
                         format_args!(
@@ -1581,7 +1583,7 @@ impl Reporter {
         if let Some(withheld) =
             path_withhold(node.has_path(&hash), node.path_route(&hash).is_some())
         {
-            actions.extend(node.request_path(&hash).actions);
+            actions.extend(node.request_path_unthrottled(&hash).actions);
             // The announce went out before the route was known; the path
             // request goes out now. Both are airtime this attempt spent,
             // and this is the branch a node whose target has walked away

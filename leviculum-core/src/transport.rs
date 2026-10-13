@@ -9061,7 +9061,11 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// Request a path to a destination
     ///
     /// Sends a path request packet to discover the route to a destination.
-    /// Rate-limited to one request per destination per PATH_REQUEST_MIN_INTERVAL_MS.
+    /// Rate-limited to one request per destination per
+    /// [`PATH_REQUEST_MIN_INTERVAL_MS`], which makes this the call for the
+    /// requests the stack raises on its own; an application's request goes
+    /// through [`request_path_unthrottled`](Self::request_path_unthrottled).
+    /// The constant's documentation lists which callers are which.
     ///
     /// # Arguments
     /// * `dest_hash` - The destination hash to find a path for

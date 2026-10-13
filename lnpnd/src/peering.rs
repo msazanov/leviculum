@@ -1201,12 +1201,17 @@ impl PeeringRuntime {
     ) {
         self.harvest_mining();
 
+        // The PN's path requests are the application's, as LXMRouter's and
+        // LXMPeer's are in the reference (`LXMRouter.py:642`,
+        // `LXMPeer.py:297`), so they skip the transport's interval (711). Their
+        // own pacing: this list is drained once, and the two in `start_round`
+        // fire at most once per round, one peer per `sync_interval_ms`.
         for destination in std::mem::take(&mut self.static_paths_pending) {
             tracing::debug!(
                 "lnpnd: path request for never-heard static peer {}",
                 full_hex(&destination)
             );
-            out.merge(core.request_path(&DestinationHash::new(destination)));
+            out.merge(core.request_path_unthrottled(&DestinationHash::new(destination)));
         }
 
         // The round's watchdog, the board's own (`round_step`): a round
@@ -1339,7 +1344,7 @@ impl PeeringRuntime {
         // restart (§5).
         if !peer.peering_key_ready() {
             let Some(peer_identity_hash) = peer.identity_hash else {
-                out.merge(core.request_path(&DestinationHash::new(destination)));
+                out.merge(core.request_path_unthrottled(&DestinationHash::new(destination)));
                 return;
             };
             peer.state = SyncPhase::KeyMining;
@@ -1437,7 +1442,7 @@ impl PeeringRuntime {
             .as_ref()
             .map(|identity| identity.ed25519_verifying().to_bytes())
         else {
-            out.merge(core.request_path(&DestinationHash::new(destination)));
+            out.merge(core.request_path_unthrottled(&DestinationHash::new(destination)));
             return;
         };
         peer.book_sync_attempt(now);

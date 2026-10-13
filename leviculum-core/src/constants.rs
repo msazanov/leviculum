@@ -248,7 +248,24 @@ pub const PENDING_LOCAL_PR_EXPIRY_MS: u64 = PATH_REQUEST_TIMEOUT_MS;
 /// Maximum number of path request dedup tags to retain
 pub const MAX_PATH_REQUEST_TAGS: usize = 32_000;
 
-/// Minimum interval between path requests for the same destination (milliseconds)
+/// Minimum interval between path requests for the same destination
+/// (milliseconds), Python `PATH_REQUEST_MI` (Transport.py:83).
+///
+/// It paces only the requests the stack raises on its own, as the
+/// reference's does: `transport_jobs` checks it before rediscovering the
+/// path of a link that never came up (Transport.py:538 for an initiator,
+/// :703 for a link this node relays), while the application API
+/// `Transport.request_path` (Transport.py:2771) always transmits. Ours
+/// splits the same way. `Transport::request_path` applies the interval and
+/// serves the automated callers: the link-timeout rediscovery
+/// (`handle_link_timeouts`, :703), the failed-handshake recovery in
+/// `NodeCore` (:538), and two of our own, the relay's no-path solicitation
+/// and the peer-up pull. `request_path_unthrottled` skips it and serves every
+/// application (711): the `ReticulumNode::request_path` API behind the client
+/// tools and the FFI, LXMF delivery and propagation, the propagation nodes'
+/// peer sync, and the board's telemetry. A local client's request reaching a
+/// shared instance is a packet to forward, not a request of the daemon's own,
+/// and is forwarded without the interval (Transport.py:3006-3013).
 pub const PATH_REQUEST_MIN_INTERVAL_MS: u64 = 20_000;
 
 /// Link constants

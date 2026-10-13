@@ -451,7 +451,7 @@ impl PropagationTransport {
         self.wanted_links.insert(destination);
         if !node.has_path(&destination) {
             return Ok(PropagationTransportOutput {
-                core: node.request_path(&destination),
+                core: node.request_path_unthrottled(&destination),
                 events: Vec::new(),
             });
         }

@@ -835,7 +835,7 @@ impl PropagationRuntime {
             .collect::<Vec<_>>();
         let mut output = TickOutput::default();
         for destination in orphaned {
-            output.merge(node.request_path(&destination));
+            output.merge(node.request_path_unthrottled(&destination));
             self.transport.forget_known_node(&destination);
         }
         output
@@ -962,9 +962,11 @@ impl PropagationRuntime {
             Err(RouterError::Node(_)) => {
                 if let Some(entry) = router.outbound.get_mut(&message_id) {
                     entry.next_attempt_ms = now_ms.saturating_add(super::PATH_REQUEST_WAIT_MS);
-                    output.core.merge(
-                        node.request_path(&DestinationHash::new(entry.message().destination_hash)),
-                    );
+                    output
+                        .core
+                        .merge(node.request_path_unthrottled(&DestinationHash::new(
+                            entry.message().destination_hash,
+                        )));
                 }
                 router.persistence_dirty = true;
                 return Ok(output);
@@ -1010,7 +1012,9 @@ impl PropagationRuntime {
                 });
                 return Ok(output);
             }
-            output.core.merge(node.request_path(&propagation_node));
+            output
+                .core
+                .merge(node.request_path_unthrottled(&propagation_node));
             return Ok(output);
         }
 

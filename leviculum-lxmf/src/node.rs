@@ -688,7 +688,7 @@ impl LxmfNode {
         self.wanted_links.insert(destination);
         if !node.has_path(&destination) {
             let mut output = LxmfNodeOutput {
-                core: node.request_path(&destination),
+                core: node.request_path_unthrottled(&destination),
                 events: Vec::new(),
             };
             output

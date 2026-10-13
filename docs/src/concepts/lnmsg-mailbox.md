@@ -11,9 +11,9 @@ This is where a naive design produces a client that silently loses mail,
 and the library has arranged things so that the naive design is the
 default: **nothing syncs unless the application asks**
 (`request_messages_from_propagation_node`,
-`leviculum-lxmf/src/router/propagation_runtime.rs:1399`, and
+`leviculum-lxmf/src/router/propagation_runtime.rs:1403`, and
 `next_deadline()` returns `None` outside `PathRequested`,
-`leviculum-lxmf/src/router/propagation_runtime.rs:1171-1182`).
+`leviculum-lxmf/src/router/propagation_runtime.rs:1175-1186`).
 
 ### When to sync
 
@@ -116,7 +116,7 @@ TRUSTED** (its `NomadNetworkApp.py`, lines 607-631). columba auto-selects
 the fewest-hops node, full stop. The library's own auto-selection ranks by
 route, hops, peering cost and stamp cost
 (`select_outbound_propagation_node`,
-`leviculum-lxmf/src/router/propagation_runtime.rs:1161-1196`) with no trust
+`leviculum-lxmf/src/router/propagation_runtime.rs:1165-1200`) with no trust
 input at all, because it has no notion of trust.
 
 Your mailbox sees the *envelope* of every message sent to you: who sent it
@@ -152,9 +152,9 @@ consequence spelled out, not a config-file default nobody reads.
 - The sync schedule (there is none in the library).
 - Persistence of known propagation nodes and of the selection, since
   neither is in the router snapshot (`snapshot`,
-  `leviculum-lxmf/src/router.rs:2069-2086`); replay via
+  `leviculum-lxmf/src/router.rs:2077-2094`); replay via
   `restore_known_propagation_node`
-  (`leviculum-lxmf/src/router/propagation_runtime.rs:1351`).
+  (`leviculum-lxmf/src/router/propagation_runtime.rs:1355`).
 - Re-selection after restart.
 - Proof-of-work for `PropagationStampPending`, off the core lock.
 - Calling `persist()` on `PersistenceRequested`.
@@ -194,7 +194,7 @@ Two further facts a UI must not paper over. `Message::verification` can be
 `Unverified` when the source identity has never been announced to us
 (`leviculum-lxmf/src/message.rs:229-231`), and such messages **are
 delivered to the application anyway**
-(`leviculum-lxmf/src/router.rs:1474-1477`). And the router discards the
+(`leviculum-lxmf/src/router.rs:1476-1479`). And the router discards the
 display name from announces entirely, so **the client must maintain its own
 hash-to-name map** from raw `NodeEvent::AnnounceReceived`.
 

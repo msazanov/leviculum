@@ -1287,7 +1287,7 @@ impl LxmfHelperProcessor {
                 // a hook here has them re-fed to the router for the reason
                 // `MAX_ABSORB_ROUNDS` gives. Exempting this one call would be
                 // an exemption nobody could see from the call site.
-                let output = core.request_path(&peer);
+                let output = core.request_path_unthrottled(&peer);
                 self.absorb(
                     ready,
                     core,

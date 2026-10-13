@@ -2371,8 +2371,13 @@ impl Engine {
         let now_ms = node.now_ms();
 
         self.harvest_mining();
+        // The PN's path requests are the application's, as LXMRouter's and
+        // LXMPeer's are in the reference (`LXMRouter.py:642`,
+        // `LXMPeer.py:297`), so they skip the transport's interval (711). Their
+        // own pacing: this list is drained once, and the two in the sync round
+        // below fire at most once per round, one peer per `SYNC_INTERVAL_SECS`.
         for destination in core::mem::take(&mut self.static_paths_pending) {
-            out.merge(node.request_path(&DestinationHash::new(destination)));
+            out.merge(node.request_path_unthrottled(&DestinationHash::new(destination)));
         }
         self.tick_announce(node, now_ms, &mut out);
         self.tick_maintenance(node, now_ms);
@@ -2844,7 +2849,7 @@ impl Engine {
         };
         if !peer.peering_key_ready() {
             let Some(peer_identity_hash) = peer.identity_hash else {
-                out.merge(node.request_path(&DestinationHash::new(destination)));
+                out.merge(node.request_path_unthrottled(&DestinationHash::new(destination)));
                 return;
             };
             // One miner, one job: the pick never brings a keyless peer here
@@ -2920,7 +2925,7 @@ impl Engine {
             .as_ref()
             .map(|identity| identity.ed25519_verifying().to_bytes())
         else {
-            out.merge(node.request_path(&DestinationHash::new(destination)));
+            out.merge(node.request_path_unthrottled(&DestinationHash::new(destination)));
             return;
         };
         peer.book_sync_attempt(now);

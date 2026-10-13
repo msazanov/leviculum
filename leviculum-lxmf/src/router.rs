@@ -1258,7 +1258,9 @@ impl LxmfRouter {
                 // Python requests the path again when a direct delivery link
                 // closes while a message still needs it. Do not expire a
                 // cached path here; NodeCore handles failed-handshake expiry.
-                output.core.merge(node.request_path(destination_hash));
+                output
+                    .core
+                    .merge(node.request_path_unthrottled(destination_hash));
             }
         }
         if let NodeEvent::AnnounceReceived { announce, .. } = event {
@@ -1737,7 +1739,9 @@ impl LxmfRouter {
                 // pre-emptive request does not consume the delivery budget.
                 if !has_path && entry.attempts == 0 && !self.preemptive_path_requests.contains(&id)
                 {
-                    output.core.merge(node.request_path(&destination));
+                    output
+                        .core
+                        .merge(node.request_path_unthrottled(&destination));
                     self.preemptive_path_requests.insert(id);
                     entry.next_attempt_ms = now_ms.saturating_add(PATH_REQUEST_WAIT_MS);
                     self.outbound.insert(id, entry);
@@ -1747,7 +1751,9 @@ impl LxmfRouter {
                 // After one pathless send attempt, Python requests the path
                 // again and counts that as the next delivery attempt.
                 if !has_path && entry.attempts >= MAX_PATHLESS_TRIES {
-                    output.core.merge(node.request_path(&destination));
+                    output
+                        .core
+                        .merge(node.request_path_unthrottled(&destination));
                     entry.attempts = entry.attempts.saturating_add(1);
                     entry.next_attempt_ms = now_ms.saturating_add(PATH_REQUEST_WAIT_MS);
                     self.outbound.insert(id, entry);
@@ -1759,7 +1765,9 @@ impl LxmfRouter {
                 // and performs path discovery before trying again.
                 if has_path && entry.attempts == MAX_PATHLESS_TRIES.saturating_add(1) {
                     node.remove_path(destination.as_bytes());
-                    output.core.merge(node.request_path(&destination));
+                    output
+                        .core
+                        .merge(node.request_path_unthrottled(&destination));
                     entry.attempts = entry.attempts.saturating_add(1);
                     entry.next_attempt_ms = now_ms.saturating_add(PATH_REQUEST_WAIT_MS);
                     self.outbound.insert(id, entry);

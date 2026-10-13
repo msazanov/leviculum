@@ -3593,6 +3593,13 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// Sends a PATH_REQUEST packet to all interfaces. The path response
     /// (if any) will arrive as a `PathFound` event and `has_path()` will
     /// return true.
+    ///
+    /// Paced by the transport's per-destination minimum interval, for a
+    /// request the stack raises on its own. An application asking for a path
+    /// calls [`request_path_unthrottled`](Self::request_path_unthrottled),
+    /// which always transmits as the reference's application API does
+    /// ([`PATH_REQUEST_MIN_INTERVAL_MS`](crate::constants::PATH_REQUEST_MIN_INTERVAL_MS)
+    /// lists the callers).
     pub fn request_path(&mut self, dest_hash: &DestinationHash) -> crate::transport::TickOutput {
         let mut tag = [0u8; TRUNCATED_HASHBYTES];
         self.rng.fill_bytes(&mut tag);
