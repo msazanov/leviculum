@@ -36,10 +36,11 @@
 //!   docs/src/protocol-notes/announce-dedup-and-path-replacement.md §5).
 //!   In this room that collapses to "the epoch's first-heard copy wins",
 //!   computed as a pure fold over the schedule. The fold doubles as the
-//!   model cross-check for arm (i): our only same-emission deviation,
-//!   `FewerHopsWins`, is unreachable when the shorter copy always arrives
-//!   first, so (i) must equal (iii) on every metric here — asserted, which
-//!   validates the replay against the real gate.
+//!   model cross-check for arm (i): the live same-emission rule is
+//!   Python's since #231, and the retired `FewerHopsWins` deviation was
+//!   unreachable here anyway (the shorter copy always arrives first), so
+//!   (i) must equal (iii) on every metric here — asserted, which validates
+//!   the replay against the real gate.
 //!
 //! ## The verdict (#425 step 2, pinned)
 //!
@@ -249,9 +250,10 @@ fn pathchoice_rule_table() {
             let reference = run_reference_arm(&schedule);
 
             // Model cross-check, per seed: in this room the shipped rule
-            // and the Python reference are indistinguishable (the
-            // FewerHopsWins deviation needs the shorter copy to arrive
-            // SECOND, which a lost direct copy never does), so the real
+            // and the Python reference are indistinguishable (the live
+            // same-emission rule is Python's, and the retired FewerHopsWins
+            // needed the shorter copy to arrive SECOND, which a lost direct
+            // copy never does), so the real
             // gate must reproduce the fold exactly. This pins the replay
             // to the real acceptance path.
             assert_eq!(

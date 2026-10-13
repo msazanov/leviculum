@@ -401,6 +401,10 @@ struct RelayOnlyTrace {
     delivered_to_client: bool,
     /// Hop count after the board asked for the path again and lnsd answered.
     board_hops_after_path_request: Option<u8>,
+    /// The next hop the board held at that point.
+    board_next_hop_after_path_request: Option<[u8; TRUNCATED_HASHBYTES]>,
+    /// Hop count after the board then dropped the path and asked once more.
+    board_hops_after_drop_and_request: Option<u8>,
 }
 
 /// The nodes as the relay leaves the bus: the board holds the target at two
@@ -540,11 +544,39 @@ fn run_relay_only() -> RelayOnlyTrace {
     // And then the board asks for the path again, as the field log shows it
     // doing, and lnsd answers from its own table. Does the stale two-hop entry
     // through the departed relay give way?
-    let mut air: Vec<(bool, Vec<u8>)> = Vec::new(); // (from_board, frame)
     let out = board.request_path(&target);
-    for f in bound_for(&out, BOARD_RADIO) {
-        air.push((true, f));
+    exchange_on_the_silent_channel(&mut lnsd, &mut board, bound_for(&out, BOARD_RADIO));
+    let board_hops_after_path_request = board.hops_to(&target);
+    let board_next_hop_after_path_request = board
+        .transport
+        .get_path_clone(target.as_bytes())
+        .and_then(|p| p.next_hop);
+
+    // The reference's recovery: drop the path, then ask
+    // (`reference/LXMF/LXMF/LXMRouter.py:2743-2751`, the board's
+    // `RetryStep::Rediscover`).
+    board.remove_path(target.as_bytes());
+    let out = board.request_path_unthrottled(&target);
+    exchange_on_the_silent_channel(&mut lnsd, &mut board, bound_for(&out, BOARD_RADIO));
+    let board_hops_after_drop_and_request = board.hops_to(&target);
+
+    RelayOnlyTrace {
+        board_hops,
+        report_transport_id,
+        relay_identity,
+        lnsd_identity,
+        overheard_drops,
+        delivered_to_client,
+        board_hops_after_path_request,
+        board_next_hop_after_path_request,
+        board_hops_after_drop_and_request,
     }
+}
+
+/// Run the board-lnsd channel, the relay gone, starting from the board's
+/// `frames`, for [`ROUNDS`] steps of both nodes' timers.
+fn exchange_on_the_silent_channel(lnsd: &mut Node, board: &mut Node, frames: Vec<Vec<u8>>) {
+    let mut air: Vec<(bool, Vec<u8>)> = frames.into_iter().map(|f| (true, f)).collect();
     for _ in 0..ROUNDS {
         for (from_board, frame) in core::mem::take(&mut air) {
             if from_board {
@@ -559,7 +591,7 @@ fn run_relay_only() -> RelayOnlyTrace {
                 }
             }
         }
-        for node in [&mut lnsd, &mut board] {
+        for node in [&mut *lnsd, &mut *board] {
             let now = node.transport().clock().now_ms();
             node.transport().clock().set(now + STEP_MS);
         }
@@ -572,22 +604,13 @@ fn run_relay_only() -> RelayOnlyTrace {
             air.push((true, f));
         }
     }
-
-    RelayOnlyTrace {
-        board_hops,
-        report_transport_id,
-        relay_identity,
-        lnsd_identity,
-        overheard_drops,
-        delivered_to_client,
-        board_hops_after_path_request: board.hops_to(&target),
-    }
 }
 
 fn describe_relay_only(t: &RelayOnlyTrace) -> String {
     std::format!(
         "board_hops={:?} report_transport_id={:?} relay_identity={:?} \
-         lnsd_identity={:?} overheard_drops={} delivered={} hops_after_pr={:?}",
+         lnsd_identity={:?} overheard_drops={} delivered={} hops_after_pr={:?} \
+         hops_after_drop_and_pr={:?}",
         t.board_hops,
         t.report_transport_id.map(|h| h[..4].to_vec()),
         &t.relay_identity[..4],
@@ -595,6 +618,7 @@ fn describe_relay_only(t: &RelayOnlyTrace) -> String {
         t.overheard_drops,
         t.delivered_to_client,
         t.board_hops_after_path_request,
+        t.board_hops_after_drop_and_request,
     )
 }
 
@@ -650,19 +674,36 @@ fn a_path_learned_through_a_relay_addresses_the_report_at_the_relay() {
 
 /// The recovery the field log shows being attempted: the board asks for the
 /// path again on the now-silent channel and the receiver answers from its own
-/// table. Whether the stale two-hop entry gives way decides whether #344 is a
-/// transient or a permanent black hole.
+/// table. The answer is the emission the board already holds, so asking alone
+/// does not heal: under Python's same-emission rule (live since Codeberg
+/// #231, Transport.py:1772) a second copy of one emission never replaces the
+/// path, however few hops it took. Dropping the path first does, which is
+/// the reference's recovery (`reference/LXMF/LXMF/LXMRouter.py:2743-2751`)
+/// and the board's `RetryStep::Rediscover`
+/// (`an_unproven_report_asks_for_the_path_again_before_its_retry`).
 #[test]
-fn asking_again_heals_the_path_through_the_departed_relay() {
+fn asking_again_heals_the_path_only_once_the_stale_one_is_dropped() {
     let t = run_relay_only();
 
     assert_eq!(
         t.board_hops_after_path_request,
+        Some(2),
+        "the answer carries the emission the stale entry came from: a replay \
+         under Python's rule, so the two-hop entry stays ({})",
+        describe_relay_only(&t)
+    );
+    assert_eq!(
+        t.board_next_hop_after_path_request,
+        Some(t.relay_identity),
+        "and still names the departed relay ({})",
+        describe_relay_only(&t)
+    );
+    assert_eq!(
+        t.board_hops_after_drop_and_request,
         Some(1),
-        "a path request answered by the destination's own host must replace \
-         the entry through a relay that is no longer there; while it does not, \
-         every further report is addressed at the departed relay and silently \
-         discarded ({})",
+        "a path request after dropping the stale entry must install the \
+         receiver's direct route; while it does not, every further report is \
+         addressed at the departed relay and silently discarded ({})",
         describe_relay_only(&t)
     );
 }
