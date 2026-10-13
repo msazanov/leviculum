@@ -515,8 +515,8 @@ central's connection handle to the peripheral and forward ACL data
 under the sender's handle, so every room stalls from the second
 concurrent link (N >= 3) and the emulator's bug is measured as a mesh
 finding. Upstream commit `4ff7deaf8c` fixes it; with it the ladder is
-green to N = 16, which is the emulator's own `MAX_BTDEV_ENTRIES`
-ceiling.
+green to N = 16, which is the stock emulator's own `MAX_BTDEV_ENTRIES`
+ceiling (a third patch raises it, below).
 
 The fix is not the only thing a stock build gets wrong. btvirt reports a
 legacy advertiser only at two instants, when a scanner enables scanning
@@ -532,18 +532,18 @@ carries the before/after trace and the runs that justify it.
 
 `just install-ci` therefore builds btvirt itself
 (`scripts/install-btvirt.sh`): it fetches the bluez source matching this
-host, applies the vendored upstream patch and then the local one from
+host, applies the vendored upstream patch and then the two local ones from
 `scripts/patches/`, and installs the binary together with a provenance
 sidecar, `/usr/local/bin/btvirt.provenance`, whose first non-comment line
 every room prints as `origin=`:
 
 ```
-BLE_ROOM_BTVIRT bin=/usr/local/bin/btvirt bytes=896800 origin="bluez 5.82-1.1 + upstream 4ff7deaf8c + local adv-every-interval; built 2026-10-10, md5 bbcd9427bf1cf23c6416de088f9b4ccb"
+BLE_ROOM_BTVIRT bin=/usr/local/bin/btvirt bytes=896816 origin="bluez 5.82-1.1 + upstream 4ff7deaf8c + local adv-every-interval + local max-btdev-24; built 2026-10-13, md5 d4a62600d53aa83e102d71d9034c20a7"
 ```
 
-A sidecar that names `4ff7deaf8c` without `adv-every-interval` is a bench
-provisioned before the local patch; `--check` fails it and the installer
-rebuilds it.
+A sidecar that names `4ff7deaf8c` without `adv-every-interval` or without
+`max-btdev-24` is a bench provisioned before that local patch; `--check`
+fails it and the installer rebuilds it.
 
 A room with no sidecar still runs and says `origin=unrecorded`, which
 is a result nobody can attribute afterwards. Verify a bench without
@@ -556,8 +556,8 @@ service, `cap_net_raw` on `btmon`) are listed in
 `scripts/install-ci.sh` at the btvirt step; nothing can provision them
 for you.
 
-Each patch is applied by content, not by version number, the local one
-against the tree the upstream one left. Before touching the source tree
+Each patch is applied by content, not by version number, each local one
+against the tree the patches before it left. Before touching the source tree
 the script asks `patch --dry-run` which of three states it is in: the fix reverse-applies cleanly (already there — leave it
 alone), it applies forward (stock — apply it), or neither (refuse,
 rather than build an emulator nobody can name). No released bluez known
@@ -574,16 +574,19 @@ fits *Debian's* bluez — a patch and a fixture derived from it drift
 together — and that is what `patch --dry-run` answers at provisioning
 time.
 
-**Sixteen controllers is the ceiling.** `MAX_BTDEV_ENTRIES` is 16 in
-bluez's `emulator/btdev.c`, in the 5.82 this host builds from and in
-upstream master (read 2026-09-27 at bluez HEAD `8b4a4176`): `btvirt -L
--l16` runs, `-l17` exits at once with "Failed to open Virtual HCI
-device". Sixteen is therefore the largest room this bench can host, and
-on the patched binary it is green. That is why periculum's
-`regression/ble_room_20.toml` carries an `[unsupported]` section rather
-than a red — a twenty-node room cannot be built here at all, and the
-cell skips as infra after 21 s with the kernel showing no new
-controllers. That skip is not a bug in `lnsd`.
+**Twenty-four controllers is the ceiling.** Stock `MAX_BTDEV_ENTRIES`
+is 16 in bluez's `emulator/btdev.c`, in the 5.82 this host builds from
+and in upstream master (read 2026-09-27 at bluez HEAD `8b4a4176`):
+`btvirt -L -l16` runs, `-l17` exits at once with "Failed to open Virtual
+HCI device". Until 2026-10-13 that made periculum's
+`regression/ble_room_20` an `[unsupported]` infra skip. The local patch
+`max-btdev-24` raises the constant to 24, the number periculum's
+`MAX_CONTROLLERS` validates rooms against, so the room can now run
+`ble_room_20`: on the patched binary `-l20` brings up twenty
+controllers, `-l25` fails as `-l17` did, and `ble_room_20` was green
+three of three with 380 of 380 ordered probes each (periculum order
+701). A bench rebuilt from a tree without the patch drops back to
+sixteen, and the cell skips as infra again.
 
 ## Concurrent test protection
 

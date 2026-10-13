@@ -1,0 +1,48 @@
+Local bluez patch, not upstream. Applied by scripts/install-btvirt.sh to the
+`apt-get source bluez` tree AFTER bluez-4ff7deaf8c-emulator-receiving-side-
+handle.patch and bluez-local-emulator-legacy-adv-every-interval.patch, whose
+post-image it is cut against, before building emulator/btvirt.
+
+  tag:      max-btdev-24 (the name the provenance sidecar carries)
+  subject:  emulator: hold twenty-four controllers instead of sixteen
+  cut:      2026-10-13, against bluez 5.82-1.1 (Debian) + 4ff7deaf8c
+            + adv-every-interval, 1 hunk
+  files:    emulator/btdev.c only
+
+WHAT IT CHANGES
+
+`MAX_BTDEV_ENTRIES` goes from 16 to 24. It sizes `btdev_list`, the one array
+of controller pointers, and bounds every loop over it (add_btdev, del_btdev,
+valid_btdev, the two address lookups, inquiry_callback's cursor, the
+broadcast loops). Nothing else pins sixteen: the slot index becomes a
+`uint8_t` address byte, the `-l` count is an unbounded atoi, and connection
+handles are allocated per controller.
+
+WHY 24
+
+Sixteen was the only reason periculum's regression/ble_room_20 could not run
+here: `btvirt -L -l17` exits at once with "Failed to open Virtual HCI
+device". Twenty-four is the twenty-node room plus four of headroom, and it is
+the number periculum's `MAX_CONTROLLERS` (eec45df) validates rooms against,
+so the two must move together.
+
+THE MEASUREMENT (periculum order 701, 2026-10-13, artefacts /home/lew/ci/p701)
+
+On the patched binary `-L -l20` brings up twenty controllers and `-l25`
+fails with the old message, and ble_room_20 ran green three of three, 380 of
+380 ordered probes answered each run. Built binary md5
+d4a62600d53aa83e102d71d9034c20a7.
+
+patch(1) ignores this header.
+
+--- a/emulator/btdev.c
++++ b/emulator/btdev.c
+@@ -272,7 +272,7 @@
+ 
+ #define DEFAULT_INQUIRY_INTERVAL 100 /* 100 milliseconds */
+ 
+-#define MAX_BTDEV_ENTRIES 16
++#define MAX_BTDEV_ENTRIES 24
+ 
+ static const uint8_t LINK_KEY_NONE[16] = { 0 };
+ static const uint8_t LINK_KEY_DUMMY[16] = {	0, 1, 2, 3, 4, 5, 6, 7,

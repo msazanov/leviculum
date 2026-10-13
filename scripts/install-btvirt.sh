@@ -13,7 +13,7 @@
 # N, because the misrouted MTU response also killed healthy ATT channels on
 # third nodes. Upstream `4ff7deaf8c` fixes exactly that, and with it the ladder
 # is green to N = 16 -- the emulator's own `MAX_BTDEV_ENTRIES` ceiling, not
-# ours. Debian packages no btvirt at all, and a stock build reproduces the
+# ours (raised to 24 by the third patch below). Debian packages no btvirt at all, and a stock build reproduces the
 # stall, so a bench provisioned either way measures the emulator's bug and
 # calls it a mesh finding. (periculum #49.)
 #
@@ -29,9 +29,18 @@
 # `adv-every-interval`, its header carries the measurement) re-sends the
 # report every advertising interval; it is applied after the upstream fix.
 #
+# AND WHY SIXTEEN CONTROLLERS ARE NOT ENOUGH
+#
+# btvirt holds at most `MAX_BTDEV_ENTRIES` controllers, 16 in bluez 5.82, so
+# periculum's twenty-node `ble_room_20` could not be built: `-l17` exits at
+# once. A second local patch (tag `max-btdev-24`, its header carries the
+# measurement) raises the constant to 24, the number periculum's
+# `MAX_CONTROLLERS` validates rooms against; measured 2026-10-13, ble_room_20
+# green three of three on it. It is applied last.
+#
 # WHAT IT LEAVES BEHIND, AND WHY THE SIDECAR IS NOT OPTIONAL
 #
-#   /usr/local/bin/btvirt             the emulator, both patches applied
+#   /usr/local/bin/btvirt             the emulator, all three patches applied
 #   /usr/local/bin/btvirt.provenance  what it was built from, one line
 #
 # periculum's ble_room runner prints the sidecar's first non-comment line as
@@ -41,9 +50,9 @@
 # difference between a result and an anecdote. Keep the line's shape: the
 # runner quotes at most 160 characters of it.
 #
-# Idempotent: a host whose sidecar names both patches is left untouched, so
-# `just install-ci` stays a one-command re-run; a sidecar naming the upstream
-# fix alone is a bench provisioned before the local patch existed, and is
+# Idempotent: a host whose sidecar names all three patches is left untouched,
+# so `just install-ci` stays a one-command re-run; a sidecar missing either
+# local patch is a bench provisioned before that patch existed, and is
 # rebuilt. So is a source tree that already has a fix, which is how a future
 # bluez shipping it is handled: see patch_state below.
 #
@@ -82,6 +91,12 @@ LOCAL_PATCH_TAG=adv-every-interval
 LOCAL_PATCH_SUBJECT="emulator: report a legacy advertiser every advertising interval"
 LOCAL_PATCH_FILE="$REPO_DIR/scripts/patches/bluez-local-emulator-legacy-adv-every-interval.patch"
 
+# The controller ceiling, cut against the tree the two above leave behind and
+# applied last.
+MAX_PATCH_TAG=max-btdev-24
+MAX_PATCH_SUBJECT="emulator: hold twenty-four controllers instead of sixteen"
+MAX_PATCH_FILE="$REPO_DIR/scripts/patches/bluez-local-emulator-max-btdev-24.patch"
+
 say() { echo "[install-btvirt] $*"; }
 
 # The sidecar's `origin=`: first non-empty, non-comment line, exactly the line
@@ -105,13 +120,13 @@ provenance_names_patch() {
     esac
 }
 
-# And the local patch, by its tag. Separate from the above so that --check
-# can say which of the two a bench lacks.
-provenance_names_local_patch() {
+# And a local patch, by its tag. Separate from the above so that --check
+# can say which of the three a bench lacks.
+provenance_names_tag() {
     local line
     line=$(origin_line) || return 1
     case "$line" in
-        *"$LOCAL_PATCH_TAG"*) return 0 ;;
+        *"$1"*) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -153,15 +168,19 @@ check() {
     if ! provenance_names_patch; then
         say "UNPATCHED: $PROVENANCE does not name $PATCH_SHORT"
         say "           origin=\"$line\""
-        say "           expected: bluez <version> + upstream $PATCH_SHORT + local $LOCAL_PATCH_TAG; ..."
+        say "           expected: bluez <version> + upstream $PATCH_SHORT + local $LOCAL_PATCH_TAG + local $MAX_PATCH_TAG; ..."
         return 1
     fi
-    if ! provenance_names_local_patch; then
-        say "WITHOUT $LOCAL_PATCH_TAG: $PROVENANCE names $PATCH_SHORT but not the local patch"
+    local tag subject
+    for tag in "$LOCAL_PATCH_TAG" "$MAX_PATCH_TAG"; do
+        provenance_names_tag "$tag" && continue
+        subject=$LOCAL_PATCH_SUBJECT
+        [ "$tag" = "$MAX_PATCH_TAG" ] && subject=$MAX_PATCH_SUBJECT
+        say "WITHOUT $tag: $PROVENANCE names $PATCH_SHORT but not this local patch"
         say "           origin=\"$line\""
-        say "           ($LOCAL_PATCH_SUBJECT); run: bash scripts/install-btvirt.sh"
+        say "           ($subject); run: bash scripts/install-btvirt.sh"
         return 1
-    fi
+    done
     if [ "$PROVENANCE" -ot "$BTVIRT_BIN" ]; then
         say "STALE: $PROVENANCE is older than the binary it describes"
         say "       origin=\"$line\""
@@ -202,8 +221,8 @@ check() {
 #   no         neither. Refuse: building an unknown emulator is the failure
 #              this whole script exists to prevent.
 #
-# Both patches go through it, in order, each judged against the tree the one
-# before it left.
+# All three patches go through it, in order, each judged against the tree the
+# one before it left.
 patch_state() {
     local srcdir="$1" logdir="$2" file="$3"
     if (cd "$srcdir" && patch -p1 --reverse --forward --dry-run \
@@ -321,8 +340,8 @@ provenance_text() {
     local version="$1" md5="$2" today="$3"
     printf '%s\n%s\n%s\n' \
         "# written by scripts/install-btvirt.sh on $today" \
-        "# source: apt-get source bluez ($version), patch -p1 < $(basename "$PATCH_FILE") ($PATCH_SHA), then < $(basename "$LOCAL_PATCH_FILE")" \
-        "bluez $version + upstream $PATCH_SHORT + local $LOCAL_PATCH_TAG; built $today, md5 $md5"
+        "# source: apt-get source bluez ($version), patch -p1 < $(basename "$PATCH_FILE") ($PATCH_SHA), then < $(basename "$LOCAL_PATCH_FILE") < $(basename "$MAX_PATCH_FILE")" \
+        "bluez $version + upstream $PATCH_SHORT + local $LOCAL_PATCH_TAG + local $MAX_PATCH_TAG; built $today, md5 $md5"
 }
 
 SUDO=""
@@ -341,7 +360,8 @@ need_sudo() {
 install_btvirt() {
     # Idempotence, checked before anything is fetched or compiled.
     if [ -x "$BTVIRT_BIN" ] && provenance_names_patch \
-            && provenance_names_local_patch; then
+            && provenance_names_tag "$LOCAL_PATCH_TAG" \
+            && provenance_names_tag "$MAX_PATCH_TAG"; then
         local line
         line=$(origin_line)
         say "already patched, nothing to do"
@@ -350,7 +370,7 @@ install_btvirt() {
     fi
 
     local f
-    for f in "$PATCH_FILE" "$LOCAL_PATCH_FILE"; do
+    for f in "$PATCH_FILE" "$LOCAL_PATCH_FILE" "$MAX_PATCH_FILE"; do
         if ! [ -r "$f" ]; then
             say "ERROR: vendored patch missing: $f"
             return 1
@@ -410,7 +430,9 @@ install_btvirt() {
     if ! apply_patch "$srcdir" "$workdir" "$PATCH_FILE" "$PATCH_SHORT" \
             "$PATCH_SUBJECT" \
         || ! apply_patch "$srcdir" "$workdir" "$LOCAL_PATCH_FILE" \
-            "$LOCAL_PATCH_TAG" "$LOCAL_PATCH_SUBJECT"; then
+            "$LOCAL_PATCH_TAG" "$LOCAL_PATCH_SUBJECT" \
+        || ! apply_patch "$srcdir" "$workdir" "$MAX_PATCH_FILE" \
+            "$MAX_PATCH_TAG" "$MAX_PATCH_SUBJECT"; then
         say "       the source above is bluez $version"
         return 1
     fi
@@ -492,8 +514,8 @@ self_test() {
     }
 
     write_good_note() {
-        printf '# a comment the reader must skip\n\nbluez 5.82-1.1 + upstream %s (%s) + local %s; built 2026-10-10, md5 %s\n' \
-            "$PATCH_SHORT" "$PATCH_SUBJECT" "$LOCAL_PATCH_TAG" \
+        printf '# a comment the reader must skip\n\nbluez 5.82-1.1 + upstream %s (%s) + local %s + local %s; built 2026-10-10, md5 %s\n' \
+            "$PATCH_SHORT" "$PATCH_SUBJECT" "$LOCAL_PATCH_TAG" "$MAX_PATCH_TAG" \
             "$(md5sum "$bin" | cut -d' ' -f1)" >"$note"
     }
 
@@ -621,6 +643,42 @@ self_test() {
             fi
             state=$(patch_state "$trimmed" "$logs" "$LOCAL_PATCH_FILE")
             is no "$state" "an unrelated tree refuses $LOCAL_PATCH_TAG"
+
+            # The controller ceiling, last, on the tree the two above left.
+            if ! make_fixture "$src" "$MAX_PATCH_FILE" overlay; then
+                bad "could not overlay $MAX_PATCH_FILE on the patched tree"
+            else
+                state=$(patch_state "$src" "$logs" "$MAX_PATCH_FILE")
+                is appliable "$state" "twice-patched tree takes $MAX_PATCH_TAG"
+                if apply_patch "$src" "$logs" "$MAX_PATCH_FILE" \
+                        "$MAX_PATCH_TAG" "$MAX_PATCH_SUBJECT" \
+                        >/dev/null 2>&1; then
+                    ok "the ceiling patch applies"
+                else
+                    bad "the ceiling patch does not apply to its own pre-image"
+                fi
+                if grep -qF '#define MAX_BTDEV_ENTRIES 24' "$src/emulator/btdev.c" \
+                        && ! grep -qF '#define MAX_BTDEV_ENTRIES 16' \
+                            "$src/emulator/btdev.c"; then
+                    ok "the ceiling is twenty-four, not sixteen"
+                else
+                    bad "the ceiling patch did not move MAX_BTDEV_ENTRIES to 24"
+                fi
+                # Neither earlier patch may be clobbered by the overlay.
+                for want in \
+                        'cc.handle = cpu_to_le16(conn->link->handle);' \
+                        'le_adv_broadcast_start(dev);'; do
+                    if grep -qF "$want" "$src/emulator/btdev.c"; then
+                        ok "survives the ceiling patch: $want"
+                    else
+                        bad "gone after the ceiling patch: $want"
+                    fi
+                done
+                state=$(patch_state "$src" "$logs" "$MAX_PATCH_FILE")
+                is applied "$state" "ceiling-patched tree reads as applied"
+            fi
+            state=$(patch_state "$trimmed" "$logs" "$MAX_PATCH_FILE")
+            is no "$state" "an unrelated tree refuses $MAX_PATCH_TAG"
         fi
     fi
 
@@ -641,8 +699,13 @@ self_test() {
     else
         bad "sidecar comment does not name $(basename "$LOCAL_PATCH_FILE")"
     fi
+    if echo "$text" | sed -n 2p | grep -qF "$(basename "$MAX_PATCH_FILE")"; then
+        ok "sidecar comment names the ceiling patch file"
+    else
+        bad "sidecar comment does not name $(basename "$MAX_PATCH_FILE")"
+    fi
     if echo "$origin" | grep -qE \
-        "^bluez 5\.82-1\.1 \+ upstream $PATCH_SHORT \+ local $LOCAL_PATCH_TAG; built 2026-09-27, md5 [0-9a-f]{32}$"
+        "^bluez 5\.82-1\.1 \+ upstream $PATCH_SHORT \+ local $LOCAL_PATCH_TAG \+ local $MAX_PATCH_TAG; built 2026-09-27, md5 [0-9a-f]{32}$"
     then
         ok "origin line has the shape periculum reads"
     else
@@ -674,6 +737,13 @@ self_test() {
     printf 'bluez 5.82-1.1 + upstream %s (%s); built 2026-09-27, md5 %s\n' \
         "$PATCH_SHORT" "$PATCH_SUBJECT" "$(md5sum "$bin" | cut -d' ' -f1)" >"$note"
     expect 1 "origin line naming the upstream fix without $LOCAL_PATCH_TAG"
+
+    # A bench provisioned before the ceiling patch: both earlier patches,
+    # md5 and mtime honest. It must fail, or the room would skip ble_room_20
+    # as infra on a bench that only needs a rebuild.
+    printf 'bluez 5.82-1.1 + upstream %s + local %s; built 2026-10-10, md5 %s\n' \
+        "$PATCH_SHORT" "$LOCAL_PATCH_TAG" "$(md5sum "$bin" | cut -d' ' -f1)" >"$note"
+    expect 1 "origin line naming both earlier patches without $MAX_PATCH_TAG"
 
     write_good_note
     expect 0 "patched sidecar describing this binary"

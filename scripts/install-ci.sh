@@ -183,7 +183,9 @@ fi
 # (scripts/patches/, commit 4ff7deaf8c) and then the local patch that makes a
 # legacy advertiser repeat every interval (tag adv-every-interval: stock
 # btvirt reports it only at the scan-enable and advertise-enable instants, so
-# re-sightings measured the emulator's phase), builds emulator/btvirt,
+# re-sightings measured the emulator's phase), then the local patch that
+# raises the controller ceiling to twenty-four (tag max-btdev-24, below),
+# builds emulator/btvirt,
 # installs it, and writes the provenance sidecar the room prints as `origin=`. It is
 # idempotent and it warns rather than fails when a prerequisite (deb-src,
 # sudo, a compiler) is missing -- only the BLE bench needs any of this. A
@@ -192,24 +194,25 @@ fi
 #
 # Re-verify later without installing anything: bash scripts/install-ci.sh --check
 # Drive the patch and sidecar logic with no root and no build, against a
-# source tree synthesised from the vendored patch: just btvirt-selftest.
+# source tree synthesised from the vendored patches: just btvirt-selftest.
 #
-# THE CEILING: SIXTEEN CONTROLLERS, AND THE CELL THAT DECLARES IT
+# THE CEILING: TWENTY-FOUR CONTROLLERS, PATCHED UP FROM SIXTEEN
 #
-# btvirt holds at most sixteen emulated controllers -- `MAX_BTDEV_ENTRIES`
-# is 16 in bluez's `emulator/btdev.c`, in the 5.82 this host builds from and
-# in upstream master (read 2026-09-27 at bluez HEAD 8b4a4176). Measured the
-# same day: `btvirt -L -l16` runs, `-l17` exits at once with "Failed to open
-# Virtual HCI device". So sixteen is the largest room this bench can host,
-# and it is green on the patched binary (240 of 240 ordered probes). Above
-# it nothing here can help: a second emulator instance sharing one air, a
-# patched ceiling, or real radios.
+# Stock btvirt holds at most sixteen emulated controllers --
+# `MAX_BTDEV_ENTRIES` is 16 in bluez's `emulator/btdev.c`, in the 5.82 this
+# host builds from and in upstream master (read 2026-09-27 at bluez HEAD
+# 8b4a4176): `btvirt -L -l16` runs, `-l17` exits at once with "Failed to
+# open Virtual HCI device". Until 2026-10-13 that made periculum's
+# `regression/ble_room_20` unbuildable here, an `[unsupported]` skip.
 #
-# That is why periculum's `regression/ble_room_20.toml` carries an
-# `[unsupported]` section rather than a red -- twenty nodes cannot be built
-# here at all, and the cell skips as infra after 21 s with the kernel
-# showing no new controllers. Do not read that skip as a bug in lnsd or in
-# this script. `ble_room_2`, `ble_room_10` and the rest run normally.
+# The local patch max-btdev-24 raises the constant to twenty-four, the
+# number periculum's `MAX_CONTROLLERS` validates rooms against. Measured
+# 2026-10-13 (periculum order 701): `-l20` brings up twenty controllers,
+# `-l25` fails as `-l17` did, and ble_room_20 ran green three of three, 380
+# of 380 ordered probes each. So the room can now run ble_room_20, and a
+# bench rebuilt from this tree keeps it; one whose sidecar lacks
+# max-btdev-24 fails --check and is rebuilt. Above twenty-four the old
+# answer stands: a bigger patch, or real radios.
 #
 # Prerequisites the cells need beyond the binary (one-time provisioning):
 #   - kernel hci_vhci module, loaded at boot and group-writable:
