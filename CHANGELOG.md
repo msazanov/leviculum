@@ -642,7 +642,10 @@ Toolchain: Rust 1.97.1
   a local shared instance, inside the receipt timeout a stock Python client
   gives it (leviculum#709). It used to prove in 26 to 50 ms, and a stock
   client tore the link down and parked the message: four of the first five
-  uploads from a stock client over loopback.
+  uploads from a stock client over loopback. A client that asks lnpnd for
+  its path in the 20 s before the node's first announce now also learns
+  the stamp cost; until now it failed its first upload with "cannot
+  generate propagation stamp".
 
 - A board south of the equator or west of Greenwich reports its GNSS
   position with the right sign (leviculum#447); it was mirrored across the

@@ -602,6 +602,15 @@ impl<S: PropagationStore> Engine<S> {
         peering.set_cadence(self.sync_interval_ms, self.rotation_interval_ms);
         // Restored peers may already require true stamp values (§5).
         node.set_compute_stamp_value(peering.requires_stamp_values());
+        // What a path response carries until the first announce refreshes
+        // it: the reference parks its app data on the destination at
+        // registration (`set_default_app_data`,
+        // `reference/LXMF/LXMF/LXMRouter.py:191`). Without it a client that
+        // asks for the path in the 20 s before that announce reads no stamp
+        // cost and fails its upload (`LXMRouter.py:2634-2640`).
+        if let Some(destination) = core.destination_mut(&destination_hash) {
+            destination.set_default_app_data(&node.announce_app_data(unix_secs()));
+        }
         self.emit(EngineEvent::Ready {
             destination_hash: *destination_hash.as_bytes(),
         });
@@ -3339,6 +3348,86 @@ mod tests {
                 .peering
                 .is_throttled_for_tests(&remote_hash, now + PN_STAMP_THROTTLE_SECS + 1),
             "and no longer"
+        );
+    }
+
+    /// A path request answered before the node's first announce must carry
+    /// the node's announce data: a stock client reads the stamp cost it has
+    /// to mine out of whatever announce it last heard for the node
+    /// (`get_outbound_propagation_cost`,
+    /// `reference/LXMF/LXMF/LXMRouter.py:421-442`), and a response without
+    /// app data leaves it nothing, so it fails the message ("cannot
+    /// generate propagation stamp", `LXMRouter.py:2634-2640`). The
+    /// reference parks the app data on the destination at registration
+    /// (`set_default_app_data`, `LXMRouter.py:191`), which is what a path
+    /// response reads (#158's pin, `mvr_default_announce_app_data.rs`).
+    /// lnpnd announces 20 s after start, so every client that asked in that
+    /// window lost its first upload (leviculum order 709).
+    #[test]
+    fn a_path_response_before_the_first_announce_carries_the_stamp_cost() {
+        use leviculum_lxmf::propagation::PropagationNodeAnnounce;
+
+        let server_dir = tempfile::tempdir().expect("tempdir");
+        let client_dir = tempfile::tempdir().expect("tempdir");
+        let mut server = core(server_dir.path());
+        let mut client = core(client_dir.path());
+        let (mut engine, _events) = Engine::new(EngineConfig {
+            identity: leviculum_std::generate_identity(),
+            node_config: PropagationNodeConfig::default(),
+            store: MemoryPropagationStore::new(64_000),
+            announce_interval_secs: 3600,
+            // No announce within the test: the response is all there is.
+            announce_delay_secs: 3600,
+            peering: PeeringConfig::default(),
+            peer_store: Box::new(MemoryPeerStore::default()),
+            control_allowed: Vec::new(),
+            auth_allowed: None,
+            mailbox: None,
+            store_limit_bytes: 64_000,
+            delivery_limit_kb: 1000,
+        });
+        let start = server.now_ms();
+        let _ = engine.on_tick(&mut server, start);
+        let destination_hash = match &engine.state {
+            State::Ready(ready) => ready.destination_hash,
+            _ => panic!("engine must be ready"),
+        };
+
+        // The response leaves after the path-request grace, from the
+        // node's timer, not from the packet's own handling.
+        let request = client.request_path(&destination_hash);
+        for data in wire_of(&request) {
+            let _ = server.handle_packet(leviculum_core::InterfaceId(0), &data);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(
+            leviculum_core::constants::PATH_REQUEST_GRACE_MS + 50,
+        ));
+        let response = server.handle_timeout();
+        let mut events = Vec::new();
+        for data in wire_of(&response) {
+            let out = client.handle_packet(leviculum_core::InterfaceId(0), &data);
+            events.extend(out.events);
+        }
+        let app_data = events
+            .iter()
+            .find_map(|event| match event {
+                NodeEvent::AnnounceReceived { announce, .. }
+                    if announce.destination_hash() == &destination_hash =>
+                {
+                    Some(announce.app_data().to_vec())
+                }
+                _ => None,
+            })
+            .expect("the node must answer the path request");
+        let announce = PropagationNodeAnnounce::decode(&app_data).unwrap_or_else(|error| {
+            panic!(
+                "the path response carries no propagation app data ({} bytes): {error:?}",
+                app_data.len()
+            )
+        });
+        assert_eq!(
+            announce.stamp_cost,
+            u64::from(PropagationNodeConfig::default().stamp_cost)
         );
     }
 
