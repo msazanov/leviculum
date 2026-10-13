@@ -231,25 +231,36 @@ Three facts follow:
   interface to begin with.
 
 Recorded 2026-09-27 against `~/coding/Reticulum` at 1.5.2. The nearest
-thing we had to this arm was our own same-emission clause
+thing we have to this arm is our own same-emission clause
 (`transport.rs`, `SameEmissionRule::FewerHopsWins`, Codeberg #231),
-which ranked by hop count rather than by a configured preference. It is
-retired: on the three relayed lnsd arms (`pathchoice_loss30/50/70`, 41
-to 43 `PATH_ADD` each, 2026-09-27) `reason="same_emission_fewer_hops"`
-fired 0 times, because on one shared radio the direct copy, when it
-arrives at all, arrives first. A deviation with a measured contribution
-of zero does not meet the deviation rule, so since 2026-10-13 the live
-`SAME_EMISSION_RULE` is `StrictlyNewerOnly`, the 1.3.5 rule above: a
-same-blob copy is dropped by the replay guard whatever its hop count.
-The enum keeps the retired rule and a `FewerHopsOnOtherInterface`
-candidate compiled and tested, so a measurement that shows a gain (the
-BLE-plus-LoRa board hearing a phone over both is the candidate) flips
-it back in one line.
+which ranks by hop count rather than by a configured preference. It is
+live, as a deviation, on two measurements:
+
+* On the three relayed lnsd arms (`pathchoice_loss30/50/70`, 41 to 43
+  `PATH_ADD` each, 2026-09-27) `reason="same_emission_fewer_hops"`
+  fired 0 times, because on one shared radio the direct copy, when it
+  arrives at all, arrives first. There the clause costs nothing.
+* With the clause retired for a day (`SAME_EMISSION_RULE =
+  StrictlyNewerOnly`, the 1.3.5 rule above, 2026-10-13), the land gate
+  on 8f33581e went red on `conformance/link_failure_recovery`:
+  `VERDICT link_failure_recovery RED step 9 (wait_for_path) failed:
+  path to ba8c7f6d... did not settle at 1 hop(s) before timeout, last
+  seen: 2 hop(s)`. When a blocked direct link comes back, the direct
+  copy is the emission the node already holds via the relay, a replay
+  under Python's rule whatever its hop count, so the node relays
+  through a third node until the destination announces again. That is
+  a third node's airtime for every packet for up to an announce
+  interval, and the clause is what heals it.
+
+Wire format and semantics are unchanged (a copy is accepted or not,
+nothing new is sent), so the deviation rule admits it. The enum keeps
+`StrictlyNewerOnly` and a `FewerHopsOnOtherInterface` candidate
+compiled and tested on the pure function.
 
 ## 6. The measured same-emission arm: `path_choice = hops_and_loss`
 
 Since 2026-10-05 (Codeberg #230) the same-emission clause has a second,
-opt-in rule beside the default (Python's rule since #231, §5): `path_choice =
+opt-in rule beside the default hop ranking (§5): `path_choice =
 hops_and_loss` (the `[reticulum]` key; `TransportConfig::path_choice`,
 `PathChoice` in `transport.rs`). Where §5's 1.5.2 `gravity` re-ranks
 equal-emission copies by an operator-CONFIGURED preference, this rule
@@ -270,9 +281,7 @@ losing more than ~29 % of announces. Three properties bound it:
   absence of a direct copy of it proves nothing.
 * **Degradation.** Below `DIRECT_EVIDENCE_MIN_KNOWN` known emissions —
   a fresh destination, or a mesh whose announce cadence is too sparse
-  to score — the rule ranks same-emission copies by plain hop count,
-  which is the retired `FewerHopsWins` and so more permissive than the
-  default `hops` since #231. The default IS
+  to score — the rule decides exactly like `hops`. The default IS
   `hops`; the knob is a deliberate opt-in and rnsd ignores the key in
   a shared config.
 * **Evidence.** The pinned replay `mvr_pathchoice_rule_table`

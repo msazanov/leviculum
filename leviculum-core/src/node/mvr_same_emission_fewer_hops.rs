@@ -5,13 +5,10 @@
 //!
 //! `transport.rs`'s equal-or-fewer-hops acceptance arm has a second
 //! condition beside "the emission is newer": `announce_emitted ==
-//! path_timebase && accept_same_emission(..)`, live as
-//! [`SameEmissionRule::StrictlyNewerOnly`] since #231, i.e. Python's rule:
-//! a second copy of an announce we already installed never replaces the
-//! path. Until then it was [`SameEmissionRule::FewerHopsWins`], a deviation
-//! that replaced the path whenever the copy took strictly fewer hops; #231
-//! counted it at zero on the relayed pathchoice arms (loss30/50/70, 41 to
-//! 43 PATH_ADD each) and retired it. Python has no such acceptance: the vendored
+//! path_timebase && accept_same_emission(..)`, today
+//! [`SameEmissionRule::FewerHopsWins`]. A second copy of an announce we
+//! already installed replaces the path whenever it took strictly fewer
+//! hops. Python has no such acceptance: the vendored
 //! reference/Reticulum/RNS/Transport.py:1772 (1.3.5) demands an unseen
 //! random blob AND `announce_emitted > path_timebase`, and 1.5.2 — the
 //! version periculum's `rnsd` arm pins — adds only a `gravity` arm on equal
@@ -38,19 +35,31 @@
 //!
 //! ## What is pinned
 //!
-//! 1. Today's behaviour, Python's: relayed (hops 2, via bravo) first,
-//!    direct (hops 1) second — the replay guard drops the direct copy, the
-//!    entry stays at hops 2 via bravo, and no `PATH_ADD` is logged.
+//! 1. Today's behaviour: relayed (hops 2, via bravo) first, direct
+//!    (hops 1) second — the entry moves to hops 1 with `next_hop` None,
+//!    and `PATH_ADD` names `reason=same_emission_fewer_hops`, the readout
+//!    the per-arm count is taken from.
 //! 2. The control: direct first, relayed second — the entry stays at
 //!    hops 1 under every candidate rule, so a change to #231's decision
 //!    cannot regress the ordinary case.
-//! 3. The retired deviation, expressed but NOT wired in: the same two
-//!    copies under [`SameEmissionRule::FewerHopsWins`] would swap to the
-//!    1-hop route, which is what flipping the constant back would restore.
+//! 3. Python's rule, expressed but NOT wired in: the same two copies under
+//!    [`SameEmissionRule::StrictlyNewerOnly`] keep the relayed 2-hop
+//!    entry.
 //! 4. Option (C) of #231: fewer hops only on a different interface — the
 //!    one-radio room rejects, a genuine second route accepts.
 //!
 //! Sans-I/O: 1 node, 1-2 mock interfaces, deterministic, sub-second.
+//!
+//! ## The decision (#231)
+//!
+//! `FewerHopsWins` is live, as a deviation the deviation rule admits on a
+//! measurement. On the relayed pathchoice arms (loss30/50/70, 41 to 43
+//! `PATH_ADD` each) it fired 0 times: on one shared radio the direct copy,
+//! when it arrives at all, arrives first. Retired on that count, the land
+//! gate on 8f33581e went red on `conformance/link_failure_recovery`: after
+//! the direct link comes back the direct copy is the emission already held
+//! at 2 hops, a replay under Python's rule, so the path stays on the relay
+//! until the destination announces again. This clause is what heals it.
 
 extern crate std;
 
@@ -148,11 +157,10 @@ impl Charlie {
 }
 
 /// Assertion 1 + 3: the relayed copy arrives first, the direct copy of the
-/// SAME emission arrives second on the same radio. The live rule, Python's,
-/// keeps the route; the retired deviation, expressed against the pure
-/// function, would have swapped it.
+/// SAME emission arrives second on the same radio. Today's rule swaps the
+/// route; Python's rule, expressed against the pure function, keeps it.
 #[test]
-fn relayed_first_then_direct_keeps_the_relayed_route() {
+fn relayed_first_then_direct_swaps_to_the_one_hop_route() {
     let mut node = make_node();
     let lora = add_iface(&mut node, "lora_sx1262", 0);
     let charlie = make_charlie();
@@ -171,7 +179,6 @@ fn relayed_first_then_direct_keeps_the_relayed_route() {
     );
 
     // charlie's own copy of the SAME announce arrives second.
-    let replays_before = node.transport.stats().drops_announce_replay();
     let ((), logs) = crate::test_log_capture::with_captured_logs(|| {
         let _ = node.handle_packet(InterfaceId(lora), &charlie.direct());
     });
@@ -180,30 +187,27 @@ fn relayed_first_then_direct_keeps_the_relayed_route() {
         .get_path_clone(charlie.dest_hash.as_bytes())
         .expect("path still present");
     assert_eq!(
-        after.hops, 2,
-        "Python's rule (reference/Reticulum/RNS/Transport.py:1772, live as \
-         SameEmissionRule::StrictlyNewerOnly) requires a strictly newer \
-         emission and an unseen random blob; a second copy of one emission \
-         is neither, however few hops it saved — Codeberg #231"
+        after.hops, 1,
+        "today's rule (SameEmissionRule::FewerHopsWins) replaces the \
+         installed 2-hop entry with the direct copy of the same emission \
+         — Codeberg #231"
     );
     assert_eq!(
-        after.next_hop,
-        Some(BRAVO),
-        "alpha keeps bravo's route until a fresh emission arrives"
+        after.next_hop, None,
+        "a 1-hop path is reached without a relay, so next_hop is cleared"
     );
-    assert_eq!(
-        node.transport.stats().drops_announce_replay(),
-        replays_before + 1,
-        "a seen random blob is a replay whatever its hop count: the replay \
-         guard drops the copy before the acceptance arm sees it"
-    );
+    // With the quotes: `tracing` renders a `&'static str` field quoted, so
+    // the recipe that counts these across a corpus run has to grep
+    // `reason="same_emission_fewer_hops"` and not the bare token. Pinned
+    // here because the count is the whole measurement #231 is waiting on.
     assert!(
-        !logs.contains("event=\"PATH_ADD\""),
-        "nothing was installed, so nothing is logged as installed; \
-         logs={logs:?}"
+        logs.contains("event=\"PATH_ADD\"") && logs.contains("reason=\"same_emission_fewer_hops\""),
+        "the swap must be attributable in the logs: `reason=` on PATH_ADD is \
+         the readout #231's per-arm count is taken from, and a soak's direct \
+         share cannot substitute for it; logs={logs:?}"
     );
 
-    // Assertion 3 — the retired deviation on the very copies this run kept,
+    // Assertion 3 — Python's rule on the very copies this run swapped on,
     // via the pure function, NOT wired in.
     let existing = SameEmissionCopy {
         hops: 2,
@@ -215,12 +219,21 @@ fn relayed_first_then_direct_keeps_the_relayed_route() {
     };
     assert!(
         !accept_same_emission(SameEmissionRule::StrictlyNewerOnly, existing, incoming),
-        "the live rule refuses a second copy of one emission"
+        "Python 1.3.5 (reference/Reticulum/RNS/Transport.py:1772) requires a \
+         strictly newer emission \
+         and an unseen random blob; a second copy of one emission is \
+         neither, however few hops it saved"
     );
-    assert!(
-        accept_same_emission(SameEmissionRule::FewerHopsWins, existing, incoming),
-        "the retired deviation took any strictly shorter copy: flipping \
-         SAME_EMISSION_RULE back to it restores the swap to 1 hop"
+    let hops_under_pythons_rule =
+        if accept_same_emission(SameEmissionRule::StrictlyNewerOnly, existing, incoming) {
+            incoming.hops
+        } else {
+            existing.hops
+        };
+    assert_eq!(
+        hops_under_pythons_rule, 2,
+        "under Python's rule alpha keeps bravo's 2-hop route until a fresh \
+         emission arrives — this is the behaviour difference #231 decides on"
     );
 }
 
@@ -327,15 +340,15 @@ fn option_c_accepts_only_across_interfaces() {
     );
 }
 
-/// The live rule is Python's (#231). Flipping [`SAME_EMISSION_RULE`] back
-/// to a hop-counting rule is a deviation and needs a measurement that it
-/// improves delivery, e.g. a BLE-plus-LoRa board hearing a phone over both.
+/// The live rule is `FewerHopsWins` (#231): a link restore heals to the
+/// direct route on the next direct copy (`conformance/link_failure_recovery`).
 #[test]
-fn the_live_rule_is_pythons() {
+fn the_live_rule_is_still_todays() {
     assert_eq!(
         SAME_EMISSION_RULE,
-        SameEmissionRule::StrictlyNewerOnly,
-        "a pass that flips the live rule must land the measurement with it: \
-         #231 counted FewerHopsWins at 0 on the relayed pathchoice arms"
+        SameEmissionRule::FewerHopsWins,
+        "Python's rule leaves a node on the relay after its direct link comes \
+         back, until the next announce (link_failure_recovery step 9); a pass \
+         that flips it must land a measurement that outweighs that"
     );
 }

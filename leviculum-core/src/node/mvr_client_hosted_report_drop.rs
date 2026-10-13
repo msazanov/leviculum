@@ -674,36 +674,39 @@ fn a_path_learned_through_a_relay_addresses_the_report_at_the_relay() {
 
 /// The recovery the field log shows being attempted: the board asks for the
 /// path again on the now-silent channel and the receiver answers from its own
-/// table. The answer is the emission the board already holds, so asking alone
-/// does not heal: under Python's same-emission rule (live since Codeberg
-/// #231, Transport.py:1772) a second copy of one emission never replaces the
-/// path, however few hops it took. Dropping the path first does, which is
-/// the reference's recovery (`reference/LXMF/LXMF/LXMRouter.py:2743-2751`)
-/// and the board's `RetryStep::Rediscover`
+/// table. Whether the stale two-hop entry gives way decides whether #344 is a
+/// transient or a permanent black hole. The answer is the emission the board
+/// already holds, so it heals only through the same-emission clause
+/// (`SameEmissionRule::FewerHopsWins`, live, Codeberg #231); under Python's
+/// rule (Transport.py:1772) the stale entry would stay. Dropping the path
+/// first heals under either rule, which is the reference's recovery
+/// (`reference/LXMF/LXMF/LXMRouter.py:2743-2751`) and the board's
+/// `RetryStep::Rediscover`
 /// (`an_unproven_report_asks_for_the_path_again_before_its_retry`).
 #[test]
-fn asking_again_heals_the_path_only_once_the_stale_one_is_dropped() {
+fn asking_again_heals_the_path_through_the_departed_relay() {
     let t = run_relay_only();
 
     assert_eq!(
         t.board_hops_after_path_request,
-        Some(2),
-        "the answer carries the emission the stale entry came from: a replay \
-         under Python's rule, so the two-hop entry stays ({})",
+        Some(1),
+        "a path request answered by the destination's own host must replace \
+         the entry through a relay that is no longer there; while it does not, \
+         every further report is addressed at the departed relay and silently \
+         discarded ({})",
         describe_relay_only(&t)
     );
-    assert_eq!(
+    assert_ne!(
         t.board_next_hop_after_path_request,
         Some(t.relay_identity),
-        "and still names the departed relay ({})",
+        "and no longer names the departed relay ({})",
         describe_relay_only(&t)
     );
     assert_eq!(
         t.board_hops_after_drop_and_request,
         Some(1),
-        "a path request after dropping the stale entry must install the \
-         receiver's direct route; while it does not, every further report is \
-         addressed at the departed relay and silently discarded ({})",
+        "a path request after dropping the entry installs the receiver's \
+         direct route as well ({})",
         describe_relay_only(&t)
     );
 }

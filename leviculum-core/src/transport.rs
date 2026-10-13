@@ -244,11 +244,12 @@ pub(crate) struct SameEmissionCopy {
 #[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SameEmissionRule {
-    /// The deviation #231 was about, live until 2026-10-13: a copy of an
-    /// emission we already hold replaces the installed path whenever it
-    /// took strictly fewer hops, wherever it came from. Retired because
-    /// it measured zero: three relayed lnsd arms (loss30/50/70, 41 to 43
-    /// PATH_ADD each) never took it once.
+    /// The live deviation #231 is about: a copy of an emission we already
+    /// hold replaces the installed path whenever it took strictly fewer
+    /// hops, wherever it came from. Two measurements: on the relayed
+    /// pathchoice arms (loss30/50/70, 41 to 43 PATH_ADD each) it fired 0
+    /// times, and without it `conformance/link_failure_recovery` stays on
+    /// the relay after the direct link is restored (step 9 red).
     FewerHopsWins,
     /// Python's rule, in both versions that matter to us. The vendored
     /// reference/Reticulum/RNS/Transport.py:1772 (1.3.5) requires an unseen
@@ -275,12 +276,18 @@ pub(crate) enum SameEmissionRule {
     FewerHopsOnOtherInterface,
 }
 
-/// The live rule: Python's. #231 measured the `FewerHopsWins` deviation on
-/// the relayed pathchoice arms and found it never fires (on one shared
-/// radio the direct copy, when it arrives at all, arrives first), so the
-/// deviation rule no longer admitted it. Flipping back on a measurement,
-/// e.g. a BLE-plus-LoRa board hearing a phone over both, is this one line.
-pub(crate) const SAME_EMISSION_RULE: SameEmissionRule = SameEmissionRule::StrictlyNewerOnly;
+/// The live rule: `FewerHopsWins`, a deviation the deviation rule admits on
+/// #231's two measurements. On the relayed pathchoice arms it never fires
+/// (on one shared radio the direct copy, when it arrives at all, arrives
+/// first), so it costs nothing there. On `conformance/link_failure_recovery`
+/// it is what heals: once a blocked direct link comes back, the direct copy
+/// is the emission already held via the relay, a replay under Python's rule
+/// (Transport.py:1772), and without the clause the node relays through a
+/// third node until the destination announces again (land gate on
+/// 8f33581e: step 9, "did not settle at 1 hop(s) before timeout, last
+/// seen: 2 hop(s)"). Wire and semantics are unchanged: a copy is accepted
+/// or not, nothing new is sent.
+pub(crate) const SAME_EMISSION_RULE: SameEmissionRule = SameEmissionRule::FewerHopsWins;
 
 /// Does `incoming` — a second copy of the emission `existing` was installed
 /// from — replace the installed path under `rule`?
@@ -910,9 +917,9 @@ pub(crate) struct QueuedAnnounce {
 /// and at 0 % loss the two are identical.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PathChoice {
-    /// Today's rule and the default: fewer hops wins on a newer emission,
-    /// and a second copy of one emission follows `SAME_EMISSION_RULE`
-    /// (Python's, since #231). Nothing the transport has
+    /// Today's rule and the default: fewer hops wins
+    /// (`SameEmissionRule::FewerHopsWins`, the live `SAME_EMISSION_RULE`,
+    /// #231). Nothing the transport has
     /// learned about a link enters the choice.
     #[default]
     Hops,
@@ -923,10 +930,8 @@ pub enum PathChoice {
     /// (`1/r² > 2` at `r < 0.71`). Evidence needs
     /// `DIRECT_EVIDENCE_MIN_KNOWN` announce emissions to warm up; until
     /// then, and whenever announces are too sparse to score, the rule
-    /// ranks a second copy of one emission by plain hop count, which is
-    /// the retired `SameEmissionRule::FewerHopsWins`: since #231 that is
-    /// one acceptance more than [`PathChoice::Hops`]. Default-off until a
-    /// rig series says otherwise (#230).
+    /// behaves exactly like [`PathChoice::Hops`]. Default-off until a rig
+    /// series says otherwise (#230).
     HopsAndLoss,
 }
 
@@ -5668,7 +5673,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// recall source is the cached announce for the destination
     /// (`get_announce_cache`, keyed by destination hash, holding the raw announce
     /// whose payload starts with the 64-byte public key), the same source the
-    /// link-request path uses at transport.rs:4063. A destination with no cached
+    /// link-request path uses at transport.rs:4068. A destination with no cached
     /// announce cannot be associated with an identity, so it is left untouched,
     /// exactly as Python keeps a path whose `Identity.recall` returns `None`.
     ///
@@ -6469,7 +6474,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             path_response = is_path_response,
         );
 
-        // Gate on the already-incremented hops (transport.rs:1635 ran in the
+        // Gate on the already-incremented hops (transport.rs:1640 ran in the
         // inbound path before handle_announce, and local-client/shared-instance
         // accounting has already been applied there). Announces whose hop count
         // exceeds max_hops are neither stored in the path table nor scheduled
@@ -6498,11 +6503,10 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // blob carries an emission we already hold, so this is the same
         // question as `same_emission_wins` there, asked early:
         // - under `PathChoice::Hops`, whatever `SAME_EMISSION_RULE` says.
-        //   Python's rule (live since #231) accepts no second copy, so a
-        //   seen blob is a replay whatever its hop count, as
-        //   Transport.py:1772 reads (`not random_blob in random_blobs`).
-        //   The former `packet.hops >= path.hops` here was the door the
-        //   `FewerHopsWins` deviation needed, and still opens with it.
+        //   With the live `FewerHopsWins` (#231) that opens exactly the old
+        //   `packet.hops < path.hops` case and nothing else; under Python's
+        //   `StrictlyNewerOnly` a seen blob would be a replay whatever its
+        //   hop count (Transport.py:1772, `not random_blob in random_blobs`).
         // - under `PathChoice::HopsAndLoss`, a fewer-hops copy, or one
         //   that wins the cost comparison (Codeberg #230) — a relayed copy
         //   of the emission we installed a marginal DIRECT path from has
@@ -6643,27 +6647,27 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // same emission but strictly fewer hops (same announce via
                 // a shorter path, e.g. direct vs relayed path response).
                 //
-                // The second clause is Python's equal-or-fewer-hops branch
-                // as `SAME_EMISSION_RULE` reads it. Python demands a
-                // strictly newer emission AND an unseen random blob
+                // The second clause is a deliberate deviation: Python's
+                // equal-or-fewer-hops branch demands a strictly newer
+                // emission AND an unseen random blob
                 // (Transport.py:1772), so a second copy of an announce it
                 // has already heard can never displace the installed path,
-                // however few hops it took; the live `StrictlyNewerOnly`
-                // agrees, and under it the replay guard above has already
-                // dropped such a copy, so this arm is reached only when the
-                // rule is flipped. The `FewerHopsWins` deviation it
-                // replaced was measured on the relayed pathchoice arms
-                // (Codeberg #231, 2026-09-27): `reason=
+                // however few hops it took. The rule lives in
+                // `accept_same_emission` beside `SAME_EMISSION_RULE`, which
+                // is `FewerHopsWins` on two measurements (Codeberg #231):
+                // on the relayed pathchoice arms `reason=
                 // "same_emission_fewer_hops"` fired 0 times in 41 to 43
-                // PATH_ADD per arm, so it no longer met the deviation rule.
-                // The reason string stays so a flipped rule is countable.
+                // PATH_ADD per arm, and without it
+                // `conformance/link_failure_recovery` stays on the relay
+                // after the direct link is restored, until the destination
+                // announces again. This clause is the heal.
                 //
                 // Under `path_choice = hops_and_loss` (Codeberg #230) the
                 // same-emission clause compares route COST instead: hop
                 // count, with the direct link priced by its announce
                 // re-hear evidence (`lower_route_cost`). With no evidence
-                // yet the costs degenerate to plain hop counts, i.e. the
-                // retired `FewerHopsWins`, not the live default.
+                // yet the costs degenerate to plain hop counts and the two
+                // knob settings decide identically.
                 let (same_emission_wins, same_emission_reason) = match self.config.path_choice {
                     PathChoice::Hops => (
                         accept_same_emission(
@@ -6803,10 +6807,9 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // other reference branches the same way (leviculum#441; mvr
         // `rate_window_withholds_no_reference_relay`). What the window still
         // withholds is only what the reference does not accept at all: the
-        // same-emission swaps that are our own deviation (the
-        // `path_choice = hops_and_loss` cost swaps, and
-        // `same_emission_fewer_hops` should `SAME_EMISSION_RULE` be flipped
-        // back to a hop-counting rule). A flood of announces the reference accepts meets the
+        // same-emission swaps that are our own deviation
+        // (`same_emission_fewer_hops`, the `path_choice = hops_and_loss`
+        // cost swaps). A flood of announces the reference accepts meets the
         // per-interface announce cap at egress, the reference's own defence,
         // plus `announce_rate_target` where configured.
         let reference_accepts = matches!(
@@ -11561,7 +11564,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // Emit the STORED path-table count, matching Python
                 // Transport.py:2956 (`packet.hops = path_table[dst][IDX_PT_HOPS]`).
                 // The cached raw's hop byte is the PRE-increment wire value
-                // (`stored - 1`): the receipt increment (`transport.rs:2579`) only
+                // (`stored - 1`): the receipt increment (`transport.rs:2584`) only
                 // touches the in-memory packet, never the raw buffer stashed by
                 // `set_announce_cache`. Using it here would put `stored - 1` on the
                 // wire and every peer that learns via this response would be one hop
@@ -14533,21 +14536,6 @@ mod tests {
             let identity = Identity::generate(&mut OsRng);
             let config = TransportConfig {
                 enable_transport: true,
-                ..TransportConfig::default()
-            };
-            Transport::new(config, clock, MemoryStorage::with_defaults(), identity)
-        }
-
-        /// A transport under `path_choice = hops_and_loss` (Codeberg #230):
-        /// with no direct-link evidence its cost swap takes a same-emission
-        /// copy with fewer hops, the one acceptance the default rule has
-        /// not had since #231.
-        fn make_transport_hops_and_loss() -> Transport<MockClock, MemoryStorage> {
-            let clock = MockClock::new(TEST_TIME_MS);
-            let identity = Identity::generate(&mut OsRng);
-            let config = TransportConfig {
-                enable_transport: true,
-                path_choice: PathChoice::HopsAndLoss,
                 ..TransportConfig::default()
             };
             Transport::new(config, clock, MemoryStorage::with_defaults(), identity)
@@ -17801,7 +17789,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // `random_blobs` (transport.rs:7217), a deliberate anti-replay
+            // `random_blobs` (transport.rs:7220), a deliberate anti-replay
             // extension — so the blob count is not a rejection indicator.)
             transport
                 .clock
@@ -23497,15 +23485,9 @@ mod tests {
             // within the rate limit window, the path table must update to
             // the shorter route. Previously the rate limiter did a hard
             // `return Ok(())` that blocked path table updates.
-            //
-            // Under `path_choice = hops_and_loss`: the default rule is
-            // Python's since #231 and keeps the first copy of an emission
-            // (test_replay_announce_rejected_when_fewer_hops), so the cost
-            // swap is the remaining same-emission acceptance the rate window
-            // must not block.
             use crate::destination::{Destination, DestinationType, Direction};
 
-            let mut transport = make_transport_hops_and_loss();
+            let mut transport = make_transport_enabled();
             let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
             let _idx1 = transport.register_interface(Box::new(MockInterface::new("if1", 2)));
 
@@ -23553,10 +23535,9 @@ mod tests {
         fn test_rate_limited_announce_suppresses_rebroadcast() {
             // Companion to the above: when a rate-limited announce updates
             // the path table, it must NOT be rebroadcast (to avoid flooding).
-            // Under `hops_and_loss` for the reason given there.
             use crate::destination::{Destination, DestinationType, Direction};
 
-            let mut transport = make_transport_hops_and_loss();
+            let mut transport = make_transport_enabled();
             let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
             let _idx1 = transport.register_interface(Box::new(MockInterface::new("if1", 2)));
 
@@ -23902,7 +23883,7 @@ mod tests {
         // (PATHFINDER_MAX_HOPS=128) must NOT be stored in the path table nor
         // scheduled for rebroadcast, mirroring Python RNS Transport.py:1750
         // (`local_and_hops_condition = packet.hops < PATHFINDER_M+1`, M=128).
-        // The inbound path increments hops once (transport.rs:1635) before
+        // The inbound path increments hops once (transport.rs:1640) before
         // handle_announce, so `packet.hops` inside the handler is already the
         // post-increment value — same accounting as the RNS gate.
         #[test]
@@ -25670,15 +25651,13 @@ mod tests {
             assert_eq!(transport.stats().announces_processed, 2);
         }
 
-        // No replay bypass for a better hop count (Codeberg #231)
+        // Replay bypass for better hop count
         #[test]
-        fn test_replay_announce_rejected_when_fewer_hops() {
+        fn test_replay_announce_accepted_when_fewer_hops() {
             // Scenario: path request response arrives via relay (2 hops), then the
             // direct announce from the source arrives (0 hops) with the same
-            // random_blob. Under Python's rule (Transport.py:1772, live as
-            // `SAME_EMISSION_RULE` since #231) a seen random blob is a replay
-            // whatever its hop count: the relayed path stays until a newer
-            // emission arrives.
+            // random_blob. The direct announce must NOT be rejected as replay
+            // (`SameEmissionRule::FewerHopsWins`, Codeberg #231).
             use crate::destination::{Destination, DestinationType, Direction};
 
             let mut transport = make_transport_enabled();
@@ -25725,34 +25704,33 @@ mod tests {
                 .clock
                 .advance(transport.config().announce_rate_limit_ms + 1);
             transport.storage_mut().clear_packet_hashes(); // allow reprocessing
-            let replays_before = transport.stats().drops_announce_replay();
             transport.process_incoming(0, &buf[..len]).unwrap();
 
+            // Path must be updated to the better route
             assert_eq!(
                 transport.hops_to(&dest_hash),
-                Some(3),
-                "a second copy of the installed emission must not replace the \
-                 3-hop relayed path, however few hops it took"
+                Some(1),
+                "Direct announce (wire=0 + receipt) must replace the 3-hop relayed path"
             );
             assert_eq!(
                 transport.path(&dest_hash).unwrap().interface_index,
-                1,
-                "Path still points to interface 1 (relayed)"
-            );
-            assert_eq!(
-                transport.stats().drops_announce_replay(),
-                replays_before + 1,
-                "the replay guard, not the acceptance arm, refuses the copy"
+                0,
+                "Path should now point to interface 0 (direct)"
             );
         }
 
-        /// `PATH_ADD` names the acceptance branch, so a stack A/B can
-        /// attribute a direct-share difference instead of inferring one
-        /// from the hop count `alpha` ends up with (that number is the sum
-        /// of every acceptance branch). It is how Codeberg #231 counted the
-        /// former same-emission-fewer-hops clause at zero on the relayed
-        /// pathchoice arms; under Python's rule, live since, the second
-        /// copy installs nothing and so names nothing.
+        /// The same-emission-fewer-hops clause is a deviation from Python
+        /// (Transport.py:1772 demands a strictly newer emission AND an
+        /// unseen random blob) — Codeberg #231. The hop count `alpha` ends
+        /// up with is the sum of every acceptance branch: on an empty path
+        /// table the first response to arrive wins whatever its hop count,
+        /// and on a populated one a fresher emission wins in BOTH stacks.
+        /// Only this clause differs between them.
+        ///
+        /// This pins the branch as separately countable, so a stack A/B can
+        /// attribute a direct-share difference instead of inferring one; it
+        /// is how #231 counted the clause at zero on the relayed pathchoice
+        /// arms.
         #[cfg(feature = "tracing")]
         #[test]
         fn test_path_add_names_the_acceptance_branch() {
@@ -25795,7 +25773,7 @@ mod tests {
             );
 
             // The direct copy of the SAME announce: same random blob, same
-            // emission, fewer hops. Python has no branch for it, nor do we.
+            // emission, fewer hops. This is the branch Python does not have.
             transport
                 .clock
                 .advance(transport.config().announce_rate_limit_ms + 1);
@@ -25803,12 +25781,12 @@ mod tests {
             let ((), second_logs) = crate::test_log_capture::with_captured_logs(|| {
                 transport.process_incoming(0, &buf[..len]).unwrap();
             });
-            assert_eq!(transport.hops_to(&dest_hash), Some(3));
+            assert_eq!(transport.hops_to(&dest_hash), Some(1));
             assert_eq!(
                 path_add_reason(&second_logs),
-                None,
-                "a second copy of one emission installs no path, so no \
-                 PATH_ADD and no reason"
+                Some("same_emission_fewer_hops"),
+                "the deviating clause must be countable on its own, not \
+                 inferred from the resulting hop count"
             );
         }
 
