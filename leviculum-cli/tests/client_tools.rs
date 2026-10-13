@@ -260,6 +260,99 @@ fn a_path_is_found_then_dropped_from_the_daemons_table() {
     );
 }
 
+/// Two `lnpath` queries for the same destination a second apart both
+/// put a path request on the daemon's wire (711). The reference's
+/// `Transport.request_path` (Transport.py:2771) always transmits, and rnsd
+/// forwards a local client's request without a minimum interval
+/// (Transport.py:3006-3013); the 20 s `PATH_REQUEST_MIN_INTERVAL_MS` paces
+/// only what a stack raises on its own. The peer behind the daemon's TCP
+/// interface is a plain listener that counts what arrives.
+#[test]
+fn two_path_queries_inside_the_interval_both_reach_the_wire() {
+    use leviculum_std::interfaces::hdlc::{DeframeResult, Deframer};
+    use std::io::Read;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("listener addr").port();
+    let mut target = [0u8; 16];
+    for (i, byte) in target.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&UNKNOWN_HASH[2 * i..2 * i + 2], 16).expect("hex");
+    }
+    let seen = Arc::new(AtomicUsize::new(0));
+    let connected = Arc::new(AtomicUsize::new(0));
+    {
+        let seen = Arc::clone(&seen);
+        let connected = Arc::clone(&connected);
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            connected.store(1, Ordering::SeqCst);
+            let mut deframer = Deframer::new();
+            let mut buf = [0u8; 4096];
+            while let Ok(n) = stream.read(&mut buf) {
+                if n == 0 {
+                    return;
+                }
+                for result in deframer.process(&buf[..n]) {
+                    // A Type-1 Data packet whose payload opens with the
+                    // target: flags(1) hops(1) dest(16) context(1), then
+                    // target(16) + [transport id(16)] + tag(16).
+                    if let DeframeResult::Frame(raw) = result {
+                        if (raw.len() == 19 + 32 || raw.len() == 19 + 48)
+                            && raw[0] & 0b11 == 0
+                            && raw[19..35] == target
+                        {
+                            seen.fetch_add(1, Ordering::SeqCst);
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    let name = format!("lnpathpr{}", std::process::id());
+    let dir = tempfile::tempdir().expect("temp dir");
+    write_config(
+        dir.path(),
+        &name,
+        &format!(
+            "  [[Peer]]\n    type = TCPClientInterface\n    enabled = yes\n    \
+             target_host = 127.0.0.1\n    target_port = {port}\n    \
+             ingress_control = false\n"
+        ),
+    );
+    let _daemon = spawn_lnsd(dir.path());
+    assert!(
+        wait_for_instance(&name, Duration::from_secs(20)),
+        "lnsd never bound rns/{name}"
+    );
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while connected.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(connected.load(Ordering::SeqCst), 1, "lnsd never connected");
+    std::thread::sleep(Duration::from_millis(500));
+
+    let first = lnpath(dir.path(), &["-w", "1", UNKNOWN_HASH]);
+    let second = lnpath(dir.path(), &["-w", "1", UNKNOWN_HASH]);
+    assert_eq!(first.code, 1, "stdout: {}", first.stdout);
+    assert_eq!(second.code, 1, "stdout: {}", second.stdout);
+    std::thread::sleep(Duration::from_secs(1));
+
+    let on_wire = seen.load(Ordering::SeqCst);
+    println!(
+        "LNPATH_PATH_REQUESTS asked=2 on_wire={on_wire} first_query_ms={}",
+        first.elapsed.as_millis()
+    );
+    assert_eq!(
+        on_wire, 2,
+        "each lnpath query must put its own path request on the wire"
+    );
+}
+
 /// Read the daemon's probe-responder hash out of `lnstatus`, which prints
 /// it as ` Probe responder at <hash> active`.
 fn probe_hash(config: &Path) -> String {
