@@ -44,6 +44,26 @@ fn unix_secs() -> u64 {
         .unwrap_or(0)
 }
 
+/// The stamp cost our test node announces. Not 0: the stock Python client
+/// reads a 0 as "no cost known" (`if not target_propagation_cost`,
+/// `reference/LXMF/LXMF/LXMRouter.py:429`, `:441`) and logs
+/// `Propagation node stamp cost still unavailable after path request` on
+/// every deferred-stamp pass, once per message, although its caller tests
+/// for `None` (`:2635`) and mints at 0 anyway. Not the shipped 13 either:
+/// the client mints one stamp per message, a geometric draw of 2^13
+/// hashes over a 256 KB workblock on average, and these tests are about
+/// serving, not minting. Cost 1 silences the line.
+///
+/// The default flexibility of 3 leaves the minimum an upload must prove at
+/// 0, so nothing here validates a stamp, and that is deliberate: the
+/// client's link-packet receipt times out at `max(rtt * 6, 5 ms)`
+/// (`reference/Reticulum/RNS/Packet.py:431`), a few milliseconds on
+/// loopback, and one workblock expansion in a debug build took 73 ms
+/// before the proof could leave (measured 2026-10-13). The sender then
+/// tears the link down and falls back to OUTBOUND
+/// (`reference/LXMF/LXMF/LXMessage.py:616-621`).
+const PN_STAMP_COST: u8 = 1;
+
 /// Our propagation node: the `PropagationNode` role over a sans-io core.
 struct PnHost {
     node: NodeCore<OsRng, TestClock, MemoryStorage>,
@@ -84,9 +104,8 @@ impl PnHost {
 
         let role = PropagationNode::new(
             MemoryPropagationStore::new(64 * 1024),
-            // Cost 0: the Python clients here upload without grinding.
             PropagationNodeConfig {
-                stamp_cost: 0,
+                stamp_cost: PN_STAMP_COST,
                 // This role never offers to a peer, so it needs no values.
                 always_compute_stamp_value: false,
                 ..PropagationNodeConfig::default()
@@ -168,7 +187,7 @@ impl PnHost {
                     .get_mut(link_id)
                     .and_then(VecDeque::pop_front);
                 match self.role.handle_upload(data, unix_secs(), |_, _| {
-                    unreachable!("stamp cost 0 must not validate")
+                    unreachable!("a minimum accepted cost of 0 must not validate")
                 }) {
                     UploadOutcome::Accepted { transient_id, .. } => {
                         self.accepted.insert(transient_id);
@@ -199,7 +218,7 @@ impl PnHost {
                 ..
             } if self.owns_link(link_id) => {
                 match self.role.handle_upload(data, unix_secs(), |_, _| {
-                    unreachable!("stamp cost 0 must not validate")
+                    unreachable!("a minimum accepted cost of 0 must not validate")
                 }) {
                     UploadOutcome::Accepted { transient_id, .. } => {
                         self.accepted.insert(transient_id);
@@ -719,12 +738,18 @@ async fn a_python_client_drains_a_full_field_mailbox_in_one_sync() {
         );
     }
 
-    // About 96 s of this test, and not shortened by queueing all 24 and
-    // waiting once (measured 2026-10-13: 99.1 s either way). The rate is
-    // the stock sender's: a propagated message defers its propagation
-    // stamp by default (`reference/LXMF/LXMF/LXMessage.py:164`), and the
+    // All 24 are queued at once and stored when they are. The rate is the
+    // stock sender's: a propagated message defers its propagation stamp
+    // by default (`reference/LXMF/LXMF/LXMessage.py:164`), the
     // deferred-stamp job mints for one message per 4 s jobloop pass
-    // (`reference/LXMF/LXMF/LXMRouter.py:2582-2587`).
+    // (`reference/LXMF/LXMF/LXMRouter.py:2582-2587`), and the next pass's
+    // `process_outbound` uploads it. One message at a time costs two
+    // passes each (195 s measured 2026-10-13); queued, minting and
+    // uploading overlap and the test takes 103 s. Against a node
+    // announcing cost 0 the sequential form ran at one pass each (99 s):
+    // the client's needless path request (`:431`) drew a path response
+    // whose handler kicked `process_outbound` at once
+    // (`reference/LXMF/LXMF/Handlers.py:41-54`).
     for index in 0..MESSAGES {
         let content = format!("field mailbox message {index}");
         let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
@@ -746,13 +771,17 @@ async fn a_python_client_drains_a_full_field_mailbox_in_one_sync() {
                 Err(e) => panic!("sender could not address the recipient: {e:?}"),
             }
         }
-        let stored = host
-            .pump_until(Duration::from_secs(30), |h| {
-                h.role.store().len() == index + 1
-            })
-            .await;
-        assert!(stored, "upload {index} must be appended to our store");
     }
+    let stored = host
+        .pump_until(Duration::from_secs(8 * MESSAGES as u64), |h| {
+            h.role.store().len() == MESSAGES
+        })
+        .await;
+    assert!(
+        stored,
+        "all {MESSAGES} uploads must be appended to our store: {} so far",
+        host.role.store().len()
+    );
 
     // The premise, asserted rather than assumed: this mailbox accounts
     // to less than the board's cap, so one fetch may serve all of it,
