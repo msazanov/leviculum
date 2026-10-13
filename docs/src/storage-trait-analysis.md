@@ -3,6 +3,10 @@
 Deep analysis of every Storage trait method: callers, frequency,
 embedded relevance, and proposed sub-trait groupings.
 
+A dated study, not a living reference: it describes the tree as of
+2026-03-28 (58b19c35), and its callers, counts and line numbers are not
+kept current. Only the `flush` row was corrected since (2026-10-13).
+
 ## Method Inventory: 71 methods across 15 data categories
 
 ### Group 1: Packet Dedup (3 methods)
@@ -200,7 +204,7 @@ IS the daemon.
 
 | # | Method | Caller | Frequency | Embedded? |
 |---|--------|--------|-----------|-----------|
-| 70 | `flush` | Driver (2: `save_persistent_state`, `auto_interface`) | rarely | OPTIONAL |
+| 70 | `flush` | No daemon caller since c8edafb8 (2026-10-13): the driver runs its three phases itself (`begin_flush`/`settle_flush`, periodic and in `shutdown_flush`). Callers: `heap-gap-bench`, tests | rarely | OPTIONAL |
 | 71 | `diagnostic_dump` | Driver (1) | rarely | OPTIONAL |
 
 Already have empty default implementations. No action needed.
