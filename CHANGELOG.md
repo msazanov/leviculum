@@ -638,6 +638,12 @@ Toolchain: Rust 1.97.1
 
 ### Fixed
 
+- lnpnd proves a client's upload about 3 ms after it arrives over a LAN or
+  a local shared instance, inside the receipt timeout a stock Python client
+  gives it (leviculum#709). It used to prove in 26 to 50 ms, and a stock
+  client tore the link down and parked the message: four of the first five
+  uploads from a stock client over loopback.
+
 - A board south of the equator or west of Greenwich reports its GNSS
   position with the right sign (leviculum#447); it was mirrored across the
   equator or the prime meridian on the display, in the board's announce and

@@ -75,6 +75,22 @@ const STORE_MAINTENANCE_SECS: u64 = 480;
 /// value lnmsg's engine settled on for the same job.
 const POLL_INTERVAL_MS: u64 = 200;
 
+/// How soon the engine asks the driver back while the validation worker
+/// holds a job: from the hook that queued it and from every tick until the
+/// verdict drains.
+///
+/// The verdict gates the proof, and a stock Python client gives the proof
+/// a few milliseconds over a LAN (`max(rtt * 6, 5 ms)`,
+/// `reference/Reticulum/RNS/Packet.py:431`) before it tears the link down
+/// and parks the message (`reference/LXMF/LXMF/LXMessage.py:616-621`).
+/// The worker has no way to wake the driver, so the engine polls it. At
+/// 20 ms, and with the queueing hook asking for no wake at all, release
+/// lnpnd proved a loopback upload in 26 to 50 ms and lost four links of
+/// five where lxmd proves in 16 ms (leviculum order 709). One stamp is a
+/// 1.2 ms grind in a release build, so a 1 ms poll is about one extra
+/// tick per upload, and the polling stops with the last verdict.
+const VALIDATION_POLL_MS: u64 = 1;
+
 /// How many messages one hook invocation may persist before it hands the
 /// core back.
 ///
@@ -1604,6 +1620,16 @@ impl<S: PropagationStore + Send + 'static> leviculum_std::driver::CoreProcessor 
             _ => {}
         }
         self.state = State::Ready(ready);
+        // A job queued for the worker, here or by an earlier hook, comes
+        // back at the next poll: nothing else would wake the engine for
+        // its verdict, and the proof waits on it.
+        if self.validation.busy() {
+            let due = core.now_ms() + VALIDATION_POLL_MS;
+            out.next_deadline_ms = Some(match out.next_deadline_ms {
+                Some(existing) => existing.min(due),
+                None => due,
+            });
+        }
         out
     }
 
@@ -1659,7 +1685,7 @@ impl<S: PropagationStore + Send + 'static> leviculum_std::driver::CoreProcessor 
         let validation_poll = if self.validation.busy() {
             // Grinding in flight: come back quickly so the append and the
             // proof follow the worker with minimal added latency.
-            now_ms + 20
+            now_ms + VALIDATION_POLL_MS
         } else {
             now_ms + POLL_INTERVAL_MS
         };
@@ -3314,6 +3340,146 @@ mod tests {
                 .is_throttled_for_tests(&remote_hash, now + PN_STAMP_THROTTLE_SECS + 1),
             "and no longer"
         );
+    }
+
+    /// leviculum#709: a stock Python client's single-packet upload must be
+    /// proven within the client's packet-receipt timeout, which over a LAN
+    /// or a loopback shared instance is a few milliseconds
+    /// (`max(rtt * 6, 5 ms)`, `reference/Reticulum/RNS/Packet.py:431`,
+    /// `RNS/Link.py:81-82`). A late proof is a lost upload: the client's
+    /// timeout callback tears the link down and parks the message as
+    /// OUTBOUND (`reference/LXMF/LXMF/LXMessage.py:616-621`).
+    ///
+    /// **The named failure mode:** the stamp goes to the validation worker
+    /// and the hook returns asking for nothing, so the verdict waited for
+    /// the 200 ms idle tick or for the next unrelated event; on_tick, once
+    /// it ran, polled the worker at 20 ms. A stock client against release
+    /// lnpnd over loopback: proofs at 26 to 50 ms, four of the first five
+    /// links torn down, against lxmd's 16 ms (leviculum order 709).
+    ///
+    /// This plays the driver: every hook's `next_deadline_ms` is the next
+    /// wake, as `tighten_next_poll` makes it. The grind itself takes what it
+    /// takes (75 ms in a debug build, 1.2 ms in release); what is asserted
+    /// is that the engine never sleeps past its verdict by more than
+    /// [`VALIDATION_POLL_MS`].
+    #[test]
+    fn a_queued_upload_asks_the_driver_back_until_its_proof_leaves() {
+        use leviculum_lxmf::constants::{LXMF_OVERHEAD, WORKBLOCK_EXPAND_ROUNDS_PN};
+        use leviculum_lxmf::{CooperativeStamper, PropagationUpload, StampCancel};
+
+        let server_dir = tempfile::tempdir().expect("tempdir");
+        let client_dir = tempfile::tempdir().expect("tempdir");
+        let mut server = core(server_dir.path());
+        let mut client = core(client_dir.path());
+        let identity = leviculum_std::generate_identity();
+        let signing_key = identity.ed25519_verifying().to_bytes();
+        // The shipped cost: every upload goes through the worker.
+        let (mut engine, _events) = Engine::new(EngineConfig {
+            identity,
+            node_config: PropagationNodeConfig::default(),
+            store: MemoryPropagationStore::new(64_000),
+            announce_interval_secs: 3600,
+            announce_delay_secs: 3600,
+            peering: PeeringConfig::default(),
+            peer_store: Box::new(MemoryPeerStore::default()),
+            control_allowed: Vec::new(),
+            auth_allowed: None,
+            mailbox: None,
+            store_limit_bytes: 64_000,
+            delivery_limit_kb: 1000,
+        });
+        let start = server.now_ms();
+        let _ = engine.on_tick(&mut server, start);
+        let (destination_hash, min_cost) = match &engine.state {
+            State::Ready(ready) => (ready.destination_hash, ready.min_cost),
+            _ => panic!("engine must be ready"),
+        };
+        assert!(
+            ValidationWorker::worth_deferring(min_cost, false),
+            "the upload must go to the worker, or the test proves nothing"
+        );
+
+        let (link_id, _, out) = client
+            .connect(destination_hash, &signing_key)
+            .expect("connect");
+        let (events, _) = converse(&mut engine, &mut server, &mut client, out);
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, NodeEvent::LinkEstablished { .. })),
+            "the link must come up: {events:?}"
+        );
+
+        let mut unstamped = vec![0x42u8; LXMF_OVERHEAD + 40];
+        unstamped[16..].fill(0x17);
+        let transient_id = leviculum_core::crypto::full_hash(&unstamped);
+        let stamp = futures::executor::block_on(
+            CooperativeStamper::cooperative(rand_core::OsRng).generate(
+                &transient_id,
+                min_cost,
+                WORKBLOCK_EXPAND_ROUNDS_PN,
+                &StampCancel::new(),
+            ),
+        )
+        .expect("a stamp at the node's minimum");
+        let upload = PropagationUpload::single(1_700_000_000.0, unstamped, stamp).encode();
+        let (_, out) = client
+            .send_packet_on_link(&link_id, &upload)
+            .expect("upload packet");
+
+        let is_proof = |data: &Vec<u8>| {
+            Packet::unpack(data).is_ok_and(|packet| packet.flags.packet_type == PacketType::Proof)
+        };
+        // The data packet reaches the engine's core; every event goes
+        // through the engine, as the driver routes it.
+        let mut wake: Option<u64> = None;
+        let mut proven = false;
+        for data in wire_of(&out) {
+            let core_out = server.handle_packet(leviculum_core::InterfaceId(0), &data);
+            for event in &core_out.events {
+                let hook = engine.on_event(&mut server, event);
+                proven |= wire_of(&hook).iter().any(is_proof);
+                if let Some(deadline) = hook.next_deadline_ms {
+                    wake = Some(wake.map_or(deadline, |w| w.min(deadline)));
+                }
+            }
+        }
+        assert!(!proven, "the proof cannot leave before the verdict");
+        let queued_at = server.now_ms();
+        let wake_after_queue = wake.expect(
+            "the hook that queued the upload must ask the driver back; \
+             it asked for nothing, so the verdict waits for an unrelated wake",
+        );
+        assert!(
+            wake_after_queue <= queued_at + VALIDATION_POLL_MS,
+            "asked back at +{} ms, past the {VALIDATION_POLL_MS} ms poll",
+            wake_after_queue.saturating_sub(queued_at)
+        );
+
+        let mut wake = wake_after_queue;
+        let give_up = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !proven {
+            assert!(std::time::Instant::now() < give_up, "no proof within 10 s");
+            let now = server.now_ms();
+            if wake > now {
+                std::thread::sleep(std::time::Duration::from_millis(wake - now));
+            }
+            let now = server.now_ms();
+            let tick = engine.on_tick(&mut server, now);
+            proven = wire_of(&tick).iter().any(is_proof);
+            if proven {
+                break;
+            }
+            wake = tick
+                .next_deadline_ms
+                .expect("the engine always names a wake");
+            assert!(
+                wake <= now + VALIDATION_POLL_MS,
+                "while the worker grinds the engine slept to +{} ms, past the \
+                 {VALIDATION_POLL_MS} ms poll",
+                wake.saturating_sub(now)
+            );
+        }
     }
 }
 
