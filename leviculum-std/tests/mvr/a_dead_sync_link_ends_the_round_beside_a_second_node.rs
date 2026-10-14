@@ -55,9 +55,12 @@
 //!   release lxmf-node        set_pn c; sync
 //! ```
 //!
-//! No hardware, no Docker, no Python. It runs as long as the client's three
-//! link requests take to time out (about 40 s), because that wait is the
-//! event under test.
+//! No hardware, no Docker, no Python. The config both stacks read sets the
+//! test-only `link_establishment_timeout_ms` ([`LINK_TIMEOUT_MS`]), so the
+//! client's three link requests time out in about three seconds rather than
+//! the reference schedule's forty: the event under test is `LINK_DIED`
+//! reaching the runtime beside a second node, not the retry schedule that
+//! leads up to it (745).
 //!
 //! **Acceptance**: red on 419bdb8a..46c61ca7 with `sync_timeout` after the
 //! whole budget; green once the round reports `sync_failed_state_0xf1`
@@ -81,10 +84,15 @@ use rand_core::OsRng;
 /// Unique per test in this binary, so two mvrs never share a socket name.
 static INSTANCE_SEQ: AtomicUsize = AtomicUsize::new(0);
 
+/// The establishment timeout per link request, before its jitter of at most
+/// 25 %, that the config hands both lnsd and lxmf-node. Long enough for a
+/// proof over the local socket, which the dead node never sends anyway.
+const LINK_TIMEOUT_MS: u32 = 1000;
+
 /// The sync budget handed to lxmf-node. Longer than the three handshake
-/// timeouts the round spends (3 x ~13.6 s) plus the failure report, so a red
-/// run is `sync_timeout` at the end of it rather than an early verdict.
-const SYNC_BUDGET_SECS: u64 = 75;
+/// timeouts the round spends (3 x at most 1.25 s) plus the failure report, so
+/// a red run is `sync_timeout` at the end of it rather than an early verdict.
+const SYNC_BUDGET_SECS: u64 = 8;
 
 /// Resolve a release binary the way `lncp_fetch_rust_responder` does: the
 /// `just mvr` recipe builds them (`build-integ-bins`), `cargo test` does not.
@@ -137,7 +145,8 @@ fn spawn_lnsd(dir: &Path, name: &str) -> Reaped {
         dir.join("config"),
         format!(
             "[reticulum]\n  enable_transport = yes\n  share_instance = yes\n  \
-             instance_name = {name}\n\n[logging]\n  loglevel = 5\n\n[interfaces]\n"
+             instance_name = {name}\n  link_establishment_timeout_ms = {LINK_TIMEOUT_MS}\n\n\
+             [logging]\n  loglevel = 5\n\n[interfaces]\n"
         ),
     )
     .expect("lnsd config");
