@@ -3198,6 +3198,24 @@ impl ReticulumNode {
         Ok(())
     }
 
+    /// Request a path on the listed interfaces only, ignoring the request limiter. See
+    /// `NodeCore::request_path_on`.
+    pub async fn request_path_on(
+        &self,
+        dest_hash: &leviculum_core::DestinationHash,
+        interfaces: &[usize],
+    ) -> Result<(), Error> {
+        let output = {
+            let mut inner = self.inner.lock_recover();
+            inner.request_path_on(dest_hash, interfaces)
+        };
+        self.action_dispatch_tx
+            .send(output)
+            .await
+            .map_err(|_| Error::NotRunning)?;
+        Ok(())
+    }
+
     /// Wait until a path to `dest_hash` is known, actively re-issuing a
     /// PATH_REQUEST if it has not arrived passively within `retry_interval`.
     ///

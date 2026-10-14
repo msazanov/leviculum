@@ -8993,6 +8993,32 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         on_interface: Option<usize>,
         tag: &[u8; TRUNCATED_HASHBYTES],
     ) -> Result<(), TransportError> {
+        self.request_path_inner(dest_hash, on_interface, tag, false)
+    }
+
+    /// Like [`request_path`](Self::request_path) but skips the per-destination
+    /// `PATH_REQUEST_MIN_INTERVAL_MS` limiter.
+    ///
+    /// For a caller that has just learned its current route is dead (a tunnel client whose link
+    /// went silent) and asks again on the interfaces it still trusts. The limiter exists to stop a
+    /// node flooding the mesh; one request per failure, sent on a chosen interface, is not a flood.
+    /// The wire packet is the ordinary request, so peers see nothing new.
+    pub fn request_path_forced(
+        &mut self,
+        dest_hash: &[u8; TRUNCATED_HASHBYTES],
+        on_interface: Option<usize>,
+        tag: &[u8; TRUNCATED_HASHBYTES],
+    ) -> Result<(), TransportError> {
+        self.request_path_inner(dest_hash, on_interface, tag, true)
+    }
+
+    fn request_path_inner(
+        &mut self,
+        dest_hash: &[u8; TRUNCATED_HASHBYTES],
+        on_interface: Option<usize>,
+        tag: &[u8; TRUNCATED_HASHBYTES],
+        force: bool,
+    ) -> Result<(), TransportError> {
         let now = self.clock.now_ms();
 
         // A caller asking for a path while the table holds an entry over
@@ -9010,9 +9036,11 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         }
 
         // Rate limiting
-        if let Some(last_request) = self.storage.get_path_request_time(dest_hash) {
-            if now.saturating_sub(last_request) < PATH_REQUEST_MIN_INTERVAL_MS {
-                return Ok(());
+        if !force {
+            if let Some(last_request) = self.storage.get_path_request_time(dest_hash) {
+                if now.saturating_sub(last_request) < PATH_REQUEST_MIN_INTERVAL_MS {
+                    return Ok(());
+                }
             }
         }
         self.storage.set_path_request_time(*dest_hash, now);
@@ -17932,6 +17960,35 @@ mod tests {
             transport.request_path(&dest_hash, None, &tag2).unwrap();
             let sent3 = transport.stats().packets_sent;
             assert!(sent3 > sent2, "After cooldown, request should go through");
+        }
+
+        #[test]
+        fn test_request_path_forced_skips_limiter_and_targets_one_interface() {
+            let mut transport = make_transport_enabled();
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+            let _idx1 = transport.register_interface(Box::new(MockInterface::new("if1", 1)));
+
+            let dest_hash = [0x42; TRUNCATED_HASHBYTES];
+            let tag = [0xAB; TRUNCATED_HASHBYTES];
+
+            transport.request_path(&dest_hash, None, &tag).unwrap();
+            transport.drain_actions();
+            let sent1 = transport.stats().packets_sent;
+
+            // The ordinary call is now limited ...
+            transport.request_path(&dest_hash, None, &tag).unwrap();
+            assert_eq!(sent1, transport.stats().packets_sent);
+
+            // ... the forced one is not, and goes to exactly the interface asked.
+            transport.request_path_forced(&dest_hash, Some(1), &tag).unwrap();
+            assert!(transport.stats().packets_sent > sent1, "forced request must bypass the limiter");
+            let actions = transport.drain_actions();
+            let sends = actions
+                .iter()
+                .filter(|a| matches!(a, Action::SendPacket { iface, .. } if iface.0 == 1))
+                .count();
+            let others = actions.len() - sends;
+            assert_eq!((sends, others), (1, 0), "one packet, on the chosen interface only");
         }
 
         // Path Request Format Tests

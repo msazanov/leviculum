@@ -320,6 +320,7 @@ pub struct LinkStats {
     pub(crate) busy_rejections: u64,
     pub(crate) pacing_rejections: u64,
     pub(crate) iface_pacing_rejections: u64,
+    pub(crate) attached_interface: Option<usize>,
 }
 
 impl LinkStats {
@@ -393,6 +394,13 @@ impl LinkStats {
     /// gate before reaching the channel (leviculum#35).
     pub fn iface_pacing_rejections(&self) -> u64 {
         self.iface_pacing_rejections
+    }
+
+    /// Interface the link was established on (Python `Link.attached_interface`). The path table
+    /// can flip to another interface later (every newer announce may), so this, not the path,
+    /// says which neighbour carries the link.
+    pub fn attached_interface(&self) -> Option<usize> {
+        self.attached_interface
     }
 }
 
@@ -3461,6 +3469,26 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 HexShort(dest_hash.as_bytes()),
                 e
             );
+        }
+        self.process_events_and_actions()
+    }
+
+    /// Request a path on the given interfaces only, ignoring the per-destination request limiter.
+    ///
+    /// Used after a route failed: the interface that carried the dead route is left out, so a
+    /// neighbour that still lists the dead route cannot answer first and put it back.
+    pub fn request_path_on(&mut self, dest_hash: &DestinationHash, interfaces: &[usize]) -> crate::transport::TickOutput {
+        let mut tag = [0u8; TRUNCATED_HASHBYTES];
+        self.rng.fill_bytes(&mut tag);
+        for &idx in interfaces {
+            if let Err(e) = self.transport.request_path_forced(dest_hash.as_bytes(), Some(idx), &tag) {
+                crate::tracing::debug!(
+                    "Failed to send path request for <{}> on interface {}: {}",
+                    HexShort(dest_hash.as_bytes()),
+                    idx,
+                    e
+                );
+            }
         }
         self.process_events_and_actions()
     }
