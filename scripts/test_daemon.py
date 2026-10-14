@@ -827,12 +827,16 @@ class TestDaemon:
             # on the link (Resource.py:522-524 polls
             # Link.ready_for_new_resource, Link.py:1331); lift that gate on
             # this link. The advertise jobs run here, in order, instead of
-            # on the threads advertise() starts: every advertisement is on
-            # the wire before this call returns, so on the in-order path to
-            # the receiver the last one precedes every part of the first,
-            # which cannot flow before the receiver's request comes back.
-            # The sender keeps a list and matches requests and proofs by
-            # hash, so it serves them all.
+            # on the threads advertise() starts. The link takes no inbound
+            # packet until the last advertisement is sent (746): the
+            # receiver's request for the first resource reaches the
+            # interface thread, which would send its part from inside
+            # Link.receive (Transport.py:2138) while this thread still
+            # packs the second advertisement; on a loaded host that part
+            # went out first. With the link's input held, every
+            # advertisement precedes every part on the in-order path to the
+            # receiver. The sender keeps a list and matches requests and
+            # proofs by hash, so it serves them all.
             link_hash = params.get("link_hash")
             link = self.links.get(link_hash)
             if not link:
@@ -842,8 +846,18 @@ class TestDaemon:
                 RNS.Resource(bytes.fromhex(data_hex), link, advertise=False)
                 for data_hex in params.get("data", [])
             ]
-            for resource in resources:
-                resource._Resource__advertise_job()
+            inbound_held = threading.Lock()
+            receive = link.receive
+
+            def held_receive(packet):
+                with inbound_held:
+                    receive(packet)
+
+            with inbound_held:
+                link.receive = held_receive
+                for resource in resources:
+                    resource._Resource__advertise_job()
+            del link.receive
             return {"result": {"resource_hashes": [r.hash.hex() for r in resources]}}
 
         elif method == "get_received_resources":

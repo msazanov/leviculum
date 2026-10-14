@@ -599,6 +599,10 @@ async fn test_python_sends_large_resource_to_rust() {
 /// had freed the link; the order of the receiver's events tells the two
 /// apart. (Two separate sends were not enough: on an idle host the first
 /// transfer finished before the second call's advertisement arrived.)
+/// The daemon also holds the link's inbound packets until both
+/// advertisements are sent, because otherwise lnsd's request for the first
+/// is served by Python's interface thread while the second is still being
+/// packed, and on a loaded host that part reached lnsd first (746).
 #[tokio::test]
 async fn test_python_sends_two_concurrent_resources_rust_receives_both() {
     let (
