@@ -129,7 +129,7 @@ implementations of *one* model, which is the floor any split model
 would build on top of. lnsd's central task always reports `CentralGone`
 when it ends,
 including when the dial never connected at all (`CentralGone`,
-`leviculum-std/src/interfaces/ble/bluez.rs:432`), and the orchestrator
+`leviculum-std/src/interfaces/ble/bluez.rs:443`), and the orchestrator
 restarts the strict scan phase on that event (`CentralGone`,
 `leviculum-std/src/interfaces/ble/mod.rs:1182`, into `note_reset`,
 `leviculum-std/src/interfaces/ble/links.rs:1721`). The firmware restarts

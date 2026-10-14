@@ -45,6 +45,17 @@ const SCAN_WINDOW: Duration = Duration::from_secs(2);
 /// identity read, subscribe, handshake.
 const SETUP_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// Budget for the connect step alone, the board's `CONNECT_TIMEOUT_10MS`
+/// (5 s, `leviculum-nrf/src/ble/columba.rs`). A connection forms on the
+/// peer's next advertisement, so the attempt is the one fresh read of
+/// the record that chose the dial: a peer whose incoming slots filled
+/// after we last saw it took its advertisement off the air
+/// (`reconcile_advertising`), and nothing answers. Under the setup
+/// budget alone such a dial held the adapter for the full 20 s; at two
+/// central links per node, every one of the 58 setup timeouts in 727's
+/// twenty-node rooms was a dial to a peer that had gone dark (732).
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Register the Columba advertisement.
 ///
 /// Separate from [`serve_gatt`] because the two have different
@@ -451,13 +462,7 @@ impl CentralTask {
             }
             Ok::<(), bluer::Error>(())
         };
-        if let Err(source) = connect.await {
-            let adapter_present = self.adapter.is_powered().await.is_ok();
-            return Err(SetupError {
-                failure: connect_failure(&source, adapter_present),
-                source,
-            });
-        }
+        bounded_connect(connect, async { self.adapter.is_powered().await.is_ok() }).await?;
         self.layout_and_handshake(&device).await
     }
 
@@ -633,6 +638,35 @@ fn connect_failure(source: &bluer::Error, adapter_present: bool) -> DialFailure 
     match source.kind {
         bluer::ErrorKind::NotFound if adapter_present => DialFailure::NoObject,
         _ => DialFailure::Transport,
+    }
+}
+
+/// The connect step of a central setup under [`CONNECT_TIMEOUT`] (732).
+/// A failed connect is classified by [`connect_failure`], which reads
+/// `adapter_present` only then; a connect that nothing answered is the
+/// air's business (`Transport`), the class the setup timeout gave it
+/// before, so the address's backoff is unchanged and only the wait is
+/// shorter.
+async fn bounded_connect(
+    connect: impl std::future::Future<Output = Result<(), bluer::Error>>,
+    adapter_present: impl std::future::Future<Output = bool>,
+) -> Result<(), SetupError> {
+    match tokio::time::timeout(CONNECT_TIMEOUT, connect).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(source)) => Err(SetupError {
+            failure: connect_failure(&source, adapter_present.await),
+            source,
+        }),
+        Err(_) => Err(SetupError {
+            failure: DialFailure::Transport,
+            source: bluer::Error {
+                kind: bluer::ErrorKind::ConnectionAttemptFailed,
+                message: format!(
+                    "connect not answered within {} s: the peer is not advertising",
+                    CONNECT_TIMEOUT.as_secs()
+                ),
+            },
+        }),
     }
 }
 
@@ -859,5 +893,37 @@ mod tests {
         }
         assert_eq!(delivered, vec![packet]);
         assert_eq!(table.link_count(), 0, "the link is released");
+    }
+
+    /// 732: a dial to a peer that went dark (its incoming slots filled
+    /// after the sighting that chose it) gives up at the connect bound,
+    /// as a `Transport` failure, instead of holding the adapter for the
+    /// whole setup budget.
+    #[tokio::test(start_paused = true)]
+    async fn a_connect_nothing_answers_gives_up_at_the_connect_bound() {
+        let start = tokio::time::Instant::now();
+        let outcome = tokio::time::timeout(
+            SETUP_TIMEOUT,
+            bounded_connect(std::future::pending(), async { true }),
+        )
+        .await;
+        let Ok(Err(e)) = outcome else {
+            panic!("the connect bound must end the dial before the setup budget");
+        };
+        assert_eq!(e.failure, DialFailure::Transport);
+        assert_eq!(start.elapsed(), CONNECT_TIMEOUT);
+        assert!(CONNECT_TIMEOUT < SETUP_TIMEOUT);
+    }
+
+    /// 732: the bound does not cut a connect the peer answers inside it,
+    /// however late in the budget.
+    #[tokio::test(start_paused = true)]
+    async fn a_connect_answered_inside_the_bound_proceeds() {
+        let late = CONNECT_TIMEOUT - Duration::from_millis(100);
+        let connect = async move {
+            tokio::time::sleep(late).await;
+            Ok(())
+        };
+        assert!(bounded_connect(connect, async { true }).await.is_ok());
     }
 }

@@ -1146,8 +1146,8 @@ pub(crate) fn capability_record(
 /// Whether a sighting's advertised capacity is worth a dial (#432): a
 /// peer that published its last incoming slot as gone cannot accept
 /// one, so the dial can only end in a refusal or — since a full node
-/// goes dark and a dark node cannot even refuse — in the 20 s setup
-/// timeout `bluez.rs` budgets for it.
+/// goes dark and a dark node cannot even refuse — in the 5 s connect
+/// bound `bluez.rs` puts on the attempt (732; the 20 s setup budget before).
 ///
 /// The one place the count GATES rather than ranks, and it gates only
 /// our spending of a dial: no link is ever refused for it
