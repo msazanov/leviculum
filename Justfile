@@ -1347,6 +1347,8 @@ tree-clean-selftest:
 #   whole test -- but it would have to be a second implementation of the
 #   anchor rule in a script, and finder and fixer are one implementation here
 #   on purpose (docs/src/concepts/checks-and-citations.md:428)
+# not-in-guards: tmp-leftovers -- the whole `cargo test --workspace`, about
+#   ten minutes (730). Its subject is every test binary, so it has no subset.
 # not-in-guards: source-invariant-tests -- 18.8 s and a test runner of its
 #   own; its census half check-source-invariant-census is in `guards`.
 #   RUN IT BY HAND INSTEAD, before committing, whenever a pass edits a file
@@ -1406,7 +1408,7 @@ guards: tree-snapshot tree-clean-selftest check-submodules check-trailers check-
 # `check-all-targets` dependency compiles those targets but does not lint
 # them, which is exactly the gap.
 [doc('Tier 0 (~3.5 min): the gate every git push runs')]
-fast: tree-snapshot tree-clean-selftest check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest site-unpack-docs-selftest deb-stamp-selftest lock-contention-selftest toolchain-status-selftest sweep-selftest btvirt-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-test-ports check-ignored-source check-just-docs check-guards-subset check-standard-integ check-config-table-citations prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck hw-witness check-fuzz-lock fuzz-selftest fuzz-regress notices-guard doc-touched doc-gate changelog-links core-no-tracing event-catalog m0-build-gate lxmf-embedded-gate i686-usize-gate no-atomic64-gate check-all-targets citation-guard source-invariant-tests
+fast: tree-snapshot tree-clean-selftest check-submodules check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest site-unpack-docs-selftest deb-stamp-selftest lock-contention-selftest toolchain-status-selftest sweep-selftest btvirt-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-test-ports check-ignored-source check-just-docs check-guards-subset check-standard-integ check-config-table-citations prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck hw-witness check-fuzz-lock fuzz-selftest fuzz-regress notices-guard doc-touched doc-gate changelog-links core-no-tracing event-catalog m0-build-gate lxmf-embedded-gate i686-usize-gate no-atomic64-gate check-all-targets citation-guard source-invariant-tests tmp-leftovers
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib
@@ -2177,3 +2179,15 @@ test-under-quota quota="25%":
     -python3 scripts/test-under-quota.py run --quota none
     -python3 scripts/test-under-quota.py run --quota {{quota}}
     python3 scripts/test-under-quota.py report --quota {{quota}}
+
+# 730: `cargo test --workspace` leaves nothing behind in the temp directory.
+# /tmp on the coder host is a tmpfs, so a leaked scratch directory is RAM, and
+# on 2026-10-14 it held 40 201 such entries and stood at 100 %. The script runs
+# the suite in the ordinary way with TMPDIR pointed at a fresh directory of its
+# own and fails, naming them, on anything left in it once the suite exits;
+# another lane's run cannot write there, which is what keeps the verdict
+# deterministic where a diff of /tmp itself is not. About ten minutes, the
+# length of the suite it runs.
+[doc('Fail if cargo test --workspace leaves entries in its TMPDIR')]
+tmp-leftovers:
+    @bash scripts/tmp-leftovers.sh
