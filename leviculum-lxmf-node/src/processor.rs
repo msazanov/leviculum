@@ -869,6 +869,15 @@ impl LxmfHelperProcessor {
                 announce_delay_secs,
                 options,
             } => self.pn_enable(core, announce_delay_secs, &options, out),
+            Command::PnAnnounce => match self.pn.as_mut() {
+                Some(pn) => match pn.engine.announce_now(core, out) {
+                    Some(hash) => self
+                        .emitter
+                        .event("lxmf_pn_announce_sent", &[("hash", hex_encode(&hash))]),
+                    None => self.emitter.error("propagation node not ready"),
+                },
+                None => self.emitter.error("propagation node not enabled"),
+            },
             Command::PnStoreSize => match self.pn.as_ref().and_then(|pn| pn.engine.store_count()) {
                 Some(size) => self
                     .emitter

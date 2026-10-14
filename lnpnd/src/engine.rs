@@ -1079,6 +1079,25 @@ impl<S: PropagationStore> Engine<S> {
         true
     }
 
+    /// Announce the propagation destination now, outside the cadence: the
+    /// conformance helper's `pn_announce`, which a cell uses for a second
+    /// announce a collision cannot take for good. The reference helper does
+    /// the same, `announce_propagation_node`'s body without its delay thread
+    /// (`reference/LXMF/LXMF/LXMRouter.py:338-346`). The scheduled cadence is
+    /// left as it was. Returns the destination hash, or `None` before the
+    /// node is ready.
+    pub fn announce_now(
+        &mut self,
+        core: &mut StdNodeCoreRef<'_>,
+        out: &mut TickOutput,
+    ) -> Option<[u8; 16]> {
+        let mut ready = self.take_ready(core)?;
+        self.announce(&mut ready, core, out);
+        let hash = *ready.destination_hash.as_bytes();
+        self.state = State::Ready(ready);
+        Some(hash)
+    }
+
     /// A stored message addressed to our own mailbox is delivered locally
     /// instead of waiting for a client that will never come — the
     /// reference's own short-circuit (`lxmf_propagation`,

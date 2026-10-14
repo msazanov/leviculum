@@ -84,6 +84,13 @@ pub enum Command {
         announce_delay_secs: Option<u64>,
         options: Vec<(String, String)>,
     },
+    /// `pn_announce` — announce the propagation destination once more, now,
+    /// and emit `lxmf_pn_announce_sent hash=<hex>`. The helper runs no
+    /// interval of its own; a scenario that needs a second announce asks for
+    /// it. Refused with `propagation node not enabled` before `pn_enable`.
+    /// A receiver drops a repeat announce from the same wall-clock second
+    /// as the one it holds, so the verb is news only a second after the last.
+    PnAnnounce,
     /// `pn_store_size` — emit `lxmf_pn_store size=<n>`, the number of
     /// messages the node's store currently holds.
     PnStoreSize,
@@ -234,6 +241,7 @@ pub fn parse_command(line: &str) -> Result<Option<Command>, CommandError> {
                 options,
             }))
         }
+        "pn_announce" => Ok(Some(Command::PnAnnounce)),
         "pn_store_size" => Ok(Some(Command::PnStoreSize)),
         "pn_peers" => Ok(Some(Command::PnPeers)),
         "pn_reoffer" => {
@@ -576,6 +584,7 @@ mod tests {
         let hash = "0102030405060708090a0b0c0d0e0f10";
         let peer = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
         assert_eq!(parse_command("pn_peers"), Ok(Some(Command::PnPeers)));
+        assert_eq!(parse_command("pn_announce"), Ok(Some(Command::PnAnnounce)));
         assert_eq!(
             parse_command(&format!("pn_reoffer {hash}")),
             Ok(Some(Command::PnReoffer { peer }))
