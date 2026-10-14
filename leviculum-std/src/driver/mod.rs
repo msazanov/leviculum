@@ -7263,16 +7263,20 @@ mod tests {
         assert_eq!(announce_cap_percent_from_config(&cfg), Some(100));
     }
 
-    /// A fresh core to apply interface config against.
-    fn test_core(tag: &str) -> StdNodeCore {
+    /// A fresh core to apply interface config against, with the storage
+    /// directory it lives in; hold the second for as long as the first.
+    fn test_core(tag: &str) -> (StdNodeCore, tempfile::TempDir) {
         use leviculum_core::node::NodeCoreBuilder;
-        let tmp = std::env::temp_dir().join(format!("drv-{tag}-{}", std::process::id()));
-        std::fs::create_dir_all(&tmp).unwrap();
-        NodeCoreBuilder::new().enable_transport(true).build(
+        let tmp = tempfile::Builder::new()
+            .prefix(&format!("drv-{tag}-"))
+            .tempdir()
+            .unwrap();
+        let core = NodeCoreBuilder::new().enable_transport(true).build(
             rand_core::OsRng,
             crate::clock::SystemClock::new(),
             crate::storage::Storage::new(&tmp).unwrap(),
-        )
+        );
+        (core, tmp)
     }
 
     // --- Codeberg #376: the peer-up announce, on lnsd ---
@@ -7333,7 +7337,7 @@ mod tests {
     /// two-hop reading #376 opened with.
     #[test]
     fn a_peer_up_announces_to_that_peer_alone() {
-        let mut core = test_core("peerup-one");
+        let (mut core, _tmp) = test_core("peerup-one");
         let mut gate = PeerAnnounceLimiter::new();
         announced_destination(&mut core);
 
@@ -7352,7 +7356,7 @@ mod tests {
     /// the identity and a rotation cannot reset it.
     #[test]
     fn the_same_identity_relinking_inside_the_window_announces_once() {
-        let mut core = test_core("peerup-limit");
+        let (mut core, _tmp) = test_core("peerup-limit");
         let mut gate = PeerAnnounceLimiter::new();
         announced_destination(&mut core);
 
@@ -7389,7 +7393,7 @@ mod tests {
     /// on the same adapter each get their own announce.
     #[test]
     fn the_limit_is_per_peer() {
-        let mut core = test_core("peerup-perpeer");
+        let (mut core, _tmp) = test_core("peerup-perpeer");
         let mut gate = PeerAnnounceLimiter::new();
         announced_destination(&mut core);
 
@@ -7424,7 +7428,7 @@ mod tests {
     /// the receiver's path table for the life of the entry.
     #[test]
     fn no_announce_without_a_clock() {
-        let mut core = test_core("peerup-noclock");
+        let (mut core, _tmp) = test_core("peerup-noclock");
         let mut gate = PeerAnnounceLimiter::new();
         announced_destination(&mut core);
 
@@ -7444,7 +7448,7 @@ mod tests {
     /// and the interface silently runs at the default the config overrode.
     #[test]
     fn configured_announce_cap_reaches_the_core() {
-        let mut core = test_core("cap");
+        let (mut core, _tmp) = test_core("cap");
         let cfg = InterfaceConfig {
             interface_type: "RNodeInterface".to_string(),
             bitrate: Some(9_600),
@@ -7467,7 +7471,7 @@ mod tests {
     /// branch that logs the warning rather than pretending the key applied.
     #[test]
     fn announce_cap_without_a_bitrate_registers_no_cap() {
-        let mut core = test_core("nocap");
+        let (mut core, _tmp) = test_core("nocap");
         let cfg = InterfaceConfig {
             interface_type: "RNodeInterface".to_string(),
             bitrate: None,
@@ -7589,9 +7593,10 @@ mod tests {
         use leviculum_core::transport::TickOutput;
         use leviculum_core::DestinationHash;
 
-        let tmp =
-            std::env::temp_dir().join(format!("without-events-dispatch-{}", std::process::id()));
-        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = tempfile::Builder::new()
+            .prefix("without-events-dispatch-")
+            .tempdir()
+            .unwrap();
         let core: Arc<Mutex<StdNodeCore>> = {
             let node = NodeCoreBuilder::new().enable_transport(true).build(
                 rand_core::OsRng,
@@ -7646,8 +7651,10 @@ mod tests {
         use leviculum_core::node::NodeCoreBuilder;
         use leviculum_core::transport::{Action, InterfaceId};
 
-        let tmp = std::env::temp_dir().join(format!("frames-dropped-{}", std::process::id()));
-        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = tempfile::Builder::new()
+            .prefix("frames-dropped-")
+            .tempdir()
+            .unwrap();
         let core: Arc<Mutex<StdNodeCore>> = {
             let node = NodeCoreBuilder::new().enable_transport(true).build(
                 rand_core::OsRng,
@@ -8716,8 +8723,10 @@ mod tests {
         let _ = Ordering::Relaxed; // silences unused-import on minor builds
 
         // Minimal StdNodeCore in Arc<Mutex>.
-        let tmp = std::env::temp_dir().join(format!("bug3-phase2a-c3-test-{}", std::process::id()));
-        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = tempfile::Builder::new()
+            .prefix("bug3-phase2a-c3-test-")
+            .tempdir()
+            .unwrap();
         let core: Arc<Mutex<StdNodeCore>> = {
             let node = leviculum_core::node::NodeCoreBuilder::new()
                 .enable_transport(true)
@@ -8827,8 +8836,10 @@ mod tests {
         use crate::interfaces::{InterfaceCounters, InterfaceHandle, InterfaceInfo};
         use leviculum_core::transport::InterfaceId;
 
-        let tmp = std::env::temp_dir().join(format!("bug19-a2-test-{}", std::process::id()));
-        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = tempfile::Builder::new()
+            .prefix("bug19-a2-test-")
+            .tempdir()
+            .unwrap();
         let core: Arc<Mutex<StdNodeCore>> = {
             let node = leviculum_core::node::NodeCoreBuilder::new()
                 .enable_transport(true)
@@ -8888,8 +8899,10 @@ mod tests {
         use crate::interfaces::{InterfaceCounters, InterfaceHandle, InterfaceInfo};
         use leviculum_core::transport::InterfaceId;
 
-        let tmp = std::env::temp_dir().join(format!("bug19-a2-non-lora-{}", std::process::id()));
-        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = tempfile::Builder::new()
+            .prefix("bug19-a2-non-lora-")
+            .tempdir()
+            .unwrap();
         let core: Arc<Mutex<StdNodeCore>> = {
             let node = leviculum_core::node::NodeCoreBuilder::new()
                 .enable_transport(true)
@@ -8946,8 +8959,10 @@ mod tests {
         use crate::interfaces::{InterfaceCounters, InterfaceHandle, InterfaceInfo};
         use leviculum_core::transport::InterfaceId;
 
-        let tmp = std::env::temp_dir().join(format!("bug19-a2-reconfig-{}", std::process::id()));
-        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = tempfile::Builder::new()
+            .prefix("bug19-a2-reconfig-")
+            .tempdir()
+            .unwrap();
         let core: Arc<Mutex<StdNodeCore>> = {
             let node = leviculum_core::node::NodeCoreBuilder::new()
                 .enable_transport(true)
@@ -9063,8 +9078,10 @@ mod tests {
         responder.register_destination(dest);
 
         // The driver under test: daemon-mode ReticulumNode, never started.
-        let tmp = std::env::temp_dir().join(format!("link-accessors-126-{}", std::process::id()));
-        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = tempfile::Builder::new()
+            .prefix("link-accessors-126-")
+            .tempdir()
+            .unwrap();
         let core = NodeCoreBuilder::new().build(
             rand_core::OsRng,
             SystemClock::new(),

@@ -171,14 +171,19 @@ fn the_text_file_is_shown_and_titles_the_page() {
 
 #[test]
 fn the_about_page_is_served_over_micron_but_is_not_a_post() {
-    let dir = tempfile::tempdir().expect("posts dir");
-    std::fs::write(dir.path().join("erster.md"), "Erster Text.\n").expect("write post");
-    let about = dir.path().join("..").join("about.md");
+    // The about file sits beside the posts directory inside a directory of
+    // the test's own: beside a bare tempdir it was TMPDIR itself, shared with
+    // every other run and left behind by each (730).
+    let root = tempfile::tempdir().expect("root dir");
+    let dir = root.path().join("posts");
+    std::fs::create_dir(&dir).expect("posts dir");
+    std::fs::write(dir.join("erster.md"), "Erster Text.\n").expect("write post");
+    let about = dir.join("..").join("about.md");
     std::fs::write(&about, "+++\ntitle = \"Über mich\"\n+++\n\nText.\n").expect("write about");
 
     let snapshot = load_snapshot(
         &meta_with_about(),
-        &Sources::new(dir.path()).with_about(Some(&about)),
+        &Sources::new(&dir).with_about(Some(&about)),
     )
     .expect("load snapshot");
 

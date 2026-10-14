@@ -46,6 +46,9 @@ mod ports;
 struct TestNode {
     node: ReticulumNode,
     rx: EventReceiver,
+    /// Last, so it is removed after the node is dropped. It used to be
+    /// `mem::forget`-ten, which kept it alive and in /tmp for good (730).
+    _storage: tempfile::TempDir,
 }
 
 async fn start(builder: ReticulumNodeBuilder) -> TestNode {
@@ -55,10 +58,13 @@ async fn start(builder: ReticulumNodeBuilder) -> TestNode {
         .build()
         .await
         .expect("build node");
-    std::mem::forget(storage);
     node.start().await.expect("start node");
     let rx = node.take_event_receiver().expect("event rx");
-    TestNode { node, rx }
+    TestNode {
+        node,
+        rx,
+        _storage: storage,
+    }
 }
 
 /// The listener that owns the destination under test. Announces flow

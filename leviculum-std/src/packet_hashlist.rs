@@ -105,9 +105,10 @@ mod tests {
 
     #[test]
     fn test_save_and_load_via_storage() {
-        let path =
-            std::env::temp_dir().join(format!("reticulum_test_hashlist_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&path);
+        let path = tempfile::Builder::new()
+            .prefix("reticulum_test_hashlist_")
+            .tempdir()
+            .unwrap();
         let storage = Storage::new(&path).unwrap();
 
         let mut cache = BTreeSet::new();
@@ -118,8 +119,6 @@ mod tests {
         let loaded = load_packet_hashlist(&storage);
         assert_eq!(loaded.len(), 2);
         assert!(loaded.contains(&[0x11; 32]));
-
-        let _ = std::fs::remove_dir_all(&path);
     }
 
     #[test]

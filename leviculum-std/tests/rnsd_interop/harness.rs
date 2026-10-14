@@ -159,12 +159,32 @@ pub struct TestDaemon {
     /// helper stays correct as new TestDaemon variants add interfaces
     /// (UDP, AutoInterface, future LoRa).
     initial_peer_count: usize,
+    /// The daemon's TMPDIR, so the `rns_test_*` config directory it makes
+    /// there goes with the harness rather than with the daemon (730). The
+    /// daemon removes its own only when its main loop ends, which a `kill`
+    /// from `drop` never lets it reach: 1 824 of them sat in /tmp on
+    /// 2026-10-14. Declared after `process`, and fields drop after
+    /// `Drop::drop` has killed it, so nothing is still writing here.
+    _scratch: tempfile::TempDir,
 }
 
 impl TestDaemon {
     /// Path to the test daemon script
     const DAEMON_SCRIPT: &'static str =
         concat!(env!("CARGO_MANIFEST_DIR"), "/../scripts/test_daemon.py");
+
+    /// `python3` with TMPDIR pointed at a directory this harness owns, see
+    /// the `_scratch` field. Short prefix on purpose: a Unix socket the
+    /// daemon puts under its temp directory has 108 bytes for the whole path.
+    fn python3_in_scratch() -> Result<(Command, tempfile::TempDir), HarnessError> {
+        let scratch = tempfile::Builder::new()
+            .prefix("rns_test_")
+            .tempdir()
+            .map_err(HarnessError::SpawnFailed)?;
+        let mut cmd = Command::new("python3");
+        cmd.env("TMPDIR", scratch.path());
+        Ok((cmd, scratch))
+    }
 
     /// Timeout for daemon startup
     const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -517,7 +537,7 @@ impl TestDaemon {
             cmd_port.to_string(),
         ];
         args.extend(extra_args);
-        let mut cmd = Command::new("python3");
+        let (mut cmd, scratch) = Self::python3_in_scratch()?;
         cmd.args(&args)
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
@@ -565,6 +585,7 @@ impl TestDaemon {
             udp_forward_port: None,
             probe_dest_hash,
             initial_peer_count: 0,
+            _scratch: scratch,
         };
 
         // Ping to verify daemon is responsive
@@ -694,7 +715,7 @@ impl TestDaemon {
         udp_listen_port: u16,
         udp_forward_port: u16,
     ) -> Result<Self, HarnessError> {
-        let mut cmd = Command::new("python3");
+        let (mut cmd, scratch) = Self::python3_in_scratch()?;
         cmd.args([
             Self::DAEMON_SCRIPT,
             "--rns-port",
@@ -744,6 +765,7 @@ impl TestDaemon {
             udp_forward_port: Some(udp_forward_port),
             probe_dest_hash: None,
             initial_peer_count: 0,
+            _scratch: scratch,
         };
 
         match daemon.ping().await {
@@ -824,7 +846,7 @@ impl TestDaemon {
         if echo_channel {
             args.push("--echo-channel".to_string());
         }
-        let mut cmd = Command::new("python3");
+        let (mut cmd, scratch) = Self::python3_in_scratch()?;
         cmd.args(&args)
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
@@ -864,6 +886,7 @@ impl TestDaemon {
             udp_forward_port: None,
             probe_dest_hash: None,
             initial_peer_count: 0,
+            _scratch: scratch,
         };
 
         match daemon.ping().await {
@@ -909,7 +932,7 @@ impl TestDaemon {
 
     /// Start a daemon with `respond_to_probes` on specific ports.
     async fn start_with_probes_ports(rns_port: u16, cmd_port: u16) -> Result<Self, HarnessError> {
-        let mut cmd = Command::new("python3");
+        let (mut cmd, scratch) = Self::python3_in_scratch()?;
         cmd.args([
             Self::DAEMON_SCRIPT,
             "--rns-port",
@@ -960,6 +983,7 @@ impl TestDaemon {
             udp_forward_port: None,
             probe_dest_hash,
             initial_peer_count: 0,
+            _scratch: scratch,
         };
 
         match daemon.ping().await {
@@ -1043,7 +1067,7 @@ impl TestDaemon {
             args.push(bits.to_string());
         }
 
-        let mut cmd = Command::new("python3");
+        let (mut cmd, scratch) = Self::python3_in_scratch()?;
         cmd.args(&args)
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
@@ -1086,6 +1110,7 @@ impl TestDaemon {
             udp_forward_port: None,
             probe_dest_hash,
             initial_peer_count: 0,
+            _scratch: scratch,
         };
 
         match daemon.ping().await {

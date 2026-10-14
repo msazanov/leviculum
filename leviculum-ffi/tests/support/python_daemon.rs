@@ -31,6 +31,11 @@ pub struct PyDaemon {
     child: Child,
     pub rns_port: u16,
     pub cmd_port: u16,
+    /// The daemon's TMPDIR, so the `rns_test_*` config directory it makes
+    /// there goes with this handle rather than with the daemon, which removes
+    /// its own only when its main loop ends and a `kill` never lets it (730).
+    /// Last, so it is removed after `Drop::drop` has killed the daemon.
+    _scratch: tempfile::TempDir,
 }
 
 impl PyDaemon {
@@ -58,8 +63,13 @@ impl PyDaemon {
             return None;
         }
 
+        let scratch = tempfile::Builder::new()
+            .prefix("rns_test_")
+            .tempdir()
+            .ok()?;
         let mut cmd = Command::new("python3");
-        cmd.arg(&script)
+        cmd.env("TMPDIR", scratch.path())
+            .arg(&script)
             .arg("--rns-port")
             .arg(rns_port.to_string())
             .arg("--cmd-port")
@@ -103,6 +113,7 @@ impl PyDaemon {
                     child,
                     rns_port,
                     cmd_port,
+                    _scratch: scratch,
                 })
             }
             _ => {

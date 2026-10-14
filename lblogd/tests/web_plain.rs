@@ -170,13 +170,18 @@ async fn the_file_area_is_served_verbatim_and_nothing_else_is() {
 #[tokio::test]
 async fn a_file_request_cannot_climb_out_of_the_area() {
     let posts_dir = tempfile::tempdir().expect("posts dir");
-    let files_dir = tempfile::tempdir().expect("files dir");
+    // The secret sits beside the file area inside a directory of the test's
+    // own: written straight into the area's parent it was TMPDIR itself,
+    // shared with every other run and left behind by each (730).
+    let root = tempfile::tempdir().expect("root dir");
+    let files_dir = root.path().join("files");
+    std::fs::create_dir(&files_dir).expect("files dir");
     write_fixture_posts(posts_dir.path());
-    std::fs::write(files_dir.path().join("antenne.png"), b"pixels").expect("write picture");
-    let secret = files_dir.path().parent().unwrap().join("secret.txt");
+    std::fs::write(files_dir.join("antenne.png"), b"pixels").expect("write picture");
+    let secret = root.path().join("secret.txt");
     std::fs::write(&secret, b"not for readers").expect("write secret");
 
-    let sources = Sources::new(posts_dir.path()).with_files(Some(FileArea::new(files_dir.path())));
+    let sources = Sources::new(posts_dir.path()).with_files(Some(FileArea::new(&files_dir)));
     let (_reloader, content) = Reloader::new(fixture_meta(), sources).expect("initial load");
     let bind = serve_plain(content).await;
 

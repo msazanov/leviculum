@@ -2735,8 +2735,10 @@ mod tests {
         use std::collections::BTreeMap;
         use std::sync::{Arc, Mutex};
 
-        let tmp = std::env::temp_dir().join(format!("rpc-packet-radio-{}", std::process::id()));
-        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = tempfile::Builder::new()
+            .prefix("rpc-packet-radio-")
+            .tempdir()
+            .unwrap();
         let mut core: StdNodeCore = NodeCoreBuilder::new().enable_transport(true).build(
             rand_core::OsRng,
             SystemClock::new(),
@@ -2831,8 +2833,10 @@ mod tests {
         use std::collections::BTreeMap;
         use std::sync::{Arc, Mutex};
 
-        let tmp = std::env::temp_dir().join(format!("rpc-identity-data-{}", std::process::id()));
-        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = tempfile::Builder::new()
+            .prefix("rpc-identity-data-")
+            .tempdir()
+            .unwrap();
         let mut core: StdNodeCore = NodeCoreBuilder::new().enable_transport(true).build(
             rand_core::OsRng,
             SystemClock::new(),
@@ -2894,8 +2898,10 @@ mod tests {
         use std::collections::BTreeMap;
         use std::sync::{Arc, Mutex};
 
-        let tmp = std::env::temp_dir().join(format!("rpc-dest-data-{}", std::process::id()));
-        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = tempfile::Builder::new()
+            .prefix("rpc-dest-data-")
+            .tempdir()
+            .unwrap();
         let stats: InterfaceStatsMap = Arc::new(Mutex::new(BTreeMap::new()));
         let start = std::time::Instant::now();
 
@@ -3087,8 +3093,10 @@ mod tests {
         use std::collections::BTreeMap;
         use std::sync::{Arc, Mutex};
 
-        let tmp = std::env::temp_dir().join(format!("rpc-radio-stats-{}", std::process::id()));
-        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = tempfile::Builder::new()
+            .prefix("rpc-radio-stats-")
+            .tempdir()
+            .unwrap();
         let mut core: StdNodeCore = NodeCoreBuilder::new().enable_transport(true).build(
             rand_core::OsRng,
             SystemClock::new(),
@@ -3161,8 +3169,10 @@ mod tests {
         use std::collections::BTreeMap;
         use std::sync::{Arc, Mutex};
 
-        let tmp = std::env::temp_dir().join(format!("rpc-link-profile-{}", std::process::id()));
-        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = tempfile::Builder::new()
+            .prefix("rpc-link-profile-")
+            .tempdir()
+            .unwrap();
         let mut core: StdNodeCore = NodeCoreBuilder::new().enable_transport(true).build(
             rand_core::OsRng,
             SystemClock::new(),
@@ -3275,8 +3285,10 @@ mod tests {
         use std::collections::BTreeMap;
         use std::sync::{Arc, Mutex};
 
-        let tmp = std::env::temp_dir().join(format!("rpc-bitrate-order-{}", std::process::id()));
-        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = tempfile::Builder::new()
+            .prefix("rpc-bitrate-order-")
+            .tempdir()
+            .unwrap();
         let mut core: StdNodeCore = NodeCoreBuilder::new().enable_transport(true).build(
             rand_core::OsRng,
             SystemClock::new(),
@@ -3339,8 +3351,10 @@ mod tests {
         use std::sync::atomic::Ordering;
         use std::sync::{Arc, Mutex};
 
-        let tmp = std::env::temp_dir().join(format!("rpc-listener-rows-{}", std::process::id()));
-        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = tempfile::Builder::new()
+            .prefix("rpc-listener-rows-")
+            .tempdir()
+            .unwrap();
         let mut core: StdNodeCore = NodeCoreBuilder::new().enable_transport(true).build(
             rand_core::OsRng,
             SystemClock::new(),
@@ -3489,8 +3503,10 @@ mod tests {
         use std::collections::BTreeMap;
         use std::sync::{Arc, Mutex};
 
-        let tmp = std::env::temp_dir().join(format!("rpc-{tag}-{}", std::process::id()));
-        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = tempfile::Builder::new()
+            .prefix(&format!("rpc-{tag}-"))
+            .tempdir()
+            .unwrap();
         let mut core: StdNodeCore = NodeCoreBuilder::new().enable_transport(true).build(
             rand_core::OsRng,
             SystemClock::new(),
@@ -3841,8 +3857,10 @@ mod tests {
         use std::collections::BTreeMap;
         use std::sync::{Arc, Mutex};
 
-        let tmp = std::env::temp_dir().join(format!("rpc-iface-kind-{}", std::process::id()));
-        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = tempfile::Builder::new()
+            .prefix("rpc-iface-kind-")
+            .tempdir()
+            .unwrap();
         let mut core: StdNodeCore = NodeCoreBuilder::new().enable_transport(true).build(
             rand_core::OsRng,
             SystemClock::new(),
@@ -3897,9 +3915,10 @@ mod tests {
         use leviculum_core::traits::Storage as _;
         use std::collections::BTreeMap;
 
-        let tmp = std::env::temp_dir().join(format!("rpc-tt-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = tempfile::Builder::new()
+            .prefix("rpc-tt-")
+            .tempdir()
+            .unwrap();
         let mut core: StdNodeCore = NodeCoreBuilder::new().enable_transport(true).build(
             rand_core::OsRng,
             SystemClock::new(),
@@ -4115,8 +4134,6 @@ mod tests {
             Value::Bool(true),
             "retaining a destination must be visible in the dump"
         );
-
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     // Codeberg #174: the collection census the dump carries. What is pinned
@@ -4135,9 +4152,10 @@ mod tests {
         use leviculum_core::traits::Storage as _;
         use std::collections::BTreeMap;
 
-        let tmp = std::env::temp_dir().join(format!("rpc-tt-counts-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = tempfile::Builder::new()
+            .prefix("rpc-tt-counts-")
+            .tempdir()
+            .unwrap();
         let mut core: StdNodeCore = NodeCoreBuilder::new().enable_transport(true).build(
             rand_core::OsRng,
             SystemClock::new(),
@@ -4213,8 +4231,6 @@ mod tests {
             Value::I64(leviculum_core::memory_storage::TableCaps::desktop().path_cap as i64)
         );
         assert_eq!(get("path_table", "entries"), Value::I64(0));
-
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     // The `rnstatus -l` pair. Both verbs answer from the TRANSPORT link table
@@ -4236,9 +4252,10 @@ mod tests {
         use leviculum_core::traits::Storage as _;
         use std::sync::{Arc, Mutex};
 
-        let tmp = std::env::temp_dir().join(format!("rpc-lcpair-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = tempfile::Builder::new()
+            .prefix("rpc-lcpair-")
+            .tempdir()
+            .unwrap();
         let mut core: StdNodeCore = NodeCoreBuilder::new().enable_transport(true).build(
             rand_core::OsRng,
             SystemClock::new(),
@@ -4305,8 +4322,6 @@ mod tests {
             "active_link_count is the validated subset — by the `validated` \
              flag, not by a byte of the link id"
         );
-
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     // Codeberg #028: the sizes-only answer, and the rule that makes it safe.
@@ -4323,9 +4338,10 @@ mod tests {
         use leviculum_core::storage_types::{PathEntry, ReverseEntry};
         use leviculum_core::traits::Storage as _;
 
-        let tmp = std::env::temp_dir().join(format!("rpc-tt-sizes-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = tempfile::Builder::new()
+            .prefix("rpc-tt-sizes-")
+            .tempdir()
+            .unwrap();
         let mut core: StdNodeCore = NodeCoreBuilder::new().enable_transport(true).build(
             rand_core::OsRng,
             SystemClock::new(),
@@ -4411,8 +4427,6 @@ mod tests {
             top.get(&HashableValue::String("rows_for".into())),
             Some(&Value::List(vec![pickle_str("reverse_table")]))
         );
-
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     // Codeberg #028: the size a caller reads and the rows it would have got
@@ -4430,9 +4444,10 @@ mod tests {
         use leviculum_core::storage_types::{AnnounceEntry, LinkEntry, PathEntry, ReverseEntry};
         use leviculum_core::traits::Storage as _;
 
-        let tmp = std::env::temp_dir().join(format!("rpc-tt-agree-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = tempfile::Builder::new()
+            .prefix("rpc-tt-agree-")
+            .tempdir()
+            .unwrap();
         let mut core: StdNodeCore = NodeCoreBuilder::new().enable_transport(true).build(
             rand_core::OsRng,
             SystemClock::new(),
@@ -4557,8 +4572,6 @@ mod tests {
                 );
             }
         }
-
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     // Codeberg #028, the measurement this batch exists for: a status call on
@@ -4613,9 +4626,10 @@ mod tests {
             .expect("transport_tables must serialize")
         };
 
-        let tmp = std::env::temp_dir().join(format!("rpc-tt-alloc-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = tempfile::Builder::new()
+            .prefix("rpc-tt-alloc-")
+            .tempdir()
+            .unwrap();
         let mut core: StdNodeCore = NodeCoreBuilder::new().enable_transport(true).build(
             rand_core::OsRng,
             SystemClock::new(),
@@ -4696,8 +4710,6 @@ mod tests {
              little to be those rows — the measurement is broken, not the fix",
             PATHS + REVERSE
         );
-
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// `table_sizes` as a name -> entries map, for the tests that read it.
@@ -4732,9 +4744,10 @@ mod tests {
         use std::collections::BTreeMap;
         use std::sync::{Arc, Mutex};
 
-        let tmp = std::env::temp_dir().join(format!("rpc-tt-codec-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = tempfile::Builder::new()
+            .prefix("rpc-tt-codec-")
+            .tempdir()
+            .unwrap();
         let stats: InterfaceStatsMap = Arc::new(Mutex::new(BTreeMap::new()));
         let mut core: StdNodeCore = NodeCoreBuilder::new().enable_transport(true).build(
             rand_core::OsRng,
@@ -4805,7 +4818,6 @@ mod tests {
                 "{codec:?}: a collection with no ceiling must decode as None"
             );
         }
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     // The identities listing (lnstatus --identities): a peer identity learned
@@ -4827,8 +4839,10 @@ mod tests {
         use std::collections::BTreeMap;
         use std::sync::{Arc, Mutex};
 
-        let tmp = std::env::temp_dir().join(format!("rpc-identity-table-{}", std::process::id()));
-        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = tempfile::Builder::new()
+            .prefix("rpc-identity-table-")
+            .tempdir()
+            .unwrap();
         let mut core: StdNodeCore = NodeCoreBuilder::new()
             .enable_transport(true)
             .respond_to_probes(true)
@@ -4947,7 +4961,6 @@ mod tests {
                 "{codec:?}: a name this node never registered stays unknown, not guessed"
             );
         }
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// D8 of the 2026-10-11 shared-instance audit: every answer that names a
@@ -4969,9 +4982,10 @@ mod tests {
 
         const CONFIGURED: usize = 0;
         const SPAWNED: usize = 7;
-        let tmp = std::env::temp_dir().join(format!("rpc-path-names-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = tempfile::Builder::new()
+            .prefix("rpc-path-names-")
+            .tempdir()
+            .unwrap();
         let mut core: StdNodeCore = NodeCoreBuilder::new().enable_transport(true).build(
             rand_core::OsRng,
             SystemClock::new(),
@@ -5082,7 +5096,6 @@ mod tests {
                 "next_hop_if_name must name the interface_stats row"
             );
         }
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// D9 of the 2026-10-11 shared-instance audit: with no path the answer is
@@ -5094,9 +5107,10 @@ mod tests {
         use crate::interfaces::inventory::InterfaceInventory;
         use leviculum_core::node::NodeCoreBuilder;
 
-        let tmp = std::env::temp_dir().join(format!("rpc-nhif-none-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = tempfile::Builder::new()
+            .prefix("rpc-nhif-none-")
+            .tempdir()
+            .unwrap();
         let core: StdNodeCore = NodeCoreBuilder::new().enable_transport(true).build(
             rand_core::OsRng,
             SystemClock::new(),
@@ -5111,6 +5125,5 @@ mod tests {
                 hash.len()
             );
         }
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

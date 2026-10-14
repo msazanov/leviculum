@@ -124,14 +124,16 @@ fn micron_targets(micron: &str) -> Vec<String> {
     targets
 }
 
-fn router() -> Router {
+/// The router, with the posts directory it was loaded from; hold the second
+/// for as long as the first. The directory is only read at load, but a reload
+/// must not find it gone. It used to be `mem::forget`-ten, which kept it in
+/// /tmp for good (730).
+fn router() -> (Router, tempfile::TempDir) {
     let posts = tempfile::tempdir().expect("posts dir");
     let (reloader, content) = Reloader::new(meta(), sources(posts.path())).expect("initial load");
-    // Both live for the router's lifetime, as in the daemon. The posts
-    // directory is only read at load, but a reload must not find it gone.
+    // The reloader lives for the router's lifetime, as in the daemon.
     std::mem::forget(reloader);
-    std::mem::forget(posts);
-    build_router(content)
+    (build_router(content), posts)
 }
 
 async fn status_of(router: &Router, path: &str) -> StatusCode {
@@ -232,7 +234,7 @@ fn every_page_renders_on_the_mesh_and_parses_as_micron() {
 
 #[tokio::test]
 async fn every_page_renders_on_the_web() {
-    let router = router();
+    let (router, _posts) = router();
     for name in page_names() {
         let path = match name.as_str() {
             "index" => "/".to_string(),
@@ -247,7 +249,7 @@ async fn every_page_renders_on_the_web() {
 async fn the_landing_page_carries_its_four_links_and_they_land() {
     let index = read(&pages_dir().join("index.md"));
     let links = markdown_links(&index);
-    let router = router();
+    let (router, _posts) = router();
     for label in ["Download", "Documentation", "Source", "Blog"] {
         let (_, url) = links
             .iter()
@@ -268,7 +270,7 @@ async fn the_landing_page_carries_its_four_links_and_they_land() {
 
 #[tokio::test]
 async fn every_site_link_on_every_page_lands() {
-    let router = router();
+    let (router, _posts) = router();
     for name in page_names() {
         let md = read(&pages_dir().join(format!("{name}.md")));
         for (label, url) in markdown_links(&md) {
@@ -290,7 +292,7 @@ async fn every_site_link_on_every_page_lands() {
 
 #[tokio::test]
 async fn the_landing_page_names_its_author_and_a_contact() {
-    let body = body_of(&router(), "/").await;
+    let body = body_of(&router().0, "/").await;
     assert!(
         body.contains("by <a href=\"/about\">Lew Palm</a>"),
         "{body}"

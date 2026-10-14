@@ -585,8 +585,10 @@ mod tests {
 
     #[test]
     fn test_save_and_load_via_storage() {
-        let path = std::env::temp_dir().join(format!("reticulum_test_kd_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&path);
+        let path = tempfile::Builder::new()
+            .prefix("reticulum_test_kd_")
+            .tempdir()
+            .unwrap();
         let storage = Storage::new(&path).unwrap();
 
         let mut store = KnownDestinationsStore {
@@ -602,7 +604,5 @@ mod tests {
         let identities: Vec<_> = loaded.identities().collect();
         assert_eq!(identities.len(), 1);
         assert_eq!(identities[0].0.into_bytes(), hash);
-
-        let _ = std::fs::remove_dir_all(&path);
     }
 }

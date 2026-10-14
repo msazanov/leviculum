@@ -169,7 +169,7 @@ read the answers:
   `reference/Reticulum/RNS/Utilities/rnstatus.py:432`) reads the same
   against either daemon. Announce-rate defaults follow Python's
   transport branch (3600/0/5 when transport is on, None when off;
-  pinned in `leviculum-std/src/rpc/mod.rs:935-981`).
+  pinned in `leviculum-std/src/rpc/mod.rs:934-980`).
 * **`path_table`** — six keys, units, the direct-path `via` spelled as
   the destination hash exactly as Python's `received_from` makes it
   (`build_path_table`, `leviculum-std/src/rpc/handlers.rs:1113`,
@@ -194,7 +194,7 @@ read the answers:
   `source`/`until`/`reason`, and the membership bool
   (`build_blackholed_identities`,
   `leviculum-std/src/rpc/handlers.rs:1899`, round-tripped in
-  `test_rpc_blackhole_round_trip`, `leviculum-std/src/rpc/mod.rs:1061`;
+  `test_rpc_blackhole_round_trip`, `leviculum-std/src/rpc/mod.rs:1060`;
   consumed by `rnpath -b/-B/-U`,
   `reference/Reticulum/RNS/Utilities/rnpath.py:185-199`).
 * **`destination_data` and `identity_data`** — all five ops parsed and
@@ -686,7 +686,7 @@ tunes the ingress/egress limiters globally
 per-interface spellings (`leviculum-std/src/ini_config.rs:845-855`)
 but the global ones fall into the catch-all, so our
 transport-enabled defaults are the hardcoded 3600/0/5
-(`leviculum-std/src/rpc/mod.rs:815-826` pins them). A config that
+(`leviculum-std/src/rpc/mod.rs:814-825` pins them). A config that
 raises the global target gets Python's enforcement and ours at the
 defaults — different rebroadcast rate limiting on the same mesh.
 Class: **silently ignored config**. Test: drop-in — a config with

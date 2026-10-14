@@ -1439,14 +1439,19 @@ mod tests {
         );
     }
 
-    fn temp_storage_path() -> PathBuf {
-        std::env::temp_dir().join(format!("reticulum_test_builder_{}", std::process::id()))
+    /// A directory of its own for one test's storage subdirectories.
+    fn temp_storage_path() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("reticulum_test_builder_")
+            .tempdir()
+            .unwrap()
     }
 
     #[test]
     fn test_identity_round_trip() {
         use leviculum_core::identity_store::IdentityStore;
-        let path = temp_storage_path().join("rt");
+        let dir = temp_storage_path();
+        let path = dir.path().join("rt");
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).unwrap();
 
@@ -1463,7 +1468,8 @@ mod tests {
     #[test]
     fn test_first_run_creates_identity_file() {
         use leviculum_core::identity_store::IdentityStore;
-        let path = temp_storage_path().join("first_run");
+        let dir = temp_storage_path();
+        let path = dir.path().join("first_run");
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).unwrap();
 
@@ -1484,7 +1490,8 @@ mod tests {
     #[test]
     fn test_second_run_loads_same_identity() {
         use leviculum_core::identity_store::IdentityStore;
-        let path = temp_storage_path().join("second_run");
+        let dir = temp_storage_path();
+        let path = dir.path().join("second_run");
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).unwrap();
 
@@ -1500,7 +1507,8 @@ mod tests {
 
     #[test]
     fn test_explicit_identity_overrides_persistence() {
-        let path = temp_storage_path().join("explicit_id");
+        let dir = temp_storage_path();
+        let path = dir.path().join("explicit_id");
         let _ = std::fs::remove_dir_all(&path);
 
         let explicit_id = Identity::generate(&mut rand_core::OsRng);
@@ -1528,7 +1536,8 @@ mod tests {
 
     #[test]
     fn test_build_sync_persists_identity() {
-        let path = temp_storage_path().join("build_persist");
+        let dir = temp_storage_path();
+        let path = dir.path().join("build_persist");
         let _ = std::fs::remove_dir_all(&path);
 
         let node1 = ReticulumNodeBuilder::new()
@@ -1551,7 +1560,8 @@ mod tests {
     #[test]
     fn test_wrong_size_identity_file_is_a_hard_error() {
         use leviculum_core::identity_store::IdentityStore;
-        let path = temp_storage_path().join("wrong_size");
+        let dir = temp_storage_path();
+        let path = dir.path().join("wrong_size");
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).unwrap();
 
@@ -1582,7 +1592,8 @@ mod tests {
     fn test_truncated_identity_refuses_build_instead_of_rotating() {
         // The data-loss path end to end: builder must not mint a fresh
         // identity over a damaged file (#273).
-        let path = temp_storage_path().join("truncated_build");
+        let dir = temp_storage_path();
+        let path = dir.path().join("truncated_build");
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).unwrap();
 
@@ -1615,7 +1626,8 @@ mod tests {
     #[test]
     fn test_save_leaves_no_temp_file_behind() {
         use leviculum_core::identity_store::IdentityStore;
-        let path = temp_storage_path().join("durable_save");
+        let dir = temp_storage_path();
+        let path = dir.path().join("durable_save");
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).unwrap();
 

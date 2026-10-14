@@ -56,14 +56,24 @@ struct PythonPeer {
     process: std::process::Child,
     rns_port: u16,
     cmd_port: u16,
+    /// The daemon's TMPDIR, so the `rns_test_*` config directory it makes
+    /// there goes with this handle rather than with the daemon, which removes
+    /// its own only when its main loop ends and a `kill` never lets it (730).
+    /// Last, so it is removed after `Drop::drop` has killed the daemon.
+    _scratch: tempfile::TempDir,
 }
 
 impl PythonPeer {
     fn start() -> Self {
         let rns_port = port_alloc::free_tcp_port();
         let cmd_port = port_alloc::free_tcp_port();
+        let scratch = tempfile::Builder::new()
+            .prefix("rns_test_")
+            .tempdir()
+            .expect("the Python daemon's TMPDIR");
         let mut command = Command::new("python3");
         command
+            .env("TMPDIR", scratch.path())
             .arg(daemon_script())
             .args(["--rns-port", &rns_port.to_string()])
             .args(["--cmd-port", &cmd_port.to_string()])
@@ -97,6 +107,7 @@ impl PythonPeer {
             process,
             rns_port,
             cmd_port,
+            _scratch: scratch,
         };
         assert_eq!(
             peer.rpc("ping", serde_json::json!({})),

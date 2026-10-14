@@ -50,10 +50,12 @@ fn open_pty(path: &std::path::Path) -> std::fs::File {
 
 #[test]
 fn undrained_stderr_does_not_stall_forwarding() {
-    let dir = std::env::temp_dir().join(format!("lora-proxy-logbp-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("create temp dir");
-    let pty_a = dir.join("a.pty");
-    let pty_b = dir.join("b.pty");
+    let dir = tempfile::Builder::new()
+        .prefix("lora-proxy-logbp-")
+        .tempdir()
+        .expect("create temp dir");
+    let pty_a = dir.path().join("a.pty");
+    let pty_b = dir.path().join("b.pty");
 
     // Spawned exactly the way periculum spawns it: debug logging into a
     // piped stderr that nobody reads while the proxy runs. Supervised,

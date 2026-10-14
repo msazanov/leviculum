@@ -30,3 +30,6 @@ clap = { version = "4", features = ["derive"] }
 # let a harness spawn bare. Test-only, so the shipped `lora-proxy` binary still
 # links nothing but leviculum-core.
 leviculum-std = { path = "../leviculum-std" }
+# The PTY directory of tests/log_backpressure.rs, removed on every exit path
+# of the test rather than left in /tmp (730).
+tempfile = "3"

@@ -1289,7 +1289,6 @@ impl leviculum_core::traits::Storage for Storage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env::temp_dir;
 
     use crate::file_ratchet_store::{RATCHETKEYS_DIR, RATCHETS_DIR};
     use crate::known_destinations::{
@@ -1297,9 +1296,15 @@ mod tests {
     };
     use crate::packet_hashlist::{encode_packet_hashlist, PACKET_HASHLIST_FILE};
 
-    fn temp_storage() -> Storage {
-        let path = temp_dir().join(format!("reticulum_test_{}", std::process::id()));
-        Storage::new(&path).unwrap()
+    /// A storage in a directory of its own, with that directory; hold the
+    /// second for as long as the first. Until 730 every caller shared one
+    /// `reticulum_test_<pid>` directory, which outlived the run.
+    fn temp_storage() -> (Storage, tempfile::TempDir) {
+        let path = tempfile::Builder::new()
+            .prefix("reticulum_test_")
+            .tempdir()
+            .unwrap();
+        (Storage::new(&path).unwrap(), path)
     }
 
     /// Codeberg #336: the names come off the filesystem, so `hex_decode`
@@ -1323,7 +1328,7 @@ mod tests {
 
     #[test]
     fn test_raw_storage() {
-        let storage = temp_storage();
+        let (storage, _dir) = temp_storage();
 
         storage.write_raw("test", "data.bin", b"hello").unwrap();
         let data = storage.read_raw("test", "data.bin").unwrap();
@@ -1335,7 +1340,7 @@ mod tests {
 
     #[test]
     fn test_serialized_storage() {
-        let storage = temp_storage();
+        let (storage, _dir) = temp_storage();
 
         let value = vec![1u32, 2, 3, 4, 5];
         storage.write("test", "numbers.mp", &value).unwrap();
@@ -1349,7 +1354,7 @@ mod tests {
 
     #[test]
     fn test_exists() {
-        let storage = temp_storage();
+        let (storage, _dir) = temp_storage();
 
         assert!(!storage.exists("test", "nonexistent"));
 
@@ -1362,7 +1367,7 @@ mod tests {
 
     #[test]
     fn test_root_storage() {
-        let storage = temp_storage();
+        let (storage, _dir) = temp_storage();
 
         storage.write_root("root_data.bin", b"root_hello").unwrap();
         let data = storage.read_root("root_data.bin").unwrap();
@@ -1378,7 +1383,7 @@ mod tests {
 
     #[test]
     fn test_read_root_missing_file() {
-        let storage = temp_storage();
+        let (storage, _dir) = temp_storage();
         let result = storage.read_root("nonexistent");
         assert!(result.is_err());
     }
@@ -1387,7 +1392,7 @@ mod tests {
     fn test_runtime_storage_delegates_to_inner() {
         use leviculum_core::traits::Storage as CoreStorage;
 
-        let mut storage = temp_storage();
+        let (mut storage, _dir) = temp_storage();
 
         // Verify packet hash dedup works (was no-op before this commit)
         let hash = [0x42u8; 32];
@@ -1424,8 +1429,10 @@ mod tests {
     fn test_flush_persists_identities() {
         use leviculum_core::traits::Storage as CoreStorage;
 
-        let path = temp_dir().join(format!("reticulum_test_flush_id_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&path);
+        let path = tempfile::Builder::new()
+            .prefix("reticulum_test_flush_id_")
+            .tempdir()
+            .unwrap();
 
         // Create storage, add identity, flush
         {
@@ -1443,16 +1450,16 @@ mod tests {
                 "identity should persist across restarts"
             );
         }
-
-        let _ = std::fs::remove_dir_all(&path);
     }
 
     #[test]
     fn test_flush_persists_packet_hashes() {
         use leviculum_core::traits::Storage as CoreStorage;
 
-        let path = temp_dir().join(format!("reticulum_test_flush_hash_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&path);
+        let path = tempfile::Builder::new()
+            .prefix("reticulum_test_flush_hash_")
+            .tempdir()
+            .unwrap();
 
         let hash = [0xBB; 32];
 
@@ -1471,16 +1478,16 @@ mod tests {
                 "packet hash should persist across restarts"
             );
         }
-
-        let _ = std::fs::remove_dir_all(&path);
     }
 
     #[test]
     fn test_flush_merges_with_disk() {
         use leviculum_core::traits::Storage as CoreStorage;
 
-        let path = temp_dir().join(format!("reticulum_test_flush_merge_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&path);
+        let path = tempfile::Builder::new()
+            .prefix("reticulum_test_flush_merge_")
+            .tempdir()
+            .unwrap();
 
         // Create storage with identity A, flush
         let id_a = Identity::generate(&mut rand_core::OsRng);
@@ -1507,17 +1514,16 @@ mod tests {
             assert!(CoreStorage::get_identity(&storage, &[0x01; TRUNCATED_HASHBYTES]).is_some());
             assert!(CoreStorage::get_identity(&storage, &[0x02; TRUNCATED_HASHBYTES]).is_some());
         }
-
-        let _ = std::fs::remove_dir_all(&path);
     }
 
     #[test]
     fn test_new_storage_loads_persistent_data() {
-        let path = temp_dir().join(format!("reticulum_test_autoload_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&path);
+        let path = tempfile::Builder::new()
+            .prefix("reticulum_test_autoload_")
+            .tempdir()
+            .unwrap();
 
         // Manually write a known_destinations file and packet_hashlist
-        std::fs::create_dir_all(&path).unwrap();
 
         // Write a known_destinations file with one entry
         let id = Identity::generate(&mut rand_core::OsRng);
@@ -1533,13 +1539,13 @@ mod tests {
             },
         );
         let encoded = encode_known_destinations(&entries).unwrap();
-        std::fs::write(path.join(KNOWN_DESTINATIONS_FILE), &encoded).unwrap();
+        std::fs::write(path.path().join(KNOWN_DESTINATIONS_FILE), &encoded).unwrap();
 
         // Write a packet_hashlist with one hash
         let hash = [0xDD; 32];
         let hashes = [hash];
         let (encoded, _) = encode_packet_hashlist(hashes.iter()).unwrap();
-        std::fs::write(path.join(PACKET_HASHLIST_FILE), &encoded).unwrap();
+        std::fs::write(path.path().join(PACKET_HASHLIST_FILE), &encoded).unwrap();
 
         // Create storage, should load both automatically
         let storage = Storage::new(&path).unwrap();
@@ -1553,8 +1559,6 @@ mod tests {
             CoreStorage::has_packet_hash(&storage, &hash),
             "should auto-load packet hash from packet_hashlist"
         );
-
-        let _ = std::fs::remove_dir_all(&path);
     }
 
     /// Codeberg #420: the known-destinations file must carry what a
@@ -1572,11 +1576,10 @@ mod tests {
         use leviculum_core::traits::Storage as CoreStorage;
         use leviculum_core::{Destination, DestinationType, Direction};
 
-        let path = temp_dir().join(format!(
-            "reticulum_test_flush_appdata_{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&path);
+        let path = tempfile::Builder::new()
+            .prefix("reticulum_test_flush_appdata_")
+            .tempdir()
+            .unwrap();
 
         // The state a validated announce leaves behind in storage: the
         // identity in the runtime table, the raw packet in the announce cache.
@@ -1609,7 +1612,7 @@ mod tests {
         }
 
         let bytes =
-            std::fs::read(path.join(KNOWN_DESTINATIONS_FILE)).expect("the file was written");
+            std::fs::read(path.path().join(KNOWN_DESTINATIONS_FILE)).expect("the file was written");
         let entries = decode_known_destinations(&bytes).expect("decodes as Python would");
         let entry = entries
             .get(&dest_hash)
@@ -1627,16 +1630,16 @@ mod tests {
             Some(app_data.as_slice()),
             "a restarted node must recall what the destination announced"
         );
-
-        let _ = std::fs::remove_dir_all(&path);
     }
 
     #[test]
     fn test_flush_updates_timestamp_on_existing_entry() {
         use leviculum_core::traits::Storage as CoreStorage;
 
-        let path = temp_dir().join(format!("reticulum_test_flush_ts_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&path);
+        let path = tempfile::Builder::new()
+            .prefix("reticulum_test_flush_ts_")
+            .tempdir()
+            .unwrap();
 
         let dest_hash = [0xEE; TRUNCATED_HASHBYTES];
         let id = Identity::generate(&mut rand_core::OsRng);
@@ -1694,8 +1697,6 @@ mod tests {
                 "packet_hash should be preserved across flush"
             );
         }
-
-        let _ = std::fs::remove_dir_all(&path);
     }
 
     // Three-phase flush (leviculum#44)
@@ -1707,8 +1708,10 @@ mod tests {
 
     #[test]
     fn test_take_flush_snapshot_defers_dirty_clear() {
-        let path = temp_dir().join(format!("reticulum_test_snap_defer_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&path);
+        let path = tempfile::Builder::new()
+            .prefix("reticulum_test_snap_defer_")
+            .tempdir()
+            .unwrap();
 
         let mut storage = Storage::new(&path).unwrap();
         let id = Identity::generate(&mut rand_core::OsRng);
@@ -1729,20 +1732,20 @@ mod tests {
             "an undisturbed write must clear the dirty flag"
         );
 
-        let bytes = std::fs::read(path.join(KNOWN_DESTINATIONS_FILE)).unwrap();
+        let bytes = std::fs::read(path.path().join(KNOWN_DESTINATIONS_FILE)).unwrap();
         let entries = decode_known_destinations(&bytes).unwrap();
         assert!(
             entries.contains_key(&[0xA1; TRUNCATED_HASHBYTES]),
             "the snapshotted identity must land on disk"
         );
-
-        let _ = std::fs::remove_dir_all(&path);
     }
 
     #[test]
     fn test_dirtied_mid_write_stays_dirty() {
-        let path = temp_dir().join(format!("reticulum_test_snap_gen_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&path);
+        let path = tempfile::Builder::new()
+            .prefix("reticulum_test_snap_gen_")
+            .tempdir()
+            .unwrap();
 
         let mut storage = Storage::new(&path).unwrap();
         let id_a = Identity::generate(&mut rand_core::OsRng);
@@ -1782,14 +1785,14 @@ mod tests {
         let (_, hashes) = second.packet_hashes.as_ref().unwrap();
         assert!(hashes.contains(&[0x0A; 32]));
         assert!(hashes.contains(&[0x0B; 32]));
-
-        let _ = std::fs::remove_dir_all(&path);
     }
 
     #[test]
     fn test_failed_write_leaves_dirty_for_retry() {
-        let path = temp_dir().join(format!("reticulum_test_snap_retry_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&path);
+        let path = tempfile::Builder::new()
+            .prefix("reticulum_test_snap_retry_")
+            .tempdir()
+            .unwrap();
 
         let mut storage = Storage::new(&path).unwrap();
         let id = Identity::generate(&mut rand_core::OsRng);
@@ -1817,33 +1820,31 @@ mod tests {
         drop(storage.finish_flush(snapshot.write()));
         assert!(!storage.identities_dirty);
         assert!(!storage.packet_hashes_dirty);
-        assert!(path.join(KNOWN_DESTINATIONS_FILE).exists());
-        assert!(path.join(PACKET_HASHLIST_FILE).exists());
-
-        let _ = std::fs::remove_dir_all(&path);
+        assert!(path.path().join(KNOWN_DESTINATIONS_FILE).exists());
+        assert!(path.path().join(PACKET_HASHLIST_FILE).exists());
     }
 
     #[test]
     fn test_take_flush_snapshot_none_when_clean() {
-        let path = temp_dir().join(format!("reticulum_test_snap_clean_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&path);
+        let path = tempfile::Builder::new()
+            .prefix("reticulum_test_snap_clean_")
+            .tempdir()
+            .unwrap();
 
         let mut storage = Storage::new(&path).unwrap();
         assert!(storage.take_flush_snapshot().is_none());
 
         // The trait-level shutdown flush stays a no-op on clean storage.
         CoreStorage::flush(&mut storage);
-        assert!(!path.join(KNOWN_DESTINATIONS_FILE).exists());
-        assert!(!path.join(PACKET_HASHLIST_FILE).exists());
-
-        let _ = std::fs::remove_dir_all(&path);
+        assert!(!path.path().join(KNOWN_DESTINATIONS_FILE).exists());
+        assert!(!path.path().join(PACKET_HASHLIST_FILE).exists());
     }
 
     #[test]
     fn test_hashset_packet_cache_has_add() {
         use leviculum_core::traits::Storage as CoreStorage;
 
-        let mut storage = temp_storage();
+        let (mut storage, _dir) = temp_storage();
         let hash = [0x42u8; 32];
 
         assert!(!CoreStorage::has_packet_hash(&storage, &hash));
@@ -1858,8 +1859,10 @@ mod tests {
     fn test_hashset_packet_cache_rotation() {
         use leviculum_core::traits::Storage as CoreStorage;
 
-        let path = temp_dir().join(format!("reticulum_test_rotation_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&path);
+        let path = tempfile::Builder::new()
+            .prefix("reticulum_test_rotation_")
+            .tempdir()
+            .unwrap();
 
         let mut storage = Storage::new(&path).unwrap();
         // Override cap to a small value for testing
@@ -1889,19 +1892,16 @@ mod tests {
         // So current=0, prev=6. The 6th hash is in prev.
         assert_eq!(storage.packet_cache.len(), 0);
         assert_eq!(storage.packet_cache_prev.len(), 6);
-
-        let _ = std::fs::remove_dir_all(&path);
     }
 
     #[test]
     fn test_hashset_packet_cache_persistence() {
         use leviculum_core::traits::Storage as CoreStorage;
 
-        let path = temp_dir().join(format!(
-            "reticulum_test_hash_persist_{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&path);
+        let path = tempfile::Builder::new()
+            .prefix("reticulum_test_hash_persist_")
+            .tempdir()
+            .unwrap();
 
         let hash_a = [0xAA; 32];
         let hash_b = [0xBB; 32];
@@ -1935,8 +1935,6 @@ mod tests {
                 "hash_b should persist"
             );
         }
-
-        let _ = std::fs::remove_dir_all(&path);
     }
 
     /// Codeberg #174: this wrapper's own collections are bound to its census
@@ -1956,7 +1954,7 @@ mod tests {
             "the parse found only {fields:?}, which cannot be this struct"
         );
 
-        let storage = temp_storage();
+        let (storage, _dir) = temp_storage();
         let counted: Vec<&str> = CoreStorage::collection_counts(&storage)
             .iter()
             .map(|c| c.name)
@@ -1987,7 +1985,7 @@ mod tests {
     fn the_census_counts_this_wrappers_dedup_cache_not_the_inner_one() {
         use leviculum_core::traits::Storage as CoreStorage;
 
-        let mut storage = temp_storage();
+        let (mut storage, _dir) = temp_storage();
         for i in 0..5u8 {
             CoreStorage::add_packet_hash(&mut storage, [i; 32]);
         }
@@ -2009,7 +2007,7 @@ mod tests {
     fn diagnostic_dump_names_every_counted_collection() {
         use leviculum_core::traits::Storage as CoreStorage;
 
-        let storage = temp_storage();
+        let (storage, _dir) = temp_storage();
         let (dump, _) = CoreStorage::diagnostic_dump(&storage);
         for row in CoreStorage::collection_counts(&storage) {
             assert!(
@@ -2024,7 +2022,7 @@ mod tests {
     fn test_hashset_diagnostic_dump() {
         use leviculum_core::traits::Storage as CoreStorage;
 
-        let mut storage = temp_storage();
+        let (mut storage, _dir) = temp_storage();
         CoreStorage::add_packet_hash(&mut storage, [0x01; 32]);
         CoreStorage::add_packet_hash(&mut storage, [0x02; 32]);
 
@@ -2042,10 +2040,11 @@ mod tests {
 
     // Ratchet Persistence Tests
     /// Create a temp storage with a unique per-test directory.
-    fn unique_temp_storage(suffix: &str) -> (Storage, PathBuf) {
-        let path = temp_dir().join(format!("reticulum_ratchet_{}_{suffix}", std::process::id()));
-        // Clean up any previous run
-        let _ = std::fs::remove_dir_all(&path);
+    fn unique_temp_storage(suffix: &str) -> (Storage, tempfile::TempDir) {
+        let path = tempfile::Builder::new()
+            .prefix(&format!("reticulum_ratchet_{suffix}_"))
+            .tempdir()
+            .unwrap();
         let storage = Storage::new(&path).unwrap();
         (storage, path)
     }
@@ -2060,7 +2059,7 @@ mod tests {
 
         // Verify file exists
         let hex = hex_encode(&hash);
-        let file_path = path.join(RATCHETS_DIR).join(&hex);
+        let file_path = path.path().join(RATCHETS_DIR).join(&hex);
         assert!(file_path.exists(), "Ratchet file should exist on disk");
 
         // Drop and recreate from same directory
@@ -2068,9 +2067,6 @@ mod tests {
         let storage2 = Storage::new(&path).unwrap();
         let loaded = CoreStorage::get_known_ratchet(&storage2, &hash);
         assert_eq!(loaded, Some(ratchet), "Ratchet should survive restart");
-
-        // Cleanup
-        let _ = std::fs::remove_dir_all(&path);
     }
 
     #[test]
@@ -2083,7 +2079,7 @@ mod tests {
 
         // Verify file exists
         let hex = hex_encode(&hash);
-        let file_path = path.join(RATCHETKEYS_DIR).join(&hex);
+        let file_path = path.path().join(RATCHETKEYS_DIR).join(&hex);
         assert!(file_path.exists(), "Ratchet keys file should exist on disk");
 
         // Drop and recreate from same directory
@@ -2091,9 +2087,6 @@ mod tests {
         let storage2 = Storage::new(&path).unwrap();
         let loaded = CoreStorage::load_dest_ratchet_keys(&storage2, &hash);
         assert_eq!(loaded, Some(data), "Ratchet keys should survive restart");
-
-        // Cleanup
-        let _ = std::fs::remove_dir_all(&path);
     }
 
     #[test]
@@ -2110,8 +2103,8 @@ mod tests {
         // Both files should exist
         let hex1 = hex_encode(&h1);
         let hex2 = hex_encode(&h2);
-        assert!(path.join(RATCHETS_DIR).join(&hex1).exists());
-        assert!(path.join(RATCHETS_DIR).join(&hex2).exists());
+        assert!(path.path().join(RATCHETS_DIR).join(&hex1).exists());
+        assert!(path.path().join(RATCHETS_DIR).join(&hex2).exists());
 
         // Expire: h1 is 4000ms old at now=5000, threshold=3000
         let removed = CoreStorage::expire_known_ratchets(&mut storage, 5000, 3000);
@@ -2119,16 +2112,13 @@ mod tests {
 
         // h1 file should be deleted, h2 should remain
         assert!(
-            !path.join(RATCHETS_DIR).join(&hex1).exists(),
+            !path.path().join(RATCHETS_DIR).join(&hex1).exists(),
             "Expired ratchet file should be deleted"
         );
         assert!(
-            path.join(RATCHETS_DIR).join(&hex2).exists(),
+            path.path().join(RATCHETS_DIR).join(&hex2).exists(),
             "Non-expired ratchet file should remain"
         );
-
-        // Cleanup
-        let _ = std::fs::remove_dir_all(&path);
     }
 
     #[test]
@@ -2136,7 +2126,7 @@ mod tests {
         let (_, path) = unique_temp_storage("kr_corrupt");
 
         // Write a corrupted file manually
-        let ratchets_dir = path.join(RATCHETS_DIR);
+        let ratchets_dir = path.path().join(RATCHETS_DIR);
         std::fs::create_dir_all(&ratchets_dir).unwrap();
         let hex = hex_encode(&[0x33; TRUNCATED_HASHBYTES]);
         std::fs::write(ratchets_dir.join(&hex), b"garbage data").unwrap();
@@ -2151,9 +2141,6 @@ mod tests {
             !ratchets_dir.join(&hex).exists(),
             "Corrupted file should be deleted"
         );
-
-        // Cleanup
-        let _ = std::fs::remove_dir_all(&path);
     }
 
     #[test]

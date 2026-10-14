@@ -16,16 +16,35 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+static TREE: OnceLock<PathBuf> = OnceLock::new();
+
 /// The fixture tree with sysfs names restored, built once per test process.
+///
+/// A static is never dropped, so a `TempDir` held here would outlive the run
+/// exactly as the fixed `lnflash-sysfs-<pid>` directory before it did, one
+/// per test binary per run (730). The tree is removed by an `atexit` hook
+/// instead, which the test harness reaches on every ordinary exit, a failed
+/// test included.
 pub fn materialized() -> &'static Path {
-    static TREE: OnceLock<PathBuf> = OnceLock::new();
     TREE.get_or_init(|| {
         let src = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sysfs"));
-        let dst = std::env::temp_dir().join(format!("lnflash-sysfs-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dst);
+        let dst = tempfile::Builder::new()
+            .prefix("lnflash-sysfs-")
+            .tempdir()
+            .expect("temp dir for the sysfs fixture tree")
+            .keep();
         copy_decoded(src, &dst).expect("materialize sysfs fixture tree");
+        // SAFETY: registers a plain `extern "C" fn` with no captured state;
+        // it only reads `TREE`, which is set by the time this returns.
+        unsafe { libc::atexit(remove_tree) };
         dst
     })
+}
+
+extern "C" fn remove_tree() {
+    if let Some(tree) = TREE.get() {
+        let _ = std::fs::remove_dir_all(tree);
+    }
 }
 
 /// A private copy of the fixture tree, for tests that mutate the bus — a

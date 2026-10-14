@@ -669,9 +669,13 @@ mod tests {
     #[tokio::test]
     async fn register_and_announce_single_destination() {
         let id = generate_identity();
+        let storage = tempfile::Builder::new()
+            .prefix("leviculum-api-test-announce-")
+            .tempdir()
+            .unwrap();
         let mut node = NodeBuilder::new()
             .identity(id.clone())
-            .storage_path(std::env::temp_dir().join("leviculum-api-test-announce"))
+            .storage_path(storage.path().to_path_buf())
             .enable_transport(false)
             .build()
             .expect("build node");
@@ -696,8 +700,12 @@ mod tests {
 
     #[tokio::test]
     async fn node_lifecycle_without_interfaces() {
+        let storage = tempfile::Builder::new()
+            .prefix("leviculum-api-test-lifecycle-")
+            .tempdir()
+            .unwrap();
         let mut node = NodeBuilder::new()
-            .storage_path(std::env::temp_dir().join("leviculum-api-test-lifecycle"))
+            .storage_path(storage.path().to_path_buf())
             .enable_transport(false)
             .build()
             .expect("build node");

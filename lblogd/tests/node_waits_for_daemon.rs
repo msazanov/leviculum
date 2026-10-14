@@ -54,14 +54,17 @@ fn blog_config(instance_name: &str, data_dir: &std::path::Path) -> BlogNodeConfi
     }
 }
 
-fn empty_content() -> lblogd::content::SnapshotRx {
-    let posts_dir = Box::leak(Box::new(tempfile::tempdir().expect("posts dir")));
+/// Content over an empty posts directory, with that directory; hold the
+/// second for the test's duration. It used to be leaked, which kept it in
+/// /tmp for good (730).
+fn empty_content() -> (lblogd::content::SnapshotRx, tempfile::TempDir) {
+    let posts_dir = tempfile::tempdir().expect("posts dir");
     let (reloader, content) =
         Reloader::new(fixture_meta(), Sources::new(posts_dir.path())).expect("initial content");
     // The reloader owns the watch channel's sender; keep it alive for the
     // test's duration so the receiver does not see it drop.
     Box::leak(Box::new(reloader));
-    content
+    (content, posts_dir)
 }
 
 /// The bug: a daemon that is merely a couple of seconds late must not cost
@@ -83,9 +86,10 @@ async fn start_waiting_survives_a_daemon_that_is_not_up_yet() {
 
     let data_dir = tempfile::tempdir().expect("data dir");
     let started = Instant::now();
+    let (content, _posts) = empty_content();
     let blog = BlogNode::start_waiting(
         blog_config(&instance_name, data_dir.path()),
-        empty_content(),
+        content,
         Duration::from_secs(20),
     )
     .await
@@ -118,9 +122,10 @@ async fn start_waiting_still_fails_when_no_daemon_ever_appears() {
     // the floor below is here to catch. The production bound is
     // `node::DAEMON_WAIT`.
     let started = Instant::now();
+    let (content, _posts) = empty_content();
     let result = BlogNode::start_waiting(
         blog_config(&instance_name, data_dir.path()),
-        empty_content(),
+        content,
         Duration::from_millis(2500),
     )
     .await;
@@ -148,13 +153,10 @@ async fn start_waiting_still_fails_when_no_daemon_ever_appears() {
 async fn plain_start_still_fails_fast() {
     let instance_name = format!("lblogd-311-fast-{}", std::process::id());
     let data_dir = tempfile::tempdir().expect("data dir");
+    let (content, _posts) = empty_content();
 
     let started = Instant::now();
-    let result = BlogNode::start(
-        blog_config(&instance_name, data_dir.path()),
-        empty_content(),
-    )
-    .await;
+    let result = BlogNode::start(blog_config(&instance_name, data_dir.path()), content).await;
 
     assert!(result.is_err(), "no daemon means no node");
     assert!(

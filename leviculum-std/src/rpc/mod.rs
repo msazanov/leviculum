@@ -605,21 +605,21 @@ mod tests {
 
     static RPC_TEST_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
-    /// Create a minimal ReticulumNode and extract its inner Arc<Mutex<StdNodeCore>>.
-    fn make_test_core(transport: bool) -> Arc<Mutex<StdNodeCore>> {
-        let id = RPC_TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let storage_path = std::env::temp_dir().join(format!(
-            "reticulum_rpc_test_{}_{}_{}",
-            std::process::id(),
-            id,
-            transport
-        ));
+    /// Create a minimal ReticulumNode and extract its inner Arc<Mutex<StdNodeCore>>,
+    /// with the storage directory it lives in; hold the second for as long as
+    /// the first. Until 730 the directory was a fixed
+    /// `reticulum_rpc_test_<pid>_<n>` that nothing removed.
+    fn make_test_core(transport: bool) -> (Arc<Mutex<StdNodeCore>>, tempfile::TempDir) {
+        let storage = tempfile::Builder::new()
+            .prefix(&format!("reticulum_rpc_test_{transport}_"))
+            .tempdir()
+            .expect("temp storage dir");
         let node = crate::driver::ReticulumNodeBuilder::new()
-            .storage_path(storage_path)
+            .storage_path(storage.path().to_path_buf())
             .enable_transport(transport)
             .build_sync()
             .expect("build_sync failed");
-        node.inner()
+        (node.inner(), storage)
     }
 
     fn empty_stats_map() -> InterfaceStatsMap {
@@ -720,16 +720,15 @@ mod tests {
     }
 
     async fn interface_stats_round_trip(tag: &str, ini: &str, want_ar: (i64, i64, i64)) {
-        let id = RPC_TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut config = crate::ini_config::parse_ini(ini).expect("parse");
         config.reticulum.enable_transport = true;
+        let storage = tempfile::Builder::new()
+            .prefix(&format!("reticulum_rpc_test_{tag}_"))
+            .tempdir()
+            .expect("temp storage dir");
         let core = crate::driver::ReticulumNodeBuilder::new()
             .config(config)
-            .storage_path(std::env::temp_dir().join(format!(
-                "reticulum_rpc_test_{}_{}_{tag}",
-                std::process::id(),
-                id
-            )))
+            .storage_path(storage.path().to_path_buf())
             .enable_transport(true)
             .build_sync()
             .expect("build_sync failed")
@@ -933,7 +932,7 @@ mod tests {
     /// so rnstatus renders no `(t:.../p:.../g:...)` suffix.
     #[tokio::test]
     async fn test_rpc_interface_stats_announce_rate_none_without_transport() {
-        let core = make_test_core(false);
+        let (core, _storage) = make_test_core(false);
         core.lock()
             .unwrap()
             .set_interface_name(0, "tcp_client_0".to_string());
@@ -988,7 +987,7 @@ mod tests {
     async fn test_rpc_interface_stats_configured_announce_rate() {
         use leviculum_core::transport::AnnounceRateConfig;
 
-        let core = make_test_core(true);
+        let (core, _storage) = make_test_core(true);
         {
             let mut c = core.lock().unwrap();
             c.set_interface_name(0, "tcp_client_0".to_string());
@@ -1061,7 +1060,7 @@ mod tests {
     async fn test_rpc_blackhole_round_trip() {
         use pickle::pickle_bytes;
 
-        let core = make_test_core(true);
+        let (core, _storage) = make_test_core(true);
         let start_time = std::time::Instant::now();
         let authkey = derive_authkey(&core);
 
@@ -1169,7 +1168,7 @@ mod tests {
     /// Test that wrong authkey is rejected.
     #[tokio::test]
     async fn test_rpc_auth_failure() {
-        let core = make_test_core(true);
+        let (core, _storage) = make_test_core(true);
         let start_time = std::time::Instant::now();
         let authkey = derive_authkey(&core);
 
@@ -1217,14 +1216,16 @@ mod tests {
     async fn configured_rpc_key_keys_the_listener() {
         let id = RPC_TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let instance_name = format!("rpctest_rpckey_{}_{}", std::process::id(), id);
-        let storage_path =
-            std::env::temp_dir().join(format!("reticulum_rpc_key_test_{}", instance_name));
+        let storage = tempfile::Builder::new()
+            .prefix("reticulum_rpc_key_test_")
+            .tempdir()
+            .expect("temp storage dir");
         let key = vec![0x5Au8; 16];
         let mut config = crate::config::Config::default();
         config.reticulum.rpc_key = Some(key.clone());
         let mut node = crate::driver::ReticulumNodeBuilder::new()
             .config(config)
-            .storage_path(storage_path)
+            .storage_path(storage.path().to_path_buf())
             .share_instance(true)
             .instance_name(instance_name.clone())
             .build()
@@ -1262,7 +1263,7 @@ mod tests {
     /// `rpc::handlers::tests::link_count_pair_answers_from_the_transport_link_table`.
     #[tokio::test]
     async fn test_rpc_link_count() {
-        let core = make_test_core(false);
+        let (core, _storage) = make_test_core(false);
         let start_time = std::time::Instant::now();
         let authkey = derive_authkey(&core);
 
@@ -1301,7 +1302,7 @@ mod tests {
     /// an explicit `max_hops: None` request is accepted directly.
     #[tokio::test]
     async fn test_rpc_query_path_table_sends_max_hops() {
-        let core = make_test_core(true);
+        let (core, _storage) = make_test_core(true);
         let start_time = std::time::Instant::now();
         let authkey = derive_authkey(&core);
 
@@ -1413,7 +1414,7 @@ mod tests {
     /// regressions in the request → handler → response wiring.
     #[tokio::test]
     async fn test_rpc_query_link_table_round_trip() {
-        let core = make_test_core(true);
+        let (core, _storage) = make_test_core(true);
         let start_time = std::time::Instant::now();
         let authkey = derive_authkey(&core);
 
@@ -1454,7 +1455,7 @@ mod tests {
         use leviculum_core::storage_types::PathEntry;
         use leviculum_core::traits::Storage as _;
 
-        let core = make_test_core(true);
+        let (core, _storage) = make_test_core(true);
         let start_time = std::time::Instant::now();
         let authkey = derive_authkey(&core);
 
@@ -1623,7 +1624,7 @@ mod tests {
         let now = crate::discovery::now_unix_secs();
         crate::discovery::persist_discovered(td.path(), &di, 2, now).unwrap();
 
-        let core = make_test_core(true);
+        let (core, _storage) = make_test_core(true);
         let start_time = std::time::Instant::now();
         let authkey = derive_authkey(&core);
         let instance_name = format!("rpctest_disc_{}", std::process::id());
@@ -1676,7 +1677,7 @@ mod tests {
     #[tokio::test]
     async fn test_rpc_interface_stats_status_reflects_is_online() {
         for (case, expected_status) in [("offline", false), ("online", true)] {
-            let core = make_test_core(true);
+            let (core, _storage) = make_test_core(true);
             let start_time = std::time::Instant::now();
             let authkey = derive_authkey(&core);
 

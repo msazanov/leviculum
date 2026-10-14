@@ -2099,6 +2099,7 @@ dependencies = [
  "leviculum-core",
  "leviculum-std",
  "nix 0.29.0",
+ "tempfile",
  "tokio",
  "tokio-serial",
  "tracing",

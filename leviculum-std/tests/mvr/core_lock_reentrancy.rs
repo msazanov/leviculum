@@ -138,6 +138,9 @@ struct Fixture {
     node: Arc<ReticulumNode>,
     events: leviculum_std::driver::EventReceiver,
     ticks: Arc<AtomicUsize>,
+    /// Last, so it is removed after the node is dropped. It used to be
+    /// `mem::forget`-ten, which kept it alive and in /tmp for good (730).
+    _storage: tempfile::TempDir,
 }
 
 /// Build and start a node whose processor re-enters (or does not), and hand the
@@ -169,13 +172,11 @@ async fn start_node(reenter: bool) -> Fixture {
     let node = Arc::new(node);
     cell.set(Arc::downgrade(&node)).ok();
 
-    // Keep the storage alive for the node's lifetime.
-    std::mem::forget(storage);
-
     Fixture {
         node,
         events,
         ticks,
+        _storage: storage,
     }
 }
 
@@ -218,6 +219,7 @@ async fn a_processor_relocking_the_core_is_named_not_hung() {
         node,
         mut events,
         ticks,
+        _storage,
     } = start_node(true).await;
 
     let outcome = wait_for_processor_panic(&mut events, "on_tick").await;
@@ -266,6 +268,7 @@ async fn a_processor_that_does_not_re_enter_is_left_alone() {
         node,
         mut events,
         ticks,
+        _storage,
     } = start_node(false).await;
 
     // Long enough for several timer ticks, each of which takes the core lock
