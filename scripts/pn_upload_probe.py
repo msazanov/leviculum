@@ -17,7 +17,7 @@ Prints one line per upload,
     UPLOAD n=<i> state=<final> proof_ms=<ms|none> timeout_ms=<ms>
            check_ms=<first check after the timeout, ms> teardowns=<k>
 
-and a final `SUMMARY` line. Exit status 0 iff every upload reached SENT
+and a final `PROBE_SUMMARY` line. Exit status 0 iff every upload reached SENT
 without a link teardown.
 """
 
@@ -154,7 +154,7 @@ def main():
         if state in ("SENT", "DELIVERED") and teardowns == 0:
             clean += 1
 
-    print(f"SUMMARY uploads={args.count} clean={clean}", flush=True)
+    print(f"PROBE_SUMMARY uploads={args.count} clean={clean}", flush=True)
     sys.stdout.flush()
     os._exit(0 if clean == args.count else 1)
 
