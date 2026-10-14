@@ -80,9 +80,8 @@ The config file is lxmd's format and keys (`lxmd --exampleconfig` and
 example on first daemon start if missing. All keys of the reference's
 `[propagation]`, `[lxmf]` and `[logging]` sections are accepted, and most are
 honoured identically. The keys accepted but not acted on
-(`prioritise_destinations`, `sequential_pn_stamp_validation`,
-`static_peers_bypass_sequential`, and `[propagation] announce_at_start`)
-are warned about at startup; lnpnd(1)
+(`prioritise_destinations`, `sequential_pn_stamp_validation`, and
+`static_peers_bypass_sequential`) are warned about at startup; lnpnd(1)
 explains each.
 
 Two defaults differ deliberately from the reference and are wire-legal:

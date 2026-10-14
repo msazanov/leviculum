@@ -473,6 +473,7 @@ impl Lnpnd {
             store,
             announce_interval_secs,
             announce_delay_secs,
+            announce_at_start: true,
             peering: options.peering,
             peer_store: Box::new(MemoryPeerStore::default()),
             control_allowed: Vec::new(),

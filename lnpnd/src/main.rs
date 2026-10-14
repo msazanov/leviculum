@@ -372,6 +372,7 @@ async fn remote_command(args: &Args, config_dir: &Path, instance: String) -> Exi
 struct Effective {
     node_name: Option<String>,
     announce_interval_secs: u64,
+    node_announce_at_start: bool,
     autopeer: bool,
     autopeer_maxdepth: u8,
     store_limit_kb: u64,
@@ -433,6 +434,13 @@ fn resolve(args: &Args, file: &RawConfig) -> Result<Effective, lnpnd::config::Co
                 .map(|minutes| minutes * 60)
                 .unwrap_or(DEFAULT_ANNOUNCE_INTERVAL_SECS),
         ),
+        // On when absent, where `lxmd` reads an absent key as off
+        // (`reference/LXMF/LXMF/Utilities/lxmd.py:123-126`): its generated
+        // config writes `yes` (`:985`), so that is what nodes in the field
+        // run, and a config without the key gets the second chance too.
+        node_announce_at_start: file
+            .get_bool("propagation", "announce_at_start")?
+            .unwrap_or(true),
         autopeer: args
             .autopeer
             .or(file.get_bool("propagation", "autopeer")?)
@@ -676,6 +684,7 @@ async fn daemon(args: &Args, config_dir: &Path, instance: String) -> ExitCode {
         store,
         announce_interval_secs: effective.announce_interval_secs,
         announce_delay_secs: lnpnd::engine::ANNOUNCE_DELAY_SECS,
+        announce_at_start: effective.node_announce_at_start,
         peering,
         peer_store: Box::new(peer_store),
         control_allowed: effective.control_allowed.clone(),
@@ -1023,6 +1032,7 @@ mod tests {
         // Minutes in the file, seconds in the daemon (`as_int(...)*60`,
         // `reference/LXMF/LXMF/Utilities/lxmd.py:154`).
         assert_eq!(effective.announce_interval_secs, 360 * 60);
+        assert!(effective.node_announce_at_start);
         assert!(effective.autopeer);
         assert_eq!(effective.autopeer_maxdepth, 4);
         // Megabytes in the file, kilobytes in the daemon (`lxmd.py:158-159`).
@@ -1130,22 +1140,25 @@ mod tests {
         }
     }
 
-    /// `[propagation] announce_at_start` is not acted on — lnpnd announces
-    /// the node shortly after start either way. It has to appear in the
-    /// start-up warning, or an operator who set it to `no` gets an announce
-    /// nobody told them about.
+    /// `[propagation] announce_at_start` is acted on: `no` leaves the
+    /// router's own start announce alone, as in `lxmd`, absent means on.
+    /// Being honoured, it is no longer named in the start-up warning.
     #[test]
-    fn propagation_announce_at_start_is_reported_as_inert() {
-        let file = RawConfig::parse(PUBLIC_NODE_CONFIG).expect("parses");
+    fn propagation_announce_at_start_is_honoured() {
+        let args = Args::parse_from(["lnpnd"]);
+        let off = RawConfig::parse("[propagation]\nannounce_at_start = no\n").expect("parses");
         assert!(
-            file.inert_keys()
-                .iter()
-                .any(|(section, key, _)| *section == "propagation" && *key == "announce_at_start"),
-            "the key must be named in the start-up warning, not swallowed"
+            !resolve(&args, &off)
+                .expect("resolves")
+                .node_announce_at_start
         );
-        // The `[lxmf]` spelling IS acted on, and must not be warned about.
-        let mailbox_only = RawConfig::parse("[lxmf]\nannounce_at_start = no\n").expect("parses");
-        assert!(mailbox_only.inert_keys().is_empty());
+        assert!(off.inert_keys().is_empty());
+        let absent = RawConfig::parse("[propagation]\n").expect("parses");
+        assert!(
+            resolve(&args, &absent)
+                .expect("resolves")
+                .node_announce_at_start
+        );
     }
 
     #[test]

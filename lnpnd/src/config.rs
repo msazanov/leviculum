@@ -211,11 +211,6 @@ impl RawConfig {
         const INERT: &[(&str, &str, &str)] = &[
             (
                 "propagation",
-                "announce_at_start",
-                "lnpnd always announces the node shortly after start; see lnpnd(1)",
-            ),
-            (
-                "propagation",
                 "prioritise_destinations",
                 "eviction is size- and age-driven only; see lnpnd(1)",
             ),
@@ -329,9 +324,10 @@ enable_node = yes
 
 announce_interval = 360
 
-# Whether to announce when the node starts. lnpnd always announces
-# shortly after start (the router's own behaviour); this key is
-# accepted for lxmd compatibility.
+# Whether to announce when the node starts. The node announces itself
+# 20 seconds after start either way; with this on, a second announce
+# follows 10 seconds later, so one lost announce does not leave the
+# node unknown until the next interval. On if absent.
 
 announce_at_start = yes
 

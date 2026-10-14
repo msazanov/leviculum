@@ -40,6 +40,7 @@ fn production_engine(identity: Identity) -> (Engine<MemoryPropagationStore>, Eng
         store: MemoryPropagationStore::new(64_000),
         announce_interval_secs: 3600,
         announce_delay_secs: 0,
+        announce_at_start: true,
         peering: leviculum_lxmf::PeeringConfig::default(),
         peer_store: Box::new(MemoryPeerStore::default()),
         control_allowed: Vec::new(),

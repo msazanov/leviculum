@@ -76,7 +76,10 @@ pub enum Command {
     /// `autopeer_maxdepth`, `from_static_only`, `static_peers` (hex,
     /// comma-separated), `store_limit_kb`, `transfer_limit_kb`,
     /// `sync_limit_kb`. Both helpers accept the same keys, so the driver
-    /// stays identical across stacks.
+    /// stays identical across stacks. This one also takes
+    /// `announce_at_start` (`true`/`false`, default `false`): `lnpnd`'s
+    /// second start announce, which the Python helper's router-only path
+    /// does not send.
     PnEnable {
         announce_delay_secs: Option<u64>,
         options: Vec<(String, String)>,

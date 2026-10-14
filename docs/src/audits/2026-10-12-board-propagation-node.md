@@ -114,7 +114,7 @@ Test: the table-full decline is already pinned
 stock config.** Board: `AUTOPEER_MAXDEPTH_DEFAULT`,
 `leviculum-lxmf/src/peering.rs:70`, the router's code default
 (`reference/LXMF/LXMF/LXMRouter.py:45`); lnpnd deliberately runs 6
-(`DEFAULT_AUTOPEER_MAXDEPTH`, `lnpnd/src/config.rs:293`) because
+(`DEFAULT_AUTOPEER_MAXDEPTH`, `lnpnd/src/config.rs:288`) because
 lxmd's *generated* config ships 6
 (`reference/LXMF/LXMF/Utilities/lxmd.py:995`), so stock nodes in the
 field run 6 (leviculum#442 D10).
@@ -129,7 +129,7 @@ more candidates pressing on the 16-slot table (D1).
 Test: an mvr driving `handle_announce` at hops 5-6 asserting
 `Added`, board config — one assertion beside lnpnd's
 `a_sync_from_a_client_or_from_beyond_the_depth_peers_nobody`
-(`lnpnd/src/engine.rs:2482`).
+(`lnpnd/src/engine.rs:2585`).
 **Fixed in d2a9dcfb**: the board builds its table from
 `board_peering_config` (`leviculum-nrf/pn-store`), whose
 `BOARD_AUTOPEER_MAXDEPTH` is 6 with lxmd's generated config as its
@@ -266,7 +266,7 @@ Price to adopt: 0 B — the link is still up when
 `on_inbound_resource` runs on the board's synchronous event path, so
 its hop count is a read, not a new field.
 Test: the lnpnd rule's test shape
-(`lnpnd/src/engine.rs:2634-2641`) replayed through the board engine.
+(`lnpnd/src/engine.rs:2737-2744`) replayed through the board engine.
 **Fixed in 00ac770b**: the board reads the link's hop count at the
 resource advertisement, while the link certainly exists, into one slot
 (`AdvertisedHops`, `leviculum-nrf/sync-batch`; one because D14 admits
@@ -371,7 +371,7 @@ lnpnd's 500 MB default.** The region is one linker number
 (`memory.x:91`, 16 pages); a record never straddles a page
 (`MAX_BODY`, `leviculum-nrf/record-log/src/lib.rs:229` = 4096 − 12 −
 42), and the peer records share the region. lnpnd defaults to 500 MB
-(`message_storage_limit`, `lnpnd/src/config.rs:357`); the reference
+(`message_storage_limit`, `lnpnd/src/config.rs:353`); the reference
 is unlimited until configured
 (`reference/LXMF/LXMF/LXMRouter.py:139`).
 What a peer sees: displacement evictions orders of magnitude
@@ -409,7 +409,7 @@ records keep tag 0 forever. The host closed both halves this week —
 it always computes (8f470aa7, leviculum#442 D6,
 `leviculum-lxmf/src/propagation_node.rs:399-406`) and re-prices an
 old store once at start (645e3580, `reprice_stored_values`,
-`lnpnd/src/validation.rs:114`, run at `lnpnd/src/main.rs:622-633`).
+`lnpnd/src/validation.rs:114`, run at `lnpnd/src/main.rs:630-641`).
 What a stock peer sees: a fresh board's whole early store never
 syncs out of it. The messages are served to their *recipients* on
 `/get` unharmed (the serve does not filter by value); what is lost
@@ -609,7 +609,7 @@ Pinned by `four_links_advertising_at_once_get_what_the_reserve_funds`
 lnpnd and the reference.** lnpnd tears down a propagation link
 without payload after `PROPAGATION_LINK_MAX_INACTIVITY_SECS` = 180 s
 (`leviculum-lxmf/src/constants.rs:30`, applied `close_idle_links`,
-`lnpnd/src/engine.rs:981`, the reference's
+`lnpnd/src/engine.rs:1001`, the reference's
 `reference/LXMF/LXMF/LXMRouter.py:968-974`). The board has no such
 pass; its inbound links fall to the core's generic stale rule,
 keepalive 360 s × 2 + 5 s grace
@@ -628,7 +628,7 @@ links reading `no_data_for_ms`, the lnpnd loop transplanted; a few
 hundred bytes of flash.
 Test: lnpnd's
 `an_idle_inbound_link_is_torn_down_after_the_reference_bound`
-(`lnpnd/src/engine.rs:3118`) through the board engine.
+(`lnpnd/src/engine.rs:3222`) through the board engine.
 **Fixed in 5c82832d**: one rule for both stacks, `link_idle_past_bound`
 (`leviculum-lxmf`), used by lnpnd's `close_idle_links` and by the
 board's sweep in `settle` (`tick_idle_links`, at most 15 s late on a
@@ -666,7 +666,7 @@ shortfalls re-listed on the client's next round.
 lnpnd registers the reference's control destination with
 `/pn/get/stats`, `/pn/peer/sync`, `/pn/peer/unpeer` behind the
 identity allow list (`register_control_handlers`,
-`lnpnd/src/engine.rs:662-665`, the codec in
+`lnpnd/src/engine.rs:682-685`, the codec in
 `leviculum-lxmf/src/control.rs:35-39`, against
 `reference/LXMF/LXMF/LXMRouter.py:672-676` and `:89-91`). The board
 registers nothing of it.
@@ -695,7 +695,7 @@ conformance cells already run, pointed at a board.
 
 **D18 — no client allow/ignore lists on the board.** lnpnd carries
 the reference's `auth_required`/`allowed` and `ignored` lists
-(`lnpnd/src/main.rs:642-657`); on the board every identified client
+(`lnpnd/src/main.rs:650-665`); on the board every identified client
 may `/get` its mailbox and anyone may upload.
 What an operator sees: a board mailbox cannot be restricted to a
 user set. Class: semantic. Price: 16 B flash per hash plus a lookup

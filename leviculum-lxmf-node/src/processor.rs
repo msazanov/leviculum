@@ -1027,6 +1027,10 @@ impl LxmfHelperProcessor {
         // 5 MB, the limit the interop harness gives the Python control
         // node (`set_message_storage_limit(megabytes=5)`).
         let mut store_limit: u64 = 5_000_000;
+        // Off unless asked for: the Python helper's `pn_enable` runs the
+        // router alone (`enable_propagation()`), not `lxmd`'s deferred start
+        // announce, so both stacks send one start announce by default.
+        let mut announce_at_start = false;
         for (key, value) in options {
             let parsed = match key.as_str() {
                 "stamp_cost" => value.parse().map(|v| node_config.stamp_cost = v).is_ok(),
@@ -1055,6 +1059,7 @@ impl LxmfHelperProcessor {
                     .collect::<Result<Vec<_>, _>>()
                     .is_ok(),
                 "store_limit_kb" => value.parse().map(|v: u64| store_limit = v * 1000).is_ok(),
+                "announce_at_start" => value.parse().map(|v| announce_at_start = v).is_ok(),
                 _ => {
                     self.emitter.error(&format!("unknown pn option: {key}"));
                     return;
@@ -1088,6 +1093,7 @@ impl LxmfHelperProcessor {
             store,
             announce_interval_secs: lnpnd::engine::DEFAULT_ANNOUNCE_INTERVAL_SECS,
             announce_delay_secs: announce_delay_secs.unwrap_or(lnpnd::engine::ANNOUNCE_DELAY_SECS),
+            announce_at_start,
             peering,
             peer_store: Box::new(peer_store),
             // Remote management is enabled per scenario via

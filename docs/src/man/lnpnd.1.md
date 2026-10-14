@@ -80,12 +80,9 @@ Exit codes follow lxmd's: 200 timeout, 203 no identity / bad hash, 204 access de
 
 ## CONFIGURATION
 
-The config file is lxmd's format and keys (`lxmd --exampleconfig` and `lnpnd --exampleconfig` describe the same file). All keys of the reference's `[propagation]`, `[lxmf]` and `[logging]` sections are accepted. Most are honoured identically: announce intervals and costs, autopeering and its depth, static peers, `max_peers`, `from_static_only`, `max_inbound_syncs`, `auth_required` (with the `allowed` file), `control_allowed`, storage and transfer limits, `display_name`, `stamp_cost`, `delivery_transfer_max_accepted_size`, `on_inbound`, `loglevel`, and the `ignored` file.
+The config file is lxmd's format and keys (`lxmd --exampleconfig` and `lnpnd --exampleconfig` describe the same file). All keys of the reference's `[propagation]`, `[lxmf]` and `[logging]` sections are accepted. Most are honoured identically: announce intervals and costs, `announce_at_start`, autopeering and its depth, static peers, `max_peers`, `from_static_only`, `max_inbound_syncs`, `auth_required` (with the `allowed` file), `control_allowed`, storage and transfer limits, `display_name`, `stamp_cost`, `delivery_transfer_max_accepted_size`, `on_inbound`, `loglevel`, and the `ignored` file.
 
 Keys accepted but not acted on, so a config file shared with lxmd parses cleanly (each is warned about at startup):
-
-`announce_at_start` (in `[propagation]`)
-:   lnpnd always announces the propagation node shortly after start, so `yes` is already the case and `no` has nothing to switch off. The `[lxmf]` key of the same name *is* honoured: it governs the daemon's own delivery destination.
 
 `prioritise_destinations`
 :   lnpnd's store eviction is size- and age-driven only. The reference uses this list to keep favoured destinations when the store overflows; lnpnd's store design (shared with the board-hosted node, where the list would not fit) does not carry per-destination priority.
@@ -96,6 +93,8 @@ Keys accepted but not acted on, so a config file shared with lxmd parses cleanly
 The three announced costs default to `propagation_stamp_cost_target = 13`, `propagation_stamp_cost_flexibility = 3` and `peering_cost = 1`, the same as a board's propagation node. 13 is the reference's own floor (`PROPAGATION_COST_MIN`; lxmd's default is 16), so a store accepted here travels through every default peer. Peering cost 1 rather than 0, because a stock lxmd peer never syncs toward a node announcing 0: its `peering_key_ready` returns false on a falsy cost (`LXMPeer.py:228`). The reference's default peering cost is 18. The mailbox's `[lxmf] stamp_cost` is a separate knob and keeps lxmd's default of 12.
 
 `autopeer_maxdepth` defaults to 6, the value lxmd's generated config carries, so stock nodes in the field run it; the LXMF router's own code default is 4. At 4 a stock node five or six hops away peers with lnpnd and is declined in turn, so messages flow from it to lnpnd only. A board's propagation node keeps 4.
+
+`[propagation] announce_at_start` works as in lxmd: the node announces 20 s after start either way, and with the key on a second announce follows 10 s later, after which the `announce_interval` runs from the second. Unlike lxmd, an absent key means on, the value lxmd's generated config carries, so a fresh node gets two chances to be heard before its peers wait out a whole interval.
 
 `enable_node = no` is refused: the propagation node is what lnpnd is. For a mailbox-only daemon use lxmd; for a client, **lnmsg**.
 

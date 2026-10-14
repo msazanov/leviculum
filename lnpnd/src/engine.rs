@@ -61,6 +61,15 @@ use crate::validation::{
 /// applied in `announce_propagation_node` `:338-341`).
 pub const ANNOUNCE_DELAY_SECS: u64 = 20;
 
+/// How long after the router's start announce the daemon's deferred one
+/// follows when `[propagation] announce_at_start` is on: `lxmd` runs its
+/// deferred start jobs `DEFFERED_JOBS_DELAY` = 10 s after start
+/// (`reference/LXMF/LXMF/Utilities/lxmd.py:33`, `:501-503`), and that
+/// announce sleeps the same `NODE_ANNOUNCE_DELAY` as the router's own
+/// (`reference/LXMF/LXMF/LXMRouter.py:338-341`), so the two leave 10 s
+/// apart.
+pub const START_ANNOUNCE_GAP_SECS: u64 = 10;
+
 /// Default re-announce cadence: `lxmd`'s default config announces the node
 /// every 360 minutes (`announce_interval = 360`,
 /// `reference/LXMF/LXMF/Utilities/lxmd.py:981`).
@@ -125,6 +134,10 @@ pub struct EngineConfig<S> {
     /// Delay before the first announce; [`ANNOUNCE_DELAY_SECS`] is the
     /// reference's behaviour and the production value, tests shorten it.
     pub announce_delay_secs: u64,
+    /// `[propagation] announce_at_start`: follow the first announce with
+    /// the daemon's deferred start announce [`START_ANNOUNCE_GAP_SECS`]
+    /// later, as `lxmd` does (`reference/LXMF/LXMF/Utilities/lxmd.py:501-503`).
+    pub announce_at_start: bool,
     /// Peering configuration (part 2); reference key names.
     pub peering: PeeringConfig,
     /// Where the peer table persists — a file on the host, the record log
@@ -264,6 +277,10 @@ pub struct Engine<S> {
     next_announce_at: Option<u64>,
     announce_interval_secs: u64,
     announce_delay_secs: u64,
+    /// The deferred start announce is still owed: the announce after the
+    /// first comes [`START_ANNOUNCE_GAP_SECS`] later instead of an
+    /// interval later.
+    start_announce_owed: bool,
     /// Peering cadences in milliseconds, the reference's unless a test sets
     /// them ([`Self::with_sync_interval`], [`Self::with_rotation_interval`]);
     /// handed to the peering runtime when the role registers.
@@ -423,6 +440,7 @@ impl<S: PropagationStore> Engine<S> {
         let (events, receiver) = std::sync::mpsc::channel();
         let announce_interval_secs = config.announce_interval_secs;
         let announce_delay_secs = config.announce_delay_secs;
+        let start_announce_owed = config.announce_at_start;
         (
             Self {
                 state: State::Unregistered(Box::new(config)),
@@ -432,6 +450,7 @@ impl<S: PropagationStore> Engine<S> {
                 next_announce_at: None,
                 announce_interval_secs,
                 announce_delay_secs,
+                start_announce_owed,
                 sync_interval_ms: SYNC_INTERVAL_SECS * 1000,
                 rotation_interval_ms: ROTATION_INTERVAL_SECS * 1000,
                 next_maintenance_at: 0,
@@ -503,6 +522,7 @@ impl<S: PropagationStore> Engine<S> {
             store,
             announce_interval_secs: _,
             announce_delay_secs: _,
+            announce_at_start: _,
             peering,
             peer_store,
             control_allowed,
@@ -1698,7 +1718,15 @@ impl<S: PropagationStore + Send + 'static> leviculum_std::driver::CoreProcessor 
             .get_or_insert(now_ms + self.announce_delay_secs * 1000);
         if now_ms >= next_announce {
             self.announce(&mut ready, core, &mut out);
-            self.next_announce_at = Some(now_ms + self.announce_interval_secs * 1000);
+            // The interval runs from the deferred start announce, as
+            // `lxmd`'s timer runs from its deferred start jobs
+            // (`reference/LXMF/LXMF/Utilities/lxmd.py:506`).
+            let wait_secs = if std::mem::take(&mut self.start_announce_owed) {
+                START_ANNOUNCE_GAP_SECS
+            } else {
+                self.announce_interval_secs
+            };
+            self.next_announce_at = Some(now_ms + wait_secs * 1000);
         }
 
         if now_ms >= self.next_maintenance_at {
@@ -1819,6 +1847,7 @@ mod tests {
             store: MemoryPropagationStore::new(64_000),
             announce_interval_secs: 3600,
             announce_delay_secs: 0,
+            announce_at_start: true,
             peering: leviculum_lxmf::PeeringConfig::default(),
             peer_store: Box::new(MemoryPeerStore::default()),
             control_allowed,
@@ -1993,6 +2022,78 @@ mod tests {
             announces_in(&out).len(),
             2,
             "allowing a remote re-announces both immediately"
+        );
+    }
+
+    /// How many announces of `destination` a tick put on the wire.
+    fn announces_of(out: &TickOutput, destination: [u8; 16]) -> usize {
+        announces_in(out)
+            .iter()
+            .filter(|packet| packet.destination_hash == destination)
+            .count()
+    }
+
+    /// When, in seconds after start, the node announced its propagation
+    /// destination over the first `horizon_secs`, ticked once a second.
+    fn node_announce_times(announce_at_start: bool, horizon_secs: u64) -> Vec<u64> {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let (mut engine, _events) = Engine::new(EngineConfig {
+            identity: leviculum_std::generate_identity(),
+            node_config: cost_free(),
+            store: MemoryPropagationStore::new(64_000),
+            announce_interval_secs: 3600,
+            announce_delay_secs: ANNOUNCE_DELAY_SECS,
+            announce_at_start,
+            peering: leviculum_lxmf::PeeringConfig::default(),
+            peer_store: Box::new(MemoryPeerStore::default()),
+            control_allowed: Vec::new(),
+            auth_allowed: None,
+            mailbox: None,
+            store_limit_bytes: 64_000,
+            delivery_limit_kb: 1000,
+        });
+        let start = core.now_ms();
+        let out = engine.on_tick(&mut core, start);
+        let node = engine.destination_hash().expect("registered");
+        let mut seen = vec![0; announces_of(&out, node)];
+        for secs in 1..=horizon_secs {
+            let out = engine.on_tick(&mut core, start + secs * 1000);
+            seen.extend(std::iter::repeat_n(secs, announces_of(&out, node)));
+        }
+        seen
+    }
+
+    /// With `[propagation] announce_at_start` on, the node announces twice
+    /// near start, as a stock `lxmd` does: the router's own announce
+    /// `NODE_ANNOUNCE_DELAY` after the role comes up
+    /// (`reference/LXMF/LXMF/LXMRouter.py:41`, `:685`), and the daemon's
+    /// deferred start announce, which runs `DEFFERED_JOBS_DELAY` after
+    /// start and goes through the same delayed announce
+    /// (`reference/LXMF/LXMF/Utilities/lxmd.py:33`, `:501-503`;
+    /// `LXMRouter.py:338-341`), so 10 s after the first. The interval then
+    /// runs from the second (`lxmd.py:481-485`, `:506`). A node whose one
+    /// start announce is lost on a busy carrier is otherwise unknown to
+    /// its peers for the whole interval.
+    #[test]
+    fn the_node_announces_twice_at_start_then_on_the_interval() {
+        let second = ANNOUNCE_DELAY_SECS + START_ANNOUNCE_GAP_SECS;
+        assert_eq!(
+            node_announce_times(true, second + 3600),
+            vec![ANNOUNCE_DELAY_SECS, second, second + 3600],
+            "router announce, deferred start announce, then the interval \
+             from the second (seconds after start)"
+        );
+    }
+
+    /// With `announce_at_start = no` only the router's own start announce
+    /// goes out, as in `lxmd`, and the interval runs from it.
+    #[test]
+    fn without_announce_at_start_the_node_announces_once_at_start() {
+        assert_eq!(
+            node_announce_times(false, ANNOUNCE_DELAY_SECS + 3600),
+            vec![ANNOUNCE_DELAY_SECS, ANNOUNCE_DELAY_SECS + 3600],
+            "seconds after start"
         );
     }
 
@@ -2282,6 +2383,7 @@ mod tests {
             store: MemoryPropagationStore::new(64_000),
             announce_interval_secs: 3600,
             announce_delay_secs: 0,
+            announce_at_start: true,
             peering,
             peer_store: Box::new(MemoryPeerStore::default()),
             control_allowed: Vec::new(),
@@ -2430,6 +2532,7 @@ mod tests {
             store: MemoryPropagationStore::new(400),
             announce_interval_secs: 3600,
             announce_delay_secs: 0,
+            announce_at_start: true,
             peering: PeeringConfig::default(),
             peer_store: Box::new(MemoryPeerStore::default()),
             control_allowed: Vec::new(),
@@ -2658,6 +2761,7 @@ mod tests {
                 store: MemoryPropagationStore::new(64_000),
                 announce_interval_secs: 3600,
                 announce_delay_secs: 0,
+                announce_at_start: true,
                 peering: PeeringConfig {
                     autopeer_maxdepth: 1,
                     ..PeeringConfig::default()
@@ -3130,6 +3234,10 @@ mod tests {
             store: MemoryPropagationStore::new(64_000),
             announce_interval_secs: 3600,
             announce_delay_secs: 0,
+            // The deferred start announce would otherwise go out with the
+            // first tick past start, the one at the bound below, which
+            // asserts a silent wire.
+            announce_at_start: false,
             peering: PeeringConfig {
                 autopeer: false,
                 ..PeeringConfig::default()
@@ -3204,6 +3312,7 @@ mod tests {
             store: MemoryPropagationStore::new(64_000),
             announce_interval_secs: 3600,
             announce_delay_secs: 0,
+            announce_at_start: true,
             peering: PeeringConfig {
                 autopeer: false,
                 from_static_only: true,
@@ -3299,6 +3408,7 @@ mod tests {
             store: MemoryPropagationStore::new(64_000),
             announce_interval_secs: 3600,
             announce_delay_secs: 0,
+            announce_at_start: true,
             peering: PeeringConfig::default(),
             peer_store: Box::new(MemoryPeerStore::default()),
             control_allowed: Vec::new(),
@@ -3419,6 +3529,7 @@ mod tests {
             announce_interval_secs: 3600,
             // No announce within the test: the response is all there is.
             announce_delay_secs: 3600,
+            announce_at_start: true,
             peering: PeeringConfig::default(),
             peer_store: Box::new(MemoryPeerStore::default()),
             control_allowed: Vec::new(),
@@ -3500,6 +3611,7 @@ mod tests {
             store: MemoryPropagationStore::new(64_000),
             announce_interval_secs: 3600,
             announce_delay_secs: 3600,
+            announce_at_start: true,
             peering: PeeringConfig::default(),
             peer_store: Box::new(MemoryPeerStore::default()),
             control_allowed: Vec::new(),
@@ -3835,6 +3947,7 @@ mod inbound_sync_slices {
             },
             announce_interval_secs: 3600,
             announce_delay_secs: 0,
+            announce_at_start: true,
             peering: leviculum_lxmf::PeeringConfig::default(),
             peer_store: Box::new(MemoryPeerStore::default()),
             control_allowed: Vec::new(),
