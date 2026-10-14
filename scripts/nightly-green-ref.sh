@@ -42,8 +42,26 @@
 # Refs older than --retention-days are deleted in the same push, so the set
 # stays bounded (one ref per night, ~30 live).
 #
-# WHAT IT REFUSES TO SIGN. The caller hands in the night's overall verdict, and
-# a non-green verdict simply means no ref — exit 0, that is the system working.
+# WHAT IT SIGNS. The caller hands in the night's overall verdict:
+#
+#   green       every cell green, nothing skipped, nothing undecided.
+#   attributed  green-or-attributed (726, Lew 2026-10-14): no NEW unexplained
+#               red, no undecided cell, the unit suite green, no stale
+#               exclusion. Registered reds (a red with a visible, reasoned
+#               attribution) and infra skips are allowed. That is the ground
+#               state of CLAUDE.md's workflow priorities, and a night in it
+#               is fit to publish: from 2026-10-08 to 10-14 no night was
+#               strictly green, and the forge release stood still for six days.
+#   red         anything else.
+#
+# `attributed` signs exactly as `green` does, with the same evidence check
+# below, under the same ref name: the forge (scripts/check-nightly-green.sh)
+# reads `refs/nightly/green/<stamp>` and does not distinguish the two. The word
+# that signed a ref is in this script's log on the nightly host, and the
+# nightly's status file; the ref itself is lightweight and carries none.
+#
+# WHAT IT REFUSES TO SIGN. A verdict that is neither green nor attributed simply
+# means no ref — exit 0, that is the system working.
 # But the one property this whole gate is about is not taken on trust: the
 # run's own test manifest must show that the `rnsd_interop` unit EXECUTED and
 # that every test in it passed. `scripts/run-with-manifest.py` writes that
@@ -57,7 +75,7 @@
 #
 #   bash scripts/nightly-green-ref.sh \
 #       --commit   <sha of the tested commit> \
-#       --verdict  green|red \
+#       --verdict  green|attributed|red \
 #       --remote   ssh://git@codeberg.org/Lew_Palm/leviculum.git
 #
 # `--manifest` defaults to the `workspace-all-targets` manifest THIS checkout
@@ -93,29 +111,31 @@ while [ $# -gt 0 ]; do
         --remote)          REMOTE="${2:-}"; shift 2 ;;
         --retention-days)  RETENTION_DAYS="${2:-}"; shift 2 ;;
         --dry-run)         DRY_RUN=1; shift ;;
-        -h|--help)         sed -n '2,70p' "$0"; exit 0 ;;
+        -h|--help)         sed -n '2,93p' "$0"; exit 0 ;;
         *)                 die "unknown argument '$1'" ;;
     esac
 done
 
 [ -n "$COMMIT" ]   || die "--commit is required"
-[ -n "$VERDICT" ]  || die "--verdict is required (green|red)"
+[ -n "$VERDICT" ]  || die "--verdict is required (green|attributed|red)"
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 # --- The night's own verdict ----------------------------------------------
 #
-# Anything but green means no ref, and that is not an error: it is the entire
-# point of the mechanism. Said out loud, because a channel that goes quiet is
-# indistinguishable from a channel that is broken.
+# Anything but green or attributed means no ref, and that is not an error: it
+# is the entire point of the mechanism. Said out loud, because a channel that
+# goes quiet is indistinguishable from a channel that is broken.
 case "$VERDICT" in
-    green|GREEN|GRUEN|gruen) ;;
+    green|GREEN|GRUEN|gruen) SIGNED_AS=green ;;
+    attributed|ATTRIBUTED) SIGNED_AS=attributed ;;
     *)
-        echo "nightly-green-ref: verdict '$VERDICT' is not green — no ref pushed."
-        echo "nightly-green-ref: the forge will refuse to publish ${COMMIT:0:12} until a green night covers it."
+        echo "nightly-green-ref: verdict '$VERDICT' is neither green nor attributed — no ref pushed."
+        echo "nightly-green-ref: the forge will refuse to publish ${COMMIT:0:12} until a green-or-attributed night covers it."
         exit 0
         ;;
 esac
+echo "nightly-green-ref: verdict ${SIGNED_AS}"
 
 # --- The evidence, which is not taken on trust ----------------------------
 #
@@ -262,7 +282,7 @@ while read -r _sha ref; do
     fi
 done < <(git -C "$REPO_DIR" ls-remote "$REMOTE" 'refs/nightly/green/*' 2>/dev/null)
 
-echo "nightly-green-ref: $NEW_REF -> ${COMMIT:0:12} on $REMOTE"
+echo "nightly-green-ref: $NEW_REF -> ${COMMIT:0:12} on $REMOTE (signed ${SIGNED_AS})"
 [ "$pruned" -gt 0 ] && echo "nightly-green-ref: pruning $pruned ref(s) older than ${RETENTION_DAYS} days"
 
 if [ "$DRY_RUN" = "1" ]; then

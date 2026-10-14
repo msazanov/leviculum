@@ -350,6 +350,35 @@ grep -qE 'would push: \+'"$HEAD_SHA"':refs/nightly/green/[0-9]{8}T[0-9]{6}Z' "$F
 grep -q '2 test(s) passed' "$FAKE_DIR/out" || fail "the evidence it checked is not in the log"
 [ "$failures" -eq "$before" ] || dumpout
 
+# --- Case: an attributed night signs as a green one does ------------------
+#
+# 726: a green-or-attributed night (registered reds and infra skips, nothing
+# new, unit suite green) is fit to publish. Same ref name, same evidence check,
+# and the word that signed it in the log.
+echo "[case] ref/attributed-pushes"
+before=$failures
+setup ref-attributed
+write_manifest "$FAKE_DIR/m.json" "$HEAD_SHA" false 0 green
+run_ref attributed "$FAKE_DIR/m.json"
+[ "$(rc)" = "0" ] || fail "exit $(rc) on an attributed night with green interop"
+grep -qE 'would push: \+'"$HEAD_SHA"':refs/nightly/green/[0-9]{8}T[0-9]{6}Z' "$FAKE_DIR/out" \
+    || fail "an attributed night did not push '+<commit>:refs/nightly/green/<stamp>'"
+grep -q 'signed attributed' "$FAKE_DIR/out" || fail "the log does not say the ref was signed attributed"
+[ "$failures" -eq "$before" ] || dumpout
+
+# --- Case: attributed does not excuse a red rnsd_interop ------------------
+#
+# An attribution covers the corpus cells the night registered, not the unit
+# suite: the manifest check runs for attributed exactly as for green.
+echo "[case] ref/attributed-red-interop-is-refused"
+before=$failures
+setup ref-attributed-red-interop
+write_manifest "$FAKE_DIR/m.json" "$HEAD_SHA" false 0 red
+run_ref attributed "$FAKE_DIR/m.json"
+[ "$(rc)" != "0" ] || fail "exit 0 on an attributed night with a failing rnsd_interop"
+grep -q 'would push' "$FAKE_DIR/out" && fail "an attributed night pushed a ref although rnsd_interop was red"
+[ "$failures" -eq "$before" ] || dumpout
+
 # --- Case: a red night pushes nothing, and is not an error ----------------
 echo "[case] ref/red-night"
 before=$failures
