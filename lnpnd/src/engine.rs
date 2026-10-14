@@ -42,7 +42,7 @@ use leviculum_lxmf::node::APP_NAME;
 use leviculum_lxmf::peering::{
     PeerStore, PeeringConfig, OFFER_REQUEST_PATH, ROTATION_INTERVAL_SECS, SYNC_INTERVAL_SECS,
 };
-use leviculum_lxmf::propagation::{MessageListResponse, PeerError};
+use leviculum_lxmf::propagation::{MessageListResponse, PeerError, PropagationUpload};
 use leviculum_lxmf::propagation_client::PROPAGATION_ASPECT;
 use leviculum_lxmf::propagation_node::link_idle_past_bound;
 use leviculum_lxmf::{
@@ -318,9 +318,11 @@ enum Pending {
 enum Verdicts {
     /// Ground by the validation worker before the payload was queued.
     Ground(HashMap<TransientId, Option<u16>>),
-    /// Cheap enough to run here: [`ValidationWorker::worth_deferring`] said
-    /// no, which means no cost gate and no value to measure, so this is a
-    /// constant rather than a hash grind.
+    /// Judged at the store, under the lock: either
+    /// [`ValidationWorker::worth_deferring`] said no, which means no cost
+    /// gate and no value to measure, so this is a constant rather than a
+    /// hash grind; or the payload is a single upload ground in the hook that
+    /// received it (`Engine::grinds_inline`), one stamp.
     Inline { min_cost: u8, compute_value: bool },
 }
 
@@ -1374,7 +1376,7 @@ impl<S: PropagationStore> Engine<S> {
         ready: &mut Ready<S>,
         core: &mut StdNodeCoreRef<'_>,
         out: &mut TickOutput,
-    ) {
+    ) -> usize {
         while let Some(done) = self.validation.try_recv() {
             self.pending.push_back(Pending::from_validated(done));
         }
@@ -1394,6 +1396,35 @@ impl<S: PropagationStore> Engine<S> {
                 None => now_ms,
             });
         }
+        PERSIST_PER_HOOK - budget
+    }
+
+    /// Whether a link packet's stamp is ground in the hook that received
+    /// it rather than on the worker (leviculum order 716).
+    ///
+    /// The proof waits on the verdict, and a stock client gives it
+    /// `max(rtt * 6, 5 ms)` over a LAN (`reference/Reticulum/RNS/Packet.py:431`).
+    /// Through the worker the verdict needs two wake-ups the hook does not
+    /// control: the worker thread's, after the queueing, and the driver's,
+    /// for the poll that drains it. Beside a CPU burner on the coder host
+    /// one of the two came a scheduler tick (4 ms at `CONFIG_HZ=250`) late
+    /// in a fifth of the uploads, nearly always the worker's, and the proof
+    /// left at 6 to 7 ms. Ground here, the thread that already holds the CPU
+    /// does the work. One stamp is a 1.2 ms grind in a release build, which
+    /// with the one append the hook pays for stays inside the hook budget
+    /// (`the_hook_budget_pays_for_the_slice_it_takes`); the
+    /// reference grinds the packet path on its packet callback too
+    /// (`reference/LXMF/LXMF/LXMRouter.py:2243`).
+    ///
+    /// Only a single upload, and only with nothing older in flight: a job on
+    /// the worker or a payload in the store queue is earlier traffic, and
+    /// overtaking it would break the per-link validate, append, prove order
+    /// (`crate::validation`). A packet that is not a single upload is
+    /// classified by the drain and gains nothing from grinding early.
+    fn grinds_inline(&self, data: &[u8]) -> bool {
+        !self.validation.busy()
+            && self.pending.is_empty()
+            && PropagationUpload::decode(data).is_ok()
     }
 }
 
@@ -1412,7 +1443,7 @@ impl<S: PropagationStore + Send + 'static> leviculum_std::driver::CoreProcessor 
         };
         // Finished validations first: they are older traffic than this
         // event, and applying them here keeps the per-link order.
-        self.drain_pending(&mut ready, core, &mut out);
+        let persisted = self.drain_pending(&mut ready, core, &mut out);
         // The mailbox router sees every event and filters for its own
         // links, exactly as lnmsg's engine feeds it.
         if let Some(mut mailbox) = ready.mailbox.take() {
@@ -1507,7 +1538,9 @@ impl<S: PropagationStore + Send + 'static> leviculum_std::driver::CoreProcessor 
                     .and_then(VecDeque::pop_front);
                 let min_cost = ready.min_cost;
                 let compute_value = ready.node.compute_stamp_value();
-                if ValidationWorker::worth_deferring(min_cost, compute_value) {
+                if ValidationWorker::worth_deferring(min_cost, compute_value)
+                    && !self.grinds_inline(data)
+                {
                     // The grinding goes to the worker (deliverable 5); the
                     // append and the proof follow at the drain, in order.
                     self.validation.enqueue(ValidationJob {
@@ -1520,10 +1553,12 @@ impl<S: PropagationStore + Send + 'static> leviculum_std::driver::CoreProcessor 
                         compute_value,
                     });
                 } else {
-                    // Nothing to grind, but the append and the proof are
+                    // Nothing to grind, or one stamp ground here (see
+                    // `grinds_inline`), but the append and the proof are
                     // still the drain's: one dispatch can carry several
                     // uploads, and storing them all here is the same
-                    // unbounded hold a batch is.
+                    // unbounded hold a batch is. The drain after this match
+                    // stores it in this hook when the budget is unspent.
                     self.pending.push_back(Pending::Packet {
                         link_id: *link_id,
                         data: data.clone(),
@@ -1627,6 +1662,12 @@ impl<S: PropagationStore + Send + 'static> leviculum_std::driver::CoreProcessor 
                 ready.peering.on_link_closed(link_id);
             }
             _ => {}
+        }
+        // What this event queued is stored now if the drain above left the
+        // hook's budget unspent: an upload proven in the hook that received
+        // it waits for no wake at all.
+        if persisted == 0 && !self.pending.is_empty() {
+            self.drain_pending(&mut ready, core, &mut out);
         }
         self.state = State::Ready(ready);
         // A job queued for the worker, here or by an earlier hook, comes
@@ -3431,28 +3472,18 @@ mod tests {
         );
     }
 
-    /// leviculum#709: a stock Python client's single-packet upload must be
-    /// proven within the client's packet-receipt timeout, which over a LAN
-    /// or a loopback shared instance is a few milliseconds
-    /// (`max(rtt * 6, 5 ms)`, `reference/Reticulum/RNS/Packet.py:431`,
-    /// `RNS/Link.py:81-82`). A late proof is a lost upload: the client's
-    /// timeout callback tears the link down and parks the message as
-    /// OUTBOUND (`reference/LXMF/LXMF/LXMessage.py:616-621`).
-    ///
-    /// **The named failure mode:** the stamp goes to the validation worker
-    /// and the hook returns asking for nothing, so the verdict waited for
-    /// the 200 ms idle tick or for the next unrelated event; on_tick, once
-    /// it ran, polled the worker at 20 ms. A stock client against release
-    /// lnpnd over loopback: proofs at 26 to 50 ms, four of the first five
-    /// links torn down, against lxmd's 16 ms (leviculum order 709).
-    ///
-    /// This plays the driver: every hook's `next_deadline_ms` is the next
-    /// wake, as `tighten_next_poll` makes it. The grind itself takes what it
-    /// takes (75 ms in a debug build, 1.2 ms in release); what is asserted
-    /// is that the engine never sleeps past its verdict by more than
-    /// [`VALIDATION_POLL_MS`].
-    #[test]
-    fn a_queued_upload_asks_the_driver_back_until_its_proof_leaves() {
+    /// A link up between a client core and the engine's core, and a
+    /// single upload stamped at the node's minimum, ready to send.
+    struct UploadFixture {
+        engine: Engine<MemoryPropagationStore>,
+        server: leviculum_std::driver::StdNodeCore,
+        client: leviculum_std::driver::StdNodeCore,
+        link_id: LinkId,
+        upload: Vec<u8>,
+        _dirs: (tempfile::TempDir, tempfile::TempDir),
+    }
+
+    fn upload_fixture() -> UploadFixture {
         use leviculum_lxmf::constants::{LXMF_OVERHEAD, WORKBLOCK_EXPAND_ROUNDS_PN};
         use leviculum_lxmf::{CooperativeStamper, PropagationUpload, StampCancel};
 
@@ -3462,7 +3493,7 @@ mod tests {
         let mut client = core(client_dir.path());
         let identity = leviculum_std::generate_identity();
         let signing_key = identity.ed25519_verifying().to_bytes();
-        // The shipped cost: every upload goes through the worker.
+        // The shipped cost: every upload's stamp is ground.
         let (mut engine, _events) = Engine::new(EngineConfig {
             identity,
             node_config: PropagationNodeConfig::default(),
@@ -3485,7 +3516,7 @@ mod tests {
         };
         assert!(
             ValidationWorker::worth_deferring(min_cost, false),
-            "the upload must go to the worker, or the test proves nothing"
+            "the stamp must need grinding, or the test proves nothing"
         );
 
         let (link_id, _, out) = client
@@ -3512,28 +3543,113 @@ mod tests {
         )
         .expect("a stamp at the node's minimum");
         let upload = PropagationUpload::single(1_700_000_000.0, unstamped, stamp).encode();
-        let (_, out) = client
-            .send_packet_on_link(&link_id, &upload)
-            .expect("upload packet");
+        UploadFixture {
+            engine,
+            server,
+            client,
+            link_id,
+            upload,
+            _dirs: (server_dir, client_dir),
+        }
+    }
 
-        let is_proof = |data: &Vec<u8>| {
-            Packet::unpack(data).is_ok_and(|packet| packet.flags.packet_type == PacketType::Proof)
-        };
-        // The data packet reaches the engine's core; every event goes
-        // through the engine, as the driver routes it.
+    fn is_proof(data: &[u8]) -> bool {
+        Packet::unpack(data).is_ok_and(|packet| packet.flags.packet_type == PacketType::Proof)
+    }
+
+    /// Send the fixture's upload and run every event it raises through the
+    /// engine, as the driver routes them. Returns whether a proof left and
+    /// the earliest wake any hook asked for.
+    fn deliver_upload(fixture: &mut UploadFixture) -> (bool, Option<u64>) {
+        let (_, out) = fixture
+            .client
+            .send_packet_on_link(&fixture.link_id, &fixture.upload)
+            .expect("upload packet");
         let mut wake: Option<u64> = None;
         let mut proven = false;
         for data in wire_of(&out) {
-            let core_out = server.handle_packet(leviculum_core::InterfaceId(0), &data);
+            let core_out = fixture
+                .server
+                .handle_packet(leviculum_core::InterfaceId(0), &data);
             for event in &core_out.events {
-                let hook = engine.on_event(&mut server, event);
-                proven |= wire_of(&hook).iter().any(is_proof);
+                let hook = fixture.engine.on_event(&mut fixture.server, event);
+                proven |= wire_of(&hook).iter().any(|data| is_proof(data));
                 if let Some(deadline) = hook.next_deadline_ms {
                     wake = Some(wake.map_or(deadline, |w| w.min(deadline)));
                 }
             }
         }
+        (proven, wake)
+    }
+
+    /// leviculum order 716: a single upload with nothing older in flight is
+    /// ground, stored and proven in the hook that received it.
+    ///
+    /// **The named failure mode:** the stamp went to the validation worker,
+    /// so the proof needed two wake-ups the hook does not control, the
+    /// worker thread's and the driver's poll. Beside a CPU burner on the
+    /// coder host (`scripts/pn-upload-ab.py --pn lnpnd --burn 8`) one of
+    /// them came a 4 ms scheduler tick late in a fifth of the uploads and
+    /// the proof left at 6 to 7 ms, past a loopback client's 5 to 6 ms
+    /// receipt timeout (`max(rtt * 6, 5 ms)`,
+    /// `reference/Reticulum/RNS/Packet.py:431`); 714 saw a link torn down
+    /// for it under a running corpus. A refactor that hands the lone upload
+    /// back to the worker makes this red, however fast the worker is.
+    #[test]
+    fn a_lone_upload_is_proven_in_the_hook_that_received_it() {
+        let mut fixture = upload_fixture();
+        let (proven, _) = deliver_upload(&mut fixture);
+        assert!(
+            !fixture.engine.validation.busy(),
+            "the lone upload went to the worker"
+        );
+        assert!(
+            proven,
+            "no proof left the hooks that received the upload; it waits for a wake"
+        );
+    }
+
+    /// leviculum#709: an upload that does go through the validation worker
+    /// (here: behind an older job, which it may not overtake) must still be
+    /// proven within the client's packet-receipt timeout, which over a LAN
+    /// or a loopback shared instance is a few milliseconds
+    /// (`max(rtt * 6, 5 ms)`, `reference/Reticulum/RNS/Packet.py:431`,
+    /// `RNS/Link.py:81-82`). A late proof is a lost upload: the client's
+    /// timeout callback tears the link down and parks the message as
+    /// OUTBOUND (`reference/LXMF/LXMF/LXMessage.py:616-621`).
+    ///
+    /// **The named failure mode:** the stamp goes to the validation worker
+    /// and the hook returns asking for nothing, so the verdict waited for
+    /// the 200 ms idle tick or for the next unrelated event; on_tick, once
+    /// it ran, polled the worker at 20 ms. A stock client against release
+    /// lnpnd over loopback: proofs at 26 to 50 ms, four of the first five
+    /// links torn down, against lxmd's 16 ms (leviculum order 709).
+    ///
+    /// This plays the driver: every hook's `next_deadline_ms` is the next
+    /// wake, as `tighten_next_poll` makes it. The worker is held on an
+    /// older, empty job until the upload has queued behind it, so the
+    /// upload takes the worker path whatever the machine's speed; what is
+    /// asserted is that the engine never sleeps past its verdict by more
+    /// than [`VALIDATION_POLL_MS`].
+    #[test]
+    fn a_queued_upload_asks_the_driver_back_until_its_proof_leaves() {
+        let mut fixture = upload_fixture();
+        let (held, gate) = ValidationWorker::spawn_held();
+        fixture.engine.validation = held;
+        assert!(fixture.engine.validation.enqueue(ValidationJob {
+            link_id: LinkId::new([0xEE; 16]),
+            carrier: Carrier::Packet,
+            data: Vec::new(),
+            proof: None,
+            sender: SyncSender::default(),
+            min_cost: 13,
+            compute_value: false,
+        }));
+
+        let (proven, wake) = deliver_upload(&mut fixture);
         assert!(!proven, "the proof cannot leave before the verdict");
+        let engine = &mut fixture.engine;
+        let server = &mut fixture.server;
         let queued_at = server.now_ms();
         let wake_after_queue = wake.expect(
             "the hook that queued the upload must ask the driver back; \
@@ -3544,8 +3660,10 @@ mod tests {
             "asked back at +{} ms, past the {VALIDATION_POLL_MS} ms poll",
             wake_after_queue.saturating_sub(queued_at)
         );
+        drop(gate);
 
         let mut wake = wake_after_queue;
+        let mut proven = false;
         let give_up = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while !proven {
             assert!(std::time::Instant::now() < give_up, "no proof within 10 s");
@@ -3554,8 +3672,8 @@ mod tests {
                 std::thread::sleep(std::time::Duration::from_millis(wake - now));
             }
             let now = server.now_ms();
-            let tick = engine.on_tick(&mut server, now);
-            proven = wire_of(&tick).iter().any(is_proof);
+            let tick = engine.on_tick(server, now);
+            proven = wire_of(&tick).iter().any(|data| is_proof(data));
             if proven {
                 break;
             }
@@ -3639,6 +3757,13 @@ mod inbound_sync_slices {
     /// appends a hook takes times what an append costs — and never the
     /// host's wake-up latency.
     const PRICED_APPEND_COST: Duration = Duration::from_micros(1_400);
+
+    /// One cost-13 propagation stamp validated in a release build: the
+    /// worker's own grind, 1.08 to 1.45 ms over 60 uploads idle and beside
+    /// `stress-ng --cpu 8` on the coder host (leviculum order 716,
+    /// 2026-10-14), rounded up. `Engine::grinds_inline` pays it under the
+    /// lock once per lone upload.
+    const PRICED_STAMP_GRIND: Duration = Duration::from_micros(1_500);
 
     /// A store that counts its appends; the caller charges each one what a
     /// durable write costs.
@@ -3813,7 +3938,8 @@ mod inbound_sync_slices {
 
     /// The claim the slice above implements, stated as arithmetic: a hook
     /// stores at most [`PERSIST_PER_HOOK`] messages, one durable append
-    /// each, and that is what the hook budget pays for.
+    /// each, plus at most one stamp ground inline, and that is what the hook
+    /// budget pays for.
     ///
     /// This is the deterministic half of the test above. It reads two
     /// constants and a price measured once on a named disk, and asks no
@@ -3827,6 +3953,16 @@ mod inbound_sync_slices {
             "a hook's {PERSIST_PER_HOOK} append(s) cost {sliced:?}, past the \
              {PROCESSOR_TICK_BUDGET:?} budget: either the slice grew or the \
              disk got slower, and one of the two has to move"
+        );
+
+        // A lone upload's stamp, ground in the hook that stores it
+        // (`Engine::grinds_inline`), is paid on top of the one append.
+        let inline = sliced + PRICED_STAMP_GRIND;
+        assert!(
+            inline <= PROCESSOR_TICK_BUDGET,
+            "an inline grind and its append cost {inline:?}, past the \
+             {PROCESSOR_TICK_BUDGET:?} budget: the lone upload has to go back \
+             to the worker, or the slice has to shrink"
         );
 
         // Non-vacuous: what the slicing took away. Storing the batch in one

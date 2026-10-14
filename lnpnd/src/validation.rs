@@ -10,6 +10,14 @@
 //! (`reference/LXMF/LXMF/LXMRouter.py:2395-2402`). Here a single worker
 //! thread does the hash grinding; the engine's hook only queues.
 //!
+//! One exception: a lone single-packet upload with nothing older in flight
+//! is ground in the hook (`Engine::grinds_inline`, `lnpnd/src/engine.rs`),
+//! one stamp, 1.1 to 1.5 ms in a release build, because its proof races a
+//! client timeout of a few milliseconds and the trip through this worker
+//! costs two thread wake-ups (leviculum order 716). The reference grinds
+//! that path on its packet callback as well
+//! (`reference/LXMF/LXMF/LXMRouter.py:2243`).
+//!
 //! # What stays ordered
 //!
 //! The upload proof correlates to the packet by per-link FIFO (engine
@@ -189,9 +197,22 @@ pub(crate) struct ValidationWorker {
 
 impl ValidationWorker {
     pub(crate) fn spawn() -> Self {
+        Self::spawn_gated(None)
+    }
+
+    /// A worker that starts each job only once the returned sender has
+    /// sent a token or been dropped, so a test can hold a job in flight
+    /// for as long as it needs the worker busy.
+    #[cfg(test)]
+    pub(crate) fn spawn_held() -> (Self, Sender<()>) {
+        let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
+        (Self::spawn_gated(Some(gate_rx)), gate_tx)
+    }
+
+    fn spawn_gated(gate: Option<Receiver<()>>) -> Self {
         let (jobs_tx, jobs_rx) = std::sync::mpsc::channel::<ValidationJob>();
         let (results_tx, results_rx) = std::sync::mpsc::channel::<ValidationDone>();
-        std::thread::spawn(move || run_worker(&jobs_rx, &results_tx));
+        std::thread::spawn(move || run_worker(&jobs_rx, &results_tx, gate.as_ref()));
         Self {
             jobs: jobs_tx,
             results: results_rx,
@@ -259,8 +280,16 @@ fn stamps_in(data: &[u8]) -> Vec<(TransientId, [u8; STAMP_SIZE])> {
     stamps
 }
 
-fn run_worker(jobs: &Receiver<ValidationJob>, results: &Sender<ValidationDone>) {
+fn run_worker(
+    jobs: &Receiver<ValidationJob>,
+    results: &Sender<ValidationDone>,
+    gate: Option<&Receiver<()>>,
+) {
     while let Ok(job) = jobs.recv() {
+        if let Some(gate) = gate {
+            // A dropped sender opens the gate for good.
+            let _ = gate.recv();
+        }
         let mut verdicts = HashMap::new();
         for (transient_id, stamp) in stamps_in(&job.data) {
             let verdict =
