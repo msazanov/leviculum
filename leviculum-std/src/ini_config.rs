@@ -909,6 +909,9 @@ fn apply_interface_key(iface: &mut InterfaceConfig, key: &str, value: &str) -> R
         "tx_gap_ms" => iface.tx_gap_ms = value.parse().ok(),
         // The fragmenter's MTU cap (#379), the other measurement knob.
         "fragment_mtu" => iface.fragment_mtu = value.parse().ok(),
+        // The dial count (#723), a measurement knob; range-checked against
+        // `max_connections` when the interface is built.
+        "central_links" => iface.central_links = value.parse().ok(),
         // Discovery position and radio keys (D15 of the 2026-10-11
         // shared-instance audit; Python Reticulum.py:857-867, `as_float` for the
         // position, `as_int` for the rest). Published by `descriptor_from_config`;
@@ -1262,6 +1265,7 @@ mod tests {
     enable_peripheral = no
     tx_gap_ms = 25
     fragment_mtu = 253
+    central_links = 2
 "#,
         )
         .unwrap();
@@ -1280,6 +1284,7 @@ mod tests {
         assert_eq!(ble.enable_peripheral, Some(false));
         assert_eq!(ble.tx_gap_ms, Some(25));
         assert_eq!(ble.fragment_mtu, Some(253));
+        assert_eq!(ble.central_links, Some(2));
 
         // A minimal section leaves the tunables to the builder's defaults.
         let config = parse_ini(
@@ -1300,6 +1305,7 @@ mod tests {
         assert_eq!(ble.enable_peripheral, None);
         assert_eq!(ble.tx_gap_ms, None, "unset is the firmware's gap");
         assert_eq!(ble.fragment_mtu, None, "unset is the exchanged MTU");
+        assert_eq!(ble.central_links, None, "unset is the one dial");
         assert_eq!(
             ble.initiate_only, None,
             "no key is no restriction, not an empty list"

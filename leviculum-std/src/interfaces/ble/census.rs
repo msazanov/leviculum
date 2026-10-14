@@ -342,7 +342,7 @@ mod tests {
     /// the census total is their sum.
     #[test]
     fn the_census_prices_what_the_orchestrator_holds() {
-        let mut table = LinkTable::new(OWN, 4);
+        let mut table = LinkTable::new(OWN, 4, 1);
         table.admit(PEER_C, ADDR_C, Role::Central, 185, 0);
         table.admit(PEER_P, ADDR_P, Role::Peripheral, 185, 0);
         // The first fragment of a two-fragment packet: a reassembly in
@@ -474,7 +474,7 @@ mod tests {
     /// link task takes it. The census must read an empty queue.
     #[test]
     fn a_keepalive_pushed_in_the_publishing_tick_reads_as_an_empty_queue() {
-        let mut table = LinkTable::new(OWN, 4);
+        let mut table = LinkTable::new(OWN, 4, 1);
         table.admit(PEER_C, ADDR_C, Role::Central, 185, 0);
         let (tx, _rx) = packet_queue(4);
         let mut central_pipes = HashMap::new();

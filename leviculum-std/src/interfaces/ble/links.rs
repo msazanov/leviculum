@@ -73,7 +73,7 @@ pub(crate) const DEFAULT_MAX_LINKS: usize = 4;
 ///
 /// A cap per ROLE, not a share of [`DEFAULT_MAX_LINKS`] (#432): the
 /// total stays what the operator configured (`max_connections`) and the
-/// incoming side gets the rest of it, `max_links - CENTRAL_LINKS`. What
+/// incoming side gets the rest of it, `max_links - DEFAULT_CENTRAL_LINKS`. What
 /// the split buys is the room the rig could not get out of — nine
 /// boards that spent an eighteen-dial combined budget on each other and
 /// all went dark, leaving the tenth with nothing on the air to dial
@@ -81,13 +81,22 @@ pub(crate) const DEFAULT_MAX_LINKS: usize = 4;
 /// replays it). With one outgoing slot each those nine can land eight
 /// dials, not eighteen, and every one of them is still advertising when
 /// the tenth arrives.
-pub(crate) const CENTRAL_LINKS: usize = 1;
+///
+/// The DEFAULT since #723: `central_links` raises it on a host, up to
+/// [`MAX_CENTRAL_LINKS`], to measure a room whose nodes dial more than
+/// once. The board's slot layout is pinned to this default, not to the
+/// key.
+pub(crate) const DEFAULT_CENTRAL_LINKS: usize = 1;
+
+/// The largest `central_links` a host interface accepts (#723): a
+/// measurement range, two and three dials beside the default one.
+pub(crate) const MAX_CENTRAL_LINKS: usize = 3;
 
 // The advertised free-slot count and this table's incoming budget are
 // the same quantity, as they are on a board
 // (`columba.rs`'s `PERIPH_LINKS == PERIPH_SLOTS`): at the shipped
 // default the record can express every count the table can hold.
-const _: () = assert!(DEFAULT_MAX_LINKS - CENTRAL_LINKS == PERIPH_SLOTS as usize);
+const _: () = assert!(DEFAULT_MAX_LINKS - DEFAULT_CENTRAL_LINKS == PERIPH_SLOTS as usize);
 
 /// A link whose peer has been silent this long is torn down. Three missed
 /// keepalives at the protocol's 15 s cadence: one lost keepalive must not
@@ -373,8 +382,12 @@ pub(crate) struct KeepalivePlan {
 pub(crate) struct LinkTable {
     own_identity: IdentityHash,
     max_links: usize,
+    /// Outgoing (central-role) links admitted at once: the
+    /// `central_links` key, [`DEFAULT_CENTRAL_LINKS`] unless a host
+    /// raised it (#723).
+    central_cap: usize,
     /// Incoming (peripheral-role) links admitted at once: the
-    /// configured total minus the one outgoing slot ([`CENTRAL_LINKS`],
+    /// configured total minus the outgoing slots ([`Self::central_cap`],
     /// #432). Floored at one so that a deliberately tiny
     /// `max_connections = 1` still serves a peer that dials us — there
     /// the total below is what binds, not this.
@@ -399,12 +412,17 @@ pub(crate) struct LinkTable {
 }
 
 impl LinkTable {
-    pub(crate) fn new(own_identity: IdentityHash, max_links: usize) -> Self {
+    /// `central_links` is the outgoing budget, validated by the builder
+    /// (1 to [`MAX_CENTRAL_LINKS`], below `max_links`); floored at one
+    /// here so a table never refuses every dial.
+    pub(crate) fn new(own_identity: IdentityHash, max_links: usize, central_links: usize) -> Self {
         let max_links = max_links.max(1);
+        let central_cap = central_links.max(1);
         Self {
             own_identity,
             max_links,
-            incoming_cap: max_links.saturating_sub(CENTRAL_LINKS).max(1),
+            central_cap,
+            incoming_cap: max_links.saturating_sub(central_cap).max(1),
             links: Vec::new(),
             pending: Vec::new(),
             abandon_reports: Vec::new(),
@@ -443,7 +461,7 @@ impl LinkTable {
     }
 
     /// Whether an outgoing slot is free, the scan path's and the dial
-    /// pump's gate (`ble/mod.rs:1059`, `:856`).
+    /// pump's gate (`ble/mod.rs:1070`, `:867`).
     ///
     /// Half of what was one occupancy predicate before #432. It reads
     /// the CENTRAL links only, so a node with a lively GATT server
@@ -451,7 +469,7 @@ impl LinkTable {
     /// not blocked from dialling by their own incoming links, they were
     /// blocked by having spent a shared budget on them.
     pub(crate) fn may_dial(&self) -> bool {
-        self.role_count(Role::Central) < CENTRAL_LINKS && !self.is_full()
+        self.role_count(Role::Central) < self.central_cap && !self.is_full()
     }
 
     /// Incoming slots still free, the number that goes on the air
@@ -664,12 +682,12 @@ impl LinkTable {
                 new_usable_mtu,
             });
         }
-        // Per-role caps since #432: one outgoing ([`CENTRAL_LINKS`]),
-        // `max_links - 1` incoming, the total behind both. A
+        // Per-role caps since #432: `central_links` outgoing (one by
+        // default), the rest incoming, the total behind both. A
         // displacement above already freed its row, so the counts here
         // are the ones this link would actually join.
         let cap = match role {
-            Role::Central => CENTRAL_LINKS,
+            Role::Central => self.central_cap,
             Role::Peripheral => self.incoming_cap,
         };
         if self.role_count(role) >= cap || self.links.len() >= self.max_links {
@@ -1823,7 +1841,7 @@ pub(crate) const CHURN_POLICY: ChurnPolicy = ChurnPolicy::MEASURED;
 ///
 /// A PC beside a phone is the same case as a board beside one: every
 /// session the phone buys lasts until its next address rotation, and
-/// the one outgoing slot ([`CENTRAL_LINKS`]) pays for each of them.
+/// the one outgoing slot ([`DEFAULT_CENTRAL_LINKS`]) pays for each of them.
 /// The rule's reasoning lives on the ledger; this type only adapts it.
 pub(crate) struct ChurnGate {
     policy: ChurnPolicy,
@@ -2222,7 +2240,7 @@ mod tests {
     }
 
     fn table() -> LinkTable {
-        LinkTable::new(OWN, DEFAULT_MAX_LINKS)
+        LinkTable::new(OWN, DEFAULT_MAX_LINKS, DEFAULT_CENTRAL_LINKS)
     }
 
     /// lnsd paces every BLE link at the firmware's compiled default gap
@@ -3369,7 +3387,7 @@ mod tests {
 
     #[test]
     fn max_links_bounds_both_roles_together() {
-        let mut t = LinkTable::new(OWN, 2);
+        let mut t = LinkTable::new(OWN, 2, DEFAULT_CENTRAL_LINKS);
         assert_eq!(
             t.admit([1; 16], ADDR_1, Role::Central, 185, 0).0,
             Admission::Accept
@@ -3381,6 +3399,61 @@ mod tests {
         assert!(t.is_full());
         assert_eq!(
             t.admit([3; 16], ADDR_3, Role::Central, 185, 0).0,
+            Admission::RejectFull
+        );
+    }
+
+    /// `central_links = 2` (#723): two outgoing links, `max_links - 2`
+    /// incoming, the dial gate open until the second central lands and
+    /// a third refused; the advertised count shrinks by the same one.
+    #[test]
+    fn two_central_links_admit_two_dials_and_the_rest_incoming() {
+        let mut t = LinkTable::new(OWN, DEFAULT_MAX_LINKS, 2);
+        assert_eq!(t.free_incoming_slots(), (DEFAULT_MAX_LINKS - 2) as u8);
+        assert!(t.may_dial());
+        assert_eq!(
+            t.admit([1; 16], ADDR_1, Role::Central, 185, 0).0,
+            Admission::Accept
+        );
+        assert!(t.may_dial(), "one dial spent, the second slot is free");
+        assert_eq!(
+            t.admit([2; 16], ADDR_2, Role::Central, 185, 0).0,
+            Admission::Accept
+        );
+        assert!(!t.may_dial(), "both outgoing slots spent");
+        assert_eq!(
+            t.admit([3; 16], ADDR_3, Role::Central, 185, 0).0,
+            Admission::RejectFull,
+            "a third dial is over the outgoing cap"
+        );
+        for i in 0..(DEFAULT_MAX_LINKS - 2) as u8 {
+            assert_eq!(
+                t.admit([0x40 + i; 16], [0x40 + i; 6], Role::Peripheral, 185, 0)
+                    .0,
+                Admission::Accept
+            );
+        }
+        assert_eq!(t.free_incoming_slots(), 0);
+        assert_eq!(
+            t.admit([0x50; 16], [0x50; 6], Role::Peripheral, 185, 0).0,
+            Admission::RejectFull,
+            "the incoming side holds max_links - 2"
+        );
+        assert!(t.is_full());
+    }
+
+    /// At the default the table is today's: one dial, `max_links - 1`
+    /// incoming. The other tests pin the rest of that shape through
+    /// `DEFAULT_CENTRAL_LINKS`.
+    #[test]
+    fn the_default_central_links_is_one_dial() {
+        let mut t = LinkTable::new(OWN, DEFAULT_MAX_LINKS, DEFAULT_CENTRAL_LINKS);
+        assert_eq!(DEFAULT_CENTRAL_LINKS, 1);
+        assert_eq!(t.free_incoming_slots(), PERIPH_SLOTS);
+        t.admit([1; 16], ADDR_1, Role::Central, 185, 0);
+        assert!(!t.may_dial());
+        assert_eq!(
+            t.admit([2; 16], ADDR_2, Role::Central, 185, 0).0,
             Admission::RejectFull
         );
     }
@@ -3398,7 +3471,7 @@ mod tests {
     /// boundary this walks is the incoming cap and not the total.
     #[test]
     fn an_incoming_full_table_goes_dark_and_a_freed_slot_re_advertises() {
-        let mut t = LinkTable::new(OWN, 3);
+        let mut t = LinkTable::new(OWN, 3, DEFAULT_CENTRAL_LINKS);
         assert!(t.should_advertise(), "empty table advertises");
         t.admit(ID_A, ADDR_1, Role::Peripheral, 185, 0);
         assert!(t.should_advertise(), "one incoming slot still advertises");
@@ -4359,7 +4432,7 @@ mod tests {
     #[test]
     fn an_unlisted_peer_is_refused_by_name_not_by_capacity() {
         let list = PeerAllowlist::parse("accept_only", &["b2b2b2b2"]).expect("parses");
-        let mut t = LinkTable::new(OWN, 1).with_accept_only(list);
+        let mut t = LinkTable::new(OWN, 1, DEFAULT_CENTRAL_LINKS).with_accept_only(list);
         assert!(matches!(
             t.peripheral_frame(ADDR_2, 185, &ID_B, 0),
             Inbound::HandshakeComplete { .. }
@@ -4473,12 +4546,12 @@ mod tests {
     /// Ten nodes, each with its own table at the shipped default.
     fn seed2_room() -> Vec<LinkTable> {
         (0..10)
-            .map(|i| LinkTable::new(seed2_id(i), DEFAULT_MAX_LINKS))
+            .map(|i| LinkTable::new(seed2_id(i), DEFAULT_MAX_LINKS, DEFAULT_CENTRAL_LINKS))
             .collect()
     }
 
     /// One dial in the room, gated exactly as the driver gates it: the
-    /// dialler needs an outgoing slot (`may_dial`, `ble/mod.rs:1059` and
+    /// dialler needs an outgoing slot (`may_dial`, `ble/mod.rs:1070` and
     /// the pump at `:856`) and the target must be on the air
     /// (`should_advertise` — a dark peer sends no connectable PDU, so a
     /// dial at it can only run out `bluez.rs`'s 20 s setup budget).
@@ -4702,7 +4775,7 @@ mod tests {
         // The range the record can express is the range the shipped
         // table can hold — the firmware asserts the same equality at
         // compile time, and so does this module (`PERIPH_SLOTS` beside
-        // `CENTRAL_LINKS`).
+        // `DEFAULT_CENTRAL_LINKS`).
         assert_eq!(
             table().free_incoming_slots(),
             PERIPH_SLOTS,

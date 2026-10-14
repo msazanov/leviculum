@@ -49,9 +49,31 @@ pub(super) fn build(
             )));
         }
     }
+    let max_connections = config.max_connections.unwrap_or(links::DEFAULT_MAX_LINKS);
+    // A measurement knob (#723): how many of the links a host dials.
+    // Refused rather than clamped outside 1..=3 and outside the total's
+    // room for one incoming link, so a room log never claims a dial
+    // count the table did not run.
+    let central_links = match config.central_links {
+        Some(n)
+            if (1..=links::MAX_CENTRAL_LINKS).contains(&n)
+                && n <= max_connections.saturating_sub(1) =>
+        {
+            n
+        }
+        Some(bad) => {
+            return Err(Error::Config(format!(
+                "BLEInterface central_links must be between 1 and {} and below \
+                 max_connections ({max_connections}), got {bad}",
+                links::MAX_CENTRAL_LINKS
+            )));
+        }
+        None => links::DEFAULT_CENTRAL_LINKS,
+    };
     let opts = BleOptions {
         adapter: config.device.clone(),
-        max_connections: config.max_connections.unwrap_or(links::DEFAULT_MAX_LINKS),
+        max_connections,
+        central_links,
         min_rssi: config.min_rssi.unwrap_or(defaults.min_rssi),
         discovery_interval,
         enable_central: config.enable_central.unwrap_or(true),
@@ -89,12 +111,13 @@ pub(super) fn build(
         }
     };
     tracing::info!(
-        "BLE interface on {} (central={}, peripheral={}, max_links={}, min_rssi={} dBm, \
-         initiate_only={}, accept_only={}, tx_gap_ms={}, fragment_mtu={})",
+        "BLE interface on {} (central={}, peripheral={}, max_links={}, central_links={}, \
+         min_rssi={} dBm, initiate_only={}, accept_only={}, tx_gap_ms={}, fragment_mtu={})",
         opts.adapter.as_deref().unwrap_or("default adapter"),
         opts.enable_central,
         opts.enable_peripheral,
         opts.max_connections,
+        opts.central_links,
         opts.min_rssi,
         listed(&opts.initiate_only),
         listed(&opts.accept_only),
@@ -333,6 +356,41 @@ mod tests {
         };
         assert!(serve_only.initiate_only.is_none());
         build(1, &serve_only, &owner.ctx()).expect("a serve pin alone builds");
+    }
+
+    /// `central_links` builds from 1 to 3 below the total, and is
+    /// refused with its name at 0, above 3, and where it would leave the
+    /// total no incoming link (#723).
+    #[tokio::test]
+    async fn central_links_is_range_checked_with_the_key_named() {
+        let owner = CtxOwner::new();
+        let with = |central: usize, max: Option<usize>| InterfaceConfig {
+            interface_type: "BLEInterface".to_string(),
+            central_links: Some(central),
+            max_connections: max,
+            ..Default::default()
+        };
+        for good in [1, 2, 3] {
+            build(0, &with(good, None), &owner.ctx())
+                .unwrap_or_else(|e| panic!("{good} of 4 must build: {e}"));
+        }
+        for (bad, max) in [
+            (0, None),
+            (4, None),
+            (4, Some(7)),
+            (2, Some(2)),
+            (1, Some(1)),
+        ] {
+            let err = build(0, &with(bad, max), &owner.ctx())
+                .err()
+                .unwrap_or_else(|| panic!("{bad} of {max:?} must not build"));
+            assert!(err.to_string().contains("central_links"), "{err}");
+        }
+        assert_eq!(
+            BleOptions::default().central_links,
+            links::DEFAULT_CENTRAL_LINKS,
+            "no key is today's one dial"
+        );
     }
 
     /// A negative or non-finite discovery_interval is refused at build

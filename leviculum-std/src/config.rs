@@ -852,7 +852,7 @@ pub struct InterfaceConfig {
     /// open a connection to and nothing else — an unlisted peer that
     /// dials US is served exactly as before. Entries are validated when
     /// the interface is built (`InitiateAllowlist::parse`,
-    /// `leviculum-std/src/interfaces/ble/links.rs:1525`). No reference
+    /// `leviculum-std/src/interfaces/ble/links.rs:1543`). No reference
     /// key: `ble-reticulum` has none, and this changes no wire byte.
     pub initiate_only: Option<Vec<String>>,
     /// Peers whose INCOMING link this interface serves — the symmetric
@@ -882,6 +882,11 @@ pub struct InterfaceConfig {
     /// BlueZ hosts exchange 512, a board 253, and only the latter splits
     /// a full packet. No reference key.
     pub fragment_mtu: Option<usize>,
+    /// Outgoing BLE links inside `max_connections`, 1 to 3 and below it;
+    /// absent is one, the boards' single central slot. A measurement
+    /// knob (#723) for rooms whose host nodes dial more than once. No
+    /// reference key.
+    pub central_links: Option<usize>,
 }
 
 /// A single vport subinterface of an `RNodeMultiInterface`, parsed from a
@@ -1031,6 +1036,7 @@ impl Default for InterfaceConfig {
             accept_only: None,
             tx_gap_ms: None,
             fragment_mtu: None,
+            central_links: None,
         }
     }
 }

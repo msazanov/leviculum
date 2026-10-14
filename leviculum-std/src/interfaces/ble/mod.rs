@@ -88,6 +88,10 @@ pub(crate) struct BleOptions {
     pub adapter: Option<String>,
     /// Simultaneous link cap, both roles counted together.
     pub max_connections: usize,
+    /// Outgoing links inside that cap (`central_links`, #723); the rest
+    /// are incoming. [`links::DEFAULT_CENTRAL_LINKS`] unless a host
+    /// measurement raised it.
+    pub central_links: usize,
     /// Sightings weaker than this are not dialled (reference `min_rssi`).
     pub min_rssi: i16,
     /// Pause between scan windows (reference `discovery_interval`).
@@ -125,6 +129,7 @@ impl Default for BleOptions {
         Self {
             adapter: None,
             max_connections: links::DEFAULT_MAX_LINKS,
+            central_links: links::DEFAULT_CENTRAL_LINKS,
             min_rssi: -85,
             discovery_interval: Duration::from_secs(5),
             enable_central: true,
@@ -439,8 +444,12 @@ impl BleTask {
         // incoming count (#432) from its very first registration, so
         // there is no window in which a fresh node advertises a count it
         // did not compute.
-        let mut table = LinkTable::new(self.identity_hash, self.opts.max_connections)
-            .with_accept_only(self.opts.accept_only.clone());
+        let mut table = LinkTable::new(
+            self.identity_hash,
+            self.opts.max_connections,
+            self.opts.central_links,
+        )
+        .with_accept_only(self.opts.accept_only.clone());
 
         // Peripheral half. The GATT application lives for the session —
         // live peripheral links keep using it — while the advertisement
@@ -494,13 +503,15 @@ impl BleTask {
         let _scan_abort = scan_guard.map(AbortOnDrop);
 
         tracing::info!(
-            "BLE {}: up on {} addr {} name LN-… (peripheral={}, central={}, max_links={})",
+            "BLE {}: up on {} addr {} name LN-… (peripheral={}, central={}, max_links={}, \
+             central_links={})",
             self.name,
             adapter.name(),
             Address(local_addr),
             self.opts.enable_peripheral,
             self.opts.enable_central,
             self.opts.max_connections,
+            self.opts.central_links,
         );
         if let Some(lost) = lost {
             tracing::info!(

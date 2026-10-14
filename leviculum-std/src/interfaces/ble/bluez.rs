@@ -675,7 +675,9 @@ impl SetupError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::interfaces::ble::links::{Inbound, LinkTable, DEFAULT_MAX_LINKS};
+    use crate::interfaces::ble::links::{
+        Inbound, LinkTable, DEFAULT_CENTRAL_LINKS, DEFAULT_MAX_LINKS,
+    };
     use leviculum_core::framing::ble::fragment_packet;
     use std::os::fd::OwnedFd;
 
@@ -836,7 +838,7 @@ mod tests {
         );
 
         // The orchestrator's two arms, as `handle_event` runs them.
-        let mut table = LinkTable::new(OWN, DEFAULT_MAX_LINKS);
+        let mut table = LinkTable::new(OWN, DEFAULT_MAX_LINKS, DEFAULT_CENTRAL_LINKS);
         let mut delivered = Vec::new();
         for ev in events {
             match ev {
