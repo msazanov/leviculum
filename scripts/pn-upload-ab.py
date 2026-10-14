@@ -11,6 +11,7 @@ release lnpnd (`--pn lnpnd`), both at stamp cost 13. The client is
     just build-integ-bins
     scripts/pn-upload-ab.py --pn lxmd
     scripts/pn-upload-ab.py --pn lnpnd
+    scripts/pn-upload-ab.py --pn lnpnd --burn 8
 
 Exit status: the probe's (0 iff every upload reached SENT without a link
 teardown); with `--within-timeout`, additionally every proof must arrive
@@ -75,6 +76,10 @@ def main():
     parser.add_argument("--count", type=int, default=10)
     parser.add_argument("--within-timeout", action="store_true")
     parser.add_argument("--keep", action="store_true", help="keep the run directory")
+    parser.add_argument("--burn", type=int, default=0, metavar="N",
+                        help="run `stress-ng --cpu N` beside the uploads, so the daemons "
+                             "lose the CPU now and then the way a gate corpus makes them "
+                             "(leviculum order 716)")
     args = parser.parse_args()
 
     run = tempfile.mkdtemp(prefix=f"pn_upload_ab_{args.pn}_")
@@ -131,6 +136,11 @@ def main():
         if pn is None:
             sys.exit(f"{args.pn} reported no propagation destination; see {run}/pn.log")
         print(f"PN {args.pn} {pn} run={run}", flush=True)
+        if args.burn:
+            spawn(["stress-ng", "--cpu", str(args.burn), "--timeout", str(60 * (args.count + 1))],
+                  f"{run}/stress-ng.log")
+            time.sleep(5.0)
+        print(f"LOAD before={os.getloadavg()[0]:.2f} burn={args.burn}", flush=True)
 
         probe = subprocess.run(
             [sys.executable, "-u", os.path.join(REPO, "scripts", "pn_upload_probe.py"),
@@ -138,6 +148,7 @@ def main():
             env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
             timeout=60 * (args.count + 1))
         print(probe.stdout, end="", flush=True)
+        print(f"LOAD after={os.getloadavg()[0]:.2f}", flush=True)
         status = probe.returncode
         if args.within_timeout:
             late = [line for line in probe.stdout.splitlines()
