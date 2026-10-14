@@ -172,6 +172,16 @@ that host on purpose). That run is the one that normally publishes; the
 release is rolling and `scripts/publish-nightly.sh` writes the same
 `nightly` tag with its assets overwritten.
 
+The overwrite keeps one generation (#323): before its uploads a run
+renames every asset it replaces to `<name>.previous.<ext>`
+(`leviculum-nightly-amd64.previous.deb`), and after them it deletes the
+`.previous` set that displaced, so a bad build that passed the gates still
+leaves the build before it downloadable. A failed run undoes its renames.
+A run whose commit the `nightly` tag already names (the trigger and the
+04:00 fallback on a day nothing landed) renames nothing and replaces the
+current set in place, so the second publish of one commit cannot push the
+fallback out.
+
 **The site.** After a green-or-attributed night the tier-2 nightly runs
 `just nightly-publish` in the very tree it tested, seconds after it
 pushed the green ref:

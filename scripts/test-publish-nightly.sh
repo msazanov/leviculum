@@ -34,6 +34,14 @@
 # version is checked to be red: `PUBLISH_SH=<old copy> bash
 # scripts/test-publish-nightly.sh`.
 #
+# Codeberg #323 added a fourth: A GOOD BUILD WAS GONE THE MOMENT A BAD ONE
+# REPLACED IT. The swap deleted every replaced asset, so a run that published a
+# broken build left nothing to fall back to. The replaced set is now renamed to
+# `<name>.previous.<ext>` before the uploads and kept; the set before that is
+# what gets deleted. `happy-path` and `first-run-no-previous` assert the end
+# state and the order, `upload-fails` and `rename-504-gives-up` that a failed
+# run leaves every name where it was.
+#
 # Usage: bash scripts/test-publish-nightly.sh
 
 set -uo pipefail
@@ -50,9 +58,9 @@ fail() { echo "  FAIL: $*"; failures=$((failures + 1)); }
 
 # --- The fixture forge ----------------------------------------------------
 #
-# A `curl` that understands the five request shapes publish-nightly.sh makes
+# A `curl` that understands the six request shapes publish-nightly.sh makes
 # and nothing else: the release lookup, the release create, the body PATCH,
-# an asset upload and an asset delete. It honours `-o` and `-w` the way curl
+# an asset upload, an asset rename (a PATCH of its name) and an asset delete. It honours `-o` and `-w` the way curl
 # does (with both, only the status reaches stdout) and, like the real thing
 # without `-f`, it exits 0 on a 4xx or 5xx — that is the whole bug.
 #
@@ -80,7 +88,11 @@ done
 # The request bodies are journalled rather than discarded: the release body
 # is the only place a stranger reads what a download was built from, so it is
 # an assertion here and not a hope.
-[ -n "$stdin_data" ] && cat >> "$D/bodies"
+body=""
+if [ -n "$stdin_data" ]; then
+    body=$(cat)
+    printf '%s\n' "$body" >> "$D/bodies"
+fi
 
 log() { printf '%s\n' "$*" >> "$D/log"; }
 bump() { local n; n=$(cat "$D/$1" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$D/$1"; echo "$n"; }
@@ -105,6 +117,28 @@ case "$url" in
         emit 200 "$(release_json)"
         ;;
     */assets/*)
+        if [ "$method" = "PATCH" ]; then
+            n=$(bump renames)
+            id="${url##*/}"
+            new=$(printf '%s' "$body" | jq -r '.name')
+            # FAKE_RENAME_FAIL_AT counts rename REQUESTS, as the delete knob
+            # below counts deletes: a retry is a further number.
+            for f in ${FAKE_RENAME_FAIL_AT:-}; do
+                if [ "$f" = "$n" ]; then
+                    log "RENAME-FAIL $id"
+                    emit "${FAKE_RENAME_STATUS:-500}" '{"message":"gateway timeout"}'
+                fi
+            done
+            if ! grep -q "^${id}	" "$D/assets"; then
+                log "RENAME-MISSING $id"
+                emit 404 '{"errors":["attachment does not exist"]}'
+            fi
+            old=$(awk -F'\t' -v id="$id" '$1 == id { print $2 }' "$D/assets")
+            awk -F'\t' -v OFS='\t' -v id="$id" -v new="$new" '$1 == id { $2 = new } { print }' \
+                "$D/assets" > "$D/assets.new"; mv "$D/assets.new" "$D/assets"
+            log "RENAME $id $old -> $new"
+            emit 200 "{\"id\":$id,\"name\":\"$new\"}"
+        fi
         [ "$method" = "DELETE" ] || { echo "fixture curl: unexpected $method on $url" >&2; exit 99; }
         n=$(bump deletes)
         id="${url##*/}"
@@ -194,7 +228,12 @@ for a in "$@"; do
 done
 case "$sub" in
     ls-remote)
-        cat "$FAKE_DIR/green-refs" 2>/dev/null
+        # The publisher asks where the `nightly` tag points (#323); the gate
+        # asks for the green refs.
+        case "$*" in
+            *refs/tags/*) cat "$FAKE_DIR/tag-ref" 2>/dev/null ;;
+            *) cat "$FAKE_DIR/green-refs" 2>/dev/null ;;
+        esac
         exit 0
         ;;
     fetch)
@@ -236,10 +275,18 @@ OLD_NAMES=(
     leviculum-nightly-amd64.tar.gz leviculum-nightly-amd64.tar.gz.sha256
 )
 
+# The same six one build older, as #323 leaves them on the release: the
+# fallback generation, which the next successful run deletes.
+PREV_NAMES=(
+    leviculum-nightly-amd64.previous.deb leviculum-nightly-amd64.previous.deb.sha256
+    leviculum-nightly-arm64.previous.deb leviculum-nightly-arm64.previous.deb.sha256
+    leviculum-nightly-amd64.previous.tar.gz leviculum-nightly-amd64.previous.tar.gz.sha256
+)
+
 # A tree holding the script under test plus the dist/ it publishes. The
 # script derives dist/ from its own location, so the copy is what puts the
-# fixture files in front of it.
-setup() {  # <case> [empty-dist]
+# fixture files in front of it. `with-previous` adds PREV_NAMES as ids 7-12.
+setup() {  # <case> [empty-dist|with-previous]
     FAKE_DIR="$WORK/$1"; export FAKE_DIR
     TREE="$WORK/$1/tree"
     mkdir -p "$FAKE_DIR" "$TREE/scripts" "$TREE/dist"
@@ -261,6 +308,9 @@ setup() {  # <case> [empty-dist]
     echo "rustc 9.9.9 (fixturec0de 2026-01-01)" > "$TREE/.rustc-version"
     local i=0 n
     for n in "${OLD_NAMES[@]}"; do i=$((i + 1)); printf '%s\t%s\n' "$i" "$n" >> "$FAKE_DIR/assets"; done
+    if [ "${2:-}" = "with-previous" ]; then
+        for n in "${PREV_NAMES[@]}"; do i=$((i + 1)); printf '%s\t%s\n' "$i" "$n" >> "$FAKE_DIR/assets"; done
+    fi
     if [ "${2:-}" != "empty-dist" ]; then
         for n in leviculum-nightly-amd64.deb leviculum-nightly-arm64.deb \
                  leviculum-nightly-amd64.tar.gz; do
@@ -281,19 +331,42 @@ run_publish() {
 rc() { cat "$FAKE_DIR/rc"; }
 asset_names() { cut -f2 "$FAKE_DIR/assets" | sort; }
 asset_ids() { cut -f1 "$FAKE_DIR/assets" | sort -n | tr '\n' ' '; }
+# What the release must hold after a successful run: every file in dist/, and
+# one `.previous` copy of each of the six the run replaced.
+expected_after_swap() {
+    { find "$TREE/dist" -maxdepth 1 -type f -printf '%f\n'; printf '%s\n' "${PREV_NAMES[@]}"; } | sort
+}
 dumplog() { echo "  --- request log ---"; sed 's/^/    /' "$FAKE_DIR/log"; echo "  --- script output ---"; sed 's/^/    /' "$FAKE_DIR/out"; }
 
 # --- Case: happy path -----------------------------------------------------
 #
-# The release ends up holding exactly the files in dist/ and nothing from the
-# previous build, the tag moves, and — the ordering claim — no delete is
+# The release ends up holding exactly the files in dist/ plus the build they
+# replaced under `.previous` names (#323); the generation before that is gone,
+# and so is an asset this build no longer publishes (id 13). The tag moves,
+# and the ordering claims: every rename before the first upload, and no delete
 # issued before the last upload has succeeded.
 echo "[case] happy-path"
-setup happy-path
+setup happy-path with-previous
+printf '13\tlnomad-nightly-amd64.deb\n' >> "$FAKE_DIR/assets"
 run_publish
 [ "$(rc)" = "0" ] || fail "exit $(rc), expected 0"
-expected=$(find "$TREE/dist" -maxdepth 1 -type f -printf '%f\n' | sort)
-[ "$(asset_names)" = "$expected" ] || fail "release holds $(asset_names | tr '\n' ' '), expected $(echo "$expected" | tr '\n' ' ')"
+[ "$(asset_names)" = "$(expected_after_swap)" ] || fail "release holds $(asset_names | tr '\n' ' '), expected $(expected_after_swap | tr '\n' ' ')"
+for id in 1 2 3 4 5 6; do
+    grep -qE "^RENAME $id .* -> .*\.previous\." "$FAKE_DIR/log" || fail "asset $id was not renamed to its .previous name"
+done
+for id in 7 8 9 10 11 12 13; do
+    grep -qx "DELETE $id" "$FAKE_DIR/log" || fail "stale asset $id was not deleted"
+done
+grep -qE '^DELETE [1-6]$' "$FAKE_DIR/log" && fail "deleted a replaced asset instead of keeping it as .previous"
+last_rename=$(grep -n '^RENAME ' "$FAKE_DIR/log" | tail -1 | cut -d: -f1)
+first_upload=$(grep -n '^UPLOAD ' "$FAKE_DIR/log" | head -1 | cut -d: -f1)
+if [ -z "$last_rename" ] || [ -z "$first_upload" ]; then
+    fail "expected both renames and uploads in the log"
+elif [ "$last_rename" -gt "$first_upload" ]; then
+    fail "an asset was renamed at line $last_rename, after the first upload at line $first_upload"
+fi
+grep -q 'leviculum-nightly-amd64.previous.deb' "$FAKE_DIR/bodies" \
+    || fail "the release body does not name the .previous fallback"
 grep -q '^GIT ' "$FAKE_DIR/log" || fail "tag was not pushed"
 grep -q 'built with .rustc 9.9.9 (fixturec0de 2026-01-01).' "$FAKE_DIR/bodies" \
     || fail "the release body does not name the compiler the assets were built with"
@@ -309,17 +382,22 @@ fi
 # --- Case: an upload fails ------------------------------------------------
 #
 # Defect 1 and defect 2 together: the run must fail, and the previous build's
-# assets must all still be downloadable afterwards.
+# assets must all still be downloadable afterwards — under their own names
+# (#323: the renames are undone) and with the fallback generation beside them.
 echo "[case] upload-fails"
 before=$failures
-setup upload-fails
+setup upload-fails with-previous
+cp "$FAKE_DIR/assets" "$FAKE_DIR/assets.before"
 FAKE_UPLOAD_FAIL_AT=2 run_publish
 [ "$(rc)" != "0" ] || fail "exit 0 on a failed upload"
 grep -q '\[publish\] done' "$FAKE_DIR/out" && fail "reported 'done' after a failed upload"
-[ "$(asset_ids)" = "1 2 3 4 5 6 " ] || fail "release holds ids '$(asset_ids)', expected the six previous assets untouched"
-# Ids 1-6 are the previous build's; this run's start at 101, and deleting
+[ "$(asset_ids)" = "1 2 3 4 5 6 7 8 9 10 11 12 " ] || fail "release holds ids '$(asset_ids)', expected the twelve previous assets untouched"
+[ "$(sort -n "$FAKE_DIR/assets")" = "$(sort -n "$FAKE_DIR/assets.before")" ] \
+    || fail "names changed: $(sort -n "$FAKE_DIR/assets" | tr '\t\n' ': ')"
+grep -q '^RENAME ' "$FAKE_DIR/log" || fail "nothing was renamed before the uploads"
+# Ids 1-12 are the previous builds'; this run's start at 101, and deleting
 # those again is the rollback doing its job.
-grep -qE '^DELETE [1-6]$' "$FAKE_DIR/log" && fail "deleted a previous asset although the upload failed"
+grep -qE '^DELETE ([1-9]|1[0-2])$' "$FAKE_DIR/log" && fail "deleted a previous asset although the upload failed"
 grep -q '^GIT ' "$FAKE_DIR/log" && fail "moved the tag although the upload failed"
 [ "$failures" -eq "$before" ] || dumplog
 
@@ -332,11 +410,10 @@ grep -q '^GIT ' "$FAKE_DIR/log" && fail "moved the tag although the upload faile
 # delete requests for six assets, and a backoff waited before the seventh.
 echo "[case] delete-504-then-retry"
 before=$failures
-setup delete-504-retry
+setup delete-504-retry with-previous
 FAKE_DELETE_FAIL_AT=1 FAKE_DELETE_STATUS=504 run_publish
 [ "$(rc)" = "0" ] || fail "exit $(rc) although the retried delete succeeded"
-expected=$(find "$TREE/dist" -maxdepth 1 -type f -printf '%f\n' | sort)
-[ "$(asset_names)" = "$expected" ] || fail "release holds $(asset_names | tr '\n' ' '), expected $(echo "$expected" | tr '\n' ' ')"
+[ "$(asset_names)" = "$(expected_after_swap)" ] || fail "release holds $(asset_names | tr '\n' ' '), expected $(expected_after_swap | tr '\n' ' ')"
 [ "$(cat "$FAKE_DIR/deletes")" = "7" ] || fail "$(cat "$FAKE_DIR/deletes") delete requests for six assets, expected 7 (one retried)"
 grep -q '^SLEEP ' "$FAKE_DIR/log" || fail "retried without any backoff"
 grep -q '^LIST' "$FAKE_DIR/log" || fail "the release was never read back"
@@ -351,12 +428,12 @@ grep -q '^GIT ' "$FAKE_DIR/log" || fail "tag was not pushed after a swap that wo
 # wording that names the manual repair.
 echo "[case] delete-504-survives"
 before=$failures
-setup delete-504-survives
+setup delete-504-survives with-previous
 FAKE_DELETE_FAIL_AT="1 2 3 4" FAKE_DELETE_STATUS=504 run_publish
 [ "$(rc)" != "0" ] || fail "exit 0 although a replaced asset survived the swap"
 grep -q 'a replaced asset survived the swap' "$FAKE_DIR/out" \
     || fail "the failure does not name what is wrong with the release"
-grep -q 'twice: leviculum-nightly-amd64.deb' "$FAKE_DIR/out" \
+grep -q 'twice: leviculum-nightly-amd64.previous.deb' "$FAKE_DIR/out" \
     || fail "the failure does not name the asset that appears twice"
 grep -q '^LIST' "$FAKE_DIR/log" || fail "the verdict was taken without reading the release back"
 grep -q '^UPLOAD ' "$FAKE_DIR/log" || fail "expected the uploads to have happened first"
@@ -369,13 +446,74 @@ grep -q '^GIT ' "$FAKE_DIR/log" && fail "moved the tag although a replaced asset
 # and the listing still decides — here it shows the duplicate, so red.
 echo "[case] delete-403-not-retried"
 before=$failures
-setup delete-403
+setup delete-403 with-previous
 FAKE_DELETE_FAIL_AT=1 FAKE_DELETE_STATUS=403 run_publish
 [ "$(rc)" != "0" ] || fail "exit 0 although a replaced asset survived the swap"
 [ "$(cat "$FAKE_DIR/deletes")" = "6" ] || fail "$(cat "$FAKE_DIR/deletes") delete requests, expected 6: a 403 is not retried"
 grep -q 'a replaced asset survived the swap' "$FAKE_DIR/out" \
     || fail "the failure does not name what is wrong with the release"
 grep -q '^GIT ' "$FAKE_DIR/log" && fail "moved the tag although a replaced asset survived"
+[ "$failures" -eq "$before" ] || dumplog
+
+# --- Case: the first run after #323 ---------------------------------------
+#
+# The release holds no `.previous` set yet. Nothing is deleted, the six
+# replaced assets become the first fallback generation, and the read-back
+# still runs although the delete set is empty.
+echo "[case] first-run-no-previous"
+before=$failures
+setup first-run
+run_publish
+[ "$(rc)" = "0" ] || fail "exit $(rc) on the first run after #323"
+[ "$(asset_names)" = "$(expected_after_swap)" ] || fail "release holds $(asset_names | tr '\n' ' '), expected $(expected_after_swap | tr '\n' ' ')"
+grep -q '^DELETE' "$FAKE_DIR/log" && fail "deleted an asset although nothing was stale"
+grep -q '^LIST' "$FAKE_DIR/log" || fail "the release was never read back"
+grep -q '^GIT ' "$FAKE_DIR/log" || fail "tag was not pushed"
+[ "$failures" -eq "$before" ] || dumplog
+
+# --- Case: the same commit published twice --------------------------------
+#
+# The triggered publish and the 04:00 fallback cron both fire on a day nothing
+# landed, so the second run publishes the commit the tag already names. The
+# current set is then the same code again; renaming it would throw away the
+# fallback generation for a copy of what replaces it. So: no rename, the
+# current set replaced in place, the `.previous` set (ids 7-12) untouched.
+echo "[case] republish-same-commit"
+before=$failures
+setup same-commit with-previous
+printf 'deadbeefcafe\trefs/tags/nightly\n' > "$FAKE_DIR/tag-ref"
+run_publish
+[ "$(rc)" = "0" ] || fail "exit $(rc) republishing the same commit"
+[ "$(asset_names)" = "$(expected_after_swap)" ] || fail "release holds $(asset_names | tr '\n' ' '), expected $(expected_after_swap | tr '\n' ' ')"
+grep -q '^RENAME' "$FAKE_DIR/log" && fail "renamed the current set although it is the commit being published"
+for id in 7 8 9 10 11 12; do
+    grep -q "^${id}	" "$FAKE_DIR/assets" || fail "the .previous asset $id was not kept"
+done
+for id in 1 2 3 4 5 6; do
+    grep -qx "DELETE $id" "$FAKE_DIR/log" || fail "the replaced asset $id was not deleted"
+done
+grep -q '^GIT ' "$FAKE_DIR/log" || fail "tag was not pushed"
+[ "$failures" -eq "$before" ] || dumplog
+
+# --- Case: a rename answers 504 every time --------------------------------
+#
+# A rename is retried on a gateway error like a delete is. When the retries
+# run out, the renames this run made are undone and the run fails BEFORE the
+# first upload: the release keeps every asset under the name it had, nothing
+# is half-renamed, nothing is uploaded, the tag stays.
+echo "[case] rename-504-gives-up"
+before=$failures
+setup rename-504 with-previous
+cp "$FAKE_DIR/assets" "$FAKE_DIR/assets.before"
+FAKE_RENAME_FAIL_AT="3 4 5 6" FAKE_RENAME_STATUS=504 run_publish
+[ "$(rc)" != "0" ] || fail "exit 0 although a rename never got through"
+[ "$(sort -n "$FAKE_DIR/assets")" = "$(sort -n "$FAKE_DIR/assets.before")" ] \
+    || fail "names changed: $(sort -n "$FAKE_DIR/assets" | tr '\t\n' ': ')"
+grep -q '^SLEEP ' "$FAKE_DIR/log" || fail "retried without any backoff"
+[ "$(grep -c '^RENAME-FAIL ' "$FAKE_DIR/log")" = "4" ] || fail "expected four attempts at the failing rename"
+grep -q '^UPLOAD' "$FAKE_DIR/log" && fail "uploaded although the renames had failed"
+grep -q '^DELETE' "$FAKE_DIR/log" && fail "deleted an asset although the renames had failed"
+grep -q '^GIT ' "$FAKE_DIR/log" && fail "moved the tag although nothing was published"
 [ "$failures" -eq "$before" ] || dumplog
 
 # --- Case: dist/ is empty -------------------------------------------------
@@ -425,7 +563,7 @@ setup no-nightly
 run_publish
 [ "$(rc)" != "0" ] || fail "exit 0 with no green nightly behind the commit"
 grep -q 'REFUSED (NO-SIGNAL)' "$FAKE_DIR/out" || fail "the refusal does not name which condition failed"
-grep -qE '^(LOOKUP|CREATE|PATCH|UPLOAD|DELETE)' "$FAKE_DIR/log" && fail "the forge was contacted before the gate refused"
+grep -qE '^(LOOKUP|CREATE|PATCH|UPLOAD|DELETE|RENAME)' "$FAKE_DIR/log" && fail "the forge was contacted before the gate refused"
 [ "$(asset_ids)" = "1 2 3 4 5 6 " ] || fail "release holds ids '$(asset_ids)', expected the six previous assets untouched"
 grep -q '^GIT ' "$FAKE_DIR/log" && fail "moved the tag although nothing was published"
 [ "$failures" -eq "$before" ] || dumplog
@@ -448,8 +586,7 @@ echo $? > "$FAKE_DIR/rc"
 grep -q 'OVERRIDDEN' "$FAKE_DIR/out" || fail "the override did not announce itself in the log"
 grep -q 'nightly host down, release cut by hand' "$FAKE_DIR/out" \
     || fail "the reason was not recorded with the build it excused"
-expected=$(find "$TREE/dist" -maxdepth 1 -type f -printf '%f\n' | sort)
-[ "$(asset_names)" = "$expected" ] || fail "release holds $(asset_names | tr '\n' ' '), expected $(echo "$expected" | tr '\n' ' ')"
+[ "$(asset_names)" = "$(expected_after_swap)" ] || fail "release holds $(asset_names | tr '\n' ' '), expected $(expected_after_swap | tr '\n' ' ')"
 [ "$failures" -eq "$before" ] || dumplog
 
 # --- Case: dry run --------------------------------------------------------
@@ -469,7 +606,9 @@ echo $? > "$FAKE_DIR/rc"
 [ "$(rc)" = "0" ] || fail "exit $(rc) on a dry run"
 grep -q 'ACCEPTED' "$FAKE_DIR/out" || fail "the dry run skipped the nightly gate"
 grep -q 'would upload leviculum-nightly-amd64.deb ' "$FAKE_DIR/out" || fail "the dry run does not name the assets it would upload"
-grep -qE '^(LOOKUP|CREATE|PATCH|UPLOAD|DELETE)' "$FAKE_DIR/log" && fail "the dry run made a forge request"
+grep -q 'would rename leviculum-nightly-amd64.deb → leviculum-nightly-amd64.previous.deb' "$FAKE_DIR/out" \
+    || fail "the dry run does not name the renames it would do"
+grep -qE '^(LOOKUP|CREATE|PATCH|UPLOAD|DELETE|RENAME)' "$FAKE_DIR/log" && fail "the dry run made a forge request"
 grep -q '^GIT ' "$FAKE_DIR/log" && fail "the dry run moved the tag"
 [ "$(asset_ids)" = "1 2 3 4 5 6 " ] || fail "release holds ids '$(asset_ids)', expected the six previous assets untouched"
 [ "$failures" -eq "$before" ] || dumplog

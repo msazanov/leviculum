@@ -6,7 +6,11 @@
 # The release is rolling: same tag every night, assets overwritten. The
 # overwrite is an upload-then-delete swap, never the other way round:
 # the previous build stays downloadable until the new one is fully up
-# (Codeberg #286).
+# (Codeberg #286). And it stays downloadable after that, one generation
+# deep: each asset this run replaces is renamed to `<name>.previous.<ext>`
+# before the uploads, and the `.previous` set it displaces is what the swap
+# deletes (Codeberg #323). A good build is then still there the morning a bad
+# one that passed the gates has replaced it.
 # Version info for each build is embedded in the binaries themselves
 # (lnsd --version) and in the release body.
 #
@@ -168,6 +172,8 @@ https://codeberg.org/${CI_REPO}/releases/download/nightly/leviculum-nightly-sour
 
 Each asset is published with a matching \`.sha256\` next to it.
 
+**Previous build.** Every asset above is also here once more with \`.previous\` before its extension, for instance \`https://codeberg.org/${CI_REPO}/releases/download/nightly/leviculum-nightly-amd64.previous.deb\` and its \`.previous.deb.sha256\`. That is the build this one replaced, exactly one build older, kept as a fallback should this one misbehave; the next run replaces it in turn. \`dpkg-deb -I leviculum-nightly-amd64.previous.deb\` shows its version, which ends in the date and commit it was built from.
+
 Current build: \`${BUILD_ID}\` (commit \`${CI_COMMIT_SHA}\`, built with \`${RUSTC_VERSION}\`)
 
 Verify with \`lnsd --version\` after install.
@@ -189,13 +195,31 @@ if [ "${#ASSETS[@]}" -eq 0 ]; then
     exit 1
 fi
 
+# The fallback name of an asset (#323): `.previous` before its extension, so
+# a download keeps the extension a browser and dpkg go by, and the checksum of
+# `x.previous.deb` is `x.previous.deb.sha256`, the same sibling rule as the
+# current build's.
+previous_name() {  # <asset name>
+    local n="$1" ext
+    for ext in .deb.sha256 .tar.gz.sha256 .sha256 .tar.gz .deb; do
+        case "$n" in
+            *"$ext") printf '%s\n' "${n%"$ext"}.previous${ext}"; return 0 ;;
+        esac
+    done
+    printf '%s\n' "$n.previous"
+}
+
 if [ "$DRY_RUN" = "1" ]; then
     echo "[publish] DRY RUN (LEVICULUM_PUBLISH_DRY_RUN=1): no forge request is made."
     echo "[publish] would refresh the body of release tag=${TAG} on ${CI_REPO}, build ${BUILD_ID}"
     for f in "${ASSETS[@]}"; do
+        echo "[publish]   would rename $(basename "$f") → $(previous_name "$(basename "$f")"), where the release holds it"
+    done
+    for f in "${ASSETS[@]}"; do
         echo "[publish]   would upload $(basename "$f") ($(wc -c <"$f") bytes)"
     done
-    echo "[publish] would delete the assets these replace, then point tag ${TAG} at ${CI_COMMIT_SHA}"
+    echo "[publish] would delete the .previous set those renames displace and any asset dist/ no longer holds,"
+    echo "[publish] then point tag ${TAG} at ${CI_COMMIT_SHA}"
     exit 0
 fi
 
@@ -248,6 +272,56 @@ die() {  # <message...> — print the forge's own answer with it
 DELETE_ATTEMPTS=4        # the first try plus three retries
 DELETE_BACKOFF_START=2   # seconds before the first retry, doubled after each
 
+# Renaming one asset (#323), PATCH of its name. The answers mean what they
+# mean for a delete above, with one difference: a 404 is a failure here, since
+# a rename that landed leaves the asset in place and a retry of it answers
+# 2xx. Unlike the delete, a rename's verdict is read: a rename that cannot get
+# through fails the run before any upload.
+rename_asset() {  # <asset_id> <new name>
+    local id="$1" name="$2" attempt=1 backoff="$DELETE_BACKOFF_START" status
+    while : ; do
+        status=$(jq -n --arg name "$name" '{name:$name}' \
+            | api -X PATCH -H "$AUTH_HEADER" -H "Content-Type: application/json" \
+                "$API/repos/$CI_REPO/releases/$release_id/assets/$id" -d @-)
+        case "$status" in
+            2*)
+                echo "[publish]   rename asset $id → $name, HTTP $status"
+                return 0
+                ;;
+            5*|000)
+                if [ "$attempt" -ge "$DELETE_ATTEMPTS" ]; then
+                    echo "[publish]   rename asset $id → $name, HTTP $status, giving up after $attempt attempts"
+                    return 1
+                fi
+                echo "[publish]   rename asset $id → $name, HTTP $status, retry $attempt/$((DELETE_ATTEMPTS - 1)) in ${backoff}s"
+                sleep "$backoff"
+                attempt=$((attempt + 1))
+                backoff=$((backoff * 2))
+                ;;
+            *)
+                echo "[publish]   rename asset $id → $name, HTTP $status, not a transient answer"
+                return 1
+                ;;
+        esac
+    done
+}
+
+# Undo this run's renames: every asset back under the name it had when the run
+# found it. Called on each failure path before the run exits, so a failed run
+# leaves the release as it was, names included. A failed rename-back cannot be
+# repaired from here; it is named so a human can.
+renamed_ids=()
+renamed_from=()
+restore_names() {
+    local i
+    [ "${#renamed_ids[@]}" -gt 0 ] || return 0
+    echo "[publish] restoring the names of ${#renamed_ids[@]} asset(s) this run renamed"
+    for i in "${!renamed_ids[@]}"; do
+        rename_asset "${renamed_ids[$i]}" "${renamed_from[$i]}" \
+            || echo "[publish]   asset ${renamed_ids[$i]} is NOT back under ${renamed_from[$i]}; rename it by hand"
+    done
+}
+
 delete_asset() {  # <asset_id>
     local id="$1" attempt=1 backoff="$DELETE_BACKOFF_START" status transient=0
     while : ; do
@@ -295,7 +369,19 @@ release_id=$(echo "$release_json" | jq -r '.id // empty')
 # dies halfway leaves a release with stale assets rather than an empty one.
 # The README's download URLs are hardcoded to those names and 404 the moment
 # the release is empty, which is what the old delete-then-upload order cost.
-replaced_asset_ids=""
+#
+# Since #323 they split in two. `rename_plan` is the assets this run replaces
+# by name, one per name, each with its fallback name: they are renamed before
+# the uploads and kept. `stale_asset_ids` is everything else the release held
+# — the `.previous` set those renames displace, a file dist/ no longer holds,
+# a second copy under one name — and that is what the swap deletes, after the
+# uploads, as before. Deleting the displaced `.previous` set only then, and
+# not before the renames, is what lets a failed run leave the release exactly
+# as it found it; the price is that between the renames and the deletes two
+# assets share each `.previous` name.
+release_assets_json="[]"
+rename_plan=""
+stale_asset_ids=""
 
 if [ -z "$release_id" ]; then
     echo "[publish] no existing release, creating"
@@ -324,7 +410,52 @@ else
         | api -X PATCH -H "$AUTH_HEADER" -H "Content-Type: application/json" \
             "$API/repos/$CI_REPO/releases/$release_id" -d @-)
     ok "$status" || die "body refresh failed: HTTP $status"
-    replaced_asset_ids=$(echo "$release_json" | jq -r '.assets[].id')
+    release_assets_json=$(echo "$release_json" | jq -c '.assets // []')
+fi
+
+# Which commit the current assets were built from: the tag, which this script
+# moves only after a complete swap, so it names the build the release holds
+# even after a failed run. When it is the commit about to be published, the
+# current set is the same code again (the triggered publish and the 04:00
+# fallback cron both fire on a day nothing landed), and renaming it would
+# replace the one fallback a bad build leaves with a copy of that bad build.
+# Then the current set is replaced in place and `.previous` stays. An
+# unreadable tag counts as a different commit: the ordinary path.
+published_sha=$(git -C "$ROOT" ls-remote "https://codeberg.org/${CI_REPO}.git" "refs/tags/${TAG}" 2>/dev/null \
+    | awk 'NR == 1 { print $1 }') || published_sha=""
+
+upload_names=$(for f in "${ASSETS[@]}"; do basename "$f"; done | jq -R . | jq -sc .)
+if [ "$published_sha" = "$CI_COMMIT_SHA" ]; then
+    echo "[publish] tag ${TAG} already names ${CI_COMMIT_SHA}: replacing the current set in place, .previous stays"
+    previous_names=$(for f in "${ASSETS[@]}"; do previous_name "$(basename "$f")"; done | jq -R . | jq -sc .)
+    keep_ids=$(jq -c --argjson prev "$previous_names" '
+        [.[] | select(.name as $n | $prev | index($n))] | unique_by(.name) | map(.id)' <<< "$release_assets_json")
+else
+    # id<TAB>name of the first asset under each name this run uploads, in the
+    # release's own order.
+    rename_plan=$(jq -r --argjson up "$upload_names" '
+        [.[] | select(.name as $n | $up | index($n))]
+        | unique_by(.name) | sort_by(.id) | .[] | "\(.id)\t\(.name)"' <<< "$release_assets_json")
+    keep_ids=$(cut -f1 <<< "$rename_plan" | jq -R 'select(length > 0) | tonumber' | jq -sc .)
+fi
+stale_asset_ids=$(jq -r --argjson keep "$keep_ids" '
+    .[] | select(.id as $i | $keep | index($i) | not) | .id' <<< "$release_assets_json")
+
+if [ -n "$rename_plan" ]; then
+    echo "[publish] keeping the build this run replaces as .previous"
+    while IFS=$'\t' read -r asset_id name; do
+        [ -n "$asset_id" ] || continue
+        # Recorded before the request: a rename that answered 5xx may have
+        # landed anyway, and renaming it back to its own name is harmless.
+        renamed_ids+=("$asset_id")
+        renamed_from+=("$name")
+        if ! rename_asset "$asset_id" "$(previous_name "$name")"; then
+            echo "[publish] a rename did not get through; nothing has been uploaded."
+            restore_names
+            echo "[publish] release left at the previous build, names as found. Failing the run."
+            exit 1
+        fi
+    done <<< "$rename_plan"
 fi
 
 echo "[publish] uploading ${#ASSETS[@]} new assets"
@@ -350,6 +481,7 @@ for f in "${ASSETS[@]}"; do
                 echo "[publish]   rollback asset $id → HTTP $rb"
             done
         fi
+        restore_names
         echo "[publish] upload failed; release left at the previous build."
         exit 1
     fi
@@ -358,8 +490,8 @@ for f in "${ASSETS[@]}"; do
     echo "[publish]   → $name  HTTP $status id=${asset_id:-?}"
 done
 
-if [ -n "$replaced_asset_ids" ]; then
-    echo "[publish] deleting the assets this run replaced"
+if [ "$release_assets_json" != "[]" ]; then
+    echo "[publish] deleting the .previous set this run displaced and any asset it no longer publishes"
     # Forgejo's asset-delete endpoint is
     # /repos/{owner}/{repo}/releases/{release_id}/assets/{attachment_id}.
     # The release_id segment is mandatory — omitting it yields a silent
@@ -369,7 +501,7 @@ if [ -n "$replaced_asset_ids" ]; then
     while read -r asset_id; do
         [ -n "$asset_id" ] || continue
         delete_asset "$asset_id" || true
-    done <<< "$replaced_asset_ids"
+    done <<< "$stale_asset_ids"
 
     # The verdict is the release's own listing, not the statuses above. A 504
     # on a deletion the forge carried out anyway says nothing about the state
@@ -399,7 +531,7 @@ if [ -n "$replaced_asset_ids" ]; then
         if printf '%s\n' "$remaining_ids" | grep -qx "$asset_id"; then
             leftover="$leftover $asset_id"
         fi
-    done <<< "$replaced_asset_ids"
+    done <<< "$stale_asset_ids"
     if [ -n "$leftover" ]; then
         echo "[publish] note: replaced asset(s)$leftover are still on the release, under"
         echo "[publish] a name this build did not republish. No download URL is ambiguous,"
