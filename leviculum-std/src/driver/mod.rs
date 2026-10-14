@@ -202,6 +202,17 @@ const DROP_FLUSH_BOUND: Duration = Duration::from_millis(400);
 /// holds whatever still arrives rather than dropping it, so the slack between a
 /// capacity reading and the emits that follow it costs latency, never a
 /// message.
+/// Data-plane events (received packets, link data) discarded because the application did not drain its
+/// channel fast enough. Process-wide and monotonic. A drop is the designed backpressure answer for lossy
+/// traffic, but an IP tunnel must be able to SEE it: it is the receive-side half of the packet loss
+/// budget and, unlike the wire, nothing else counts it.
+pub static DATA_EVENTS_DROPPED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many data events have been dropped so far because the application channel was full.
+pub fn data_events_dropped() -> u64 {
+    DATA_EVENTS_DROPPED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 struct EventSink {
     /// Control plane: delivered while the consumer keeps up, every loss
     /// reported.
@@ -312,6 +323,7 @@ impl EventSink {
         match self.data_tx.try_send(event) {
             Ok(()) => {}
             Err(TrySendError::Full(ev)) => {
+                DATA_EVENTS_DROPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 // Silent by design: data-plane drops are normal backpressure.
                 tracing::trace!(
                     dropped_event_type = ev.variant_name(),
@@ -2868,6 +2880,52 @@ impl ReticulumNode {
         Ok(crate::interfaces::ByteChannelHandle::new(id, shutdown_tx))
     }
 
+    /// Attach a **packet-channel** interface to the running node: one Reticulum packet per datagram of a
+    /// caller-supplied carrier (QUIC DATAGRAM frames, a UDP socket), with no framing.
+    ///
+    /// The right interface under an IP tunnel: it loses exactly the packet the carrier loses, where the
+    /// byte channel's stream would stall everything behind it. See
+    /// [`PacketSource`](crate::interfaces::PacketSource) / [`PacketSink`](crate::interfaces::PacketSink)
+    /// for the carrier contract. Hold the returned handle to keep the interface attached.
+    pub fn spawn_packet_channel<R, W>(
+        &self,
+        name: &str,
+        source: R,
+        sink: W,
+        options: crate::interfaces::PacketChannelOptions,
+    ) -> Result<crate::interfaces::PacketChannelHandle, Error>
+    where
+        R: crate::interfaces::PacketSource,
+        W: crate::interfaces::PacketSink,
+    {
+        use std::sync::atomic::Ordering;
+
+        let runtime = self.runtime.as_ref().ok_or(Error::NotRunning)?;
+        let new_iface_tx = self.new_iface_tx.as_ref().ok_or(Error::NotRunning)?;
+        let next_id = self.iface_id_counter.as_ref().ok_or(Error::NotRunning)?;
+
+        let id = InterfaceId(next_id.fetch_add(1, Ordering::Relaxed));
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let handle = {
+            let _enter = runtime.enter();
+            crate::interfaces::packet_channel::spawn_packet_channel_interface(
+                crate::interfaces::packet_channel::PacketChannelConfig {
+                    id,
+                    name: name.to_string(),
+                    buffer_size: options.buffer_size,
+                    hw_mtu: options.hw_mtu,
+                    shutdown: Some(shutdown_rx),
+                },
+                source,
+                sink,
+            )
+        };
+        new_iface_tx
+            .try_send(handle)
+            .map_err(|_| Error::NotRunning)?;
+        Ok(crate::interfaces::ByteChannelHandle::new(id, shutdown_tx))
+    }
+
     /// Obtain a writable handle for an already-established inbound link.
     ///
     /// Incoming links are accepted and proved automatically by the core (Python
@@ -4137,6 +4195,9 @@ enum RxClass {
     /// Single-destination datagram — X25519 ECDH decrypt against a key
     /// snapshot. Carries the destination hash from the header.
     SingleDest([u8; 16]),
+    /// Link Channel data: no consumer reads its payload hash, so the driver
+    /// does not compute one (`leviculum_core::packet::is_hash_free_link_data`).
+    HashFreeLinkData,
     /// Everything else: cheap crypto or state-entangled; stays inline.
     Cheap,
 }
@@ -4156,6 +4217,11 @@ fn classify_rx(data: &[u8]) -> RxClass {
             {
                 RxClass::SingleDest(p.destination_hash)
             }
+            PacketType::Data
+                if leviculum_core::packet::is_hash_free_link_data(&p.flags, p.context) =>
+            {
+                RxClass::HashFreeLinkData
+            }
             _ => RxClass::Cheap,
         },
         Err(_) => RxClass::Cheap,
@@ -4173,6 +4239,79 @@ fn prepare_cheap(iface: InterfaceId, data: Vec<u8>) -> PreparedRx {
         data,
         pre,
         evict_decryptor_for: None,
+    }
+}
+
+/// Link Channel data: nothing to precompute. In particular no payload hash,
+/// which on a bulk link was the single largest cost of the receive thread; core
+/// treats the missing hash as "not needed" for exactly this packet class.
+fn prepare_hash_free(iface: InterfaceId, data: Vec<u8>) -> PreparedRx {
+    PreparedRx {
+        iface,
+        data,
+        pre: leviculum_core::node::PrecomputedRx::default(),
+        evict_decryptor_for: None,
+    }
+}
+
+#[cfg(test)]
+mod rx_class_tests {
+    use super::*;
+    use leviculum_core::packet::{
+        HeaderType, Packet, PacketContext, PacketData, PacketFlags, PacketType, TransportType,
+    };
+    use leviculum_core::DestinationType;
+
+    fn wire(packet_type: PacketType, dest_type: DestinationType, context: PacketContext) -> Vec<u8> {
+        let packet = Packet {
+            flags: PacketFlags {
+                ifac_flag: false,
+                header_type: HeaderType::Type1,
+                context_flag: false,
+                transport_type: TransportType::Broadcast,
+                dest_type,
+                packet_type,
+            },
+            hops: 0,
+            transport_id: None,
+            destination_hash: [0x31; 16],
+            context,
+            data: PacketData::Owned(vec![0xAB; 300]),
+        };
+        let mut buf = [0u8; 600];
+        let len = packet.pack(&mut buf).unwrap();
+        buf[..len].to_vec()
+    }
+
+    /// Only link Channel data skips the payload hash in the driver; every other
+    /// class keeps the precomputed hash the dedup path expects.
+    #[test]
+    fn only_link_channel_data_is_prepared_without_a_hash() {
+        let channel = wire(PacketType::Data, DestinationType::Link, PacketContext::Channel);
+        assert!(matches!(classify_rx(&channel), RxClass::HashFreeLinkData));
+        let prepared = prepare_hash_free(InterfaceId(0), channel.clone());
+        assert_eq!(prepared.pre.packet_hash, None);
+        assert_eq!(prepared.data, channel);
+
+        for (ty, dest, ctx) in [
+            (PacketType::Data, DestinationType::Link, PacketContext::Resource),
+            (PacketType::Data, DestinationType::Link, PacketContext::Keepalive),
+            (PacketType::Data, DestinationType::Link, PacketContext::None),
+            (PacketType::Data, DestinationType::Plain, PacketContext::Channel),
+            (PacketType::Proof, DestinationType::Link, PacketContext::Channel),
+            (PacketType::LinkRequest, DestinationType::Link, PacketContext::Channel),
+        ] {
+            let raw = wire(ty, dest, ctx);
+            assert!(
+                !matches!(classify_rx(&raw), RxClass::HashFreeLinkData),
+                "{ty:?}/{dest:?}/{ctx:?} must keep hashing"
+            );
+            let prepared = prepare_cheap(InterfaceId(0), raw.clone());
+            assert_eq!(prepared.pre.packet_hash, Some(leviculum_core::packet::packet_hash(&raw)));
+        }
+        // A single-destination datagram keeps its dedicated decrypt class.
+        let single = wire(PacketType::Data, DestinationType::Single, PacketContext::None);
+        assert!(matches!(classify_rx(&single), RxClass::SingleDest(_)));
     }
 }
 
@@ -4584,6 +4723,7 @@ async fn run_event_loop(
                                         None => prepare_cheap(iface_id, pkt.data),
                                     }
                                 }
+                                RxClass::HashFreeLinkData => prepare_hash_free(iface_id, pkt.data),
                                 RxClass::Cheap => prepare_cheap(iface_id, pkt.data),
                             }
                         };

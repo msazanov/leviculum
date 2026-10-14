@@ -17,6 +17,10 @@ pub mod auto_interface;
 pub(crate) mod ble;
 pub(crate) mod byte_channel;
 pub use byte_channel::{ByteChannelHandle, ByteChannelOptions};
+pub(crate) mod packet_channel;
+/// A packet-channel interface is detached the same way as a byte-channel one: drop the handle.
+pub use byte_channel::ByteChannelHandle as PacketChannelHandle;
+pub use packet_channel::{drop_counters as packet_channel_drops, PacketChannelOptions, PacketSink, PacketSource};
 pub mod hdlc;
 pub(crate) mod i2p;
 pub(crate) mod inventory;

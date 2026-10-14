@@ -199,6 +199,14 @@ impl NodeBuilder {
         self
     }
 
+    /// Capacity of the application's data-event channel (received packets / link data). Data events are
+    /// dropped when it is full; a packet-rate tunnel wants it sized for a burst of the interface reader
+    /// (one QUIC read yields tens of packets at once), not for the average rate.
+    pub fn data_channel_capacity(mut self, capacity: usize) -> Self {
+        self.inner = self.inner.data_channel_capacity(capacity);
+        self
+    }
+
     pub fn link_cipher(mut self, cipher: LinkCipher) -> Self {
         self.inner = self.inner.link_cipher(cipher);
         self
@@ -454,6 +462,23 @@ impl Node {
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
     {
         self.inner.spawn_byte_channel_with(name, stream, options)
+    }
+
+    /// Attach a packet-channel interface (one packet per carrier datagram, no framing). See
+    /// [`ReticulumNode::spawn_packet_channel`](crate::driver::ReticulumNode::spawn_packet_channel).
+    #[must_use = "dropping the handle immediately detaches the interface"]
+    pub fn spawn_packet_channel<R, W>(
+        &self,
+        name: &str,
+        source: R,
+        sink: W,
+        options: crate::interfaces::PacketChannelOptions,
+    ) -> Result<crate::interfaces::PacketChannelHandle>
+    where
+        R: crate::interfaces::PacketSource,
+        W: crate::interfaces::PacketSink,
+    {
+        self.inner.spawn_packet_channel(name, source, sink, options)
     }
 
     /// Request a path to a destination. The result arrives as a path-found event.
