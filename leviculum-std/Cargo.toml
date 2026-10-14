@@ -41,7 +41,7 @@ heap-accounting = ["dep:backtrace"]
 __compile_fail_fixtures = []
 
 [dependencies]
-leviculum-core = { path = "../leviculum-core", default-features = true }
+leviculum-core = { path = "../leviculum-core", default-features = true, features = ["ring-gcm"] }
 # `file_lxmf_store` persists an LXMF router's state, so the LXMF storage trait
 # is part of this crate's API. The dependency is one-way: leviculum-lxmf is
 # no_std and knows nothing about this crate.

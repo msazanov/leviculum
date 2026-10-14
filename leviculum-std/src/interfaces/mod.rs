@@ -25,6 +25,10 @@ pub use firmware_request::{
     request_firmware_media_silence, request_firmware_reset, FirmwareRequest,
     FIRMWARE_ANNOUNCE_SIGNAL, FIRMWARE_MEDIA_RESTORE_SIGNAL, FIRMWARE_MEDIA_SILENCE_SIGNAL,
 };
+pub(crate) mod packet_channel;
+/// A packet-channel interface is detached the same way as a byte-channel one: drop the handle.
+pub use byte_channel::ByteChannelHandle as PacketChannelHandle;
+pub use packet_channel::{drop_counters as packet_channel_drops, PacketChannelOptions, PacketSink, PacketSource};
 pub mod hdlc;
 pub(crate) mod i2p;
 pub(crate) mod inventory;

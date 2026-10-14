@@ -86,7 +86,7 @@ pub use driver::{
     Completion, CompletionError, EventReceiver, EventTap, FilteredEventTap,
     InterfaceStatusSnapshot, LinkEstablishedFuture, LinkHandle, PacketSender,
     RequestResponseFuture, ResourceSentFuture, ResourceSentInfo, ResponseInfo, ReticulumNode,
-    ReticulumNodeBuilder, TapEvent, DEFAULT_EVENT_TAP_CAPACITY,
+    ReticulumNodeBuilder, TapEvent, DEFAULT_EVENT_TAP_CAPACITY, data_events_dropped,
 };
 pub use error::{Error, Result};
 pub use file_lxmf_store::FileLxmfStorage;
