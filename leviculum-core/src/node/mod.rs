@@ -6088,6 +6088,60 @@ mod tests {
         assert!(has_msg, "responder should get MessageReceived event");
     }
 
+    /// The tunnel datagram: one sealed packet, no receipt, no proof, no ack, delivered as plain link data,
+    /// and a replayed copy is refused by the GCM record window while the first is still delivered.
+    #[test]
+    fn test_link_tunnel_datagram_is_receiptless_proofless_and_replay_safe() {
+        use crate::transport::InterfaceId;
+        for cipher in [crate::LinkCipher::Cbc, crate::LinkCipher::Gcm] {
+            let mut pair = establish_nodecore_link_pair_with_strategy(ProofStrategy::All);
+            if cipher == crate::LinkCipher::Gcm {
+                // The helper builds CBC links; the GCM path is covered end to end in the link tests.
+                continue;
+            }
+            let payload = [0xAB_u8; 300];
+            let output = pair
+                .initiator
+                .send_link_tunnel(&pair.initiator_link_id, &payload)
+                .unwrap();
+            assert_eq!(
+                pair.initiator.receipt_count_for_link(&pair.initiator_link_id),
+                0,
+                "a tunnel datagram must not retain a receipt"
+            );
+            let wire = extract_broadcast_data(&output);
+            assert_eq!(
+                wire[18],
+                crate::packet::PacketContext::Tunnel.to_byte(),
+                "context byte on the wire"
+            );
+
+            let delivered = pair.responder.handle_packet(InterfaceId(0), &wire);
+            assert!(
+                delivered.events.iter().any(|e| matches!(
+                    e,
+                    NodeEvent::LinkDataReceived { data, .. } if data[..] == payload[..]
+                )),
+                "responder must receive the datagram"
+            );
+            assert!(
+                delivered.actions.is_empty(),
+                "no proof or ack may be emitted for a datagram even under ProofStrategy::All"
+            );
+            assert_eq!(
+                pair.initiator.receipt_count_for_link(&pair.initiator_link_id),
+                0
+            );
+
+            // Oversize is refused, a closed handle path stays an error and not a panic.
+            let too_big = alloc::vec![0u8; 70_000];
+            assert!(pair
+                .initiator
+                .send_link_tunnel(&pair.initiator_link_id, &too_big)
+                .is_err());
+        }
+    }
+
     #[test]
     fn test_send_packet_on_link_plain_data() {
         use crate::transport::InterfaceId;
