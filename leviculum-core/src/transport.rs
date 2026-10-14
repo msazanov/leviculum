@@ -21545,6 +21545,62 @@ mod tests {
             );
         }
 
+        /// #715: a hub that loses many clients at once must not walk the
+        /// whole reverse table once per departure. On a host the table holds
+        /// one entry per forwarded packet, about 195 000 after twenty seconds
+        /// of the 128-connection load test, and each walk held the event loop
+        /// (and the core lock) for up to 1.4 ms; 128 clients closing together
+        /// queued behind 128 walks. The departures share the next periodic
+        /// cull's walk instead.
+        #[test]
+        fn interface_downs_share_one_reverse_table_walk() {
+            let mut transport = make_transport_enabled();
+            let now = transport.clock.now_ms();
+            let entry = |recv: usize, out: usize| ReverseEntry {
+                timestamp_ms: now,
+                receiving_interface_index: recv,
+                outbound_interface_index: out,
+                received_peer: ReverseEntry::NO_PEER,
+            };
+            for i in 0..128u8 {
+                transport
+                    .storage_mut()
+                    .set_reverse([i; TRUNCATED_HASHBYTES], entry(i as usize + 2, 1));
+            }
+            let survivor = [0xEE; TRUNCATED_HASHBYTES];
+            transport.storage_mut().set_reverse(survivor, entry(0, 1));
+
+            let before = transport.storage().reverse_sweeps;
+            for i in 0..128 {
+                transport.remove_reverse_entries_for_interface(i + 2);
+            }
+            assert_eq!(
+                transport.storage().reverse_sweeps - before,
+                0,
+                "an interface down must not walk the reverse table itself"
+            );
+            for i in 0..128u8 {
+                assert!(
+                    transport
+                        .storage()
+                        .get_reverse(&[i; TRUNCATED_HASHBYTES])
+                        .is_none(),
+                    "entry of departed interface {} still visible",
+                    i as usize + 2
+                );
+            }
+            assert!(transport.storage().get_reverse(&survivor).is_some());
+
+            transport.poll();
+            assert_eq!(
+                transport.storage().reverse_sweeps - before,
+                1,
+                "the next cull removes every departed interface's entries in one walk"
+            );
+            assert_eq!(transport.reverse_table_entries().len(), 1);
+            assert!(transport.storage().get_reverse(&survivor).is_some());
+        }
+
         // Stage 5: Strip transport header at final hop
         #[test]
         fn test_link_request_stripped_to_type1_at_final_hop() {
@@ -22189,6 +22245,67 @@ mod tests {
                 forwarded.flags.packet_type,
                 PacketType::Proof,
                 "Forwarded packet should still be a Proof"
+            );
+        }
+
+        /// #715: between an interface going down and the next cull its
+        /// reverse entries still sit in the host table, and a proof for one
+        /// of them must not be routed: the entry is as gone as the old
+        /// immediate walk made it.
+        #[test]
+        fn proof_is_not_routed_through_a_departed_interface_before_the_cull() {
+            let mut transport = make_transport_enabled();
+            let _idx0 = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+            let _idx1 = transport.register_interface(Box::new(MockInterface::new("if1", 2)));
+
+            let packet_hash = [0xAA; TRUNCATED_HASHBYTES];
+            let now = transport.clock.now_ms();
+            transport.storage_mut().set_reverse(
+                packet_hash,
+                ReverseEntry {
+                    timestamp_ms: now,
+                    receiving_interface_index: 0,
+                    outbound_interface_index: 1,
+                    received_peer: ReverseEntry::NO_PEER,
+                },
+            );
+            let sweeps = transport.storage().reverse_sweeps;
+            transport.remove_reverse_entries_for_interface(0);
+            assert_eq!(
+                transport.storage().reverse_sweeps,
+                sweeps,
+                "precondition: the entry waits for the cull"
+            );
+
+            let proof_packet = Packet {
+                flags: PacketFlags {
+                    ifac_flag: false,
+                    header_type: HeaderType::Type1,
+                    context_flag: false,
+                    transport_type: TransportType::Broadcast,
+                    dest_type: crate::destination::DestinationType::Single,
+                    packet_type: PacketType::Proof,
+                },
+                hops: 0,
+                transport_id: None,
+                destination_hash: packet_hash,
+                context: PacketContext::None,
+                data: PacketData::Owned(alloc::vec![0x55; crate::constants::PROOF_DATA_SIZE]),
+            };
+            let mut buf = [0u8; crate::constants::MTU];
+            let len = proof_packet.pack(&mut buf).unwrap();
+            transport.process_incoming(1, &buf[..len]).unwrap();
+
+            assert_eq!(
+                transport.stats().packets_forwarded,
+                0,
+                "a proof must not be routed back through a departed interface"
+            );
+            assert!(
+                !transport.drain_actions().iter().any(
+                    |a| matches!(a, Action::SendPacket { iface, .. } if *iface == InterfaceId(0))
+                ),
+                "nothing may be sent on the departed interface"
             );
         }
 

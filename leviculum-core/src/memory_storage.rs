@@ -205,6 +205,12 @@ struct RateSlot {
     timestamps: VecDeque<u64>,
 }
 
+/// Departed interfaces whose reverse entries may wait for the next cull
+/// before one walk removes them all. A hub losing more clients than this
+/// between two polls culls early, still one walk for this many departures
+/// rather than one each (#715).
+pub const DEPARTED_REVERSE_IFACES_CAP: usize = 256;
+
 /// In-memory storage with configurable per-collection capacity limits.
 ///
 /// Uses BTreeMap/BTreeSet for all collections. Not persistent, all data is
@@ -252,6 +258,24 @@ pub struct MemoryStorage {
     /// dropped anyway. Entries are keyed per packet hash and never
     /// re-inserted, so FIFO here is plain arrival order.
     reverse_table: BoundedMap<[u8; TRUNCATED_HASHBYTES], ReverseEntry>,
+    /// Interfaces that went down since the last reverse table cull.
+    ///
+    /// Their entries are dead from the moment the index lands here (every
+    /// read filters them) and leave the table in the next
+    /// [`Storage::expire_reverses`] walk, which runs anyway. A walk per
+    /// departure was the cost on a hub: this table holds one entry per
+    /// forwarded packet, about 195 000 after twenty seconds at 128
+    /// connections, and each departure held the event loop and the core lock
+    /// for up to 1.4 ms, so 128 clients closing together waited 128 walks
+    /// for their sockets to be released (#715). The reference culls the same
+    /// way, on its table-cull timer (Transport.py:672-679).
+    ///
+    /// Held to [`DEPARTED_REVERSE_IFACES_CAP`]: reaching it culls at once.
+    departed_reverse_ifaces: BTreeSet<usize>,
+    /// Full walks of `reverse_table`, counted so a test can pin how often an
+    /// operation pays one (#715).
+    #[cfg(test)]
+    pub(crate) reverse_sweeps: usize,
 
     // Link table
     /// Links routed through this node.
@@ -426,6 +450,9 @@ impl MemoryStorage {
             path_table: BoundedMap::new(caps.path_cap),
             path_states: BoundedMap::new(caps.path_cap),
             reverse_table: BoundedMap::new(caps.reverse_cap),
+            departed_reverse_ifaces: BTreeSet::new(),
+            #[cfg(test)]
+            reverse_sweeps: 0,
             link_table: BoundedMap::new(caps.link_cap),
             announce_table: BoundedMap::new(caps.announce_cap),
             announce_cache: BoundedMap::new(caps.destination_cap),
@@ -489,6 +516,29 @@ impl MemoryStorage {
         self.packet_cache_prev.clear();
     }
 
+    /// Whether `entry` routes through an interface that went down since the
+    /// last cull, which makes it as good as removed.
+    fn reverse_entry_departed(&self, entry: &ReverseEntry) -> bool {
+        self.departed_reverse_ifaces
+            .contains(&entry.receiving_interface_index)
+            || self
+                .departed_reverse_ifaces
+                .contains(&entry.outbound_interface_index)
+    }
+
+    /// Remove the entries of every departed interface now, in one walk.
+    fn cull_departed_reverses(&mut self) {
+        #[cfg(test)]
+        {
+            self.reverse_sweeps += 1;
+        }
+        let departed = core::mem::take(&mut self.departed_reverse_ifaces);
+        self.reverse_table.retain(|_, e| {
+            !departed.contains(&e.receiving_interface_index)
+                && !departed.contains(&e.outbound_interface_index)
+        });
+    }
+
     /// Clear all state (test convenience)
     pub fn clear_all(&mut self) {
         self.packet_cache.clear();
@@ -496,6 +546,7 @@ impl MemoryStorage {
         self.path_table.clear();
         self.path_states.clear();
         self.reverse_table.clear();
+        self.departed_reverse_ifaces.clear();
         self.link_table.clear();
         self.announce_table.clear();
         self.announce_cache.clear();
@@ -642,6 +693,18 @@ impl MemoryStorage {
         let _ = writeln!(
             s,
             "reverse_table: {} entries, raw {} bytes, estimated {} bytes (BTreeMap 3x)",
+            n, raw, est
+        );
+
+        // departed_reverse_ifaces: BTreeSet<usize>, 3x. Interfaces whose
+        // reverse entries wait for the next cull (#715).
+        let n = self.departed_reverse_ifaces.len();
+        let raw = (n * core::mem::size_of::<usize>()) as u64;
+        let est = raw * 3;
+        total += est;
+        let _ = writeln!(
+            s,
+            "departed_reverse_ifaces: {} entries, raw {} bytes, estimated {} bytes (BTreeSet 3x)",
             n, raw, est
         );
 
@@ -989,19 +1052,33 @@ impl Storage for MemoryStorage {
 
     // Reverse Table
     fn get_reverse(&self, hash: &[u8; TRUNCATED_HASHBYTES]) -> Option<&ReverseEntry> {
-        self.reverse_table.get(hash)
+        self.reverse_table
+            .get(hash)
+            .filter(|e| !self.reverse_entry_departed(e))
     }
 
     fn set_reverse(&mut self, hash: [u8; TRUNCATED_HASHBYTES], entry: ReverseEntry) {
+        // An entry naming an index still waiting for its cull means the index
+        // is in use again: cull first, so the old connection's entries go and
+        // this one is not mistaken for one of them.
+        if self.reverse_entry_departed(&entry) {
+            self.cull_departed_reverses();
+        }
         self.reverse_table.insert(hash, entry);
     }
 
     fn remove_reverse(&mut self, hash: &[u8; TRUNCATED_HASHBYTES]) -> Option<ReverseEntry> {
-        self.reverse_table.remove(hash)
+        self.reverse_table
+            .remove(hash)
+            .filter(|e| !self.reverse_entry_departed(e))
     }
 
     fn reverse_entries(&self) -> Vec<([u8; TRUNCATED_HASHBYTES], ReverseEntry)> {
-        self.reverse_table.iter().map(|(k, v)| (*k, *v)).collect()
+        self.reverse_table
+            .iter()
+            .filter(|(_, v)| !self.reverse_entry_departed(v))
+            .map(|(k, v)| (*k, *v))
+            .collect()
     }
 
     // Link Table
@@ -1193,16 +1270,25 @@ impl Storage for MemoryStorage {
 
     // Cleanup
     fn expire_reverses(&mut self, now_ms: u64, timeout_ms: u64) -> usize {
+        #[cfg(test)]
+        {
+            self.reverse_sweeps += 1;
+        }
         let before = self.reverse_table.len();
-        self.reverse_table
-            .retain(|_, entry| now_ms.saturating_sub(entry.timestamp_ms) <= timeout_ms);
+        let departed = core::mem::take(&mut self.departed_reverse_ifaces);
+        self.reverse_table.retain(|_, entry| {
+            now_ms.saturating_sub(entry.timestamp_ms) <= timeout_ms
+                && !departed.contains(&entry.receiving_interface_index)
+                && !departed.contains(&entry.outbound_interface_index)
+        });
         before - self.reverse_table.len()
     }
 
     fn remove_reverse_entries_for_interface(&mut self, iface_index: usize) {
-        self.reverse_table.retain(|_, e| {
-            e.receiving_interface_index != iface_index && e.outbound_interface_index != iface_index
-        });
+        self.departed_reverse_ifaces.insert(iface_index);
+        if self.departed_reverse_ifaces.len() >= DEPARTED_REVERSE_IFACES_CAP {
+            self.cull_departed_reverses();
+        }
     }
 
     fn expire_receipts(&mut self, now_ms: u64) -> Vec<PacketReceipt> {
@@ -1458,6 +1544,11 @@ impl Storage for MemoryStorage {
                 "reverse_table",
                 self.reverse_table.len(),
                 self.reverse_table.capacity(),
+            ),
+            CollectionCount::bounded(
+                "departed_reverse_ifaces",
+                self.departed_reverse_ifaces.len(),
+                DEPARTED_REVERSE_IFACES_CAP,
             ),
             CollectionCount::bounded(
                 "link_table",
@@ -1933,6 +2024,71 @@ mod tests {
         let count = s.expire_reverses(2000, 500);
         assert_eq!(count, 1);
         assert!(s.get_reverse(&hash).is_none());
+    }
+
+    /// #715: the pending departures are held to their ceiling; the one that
+    /// reaches it culls them all in a single walk.
+    #[test]
+    fn departures_at_the_ceiling_cull_in_one_walk() {
+        let mut s = MemoryStorage::with_defaults();
+        for i in 0..DEPARTED_REVERSE_IFACES_CAP as u32 {
+            s.set_reverse(
+                [i as u8; TRUNCATED_HASHBYTES],
+                ReverseEntry {
+                    timestamp_ms: 1000,
+                    receiving_interface_index: i as usize + 2,
+                    outbound_interface_index: 1,
+                    received_peer: ReverseEntry::NO_PEER,
+                },
+            );
+        }
+        let before = s.reverse_sweeps;
+        for i in 0..DEPARTED_REVERSE_IFACES_CAP {
+            s.remove_reverse_entries_for_interface(i + 2);
+        }
+        assert_eq!(s.reverse_sweeps - before, 1);
+        assert!(s.departed_reverse_ifaces.is_empty());
+        assert_eq!(s.reverse_table.len(), 0);
+    }
+
+    /// #715: an index that went down and is in use again before the cull
+    /// keeps the entries recorded for its new connection; only the old
+    /// connection's entries go.
+    #[test]
+    fn reused_interface_index_keeps_its_new_reverse_entries() {
+        let mut s = MemoryStorage::with_defaults();
+        let entry = |recv: usize| ReverseEntry {
+            timestamp_ms: 1000,
+            receiving_interface_index: recv,
+            outbound_interface_index: 1,
+            received_peer: ReverseEntry::NO_PEER,
+        };
+        let old = [0x01; TRUNCATED_HASHBYTES];
+        let new = [0x02; TRUNCATED_HASHBYTES];
+        s.set_reverse(old, entry(5));
+        s.remove_reverse_entries_for_interface(5);
+        assert!(
+            s.get_reverse(&old).is_none(),
+            "departed entry stops counting at once"
+        );
+
+        s.set_reverse(new, entry(5));
+        s.expire_reverses(1000, 500);
+
+        assert!(
+            s.get_reverse(&old).is_none(),
+            "the old connection's entry is culled"
+        );
+        assert!(
+            s.get_reverse(&new).is_some(),
+            "the new connection's entry survives the cull"
+        );
+        assert_eq!(s.reverse_entries().len(), 1);
+        assert_eq!(
+            s.reverse_table.len(),
+            1,
+            "the old entry left the table itself"
+        );
     }
 
     #[test]

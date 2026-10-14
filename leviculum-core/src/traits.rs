@@ -922,6 +922,10 @@ pub trait Storage {
     fn expire_reverses(&mut self, now_ms: u64, timeout_ms: u64) -> usize;
 
     /// Remove reverse table entries referencing a specific interface (for interface-down cleanup)
+    ///
+    /// The entries must stop being returned at once; the walk that frees
+    /// them may wait for the next [`Storage::expire_reverses`], which is
+    /// what a large host table does (#715).
     fn remove_reverse_entries_for_interface(&mut self, iface_index: usize);
 
     /// Remove expired receipts and return only the ones that timed out.
