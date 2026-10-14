@@ -149,6 +149,21 @@ pub fn done(message_id: Option<&[u8; 32]>, outcome: &str, code: u8) {
     );
 }
 
+/// The last line of a fetch that found no path to its node: [`done`]'s keys,
+/// plus how many path requests the drain sent and over how long, so the
+/// reader of a red cell does not have to count `PKT_TX` lines
+/// (leviculum#719).
+pub fn done_without_path(code: u8, path_requests: u32, path_wait_ms: u64) {
+    tracing::debug!(
+        event = "LNMSG_DONE",
+        id = "-",
+        outcome = "failed",
+        code = code,
+        path_requests = path_requests,
+        path_wait_ms = path_wait_ms,
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

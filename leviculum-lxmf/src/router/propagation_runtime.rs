@@ -29,7 +29,8 @@ use crate::{
 };
 
 /// How long a drain waits for a path to its node before it reports
-/// [`PropagationClientState::NoPath`].
+/// [`PropagationClientState::NoPath`], when its caller names no budget of its
+/// own.
 ///
 /// Python waits `LXMRouter.PR_PATH_TIMEOUT` (10 s) on one path request
 /// (`reference/LXMF/LXMF/LXMRouter.py:534-540`, `:1461-1470`), so a single
@@ -40,6 +41,15 @@ use crate::{
 /// as long to be answered as the first was (leviculum#699: `lnmsg fetch` at
 /// boot lost its only request to a daemon whose interface was still
 /// reconnecting). Wire-neutral: a repeated path request is an ordinary one.
+///
+/// The repeat runs for as long as the window, not for a fixed count: a caller
+/// with a budget of its own passes it as
+/// [`PropagationClientConfig::path_timeout_ms`] (or per drain through
+/// [`LxmfRouter::set_propagation_path_timeout_ms`](super::LxmfRouter::set_propagation_path_timeout_ms)),
+/// and the drain keeps asking every `PATH_REQUEST_WAIT_MS` until that budget
+/// ends, as the reference client re-requests on every attempt until its
+/// attempts run out (`LXMRouter.py:1776-1781`). leviculum#719: a 60 s
+/// `lnmsg fetch` gave up after this window with 46 s of its budget unused.
 pub const PROPAGATION_PATH_TIMEOUT_MS: u64 = 2 * super::PATH_REQUEST_WAIT_MS;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,7 +61,9 @@ pub struct PropagationClientConfig {
     /// (`reference/LXMF/LXMF/LXMRouter.py:1592`), default
     /// [`DELIVERY_LIMIT_KB`](crate::constants::DELIVERY_LIMIT_KB).
     pub delivery_transfer_limit_kb: u64,
-    /// Maximum time to wait for a path before reporting [`PropagationClientState::NoPath`].
+    /// Maximum time to wait for a path before reporting
+    /// [`PropagationClientState::NoPath`]. The path request is repeated every
+    /// [`PATH_REQUEST_WAIT_MS`](super::PATH_REQUEST_WAIT_MS) for all of it.
     pub path_timeout_ms: u64,
 }
 
@@ -93,6 +105,18 @@ pub struct PropagationSyncResult {
     pub duplicates: usize,
 }
 
+/// What a drain's path phase did: how many path requests it sent, and how
+/// long it waited for an answer. Read on [`PropagationClientState::NoPath`] to
+/// say what "no path" was the outcome of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PropagationPathAttempts {
+    /// Path requests sent, the first one included.
+    pub requests: u32,
+    /// From the first request to the end of the phase, or to now while it
+    /// is still running.
+    pub waited_ms: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PropagationSyncStatus {
     pub state: PropagationClientState,
@@ -122,6 +146,12 @@ struct MailboxSync {
     /// When the path request is repeated if no path has turned up. Read only
     /// in [`PropagationClientState::PathRequested`], which sets it.
     next_path_request_ms: Option<u64>,
+    /// Path requests this drain has sent.
+    path_requests: u32,
+    /// When the first of them went out; `None` if the drain needed none.
+    path_started_ms: Option<u64>,
+    /// When the path phase ended, by a path or by its deadline.
+    path_ended_ms: Option<u64>,
 }
 
 impl Default for MailboxSync {
@@ -135,6 +165,9 @@ impl Default for MailboxSync {
             duplicates: 0,
             path_deadline_ms: None,
             next_path_request_ms: None,
+            path_requests: 0,
+            path_started_ms: None,
+            path_ended_ms: None,
         }
     }
 }
@@ -754,6 +787,7 @@ impl PropagationRuntime {
         };
         if node.has_path(&destination) {
             self.client.path_deadline_ms = None;
+            self.client.path_ended_ms = Some(node.now_ms());
             self.set_state(PropagationClientState::LinkEstablishing, &mut output);
             output
                 .core
@@ -764,6 +798,7 @@ impl PropagationRuntime {
             .is_some_and(|deadline| node.now_ms() >= deadline)
         {
             self.client.path_deadline_ms = None;
+            self.client.path_ended_ms = Some(node.now_ms());
             output.core.merge(self.transport.cancel(node, destination));
             self.set_state(PropagationClientState::NoPath, &mut output);
         } else {
@@ -778,6 +813,7 @@ impl PropagationRuntime {
                 output
                     .core
                     .merge(node.request_path_unthrottled(&destination));
+                self.client.path_requests = self.client.path_requests.saturating_add(1);
                 self.client.next_path_request_ms =
                     Some(node.now_ms().saturating_add(super::PATH_REQUEST_WAIT_MS));
             }
@@ -1307,6 +1343,38 @@ impl LxmfRouter {
             .map(|runtime| runtime.client.state)
     }
 
+    /// What the current or last drain's path phase did; `None` without a
+    /// propagation client, or when the drain found its path already known.
+    pub fn propagation_client_path_attempts<R, C, S>(
+        &self,
+        node: &NodeCore<R, C, S>,
+    ) -> Option<PropagationPathAttempts>
+    where
+        R: CryptoRngCore,
+        C: Clock,
+        S: Storage,
+    {
+        let client = &self.propagation.as_ref()?.client;
+        let started = client.path_started_ms?;
+        let ended = client.path_ended_ms.unwrap_or_else(|| node.now_ms());
+        Some(PropagationPathAttempts {
+            requests: client.path_requests,
+            waited_ms: ended.saturating_sub(started),
+        })
+    }
+
+    /// Give the next drains a path budget of their own instead of the one
+    /// the client was enabled with: the drain repeats its path request for
+    /// all of it. `lnmsg fetch` passes what is left of its `--timeout`.
+    pub fn set_propagation_path_timeout_ms(
+        &mut self,
+        path_timeout_ms: u64,
+    ) -> Result<(), RouterError> {
+        let propagation = self.propagation.as_mut().ok_or(RouterError::NotFound)?;
+        propagation.config.path_timeout_ms = path_timeout_ms;
+        Ok(())
+    }
+
     pub fn propagation_client_progress(&self) -> Option<f32> {
         self.propagation
             .as_ref()
@@ -1470,6 +1538,9 @@ impl LxmfRouter {
                 Some(now_ms.saturating_add(propagation.config.path_timeout_ms));
             propagation.client.next_path_request_ms =
                 Some(now_ms.saturating_add(super::PATH_REQUEST_WAIT_MS));
+            // `ensure_link` below sends the first request.
+            propagation.client.path_requests = 1;
+            propagation.client.path_started_ms = Some(now_ms);
             propagation.set_state(PropagationClientState::PathRequested, &mut output);
             output
                 .core

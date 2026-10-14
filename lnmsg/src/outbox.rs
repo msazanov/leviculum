@@ -21,7 +21,7 @@
 //! Nothing here mentions `LxmfRouter`, `ReticulumNode` or a channel type, so
 //! [`crate::send`] can be driven by a fake with no network anywhere.
 
-use leviculum_lxmf::router::MessageState;
+use leviculum_lxmf::router::{MessageState, PropagationPathAttempts};
 
 /// How a message should reach its destination.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,8 +78,10 @@ pub enum Command {
     /// `docs/src/concepts/lnmsg-mailbox.md`.
     SelectPn { preferred: Option<[u8; 16]> },
     /// Drain the selected node's mailbox with the genuine list/fetch/confirm
-    /// round (`message_get_request` semantics).
-    Fetch,
+    /// round (`message_get_request` semantics). `path_budget_ms` is how long
+    /// the drain may keep asking for a path to the node: the path request
+    /// repeats every `PATH_REQUEST_WAIT_MS` for all of it (leviculum#719).
+    Fetch { path_budget_ms: u64 },
     /// Remove a queued message. The auto fallback cancels the stranded
     /// direct copy before uploading the propagated one, so a peer that
     /// reappears mid-fallback cannot be handed the same message twice.
@@ -137,7 +139,12 @@ pub enum OutboxEvent {
     /// are the router's own counts for the drain.
     SyncDone { received: usize, duplicates: usize },
     /// A [`Command::Fetch`] failed, with the client state that ended it.
-    SyncFailed { detail: String },
+    /// `path` is what the path phase did, when it was a missing path that
+    /// ended it.
+    SyncFailed {
+        detail: String,
+        path: Option<PropagationPathAttempts>,
+    },
 }
 
 /// The engine went away — in this slice, the driver detached a panicking

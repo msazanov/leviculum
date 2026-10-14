@@ -1482,6 +1482,152 @@ fn a_drain_survives_losing_its_first_path_request() {
     assert_eq!(server.list_requests, 1);
 }
 
+/// leviculum#719: with a budget of its own, a drain keeps asking for the path
+/// until that budget ends, not for a fixed two requests.
+///
+/// A 60 s `lnmsg fetch` sent its requests at 0 and 7 s and reported `NoPath`
+/// at 14 s with 46 s unused. Here the first three requests (0, 7, 14 s) are
+/// lost and the fourth, at 21 s, is answered inside a 60 s budget.
+#[test]
+fn a_drain_with_a_budget_keeps_asking_until_its_fourth_request_is_answered() {
+    let MailboxPair {
+        mut client,
+        mut server,
+        client_clock,
+        server_clock,
+        ..
+    } = mailbox_pair();
+    let _ = server
+        .node
+        .announce_destination(
+            &server.propagation_destination,
+            Some(&propagation_announce()),
+        )
+        .expect("announce propagation node");
+    client
+        .router
+        .set_propagation_path_timeout_ms(60_000)
+        .expect("propagation client enabled");
+
+    let selected = client
+        .router
+        .set_outbound_propagation_node(&mut client.node, Some(server.propagation_destination))
+        .expect("select propagation node");
+    let _ = client.absorb_router(selected);
+    let requested = client
+        .router
+        .request_messages_from_propagation_node(&mut client.node, None)
+        .expect("request mailbox");
+    let first = client.absorb_router(requested);
+    assert_eq!(first.len(), 1, "the drain opens with one path request");
+    let start = client_clock.get();
+
+    let mut sent_at = vec![start];
+    while client_clock.get() < start + 60_000 {
+        client_clock.set(client_clock.get() + 250);
+        server_clock.set(server_clock.get() + 250);
+        let ticked = client.router.tick(&mut client.node).expect("router tick");
+        let mut to_server = client.absorb_router(ticked);
+        if !to_server.is_empty() {
+            sent_at.push(client_clock.get());
+            if sent_at.len() <= 3 {
+                to_server.clear();
+            }
+        }
+        let timeout = server.node.handle_timeout();
+        let to_client = server.absorb_core(timeout);
+        pump(&mut client, &mut server, to_server, to_client);
+        if client.node.has_path(&server.propagation_destination) {
+            break;
+        }
+    }
+    assert_eq!(
+        sent_at,
+        vec![start, start + 7_000, start + 14_000, start + 21_000],
+        "one request every PATH_REQUEST_WAIT_MS, the fourth answered"
+    );
+    assert!(client.node.has_path(&server.propagation_destination));
+
+    let ticked = client.router.tick(&mut client.node).expect("router tick");
+    let to_server = client.absorb_router(ticked);
+    pump(&mut client, &mut server, to_server, Vec::new());
+    assert_eq!(
+        client.router.propagation_client_state(),
+        Some(PropagationClientState::Complete)
+    );
+    // The phase ends on the tick that sees the path, after the node's
+    // deferred announce answered the fourth request and before a fifth fell
+    // due.
+    let answered_after = client_clock.get() - start;
+    assert!(
+        (21_000..28_000).contains(&answered_after),
+        "{answered_after}"
+    );
+    assert_eq!(
+        client.router.propagation_client_path_attempts(&client.node),
+        Some(PropagationPathAttempts {
+            requests: 4,
+            waited_ms: answered_after,
+        })
+    );
+}
+
+/// leviculum#719: the budget, not `PROPAGATION_PATH_TIMEOUT_MS`, ends the path
+/// phase. A 10 s budget holds exactly two requests (0 and 7 s) and reports
+/// `NoPath` at 10 s, four seconds before the default window would.
+#[test]
+fn a_drain_budget_shorter_than_the_default_window_ends_the_path_phase() {
+    let MailboxPair {
+        mut client,
+        mut server,
+        client_clock,
+        ..
+    } = mailbox_pair();
+    client
+        .router
+        .set_propagation_path_timeout_ms(10_000)
+        .expect("propagation client enabled");
+
+    let selected = client
+        .router
+        .set_outbound_propagation_node(&mut client.node, Some(server.propagation_destination))
+        .expect("select propagation node");
+    let _ = client.absorb_router(selected);
+    let requested = client
+        .router
+        .request_messages_from_propagation_node(&mut client.node, None)
+        .expect("request mailbox");
+    let first = client.absorb_router(requested);
+    assert_eq!(first.len(), 1, "the drain opens with one path request");
+    let start = client_clock.get();
+
+    let mut requests = 1;
+    let mut no_path_at = None;
+    while client_clock.get() < start + PROPAGATION_PATH_TIMEOUT_MS + 7_000 {
+        client_clock.set(client_clock.get() + 250);
+        let ticked = client.router.tick(&mut client.node).expect("router tick");
+        if !client.absorb_router(ticked).is_empty() {
+            requests += 1;
+        }
+        if no_path_at.is_none()
+            && client.router.propagation_client_state() == Some(PropagationClientState::NoPath)
+        {
+            no_path_at = Some(client_clock.get() - start);
+        }
+    }
+    // Nothing is ever delivered to the node; it exists only to be absent.
+    let _ = &mut server;
+    assert_eq!(requests, 2, "requests at 0 and 7 s, none after the budget");
+    assert_eq!(no_path_at, Some(10_000));
+    assert_eq!(
+        client.router.propagation_client_path_attempts(&client.node),
+        Some(PropagationPathAttempts {
+            requests: 2,
+            waited_ms: 10_000,
+        })
+    );
+}
+
 /// mvr for Codeberg #393: the round that asked for a transfer owns it.
 ///
 /// `request_messages_from_propagation_node` replaces the client state, so a

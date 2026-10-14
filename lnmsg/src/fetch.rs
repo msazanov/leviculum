@@ -20,11 +20,22 @@
 use std::io::Write;
 use std::time::Duration;
 
+use leviculum_lxmf::router::PropagationPathAttempts;
 use tokio::time::Instant;
 
 use crate::events;
 use crate::outbox::{Command, Outbox, OutboxEvent, OutboxGone};
 use crate::seen::SeenStore;
+
+/// How much of a fetch's budget the drain's path phase leaves to the frontend.
+///
+/// The engine picks a command up on its next tick and notices the end of the
+/// path phase on a later one, each up to `POLL_INTERVAL_MS` (200 ms) late in
+/// `engine.rs`. Without a margin the frontend's own clock runs out first and
+/// the fetch ends as a bare [`FetchError::Timeout`], which says nothing about
+/// the requests the drain sent; with it, a missing path ends as
+/// [`FetchError::NoPath`] and is named as such.
+const PATH_BUDGET_MARGIN: Duration = Duration::from_secs(1);
 
 /// How long a fetch may take once the daemon connection is up, and how often
 /// the event queue is looked at. Same shape as [`crate::send::SendOptions`],
@@ -72,6 +83,9 @@ pub enum FetchError {
     NoPropagationNode(String),
     /// The drain started and then failed, in the state's own words.
     SyncFailed(String),
+    /// The drain asked for a path to the node until its budget ended, and
+    /// none came.
+    NoPath(PropagationPathAttempts),
     /// The budget ran out before the round completed.
     Timeout,
 }
@@ -93,6 +107,14 @@ impl std::fmt::Display for FetchError {
                  Name one with --pn <hash>, or set propagation_node in lnmsg's config."
             ),
             Self::SyncFailed(detail) => write!(f, "the mailbox sync failed: {detail}"),
+            Self::NoPath(attempts) => write!(
+                f,
+                "the mailbox sync failed: no path to the propagation node after {} path \
+                 requests over {:.1} s.\n  \
+                 Raise --timeout, or check that the node is reachable.",
+                attempts.requests,
+                attempts.waited_ms as f64 / 1000.0,
+            ),
             Self::Timeout => write!(
                 f,
                 "the mailbox sync did not complete inside the timeout.\n  \
@@ -179,7 +201,16 @@ pub async fn run_fetch<O: Outbox, W: Write>(
                 } => {
                     if !fetching {
                         events::pn(&destination, pn_source, stamp_cost);
-                        outbox.submit(Command::Fetch)?;
+                        // What is left of the budget, so the drain asks for a
+                        // path for as long as the user said the fetch may take
+                        // (leviculum#719), not for a fixed window.
+                        let left = options
+                            .budget
+                            .saturating_sub(start.elapsed())
+                            .saturating_sub(PATH_BUDGET_MARGIN);
+                        outbox.submit(Command::Fetch {
+                            path_budget_ms: u64::try_from(left.as_millis()).unwrap_or(u64::MAX),
+                        })?;
                         fetching = true;
                     }
                 }
@@ -232,7 +263,11 @@ pub async fn run_fetch<O: Outbox, W: Write>(
                         new,
                     });
                 }
-                OutboxEvent::SyncFailed { detail } if fetching => {
+                OutboxEvent::SyncFailed {
+                    path: Some(attempts),
+                    ..
+                } if fetching => return Err(FetchError::NoPath(attempts)),
+                OutboxEvent::SyncFailed { detail, .. } if fetching => {
                     return Err(FetchError::SyncFailed(detail));
                 }
                 // Send-side traffic; a fetch has none in flight.
@@ -333,7 +368,14 @@ mod tests {
             matches!(commands[0], Command::SelectPn { preferred: None }),
             "selection first: {commands:?}"
         );
-        assert!(matches!(commands[1], Command::Fetch));
+        // The path budget is the whole budget less the margin: the fake
+        // clock is paused, so no time has passed.
+        assert_eq!(
+            commands[1],
+            Command::Fetch {
+                path_budget_ms: 4_000
+            }
+        );
     }
 
     /// The cross-run half of the dedup rule: a message an earlier run
@@ -413,6 +455,7 @@ mod tests {
             },
             OutboxEvent::SyncFailed {
                 detail: "the propagation node did not answer".to_string(),
+                path: None,
             },
         ]);
         let mut seen = store(dir.path());
@@ -431,6 +474,47 @@ mod tests {
         assert_eq!(
             error,
             FetchError::SyncFailed("the propagation node did not answer".to_string())
+        );
+    }
+
+    /// leviculum#719: a missing path names how many requests the drain sent
+    /// and over how long, so a red cell does not need its `PKT_TX` counted.
+    #[tokio::test(start_paused = true)]
+    async fn a_missing_path_names_its_requests() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let attempts = PropagationPathAttempts {
+            requests: 9,
+            waited_ms: 59_000,
+        };
+        let mut outbox = FakeOutbox::new(vec![
+            OutboxEvent::PnSelected {
+                destination: PN,
+                stamp_cost: None,
+            },
+            OutboxEvent::SyncFailed {
+                detail: "no path to the propagation node".to_string(),
+                path: Some(attempts),
+            },
+        ]);
+        let mut seen = store(dir.path());
+        let mut printed = Vec::new();
+
+        let error = run_fetch(
+            &mut outbox,
+            None,
+            "announced",
+            &options(),
+            &mut seen,
+            &mut printed,
+        )
+        .await
+        .expect_err("no path is a failure");
+        assert_eq!(error, FetchError::NoPath(attempts));
+        assert!(
+            error
+                .to_string()
+                .contains("after 9 path requests over 59.0 s"),
+            "{error}"
         );
     }
 

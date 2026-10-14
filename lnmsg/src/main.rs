@@ -26,7 +26,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use leviculum_std::config::Config;
 
 use lnmsg::engine::{attach, AttachConfig};
-use lnmsg::fetch::{run_fetch, FetchOptions};
+use lnmsg::fetch::{run_fetch, FetchError, FetchOptions};
 use lnmsg::outbox::{SendRequest, Via};
 use lnmsg::seen::SeenStore;
 use lnmsg::send::{
@@ -481,7 +481,12 @@ async fn run_fetch_command(args: FetchArgs) -> ExitCode {
         }
         Err(error) => {
             eprintln!("lnmsg: {error}");
-            events::done(None, "failed", EXIT_FAILURE);
+            match error {
+                FetchError::NoPath(attempts) => {
+                    events::done_without_path(EXIT_FAILURE, attempts.requests, attempts.waited_ms)
+                }
+                _ => events::done(None, "failed", EXIT_FAILURE),
+            }
             ExitCode::from(EXIT_FAILURE)
         }
     };

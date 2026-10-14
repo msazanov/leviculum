@@ -140,6 +140,10 @@ struct Resolve {
     /// (`reference/LXMF/LXMF/LXMRouter.py:33`, `:1779`): one request is one
     /// packet, and a packet lost to a daemon whose interface is still
     /// reconnecting must not cost the whole send (leviculum#699).
+    ///
+    /// There is no deadline here on purpose: the repeat runs until the
+    /// frontend's own budget (`lnmsg send --timeout`) ends the run, the rule
+    /// a fetch's path phase follows too (leviculum#719).
     next_path_request_ms: Option<u64>,
     /// Set once the answer has gone out, so a repeated ask is not answered
     /// twice.
@@ -252,7 +256,7 @@ impl Engine {
         let mut rounds = 0usize;
         while let Some(router_output) = queue.pop_front() {
             for event in router_output.events {
-                self.report(event);
+                self.report(ready, core, event);
             }
             let mut core_output = router_output.core;
             let events = std::mem::take(&mut core_output.events);
@@ -275,7 +279,7 @@ impl Engine {
     }
 
     /// Turn one router event into something the frontend can act on.
-    fn report(&mut self, event: RouterEvent) {
+    fn report(&mut self, ready: &Ready, core: &StdNodeCore, event: RouterEvent) {
         match event {
             RouterEvent::MessageQueued(id) => {
                 self.tracked.insert(id, None);
@@ -311,8 +315,12 @@ impl Engine {
             }
             RouterEvent::PropagationSyncState(status) => {
                 if let Some(word) = sync_failure(status.state) {
+                    let path = (status.state == PropagationClientState::NoPath)
+                        .then(|| ready.router.propagation_client_path_attempts(core))
+                        .flatten();
                     self.emit(OutboxEvent::SyncFailed {
                         detail: word.to_string(),
+                        path,
                     });
                 }
             }
@@ -385,7 +393,9 @@ impl Engine {
                 }),
                 Ok(Command::Send(request)) => self.send(ready, core, *request, out),
                 Ok(Command::SelectPn { preferred }) => self.select_pn(ready, core, preferred, out),
-                Ok(Command::Fetch) => self.fetch(ready, core, out),
+                Ok(Command::Fetch { path_budget_ms }) => {
+                    self.fetch(ready, core, path_budget_ms, out);
+                }
                 Ok(Command::Cancel { message_id }) => self.cancel(ready, core, &message_id, out),
                 Err(TryRecvError::Empty) => return,
                 // The frontend is gone; the node is being torn down.
@@ -436,15 +446,28 @@ impl Engine {
         }
     }
 
-    /// Start one mailbox drain against the selected node.
-    fn fetch(&mut self, ready: &mut Ready, core: &mut StdNodeCore, out: &mut TickOutput) {
-        match ready
+    /// Start one mailbox drain against the selected node, asking for its path
+    /// for as long as `path_budget_ms` (leviculum#719).
+    fn fetch(
+        &mut self,
+        ready: &mut Ready,
+        core: &mut StdNodeCore,
+        path_budget_ms: u64,
+        out: &mut TickOutput,
+    ) {
+        let started = ready
             .router
-            .request_messages_from_propagation_node(core, None)
-        {
+            .set_propagation_path_timeout_ms(path_budget_ms)
+            .and_then(|()| {
+                ready
+                    .router
+                    .request_messages_from_propagation_node(core, None)
+            });
+        match started {
             Ok(output) => self.absorb(ready, core, output, out),
             Err(e) => self.emit(OutboxEvent::SyncFailed {
                 detail: format!("{e:?}"),
+                path: None,
             }),
         }
     }

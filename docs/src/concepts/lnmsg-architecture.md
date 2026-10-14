@@ -170,7 +170,7 @@ handoff, and wiring the two together is an explicit goal.
 Three layers, all sans-IO: `NodeCore` (Reticulum transport, owned by the
 app), `LxmfNode` (`leviculum-lxmf/src/node.rs:375`, the `lxmf.delivery`
 destination adapter), and `LxmfRouter`
-(`leviculum-lxmf/src/router.rs:461`, the queue, retry scheduler, stamp and
+(`leviculum-lxmf/src/router.rs:462`, the queue, retry scheduler, stamp and
 ticket policy, dedup caches and propagation client). The application builds
 on `LxmfRouter` and owns both it and the core; the router never owns the
 core, every method takes it as a parameter.
@@ -211,7 +211,7 @@ client that forgets this will silently never see incoming messages.
 
 ### `RouterEvent`
 
-Fifteen variants (`leviculum-lxmf/src/router.rs:294-342`):
+Fifteen variants (`leviculum-lxmf/src/router.rs:295-343`):
 `MessageQueued`, `MessageState { message_id, state }`, `MessageReceived`,
 `InboundRejected`, `DirectLinkEstablished`, `Duplicate`,
 `InvalidSignature`, `InvalidStamp`, `ResourceBuildPending`, `StampPending`,
@@ -222,18 +222,18 @@ What is missing is as informative as what is there. There is no announce
 event: `LxmfNodeEvent::PeerAnnounced` carries the destination hash only,
 with app data discarded (`leviculum-lxmf/src/node.rs:133-135`,
 `:746-754`), and `handle_node_event` does not forward it at all — it falls
-into `_ => {}` (`leviculum-lxmf/src/router.rs:1371`). The router does
+into `_ => {}` (`leviculum-lxmf/src/router.rs:1372`). The router does
 decode the delivery announce but keeps only `stamp_cost` and
 `compression_supported`, discarding the display name
-(`leviculum-lxmf/src/router.rs:1209-1219`). **Display-name learning is
+(`leviculum-lxmf/src/router.rs:1210-1220`). **Display-name learning is
 entirely the client's job**, from raw `NodeEvent::AnnounceReceived`.
 
 `Sending` does arrive, on the event every verdict travels on:
 `RouterEvent::MessageState`, from all three sites that enter the state —
-the composed send (`leviculum-lxmf/src/router.rs:1840-1845`), the
-built-transfer commit (`leviculum-lxmf/src/router.rs:1033-1038`) and the
+the composed send (`leviculum-lxmf/src/router.rs:1841-1846`), the
+built-transfer commit (`leviculum-lxmf/src/router.rs:1034-1039`) and the
 upload the transport reports through `UploadSubmitted`
-(`leviculum-lxmf/src/router/propagation_runtime.rs:369-381`) — and on the
+(`leviculum-lxmf/src/router/propagation_runtime.rs:402-414`) — and on the
 transition only: a submission onto an entry already in that state reports
 nothing. For a direct delivery it is the only thing between being accepted
 and being answered. For a propagated one it names the message on a link
@@ -244,9 +244,9 @@ tick, and *that* transition is reported nowhere.
 
 There is still no event for `Outbound` and none for progress: the router
 folds `LxmfNodeEvent::Progress` into `OutboundEntry::progress` without
-emitting anything (`leviculum-lxmf/src/router.rs:1423-1435`), so progress
+emitting anything (`leviculum-lxmf/src/router.rs:1424-1435`), so progress
 must be polled through `outbound()`
-(`leviculum-lxmf/src/router.rs:701`).
+(`leviculum-lxmf/src/router.rs:702`).
 
 ### `MessageState` and what it honestly means
 
@@ -264,13 +264,13 @@ Discriminants are the Python `LXMessage` constants. Four traps:
 2. **`Sent` means two different things and never applies to direct
    delivery.** For opportunistic messages it means the packet was handed to
    Reticulum unproven, and the message is still queued and still retryable
-   (`leviculum-lxmf/src/router.rs:1329-1343`). For propagated messages it
+   (`leviculum-lxmf/src/router.rs:1330-1344`). For propagated messages it
    means the propagation node accepted the upload, and the entry is
-   *deleted* (`leviculum-lxmf/src/router/propagation_runtime.rs:401-408`).
+   *deleted* (`leviculum-lxmf/src/router/propagation_runtime.rs:434-441`).
    Direct delivery goes `Outbound -> Sending -> Delivered | Rejected |
    Failed` and never passes through `Sent`, because the `Submitted` handler
    matches only `DeliveryMethod::Opportunistic`
-   (`leviculum-lxmf/src/router.rs:1405-1409`).
+   (`leviculum-lxmf/src/router.rs:1409-1413`).
 3. **`Delivered` is a Reticulum transport proof, not an application
    receipt.** It comes from `PacketDeliveryConfirmed` /
    `LinkDeliveryConfirmed` (`leviculum-lxmf/src/node.rs:1282-1304`) or from
@@ -281,9 +281,9 @@ Discriminants are the Python `LXMessage` constants. Four traps:
    read-receipt field in LXMF at all
    (`leviculum-lxmf/src/constants.rs:60-86`).
 4. **`Rejected` is ambiguous.** It means either "the receiver cancelled the
-   Resource transfer" (`leviculum-lxmf/src/router.rs:1287-1300`) or "the
+   Resource transfer" (`leviculum-lxmf/src/router.rs:1288-1301`) or "the
    propagation node refused the upload for an insufficient stamp"
-   (`leviculum-lxmf/src/router/propagation_runtime.rs:433-445`), and the
+   (`leviculum-lxmf/src/router/propagation_runtime.rs:466-478`), and the
    event alone cannot distinguish them.
 
 And one omission that shapes the whole UI: **there is no "propagated but
@@ -292,12 +292,12 @@ entry is removed, and from then on it is indistinguishable from a message
 that vanished.
 
 Terminal states remove the entry from the outbound map
-(`remove_outbound`, `leviculum-lxmf/src/router.rs:873-876`; call sites at
+(`remove_outbound`, `leviculum-lxmf/src/router.rs:874-877`; call sites at
 `:888`, `:1334`, `:1369` and five in the propagation runtime, among them
-`leviculum-lxmf/src/router/propagation_runtime.rs:924`). If the client does
+`leviculum-lxmf/src/router/propagation_runtime.rs:960`). If the client does
 not capture the `Message` at `enqueue` time it cannot render its own sent
 message afterwards, and it cannot offer a retry button.
-`MAX_DELIVERY_ATTEMPTS` is 5 (`leviculum-lxmf/src/router.rs:47`).
+`MAX_DELIVERY_ATTEMPTS` is 5 (`leviculum-lxmf/src/router.rs:48`).
 
 ### Propagation: what the router does, and what it refuses to do
 
@@ -305,9 +305,9 @@ Setup requires the client to mint a second `lxmf.propagation` destination
 via `PropagationTransport::destination`
 (`leviculum-lxmf/src/propagation_client.rs:282-292`),
 register it, and hand it to `enable_propagation_client`
-(`leviculum-lxmf/src/router.rs:603`); the transport identity must equal the
+(`leviculum-lxmf/src/router.rs:604`); the transport identity must equal the
 router's or you get `RouterError::IdentityMismatch`
-(`leviculum-lxmf/src/router.rs:608-610`).
+(`leviculum-lxmf/src/router.rs:609-611`).
 
 Node discovery is automatic from announces (`remember_announce`,
 `leviculum-lxmf/src/propagation_client.rs:384-400`, driven from the
@@ -324,7 +324,7 @@ list request, want/have partitioning, download, acknowledge and purge
 (`begin_list_request`,
 `leviculum-lxmf/src/router/propagation_runtime.rs:459-551`). The observable
 state machine is `PropagationClientState`
-(`leviculum-lxmf/src/router/propagation_runtime.rs:71-86`),
+(`leviculum-lxmf/src/router/propagation_runtime.rs:83-98`),
 wire-compatible with Python's `PR_*` constants: `Idle`, `PathRequested`,
 `LinkEstablishing`, `LinkEstablished`, `RequestSent`, `Receiving`,
 `ResponseReceived`, `Complete`, `NoPath`, `LinkFailed`, `TransferFailed`,
@@ -336,27 +336,27 @@ selected one loses its route
 What the router will not do:
 
 - **It never schedules a sync.** `request_messages_from_propagation_node`
-  (`leviculum-lxmf/src/router/propagation_runtime.rs:1403`) must be called
+  (`leviculum-lxmf/src/router/propagation_runtime.rs:1471`) must be called
   by the application every time. `PropagationClientConfig` has three fields
   and none of them is an interval
-  (`leviculum-lxmf/src/router/propagation_runtime.rs:46-56`), and
+  (`leviculum-lxmf/src/router/propagation_runtime.rs:56-68`), and
   `next_deadline()` returns `None` in every state except `PathRequested`
-  (`leviculum-lxmf/src/router/propagation_runtime.rs:1175-1186`).
+  (`leviculum-lxmf/src/router/propagation_runtime.rs:1211-1222`).
 - **It does not persist known propagation nodes.** They live in an
   in-memory map (`known_nodes`,
   `leviculum-lxmf/src/propagation_client.rs:267`) and are absent from the
-  router snapshot (`snapshot`, `leviculum-lxmf/src/router.rs:2077-2094`).
+  router snapshot (`snapshot`, `leviculum-lxmf/src/router.rs:2078-2095`).
   The client must persist and replay them via
   `restore_known_propagation_node`
-  (`leviculum-lxmf/src/router/propagation_runtime.rs:1355`). The selected
+  (`leviculum-lxmf/src/router/propagation_runtime.rs:1423`). The selected
   node is not snapshotted either.
 - **It does not clamp the transfer limit against the node's advertised
   one.** The download request carries the local
   `delivery_transfer_limit_kb` (default 1000) regardless of what the node
-  announced (`leviculum-lxmf/src/router/propagation_runtime.rs:548-553`).
+  announced (`leviculum-lxmf/src/router/propagation_runtime.rs:581-586`).
 
 Default `retain_synced_on_node` is `false`
-(`leviculum-lxmf/src/router/propagation_runtime.rs:61`), meaning the client
+(`leviculum-lxmf/src/router/propagation_runtime.rs:73`), meaning the client
 tells the node to purge what it has collected. That is a user-visible
 policy decision disguised as a config default, and
 [the mailbox page](lnmsg-mailbox.md) argues it should be surfaced.
@@ -384,14 +384,14 @@ implementations exist, both in that file: `MemoryLxmfStorage`
 crate is `no_std`.
 
 The router writes exactly one key, `b"lxmf/router-state"`
-(`ROUTER_STATE_KEY`, `leviculum-lxmf/src/router.rs:64`), holding the
+(`ROUTER_STATE_KEY`, `leviculum-lxmf/src/router.rs:65`), holding the
 outbound queue, delivered and processed ID windows, stamp costs, tickets
-and the ignore set (`leviculum-lxmf/src/router.rs:2077-2094`). A client
+and the ignore set (`leviculum-lxmf/src/router.rs:2078-2095`). A client
 should stay off the `lxmf/` prefix and is otherwise free.
 
 Restore resets every queued message to `Outbound` with
 `next_attempt_ms = 0` and `progress = 0.01`
-(`leviculum-lxmf/src/router.rs:2062-2065`), because in-flight correlation
+(`leviculum-lxmf/src/router.rs:2063-2066`), because in-flight correlation
 is expressed in a process-local monotonic clock that does not survive a
 restart. A UI therefore cannot show a stable "sending" progress across
 restarts, and must not pretend to.
@@ -417,20 +417,20 @@ restarts, and must not pretend to.
   invisible and automatic: received tickets are remembered from any
   signature-valid inbound message — `remember_verified_ticket`
   (`leviculum-lxmf/src/router.rs:1512`) — and applied when a message is
-  enqueued (`leviculum-lxmf/src/router.rs:820`). Expiry 21 days, renew at 14,
+  enqueued (`leviculum-lxmf/src/router.rs:821`). Expiry 21 days, renew at 14,
   minimum one day between issuances to the same peer
   (`leviculum-lxmf/src/constants.rs:48-51`). `issue_ticket_field` refuses
   with `RouterError::NoWallClock` when the node's clock is implausible
-  (`leviculum-lxmf/src/router.rs:681-682`), and can also legitimately
+  (`leviculum-lxmf/src/router.rs:682-683`), and can also legitimately
   return `Ok((None, _))` when rate-limited
-  (`leviculum-lxmf/src/router.rs:699`). A UI has to distinguish "granted",
+  (`leviculum-lxmf/src/router.rs:700`). A UI has to distinguish "granted",
   "not yet, try tomorrow" and "cannot, no clock".
 - **Stamps** (`leviculum-lxmf/src/stamp.rs`): proof-of-work over the
   message ID, cost being required leading zero bits, so expected work is
   2^cost hashes plus a workblock expansion of 3000 rounds
   (`WORKBLOCK_EXPAND_ROUNDS`, `leviculum-lxmf/src/constants.rs:53`). Costs
   above about 40 bits are described in-tree as "already unreachable in
-  practice" (`leviculum-lxmf/src/router.rs:1145-1146`). No wall-clock
+  practice" (`leviculum-lxmf/src/router.rs:1146-1147`). No wall-clock
   benchmark exists in the crate and none was run for this document, so any
   UI estimate of mining time must be measured first, not guessed. There is
   no cancellation and no deadline: `generate` loops until it succeeds
@@ -617,7 +617,7 @@ Three specific things `lnomad` does that must change:
    (`lnomad/src/tui.rs:6157`). A messenger has relative timestamps, a sync
    schedule and retry deadlines. A one-second tick when there is anything
    pending, and a slower one otherwise, driven by `next_deadline()`
-   (`leviculum-lxmf/src/router.rs:2008`).
+   (`leviculum-lxmf/src/router.rs:2009`).
 
 Things to carry over unchanged: the generation counter for stale-result
 rejection (`spawn_fetch`, `lnomad/src/tui.rs:5305-5346`), the tick-counted
@@ -741,14 +741,14 @@ not a list of open work.
 1. **No display name reaches the application.**
    `LxmfNodeEvent::PeerAnnounced` carries the destination hash only
    (`leviculum-lxmf/src/node.rs:133-135`), the router drops the name after
-   reading the stamp cost (`leviculum-lxmf/src/router.rs:1209-1219`), and
+   reading the stamp cost (`leviculum-lxmf/src/router.rs:1210-1220`), and
    `RouterEvent` has no announce variant. Every client will re-implement
    announce filtering and `DeliveryAnnounce::decode`. A
    `RouterEvent::PeerAnnounced { destination, announce }` would remove that
    duplication.
 2. **No "propagated, awaiting collection" state.** A propagated message
    reaches `Sent` and its queue entry is deleted
-   (`leviculum-lxmf/src/router/propagation_runtime.rs:401-408`), so the
+   (`leviculum-lxmf/src/router/propagation_runtime.rs:434-441`), so the
    client cannot distinguish "in a mailbox" from "gone" without keeping its
    own shadow record. This is the single biggest obstacle to an honest
    delivery display.
@@ -758,11 +758,11 @@ not a list of open work.
    same one.
 4. **No periodic sync scheduler and no interval config.**
    `PropagationClientConfig` has three fields
-   (`leviculum-lxmf/src/router/propagation_runtime.rs:46-56`). Arguably
+   (`leviculum-lxmf/src/router/propagation_runtime.rs:56-68`). Arguably
    correct for a sans-IO crate, but it means every client invents its own
    policy.
 5. **Known propagation nodes and the selection are not in the snapshot**
-   (`leviculum-lxmf/src/router.rs:2077-2094`), so every client writes its
+   (`leviculum-lxmf/src/router.rs:2078-2095`), so every client writes its
    own persistence and replay.
 6. **No stamp cancellation or deadline.** `generate` loops until success
    (`leviculum-lxmf/src/stamp.rs:356-367`) and `StampError::Cancelled` is
@@ -773,7 +773,7 @@ not a list of open work.
    support (`leviculum-lxmf/src/node.rs:518-519`). A user receiving a large
    attachment they do not want can only watch.
 8. **Most error types are `Debug` only.** `RouterError`
-   (`leviculum-lxmf/src/router.rs:359`), `LxmfNodeError`
+   (`leviculum-lxmf/src/router.rs:360`), `LxmfNodeError`
    (`leviculum-lxmf/src/node.rs:257`), `PropagationTransportError`
    (`leviculum-lxmf/src/propagation_client.rs:144`), `MessageError`
    (`leviculum-lxmf/src/message.rs:40`) and `StorageError` have no

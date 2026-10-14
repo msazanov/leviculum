@@ -41,7 +41,8 @@ use outbound::BuildEpochs;
 pub use outbound::OutboundEntry;
 use propagation_runtime::PropagationRuntime;
 pub use propagation_runtime::{
-    PropagationClientConfig, PropagationClientState, PropagationSyncResult, PropagationSyncStatus,
+    PropagationClientConfig, PropagationClientState, PropagationPathAttempts,
+    PropagationSyncResult, PropagationSyncStatus,
 };
 
 pub const MAX_DELIVERY_ATTEMPTS: u8 = 5;
