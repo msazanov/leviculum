@@ -11,9 +11,9 @@ This is where a naive design produces a client that silently loses mail,
 and the library has arranged things so that the naive design is the
 default: **nothing syncs unless the application asks**
 (`request_messages_from_propagation_node`,
-`leviculum-lxmf/src/router/propagation_runtime.rs:1471`, and
+`leviculum-lxmf/src/router/propagation_runtime.rs:1484`, and
 `next_deadline()` returns `None` outside `PathRequested`,
-`leviculum-lxmf/src/router/propagation_runtime.rs:1211-1222`).
+`leviculum-lxmf/src/router/propagation_runtime.rs:1224-1235`).
 
 ### When to sync
 
@@ -116,7 +116,7 @@ TRUSTED** (its `NomadNetworkApp.py`, lines 607-631). columba auto-selects
 the fewest-hops node, full stop. The library's own auto-selection ranks by
 route, hops, peering cost and stamp cost
 (`select_outbound_propagation_node`,
-`leviculum-lxmf/src/router/propagation_runtime.rs:1201-1236`) with no trust
+`leviculum-lxmf/src/router/propagation_runtime.rs:1214-1249`) with no trust
 input at all, because it has no notion of trust.
 
 Your mailbox sees the *envelope* of every message sent to you: who sent it
@@ -154,7 +154,7 @@ consequence spelled out, not a config-file default nobody reads.
   neither is in the router snapshot (`snapshot`,
   `leviculum-lxmf/src/router.rs:2078-2095`); replay via
   `restore_known_propagation_node`
-  (`leviculum-lxmf/src/router/propagation_runtime.rs:1423`).
+  (`leviculum-lxmf/src/router/propagation_runtime.rs:1436`).
 - Re-selection after restart.
 - Proof-of-work for `PropagationStampPending`, off the core lock.
 - Calling `persist()` on `PersistenceRequested`.

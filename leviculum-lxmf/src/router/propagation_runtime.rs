@@ -898,7 +898,20 @@ impl PropagationRuntime {
         // queued. Once Core no longer has a route, move pending work to the
         // best reachable announced alternative instead of exhausting every
         // attempt against the stale preference.
-        if node.hops_to(&propagation_node).is_none() {
+        //
+        // Not while a mailbox round is still running on that node: the switch
+        // replaces the client state, so the round would end without a word.
+        // A failed handshake expires the node's path in the same driver tick
+        // that reports the dead link, and this tick runs before that report
+        // reaches `LinkClosed` — which then names a node no longer selected
+        // and is ignored. 733's chain_sync cell waited out its whole 90 s
+        // budget on that silence. The round ends on its own instead: the dead
+        // link as `LinkFailed`, the reference's `PR_LINK_FAILED`
+        // (`LXMRouter.py:991-996`), a path that never comes as `NoPath`
+        // (`:1461-1470`). The reference never switches nodes by itself at
+        // all (`outbound_propagation_node` is set only by its caller,
+        // `:412`), so the next tick moving on is still the deviation it was.
+        if node.hops_to(&propagation_node).is_none() && !sync_is_active(self.client.state) {
             if let Some(alternative) = self
                 .transport
                 .known_nodes()

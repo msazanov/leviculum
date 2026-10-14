@@ -2096,3 +2096,102 @@ fn a_propagation_node_switch_invalidates_a_build_for_the_old_node() {
         "the refusal leaves the entry queued for a fresh build"
     );
 }
+
+/// 735: a mailbox round whose link dies ends as `LinkFailed`, even when the
+/// client knows a second node it could move to.
+///
+/// A failed handshake expires the node's path and reports `LinkClosed` in one
+/// driver tick, and the driver runs the router's `tick` before it delivers
+/// that event. The tick saw no route, moved to the alternative and replaced
+/// the client state, so the `LinkClosed` that followed named a node no longer
+/// selected and the round ended without a word. The order is replayed here:
+/// path gone, `tick`, then the close.
+#[test]
+fn a_dead_sync_link_ends_the_round_before_any_switch_to_a_second_node() {
+    let MailboxPair {
+        mut client,
+        mut server,
+        ..
+    } = mailbox_pair();
+    let announce = server
+        .node
+        .announce_destination(
+            &server.propagation_destination,
+            Some(&propagation_announce()),
+        )
+        .expect("announce propagation node");
+    let _ = client.receive(server.absorb_core(announce));
+    let (mut second_sink, second_hash) = upload_sink(70);
+    let announced = second_sink
+        .node
+        .announce_destination(&second_hash, Some(&propagation_announce()))
+        .expect("announce the second propagation node");
+    let _ = client.receive(take_packets(announced.actions));
+    assert!(client.router.known_propagation_node(&second_hash).is_some());
+    assert!(client.node.has_path(&second_hash));
+
+    let selected = client
+        .router
+        .set_outbound_propagation_node(&mut client.node, Some(server.propagation_destination))
+        .expect("select the first node");
+    let _ = client.absorb_router(selected);
+    let requested = client
+        .router
+        .request_messages_from_propagation_node(&mut client.node, None)
+        .expect("request mailbox");
+    let link_request = client.absorb_router(requested);
+    assert_eq!(link_request.len(), 1, "the round opens with a link request");
+    assert_eq!(
+        client.router.propagation_client_state(),
+        Some(PropagationClientState::LinkEstablishing)
+    );
+    let link_id = client
+        .node
+        .links()
+        .find(|(_, link)| *link.destination_hash() == server.propagation_destination)
+        .map(|(id, _)| *id)
+        .expect("the round's link is pending");
+
+    // The handshake timeout's path expiry, then the tick the driver runs
+    // before the close is delivered.
+    assert!(client
+        .node
+        .remove_path(server.propagation_destination.as_bytes()));
+    let ticked = client.router.tick(&mut client.node).expect("tick");
+    let _ = client.absorb_router(ticked);
+    assert_eq!(
+        client.router.outbound_propagation_node(),
+        Some(server.propagation_destination),
+        "a running round keeps its node"
+    );
+
+    client.events.clear();
+    let closed = client
+        .router
+        .handle_event(
+            &mut client.node,
+            &NodeEvent::LinkClosed {
+                link_id,
+                reason: leviculum_core::LinkCloseReason::Timeout,
+                is_initiator: true,
+                destination_hash: server.propagation_destination,
+            },
+        )
+        .expect("router handles the close");
+    let _ = client.absorb_router(closed);
+    assert_eq!(
+        client.router.propagation_client_state(),
+        Some(PropagationClientState::LinkFailed)
+    );
+    assert!(
+        client.events.iter().any(|event| matches!(
+            event,
+            RouterEvent::PropagationSyncState(PropagationSyncStatus {
+                state: PropagationClientState::LinkFailed,
+                ..
+            })
+        )),
+        "the failure is reported: {:?}",
+        client.events
+    );
+}
