@@ -36,9 +36,18 @@
 //! fill backlog is drained before the query so the storm, not a
 //! test-artifact burst queue, is what the query runs against.
 //!
-//! Without either fix this is red at every budget: the request
+//! Without either fix this was red at every budget: the request
 //! black-holes (1), or its answer is held past any budget for as long as
-//! the storm keeps the burst limiter armed (2).
+//! the storm keeps the burst limiter armed (2). Fix 2 now pins this test
+//! only on a starved host. Measured 2026-10-14 with the client uplink's
+//! `ingress_control` back at `None`: the querying client's limiter arms,
+//! but the answer passes as an announce for a destination the client has
+//! a path request out for (`Transport::own_path_request_pending`, the
+//! reference's Transport.py:1701 exemption), and under CPUQuota=25% the
+//! query took 0.41 s. What the revert does break is the daemon, itself a
+//! local client: it holds the fill announces (2 paths learned of 5097),
+//! the drain below gives up on its stall rule, and under CPUQuota=10% the
+//! query then waits behind the daemon's backlog and times out at 5 s.
 
 use std::time::Duration;
 
@@ -64,8 +73,29 @@ const PATH_TABLE_CAP: usize = 4096;
 const FILL_ANNOUNCES: usize = PATH_TABLE_CAP + 1000;
 
 /// Fresh destinations announced per second while the query runs — the
-/// field's "a few thousand PATH_ADD per minute", sustained.
+/// field's "a few thousand PATH_ADD per minute", sustained. A ceiling: the
+/// storm also waits for the daemon (see where it runs).
 const STORM_PER_SEC: u64 = 50;
+
+/// How long the daemon may take to work off the fill backlog. A liveness
+/// bound, not a budget: the wait ends when the drain sentinel arrives. The
+/// daemon learned about 24 announces a second under CPUQuota=10% in a debug
+/// build (2026-10-14), so a 5000-announce backlog on a starved runner is
+/// minutes; nothing here measures that time.
+const DRAIN_LIVENESS: Duration = Duration::from_secs(600);
+
+/// The drain stops waiting for the sentinel when the daemon learns fewer
+/// than `DRAIN_STALL_MIN_PATHS` in a `DRAIN_STALL_WINDOW`. A starved daemon
+/// still learned about 24 a second under CPUQuota=10%, with gaps of at most
+/// 1.1 s; a daemon whose uplink holds announces learns one per held-release
+/// interval (5 s), which is not working the backlog off but sitting on it.
+const DRAIN_STALL_WINDOW: Duration = Duration::from_secs(10);
+const DRAIN_STALL_MIN_PATHS: usize = 10;
+
+/// The longest the storm waits for the daemon to learn one announce before
+/// it sends the next: with the 20 ms clock pace, the storm stays above
+/// about 8 announces a second whatever the daemon does.
+const STORM_PACE_WAIT: Duration = Duration::from_millis(100);
 
 /// lnpnd's production engine on a stock configuration, as in
 /// `status_default_budget.rs`.
@@ -238,46 +268,104 @@ async fn status_at_the_shipped_budget_on_a_loaded_instance() {
     // announce out to its local clients, and the daemon verifies each, so
     // a query launched into that backlog measures the test's own burst
     // instead of the sustained load. Field announce arrival is a rate,
-    // not a one-shot 5000-announce burst; the plateau of the daemon's own
-    // path count marks the backlog processed.
-    let drained = tokio::time::timeout(Duration::from_secs(60), async {
-        let mut last = daemon.path_count();
-        loop {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            let now = daemon.path_count();
-            if now == last {
-                return;
+    // not a one-shot 5000-announce burst.
+    //
+    // The backlog is drained when the daemon has learned a sentinel
+    // announced after the last fill announce: the path from the feeder
+    // through the instance to the daemon is one FIFO, so the sentinel is
+    // processed after everything ahead of it. This used to wait for the
+    // daemon's path count to stand still for 500 ms, a proxy that a starved
+    // host satisfies early. Measured 2026-10-14 under CPUQuota=10%: the
+    // daemon's progress came in bursts with a 1.1 s gap, the plateau fired
+    // with 1507 to 2073 of the 5096 fill paths learned (three runs, all
+    // red), and the client's path request then sat behind the other 3000 or
+    // more in the daemon's inbound queue for the whole 5 s budget: the
+    // instance never relearned the control path, which is the forge red of
+    // pipeline 518 line for line. At 25 % the same proxy fired at 5096 and
+    // the query took 0.6 to 0.7 s. With the sentinel the query found no
+    // backlog and took 0.7 to 1.3 s under 10 %, 0.4 to 0.6 s under 25 %.
+    let sentinel = feeder_destination(&feeder, FILL_ANNOUNCES);
+    feeder
+        .announce_destination(&sentinel, None)
+        .await
+        .expect("announce the drain sentinel");
+    let drain_started = std::time::Instant::now();
+    let drained = tokio::time::timeout(DRAIN_LIVENESS, async {
+        let mut checkpoint = (daemon.path_count(), std::time::Instant::now());
+        while !daemon.has_path(&sentinel) {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            if checkpoint.1.elapsed() >= DRAIN_STALL_WINDOW {
+                let now = daemon.path_count();
+                if now < checkpoint.0 + DRAIN_STALL_MIN_PATHS {
+                    return false;
+                }
+                checkpoint = (now, std::time::Instant::now());
             }
-            last = now;
         }
+        true
     })
     .await;
+    eprintln!(
+        "PATH_DRAIN daemon_paths={} elapsed_ms={} sentinel={}",
+        daemon.path_count(),
+        drain_started.elapsed().as_millis(),
+        daemon.has_path(&sentinel)
+    );
+    // A daemon that has all but stopped learning is not slow, it is holding
+    // the announces (an armed burst limiter on its own uplink does that),
+    // and the sentinel would only arrive with the liveness bound. Such a
+    // drain goes on to the query, which is the assertion that names the
+    // outcome. Only a daemon still learning after `DRAIN_LIVENESS` fails
+    // here.
     assert!(
         drained.is_ok(),
-        "the daemon never finished the fill backlog"
+        "the daemon was still working off the fill backlog after \
+         {DRAIN_LIVENESS:?} ({} paths learned)",
+        daemon.path_count()
     );
 
-    // Sustained churn while the query runs: fresh destinations at
+    // Sustained churn while the query runs: fresh destinations at up to
     // `STORM_PER_SEC`, each one a PATH_ADD plus an eviction at the cap —
     // and, fanned out to the clients, exactly the announce pressure that
     // used to keep the client's burst limiter armed (defect 2 above).
-    let storm = tokio::spawn(async move {
-        let mut index = FILL_ANNOUNCES;
+    //
+    // Paced by the daemon's own progress as well as by the clock: the next
+    // announce leaves once the daemon has learned the previous one, or
+    // after `STORM_PACE_WAIT`. On a host that verifies 50 announces a
+    // second with CPU to spare that is the full rate; on a starved one the
+    // storm slows with the daemon instead of building a queue in front of
+    // the client's request that grows for as long as the query runs, which
+    // would measure the host's CPU and not the budget. Under CPUQuota=10%
+    // that queue held the answer for 2.7 s with the clock alone and 1.0 to
+    // 1.5 s with this pace. The wait is capped so a daemon that stops learning
+    // cannot stop the storm: it still runs well above the new-interface
+    // burst threshold of 3 a second.
+    let storm_sent = std::sync::atomic::AtomicUsize::new(0);
+    let storm = async {
+        let mut pace = tokio::time::interval(Duration::from_millis(1000 / STORM_PER_SEC));
+        pace.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut index = FILL_ANNOUNCES + 1;
         loop {
+            pace.tick().await;
             let hash = feeder_destination(&feeder, index);
             index += 1;
             if feeder.announce_destination(&hash, None).await.is_err() {
-                break;
+                return;
             }
-            tokio::time::sleep(Duration::from_millis(1000 / STORM_PER_SEC)).await;
+            storm_sent.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let learned_by = tokio::time::Instant::now() + STORM_PACE_WAIT;
+            while !daemon.has_path(&hash) && tokio::time::Instant::now() < learned_by {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
         }
-    });
+    };
 
     // The shipped client at the shipped budget: `client::run` is the code
-    // `main.rs` runs, fresh per-invocation storage and all.
+    // `main.rs` runs, fresh per-invocation storage and all. The storm runs
+    // beside it on this task and ends when the query does.
     let client_storage = tempfile::tempdir().expect("tempdir client");
     let query_started = std::time::Instant::now();
-    let code = lnpnd::client::run(
+    let query = lnpnd::client::run(
         ClientOptions {
             instance: instance.clone(),
             storage_dir: client_storage.path().join("state"),
@@ -289,15 +377,18 @@ async fn status_at_the_shipped_budget_on_a_loaded_instance() {
             show_status: true,
             show_peers: false,
         },
-    )
-    .await;
+    );
+    let code = tokio::select! {
+        code = query => code,
+        () = storm => panic!("the storm ended before the query: the feeder could not announce"),
+    };
     let query_elapsed = query_started.elapsed();
 
-    storm.abort();
     eprintln!(
-        "STATUS_UNDER_LOAD code={code} elapsed_ms={} table={} cap={PATH_TABLE_CAP}",
+        "STATUS_UNDER_LOAD code={code} elapsed_ms={} table={} cap={PATH_TABLE_CAP} storm_sent={}",
         query_elapsed.as_millis(),
-        shared.path_count()
+        shared.path_count(),
+        storm_sent.load(std::sync::atomic::Ordering::Relaxed)
     );
 
     assert_eq!(

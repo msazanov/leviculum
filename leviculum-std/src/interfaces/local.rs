@@ -520,8 +520,8 @@ pub(crate) fn spawn_local_client(config: LocalClientConfig) -> Result<InterfaceH
             // path-response announce it had asked for, until past any
             // query budget. That is the client half of Codeberg #427's
             // `lnpnd --status` timeouts (7 of 8 field runs at 5, 20 and
-            // 60 s alike); pinned end-to-end in
-            // `lnpnd/tests/status_under_transport_load.rs`.
+            // 60 s alike); pinned end-to-end, under a ~10 % CPU quota only
+            // (2026-10-14), by `lnpnd/tests/status_under_transport_load.rs`.
             ingress_control: Some(false),
         },
         incoming: incoming_rx,
