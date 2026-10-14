@@ -64,7 +64,7 @@ by content, not just extension (`config.rs:662-689`):
 In practice your `config` file uses the Python INI form shown
 throughout this page. Boolean values accept `Yes`, `yes`, `True`,
 `true`, `1`, `on` (and their false counterparts); anything else is read
-as `false` (`ini_config.rs:1035-1056`).
+as `false` (`ini_config.rs:1041-1062`).
 
 ## A file with a syntax error is refused
 
@@ -113,18 +113,19 @@ Core daemon settings. Every key below is parsed in
 | `shared_instance_socket` | path | unset | Explicit AF_UNIX socket path (RNS 1.3.x). Parsed for compatibility; cleared when `shared_instance_type = tcp`. (`config.rs:53-58`; `ini_config.rs:427-429`) |
 | `respond_to_probes` | bool | `false` | Answer `rnprobe` requests by signing a proof for each probe packet. (`config.rs:54-60`, `146`; `ini_config.rs:398-400`) |
 | `remote_management_enabled` | bool | `false` | Enable remote management. (`config.rs:61-63`, `147`; `ini_config.rs:468-470`) |
-| `storage_path` | path | unset | Where identity, known destinations and packet hashlist live. Relative values resolve against the config dir. (`config.rs:97-98`; `storage_path` (`ini_config.rs:588-593`)) |
+| `storage_path` | path | unset | Where identity, known destinations and packet hashlist live. Relative values resolve against the config dir. (`config.rs:97-98`; `storage_path` (`ini_config.rs:594-599`)) |
 | `flush_interval` | u64 (sec) | `3600` | Seconds between periodic storage flushes. Crash protection only — normal shutdown always flushes. (`config.rs:67-73`, `149`; `ini_config.rs:424-428`) |
 | `control_channel_capacity` | usize | `256` | Capacity of the lossless control-plane event channel (announces, paths, link/resource lifecycle). Raise on servers under heavy announce load. (`config.rs:74-82`, `150`) |
 | `data_channel_capacity` | usize | `128` | Capacity of the droppable data-plane event channel; full means normal backpressure (silent drop). Reliable channel messages are exempt: the node stops proofing them to the sender instead of dropping them, so this value also bounds how far a slow reader lets a channel run ahead. (`config.rs:83-90`, `151`) |
 | `keepalive_interval` | u64 (sec) | unset | Override link keepalive interval. When set, every link uses this interval and the stale-link timeout scales with it (stale after twice the keepalive). Local timing only, no wire change. Useful for slow links. (`config.rs:91-98`, `152`; `ini_config.rs:410-436`) |
-| `mgmt_announce_interval_secs` | u64 (sec) | `7200` | Seconds between this node's management announces, its `rnstransport.probe` and remote-management destinations. Leviculum-only; for test rooms that need a probe destination to re-announce within minutes, a field node keeps the default. Below `5` the config is refused with the key named. (`config.rs:187-195`, `319-325`; `ini_config.rs:543-553`) |
-| `storage_profile` | `desktop`/`compact` | `desktop` | Transport-table sizing profile (Codeberg #421). `compact` is sized to leave a Raspberry Pi Zero 2W (512 MB shared with the GPU, no swap) usable. An unrecognised value keeps `desktop`. (`config.rs:197-205`; `ini_config.rs:496-507`) |
-| `path_table_cap` | usize | profile | Maximum `path_table` entries, and with them `path_states`, `path_requests` and `discovery_path_requests`. Desktop `32768`, compact `8192`. The path table expires after seven days, so on a node up less than a week this is its only bound. (`config.rs:206-213`; `ini_config.rs:508-510`) |
-| `reverse_table_cap` | usize | profile | Maximum `reverse_table` entries. Desktop `200000`, compact `16384`. Entries expire after 8 minutes, so the working size is forwarding rate times that window; a field node measured 73 901. (`config.rs:214-221`; `ini_config.rs:511-513`) |
-| `link_table_cap` | usize | profile | Maximum `link_table` entries — links this node routes for, not its own (that is `max_links`). Desktop `8192`, compact `1024`. (`config.rs:222-229`; `ini_config.rs:514-516`) |
-| `announce_table_cap` | usize | profile | Maximum `announce_table` entries, the pending-rebroadcast queue. Each holds a full copy of an announce packet. Desktop `16384`, compact `2048`. (`config.rs:230-236`; `ini_config.rs:517-519`) |
-| `destination_cap` | usize | profile | Maximum entries in the destination-keyed tables: `announce_cache`, `announce_rate_table`, `known_ratchets`, `known_dest_use`. Desktop `50000`, compact `4096`. One key for four tables because they share one population. (`config.rs:237-247`; `ini_config.rs:520-522`) |
+| `link_establishment_timeout_ms` | u32 (ms) | unset | TEST ONLY, no deployment sets it. Replaces the establishment timeout of every pending link (before its jitter) with this value, so a test about a link's death does not wait out three attempts of about 13 s each. Absent or `0` keeps the reference formula. Leviculum-only; `lxmf-node` reads it from the same file. (`config.rs:168-175`; `ini_config.rs:490-495`) |
+| `mgmt_announce_interval_secs` | u64 (sec) | `7200` | Seconds between this node's management announces, its `rnstransport.probe` and remote-management destinations. Leviculum-only; for test rooms that need a probe destination to re-announce within minutes, a field node keeps the default. Below `5` the config is refused with the key named. (`config.rs:187-195`, `319-325`; `ini_config.rs:549-559`) |
+| `storage_profile` | `desktop`/`compact` | `desktop` | Transport-table sizing profile (Codeberg #421). `compact` is sized to leave a Raspberry Pi Zero 2W (512 MB shared with the GPU, no swap) usable. An unrecognised value keeps `desktop`. (`config.rs:197-205`; `ini_config.rs:502-513`) |
+| `path_table_cap` | usize | profile | Maximum `path_table` entries, and with them `path_states`, `path_requests` and `discovery_path_requests`. Desktop `32768`, compact `8192`. The path table expires after seven days, so on a node up less than a week this is its only bound. (`config.rs:206-213`; `ini_config.rs:514-516`) |
+| `reverse_table_cap` | usize | profile | Maximum `reverse_table` entries. Desktop `200000`, compact `16384`. Entries expire after 8 minutes, so the working size is forwarding rate times that window; a field node measured 73 901. (`config.rs:214-221`; `ini_config.rs:517-519`) |
+| `link_table_cap` | usize | profile | Maximum `link_table` entries — links this node routes for, not its own (that is `max_links`). Desktop `8192`, compact `1024`. (`config.rs:222-229`; `ini_config.rs:520-522`) |
+| `announce_table_cap` | usize | profile | Maximum `announce_table` entries, the pending-rebroadcast queue. Each holds a full copy of an announce packet. Desktop `16384`, compact `2048`. (`config.rs:230-236`; `ini_config.rs:523-525`) |
+| `destination_cap` | usize | profile | Maximum entries in the destination-keyed tables: `announce_cache`, `announce_rate_table`, `known_ratchets`, `known_dest_use`. Desktop `50000`, compact `4096`. One key for four tables because they share one population. (`config.rs:237-247`; `ini_config.rs:526-528`) |
 | `default_ar_target` | u32 (sec) | `3600` | Announce-rate target a transport-enabled node gives every interface that sets no `announce_rate_target` of its own, as `rnsd` does; `0` keeps the default, as in `rnsd`. (audit D16) |
 | `default_ar_penalty` | u32 (sec) | `0` | The matching announce-rate penalty. (audit D16) |
 | `default_ar_grace` | u32 | `5` | The matching announce-rate grace; `0` keeps the default, as in `rnsd`. (audit D16) |
@@ -140,7 +141,7 @@ and are best set in a TOML config or left at their defaults.
 everywhere: `lnsd --storage`, then the config key, then
 `<config_dir>/storage` (Python's only choice, `Reticulum.py:246`). The
 client tools resolve it the same way (`resolve_storage_path`,
-`config.rs:1250`), so `lnstatus`, `lncp`, `lnpath` and `lnprobe` open the
+`config.rs:1259`), so `lnstatus`, `lncp`, `lnpath` and `lnprobe` open the
 same directory as the daemon and derive the same RPC authkey from its
 `transport_identity`. Point the key at an external disk and nothing else
 has to be told about it — but note that `--storage` moves the daemon
@@ -207,31 +208,31 @@ supported-type filter (`interface_type` (`ini_config.rs:318-343`)):
 `BackboneInterface` and `BackboneClientInterface` are accepted too:
 they are wire-identical to TCP and are mapped onto the TCP interface at
 parse time, as Python does (`normalize_backbone_interface`
-(`ini_config.rs:954-989`)). An interface of any other type is skipped
+(`ini_config.rs:960-995`)). An interface of any other type is skipped
 with a log line (`tracing::warn` (`ini_config.rs:334-339`)), not an
 error.
 
 The per-type tables below cover the six types most deployments use. All
 interface keys are parsed in `apply_interface_key`
-(`ini_config.rs:698-933`); the struct they land in, with its defaults,
+(`ini_config.rs:704-939`); the struct they land in, with its defaults,
 is `InterfaceConfig` (`config.rs:242-520`).
 
 ### Keys common to every interface
 
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
-| `type` | string | (required) | Interface type, one of the eleven above. (`type` (`ini_config.rs:700`)) |
-| `enabled` | bool | `true` | Bring this interface up; the legacy spelling `interface_enabled` is honoured too. (`enabled` (`ini_config.rs:704`); `InterfaceConfig::enabled` (`config.rs:510-512`)) |
-| `outgoing` | bool | `true` | Allow sending outgoing packets. (`outgoing` (`ini_config.rs:705`); `InterfaceConfig::outgoing` (`config.rs:520-522`)) |
-| `bitrate` | u64 (bps) | per type | Override the interface's own bitrate figure, which feeds announce bandwidth capping and timing. Values below `MINIMUM_BITRATE` (`constants.rs:405-408`), 5 bps, are ignored. (`bitrate` (`ini_config.rs:762-768`); `InterfaceConfig::bitrate` (`config.rs:523-528`)) |
-| `buffer_size` | usize | per type | Channel buffer size. (`buffer_size` (`ini_config.rs:806`); `InterfaceConfig::buffer_size` (`config.rs:689-690`)) |
+| `type` | string | (required) | Interface type, one of the eleven above. (`type` (`ini_config.rs:706`)) |
+| `enabled` | bool | `true` | Bring this interface up; the legacy spelling `interface_enabled` is honoured too. (`enabled` (`ini_config.rs:710`); `InterfaceConfig::enabled` (`config.rs:519-521`)) |
+| `outgoing` | bool | `true` | Allow sending outgoing packets. (`outgoing` (`ini_config.rs:711`); `InterfaceConfig::outgoing` (`config.rs:529-531`)) |
+| `bitrate` | u64 (bps) | per type | Override the interface's own bitrate figure, which feeds announce bandwidth capping and timing. Values below `MINIMUM_BITRATE` (`constants.rs:405-408`), 5 bps, are ignored. (`bitrate` (`ini_config.rs:768-774`); `InterfaceConfig::bitrate` (`config.rs:532-537`)) |
+| `buffer_size` | usize | per type | Channel buffer size. (`buffer_size` (`ini_config.rs:812`); `InterfaceConfig::buffer_size` (`config.rs:698-699`)) |
 
 ### TCP server (`TCPServerInterface`)
 
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
-| `listen_ip` | string | unset | Address to bind. (`listen_ip` (`ini_config.rs:712`)) |
-| `listen_port` | u16 | unset | Port to listen on. (`listen_port` (`ini_config.rs:713`)) |
+| `listen_ip` | string | unset | Address to bind. (`listen_ip` (`ini_config.rs:718`)) |
+| `listen_port` | u16 | unset | Port to listen on. (`listen_port` (`ini_config.rs:719`)) |
 
 ```ini
 [interfaces]
@@ -246,10 +247,10 @@ is `InterfaceConfig` (`config.rs:242-520`).
 
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
-| `target_host` | string | unset | Remote host to connect to. (`target_host` (`ini_config.rs:714`)) |
-| `target_port` | u16 | unset | Remote port. (`target_port` (`ini_config.rs:715`)) |
-| `reconnect_interval` | u64 (sec) | `5` | Delay between reconnect attempts. (`reconnect_interval` (`ini_config.rs:807`); `InterfaceConfig::reconnect_interval_secs` (`config.rs:691-692`)) |
-| `max_reconnect_tries` | u64 | unlimited | Give up after this many attempts; unset means never. (`max_reconnect_tries` (`ini_config.rs:808`); `InterfaceConfig::max_reconnect_tries` (`config.rs:693-694`)) |
+| `target_host` | string | unset | Remote host to connect to. (`target_host` (`ini_config.rs:720`)) |
+| `target_port` | u16 | unset | Remote port. (`target_port` (`ini_config.rs:721`)) |
+| `reconnect_interval` | u64 (sec) | `5` | Delay between reconnect attempts. (`reconnect_interval` (`ini_config.rs:813`); `InterfaceConfig::reconnect_interval_secs` (`config.rs:700-701`)) |
+| `max_reconnect_tries` | u64 | unlimited | Give up after this many attempts; unset means never. (`max_reconnect_tries` (`ini_config.rs:814`); `InterfaceConfig::max_reconnect_tries` (`config.rs:702-703`)) |
 
 ```ini
 [interfaces]
@@ -264,12 +265,12 @@ is `InterfaceConfig` (`config.rs:242-520`).
 
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
-| `listen_ip` | string | `0.0.0.0` | Local bind address. (`listen_ip` (`ini_config.rs:712`)) |
-| `listen_port` | u16 | unset | Local bind port. (`listen_port` (`ini_config.rs:713`)) |
-| `forward_ip` | string | unset | Broadcast/forward address or hostname. Names are resolved at runtime and re-resolved periodically; a resolution failure is a logged interface error, not a config error. (`forward_ip` (`ini_config.rs:723`); `InterfaceConfig::forward_ip` (`config.rs:627-637`)) |
-| `forward_port` | u16 | unset | Broadcast/forward port. (`forward_port` (`ini_config.rs:724`)) |
-| `port` | u16 | unset | Fills both `listen_port` and `forward_port`; either explicit key wins over it. (`port` (`ini_config.rs:725`)) |
-| `device` | string | unset | Kernel interface name; its IPv4 broadcast address fills both `listen_ip` and `forward_ip`. Either explicit key wins over it. (`device` (`ini_config.rs:710`)) |
+| `listen_ip` | string | `0.0.0.0` | Local bind address. (`listen_ip` (`ini_config.rs:718`)) |
+| `listen_port` | u16 | unset | Local bind port. (`listen_port` (`ini_config.rs:719`)) |
+| `forward_ip` | string | unset | Broadcast/forward address or hostname. Names are resolved at runtime and re-resolved periodically; a resolution failure is a logged interface error, not a config error. (`forward_ip` (`ini_config.rs:729`); `InterfaceConfig::forward_ip` (`config.rs:636-646`)) |
+| `forward_port` | u16 | unset | Broadcast/forward port. (`forward_port` (`ini_config.rs:730`)) |
+| `port` | u16 | unset | Fills both `listen_port` and `forward_port`; either explicit key wins over it. (`port` (`ini_config.rs:731`)) |
+| `device` | string | unset | Kernel interface name; its IPv4 broadcast address fills both `listen_ip` and `forward_ip`. Either explicit key wins over it. (`device` (`ini_config.rs:716`)) |
 
 Bind and forward are independent, as in `rnsd`: an interface with only bind
 parameters receives without transmitting, one with only forward parameters
@@ -283,14 +284,14 @@ multicast. No router or DHCP needed; the link must carry multicast.
 
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
-| `group_id` | string | unset | Multicast group identifier; isolate co-located meshes by setting different IDs. (`group_id` (`ini_config.rs:820`); `InterfaceConfig::group_id` (`config.rs:697-698`)) |
-| `discovery_scope` | string | unset | Multicast scope: `link`, `admin`, `site`, `organisation`, `global`. (`discovery_scope` (`ini_config.rs:821`); `InterfaceConfig::discovery_scope` (`config.rs:699-700`)) |
-| `discovery_port` | u16 | `29716` | Discovery (announce) port. (`discovery_port` (`ini_config.rs:822`); `InterfaceConfig::discovery_port` (`config.rs:701-702`)) |
-| `data_port` | u16 | `42671` | Data port. (`data_port` (`ini_config.rs:823`); `InterfaceConfig::data_port` (`config.rs:703-704`)) |
-| `devices` | string (CSV) | unset | Whitelist of NIC names to use. (`devices` (`ini_config.rs:824`); `InterfaceConfig::devices` (`config.rs:705-706`)) |
-| `ignored_devices` | string (CSV) | unset | Blacklist of NIC names to skip. (`ignored_devices` (`ini_config.rs:825`); `InterfaceConfig::ignored_devices` (`config.rs:707-708`)) |
-| `multicast_loopback` | bool | unset (inherits `true`) | Multicast loopback (`IPV6_MULTICAST_LOOP`), the carrier self-echo mechanism. Unset inherits the default `true`, matching Python-RNS; set `no` to opt out. (`multicast_loopback` (`ini_config.rs:826`); `InterfaceConfig::multicast_loopback` (`config.rs:709-712`)) |
-| `multicast_address_type` | string | unset (inherits `temporary`) | Multicast address type of the discovery group, `temporary` or `permanent`. It is part of the group address, so peers must agree on it: an `lnsd` node left on the default next to a `permanent`-type `rnsd` peer group discovers nobody, and nothing on either side says why. Unset inherits `temporary`, the group Python joins when the key is absent. A value that is neither spelling is refused at startup rather than resolved to `temporary` the way Python resolves it. (`multicast_address_type` (`ini_config.rs:833`); `InterfaceConfig::multicast_address_type` (`config.rs:713-718`); `MulticastAddressType` (`interfaces/auto_interface/mod.rs:42-91`)) |
+| `group_id` | string | unset | Multicast group identifier; isolate co-located meshes by setting different IDs. (`group_id` (`ini_config.rs:826`); `InterfaceConfig::group_id` (`config.rs:706-707`)) |
+| `discovery_scope` | string | unset | Multicast scope: `link`, `admin`, `site`, `organisation`, `global`. (`discovery_scope` (`ini_config.rs:827`); `InterfaceConfig::discovery_scope` (`config.rs:708-709`)) |
+| `discovery_port` | u16 | `29716` | Discovery (announce) port. (`discovery_port` (`ini_config.rs:828`); `InterfaceConfig::discovery_port` (`config.rs:710-711`)) |
+| `data_port` | u16 | `42671` | Data port. (`data_port` (`ini_config.rs:829`); `InterfaceConfig::data_port` (`config.rs:712-713`)) |
+| `devices` | string (CSV) | unset | Whitelist of NIC names to use. (`devices` (`ini_config.rs:830`); `InterfaceConfig::devices` (`config.rs:714-715`)) |
+| `ignored_devices` | string (CSV) | unset | Blacklist of NIC names to skip. (`ignored_devices` (`ini_config.rs:831`); `InterfaceConfig::ignored_devices` (`config.rs:716-717`)) |
+| `multicast_loopback` | bool | unset (inherits `true`) | Multicast loopback (`IPV6_MULTICAST_LOOP`), the carrier self-echo mechanism. Unset inherits the default `true`, matching Python-RNS; set `no` to opt out. (`multicast_loopback` (`ini_config.rs:832`); `InterfaceConfig::multicast_loopback` (`config.rs:718-721`)) |
+| `multicast_address_type` | string | unset (inherits `temporary`) | Multicast address type of the discovery group, `temporary` or `permanent`. It is part of the group address, so peers must agree on it: an `lnsd` node left on the default next to a `permanent`-type `rnsd` peer group discovers nobody, and nothing on either side says why. Unset inherits `temporary`, the group Python joins when the key is absent. A value that is neither spelling is refused at startup rather than resolved to `temporary` the way Python resolves it. (`multicast_address_type` (`ini_config.rs:839`); `InterfaceConfig::multicast_address_type` (`config.rs:722-727`); `MulticastAddressType` (`interfaces/auto_interface/mod.rs:42-91`)) |
 
 ### BLE (`BLEInterface`)
 
@@ -314,17 +315,17 @@ map onto this implementation:
 
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
-| `device` | string | default adapter | BlueZ adapter to use, e.g. `hci0`. (`device` (`ini_config.rs:710`)) |
-| `max_connections` | usize | `4` | Simultaneous BLE link cap, both GATT roles counted together — and split by role inside it since #432: one slot is this node's own outgoing dial, the other `max_connections - 1` are incoming links, the boards' shape (`CENTRAL_LINKS` / `PERIPH_LINKS`). Dialling is gated on the outgoing slot and advertising on the incoming ones, so a node that has dialled still advertises and a node with a full GATT server still dials. The default is the firmware's `MAX_LINKS` (4), not the reference's 7: 3-4 links is the protocol's reliable ceiling. (`max_connections` (`ini_config.rs:892`); `InterfaceConfig::max_connections` (`config.rs:832-835`)) |
-| `min_rssi` | i16 (dBm) | `-85` | Sightings weaker than this are not dialled. (`min_rssi` (`ini_config.rs:893`); `InterfaceConfig::min_rssi` (`config.rs:836-838`)) |
-| `discovery_interval` | f64 (sec) | `5` | Pause between the 2-second BLE scan windows. (`discovery_interval` (`ini_config.rs:894`); `InterfaceConfig::discovery_interval` (`config.rs:839-841`)) |
-| `enable_central` | bool | `true` | Run the scanning + dialling central role. (`enable_central` (`ini_config.rs:895`); `InterfaceConfig::enable_central` (`config.rs:842-844`)) |
-| `enable_peripheral` | bool | `true` | Run the advertising + GATT-server peripheral role. Disabling both roles is a config error. (`enable_peripheral` (`ini_config.rs:896`); `InterfaceConfig::enable_peripheral` (`config.rs:845-847`)) |
-| `initiate_only` | string (CSV) | unset (every peer) | Peers this interface may DIAL: BLE addresses (`AA:BB:CC:DD:EE:FF`, `-` or no separator) or peer identities in hex, 8 digits (the four bytes an advertiser publishes as its hint) or all 32 (a board's `[IDENTITY]` line, truncated to those four). Unset or empty dials whoever the connection-direction rule picks, the behaviour that predates the key. It narrows dialling and nothing else: a peer left off the list that connects to US is admitted and served exactly as before, and nothing on the wire changes — it sees a node that has not dialled it yet. The digit count decides which is which — 12 is an address, 8 or 32 an identity — so both spellings can be copied out of a log line (`BLE_SCAN_DECISION addr=`, a board's `BLE_CENTRAL_ADDR`, its `[IDENTITY]`). A malformed entry is a startup error, not a dropped line. (`initiate_only` (`ini_config.rs:899-901`); `InterfaceConfig::initiate_only` (`config.rs:848-857`); `PeerAllowlist` (`interfaces/ble/links.rs:1513`)) |
-| `accept_only` | string (CSV) | unset (every peer) | Peers whose INCOMING link this interface SERVES — the symmetric counterpart of `initiate_only`, same vocabulary, same validation, same "unset or empty means everyone". A non-empty list narrows who we serve and nothing else: a peer left off it is still dialled if `initiate_only` allows it, and a peer left off `initiate_only` is still served if this list names it. An unlisted peer that connects is refused at the identity handshake — the first moment an inbound BLE connection has said who it is, since under RPA its address names nobody — so it never becomes a link, never enters the fan-out and is never reported to the core as a peer. Each refusal emits one `BLE_LINK_NOT_ADMITTED peer=<hex8> identity=<hex32> addr=<a> role=peripheral listed=<n> action=disconnect` line, so a run that turned strangers away is distinguishable from a run nobody tried. A malformed entry is a startup error, not a dropped line. (`accept_only` (`ini_config.rs:903-905`); `InterfaceConfig::accept_only` (`config.rs:858-873`); the refusal point (`interfaces/ble/links.rs:784`)) |
-| `tx_gap_ms` | u16 (ms) | unset (100) | The gap between the last fragment of one packet and the first fragment of the next on a link, overriding the firmware's compiled `DEFAULT_TX_GAP_MS`; `0` disables it. A measurement knob (#379), the sibling of a board's `--set-ble-tx-gap`: leave it unset in a deployment, where lnsd paces exactly as a board does. The bring-up line prints the gap in force. (`tx_gap_ms` (`ini_config.rs:909`); `InterfaceConfig::tx_gap_ms` (`config.rs:874-879`); `LinkPacer` (`interfaces/ble/links.rs:1795`)) |
-| `fragment_mtu` | usize | unset (exchanged) | Cap on the ATT MTU outbound fragments are sized by; at least 23, a smaller value is a startup error. Two BlueZ hosts exchange 512, at which no Reticulum packet needs a second fragment, a board 253. A measurement knob (#379) for making a desk link fragment the way a board link does; leave it unset in a deployment. The bring-up line and `BLE_LINK_UP mtu=` print the capped value. (`fragment_mtu` (`ini_config.rs:911`); `InterfaceConfig::fragment_mtu` (`config.rs:880-884`); `sizing_mtu` (`interfaces/ble/mod.rs:1643`)) |
-| `central_links` | usize | `1` | Outgoing links inside `max_connections`, the rest are incoming: `max_connections - central_links`. A measurement knob (#723) for rooms whose host nodes dial two or three times instead of once; 1 to 3 and below `max_connections`, anything else is a startup error naming the key. A board has one central slot and no such key, so leave it unset wherever lnsd should behave like one. Both bring-up lines print it. (`central_links` (`ini_config.rs:914`); `InterfaceConfig::central_links` (`config.rs:885-889`); `LinkTable::new` (`interfaces/ble/links.rs:418`)) |
+| `device` | string | default adapter | BlueZ adapter to use, e.g. `hci0`. (`device` (`ini_config.rs:716`)) |
+| `max_connections` | usize | `4` | Simultaneous BLE link cap, both GATT roles counted together — and split by role inside it since #432: one slot is this node's own outgoing dial, the other `max_connections - 1` are incoming links, the boards' shape (`CENTRAL_LINKS` / `PERIPH_LINKS`). Dialling is gated on the outgoing slot and advertising on the incoming ones, so a node that has dialled still advertises and a node with a full GATT server still dials. The default is the firmware's `MAX_LINKS` (4), not the reference's 7: 3-4 links is the protocol's reliable ceiling. (`max_connections` (`ini_config.rs:898`); `InterfaceConfig::max_connections` (`config.rs:841-844`)) |
+| `min_rssi` | i16 (dBm) | `-85` | Sightings weaker than this are not dialled. (`min_rssi` (`ini_config.rs:899`); `InterfaceConfig::min_rssi` (`config.rs:845-847`)) |
+| `discovery_interval` | f64 (sec) | `5` | Pause between the 2-second BLE scan windows. (`discovery_interval` (`ini_config.rs:900`); `InterfaceConfig::discovery_interval` (`config.rs:848-850`)) |
+| `enable_central` | bool | `true` | Run the scanning + dialling central role. (`enable_central` (`ini_config.rs:901`); `InterfaceConfig::enable_central` (`config.rs:851-853`)) |
+| `enable_peripheral` | bool | `true` | Run the advertising + GATT-server peripheral role. Disabling both roles is a config error. (`enable_peripheral` (`ini_config.rs:902`); `InterfaceConfig::enable_peripheral` (`config.rs:854-856`)) |
+| `initiate_only` | string (CSV) | unset (every peer) | Peers this interface may DIAL: BLE addresses (`AA:BB:CC:DD:EE:FF`, `-` or no separator) or peer identities in hex, 8 digits (the four bytes an advertiser publishes as its hint) or all 32 (a board's `[IDENTITY]` line, truncated to those four). Unset or empty dials whoever the connection-direction rule picks, the behaviour that predates the key. It narrows dialling and nothing else: a peer left off the list that connects to US is admitted and served exactly as before, and nothing on the wire changes — it sees a node that has not dialled it yet. The digit count decides which is which — 12 is an address, 8 or 32 an identity — so both spellings can be copied out of a log line (`BLE_SCAN_DECISION addr=`, a board's `BLE_CENTRAL_ADDR`, its `[IDENTITY]`). A malformed entry is a startup error, not a dropped line. (`initiate_only` (`ini_config.rs:905-907`); `InterfaceConfig::initiate_only` (`config.rs:857-866`); `PeerAllowlist` (`interfaces/ble/links.rs:1513`)) |
+| `accept_only` | string (CSV) | unset (every peer) | Peers whose INCOMING link this interface SERVES — the symmetric counterpart of `initiate_only`, same vocabulary, same validation, same "unset or empty means everyone". A non-empty list narrows who we serve and nothing else: a peer left off it is still dialled if `initiate_only` allows it, and a peer left off `initiate_only` is still served if this list names it. An unlisted peer that connects is refused at the identity handshake — the first moment an inbound BLE connection has said who it is, since under RPA its address names nobody — so it never becomes a link, never enters the fan-out and is never reported to the core as a peer. Each refusal emits one `BLE_LINK_NOT_ADMITTED peer=<hex8> identity=<hex32> addr=<a> role=peripheral listed=<n> action=disconnect` line, so a run that turned strangers away is distinguishable from a run nobody tried. A malformed entry is a startup error, not a dropped line. (`accept_only` (`ini_config.rs:911-913`); `InterfaceConfig::accept_only` (`config.rs:867-882`); the refusal point (`interfaces/ble/links.rs:784`)) |
+| `tx_gap_ms` | u16 (ms) | unset (100) | The gap between the last fragment of one packet and the first fragment of the next on a link, overriding the firmware's compiled `DEFAULT_TX_GAP_MS`; `0` disables it. A measurement knob (#379), the sibling of a board's `--set-ble-tx-gap`: leave it unset in a deployment, where lnsd paces exactly as a board does. The bring-up line prints the gap in force. (`tx_gap_ms` (`ini_config.rs:915`); `InterfaceConfig::tx_gap_ms` (`config.rs:883-888`); `LinkPacer` (`interfaces/ble/links.rs:1795`)) |
+| `fragment_mtu` | usize | unset (exchanged) | Cap on the ATT MTU outbound fragments are sized by; at least 23, a smaller value is a startup error. Two BlueZ hosts exchange 512, at which no Reticulum packet needs a second fragment, a board 253. A measurement knob (#379) for making a desk link fragment the way a board link does; leave it unset in a deployment. The bring-up line and `BLE_LINK_UP mtu=` print the capped value. (`fragment_mtu` (`ini_config.rs:917`); `InterfaceConfig::fragment_mtu` (`config.rs:889-893`); `sizing_mtu` (`interfaces/ble/mod.rs:1643`)) |
+| `central_links` | usize | `1` | Outgoing links inside `max_connections`, the rest are incoming: `max_connections - central_links`. A measurement knob (#723) for rooms whose host nodes dial two or three times instead of once; 1 to 3 and below `max_connections`, anything else is a startup error naming the key. A board has one central slot and no such key, so leave it unset wherever lnsd should behave like one. Both bring-up lines print it. (`central_links` (`ini_config.rs:920`); `InterfaceConfig::central_links` (`config.rs:894-898`); `LinkTable::new` (`interfaces/ble/links.rs:418`)) |
 
 ```ini
 [interfaces]
@@ -372,29 +373,29 @@ Serial keys:
 
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
-| `port` | string | unset | Serial device path, e.g. `/dev/ttyACM0`. (`port` (`ini_config.rs:725`); `InterfaceConfig::port` (`config.rs:643-644`)) |
-| `speed` / `baudrate` | u32 | unset | Serial baud rate (either spelling). (`speed` (`ini_config.rs:726`); `InterfaceConfig::speed` (`config.rs:645-646`)) |
-| `databits` | u8 | unset | Data bits. (`databits` (`ini_config.rs:727`); `InterfaceConfig::databits` (`config.rs:647-648`)) |
-| `parity` | string | unset | `none`, `even`, or `odd`. (`parity` (`ini_config.rs:728`); `InterfaceConfig::parity` (`config.rs:649-650`)) |
-| `stopbits` | u8 | unset | Stop bits. (`stopbits` (`ini_config.rs:729`); `InterfaceConfig::stopbits` (`config.rs:651-652`)) |
+| `port` | string | unset | Serial device path, e.g. `/dev/ttyACM0`. (`port` (`ini_config.rs:731`); `InterfaceConfig::port` (`config.rs:652-653`)) |
+| `speed` / `baudrate` | u32 | unset | Serial baud rate (either spelling). (`speed` (`ini_config.rs:732`); `InterfaceConfig::speed` (`config.rs:654-655`)) |
+| `databits` | u8 | unset | Data bits. (`databits` (`ini_config.rs:733`); `InterfaceConfig::databits` (`config.rs:656-657`)) |
+| `parity` | string | unset | `none`, `even`, or `odd`. (`parity` (`ini_config.rs:734`); `InterfaceConfig::parity` (`config.rs:658-659`)) |
+| `stopbits` | u8 | unset | Stop bits. (`stopbits` (`ini_config.rs:735`); `InterfaceConfig::stopbits` (`config.rs:660-661`)) |
 
 LoRa keys, derived from source — the meanings below describe the radio
 parameters the interface configures; the fields sit together in the
 RNode block of `InterfaceConfig` (`InterfaceConfig::frequency`
-(`config.rs:717-748`)):
+(`config.rs:726-757`)):
 
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
-| `frequency` | u64 (Hz) | unset | LoRa centre frequency. (`frequency` (`ini_config.rs:809`); `InterfaceConfig::frequency` (`config.rs:769-770`)) |
-| `bandwidth` | u32 (Hz) | unset | LoRa bandwidth. (`bandwidth` (`ini_config.rs:810`); `InterfaceConfig::bandwidth` (`config.rs:771-772`)) |
-| `spreadingfactor` / `spreading_factor` | u8 | unset | LoRa spreading factor (either spelling). (`spreadingfactor` (`ini_config.rs:811`); `InterfaceConfig::spreading_factor` (`config.rs:773-774`)) |
-| `codingrate` / `coding_rate` | u8 | unset | LoRa coding rate (either spelling). (`codingrate` (`ini_config.rs:812`); `InterfaceConfig::coding_rate` (`config.rs:775-776`)) |
-| `txpower` / `tx_power` | i8 (dBm) | unset (resolves to the board maximum, 22 dBm) | Transmit power (either spelling). Unset asks the board for its maximum — a board that can do less clamps and says so — rather than the 0 dBm (1 mW) Python-Reticulum resolves it to, which has no symptom at the node. An explicit `txpower = 0` still means 0. Above roughly 7 dBi of antenna gain, 22 dBm conducted exceeds the EU 27 dBm ERP allowance and has to be set down. (`txpower` (`ini_config.rs:813`); `InterfaceConfig::tx_power` (`config.rs:777-778`); `resolve_tx_power` (`rnode.rs:807`); [deviation](../concepts/python-rns-compatibility.md)) |
-| `flow_control` | bool | unset | Wait for the RNode's `CMD_READY` before the next TX. (`flow_control` (`ini_config.rs:834`); `InterfaceConfig::flow_control` (`config.rs:795-796`)) |
-| `airtime_limit_short` | f64 (%) | unset | Short-term airtime cap, percent (0.0–100.0). (`airtime_limit_short` (`ini_config.rs:835`); `InterfaceConfig::airtime_limit_short` (`config.rs:797-798`)) |
-| `airtime_limit_long` | f64 (%) | unset | Long-term airtime cap, percent (0.0–100.0). (`airtime_limit_long` (`ini_config.rs:836`); `InterfaceConfig::airtime_limit_long` (`config.rs:799-800`)) |
-| `csma_enabled` | bool | unset | Carried in the LNode radio-config frame and reported back, but current firmware no longer obeys it: LoRa channel access (pre-TX jitter plus CAD listen-before-talk) is always on, matching the RNode firmware, which offers no CSMA disable either. Only firmware older than the change still honours the flag. (`csma_enabled` (`ini_config.rs:837`); `InterfaceConfig::csma_enabled` (`config.rs:801-802`)) |
-| `preamble_symbols` | u16 (symbols) | unset (derived from the PHY) | LoRa preamble length pushed to LNode firmware in the radio-config frame (`SerialInterface` only). Unset derives what an RNode peer programs for the same PHY — 24 symbols at SF7/BW125, the 18-symbol floor from SF8 down — so a mixed pair agrees on the wire; set it only to pin a value against a non-conforming peer. A pin above roughly 20 symbols / 164 ms on air is warned about at startup and not refused: SX127x receivers (every RNode) were measured going deaf above that, losing every frame from the interface silently and one-way, while an SX126x peer copes ([Codeberg #315](https://codeberg.org/Lew_Palm/leviculum/issues/315)). Not the same key as the KISS `preamble` (TX delay in ms), which never reaches a LoRa modem. (`preamble_symbols` (`ini_config.rs:818`); `InterfaceConfig::preamble_symbols` (`config.rs:779-794`); `derive_preamble_symbols` (`rnode.rs:963`); `preamble_ceiling_warning` (`interfaces/serial.rs`)) |
+| `frequency` | u64 (Hz) | unset | LoRa centre frequency. (`frequency` (`ini_config.rs:815`); `InterfaceConfig::frequency` (`config.rs:778-779`)) |
+| `bandwidth` | u32 (Hz) | unset | LoRa bandwidth. (`bandwidth` (`ini_config.rs:816`); `InterfaceConfig::bandwidth` (`config.rs:780-781`)) |
+| `spreadingfactor` / `spreading_factor` | u8 | unset | LoRa spreading factor (either spelling). (`spreadingfactor` (`ini_config.rs:817`); `InterfaceConfig::spreading_factor` (`config.rs:782-783`)) |
+| `codingrate` / `coding_rate` | u8 | unset | LoRa coding rate (either spelling). (`codingrate` (`ini_config.rs:818`); `InterfaceConfig::coding_rate` (`config.rs:784-785`)) |
+| `txpower` / `tx_power` | i8 (dBm) | unset (resolves to the board maximum, 22 dBm) | Transmit power (either spelling). Unset asks the board for its maximum — a board that can do less clamps and says so — rather than the 0 dBm (1 mW) Python-Reticulum resolves it to, which has no symptom at the node. An explicit `txpower = 0` still means 0. Above roughly 7 dBi of antenna gain, 22 dBm conducted exceeds the EU 27 dBm ERP allowance and has to be set down. (`txpower` (`ini_config.rs:819`); `InterfaceConfig::tx_power` (`config.rs:786-787`); `resolve_tx_power` (`rnode.rs:807`); [deviation](../concepts/python-rns-compatibility.md)) |
+| `flow_control` | bool | unset | Wait for the RNode's `CMD_READY` before the next TX. (`flow_control` (`ini_config.rs:840`); `InterfaceConfig::flow_control` (`config.rs:804-805`)) |
+| `airtime_limit_short` | f64 (%) | unset | Short-term airtime cap, percent (0.0–100.0). (`airtime_limit_short` (`ini_config.rs:841`); `InterfaceConfig::airtime_limit_short` (`config.rs:806-807`)) |
+| `airtime_limit_long` | f64 (%) | unset | Long-term airtime cap, percent (0.0–100.0). (`airtime_limit_long` (`ini_config.rs:842`); `InterfaceConfig::airtime_limit_long` (`config.rs:808-809`)) |
+| `csma_enabled` | bool | unset | Carried in the LNode radio-config frame and reported back, but current firmware no longer obeys it: LoRa channel access (pre-TX jitter plus CAD listen-before-talk) is always on, matching the RNode firmware, which offers no CSMA disable either. Only firmware older than the change still honours the flag. (`csma_enabled` (`ini_config.rs:843`); `InterfaceConfig::csma_enabled` (`config.rs:810-811`)) |
+| `preamble_symbols` | u16 (symbols) | unset (derived from the PHY) | LoRa preamble length pushed to LNode firmware in the radio-config frame (`SerialInterface` only). Unset derives what an RNode peer programs for the same PHY — 24 symbols at SF7/BW125, the 18-symbol floor from SF8 down — so a mixed pair agrees on the wire; set it only to pin a value against a non-conforming peer. A pin above roughly 20 symbols / 164 ms on air is warned about at startup and not refused: SX127x receivers (every RNode) were measured going deaf above that, losing every frame from the interface silently and one-way, while an SX126x peer copes ([Codeberg #315](https://codeberg.org/Lew_Palm/leviculum/issues/315)). Not the same key as the KISS `preamble` (TX delay in ms), which never reaches a LoRa modem. (`preamble_symbols` (`ini_config.rs:824`); `InterfaceConfig::preamble_symbols` (`config.rs:788-803`); `derive_preamble_symbols` (`rnode.rs:963`); `preamble_ceiling_warning` (`interfaces/serial.rs`)) |
 
 #### A board that does not take the config
 
@@ -463,9 +464,9 @@ network on the link. They are common to all interface types:
 
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
-| `networkname` / `network_name` | string | unset | Network name for IFAC (either spelling). (`networkname` (`ini_config.rs:871`); `InterfaceConfig::networkname` (`config.rs:761-762`)) |
-| `passphrase` / `pass_phrase` | string | unset | IFAC passphrase (either spelling). (`passphrase` (`ini_config.rs:872`); `InterfaceConfig::passphrase` (`config.rs:763-764`)) |
-| `ifac_size` | usize (bits) | unset | IFAC size, specified in bits in the file and stored as bytes (`bits / 8`). Values below 8 bits are dropped, as Python drops them, so the interface falls back to its per-type default. (`ifac_size` (`ini_config.rs:879-885`); `InterfaceConfig::ifac_size` (`config.rs:765-766`)) |
+| `networkname` / `network_name` | string | unset | Network name for IFAC (either spelling). (`networkname` (`ini_config.rs:877`); `InterfaceConfig::networkname` (`config.rs:770-771`)) |
+| `passphrase` / `pass_phrase` | string | unset | IFAC passphrase (either spelling). (`passphrase` (`ini_config.rs:878`); `InterfaceConfig::passphrase` (`config.rs:772-773`)) |
+| `ifac_size` | usize (bits) | unset | IFAC size, specified in bits in the file and stored as bytes (`bits / 8`). Values below 8 bits are dropped, as Python drops them, so the interface falls back to its per-type default. (`ifac_size` (`ini_config.rs:879-885`); `InterfaceConfig::ifac_size` (`config.rs:774-775`)) |
 
 `networkname` and `passphrase` are secrets: `lnstest diag` redacts them
 before serialising a bundle (see the [`lnstest diag`](lnstest.md#diag) section).

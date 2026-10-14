@@ -165,6 +165,14 @@ pub struct ReticulumConfig {
     /// semantic change. `None` (default) keeps RTT-driven behaviour.
     #[serde(default)]
     pub keepalive_interval: Option<u64>,
+    /// TEST ONLY: the establishment timeout of every pending link, in
+    /// milliseconds, in place of the reference formula (745). Leviculum-only
+    /// key, which no deployment sets; absent or 0 keeps the formula. It lets
+    /// a test that is about a link's death not wait out the retry schedule
+    /// (three attempts of about 13 s each). Timing only, no wire or semantic
+    /// change. See `TransportConfig::link_establishment_timeout_ms`.
+    #[serde(default)]
+    pub link_establishment_timeout_ms: Option<u32>,
     /// Cap on concurrent endpoint links (#388). Leviculum-only key (rnsd
     /// has none); absent or 0 means unbounded, the Python behaviour. With
     /// `Some(n)` the daemon refuses inbound link requests (no link, no
@@ -470,6 +478,7 @@ impl Default for ReticulumConfig {
             control_channel_capacity: DEFAULT_CONTROL_CHANNEL_CAPACITY,
             data_channel_capacity: DEFAULT_DATA_CHANNEL_CAPACITY,
             keepalive_interval: None,
+            link_establishment_timeout_ms: None,
             max_links: None,
             path_entries_dump: false,
             path_choice: PathChoiceSetting::default(),

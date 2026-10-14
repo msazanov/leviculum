@@ -63,6 +63,8 @@ pub struct ReticulumNodeBuilder {
     data_channel_capacity_explicit: Option<usize>,
     /// Explicit link keepalive override in seconds (takes priority over config)
     link_keepalive_secs_explicit: Option<u64>,
+    /// Explicit test-only establishment timeout in ms (takes priority over config)
+    link_establishment_timeout_ms_explicit: Option<u32>,
     /// Explicit link-table cap override (takes priority over config, #388)
     max_links_explicit: Option<Option<usize>>,
     /// Explicit auto-connect cap override (takes priority over config value).
@@ -113,6 +115,7 @@ impl ReticulumNodeBuilder {
             control_channel_capacity_explicit: None,
             data_channel_capacity_explicit: None,
             link_keepalive_secs_explicit: None,
+            link_establishment_timeout_ms_explicit: None,
             max_links_explicit: None,
             autoconnect_discovered_interfaces_explicit: None,
             discover_interfaces_explicit: None,
@@ -680,6 +683,19 @@ impl ReticulumNodeBuilder {
         self
     }
 
+    /// TEST ONLY: the establishment timeout of every pending link, in
+    /// milliseconds, in place of the reference formula (745).
+    ///
+    /// Takes priority over the config `link_establishment_timeout_ms`.
+    /// Production never sets it; a test that is about what happens when a
+    /// link dies sets it so it does not wait out the retry schedule. A
+    /// shared-instance client program reads the config key itself and passes
+    /// it here, as it does `max_links`.
+    pub fn link_establishment_timeout_ms(mut self, ms: u32) -> Self {
+        self.link_establishment_timeout_ms_explicit = Some(ms);
+        self
+    }
+
     /// Cap the number of concurrent endpoint links (#388).
     ///
     /// Takes priority over the config `max_links`. `None` is unbounded.
@@ -980,6 +996,10 @@ impl ReticulumNodeBuilder {
         let core_builder = core_builder
             .enable_transport(enable_transport)
             .link_keepalive(link_keepalive_secs)
+            .link_establishment_timeout_ms(
+                self.link_establishment_timeout_ms_explicit
+                    .or(config.reticulum.link_establishment_timeout_ms),
+            )
             .max_links(
                 self.max_links_explicit
                     .unwrap_or(config.reticulum.max_links),

@@ -3797,6 +3797,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     // Internal: Timeout / Polling
     /// Check for handshake timeouts on pending links
     pub(super) fn check_timeouts(&mut self, now_ms: u64) {
+        let timeout_override = self.transport_config().link_establishment_timeout_ms;
         let timed_out: Vec<LinkId> = self
             .links
             .iter()
@@ -3804,7 +3805,8 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 let Some(started_at) = link.pending_since_ms() else {
                     return false;
                 };
-                now_ms.saturating_sub(started_at) > link.establishment_timeout_ms()
+                now_ms.saturating_sub(started_at)
+                    > link.establishment_timeout_ms_with(timeout_override)
             })
             .map(|(id, _)| *id)
             .collect();
@@ -3975,7 +3977,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                     HexShort(link_id.as_bytes()),
                     MsOrNone(since_request_ms),
                     MsOrNone(l.inbound_age_ms(now_ms)),
-                    l.establishment_timeout_ms(),
+                    l.establishment_timeout_ms_with(timeout_override),
                     attempts,
                     l.rtt_ms(),
                     l.keepalives_sent(),
@@ -4452,9 +4454,12 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         };
 
         // Pending handshake timeouts
+        let timeout_override = self.transport_config().link_establishment_timeout_ms;
         for link in self.links.values() {
             if let Some(started_at) = link.pending_since_ms() {
-                update(started_at.saturating_add(link.establishment_timeout_ms()));
+                update(
+                    started_at.saturating_add(link.establishment_timeout_ms_with(timeout_override)),
+                );
             }
         }
 

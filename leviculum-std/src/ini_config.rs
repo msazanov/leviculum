@@ -487,6 +487,12 @@ fn apply_reticulum_key(config: &mut ReticulumConfig, key: &str, value: &str) -> 
                 config.keepalive_interval = Some(v);
             }
         }
+        // TEST ONLY (745): leviculum-only key no deployment sets; absent or
+        // 0 keeps the reference establishment timeout.
+        "link_establishment_timeout_ms" => {
+            config.link_establishment_timeout_ms =
+                value.trim().parse().ok().filter(|&ms: &u32| ms > 0);
+        }
         // Link-table cap (#388). Leviculum-only key; absent or 0 keeps the
         // table unbounded (the Python behaviour), so a stock rnsd config is
         // unaffected. Lets a periculum node run with a board-like cap.

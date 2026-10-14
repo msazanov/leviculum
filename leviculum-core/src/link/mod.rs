@@ -40,6 +40,7 @@
 pub mod channel;
 
 use alloc::vec::Vec;
+use core::num::NonZeroU32;
 
 use crate::constants::{
     ED25519_SIGNATURE_SIZE, ESTABLISHMENT_RESPONDER_BONUS_MS, ESTABLISHMENT_TIMEOUT_PER_HOP_MS,
@@ -1134,6 +1135,19 @@ impl Link {
     /// field is set once (re-rolled only on retransmit), so this stays a
     /// pure getter returning a stable value between rolls.
     pub fn establishment_timeout_ms(&self) -> u64 {
+        self.establishment_timeout_ms_with(None)
+    }
+
+    /// [`Self::establishment_timeout_ms`], with `base_override_ms` in place of
+    /// the formula's base when it is set; the jitter is added on top either
+    /// way. The override is the node's test-only
+    /// [`TransportConfig::link_establishment_timeout_ms`](crate::transport::TransportConfig::link_establishment_timeout_ms),
+    /// which production never sets.
+    pub fn establishment_timeout_ms_with(&self, base_override_ms: Option<NonZeroU32>) -> u64 {
+        if let Some(ms) = base_override_ms {
+            let base = u64::from(ms.get());
+            return base + base * self.establishment_jitter_permille as u64 / 1000;
+        }
         let hops = core::cmp::max(1, self.hops as u64);
         let base = if self.initiator {
             // Python: first_hop_timeout(dest) + ESTABLISHMENT_TIMEOUT_PER_HOP * max(1, hops)
@@ -4551,6 +4565,23 @@ mod tests {
         assert_eq!(link.hops(), 0);
         // max(1,0)=1, (1+1)*6000 = 12000
         assert_eq!(link.establishment_timeout_ms(), 12_000);
+    }
+
+    /// The test-only override replaces the base and keeps the jitter; no
+    /// override is the reference formula (745).
+    #[test]
+    fn establishment_timeout_override_replaces_the_base_only() {
+        let dest_hash = DestinationHash::new([0x42; TRUNCATED_HASHBYTES]);
+        let mut link = Link::new_outgoing(dest_hash, &mut OsRng);
+        link.set_establishment_jitter_permille(250);
+        assert_eq!(
+            link.establishment_timeout_ms_with(None),
+            link.establishment_timeout_ms()
+        );
+        assert_eq!(
+            link.establishment_timeout_ms_with(NonZeroU32::new(1000)),
+            1250
+        );
     }
 
     #[test]

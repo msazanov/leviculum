@@ -217,6 +217,16 @@ impl NodeCoreBuilder {
         self
     }
 
+    /// TEST ONLY: the establishment timeout of every pending link, in
+    /// milliseconds, in place of the reference formula. `None` or `Some(0)`
+    /// (default) keeps the formula; production never sets it. See
+    /// [`TransportConfig::link_establishment_timeout_ms`](crate::transport::TransportConfig::link_establishment_timeout_ms).
+    pub fn link_establishment_timeout_ms(mut self, ms: Option<u32>) -> Self {
+        self.transport_config.link_establishment_timeout_ms =
+            ms.and_then(core::num::NonZeroU32::new);
+        self
+    }
+
     /// Set LRPROOF hop-asymmetry handling (#38). `true` (default) rewrites a
     /// mismatching forwarded proof to the frozen count; `false` selects the
     /// reference-exact strict check that DROPS on mismatch, arming the healing

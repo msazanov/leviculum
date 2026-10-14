@@ -220,7 +220,7 @@ maintained at `:1841-1849`) and serves them per row
 (`reference/Reticulum/RNS/Reticulum.py:1540-1559`). Our export has no
 timestamps at all, and the handler hardcodes the empty list
 (`build_rate_table`, `leviculum-std/src/rpc/handlers.rs:1688-1697`;
-`RateTableExport`, `leviculum-core/src/transport.rs:1635`). What the
+`RateTableExport`, `leviculum-core/src/transport.rs:1648`). What the
 tool sees: `rnpath -r` reads `entry["timestamps"][0]`
 (`reference/Reticulum/RNS/Utilities/rnpath.py:344`), the IndexError is
 caught per entry, and every row prints "Error while processing entry
@@ -253,7 +253,7 @@ queues on all interfaces..." trusting the daemon did it
 arm (`leviculum-std/src/rpc/handlers.rs:121`) was a constant:
 `pickle_bool(true)` with no call into the core — while the core does hold
 per-interface announce-cap queues that the verb is about
-(`drain_announce_queues`, `leviculum-core/src/transport.rs:12762`).
+(`drain_announce_queues`, `leviculum-core/src/transport.rs:12775`).
 What the operator sees: the command reports success and the queued
 announces still go out. Class: **missing op claiming success** — the
 worst of the three possible answers (refusing would at least be
@@ -263,7 +263,7 @@ announce under a capped interface, issue the RPC, assert the queue is
 empty and nothing transmits at the next drain.
 
 *Fixed in 2352c749.* The arm calls `drop_announce_queues`
-(`leviculum-core/src/transport.rs:9312`, reached through
+(`leviculum-core/src/transport.rs:9325`, reached through
 `NodeCore::drop_announce_queues`, `leviculum-core/src/node/mod.rs:2947`),
 which empties every interface's cap queue, leaves the holdoff clocks as
 they are, and logs `ANN_QUEUE_DROPPED iface= count=` per interface that
@@ -321,7 +321,7 @@ renders "Queued : N announces"
 the key as None unconditionally
 (`leviculum-std/src/rpc/handlers.rs:662`) while the core maintains
 exactly that queue per interface (the announce-cap queue,
-`leviculum-core/src/transport.rs:12762`). Class: **missing answer**
+`leviculum-core/src/transport.rs:12775`). Class: **missing answer**
 (None where a number exists). Bears on: observing a saturated LoRa
 cap, which is the state the air-path audit's D14/D15 lived in — the
 operator-visible gauge for it is missing. Test: unit — queue one
@@ -329,7 +329,7 @@ capped announce, `interface_stats` answers `announce_queue: 1`;
 drop-in — `rnstatus -A` under a saturated cap on both daemons.
 
 *Fixed in 2352c749.* The core's interface stats carry the cap-queue length
-(`announce_queue`, `leviculum-core/src/transport.rs:1263`) for an
+(`announce_queue`, `leviculum-core/src/transport.rs:1276`) for an
 interface that holds a cap, and None for one without; the row answers
 that, so `rnstatus -A` renders the line for a capped interface with a
 backlog and nothing otherwise, as against rnsd (it prints the line only
@@ -459,22 +459,22 @@ local-client special cases:
 * **Hop spoofing** — increment on receipt, then undo for the IPC hop,
   with Python's exact if/elif exclusivity between "I am the shared
   instance" and "I am a client of one" (`incoming_hop_count`,
-  `leviculum-core/src/transport.rs:10147-10157`, against
+  `leviculum-core/src/transport.rs:10160-10170`, against
   `reference/Reticulum/RNS/Transport.py:1481-1484`).
 * **Announce relay to clients** — every accepted announce is re-packed
   HEADER_2 / transport-id = this daemon, hops preserved, to every
   client but the source (`hand_announce_to_local_clients`,
-  `leviculum-core/src/transport.rs:10058`, against
+  `leviculum-core/src/transport.rs:10071`, against
   `reference/Reticulum/RNS/Transport.py:1935-1978`).
 * **Path requests** — Python's five branches including the
   forward-to-local-clients arm
-  (`leviculum-core/src/transport.rs:11703`, against
+  (`leviculum-core/src/transport.rs:11716`, against
   `reference/Reticulum/RNS/Transport.py:2911-3052`), with the pending
-  local-PR table (`leviculum-core/src/transport.rs:3132`, against
+  local-PR table (`leviculum-core/src/transport.rs:3145`, against
   `reference/Reticulum/RNS/Transport.py:2926-2936`).
 * **Plain broadcasts** — from a local client to all interfaces, from
   the network to all local clients
-  (`leviculum-core/src/transport.rs:8288-8311`, against
+  (`leviculum-core/src/transport.rs:8301-8324`, against
   `reference/Reticulum/RNS/Transport.py:1521-1534`).
 * **Disconnect/reconnect signalling** — the client drops cached
   routing state on loss and re-announces on recovery, mirroring
@@ -521,22 +521,22 @@ depths, invalid lines refuse the whole file exactly as `rnsd` panics
 on them (`parse_ini`, `leviculum-std/src/ini_config.rs:209-211`,
 against `reference/Reticulum/RNS/Reticulum.py:328-333`), inline
 comments and quote stripping to ConfigObj's own rules
-(`strip_value`, `leviculum-std/src/ini_config.rs:1071`); the config
+(`strip_value`, `leviculum-std/src/ini_config.rs:1077`); the config
 directory lookup order `/etc/reticulum` → `~/.config/reticulum` →
 `~/.reticulum` (`resolve_config_dir`,
-`leviculum-std/src/config.rs:1210`, against
+`leviculum-std/src/config.rs:1219`, against
 `reference/Reticulum/RNS/Reticulum.py:229-236`); `ifac_size` in bits
-with the ≥ 8 floor (`leviculum-std/src/ini_config.rs:879-885`,
+with the ≥ 8 floor (`leviculum-std/src/ini_config.rs:885-891`,
 against `reference/Reticulum/RNS/Reticulum.py:747-750`) and the
 per-type default IFAC sizes pinned class by class
 (`default_ifac_size`, `leviculum-std/src/driver/mod.rs:578`);
 `announce_cap` kept only in (0, 100]
-(`leviculum-std/src/ini_config.rs:859-861`, against
+(`leviculum-std/src/ini_config.rs:865-867`, against
 `reference/Reticulum/RNS/Reticulum.py:819-822`); `bitrate` gated on
-MINIMUM_BITRATE (`leviculum-std/src/ini_config.rs:762-766`);
+MINIMUM_BITRATE (`leviculum-std/src/ini_config.rs:768-772`);
 Backbone-to-TCP normalization including the `port`/`remote`/
 `listen_on` aliases (`normalize_backbone_interface`,
-`leviculum-std/src/ini_config.rs:986`, against
+`leviculum-std/src/ini_config.rs:992`, against
 `reference/Reticulum/RNS/Reticulum.py:960-972`); the three UDP config
 forms of leviculum#279 — single `port`, bind-only, forward-only, plus
 the `device` broadcast fill — each built and pinned end to end from
@@ -548,10 +548,10 @@ tests at `:327`, against
 receive-bound caveat documented where it lives
 (`leviculum-std/src/interfaces/udp.rs:21-26`); both `mode` spellings
 including Python's `interface_mode = gateway` copy/paste bug handled
-as a strict superset (`leviculum-std/src/ini_config.rs:862-870`,
+as a strict superset (`leviculum-std/src/ini_config.rs:868-876`,
 against `reference/Reticulum/RNS/Reticulum.py:717-745`); and the rule
 that an unknown key never makes lnsd refuse a config rnsd loads
-(`leviculum-std/src/ini_config.rs:645-649`).
+(`leviculum-std/src/ini_config.rs:651-655`).
 
 **D12 — three defaults flip against a config that omits the key, and
 each flips a different layer of the daemon.** All three are
@@ -562,7 +562,7 @@ daemon:
 1. **`share_instance`** — Python defaults true
    (`reference/Reticulum/RNS/Reticulum.py:287`); ours defaults false
    (`leviculum-std/src/config.rs:63-64`, resolved unchanged by the
-   builder, `leviculum-std/src/driver/builder.rs:834-836`). A config
+   builder, `leviculum-std/src/driver/builder.rs:850-852`). A config
    that never names the key gives rnsd a shared instance and lnsd
    none: every Python tool answers "No shared RNS instance available"
    against lnsd. This is the central drop-in switch defaulting to the
@@ -576,7 +576,7 @@ daemon:
    when `enabled` or `interface_enabled` is explicitly true and skips
    the section otherwise
    (`reference/Reticulum/RNS/Reticulum.py:950` and `:1056`); ours
-   defaults the field true (`leviculum-std/src/config.rs:511-512`), so
+   defaults the field true (`leviculum-std/src/config.rs:520-521`), so
    a section with no `enabled` key is live under lnsd and dead under
    rnsd.
 
@@ -626,7 +626,7 @@ refuses like the invalid-line arm does.
 
 *Fixed in 2d3eec85.* `parse_bool` accepts ConfigObj's eight spellings
 in any case and refuses everything else, the empty value included
-(`leviculum-std/src/ini_config.rs:1047`); the refusal stops the parse
+(`leviculum-std/src/ini_config.rs:1053`); the refusal stops the parse
 with the line, the key and the value named, as the invalid-line arm
 does: `config line 2: enable_transport = 'maybe' is neither true nor
 false (yes/no, true/false, on/off, 1/0)`. The same holds in interface
@@ -655,7 +655,7 @@ discoverable interface with latitude/longitude on both daemons, read
 the announce on a third node.
 
 *Fixed in 2d3eec85.* The seven keys have arms
-(`leviculum-std/src/ini_config.rs:920-926`) and reach the descriptor:
+(`leviculum-std/src/ini_config.rs:926-932`) and reach the descriptor:
 the position and the stamp cost for every discoverable type, the three
 radio keys for a KISS interface, which becomes discoverable with them
 (`descriptor_from_config`, `leviculum-std/src/discovery.rs:64`, the
@@ -683,7 +683,7 @@ transport-enabled interface's announce-rate enforcement
 `:830-833`), and the `ic_*`/`ec_pr_freq`/`egress_control` family
 tunes the ingress/egress limiters globally
 (`reference/Reticulum/RNS/Reticulum.py:635-677`). We honour the
-per-interface spellings (`leviculum-std/src/ini_config.rs:845-855`)
+per-interface spellings (`leviculum-std/src/ini_config.rs:851-861`)
 but the global ones fall into the catch-all, so our
 transport-enabled defaults are the hardcoded 3600/0/5
 (`leviculum-std/src/rpc/mod.rs:814-825` pins them). A config that
@@ -696,16 +696,16 @@ the `(t:...)` suffix.
 *Fixed in a26157d1*, for the keys that have a seam, and named for the
 rest. The three `default_ar_*` keys are read with Python's validation
 and its `or` fallback, so 0 keeps the default for the target and the
-grace (`leviculum-std/src/ini_config.rs:600`), and become the core's
+grace (`leviculum-std/src/ini_config.rs:606`), and become the core's
 node-wide fill (`TransportConfig::default_announce_rate`,
-`leviculum-core/src/transport.rs:1045`, applied in
-`resolve_announce_rate`, `leviculum-core/src/transport.rs:195`); an
+`leviculum-core/src/transport.rs:1046`, applied in
+`resolve_announce_rate`, `leviculum-core/src/transport.rs:196`); an
 interface's own `announce_rate_*` still wins. Being node-wide, as in the
 reference, the fill reaches configured interfaces, the connections a
 listener spawns and the listener rows alike, for reporting and for
 enforcement. The global `egress_control` is every interface's default
 (`TransportConfig::default_egress_control`,
-`leviculum-core/src/transport.rs:1051`), an interface's own key
+`leviculum-core/src/transport.rs:1052`), an interface's own key
 overriding it either way, and `ic_max_held_announces` sets the
 held-announce cap the boards already size. The remaining tunings,
 `ic_burst_hold`, `ic_burst_freq_new`, `ic_burst_freq`,
@@ -713,14 +713,14 @@ held-announce cap the boards already size. The remaining tunings,
 `ic_burst_penalty`, `ic_held_release_interval` and `ec_pr_freq`, run as
 constants in our limiter, globally and per interface alike; each is now
 named at WARN as read but not honoured
-(`leviculum-std/src/ini_config.rs:629`) instead of dropped in silence.
+(`leviculum-std/src/ini_config.rs:635`) instead of dropped in silence.
 Making them tunable is a change to the core limiter with its own tests,
 not a config seam. Measuring this with the reference `rnstatus -A`
 turned up a neighbour: the accepted IPC client's row rendered the fill
 as well, where the reference sets None on every local interface
 (`reference/Reticulum/RNS/Interfaces/LocalInterface.py:428-430`); that
 row now reports none (`announce_rate_of`,
-`leviculum-core/src/transport.rs:10986`), which enforcement already
+`leviculum-core/src/transport.rs:10999`), which enforcement already
 did. Pinned by `test_rnstatus_shows_the_configured_default_ar_target`:
 `rnstatus -a -A` against lnsd built from the same file with
 `default_ar_target = 7200` renders `(t:2h/p:0s/g:5)` on the TCP listener
@@ -731,10 +731,10 @@ of 3600/0/5, now one of two cases); and by unit tests per key.
 
 Deliberate, documented deviations, re-confirmed as stated: our
 `discover_interfaces` defaults true against Python's false, collecting
-being locally observable only (`leviculum-std/src/config.rs:208-223`);
+being locally observable only (`leviculum-std/src/config.rs:216-231`);
 ingress control defaults off for dial-out point-to-point types where
 Python is flat-true (`ingress_control_default_for_type`,
-`leviculum-std/src/config.rs:1067`); the discoverable-mode promotion
+`leviculum-std/src/config.rs:1076`); the discoverable-mode promotion
 fills only an UNSET mode where Python overrides an explicit one
 (`promote_discoverable_modes`, `leviculum-std/src/ini_config.rs:374`).
 Also ignored without a current consumer: `link_mtu_discovery` (no
@@ -833,7 +833,7 @@ All three are fixed in e5f78966; see the *Fixed in* note under each.
    timestamp deque (Python's cap is 16,
    `reference/Reticulum/RNS/Transport.py:96`) on the core's rate
    entries beside the `last`/`violations` already kept
-   (`leviculum-core/src/transport.rs:1635`), and serve it in
+   (`leviculum-core/src/transport.rs:1648`), and serve it in
    `build_rate_table` (`leviculum-std/src/rpc/handlers.rs:1688-1697`);
    the minimum honest interim is `[last]`, which already stops the
    per-row exception. Test: unit — a rate entry answers a non-empty

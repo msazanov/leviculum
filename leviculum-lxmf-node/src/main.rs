@@ -139,7 +139,7 @@ fn verbosity_flag(arg: &str) -> Option<(u8, u8)> {
 /// carries `[logging] loglevel = 5` (`periculum/src/topology.rs:9186`) and the
 /// container environment carries `RUST_LOG=debug`
 /// (`periculum/src/compose.rs:291-294`), so a scenario gets `PATH_REBALANCE`
-/// (`transport.rs:9782`) without touching the argv.
+/// (`transport.rs:9795`) without touching the argv.
 const DEFAULT_LOGLEVEL: u8 = 4;
 
 /// Map an RNS log level (0-7) to a tracing env-filter directive.
@@ -223,6 +223,9 @@ struct DaemonConfigKeys {
     instance_name: String,
     max_links: Option<usize>,
     keepalive_interval: Option<u64>,
+    /// The test-only `link_establishment_timeout_ms` (745): a test's config
+    /// shortens this client's link retry schedule the way it does the daemon's.
+    link_establishment_timeout_ms: Option<u32>,
     /// `[logging] loglevel`, the same key `lnsd` folds into its default
     /// tracing filter. The helper is one more leviculum stack on the node, so
     /// the node's one config file sets its level too.
@@ -237,6 +240,7 @@ fn daemon_config_keys(config_dir: &std::path::Path) -> DaemonConfigKeys {
                 instance_name: config.reticulum.instance_name,
                 max_links: config.reticulum.max_links,
                 keepalive_interval: config.reticulum.keepalive_interval,
+                link_establishment_timeout_ms: config.reticulum.link_establishment_timeout_ms,
                 loglevel: config.reticulum.loglevel,
             };
         }
@@ -245,6 +249,7 @@ fn daemon_config_keys(config_dir: &std::path::Path) -> DaemonConfigKeys {
         instance_name: "default".to_string(),
         max_links: None,
         keepalive_interval: None,
+        link_establishment_timeout_ms: None,
         loglevel: None,
     }
 }
@@ -390,6 +395,9 @@ async fn run(args: Args) -> Result<(), String> {
         .core_processor(processor);
     if let Some(secs) = daemon_keys.keepalive_interval {
         builder = builder.link_keepalive(secs);
+    }
+    if let Some(ms) = daemon_keys.link_establishment_timeout_ms {
+        builder = builder.link_establishment_timeout_ms(ms);
     }
     let mut node = builder
         .build()
