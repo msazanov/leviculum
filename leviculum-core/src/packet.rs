@@ -108,6 +108,13 @@ pub enum PacketContext {
     Command,
     CommandStatus,
     Channel,
+    /// rawg-private: one tunnelled IP packet, sealed by the link cipher, no Channel, no receipt.
+    ///
+    /// An unreliable datagram: it is not acknowledged, not retransmitted and not ordered, so a lost
+    /// or late packet costs exactly that packet and nothing else. 0xF0 sits in the unassigned gap below
+    /// the link-control block (0xFA..0xFF); stock Reticulum relays forward it untouched like any
+    /// unknown context, only endpoints of this fork interpret it.
+    Tunnel,
     Keepalive,
     LinkIdentify,
     LinkClose,
@@ -142,6 +149,7 @@ impl PacketContext {
             0x0C => PacketContext::Command,
             0x0D => PacketContext::CommandStatus,
             0x0E => PacketContext::Channel,
+            0xF0 => PacketContext::Tunnel,
             0xFA => PacketContext::Keepalive,
             0xFB => PacketContext::LinkIdentify,
             0xFC => PacketContext::LinkClose,
@@ -171,6 +179,7 @@ impl PacketContext {
             PacketContext::Command => 0x0C,
             PacketContext::CommandStatus => 0x0D,
             PacketContext::Channel => 0x0E,
+            PacketContext::Tunnel => 0xF0,
             PacketContext::Keepalive => 0xFA,
             PacketContext::LinkIdentify => 0xFB,
             PacketContext::LinkClose => 0xFC,
@@ -679,6 +688,32 @@ pub fn packet_hash(raw: &[u8]) -> [u8; 32] {
     }
 }
 
+/// Link Channel data: the hot-path packet class whose full-payload hash nothing reads.
+///
+/// SHA-256 over every received payload byte was the largest single cost of a
+/// bulk link on a one-core node (73% of the receive thread in the profile of
+/// `docs/benchmarks-1core.md`). For this class every consumer of the hash turns
+/// out to be dead weight:
+///
+/// * the duplicate check is skipped (`Channel` is a dedup-exempt context: its
+///   retransmissions are byte-identical and the handlers are idempotent), and
+///   for the same reason inserting the hash into the table is inert;
+/// * delivery proofs bind to the token tag / nonce+tag of the link layer, not to
+///   this hash (`cipher_proof_identifier`);
+/// * a Channel proof is addressed to the link id and routed by the link table,
+///   never through the reverse table keyed by the packet hash;
+/// * the node's "repack symmetry" check only logs a warning.
+///
+/// Authenticity and replay protection are untouched: the link layer verifies the
+/// AEAD tag and the GCM replay window per record, whatever the transport did.
+/// The class is deliberately narrow (Data + Link destination + Channel context)
+/// so that everything else keeps hashing exactly as before.
+pub fn is_hash_free_link_data(flags: &PacketFlags, context: PacketContext) -> bool {
+    flags.packet_type == PacketType::Data
+        && flags.dest_type == DestinationType::Link
+        && matches!(context, PacketContext::Channel | PacketContext::Tunnel)
+}
+
 /// Compute the truncated packet hash (16 bytes)
 ///
 /// Returns the first 16 bytes of the packet hash, used for reverse_table
@@ -735,6 +770,46 @@ pub fn build_proof_packet(
 
 #[cfg(test)]
 mod tests {
+    /// Only Data + Link destination + Channel context may skip the payload hash;
+    /// every neighbouring class must keep hashing.
+    #[test]
+    fn hash_free_class_is_exactly_link_channel_data() {
+        let flags = |packet_type, dest_type| PacketFlags {
+            ifac_flag: false,
+            header_type: HeaderType::Type1,
+            context_flag: false,
+            transport_type: TransportType::Broadcast,
+            dest_type,
+            packet_type,
+        };
+        let channel = PacketContext::Channel;
+        assert!(is_hash_free_link_data(&flags(PacketType::Data, DestinationType::Link), channel));
+        assert!(is_hash_free_link_data(
+            &flags(PacketType::Data, DestinationType::Link),
+            PacketContext::Tunnel
+        ));
+        assert_eq!(PacketContext::from_byte(0xF0), PacketContext::Tunnel);
+        assert_eq!(PacketContext::Tunnel.to_byte(), 0xF0);
+        for context in [
+            PacketContext::None,
+            PacketContext::Resource,
+            PacketContext::ResourcePrf,
+            PacketContext::Keepalive,
+            PacketContext::LinkClose,
+            PacketContext::Lrproof,
+            PacketContext::LinkProof,
+            PacketContext::Unknown(0x42),
+        ] {
+            assert!(!is_hash_free_link_data(&flags(PacketType::Data, DestinationType::Link), context));
+        }
+        for packet_type in [PacketType::Announce, PacketType::LinkRequest, PacketType::Proof] {
+            assert!(!is_hash_free_link_data(&flags(packet_type, DestinationType::Link), channel));
+        }
+        for dest_type in [DestinationType::Single, DestinationType::Group, DestinationType::Plain] {
+            assert!(!is_hash_free_link_data(&flags(PacketType::Data, dest_type), channel));
+        }
+    }
+
     /// The token tag is what data proofs now bind to, so its boundaries matter:
     /// a cleartext packet must never have trailing payload read as a tag, and a
     /// real token packet must yield exactly its HMAC bytes.

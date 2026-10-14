@@ -973,6 +973,32 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         Ok((packet_hash, self.process_events_and_actions()))
     }
 
+    /// Send one tunnelled datagram on an established link: sealed by the link cipher, sent once.
+    ///
+    /// Unlike [`Self::send_packet_on_link`] it keeps no receipt (a receipt per packet is state and a
+    /// timer per packet, which an IP tunnel at tens of thousands of packets per second cannot afford),
+    /// and unlike [`Self::send_on_link`] it has no window, no ordering and no retransmission: the
+    /// transport underneath either delivers the packet or drops it, and the inner IP stack copes.
+    pub fn send_link_tunnel(
+        &mut self,
+        link_id: &LinkId,
+        data: &[u8],
+    ) -> Result<crate::transport::TickOutput, send::SendError> {
+        let link_id = &self.resolve_link_id(link_id);
+        let link = self.links.get(link_id).ok_or(send::SendError::NoLink)?;
+        if link.state() != LinkState::Active {
+            return Err(send::SendError::LinkFailed);
+        }
+        if data.len() > link.mdu() {
+            return Err(send::SendError::TooLarge);
+        }
+        let packet_bytes = link
+            .build_data_packet_with_context(data, PacketContext::Tunnel, &mut self.rng)
+            .map_err(|_| send::SendError::LinkFailed)?;
+        self.route_link_packet(link_id, &packet_bytes);
+        Ok(self.process_events_and_actions())
+    }
+
     /// Send a proof for an application-accepted plain link data packet.
     pub fn send_data_proof(
         &mut self,
@@ -1671,6 +1697,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             PacketContext::Channel => {
                 self.handle_channel_packet(link_id, packet, raw_packet, rx, now_ms)
             }
+            PacketContext::Tunnel => self.handle_tunnel_packet(link_id, packet, now_secs),
             PacketContext::ResourceAdv => {
                 self.handle_resource_adv(link_id, packet, raw_packet, rx, now_ms);
             }
@@ -2121,6 +2148,38 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     }
 
     /// Regular data packet, decrypt, handle proof strategy, emit data event
+    /// One tunnelled datagram: authenticate, decrypt, hand the plaintext up. Nothing else.
+    ///
+    /// No proof (an unreliable datagram is never acknowledged), no receipt, no ring, no hash: the
+    /// cipher is the only integrity and replay check, and for GCM the record counter window rejects
+    /// duplicates. A failure drops exactly this packet.
+    fn handle_tunnel_packet(&mut self, link_id: LinkId, packet: &Packet, now_secs: u64) {
+        let Some(link) = self.links.get_mut(&link_id) else {
+            return;
+        };
+        if link.state() != LinkState::Active {
+            return;
+        }
+        link.record_inbound(now_secs);
+        let sealed = packet.data.as_slice();
+        let mut plaintext = alloc::vec![0u8; sealed.len()];
+        match link.decrypt_for_context(sealed, &mut plaintext, packet.context) {
+            Ok(len) => {
+                plaintext.truncate(len);
+                self.events.push(NodeEvent::LinkDataReceived {
+                    link_id,
+                    data: plaintext,
+                });
+            }
+            Err(_) => {
+                crate::tracing::trace!(
+                    link = %HexShort(link_id.as_bytes()),
+                    "Tunnel datagram refused by the link cipher"
+                );
+            }
+        }
+    }
+
     fn handle_plain_data_packet(
         &mut self,
         link_id: LinkId,

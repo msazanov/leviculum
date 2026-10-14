@@ -62,8 +62,8 @@ use crate::identity::Identity;
 use crate::ifac::IfacConfig;
 use crate::link::Link;
 use crate::packet::{
-    build_proof_packet, packet_hash, HeaderType, Packet, PacketContext, PacketData, PacketError,
-    PacketFlags, PacketType, TransportType,
+    build_proof_packet, is_hash_free_link_data, packet_hash, HeaderType, Packet, PacketContext,
+    PacketData, PacketError, PacketFlags, PacketType, TransportType,
 };
 pub use crate::storage_types::PathEntry;
 use crate::storage_types::{
@@ -2246,6 +2246,35 @@ fn wire_dst(data: &[u8]) -> &[u8] {
 
 /// Take the `ph` correlator prefix from a full (32-byte) or truncated
 /// (16-byte) packet hash.
+/// Test-only switch for the journey target. The leviculum-core test binary
+/// installs ONE process-global DEBUG/TRACE subscriber the first time any test
+/// captures logs (`test_log_capture`), after which `enabled!` is true for every
+/// later test on every thread. Tests that assert the journey-disabled path (no
+/// hashing of hash-free link data) pin it off for their own thread with this.
+#[cfg(test)]
+pub(crate) mod journey_override {
+    extern crate std;
+    std::thread_local! {
+        static FORCED_OFF: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+    }
+    pub(crate) fn forced_off() -> bool {
+        FORCED_OFF.with(|c| c.get())
+    }
+    /// Pins the journey target off on this thread until dropped.
+    pub(crate) struct JourneyOff;
+    impl JourneyOff {
+        pub(crate) fn new() -> Self {
+            FORCED_OFF.with(|c| c.set(true));
+            JourneyOff
+        }
+    }
+    impl Drop for JourneyOff {
+        fn drop(&mut self) {
+            FORCED_OFF.with(|c| c.set(false));
+        }
+    }
+}
+
 fn ph8(hash: &[u8]) -> [u8; PKT_PH_BYTES] {
     let mut ph = [0u8; PKT_PH_BYTES];
     ph.copy_from_slice(&hash[..PKT_PH_BYTES]);
@@ -4382,12 +4411,23 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // never hash the same packet twice. Otherwise take the driver's
         // off-lock precomputation (#29) when the bytes are unchanged, and
         // only hash here as the last resort.
-        let full_packet_hash = journey_hash
-            .or(precomputed_hash)
-            .unwrap_or_else(|| packet_hash(&raw));
-        debug_assert_eq!(
-            full_packet_hash,
-            packet_hash(&raw),
+        //
+        // Link Channel data is the exception: nothing downstream reads its hash
+        // (see `is_hash_free_link_data`), so it is not computed here. If the
+        // driver or the journey target happens to hold one already, it is used
+        // as is. `hash_free` is true exactly when `full_packet_hash` below is
+        // an all-zero PLACEHOLDER; every consumer of the hash checks it, so the
+        // placeholder can never reach a table, a key or an event.
+        let known_hash = journey_hash.or(precomputed_hash);
+        let hash_free =
+            known_hash.is_none() && is_hash_free_link_data(&packet.flags, packet.context);
+        let full_packet_hash = if hash_free {
+            [0u8; 32]
+        } else {
+            known_hash.unwrap_or_else(|| packet_hash(&raw))
+        };
+        debug_assert!(
+            hash_free || full_packet_hash == packet_hash(&raw),
             "precomputed packet hash must match the post-IFAC bytes"
         );
         let mut truncated_hash = [0u8; TRUNCATED_HASHBYTES];
@@ -4445,6 +4485,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 | PacketContext::Resource
                 | PacketContext::CacheRequest
                 | PacketContext::Channel
+                | PacketContext::Tunnel
         );
         // LRPROOFs for our own links skip dedup: link-request retries generate
         // identical proofs (deterministic for same link_id). Without
@@ -4460,6 +4501,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             && !is_link_request_for_us
             && !is_dedup_exempt_context
             && !is_lrproof_for_us
+            && !hash_free
             && self.storage.has_packet_hash(&full_packet_hash)
         {
             if packet.context == PacketContext::Lrproof {
@@ -4514,7 +4556,10 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             || (packet.flags.packet_type == PacketType::Proof
                 && packet.context == PacketContext::Lrproof);
 
-        if !defer_cache_insert {
+        // Channel is dedup-exempt, so this insert is inert for it (the comment
+        // at the link-table repeat below says the same); skipping it is what
+        // lets the payload go unhashed.
+        if !defer_cache_insert && !hash_free {
             self.storage.add_packet_hash(full_packet_hash);
         }
 
@@ -4530,9 +4575,13 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 self.handle_link_request(packet, interface_index, &raw, truncated_hash)
             }
             PacketType::Proof => self.handle_proof(packet, interface_index, full_packet_hash),
-            PacketType::Data => {
-                self.handle_data(packet, interface_index, full_packet_hash, truncated_hash)
-            }
+            PacketType::Data => self.handle_data(
+                packet,
+                interface_index,
+                full_packet_hash,
+                truncated_hash,
+                hash_free,
+            ),
         }
     }
 
@@ -4540,6 +4589,10 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// external collector is listening). Guards every hash computation done
     /// solely for journey events, so the disabled path stays zero-cost.
     fn pkt_journey_enabled(&self) -> bool {
+        #[cfg(test)]
+        if journey_override::forced_off() {
+            return false;
+        }
         crate::tracing::enabled!(target: PKT_EVENT_TARGET, crate::tracing::Level::DEBUG)
     }
 
@@ -8871,8 +8924,15 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         interface_index: usize,
         full_packet_hash: [u8; 32],
         truncated_hash: [u8; TRUNCATED_HASHBYTES],
+        // True when both hashes are zero placeholders (link Channel data, see
+        // `is_hash_free_link_data`). Every use of them below is guarded by it.
+        hash_free: bool,
     ) -> Result<(), TransportError> {
         let dest_hash = packet.destination_hash;
+        debug_assert!(
+            !hash_free || packet.flags.dest_type == DestinationType::Link,
+            "only link-addressed data can be hash-free"
+        );
 
         crate::tracing::trace!(
             "handling data packet dest=<{}> iface={} hops={} data_len={}",
@@ -9005,16 +9065,22 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 destination_hash: dest_hash,
                 packet: Box::new(packet),
                 interface_index,
-                raw_hash: Some(full_packet_hash),
+                raw_hash: (!hash_free).then_some(full_packet_hash),
             });
 
-            // Always emit ProofRequested. NodeCore decides based on strategy
-            self.events.push(TransportEvent::ProofRequested {
-                packet_hash: full_packet_hash,
-                destination_hash: dest_hash,
-                interface_index,
-                peer: self.ingress_peer,
-            });
+            // Always emit ProofRequested. NodeCore decides based on strategy.
+            // Not for hash-free link data: the destination here is a link id,
+            // which is never one of `NodeCore::destinations`, so the strategy
+            // lookup there is always `None` and the event is a no-op; the link
+            // layer proves Channel records itself, bound to the AEAD tag.
+            if !hash_free {
+                self.events.push(TransportEvent::ProofRequested {
+                    packet_hash: full_packet_hash,
+                    destination_hash: dest_hash,
+                    interface_index,
+                    peer: self.ingress_peer,
+                });
+            }
 
             return Ok(());
         }
@@ -9109,17 +9175,23 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     return Ok(()); // Unknown direction
                 };
 
-                // Populate reverse table for link-routed data packets
+                // Populate reverse table for link-routed data packets. Not for
+                // hash-free Channel data: its proofs are addressed to the link
+                // id and found in the link table (`handle_proof`), so a reverse
+                // entry keyed by the packet hash would never be read.
                 let now = self.clock.now_ms();
-                self.storage.set_reverse(
-                    truncated_hash,
-                    ReverseEntry {
-                        timestamp_ms: now,
-                        receiving_interface_index: interface_index,
-                        outbound_interface_index: target_iface,
-                        received_peer: self.ingress_peer.unwrap_or(ReverseEntry::NO_PEER),
-                    },
-                );
+<<<<<<< HEAD
+                if !hash_free {
+                    self.storage.set_reverse(
+                        truncated_hash,
+                        ReverseEntry {
+                            timestamp_ms: now,
+                            receiving_interface_index: interface_index,
+                            outbound_interface_index: target_iface,
+                            received_peer: self.ingress_peer.unwrap_or(ReverseEntry::NO_PEER),
+                        },
+                    );
+                }
 
                 // Deferred cache insert: hash was skipped in process_incoming()
                 // because dest_hash is in link_table. Python adds the hash
@@ -9137,7 +9209,9 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // self-delivery: the relay's own repeat, re-heard off the
                 // shared medium, passed dedup and was forwarded back onto the
                 // ipc leg to the sender.
-                self.storage.add_packet_hash(full_packet_hash);
+                if !hash_free {
+                    self.storage.add_packet_hash(full_packet_hash);
+                }
 
                 // Refresh the link entry on every actual repeat (Python
                 // Transport.py:1681): LINK_TIMEOUT is a rolling inactivity
@@ -9156,6 +9230,9 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                     self.iface_name(target_iface)
                 );
                 let mut forwarded = packet;
+                // The correlator prefix is zero for hash-free data (the journey
+                // target, when enabled, supplies the real hash instead and the
+                // packet is then not hash-free).
                 return self.forward_on_interface_from(
                     target_iface,
                     Some(interface_index),
@@ -9256,12 +9333,14 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 iface = %self.iface_name(interface_index),
                 matched = false,
             );
-            self.storage.add_packet_hash(full_packet_hash);
+            if !hash_free {
+                self.storage.add_packet_hash(full_packet_hash);
+            }
             self.events.push(TransportEvent::PacketReceived {
                 destination_hash: dest_hash,
                 packet: Box::new(packet),
                 interface_index,
-                raw_hash: Some(full_packet_hash),
+                raw_hash: (!hash_free).then_some(full_packet_hash),
             });
             return Ok(());
         }
@@ -27549,6 +27628,176 @@ mod tests {
                 1,
                 "Only the first copy should be forwarded"
             );
+        }
+
+        /// A link-addressed Data packet with the given context, wire hops 0.
+        fn link_packet_with_context(
+            link_id: [u8; TRUNCATED_HASHBYTES],
+            context: PacketContext,
+        ) -> Vec<u8> {
+            let packet = Packet {
+                flags: PacketFlags {
+                    ifac_flag: false,
+                    header_type: HeaderType::Type1,
+                    context_flag: true,
+                    transport_type: TransportType::Broadcast,
+                    dest_type: crate::destination::DestinationType::Link,
+                    packet_type: PacketType::Data,
+                },
+                hops: 0,
+                transport_id: None,
+                destination_hash: link_id,
+                context,
+                data: PacketData::Owned(alloc::vec![0x5A; 200]),
+            };
+            let mut buf = [0u8; 500];
+            let len = packet.pack(&mut buf).unwrap();
+            buf[..len].to_vec()
+        }
+
+        fn relay_with_link(link_id: [u8; TRUNCATED_HASHBYTES]) -> Transport<MockClock, MemoryStorage> {
+            let mut transport = make_transport_enabled();
+            let _ = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+            let _ = transport.register_interface(Box::new(MockInterface::new("if1", 2)));
+            let now = transport.clock.now_ms();
+            transport.storage_mut().set_link_entry(
+                link_id,
+                LinkEntry {
+                    timestamp_ms: now,
+                    next_hop_interface_index: 1,
+                    remaining_hops: 1,
+                    received_interface_index: 0,
+                    hops: 1,
+                    validated: true,
+                    proof_timeout_ms: now + 900_000,
+                    destination_hash: [0xBB; TRUNCATED_HASHBYTES],
+                    peer_signing_key: None,
+                },
+            );
+            transport
+        }
+
+        fn truncated_packet_hash_of(raw: &[u8]) -> [u8; TRUNCATED_HASHBYTES] {
+            let mut out = [0u8; TRUNCATED_HASHBYTES];
+            out.copy_from_slice(&packet_hash(raw)[..TRUNCATED_HASHBYTES]);
+            out
+        }
+
+        /// The bulk-link hot path: a relay forwards Channel records without
+        /// hashing the payload, leaves no table entry keyed by a hash, and a
+        /// byte-identical retransmission is forwarded again, as before.
+        #[test]
+        fn test_channel_data_relay_forwards_without_hashing() {
+            let _journey_off = journey_override::JourneyOff::new();
+            let link_id = [0xC1; TRUNCATED_HASHBYTES];
+            let mut transport = relay_with_link(link_id);
+            let raw = link_packet_with_context(link_id, PacketContext::Channel);
+
+            for round in 0..2 {
+                transport.process_incoming(0, &raw).unwrap();
+                let sent = transport
+                    .drain_actions()
+                    .iter()
+                    .filter(|a| matches!(a, Action::SendPacket { iface, .. } if iface.0 == 1))
+                    .count();
+                assert_eq!(sent, 1, "round {round}: Channel record must be forwarded");
+            }
+            assert_eq!(transport.storage().packet_hash_count(), 0, "no hash may be inserted");
+            assert!(
+                transport.storage().get_reverse(&truncated_packet_hash_of(&raw)).is_none(),
+                "no reverse entry: Channel proofs ride the link table"
+            );
+            assert_eq!(transport.stats().packets_forwarded, 2);
+        }
+
+        /// The neighbouring classes must keep their hash bookkeeping exactly.
+        #[test]
+        fn test_non_channel_link_data_relay_still_hashes() {
+            let _journey_off = journey_override::JourneyOff::new();
+            for context in [PacketContext::Resource, PacketContext::Keepalive, PacketContext::None] {
+                let link_id = [0xC2; TRUNCATED_HASHBYTES];
+                let mut transport = relay_with_link(link_id);
+                let raw = link_packet_with_context(link_id, context);
+                transport.process_incoming(0, &raw).unwrap();
+                assert_eq!(transport.stats().packets_forwarded, 1, "{context:?} forwarded");
+                assert_eq!(transport.storage().packet_hash_count(), 1, "{context:?} hash cached");
+                assert!(
+                    transport.storage().get_reverse(&truncated_packet_hash_of(&raw)).is_some(),
+                    "{context:?} keeps its reverse entry"
+                );
+            }
+        }
+
+        /// Local delivery of a Channel record carries no hash and requests no
+        /// proof from the destination layer; any other link context still does.
+        #[test]
+        fn test_channel_data_local_delivery_carries_no_hash() {
+            let _journey_off = journey_override::JourneyOff::new();
+            let link_id = [0xC3; TRUNCATED_HASHBYTES];
+            for (context, hash_free) in [
+                (PacketContext::Channel, true),
+                (PacketContext::Resource, false),
+                (PacketContext::None, false),
+            ] {
+                let mut transport = make_transport_enabled();
+                let _ = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+                transport.register_destination(link_id);
+                let raw = link_packet_with_context(link_id, context);
+                transport.process_incoming(0, &raw).unwrap();
+                let events: Vec<_> = transport.drain_events().collect();
+                let raw_hash = events.iter().find_map(|e| match e {
+                    TransportEvent::PacketReceived { raw_hash, .. } => Some(*raw_hash),
+                    _ => None,
+                });
+                let proof_requested =
+                    events.iter().any(|e| matches!(e, TransportEvent::ProofRequested { .. }));
+                if hash_free {
+                    assert_eq!(raw_hash, Some(None), "{context:?}: delivered without hash");
+                    assert!(!proof_requested, "{context:?}: no ProofRequested");
+                    assert_eq!(transport.storage().packet_hash_count(), 0);
+                } else {
+                    assert_eq!(raw_hash, Some(Some(packet_hash(&raw))), "{context:?}: hash kept");
+                    assert!(proof_requested, "{context:?}: ProofRequested kept");
+                }
+            }
+        }
+
+        /// A Channel record for a link nobody here holds is handed up unhashed
+        /// (the node layer drops it as `link-data-no-link`), not cached.
+        #[test]
+        fn test_channel_data_for_unknown_link_is_handed_up_unhashed() {
+            let _journey_off = journey_override::JourneyOff::new();
+            // A non-transport node: link-addressed data it neither relays nor owns.
+            let mut transport = make_transport_enabled();
+            transport.config.enable_transport = false;
+            let _ = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+            let raw = link_packet_with_context([0xC4; TRUNCATED_HASHBYTES], PacketContext::Channel);
+            transport.process_incoming(0, &raw).unwrap();
+            let events: Vec<_> = transport.drain_events().collect();
+            assert!(events.iter().any(|e| matches!(
+                e,
+                TransportEvent::PacketReceived { raw_hash: None, .. }
+            )));
+            assert_eq!(transport.storage().packet_hash_count(), 0);
+        }
+
+        /// With the journey target enabled the hash exists anyway (the PKT_RX
+        /// correlator needs it), so it is used exactly as before: still no extra
+        /// hashing, and nothing downstream sees a placeholder.
+        #[test]
+        fn test_channel_data_keeps_its_hash_while_the_journey_target_is_on() {
+            // No JourneyOff here: the process-global capture subscriber (or the
+            // real one in production) is what turns the target on.
+            crate::test_log_capture::with_captured_logs(|| {
+                let link_id = [0xC5; TRUNCATED_HASHBYTES];
+                let mut transport = relay_with_link(link_id);
+                assert!(transport.pkt_journey_enabled(), "capture subscriber must enable it");
+                let raw = link_packet_with_context(link_id, PacketContext::Channel);
+                transport.process_incoming(0, &raw).unwrap();
+                assert_eq!(transport.stats().packets_forwarded, 1);
+                assert_eq!(transport.storage().packet_hash_count(), 1);
+                assert!(transport.storage().get_reverse(&truncated_packet_hash_of(&raw)).is_some());
+            });
         }
 
         #[test]
