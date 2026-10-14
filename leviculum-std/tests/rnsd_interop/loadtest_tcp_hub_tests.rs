@@ -643,6 +643,9 @@ struct LoadResult {
     baseline_fds: usize,
     peak_fds: usize,
     end_fds: usize,
+    /// How long after the run's end the hub took to fall back to
+    /// `baseline + FD_END_SLACK` descriptors; the whole window if it never did.
+    fd_settle_ms: u128,
     /// Steady-phase CPU occupancy of hub, generator and machine; `None` when
     /// the run was too short for two steady samples.
     cpu: Option<CpuLoad>,
@@ -881,7 +884,7 @@ async fn run_load(
         .unwrap_or(baseline_rss_kb);
     let peak_fds = samples.iter().map(|s| s.fds).max().unwrap_or(baseline_fds);
     let end_rss_kb = read_vmrss_kb(hub_pid).unwrap_or(baseline_rss_kb);
-    let end_fds = count_open_fds(hub_pid).unwrap_or(baseline_fds);
+    let (end_fds, fd_settle_ms) = wait_for_fd_release(hub_pid, baseline_fds).await;
 
     let cpu = steady_cpu(&samples);
     LoadResult {
@@ -897,10 +900,41 @@ async fn run_load(
         baseline_fds,
         peak_fds,
         end_fds,
+        fd_settle_ms,
         cpu,
         cores: std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(1),
+    }
+}
+
+/// Descriptors above baseline the hub may still hold once the load has gone.
+const FD_END_SLACK: usize = 16;
+
+/// How long the hub gets to let go of its clients' sockets after the run ends.
+///
+/// The steady clients close about 100 ms before the end point, all 128 within
+/// 20 ms of each other, and the hub closes each socket when its connection
+/// task sees the FIN. Measured at 128 connections / 15 ms (#715): before the
+/// reverse table fix the last of them went 216 to 237 ms after the steady
+/// deadline, each one waiting for the event loop's walk of a 195 000 entry
+/// table on the previous departure. A single reading at the end point
+/// (about 210 ms) landed inside that ramp and saw 32 sockets still closing.
+/// Five seconds is twenty times the slowest release measured; a socket that
+/// is never released still fails.
+const FD_RELEASE_WINDOW: Duration = Duration::from_secs(5);
+
+/// Poll the hub's descriptor count until it is back within `FD_END_SLACK` of
+/// `baseline` or `FD_RELEASE_WINDOW` has passed. Returns the last count and the
+/// time it took.
+async fn wait_for_fd_release(hub_pid: u32, baseline: usize) -> (usize, u128) {
+    let start = tokio::time::Instant::now();
+    loop {
+        let fds = count_open_fds(hub_pid).unwrap_or(baseline);
+        if fds <= baseline + FD_END_SLACK || start.elapsed() >= FD_RELEASE_WINDOW {
+            return (fds, start.elapsed().as_millis());
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
 
@@ -1238,8 +1272,8 @@ fn report_and_assert(label: &str, res: &LoadResult, params: &LoadParams, log_fai
         100.0 * (res.peak_rss_kb as f64 - res.baseline_rss_kb as f64) / res.baseline_rss_kb as f64
     );
     println!(
-        "fds: baseline={} peak={} end={}",
-        res.baseline_fds, res.peak_fds, res.end_fds
+        "fds: baseline={} peak={} end={} (settled after {} ms)",
+        res.baseline_fds, res.peak_fds, res.end_fds, res.fd_settle_ms
     );
     print_cpu(res);
     print_rss_series(&res.samples);
@@ -1322,13 +1356,15 @@ fn report_and_assert(label: &str, res: &LoadResult, params: &LoadParams, log_fai
         res.conns,
         params.churn_workers
     );
-    // After steady clients close + drain, fds must fall back near baseline.
+    // After steady clients close + drain, fds must fall back near baseline
+    // within the release window.
     assert!(
-        res.end_fds <= res.baseline_fds + 16,
-        "{label}: end fd count {} did not return near baseline {} (+16) after teardown; \
-         per-connection fds not released",
+        res.end_fds <= res.baseline_fds + FD_END_SLACK,
+        "{label}: end fd count {} did not return near baseline {} (+{FD_END_SLACK}) within \
+         {} ms after teardown; per-connection fds not released",
         res.end_fds,
-        res.baseline_fds
+        res.baseline_fds,
+        FD_RELEASE_WINDOW.as_millis()
     );
 
     // --- 4. Log-failure patterns. ---
@@ -1648,6 +1684,7 @@ mod delivery_record_tests {
             baseline_fds: 10,
             peak_fds: 140,
             end_fds: 11,
+            fd_settle_ms: 0,
             cpu,
             cores: 4,
         }
