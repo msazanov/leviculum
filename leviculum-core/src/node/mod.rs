@@ -139,6 +139,8 @@ mod mvr_link_up_reoffer;
 mod mvr_lnode_pathresolve;
 #[cfg(test)]
 mod mvr_local_client_announce_immediate;
+#[cfg(test)]
+mod mvr_local_client_path_answer_hops;
 #[cfg(all(test, feature = "tracing"))]
 mod mvr_lrproof;
 #[cfg(all(test, feature = "tracing"))]

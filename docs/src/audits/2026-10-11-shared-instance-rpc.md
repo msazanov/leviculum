@@ -253,7 +253,7 @@ queues on all interfaces..." trusting the daemon did it
 arm (`leviculum-std/src/rpc/handlers.rs:121`) was a constant:
 `pickle_bool(true)` with no call into the core — while the core does hold
 per-interface announce-cap queues that the verb is about
-(`drain_announce_queues`, `leviculum-core/src/transport.rs:12748`).
+(`drain_announce_queues`, `leviculum-core/src/transport.rs:12762`).
 What the operator sees: the command reports success and the queued
 announces still go out. Class: **missing op claiming success** — the
 worst of the three possible answers (refusing would at least be
@@ -264,7 +264,7 @@ empty and nothing transmits at the next drain.
 
 *Fixed in 2352c749.* The arm calls `drop_announce_queues`
 (`leviculum-core/src/transport.rs:9312`, reached through
-`NodeCore::drop_announce_queues`, `leviculum-core/src/node/mod.rs:2945`),
+`NodeCore::drop_announce_queues`, `leviculum-core/src/node/mod.rs:2947`),
 which empties every interface's cap queue, leaves the holdoff clocks as
 they are, and logs `ANN_QUEUE_DROPPED iface= count=` per interface that
 held any, as the reference logs "Dropped N announces on <interface>". The
@@ -321,7 +321,7 @@ renders "Queued : N announces"
 the key as None unconditionally
 (`leviculum-std/src/rpc/handlers.rs:662`) while the core maintains
 exactly that queue per interface (the announce-cap queue,
-`leviculum-core/src/transport.rs:12748`). Class: **missing answer**
+`leviculum-core/src/transport.rs:12762`). Class: **missing answer**
 (None where a number exists). Bears on: observing a saturated LoRa
 cap, which is the state the air-path audit's D14/D15 lived in — the
 operator-visible gauge for it is missing. Test: unit — queue one
@@ -468,7 +468,7 @@ local-client special cases:
   `reference/Reticulum/RNS/Transport.py:1935-1978`).
 * **Path requests** — Python's five branches including the
   forward-to-local-clients arm
-  (`leviculum-core/src/transport.rs:11689`, against
+  (`leviculum-core/src/transport.rs:11703`, against
   `reference/Reticulum/RNS/Transport.py:2911-3052`), with the pending
   local-PR table (`leviculum-core/src/transport.rs:3132`, against
   `reference/Reticulum/RNS/Transport.py:2926-2936`).

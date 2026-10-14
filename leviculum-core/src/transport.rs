@@ -11462,7 +11462,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         if from_local && self.storage.get_path(&requested_hash).is_some() {
             if let Some(cached_raw) = self.storage.get_announce_cache(&requested_hash).cloned() {
                 // Convert cached Header1 announce to Header2 with the daemon's
-                // transport_id and receipt-incremented hops. This is required because
+                // transport_id and the stored path-table hops. This is required because
                 // Python shared instance clients use hops to decide routing:
                 // hops == 0: destination is directly reachable, send Header1
                 // hops == 1: destination needs transport, convert to Header2
@@ -11470,8 +11470,22 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // Sending Header2 with our identity ensures the client's path table
                 // stores our transport_id, so outbound packets use the correct
                 // transport_id and pass our filter (Transport.py:1341-1343).
+                //
+                // The hop count is the STORED one, as the reference sets it
+                // (Transport.py:2956 `packet.hops = path_table[dst][IDX_PT_HOPS]`),
+                // not the cached byte plus one. The two agree for a path learned
+                // from the network, where the stored count is the cached byte
+                // plus the receipt hop, but a local client's announce is stored
+                // at the cached byte (the local-client decrement, Transport.py:1482,
+                // done here by `incoming_hop_count`): the `+1` told a co-attached
+                // client the destination was one hop away, and its link then
+                // dropped the 0-hop proof (Transport.py:2228, 714).
                 if let Ok(mut announce) = Packet::unpack(&cached_raw) {
-                    announce.hops = announce.hops.saturating_add(1);
+                    announce.hops = self
+                        .storage
+                        .get_path(&requested_hash)
+                        .map(|p| p.hops)
+                        .unwrap_or_else(|| announce.hops.saturating_add(1));
                     announce.flags.header_type = HeaderType::Type2;
                     announce.flags.transport_type = TransportType::Transport;
                     announce.transport_id = Some(*self.identity.hash());
@@ -11577,7 +11591,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // Sibling emission sites audited for the same mistake and found
                 // correct: case 1 (local dest, `:5936`) emits the origin's own
                 // hops (0 for a freshly generated announce); case 2a (local client,
-                // `:5977`) does the explicit `+1` so it emits `stored`; the
+                // `:5977`) reads the stored count from the path table (714); the
                 // announce-forward path (`:6381`) puts `entry.hops`, itself the
                 // receipt-incremented `packet.hops` (`:3166`/`:3310`), and the
                 // local-client forward (`:3371`) likewise uses `packet.hops`.
@@ -29651,9 +29665,13 @@ mod tests {
         fn test_path_request_from_local_client_returns_cached_announce() {
             let mut transport = make_transport_with_local_client();
 
-            // Process an announce on the network interface to populate the cache
+            // Process an announce on the network interface to populate the cache.
+            // Simulate process_incoming's receipt hop increment: the answer
+            // carries the stored path-table count (714), so the path must be
+            // stored as the inbound path stores it.
             let (raw, dest_hash) = make_announce_raw(0, crate::packet::PacketContext::None);
-            let packet = Packet::unpack(&raw).unwrap();
+            let mut packet = Packet::unpack(&raw).unwrap();
+            packet.hops = packet.hops.saturating_add(1);
             let _ = transport.handle_announce(packet, NETWORK_IFACE, &raw, false, false);
             transport.drain_actions();
             transport.drain_events();
@@ -29731,7 +29749,7 @@ mod tests {
                     Some(*transport.identity.hash()),
                     "Transport ID should be daemon's identity"
                 );
-                // Hops should be wire hops + 1 (receipt increment)
+                // Hops should be the stored count: wire hops + 1 (receipt increment)
                 let original = Packet::unpack(&cached_raw).unwrap();
                 assert_eq!(
                     unpacked.hops,

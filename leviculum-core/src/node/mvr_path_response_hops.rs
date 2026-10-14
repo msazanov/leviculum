@@ -262,11 +262,11 @@ fn path_response_to_network_peer_emits_stored_count() {
     );
 }
 
-/// Guard: case 2a (the local-client answer, `transport.rs` `+1` arm) is
-/// unaffected. A local client requesting the path gets the STORED count S on the
-/// wire — the cached pre-increment byte (S-1) plus the explicit `+1`. This holds
-/// on master AND after the case-2b fix; it documents that only the
-/// transport->network-peer arm was wrong.
+/// Guard: case 2a (the local-client answer) emits the STORED count S on the
+/// wire for a path learned from the network, one more than the cached
+/// pre-increment byte (S-1). This held before the case-2b fix and still holds
+/// after 714 made case 2a read the path table directly; the co-attached-client
+/// case it got wrong is pinned in `mvr_local_client_path_answer_hops`.
 #[test]
 fn path_response_to_local_client_emits_stored_count_unaffected() {
     let (dest_d, announce_raw) = make_destination();
@@ -304,7 +304,7 @@ fn path_response_to_local_client_emits_stored_count_unaffected() {
         response_wire_hops,
         s,
         "case 2a must emit the STORED count ({s}) to the local client \
-         (cached byte {} + 1); this arm is correct and unchanged.",
+         (cached byte {} + 1).",
         s - 1
     );
 }
