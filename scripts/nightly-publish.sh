@@ -8,9 +8,11 @@
 # ref scripts/nightly-green-ref.sh pushes), and a forge cron that fires on its
 # own clock and again on the green-ref trigger ran twice on ed0754e4 on
 # 2026-10-08, the second site publish refused. Run from the nightly host after
-# a green night, the recipe builds the commit that night tested, in the tree it
+# a green-or-attributed night, the recipe builds the commit that night tested, in the tree it
 # tested it in, needs no secret at a third party, and does not care which
-# forge the source lives on. Lew decided the move on 2026-10-08.
+# forge the source lives on. Lew decided the move on 2026-10-08; on
+# 2026-10-14 (726) the forge release went back to the forge's cron, and this
+# host kept the site (see "THE SITE ONLY, BY DEFAULT" below).
 #
 # In order, each step the script the forge pipeline ran:
 #
@@ -20,11 +22,22 @@
 #   scripts/build-docs-tarball.sh        the book
 #   scripts/collect-nightly-debs.sh      everything staged into dist/
 #   scripts/publish-site.sh              leviculum.network/releases/nightly/
-#   scripts/publish-nightly.sh           the forge's rolling `nightly` release
+#   scripts/publish-nightly.sh           the forge's rolling `nightly` release,
+#                                        ONLY with LEVICULUM_PUBLISH_FORGE=1
+#
+# THE SITE ONLY, BY DEFAULT (726, Lew 2026-10-14). The forge release is
+# published again by .woodpecker/nightly.yml's cron run, after its own gate and
+# builds; this host publishes leviculum.network from the tree its night
+# tested. One publisher per target: the site receiver refuses a second,
+# different build under one build id, which is how the 2026-10-08 double
+# publish failed, and the forge's rolling release has a publisher every
+# morning whether or not this night is green. LEVICULUM_PUBLISH_FORGE=1 is the
+# manual fallback for a morning the forge cron could not publish: it uploads
+# this build to the forge release as well, and needs the token below.
 #
 # REFUSES, before it builds anything:
 #   * a missing tool: one line per tool, naming scripts/install-ci.sh;
-#   * a missing credential file;
+#   * a missing credential file (the token only with LEVICULUM_PUBLISH_FORGE=1);
 #   * a dirty tree: what goes out must be a commit, the one a night tested;
 #   * a HEAD no green night covers (scripts/check-nightly-green.sh, the gate
 #     publish-nightly.sh runs anyway; asked here first so a refusal costs
@@ -43,7 +56,9 @@
 #
 # Environment, all optional:
 #   LEVICULUM_PUBLISH_FROM_GREEN_RUN  sha the calling nightly tested green
-#   LEVICULUM_PUBLISH_DRY_RUN=1       build everything, upload nothing; both
+#   LEVICULUM_PUBLISH_FORGE=1         also publish the forge release (fallback;
+#                                     the forge cron owns it, see above)
+#   LEVICULUM_PUBLISH_DRY_RUN=1       build everything, upload nothing; the
 #                                     publish scripts say what they would send
 #   LEVICULUM_PUBLISH_REBUILD=1       rebuild although dist/ holds this build
 #   LEVICULUM_SITE_DIR                default ~/.config/leviculum-site, holding
@@ -53,7 +68,7 @@
 #                                     that known_hosts line
 #   LEVICULUM_CODEBERG_TOKEN_FILE     default ~/.config/codeberg-token, read by
 #                                     publish-nightly.sh when CODEBERG_TOKEN is
-#                                     unset
+#                                     unset (LEVICULUM_PUBLISH_FORGE=1 only)
 #   CI_REPO                           default Lew_Palm/leviculum
 #
 # Credentials are passed as files and never printed.
@@ -69,6 +84,11 @@ say() { printf '[nightly-publish] %s\n' "$*"; }
 die() { printf '[nightly-publish] %s\n' "$*" >&2; exit 1; }
 
 DRY_RUN="${LEVICULUM_PUBLISH_DRY_RUN:-0}"
+FORGE="${LEVICULUM_PUBLISH_FORGE:-0}"
+case "$FORGE" in
+0 | 1) ;;
+*) die "LEVICULUM_PUBLISH_FORGE is '${FORGE}'; it takes 0 (site only, the default) or 1 (site and forge)" ;;
+esac
 SITE_DIR="${LEVICULUM_SITE_DIR:-${HOME:-}/.config/leviculum-site}"
 SITE_KEY="$SITE_DIR/id"
 SITE_KNOWN_HOSTS="$SITE_DIR/known_hosts"
@@ -122,7 +142,7 @@ fi
 # --- Credentials -------------------------------------------------------------
 [ -r "$SITE_KEY" ] || die "refusing: no site publish key at ${SITE_KEY} (LEVICULUM_SITE_DIR)"
 [ -r "$SITE_KNOWN_HOSTS" ] || die "refusing: no pinned site host key at ${SITE_KNOWN_HOSTS} (LEVICULUM_SITE_DIR)"
-if [ -z "${CODEBERG_TOKEN:-}" ] && [ ! -r "$TOKEN_FILE" ]; then
+if [ "$FORGE" = 1 ] && [ -z "${CODEBERG_TOKEN:-}" ] && [ ! -r "$TOKEN_FILE" ]; then
     die "refusing: CODEBERG_TOKEN is unset and ${TOKEN_FILE} is not readable (LEVICULUM_CODEBERG_TOKEN_FILE)"
 fi
 
@@ -179,20 +199,27 @@ fi
 
 # --- Publish ----------------------------------------------------------------
 #
-# Both targets, each whatever the other did: a forge outage is the night the
-# site copy matters, and the reverse. The run fails if either failed.
+# The site always; the forge only with LEVICULUM_PUBLISH_FORGE=1 (see the
+# header). With both, each runs whatever the other did: a forge outage is the
+# night the site copy matters, and the reverse. The run fails if either failed.
 export LEVICULUM_PUBLISH_DRY_RUN="$DRY_RUN"
 site_rc=0
 bash scripts/publish-site.sh --key-file "$SITE_KEY" --known-hosts-file "$SITE_KNOWN_HOSTS" ||
     site_rc=$?
 forge_rc=0
-LEVICULUM_CODEBERG_TOKEN_FILE="$TOKEN_FILE" bash scripts/publish-nightly.sh || forge_rc=$?
+if [ "$FORGE" = 1 ]; then
+    LEVICULUM_CODEBERG_TOKEN_FILE="$TOKEN_FILE" bash scripts/publish-nightly.sh || forge_rc=$?
+    targets="the site and the forge"
+else
+    say "forge release skipped: the forge's nightly cron publishes it (LEVICULUM_PUBLISH_FORGE=1 to publish it from here)"
+    targets="the site"
+fi
 
 if [ "$site_rc" != 0 ] || [ "$forge_rc" != 0 ]; then
     die "FAILED: site publish exit ${site_rc}, forge publish exit ${forge_rc} (build ${BUILD_ID})"
 fi
 if [ "$DRY_RUN" = 1 ]; then
-    say "dry run done: build ${BUILD_ID} built, nothing uploaded"
+    say "dry run done: build ${BUILD_ID} built, nothing uploaded (targets: ${targets})"
 else
-    say "published ${BUILD_ID} to the site and the forge"
+    say "published ${BUILD_ID} to ${targets}"
 fi

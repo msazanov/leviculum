@@ -811,7 +811,7 @@ check-publish-nightly-gate:
 
 # The nightly's OTHER cron-only step, driven against a fixture tree.
 #
-# `package` and `publish` both carry `when: event: cron` (`manual` since 517), so until this
+# `package` and `publish` both carry `when: event: [cron, manual]` (726), so until this
 # recipe existed exactly half of that pair had coverage and the other half
 # had none. The rolling release stood still from 2026-08-24 to 2026-09-18
 # and every push pipeline over those five weeks was green: 03e2cb95 put a
@@ -1836,16 +1836,16 @@ deb-heapacct arch="amd64": (_require-cargo-deb) _deb-stamp
 build-deb: build-deb-amd64 build-deb-arm64
 
 # The nightly release, built and published from this tree (517). Runs on the
-# tier-2 nightly host after a GRUEN night, with
+# tier-2 nightly host after a green-or-attributed night, with
 # LEVICULUM_PUBLISH_FROM_GREEN_RUN=<the sha it just tested>, and refuses a HEAD
 # no green night covers. Both .deb architectures, the lnflash bundle, the
-# book, dist/, then the site and the forge's rolling release; a second run on
-# the same build id republishes the same dist/ without rebuilding.
-# LEVICULUM_PUBLISH_DRY_RUN=1 builds everything and uploads nothing.
-# Credentials are files: ~/.config/leviculum-site/{id,known_hosts} and
-# ~/.config/codeberg-token. The script's header lists every knob; the flow is
-# in docs/src/development-ci.md.
-[doc('Build the nightly from this tree and publish it (site + forge)')]
+# book, dist/, then the site; the forge release only with
+# LEVICULUM_PUBLISH_FORGE=1, as the forge's cron publishes it (726). A rerun
+# on one build id republishes dist/ without rebuilding, and
+# LEVICULUM_PUBLISH_DRY_RUN=1 uploads nothing. Credentials are files (see the
+# script's header): ~/.config/leviculum-site/{id,known_hosts}, for the forge
+# ~/.config/codeberg-token. The flow is in docs/src/development-ci.md.
+[doc('Build the nightly from this tree and publish it to the site')]
 nightly-publish:
     @bash scripts/nightly-publish.sh
 

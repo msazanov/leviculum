@@ -1,8 +1,9 @@
 # Nightly build pipeline for leviculum.
 #
-# Since 2026-10-08 (leviculum 517) the publisher is `just nightly-publish`
-# on the tier-2 nightly host, and this pipeline uploads only on a run
-# started by hand (see PUBLISHER above the `package` step). The asset
+# Two publishers, one target each (726, Lew 2026-10-14; see PUBLISHER above
+# the `package` step): this pipeline's cron run publishes the forge's rolling
+# `nightly` release, and `just nightly-publish` on the tier-2 nightly host
+# publishes leviculum.network from the tree that night tested. The asset
 # names and URLs below are the recipe's too: it runs the same scripts.
 #
 # Builds two musl-static .deb packages (amd64 + arm64) and uploads
@@ -65,24 +66,22 @@
 # ONE-TIME SETUP — configure a cron schedule in the Woodpecker web UI
 # (Repo → Settings → Crons). YAML cannot declare the cron itself; this
 # file only reacts to the `event: cron` trigger it produces. The cron is
-# configured as `0 4 * * *` (04:00 UTC daily), and it is the fallback,
-# not the normal path: the reviewer host fires this same cron through
-# the Woodpecker API as soon as the night pushes a green ref, because a
-# clock-fired run publishes before the signal exists (see "What fires
-# the publish" in docs/src/development-ci.md).
-# Since 517 neither run publishes; the trigger can be retired with the
-# publish steps.
+# configured as `0 4 * * *` (04:00 UTC daily). Its run publishes the
+# forge release (726). The reviewer host may also fire this same cron
+# through the Woodpecker API once the night pushes its green ref, because
+# a clock-fired run can come before the signal exists; two runs on one day
+# overwrite the same rolling release (see "What fires the publish" in
+# docs/src/development-ci.md).
 #
 # Authentication for the publish step uses a Codeberg API token
 # (write:repository scope) supplied via the Woodpecker secret
 # `codeberg_token`. NETRC is only visible inside the clone step,
 # not in user-defined steps, so a manual token is required.
 
-# Since 2026-10-08 the cron publishes nothing (see PUBLISHER below); it
-# keeps the gate and the builds. Until then:
-#
-# Two triggers. The nightly cron is what publishes; the push trigger is
-# a guard, and only builds. Packaging changes were previously unbuildable
+# Three triggers. The nightly cron is what publishes the forge release; a
+# manual run is the fallback that also publishes the site; the push trigger
+# is a guard, and only builds the amd64 packages and the lnflash bundle (726,
+# see `gate` below). Packaging changes were previously unbuildable
 # before merge — `when: event: cron` alone meant a broken manifest first
 # showed up in the following night's run, and then only to whoever
 # thought to look at the releases page. That is exactly how commit
@@ -91,8 +90,9 @@
 # not pay for a packaging build.
 when:
   - event: cron
-  # A human-started run from the Woodpecker UI. Since 2026-10-08 it is the
-  # only run that publishes from here; see "PUBLISHER" below.
+  # A human-started run from the Woodpecker UI: the fallback for a night
+  # the host cannot publish, the one run that also publishes the site; see
+  # "PUBLISHER" below.
   - event: manual
   - event: push
     path:
@@ -156,7 +156,7 @@ steps:
   # running a test. It is first because that is the whole point — steps run
   # serially in file order, and a non-zero exit here terminates the workflow,
   # so build, package and publish are never reached with a red commit. The two
-  # cron-only steps below do NOT escape that: their `when:` sets no `status:`,
+  # publishing steps below do NOT escape that: their `when:` sets no `status:`,
   # and the default is success-only (Woodpecker 3.17 workflow syntax, the
   # version ci.codeberg.org runs: "By default, steps only run when the workflow
   # has succeeded up to that point, which is equivalent to status: [success]").
@@ -170,11 +170,29 @@ steps:
   # passes there and dies in cc-rs here, a night after the commit that did it.
   #
   # That push gate does not make this step redundant. This is the one that
-  # stands between a cron run and the public releases page; the two overlap
-  # only on commits touching the packaging paths above, and on those the
-  # overlap is three minutes of insurance, not a second source of truth.
+  # stands between a cron run and the public releases page.
+  #
+  # On a PUSH it does not run (726). The overlap with ci.yml used to be three
+  # minutes of insurance; since #312 widened the gate it is 18 to 21 minutes,
+  # the same `bash scripts/ci-gate.sh` on the same commit in the same push,
+  # and it made the push run of this workflow 45 minutes long. Pipelines 515
+  # and 516 (2026-10-13) were then killed with `Canceled` 21.5 minutes in,
+  # while ci.yml beside them succeeded. Not a timeout: the repo's is 60
+  # minutes, and no newer pipeline was created at either moment, so it was not
+  # cancel-previous either. Every push or cron run of this repo the forge has
+  # killed (469, 474, 494, 505, 515, 516) ended between HH:00:36 and HH:00:52
+  # UTC on an hour divisible by three (09, 12, 15, 18), while runs that crossed
+  # 05:00 (514) and 23:00 (501) were left alone. Whatever cancels them is
+  # outside this file; what this file controls is how long a push run is
+  # exposed to it. Without the gate and the arm64 cross build, a push run is
+  # build-amd64 (8 to 9 min in 514, 516 and 517) plus build-lnflash (3 to
+  # 4 min), which is what proves a packaging commit still builds: the amd64
+  # .debs, the docs tarball and the firmware bundle from the same scripts and
+  # manifests the arm64 build uses.
   gate:
     image: rust:bookworm
+    when:
+      event: [cron, manual]
     commands:
       - bash scripts/ci-gate.sh
 
@@ -211,8 +229,13 @@ steps:
       - cargo install --locked mdbook --version "$(bash scripts/build-docs-tarball.sh --print-mdbook-pin)"
       - bash scripts/build-docs-tarball.sh
 
+  # Not on a push (726, see `gate`): the same scripts/build-deb.sh and the same
+  # manifests as build-amd64, cross-compiled, ten minutes of exposure that
+  # prove nothing build-amd64 has not.
   build-arm64:
     image: rust:bookworm
+    when:
+      event: [cron, manual]
     commands:
       # cargo-zigbuild uses Zig as the C compiler/linker — the only way
       # to cross-compile to aarch64-musl from an amd64 rust:bookworm
@@ -260,23 +283,33 @@ steps:
       # rather than on somebody's board.
       - bash scripts/lnflash-bundle.sh
 
-  # PUBLISHER (Lew, 2026-10-08, leviculum 517): the nightly is published by
-  # `just nightly-publish` on the tier-2 nightly host, run after a GRUEN night
-  # in the tree that night tested (scripts/nightly-publish.sh). Every step of
-  # this pipeline was already a script there; this file contributed the
-  # container, the cron and the secrets, and the cron/trigger pair ran twice on
-  # ed0754e4 that morning, the second site publish refused. So the cron run
-  # below builds and gates and publishes nothing: `package`, `publish` and
-  # `publish-site` run on `event: manual` only, a run started by hand from the
-  # Woodpecker UI, kept as the fallback for a night the host cannot publish.
-  # A switch rather than a deletion, so the fallback stays one click away
-  # until the recipe has published twice; the reviewer removes the three steps
-  # (and their secrets, in the order check-ci-secrets wants) after that. Do not
-  # start a manual run on a day the recipe has published: the site refuses a
-  # second, different build under the same build id.
+  # PUBLISHER (Lew, 2026-10-14, leviculum 726): the forge publishes the forge
+  # release, the tier-2 nightly host publishes the site. `package` and
+  # `publish` run on the cron again, after `gate` and the three builds;
+  # `publish-site` stays manual-only, because the host's
+  # `just nightly-publish` (scripts/nightly-publish.sh) publishes
+  # leviculum.network from the tree its night tested, and by default no longer
+  # touches the forge release.
   #
-  # Staging and publishing are manual-only (before 517: cron-only). A push build exists to prove
-  # the packages still build; letting it reach these two steps would let
+  # Why it moved back. From 2026-10-08 (517) to 2026-10-14 the cron built
+  # every night and uploaded nothing, and the host published only after a
+  # GRUEN night: no night in that week was, every one carried a registered red
+  # or the heap-accounting canary's infra skip, both of them the ground state
+  # working as designed. The forge release stood at ed0754e4 for six days and
+  # the field node ran a week-old build. The forge's gate is now the green
+  # signal scripts/check-nightly-green.sh reads, which a green-or-attributed
+  # night signs (scripts/nightly-green-ref.sh --verdict attributed).
+  #
+  # Why the site stays with the host: the cron/trigger pair ran twice on
+  # ed0754e4 on 2026-10-08, and the second site publish refused, because the
+  # receiver refuses a second, different build under one build id. One
+  # publisher per target ends that; the forge release is rolling and takes a
+  # second build on the same day by overwriting it. A manual run here still
+  # publishes both, the fallback for a night the host cannot; do not start one
+  # on a day the host has published the site.
+  #
+  # Staging and publishing are cron- and manual-only. A push build exists to
+  # prove the packages still build; letting it reach these two steps would let
   # any packaging commit replace the rolling release with a mid-day
   # build of whatever was just pushed.
   #
@@ -301,7 +334,7 @@ steps:
   package:
     image: debian:bookworm-slim
     when:
-      event: manual
+      event: [cron, manual]
     commands:
       - apt-get update && apt-get install -y git
       - export LEVICULUM_BUILD_ID="$(cat .build-id)"
@@ -310,7 +343,7 @@ steps:
   publish:
     image: debian:bookworm-slim
     when:
-      event: manual
+      event: [cron, manual]
     environment:
       CODEBERG_TOKEN:
         from_secret: codeberg_token

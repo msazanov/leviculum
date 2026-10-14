@@ -22,7 +22,8 @@
 #   CODEBERG_TOKEN  — Codeberg API token (Woodpecker secret)
 #   LEVICULUM_BUILD_ID (optional, for release body)
 #
-# Outside Woodpecker (517: `just nightly-publish` on the nightly host) the
+# Outside Woodpecker (517: `just nightly-publish` on the nightly host, which
+# runs this script only with LEVICULUM_PUBLISH_FORGE=1 since 726) the
 # token comes from a file instead, read only when CODEBERG_TOKEN is unset:
 #   LEVICULUM_CODEBERG_TOKEN_FILE  default ~/.config/codeberg-token
 # It is never printed.

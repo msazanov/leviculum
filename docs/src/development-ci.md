@@ -36,7 +36,7 @@ Three Woodpecker workflows on `ci.codeberg.org`, all in
 |------|----------|------|
 | `ci.yml` | every push, every pull request, manual | `just ci-gate` — fmt, clippy over all targets, and every workspace test except the submodule-bound suites and tests named in `scripts/ci-gate-integ.sh` (Codeberg #312) |
 | `commit-trailers.yml` | every push, every pull request, manual | `scripts/check-commit-trailers.sh` over the pushed range |
-| `nightly.yml` | cron, plus pushes touching the packaging paths | the same gate, then the .deb + tarball build; the cron run also publishes |
+| `nightly.yml` | cron, manual, plus pushes touching the packaging paths | cron: the same gate, both .deb builds and the lnflash bundle, then the forge release; push: only the amd64 .debs, the book and the lnflash bundle (726) |
 
 `ci.yml` exists because until Codeberg #299 none of the others
 covered an ordinary source commit: the nightly's push trigger is
@@ -101,7 +101,8 @@ entry, and computes everything else it runs from the tree.
 So the interop verdict is **imported rather than re-derived**
 (Codeberg #312). The tier-2 nightly already runs the whole workspace,
 with submodules, over a fresh clone pinned to `origin/master`. When
-that run is green it pushes a lightweight ref at the commit it tested:
+that run is green, or green-or-attributed, it pushes a lightweight ref
+at the commit it tested:
 
 ```
 refs/nightly/green/<YYYYMMDDTHHMMSSZ>  ->  <tested commit>
@@ -129,10 +130,51 @@ missed night and refuses two.
 
 ### What fires the publish
 
-Since 2026-10-08 (Lew's decision, leviculum 517) the nightly is
-published from the nightly host, not from the forge. After a GRUEN
-night, the tier-2 nightly runs `just nightly-publish` in the very tree
-it tested, seconds after it pushed the green ref:
+Two publishers, one target each (Lew's decision 2026-10-14, leviculum
+726). The forge's `nightly.yml` cron run publishes the forge's rolling
+`nightly` release. The tier-2 nightly host publishes leviculum.network
+from the tree its night tested. A manual run of `nightly.yml` from the
+Woodpecker UI publishes both, the fallback for a morning the host
+cannot.
+
+**What signs a night.** `scripts/nightly-green-ref.sh --verdict`
+takes `green`, `attributed` or `red`. `attributed` means
+green-or-attributed: no new unexplained red, no undecided cell, the
+unit suite green, no stale exclusion; registered reds and infra skips
+are allowed. It signs exactly as `green` does, after the same check
+that the run's manifest shows a green `rnsd_interop`, under the same
+`refs/nightly/green/<stamp>` name, so `scripts/check-nightly-green.sh`
+on the forge does not tell the two apart. The word that signed a ref is
+in the signer's log (`signed green` or `signed attributed`) on the
+nightly host; the ref is lightweight and carries none. `red` signs
+nothing. The reviewer's `nightly-tier2.sh`, which is not in this repo,
+passes the word. Until 726 only a strictly green night signed, and none
+did from 2026-10-08 to 10-14: every night carried a registered red or
+the heap-accounting canary's infra skip, so the forge release stood at
+ed0754e4 for six days.
+
+**The forge.** `package` and `publish` run on `event: [cron, manual]`,
+after `gate`, `build-amd64`, `build-arm64` and `build-lnflash`; a red
+step before them stops them, because a step's default `when:` is
+success-only. `publish` runs `scripts/publish-nightly.sh`, which asks
+`scripts/check-nightly-green.sh` first and refuses master HEAD when no
+green ref covers it. The cron is `0 4 * * *` UTC (06:00 CEST). The
+nightly's own ref is usually pushed later than that (the refs on the
+remote are stamped 04:14Z and 04:16Z on ordinary nights), so a
+clock-fired run reads yesterday's ref, which covers HEAD only when
+nothing landed since the night before. That is the refusal pipelines
+455 and 458 met. Since 2026-09-24 the reviewer host polls the forge
+every ten minutes and fires this cron through the Woodpecker API as
+soon as a new `refs/nightly/green/*` appears (`lev-nightly-publish-trigger`,
+reviewer-host tooling: it is not in this repo, and the API token stays on
+that host on purpose). That run is the one that normally publishes; the
+04:00 run is the fallback, and both on one day is harmless, because the
+release is rolling and `scripts/publish-nightly.sh` writes the same
+`nightly` tag with its assets overwritten.
+
+**The site.** After a green-or-attributed night the tier-2 nightly runs
+`just nightly-publish` in the very tree it tested, seconds after it
+pushed the green ref:
 
 ```
 LEVICULUM_PUBLISH_FROM_GREEN_RUN=<tested sha> \
@@ -144,54 +186,74 @@ first, refuses a dirty tree, and asks `scripts/check-nightly-green.sh`
 whether HEAD may go out. `LEVICULUM_PUBLISH_FROM_GREEN_RUN` is accepted
 only when it equals HEAD; it exists because the forge may not yet serve
 the ref the night pushed a moment earlier. Then it runs the scripts the
-forge pipeline ran, in the same order: `deb-stamp.sh`, `build-deb.sh`
+forge pipeline runs, in the same order: `deb-stamp.sh`, `build-deb.sh`
 for amd64 and arm64, `lnflash-bundle.sh` with the firmware built,
 `build-docs-tarball.sh`, `collect-nightly-debs.sh` into `dist/`, then
-`publish-site.sh` and `publish-nightly.sh`, each of the two whatever
+`publish-site.sh`. It does **not** run `publish-nightly.sh` by default:
+the forge cron owns the forge release. `LEVICULUM_PUBLISH_FORGE=1` is
+the manual fallback for a morning the forge could not publish; it adds
+`publish-nightly.sh`, each of the two publishes then running whatever
 the other did. The credentials are files on that host:
 `~/.config/leviculum-site/{id,known_hosts}` (the site target and port
-follow from the pinned `known_hosts` line) and
-`~/.config/codeberg-token`, read only when `CODEBERG_TOKEN` is unset.
-A second run on the same build id (one commit, one UTC day) publishes
-the same `dist/` again rather than rebuilding, because the packages
-are not byte-reproducible and the site refuses a known build id with
-different contents. `LEVICULUM_PUBLISH_DRY_RUN=1` builds everything
-and has both publish scripts say what they would upload, uploading
-nothing.
+follow from the pinned `known_hosts` line) and, with
+`LEVICULUM_PUBLISH_FORGE=1` only, `~/.config/codeberg-token`, read when
+`CODEBERG_TOKEN` is unset. A second run on the same build id (one
+commit, one UTC day) publishes the same `dist/` again rather than
+rebuilding, because the packages are not byte-reproducible and the site
+refuses a known build id with different contents.
+`LEVICULUM_PUBLISH_DRY_RUN=1` builds everything and has the publish
+scripts say what they would upload, uploading nothing.
 
-The forge's `nightly.yml` keeps its gate and its builds on the cron;
-its `package`, `publish` and `publish-site` steps run only on a
-**manual** run started from the Woodpecker UI, the fallback for a night
-the host cannot publish, and go away once the recipe has published
-twice. The rest of this section describes the forge path as it was
-until then.
+`publish-site` in `nightly.yml` stays on `event: manual`. One publisher
+per target is the fix for 2026-10-08, when the cron and its trigger ran
+twice on ed0754e4 and the second site publish was refused: the site
+receiver takes one build per build id, while the forge release takes a
+second build by overwriting the first. Do not start a manual run on a
+day the host has published the site.
 
-The publish is fired by the green ref, not by the clock. Since
-2026-09-24 the reviewer host polls the forge every ten minutes and, as
-soon as a new `refs/nightly/green/*` appears, fires the nightly cron
-through the Woodpecker API (`lev-nightly-publish-trigger`, reviewer-host
-tooling: it is not in this repo, and the API token stays on that host on
-purpose). The scheduled cron, `0 4 * * *` UTC, remains as a fallback
-rather than as the normal path; both firing on the same day is harmless,
-because the release is rolling and `scripts/publish-nightly.sh` writes
-the same `nightly` tag with its assets overwritten. Ordering is the
-whole point of the change: pipelines 455 (2026-09-23) and 458
-(2026-09-24) both refused at the publish gate because the 04:00 cron ran
-before the nightly host had pushed that day's green ref. The code was
-fine and the night had been green; the signal simply was not there yet.
+**When the two publish different commits.** The forge publishes master
+HEAD of the cron's morning; the host publishes the commit its night
+tested. Usually they are the same commit, because the publish gate
+accepts HEAD only when a green ref names it or a descendant of it. They
+differ when a manual run, the override below, or a catch-up night's ref
+lets the forge publish a HEAD the host's night did not test. Then one
+UTC day has two builds: the forge release carries the later HEAD, the
+site the tested commit, each under its own build id
+(`scripts/deb-stamp.sh` puts the commit in it), so neither receiver
+sees a second build under a known id. That is acceptable because every
+master commit passed the land gate, the full conformance corpus, before
+it was pushed; what a green ref adds on top is the interop suite the
+forge cannot run, and the gate still refuses a HEAD no signed night
+covers. The next night brings both back to one commit.
 
-That refusal is also what an operator sees when the trigger did not
-fire. The publish step refuses with `NO-SIGNAL` when no green ref can be
-read from the remote at all, and with `NOT-COVERED` — printing "the
-newest green ref is ..." and "is neither that commit nor an ancestor of
-it" — when refs exist but none of them names this commit or a
-descendant of it, which is what a night that has not pushed yet looks
-like from the publish step. Neither is a build failure and neither
-needs a code change:
+**What an operator sees when no ref covers HEAD.** The publish step
+refuses with `NO-SIGNAL` when no green ref can be read from the remote
+at all, and with `NOT-COVERED` — printing "the newest green ref is
+..." and "is neither that commit nor an ancestor of it" — when refs
+exist but none of them names this commit or a descendant of it, which
+is what a night that has not pushed yet looks like from the publish
+step. Neither is a build failure and neither needs a code change:
 `bash scripts/check-nightly-green.sh --commit <sha>` answers which ref
 the forge can see, and the fix is to wait for the night's ref to land
 and then start the nightly cron by hand from the Woodpecker UI
 (Repo → Settings → Crons) if the trigger has not done it first.
+
+**The push run.** A push touching the packaging paths runs only
+`build-amd64` and `build-lnflash`, about 12 minutes; `gate` and
+`build-arm64` are cron- and manual-only (726). The gate is the same
+`bash scripts/ci-gate.sh` that `ci.yml` runs on the same push, and it
+had grown to 18 to 21 minutes, which made the push run 45. Pipelines
+515 and 516 (2026-10-13) were killed with `Canceled` 21.5 minutes in
+while `ci.yml` beside them succeeded. It was not the timeout (the
+repository's is 60 minutes) and not cancel-previous (no newer pipeline
+was created at either moment): every run of this repository the forge
+has killed so far (469, 474, 494, 505, 515, 516) ended between
+HH:00:36 and HH:00:52 UTC on an hour divisible by three, while runs
+crossing 05:00 (514) and 23:00 (501) were left alone. What cancels them
+is outside this repository; a short push run is simply less often
+caught by it. The amd64 build proves the manifests and `build-deb.sh`
+the arm64 build uses, and the lnflash bundle has its own inputs in the
+path filter.
 
 ### Publishing anyway
 
