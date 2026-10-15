@@ -1094,6 +1094,13 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "BLE_DIAL_QUEUE",
         required_keys: &["iface", "depth", "wait_ms"],
     },
+    // 757: a queued dial dropped before it started, because the scan
+    // that ran while it waited heard its peer say it is full
+    // (`reason=stale_full`) or did not hear it at all (`reason=dark`).
+    EventSchema {
+        name: "BLE_DIAL_SKIP",
+        required_keys: &["iface", "peer", "reason"],
+    },
     EventSchema {
         name: "BLE_PEER_UP",
         required_keys: &["iface", "peer"],

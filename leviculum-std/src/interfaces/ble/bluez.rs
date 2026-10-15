@@ -17,8 +17,9 @@ use bluer::gatt::remote::CharacteristicWriteRequest;
 use bluer::gatt::CharacteristicReader;
 use bluer::gatt::WriteOp;
 use bluer::{Adapter, AdapterEvent, Address, DiscoveryFilter, DiscoveryTransport, Uuid};
+use futures::stream::BoxStream;
 use futures::{FutureExt, Stream, StreamExt};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use super::links::{IdentityHash, SERVICE_UUID_U128};
 use super::{Ev, LINK_QUEUE_DEPTH};
@@ -277,11 +278,20 @@ where
 /// Windowed discovery: scan for [`SCAN_WINDOW`], report every sighting,
 /// pause for the configured interval, repeat. Dropping the discovery
 /// stream stops the BlueZ scan between windows.
+///
+/// While a dial waits out its jitter (`hold`, the orchestrator's
+/// `DialQueue::wants_scan`) the scanner stays on (757): a window runs
+/// on past its end, and a pause is cut short by a fresh run. BlueZ
+/// refreshes a device's record only from the reports it hears while
+/// discovering, so before 757 every dial read a record 3 to 10 s old
+/// (755: in 16 of 16 misses the peer had said it was full before the
+/// dial started, and in 0 of 96 dials was discovery running).
 pub(crate) struct ScanTask {
     pub adapter: Adapter,
     pub ev_tx: mpsc::Sender<Ev>,
     pub interval: Duration,
     pub iface: String,
+    pub hold: watch::Receiver<bool>,
 }
 
 impl ScanTask {
@@ -294,65 +304,9 @@ impl ScanTask {
         if let Err(e) = self.adapter.set_discovery_filter(filter).await {
             tracing::warn!("BLE {}: discovery filter rejected: {e}", self.iface);
         }
-        loop {
-            // `discover_devices_with_changes`, not `discover_devices`:
-            // plain `DeviceAdded` fires only when bluetoothd CREATES a
-            // device object. For a device it already holds (stored after
-            // an earlier connect, or created by a previous window), the
-            // stream opens with a synthetic `DeviceAdded` carrying no
-            // RSSI — BlueZ drops RSSI outside discovery, so the receiver
-            // discards it as a cache entry — and the adv reports that
-            // then land in the window only update properties, which the
-            // plain stream never surfaces. Every window after the first
-            // was blind to every known peer (BLE path hunt round 2,
-            // 2026-08-31). The `_with_changes` stream re-emits
-            // `DeviceAdded` on each property change, so the first adv
-            // report of the window re-offers the device with its RSSI
-            // set.
-            match self.adapter.discover_devices_with_changes().await {
-                Ok(events) => {
-                    let mut events = std::pin::pin!(events);
-                    let window_end = tokio::time::Instant::now() + SCAN_WINDOW;
-                    loop {
-                        let event = tokio::select! {
-                            ev = events.next() => ev,
-                            _ = tokio::time::sleep_until(window_end) => break,
-                        };
-                        match event {
-                            Some(AdapterEvent::DeviceAdded(addr)) => {
-                                if let Some(ev) = self.probe(addr).await {
-                                    if self.ev_tx.send(ev).await.is_err() {
-                                        return;
-                                    }
-                                }
-                            }
-                            Some(_) => {}
-                            None => break,
-                        }
-                    }
-                }
-                Err(e) => {
-                    // 600: an adapter object that is gone (bluetoothd
-                    // restarted, the dongle re-enumerated) fails every
-                    // later discovery the same way, forever. Hand it to
-                    // the orchestrator, which rebuilds the session on a
-                    // fresh resolution; retrying here would only scan a
-                    // dead object path.
-                    let adapter_present = self.adapter.is_powered().await.is_ok();
-                    if adapter_lost(&e, adapter_present) {
-                        let _ = self
-                            .ev_tx
-                            .send(Ev::AdapterLost {
-                                error: e.to_string(),
-                            })
-                            .await;
-                        return;
-                    }
-                    tracing::debug!("BLE {}: discovery failed: {e}", self.iface);
-                }
-            }
-            tokio::time::sleep(self.interval).await;
-        }
+        let hold = self.hold.clone();
+        let interval = self.interval;
+        scan_cadence(self, hold, interval).await;
     }
 
     /// Read the sighting's decision inputs from BlueZ's parsed properties.
@@ -378,6 +332,163 @@ impl ScanTask {
             offers_service,
             record,
         })
+    }
+}
+
+impl Discovery for ScanTask {
+    type Item = AdapterEvent;
+
+    async fn start(&mut self) -> Result<BoxStream<'static, AdapterEvent>, RunFailed> {
+        // `discover_devices_with_changes`, not `discover_devices`:
+        // plain `DeviceAdded` fires only when bluetoothd CREATES a
+        // device object. For a device it already holds (stored after
+        // an earlier connect, or created by a previous window), the
+        // stream opens with a synthetic `DeviceAdded` carrying no
+        // RSSI — BlueZ drops RSSI outside discovery, so the receiver
+        // discards it as a cache entry — and the adv reports that
+        // then land in the window only update properties, which the
+        // plain stream never surfaces. Every window after the first
+        // was blind to every known peer (BLE path hunt round 2,
+        // 2026-08-31). The `_with_changes` stream re-emits
+        // `DeviceAdded` on each property change, so the first adv
+        // report of the window re-offers the device with its RSSI
+        // set.
+        match self.adapter.discover_devices_with_changes().await {
+            Ok(events) => Ok(events.boxed()),
+            Err(e) => {
+                // 600: an adapter object that is gone (bluetoothd
+                // restarted, the dongle re-enumerated) fails every
+                // later discovery the same way, forever. Hand it to
+                // the orchestrator, which rebuilds the session on a
+                // fresh resolution; retrying here would only scan a
+                // dead object path.
+                let adapter_present = self.adapter.is_powered().await.is_ok();
+                if adapter_lost(&e, adapter_present) {
+                    let _ = self
+                        .ev_tx
+                        .send(Ev::AdapterLost {
+                            error: e.to_string(),
+                        })
+                        .await;
+                    return Err(RunFailed::Stop);
+                }
+                tracing::debug!("BLE {}: discovery failed: {e}", self.iface);
+                Err(RunFailed::Retry)
+            }
+        }
+    }
+
+    async fn sighting(&mut self, event: AdapterEvent) -> bool {
+        let AdapterEvent::DeviceAdded(addr) = event else {
+            return true;
+        };
+        match self.probe(addr).await {
+            Some(ev) => self.ev_tx.send(ev).await.is_ok(),
+            None => true,
+        }
+    }
+
+    async fn run_edge(&mut self, on: bool) -> bool {
+        self.ev_tx.send(Ev::ScanRun { on }).await.is_ok()
+    }
+}
+
+/// Why a discovery run did not start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RunFailed {
+    /// This run failed; the next one is tried after the pause.
+    Retry,
+    /// The adapter is gone and the orchestrator was told: no more runs.
+    Stop,
+}
+
+/// What [`scan_cadence`] drives: BlueZ discovery in lnsd, a counting
+/// fake in the tests. Every method's `false` means the orchestrator is
+/// gone and the cadence ends.
+pub(crate) trait Discovery {
+    type Item: Send;
+    /// Start one discovery run; dropping the stream ends it.
+    fn start(
+        &mut self,
+    ) -> impl std::future::Future<Output = Result<BoxStream<'static, Self::Item>, RunFailed>> + Send;
+    /// One event of the running discovery.
+    fn sighting(&mut self, item: Self::Item) -> impl std::future::Future<Output = bool> + Send;
+    /// A run started (`on`) or ended, for `DialQueue::scan_run` (757).
+    fn run_edge(&mut self, on: bool) -> impl std::future::Future<Output = bool> + Send;
+}
+
+/// The scan cadence: a [`SCAN_WINDOW`] run, then `interval` with the
+/// scanner off, repeated, exactly as before 757 while `hold` stays
+/// false. While `hold` is true the scanner stays on (757): a run goes
+/// on past its window until `hold` clears, and a pause that sees `hold`
+/// set starts a run at once, which ends as soon as `hold` clears. The
+/// pause after a run is always the full `interval`, so a drained queue
+/// hands the cadence back where it would have been after a window.
+pub(crate) async fn scan_cadence<D: Discovery>(
+    mut discovery: D,
+    mut hold: watch::Receiver<bool>,
+    interval: Duration,
+) {
+    let mut held_start = false;
+    loop {
+        let mut started = false;
+        match discovery.start().await {
+            Ok(mut events) => {
+                started = true;
+                if !discovery.run_edge(true).await {
+                    return;
+                }
+                let window_end = tokio::time::Instant::now() + SCAN_WINDOW;
+                // A run the hold started has no window of its own.
+                let mut window_over = held_start;
+                loop {
+                    if window_over && !*hold.borrow_and_update() {
+                        break;
+                    }
+                    tokio::select! {
+                        event = events.next() => match event {
+                            Some(item) => {
+                                if !discovery.sighting(item).await {
+                                    return;
+                                }
+                            }
+                            None => break,
+                        },
+                        _ = tokio::time::sleep_until(window_end), if !window_over => {
+                            window_over = true;
+                        }
+                        changed = hold.changed() => {
+                            if changed.is_err() {
+                                return;
+                            }
+                        }
+                    }
+                }
+                drop(events);
+                if !discovery.run_edge(false).await {
+                    return;
+                }
+            }
+            Err(RunFailed::Stop) => return,
+            Err(RunFailed::Retry) => {}
+        }
+        // A failed start pauses the full interval whatever the hold
+        // says: a discovery that keeps failing must not become a busy
+        // loop against bluetoothd.
+        held_start = if started {
+            tokio::select! {
+                _ = tokio::time::sleep(interval) => false,
+                held = hold.wait_for(|held| *held) => {
+                    if held.is_err() {
+                        return;
+                    }
+                    true
+                }
+            }
+        } else {
+            tokio::time::sleep(interval).await;
+            false
+        };
     }
 }
 
@@ -893,6 +1004,116 @@ mod tests {
         }
         assert_eq!(delivered, vec![packet]);
         assert_eq!(table.link_count(), 0, "the link is released");
+    }
+
+    /// A discovery that hears nothing and records when each run started
+    /// and ended, on the paused test clock.
+    struct CountingDiscovery {
+        t0: tokio::time::Instant,
+        edges: std::sync::Arc<std::sync::Mutex<Vec<(bool, u64)>>>,
+    }
+
+    impl Discovery for CountingDiscovery {
+        type Item = ();
+
+        async fn start(&mut self) -> Result<BoxStream<'static, ()>, RunFailed> {
+            Ok(futures::stream::pending().boxed())
+        }
+
+        async fn sighting(&mut self, _: ()) -> bool {
+            true
+        }
+
+        async fn run_edge(&mut self, on: bool) -> bool {
+            let ms = self.t0.elapsed().as_millis() as u64;
+            self.edges.lock().expect("edges").push((on, ms));
+            true
+        }
+    }
+
+    /// Run the cadence for `ms` on the paused clock, with `script`
+    /// setting the hold at the given times, and return every run edge.
+    async fn cadence_edges(ms: u64, script: &[(u64, bool)]) -> Vec<(bool, u64)> {
+        let t0 = tokio::time::Instant::now();
+        let edges = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (hold_tx, hold_rx) = watch::channel(false);
+        let task = tokio::spawn(scan_cadence(
+            CountingDiscovery {
+                t0,
+                edges: edges.clone(),
+            },
+            hold_rx,
+            Duration::from_secs(5),
+        ));
+        for &(at, held) in script {
+            tokio::time::sleep_until(t0 + Duration::from_millis(at)).await;
+            hold_tx.send_replace(held);
+        }
+        tokio::time::sleep_until(t0 + Duration::from_millis(ms)).await;
+        task.abort();
+        let edges = edges.lock().expect("edges").clone();
+        edges
+    }
+
+    /// 757 (c): with the dial queue empty the scanner keeps the cadence
+    /// it had before 757: a 2 s window every 7 s, off in between. Over a
+    /// quiet minute that is runs at 0, 7, ..., 56 s: nine starts, each
+    /// stopped 2 s later.
+    #[tokio::test(start_paused = true)]
+    async fn with_the_queue_empty_discovery_is_off_between_windows_as_before() {
+        let edges = cadence_edges(60_000, &[]).await;
+        let starts: Vec<u64> = edges.iter().filter(|(on, _)| *on).map(|e| e.1).collect();
+        let stops: Vec<u64> = edges.iter().filter(|(on, _)| !*on).map(|e| e.1).collect();
+        let cycle = (SCAN_WINDOW + Duration::from_secs(5)).as_millis() as u64;
+        assert_eq!(starts, (0..9).map(|i| i * cycle).collect::<Vec<_>>());
+        assert_eq!(
+            stops,
+            (0..9)
+                .map(|i| i * cycle + SCAN_WINDOW.as_millis() as u64)
+                .collect::<Vec<_>>(),
+            "discovery is off between windows"
+        );
+    }
+
+    /// 757: a dial queued in the pause starts a run at once, which ends
+    /// when the queue drains; a dial queued while a window runs keeps
+    /// it on past its end. Either way the full pause follows.
+    #[tokio::test(start_paused = true)]
+    async fn a_waiting_dial_holds_the_scanner_on_until_the_queue_drains() {
+        // Horizons sit clear of the next run edge: an abort due at the
+        // same paused instant as a start would race it.
+        let edges = cadence_edges(
+            19_000,
+            &[
+                (3_000, true),
+                (4_500, false),
+                (12_500, true),
+                (15_000, false),
+            ],
+        )
+        .await;
+        assert_eq!(
+            edges,
+            vec![
+                (true, 0),
+                (false, 2_000),
+                // Held in the pause: on at once, off with the hold.
+                (true, 3_000),
+                (false, 4_500),
+                // The full pause after it.
+                (true, 9_500),
+                (false, 11_500),
+                // Held in the next pause the same way.
+                (true, 12_500),
+                (false, 15_000),
+            ]
+        );
+        let edges = cadence_edges(10_000, &[(1_000, true), (3_500, false)]).await;
+        assert_eq!(
+            edges,
+            vec![(true, 0), (false, 3_500), (true, 8_500)],
+            "a window held past its end stops when the hold clears"
+        );
     }
 
     /// 732: a dial to a peer that went dark (its incoming slots filled

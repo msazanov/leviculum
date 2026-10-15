@@ -38,7 +38,7 @@ use std::time::Duration;
 use bluer::gatt::local::CharacteristicNotifier;
 use bluer::Address;
 use futures::StreamExt;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
 
 use super::{
@@ -199,6 +199,9 @@ pub(crate) enum Ev {
         addr: Address,
         failure: Option<DialFailure>,
     },
+    /// A discovery run started (`on`) or ended (757): while one runs,
+    /// a queued dial whose peer goes unheard is evidence it went dark.
+    ScanRun { on: bool },
     /// The scan task found the adapter's D-Bus object gone (600):
     /// bluetoothd restarted or the controller re-enumerated, and with
     /// the object went the GATT application, the advertisement and
@@ -493,13 +496,17 @@ impl BleTask {
             None
         };
 
-        // Central half: windowed scanning.
+        // Central half: windowed scanning, held on while a dial waits
+        // out its jitter (757; set from the dial queue on every pass of
+        // the event loop below).
+        let (scan_hold_tx, scan_hold_rx) = watch::channel(false);
         let scan_guard = if self.opts.enable_central {
             let scan = bluez::ScanTask {
                 adapter: adapter.clone(),
                 ev_tx: ev_tx.clone(),
                 interval: self.opts.discovery_interval,
                 iface: self.name.clone(),
+                hold: scan_hold_rx,
             };
             Some(tokio::spawn(scan.run()))
         } else {
@@ -597,6 +604,10 @@ impl BleTask {
             let dial_at = dial_queue
                 .next_deadline_ms()
                 .map(|ms| start + Duration::from_millis(ms));
+            // The scanner runs while a dial waits (757), re-read like
+            // the deadline: any event may queue, start or drop a dial.
+            let want_scan = dial_queue.wants_scan();
+            scan_hold_tx.send_if_modified(|held| std::mem::replace(held, want_scan) != want_scan);
             tokio::select! {
                 outgoing = outgoing_rx.recv() => {
                     let Some(packet) = outgoing else {
@@ -723,6 +734,7 @@ impl BleTask {
                     }
                 } => {
                     self.pump_dials(
+                        &mut scheduler,
                         &mut dial_queue,
                         &table,
                         &adapter,
@@ -984,6 +996,14 @@ impl BleTask {
                         return;
                     }
                 };
+                // A dial already queued to this peer hears it again
+                // (757): the scan that runs while the dial waits reads
+                // the record the dial was chosen on afresh, and a peer
+                // that filled since says so here, before the dial
+                // spends a connect on it.
+                if let Some(skip) = dial_queue.sighted(&addr.0, decision.free_slots, now) {
+                    self.dial_skipped(skip, scheduler, table, dial_queue, backoff_until, now);
+                }
                 // Who we are WILLING to dial (`initiate_only`), as
                 // opposed to who the sort says dials whom. A pure
                 // function of the address and the advertised hint, both
@@ -1210,6 +1230,7 @@ impl BleTask {
                     }
                 }
             }
+            Ev::ScanRun { on } => dial_queue.scan_run(on, now),
             // Ends the session in the event loop, which never hands it
             // here (600).
             Ev::AdapterLost { .. } => {}
@@ -1270,29 +1291,84 @@ impl BleTask {
         now: u64,
     ) {
         if let Some((addr, decision, seen)) = scheduler.poll(now) {
-            if table.may_dial()
-                && !(table.knows_addr(&addr)
-                    || dial_queue.knows(&addr)
-                    || backoff_until.get(&addr).is_some_and(|until| *until > now))
-            {
-                tracing::info!(
-                    event = "BLE_SCAN_WINDOW",
-                    iface = %Scalar(&self.name),
-                    seen = seen,
-                    chosen = %hex12(&addr),
-                    rule = decision.as_str(),
-                );
-                if let Some(queued) = dial_queue.enqueue(addr, decision, now) {
-                    tracing::info!(
-                        event = "BLE_DIAL_QUEUE",
-                        iface = %Scalar(&self.name),
-                        depth = queued.depth,
-                        wait_ms = queued.wait_ms,
-                    );
-                }
+            self.queue_choice(table, dial_queue, backoff_until, addr, decision, seen, now);
+        }
+        self.pump_dials(
+            scheduler,
+            dial_queue,
+            table,
+            adapter,
+            backoff_until,
+            ev_tx,
+            now,
+        );
+    }
+
+    /// Queue a window's choice if it is still eligible, logging
+    /// `BLE_SCAN_WINDOW` and `BLE_DIAL_QUEUE`; `false` when the
+    /// re-check refused it.
+    #[allow(clippy::too_many_arguments)]
+    fn queue_choice(
+        &self,
+        table: &LinkTable,
+        dial_queue: &mut DialQueue,
+        backoff_until: &HashMap<Addr, u64>,
+        addr: Addr,
+        decision: leviculum_ble_tx::ConnectDecision,
+        seen: usize,
+        now: u64,
+    ) -> bool {
+        if !table.may_dial()
+            || table.knows_addr(&addr)
+            || dial_queue.knows(&addr)
+            || backoff_until.get(&addr).is_some_and(|until| *until > now)
+        {
+            return false;
+        }
+        tracing::info!(
+            event = "BLE_SCAN_WINDOW",
+            iface = %Scalar(&self.name),
+            seen = seen,
+            chosen = %hex12(&addr),
+            rule = decision.as_str(),
+        );
+        if let Some(queued) = dial_queue.enqueue(addr, decision, now) {
+            tracing::info!(
+                event = "BLE_DIAL_QUEUE",
+                iface = %Scalar(&self.name),
+                depth = queued.depth,
+                wait_ms = queued.wait_ms,
+            );
+        }
+        true
+    }
+
+    /// A queued dial was dropped before it started (757): log
+    /// `BLE_DIAL_SKIP` and queue the next eligible candidate of the
+    /// last closed window in its place. No backoff is booked: a peer
+    /// that said it is full is not elected while it says so
+    /// (`peer_has_room`), and a dark one is not sighted at all; when
+    /// either has room again its next advertisement says so.
+    fn dial_skipped(
+        &self,
+        skip: links::DialSkip,
+        scheduler: &mut ScanScheduler,
+        table: &LinkTable,
+        dial_queue: &mut DialQueue,
+        backoff_until: &HashMap<Addr, u64>,
+        now: u64,
+    ) {
+        tracing::info!(
+            event = "BLE_DIAL_SKIP",
+            iface = %Scalar(&self.name),
+            peer = %hex12(&skip.addr),
+            reason = skip.reason.as_str(),
+        );
+        while let Some((addr, decision, seen)) = scheduler.next_candidate(now) {
+            if self.queue_choice(table, dial_queue, backoff_until, addr, decision, seen, now) {
+                break;
             }
         }
-        self.pump_dials(dial_queue, table, adapter, backoff_until, ev_tx, now);
     }
 
     /// Start the dial the queue hands out, if any: one connection setup
@@ -1300,8 +1376,14 @@ impl BleTask {
     /// eligibility re-check fails — the world moved while it waited out
     /// its jitter or a setup ahead of it — is dropped, its release
     /// arming the next queued dial.
+    ///
+    /// A due dial whose peer the running scan has not heard for longer
+    /// than an advertising interval is dropped as dark before it pops
+    /// (757), and the next candidate takes its place.
+    #[allow(clippy::too_many_arguments)]
     fn pump_dials(
         &self,
+        scheduler: &mut ScanScheduler,
         dial_queue: &mut DialQueue,
         table: &LinkTable,
         adapter: &bluer::Adapter,
@@ -1309,7 +1391,14 @@ impl BleTask {
         ev_tx: &mpsc::Sender<Ev>,
         now: u64,
     ) {
-        while let Some((addr, _decision)) = dial_queue.pop_ready(now) {
+        loop {
+            if let Some(skip) = dial_queue.skip_dark_head(now) {
+                self.dial_skipped(skip, scheduler, table, dial_queue, backoff_until, now);
+                continue;
+            }
+            let Some((addr, _decision)) = dial_queue.pop_ready(now) else {
+                break;
+            };
             if !table.may_dial()
                 || table.knows_addr(&addr)
                 || backoff_until.get(&addr).is_some_and(|until| *until > now)
@@ -1322,6 +1411,8 @@ impl BleTask {
                 dial_queue.release(&addr, now);
                 continue;
             }
+            // The choice is dialled: its window's runners-up are spent.
+            scheduler.forget_rest();
             let central = bluez::CentralTask {
                 adapter: adapter.clone(),
                 addr: Address(addr),
