@@ -2229,6 +2229,19 @@ impl DialQueue {
         self.queue.first().and_then(|d| d.deadline_ms)
     }
 
+    /// What the running scan knew of the head dial's peer when it is
+    /// due (757), for the driver's debug line at the dial start: the
+    /// run's age (`None` with no run on), whether it heard the peer,
+    /// and how many peers it had heard in all.
+    pub(crate) fn head_watch(&self, now_ms: u64) -> Option<(Option<u64>, bool, usize)> {
+        let head = self.queue.first()?;
+        Some((
+            self.scan_since_ms.map(|since| now_ms.saturating_sub(since)),
+            head.heard,
+            self.run_heard.len(),
+        ))
+    }
+
     /// Whether the scanner should run now (757): a dial is waiting out
     /// its jitter, nothing in flight. A setup in flight keeps the
     /// scanner off, as before, so discovery stays out of the way of our

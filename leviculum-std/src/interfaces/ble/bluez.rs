@@ -292,6 +292,19 @@ pub(crate) struct ScanTask {
     pub interval: Duration,
     pub iface: String,
     pub hold: watch::Receiver<bool>,
+    /// The running run's tally for its debug line at the end (757):
+    /// start, events probed, cache entries among them, first live
+    /// report.
+    pub run: RunTally,
+}
+
+/// One discovery run's tally (757).
+#[derive(Default)]
+pub(crate) struct RunTally {
+    started: Option<tokio::time::Instant>,
+    events: usize,
+    cached: usize,
+    first_live_ms: Option<u128>,
 }
 
 impl ScanTask {
@@ -382,13 +395,39 @@ impl Discovery for ScanTask {
         let AdapterEvent::DeviceAdded(addr) = event else {
             return true;
         };
-        match self.probe(addr).await {
+        let ev = self.probe(addr).await;
+        self.run.events += 1;
+        match &ev {
+            Some(Ev::Scan { rssi: None, .. }) => self.run.cached += 1,
+            Some(Ev::Scan { .. }) if self.run.first_live_ms.is_none() => {
+                self.run.first_live_ms = self.run.started.map(|t| t.elapsed().as_millis());
+            }
+            _ => {}
+        }
+        match ev {
             Some(ev) => self.ev_tx.send(ev).await.is_ok(),
             None => true,
         }
     }
 
     async fn run_edge(&mut self, on: bool) -> bool {
+        if on {
+            self.run = RunTally {
+                started: Some(tokio::time::Instant::now()),
+                ..RunTally::default()
+            };
+        } else {
+            tracing::debug!(
+                "BLE {}: scan run of {} ms: {} events, {} cache entries, first live report after {} ms",
+                self.iface,
+                self.run.started.map_or(0, |t| t.elapsed().as_millis()),
+                self.run.events,
+                self.run.cached,
+                self.run
+                    .first_live_ms
+                    .map_or("-".to_string(), |ms| ms.to_string()),
+            );
+        }
         self.ev_tx.send(Ev::ScanRun { on }).await.is_ok()
     }
 }

@@ -507,6 +507,7 @@ impl BleTask {
                 interval: self.opts.discovery_interval,
                 iface: self.name.clone(),
                 hold: scan_hold_rx,
+                run: bluez::RunTally::default(),
             };
             Some(tokio::spawn(scan.run()))
         } else {
@@ -1236,7 +1237,14 @@ impl BleTask {
                     }
                 }
             }
-            Ev::ScanRun { on } => dial_queue.scan_run(on, now),
+            Ev::ScanRun { on } => {
+                tracing::debug!(
+                    "BLE {}: scan run {}",
+                    self.name,
+                    if on { "on" } else { "off" }
+                );
+                dial_queue.scan_run(on, now);
+            }
             // Ends the session in the event loop, which never hands it
             // here (600).
             Ev::AdapterLost { .. } => {}
@@ -1403,9 +1411,21 @@ impl BleTask {
                 self.dial_skipped(skip, scheduler, table, dial_queue, backoff_until, now);
                 continue;
             }
+            let watch = dial_queue.head_watch(now);
             let Some((addr, _decision)) = dial_queue.pop_ready(now) else {
                 break;
             };
+            if let Some((run_age_ms, heard, run_heard)) = watch {
+                tracing::debug!(
+                    "BLE {}: dial to {} due: scan run {} ms old, peer heard {}, \
+                     {} peers heard in the run",
+                    self.name,
+                    Address(addr),
+                    run_age_ms.map_or("-".to_string(), |ms| ms.to_string()),
+                    heard,
+                    run_heard
+                );
+            }
             if !table.may_dial()
                 || table.knows_addr(&addr)
                 || backoff_until.get(&addr).is_some_and(|until| *until > now)
