@@ -2080,9 +2080,10 @@ struct QueuedDial {
     deadline_ms: Option<u64>,
     /// Whether the running scan has heard the peer (757). Cleared when a
     /// scan run starts; set by a sighting with room. A dial queued
-    /// while a run is already on counts as heard: the sighting that
-    /// chose it may have been in that run, and BlueZ reports a peer
-    /// whose advertisement does not change only once per run.
+    /// while a run is on takes what that run heard
+    /// ([`DialQueue::run_heard`]): BlueZ reports a peer whose
+    /// advertisement does not change only once per run, so the sighting
+    /// may well have come before the dial was queued.
     heard: bool,
 }
 
@@ -2107,7 +2108,18 @@ pub(crate) struct DialQueue {
     queue: Vec<QueuedDial>,
     /// When the scan run now on started, `None` between runs (757).
     scan_since_ms: Option<u64>,
+    /// Every address the run now on has heard (757), for the dials it
+    /// is joined by. At most [`RUN_HEARD_CAP`]; past it the run counts
+    /// as having heard everyone, so an overflow can cost a dark
+    /// verdict, never invent one.
+    run_heard: Vec<Addr>,
+    run_heard_overflow: bool,
 }
+
+/// Bound on [`DialQueue::run_heard`]: more Columba peers than one
+/// adapter hears in a run anywhere we have looked (a twenty-node room
+/// hears nineteen).
+const RUN_HEARD_CAP: usize = 64;
 
 impl DialQueue {
     /// Queued dials (597): `(entries, entry bytes, allocated bytes)`. The
@@ -2116,12 +2128,19 @@ impl DialQueue {
         vec_census(&self.queue)
     }
 
+    /// Addresses the running scan has heard (757), the same triple.
+    pub(crate) fn run_heard_census(&self) -> (usize, usize, usize) {
+        vec_census(&self.run_heard)
+    }
+
     pub(crate) fn new(seed: u64) -> Self {
         Self {
             rng: Xorshift64::new(seed),
             in_flight: None,
             queue: Vec::new(),
             scan_since_ms: None,
+            run_heard: Vec::new(),
+            run_heard_overflow: false,
         }
     }
 
@@ -2157,7 +2176,8 @@ impl DialQueue {
             decision,
             jitter_ms,
             deadline_ms: None,
-            heard: self.scan_since_ms.is_some(),
+            heard: self.scan_since_ms.is_some()
+                && (self.run_heard_overflow || self.run_heard.contains(&addr)),
         });
         self.arm_head(now_ms);
         Some(DialQueued {
@@ -2223,6 +2243,8 @@ impl DialQueue {
     /// stop, and every peer still advertising is reported afresh.
     pub(crate) fn scan_run(&mut self, on: bool, now_ms: u64) {
         self.scan_since_ms = on.then_some(now_ms);
+        self.run_heard.clear();
+        self.run_heard_overflow = false;
         if on {
             for dial in &mut self.queue {
                 dial.heard = false;
@@ -2240,6 +2262,13 @@ impl DialQueue {
         free_slots: Option<u8>,
         now_ms: u64,
     ) -> Option<DialSkip> {
+        if self.scan_since_ms.is_some() && !self.run_heard.contains(addr) {
+            if self.run_heard.len() < RUN_HEARD_CAP {
+                self.run_heard.push(*addr);
+            } else {
+                self.run_heard_overflow = true;
+            }
+        }
         let at = self.queue.iter().position(|d| &d.addr == addr)?;
         if peer_has_room(free_slots) {
             self.queue[at].heard = true;
@@ -4365,8 +4394,9 @@ mod tests {
         let due = q.next_deadline_ms().expect("armed");
 
         q.scan_run(true, closed + 20);
-        // Nothing heard of ADDR_1; another peer is.
+        // Nothing heard of ADDR_1; others are.
         assert_eq!(q.sighted(&ADDR_3, Some(2), closed + 30), None);
+        assert_eq!(q.sighted(&ADDR_2, Some(1), closed + 40), None);
         let late = due.max(closed + 20 + DIAL_DARK_AFTER_MS + 1);
         assert_eq!(
             q.skip_dark_head(late),
@@ -4384,7 +4414,31 @@ mod tests {
         assert_eq!(
             q.skip_dark_head(late + DIAL_JITTER_MAX_MS),
             None,
-            "heard in a run it joined"
+            "a dial joining a run is judged by that run, and ADDR_2 was heard in it"
+        );
+    }
+
+    /// 757, the first base room's dialler 9: the runner-up queued at a
+    /// dark skip joins the run that skipped, and that run never heard
+    /// it either (its peer had gone dark before the run started). It is
+    /// judged by the run, not counted as heard for having joined one.
+    #[test]
+    fn a_dial_joining_a_run_that_never_heard_its_peer_is_skipped_dark() {
+        let mut s = ScanScheduler::new(0);
+        let mut q = DialQueue::new(7);
+        let closed = window_choosing_addr_1(&mut s, &mut q);
+        let due = q.next_deadline_ms().expect("armed");
+        q.scan_run(true, closed + 20);
+        let late = due.max(closed + 20 + DIAL_DARK_AFTER_MS + 1);
+        assert!(q.skip_dark_head(late).is_some(), "ADDR_1 is dark");
+        let (next, decision, _) = s.next_candidate(late).expect("the runner-up");
+        q.enqueue(next, decision, late).expect("queues");
+        assert_eq!(
+            q.skip_dark_head(late + DIAL_JITTER_MAX_MS),
+            Some(DialSkip {
+                addr: ADDR_2,
+                reason: DialSkipReason::Dark
+            })
         );
     }
 

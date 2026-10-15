@@ -17,6 +17,7 @@
 //! | `central_pipes` | central links' queue handles | `HashMap` capacity |
 //! | `notifiers` | subscribed centrals' notify handles | the `Vec`'s slots |
 //! | `dial_queue` | dials waiting to start | the `Vec`'s slots |
+//! | `dial_run_heard` | addresses the running scan heard, for dials joining it (757), at most 64 | the `Vec`'s slots |
 //! | `backoff_until` | addresses held from dialling | `HashMap` capacity |
 //! | `dial_backoff` | addresses with a failure run | the fixed table |
 //! | `scan_line_decided`, `_dropped`, `_backed_off` | addresses logged, absent at most 120 s, at most 64 (602) | `HashMap` capacity |
@@ -292,6 +293,8 @@ impl<const N: usize> BleState<'_, N> {
         ));
         let (n, raw, slots) = self.dial_queue.census();
         rows.push(row("dial_queue", n, raw, slots, "Vec slots"));
+        let (n, raw, slots) = self.dial_queue.run_heard_census();
+        rows.push(row("dial_run_heard", n, raw, slots, "Vec slots"));
         rows.push(hash_map_row("backoff_until", self.backoff_until));
         let fixed = size_of::<DialBackoff<N>>();
         rows.push(row(
