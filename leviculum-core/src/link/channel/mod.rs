@@ -625,10 +625,37 @@ impl Channel {
         data: &[u8],
         proof_hash: [u8; 32],
     ) -> Result<ReceiveOutcome, ChannelError> {
+        self.receive_inner(data, proof_hash, true)
+    }
+
+    /// [`receive`](Self::receive) for a host that has no room to take a
+    /// message now: the next expected envelope is kept in the rx ring like an
+    /// out-of-order one (`Buffered`) instead of being handed back, and leaves
+    /// through [`drain_received_limit`](Self::drain_received_limit) once the
+    /// host has room. Everything else is as `receive`.
+    ///
+    /// The reference receiver never refuses a channel packet for a busy
+    /// application; it proves and keeps it. A refusal here would spend the
+    /// sender's retry budget, which is sized for loss on the wire, on the
+    /// host's pace, and tear the link down when the host is merely slow (748).
+    pub fn receive_held(
+        &mut self,
+        data: &[u8],
+        proof_hash: [u8; 32],
+    ) -> Result<ReceiveOutcome, ChannelError> {
+        self.receive_inner(data, proof_hash, false)
+    }
+
+    fn receive_inner(
+        &mut self,
+        data: &[u8],
+        proof_hash: [u8; 32],
+        deliver_in_order: bool,
+    ) -> Result<ReceiveOutcome, ChannelError> {
         let envelope = Envelope::unpack(data)?;
 
         // Check if this is the next expected sequence
-        if envelope.sequence == self.next_rx_sequence {
+        if deliver_in_order && envelope.sequence == self.next_rx_sequence {
             self.next_rx_sequence =
                 ((self.next_rx_sequence as u32 + 1) % CHANNEL_SEQ_MODULUS) as u16;
 
@@ -2471,6 +2498,49 @@ mod tests {
         let env2_dup = Envelope::new(0x0001, 2, vec![42]);
         let result = channel.receive(&env2_dup.pack(), [22u8; 32]);
         assert_eq!(result, Ok(ReceiveOutcome::DuplicateBuffered));
+    }
+
+    /// 748: `receive_held` keeps even the next expected envelope in the ring,
+    /// without advancing the sequence, and the drain hands it over in order
+    /// once there is room.
+    #[test]
+    fn test_receive_held_keeps_the_in_order_envelope_for_the_drain() {
+        let mut channel = Channel::new();
+        let env0 = Envelope::new(0x0001, 0, vec![0]);
+        let env1 = Envelope::new(0x0001, 1, vec![1]);
+
+        assert_eq!(
+            channel.receive_held(&env0.pack(), [0u8; 32]),
+            Ok(ReceiveOutcome::Buffered)
+        );
+        assert_eq!(
+            channel.next_rx_sequence(),
+            0,
+            "a held envelope is not consumed"
+        );
+        assert_eq!(
+            channel.receive_held(&env0.pack(), [0u8; 32]),
+            Ok(ReceiveOutcome::DuplicateBuffered)
+        );
+        assert_eq!(
+            channel.receive_held(&env1.pack(), [1u8; 32]),
+            Ok(ReceiveOutcome::Buffered)
+        );
+
+        assert!(channel.drain_received_limit(0).is_empty());
+        let drained = channel.drain_received_limit(1);
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].0.sequence, 0);
+        let drained = channel.drain_received();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].0.sequence, 1);
+        assert_eq!(channel.next_rx_sequence(), 2);
+
+        // Once drained, a retransmit is a duplicate of a delivered message.
+        assert_eq!(
+            channel.receive_held(&env0.pack(), [0u8; 32]),
+            Ok(ReceiveOutcome::AlreadyDelivered)
+        );
     }
 
     #[test]

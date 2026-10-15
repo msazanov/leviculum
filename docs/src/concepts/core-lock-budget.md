@@ -25,9 +25,9 @@ anything with the same profile:
 
 | phase | lock | code |
 | --- | --- | --- |
-| `NodeCore::resource_send_params` | brief | `leviculum-core/src/node/mod.rs:1448` |
+| `NodeCore::resource_send_params` | brief | `leviculum-core/src/node/mod.rs:1447` |
 | `resource::prepare_resource_send` | **none** | `leviculum-core/src/resource/outgoing.rs:89` |
-| `NodeCore::commit_resource_send` | brief | `leviculum-core/src/node/mod.rs:1483` |
+| `NodeCore::commit_resource_send` | brief | `leviculum-core/src/node/mod.rs:1482` |
 
 Commit re-validates what could have changed while the build ran
 unlocked: link gone, a transfer raced in, or the link re-keyed (#66) —
@@ -36,7 +36,7 @@ the caller rebuilds once. The std driver calls the three phases itself
 (`leviculum-std/src/driver/mod.rs:3711`).
 
 `NodeCore::send_resource` still exists as the composed single call
-(`leviculum-core/src/node/mod.rs:1574`) because no_std and FFI callers
+(`leviculum-core/src/node/mod.rs:1573`) because no_std and FFI callers
 have no lock to hold and no second thread to starve. It is the
 composed form that is dangerous behind the driver, not the code it
 composes.
@@ -206,7 +206,7 @@ run behind the async driver expose the phase split; the composed form
 stays for the embedded caller.
 
 **Anything the driver runs inside its event loop.** The loop's
-`dispatch_output` (`leviculum-std/src/driver/mod.rs:5754`) routes
+`dispatch_output` (`leviculum-std/src/driver/mod.rs:5755`) routes
 actions to interfaces and forwards events. Work done there blocks not
 just the lock but interface I/O dispatch — strictly worse than the
 mutex case. The in-loop `/status` responder
@@ -284,7 +284,7 @@ offering one.
 ### The one call the seam hands out that this page forbids
 
 `NodeCore::send_resource` is `pub`
-(`leviculum-core/src/node/mod.rs:1786`) and therefore reachable on the
+(`leviculum-core/src/node/mod.rs:1785`) and therefore reachable on the
 `&mut StdNodeCore` a processor hook holds. It is the 141 ms composed
 call this page opens with — one line, in consumer code, behind the
 driver and under the lock. `PROCESSOR_TICK_BUDGET` reports it 141 ms

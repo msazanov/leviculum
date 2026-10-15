@@ -34,10 +34,14 @@ use leviculum_std::NodeEvent;
 /// the unfixed path all but the first are destroyed after being proofed.
 const MESSAGES: usize = 6;
 
-/// How long A's application ignores its event stream. Long enough for the data
-/// plane to be full when the messages arrive, short enough to stay well inside
-/// the channel's retry budget (`CHANNEL_MAX_TRIES`), which is what a node under
-/// real backpressure relies on.
+/// How long A's application ignores its event stream: long enough for the data
+/// plane to be full when the messages arrive. Since 748 the stall may outlast
+/// the sender's retry budget (`CHANNEL_MAX_TRIES`) without cost, because A
+/// keeps what it cannot deliver instead of refusing it; while A refused, the
+/// retransmits met the full plane in lockstep, one message got through per
+/// round, and a sixth message could exhaust its tries and lose the link.
+/// The deterministic form of that is the core test
+/// `test_channel_host_stall_outlasting_sender_retries_loses_nothing`.
 const STALL: Duration = Duration::from_millis(400);
 
 #[tokio::test]

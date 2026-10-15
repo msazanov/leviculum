@@ -451,11 +451,10 @@ pub struct NodeCore<R: CryptoRngCore, C: Clock, S: Storage> {
     ///
     /// A host whose event delivery *can* drop (the std driver's bounded data
     /// plane) sets this before every `handle_packet`. At zero, a channel packet
-    /// is refused untouched — no `MessageReceived`, no proof — so the sender
-    /// retransmits instead of being told a message arrived that the application
-    /// never saw.
+    /// is kept in the channel's rx ring, proven, with no `MessageReceived`
+    /// yet; it is delivered once the host has room (748).
     channel_delivery_budget: Option<usize>,
-    /// Count of channel packets refused for a full host sink since last log
+    /// Count of channel packets held for a full host sink since last log
     channel_backpressure_count: u64,
     /// Timestamp (ms) when the last host-backpressure log was emitted
     channel_backpressure_last_log_ms: u64,
@@ -2878,11 +2877,14 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// the answer already given to the peer.
     ///
     /// So a host with a droppable event sink declares its remaining room here
-    /// before feeding a packet in. At `Some(0)` the core refuses channel
-    /// packets outright — the packet is left unconsumed, no proof goes out, and
-    /// the sender retransmits until the host has room or the channel's retry
-    /// budget runs out and the link fails loudly. `None` (the default) means
-    /// the host's delivery cannot drop, so no limit applies.
+    /// before feeding a packet in. At `Some(0)` the core keeps every channel
+    /// packet in the channel's rx ring, proven, as the reference receiver
+    /// keeps what its application has not taken yet; it is delivered by the
+    /// next packet on the link or by `handle_timeout` once the host has room.
+    /// Refusing it instead would spend the sender's retry budget, which is
+    /// sized for loss on the wire, on the host's pace (748). A host that never
+    /// drains fills the bounded ring and meets its loud refusal. `None` (the
+    /// default) means the host's delivery cannot drop, so no limit applies.
     pub fn set_channel_delivery_budget(&mut self, budget: Option<usize>) {
         self.channel_delivery_budget = budget;
     }
@@ -7343,15 +7345,17 @@ mod tests {
     }
 
     /// Codeberg #280 minimal reproduction: a reliable channel message must not
-    /// be proofed to the sender when the host has no room to deliver it.
+    /// reach the application through a host sink that has no room for it.
     ///
-    /// Before the fix the core delivered and proofed unconditionally; a host
+    /// Before #280 the core delivered and proofed unconditionally; a host
     /// whose event sink was full then discarded a message the sender had
-    /// already been told arrived. With the budget at zero the packet is refused
-    /// untouched, so the sender keeps it and retransmits — and the very same
-    /// bytes, replayed once the host has room, deliver normally.
+    /// already been told arrived. Since 748 a zero budget keeps the message in
+    /// the channel's rx ring, proven but not delivered, rather than refusing
+    /// it: the proof is a promise the core keeps, and the timer hands the
+    /// message over once the host has room. A retransmit in between is proven
+    /// again and delivers nothing twice.
     #[test]
-    fn test_channel_proof_suppressed_when_host_sink_full() {
+    fn test_channel_message_held_when_host_sink_full() {
         use crate::transport::InterfaceId;
 
         let mut pair = establish_nodecore_link_pair();
@@ -7362,44 +7366,50 @@ mod tests {
             .unwrap();
         let data = extract_broadcast_data(&output);
 
+        let delivered_in = |output: &crate::transport::TickOutput| {
+            output
+                .events
+                .iter()
+                .filter_map(|e| match e {
+                    NodeEvent::MessageReceived { data, .. } => Some(data.clone()),
+                    _ => None,
+                })
+                .collect::<alloc::vec::Vec<_>>()
+        };
+
         // Host declares it cannot take another reliable delivery.
         pair.responder.set_channel_delivery_budget(Some(0));
         let output = pair.responder.handle_packet(InterfaceId(0), &data);
-
-        assert!(
-            output.actions.is_empty(),
-            "a message the host cannot take must not be proofed to the sender"
-        );
-        assert!(
-            !output
-                .events
-                .iter()
-                .any(|e| matches!(e, NodeEvent::MessageReceived { .. })),
-            "no MessageReceived while the host sink is full"
-        );
-
-        // Host drains: the sender's retransmit (identical bytes) now lands.
-        pair.responder.set_channel_delivery_budget(Some(1));
-        let output = pair.responder.handle_packet(InterfaceId(0), &data);
-
         assert_eq!(
             output.actions.len(),
             1,
-            "retransmit must be proofed once the host has room"
+            "a held message is proven on arrival, as the reference proves it"
         );
-        let delivered = output
-            .events
-            .iter()
-            .filter_map(|e| match e {
-                NodeEvent::MessageReceived { data, .. } => Some(data.clone()),
-                _ => None,
-            })
-            .collect::<alloc::vec::Vec<_>>();
+        assert!(
+            delivered_in(&output).is_empty(),
+            "no MessageReceived while the host sink is full"
+        );
+
+        // A retransmit while still full: proven again, still not delivered.
+        let output = pair.responder.handle_packet(InterfaceId(0), &data);
+        assert_eq!(output.actions.len(), 1, "a held duplicate is proven again");
+        assert!(delivered_in(&output).is_empty());
+
+        // Host drains: the timer hands the held message over, with no proof
+        // (it has had one).
+        pair.responder.set_channel_delivery_budget(Some(1));
+        let output = pair.responder.handle_timeout();
         assert_eq!(
-            delivered,
+            delivered_in(&output),
             alloc::vec![b"reliable".to_vec()],
             "the message survives the backpressure window"
         );
+
+        // A late retransmit after delivery is proven, not delivered again.
+        pair.responder.set_channel_delivery_budget(Some(1));
+        let output = pair.responder.handle_packet(InterfaceId(0), &data);
+        assert_eq!(output.actions.len(), 1);
+        assert!(delivered_in(&output).is_empty(), "delivered exactly once");
     }
 
     /// Send `bodies` on the initiator's channel with a window wide enough to
@@ -7542,6 +7552,86 @@ mod tests {
             delivered,
             alloc::vec![b"m2".to_vec()],
             "buffered message survives"
+        );
+    }
+
+    /// 748: a host whose data plane stays full for longer than the sender's
+    /// whole retry budget loses nothing and keeps the link.
+    ///
+    /// The reference receiver never refuses a channel packet: it proves it on
+    /// arrival (`reference/Reticulum/RNS/Link.py:1172`) and buffers it, so a
+    /// Python sender's `_max_tries` (`Channel.py:295`, checked at `:569`) is a
+    /// budget for loss on the wire, not for a busy application. When the core
+    /// refused every packet at a zero budget, each retransmit hit the same
+    /// full sink and the sender tore the link down after `CHANNEL_MAX_TRIES`
+    /// (the mvr `reliable_channel_messages_survive_a_full_data_plane` lost its
+    /// sixth message that way, once, on 2026-10-15). Both nodes run their
+    /// timers through a minute of stall with every packet carried both ways
+    /// (the unfixed sender gives the link up after about 23 s of it); then
+    /// the host has room and every message arrives, in order, once.
+    #[test]
+    fn test_channel_host_stall_outlasting_sender_retries_loses_nothing() {
+        use crate::transport::InterfaceId;
+
+        let mut pair = establish_nodecore_link_pair();
+        let mut to_responder = channel_burst(&mut pair, &[b"m0", b"m1", b"m2"]);
+        let mut to_initiator: alloc::vec::Vec<alloc::vec::Vec<u8>> = alloc::vec::Vec::new();
+        let mut delivered: alloc::vec::Vec<alloc::vec::Vec<u8>> = alloc::vec::Vec::new();
+        let mut closed = false;
+
+        fn observe(
+            output: &crate::transport::TickOutput,
+            delivered: &mut alloc::vec::Vec<alloc::vec::Vec<u8>>,
+            closed: &mut bool,
+        ) {
+            for event in &output.events {
+                match event {
+                    NodeEvent::MessageReceived { data, .. } => delivered.push(data.clone()),
+                    NodeEvent::LinkClosed { .. } => *closed = true,
+                    _ => {}
+                }
+            }
+        }
+
+        // The host has no room for the whole stall.
+        pair.responder.set_channel_delivery_budget(Some(0));
+        for _ in 0..60 {
+            for data in core::mem::take(&mut to_responder) {
+                let output = pair.responder.handle_packet(InterfaceId(0), &data);
+                observe(&output, &mut delivered, &mut closed);
+                to_initiator.extend(extract_all_action_data(&output));
+            }
+            for data in core::mem::take(&mut to_initiator) {
+                let output = pair.initiator.handle_packet(InterfaceId(0), &data);
+                observe(&output, &mut delivered, &mut closed);
+                to_responder.extend(extract_all_action_data(&output));
+            }
+            pair.initiator.transport().clock().advance(1_000);
+            pair.responder.transport().clock().advance(1_000);
+            let output = pair.initiator.handle_timeout();
+            observe(&output, &mut delivered, &mut closed);
+            to_responder.extend(extract_all_action_data(&output));
+            let output = pair.responder.handle_timeout();
+            observe(&output, &mut delivered, &mut closed);
+            to_initiator.extend(extract_all_action_data(&output));
+        }
+        assert!(
+            delivered.is_empty(),
+            "nothing reaches a host that has no room"
+        );
+        assert!(
+            !closed,
+            "a busy host must not cost the link: the sender's retries are for the wire"
+        );
+
+        // The host drains.
+        pair.responder.set_channel_delivery_budget(Some(8));
+        let output = pair.responder.handle_timeout();
+        observe(&output, &mut delivered, &mut closed);
+        assert_eq!(
+            delivered,
+            alloc::vec![b"m0".to_vec(), b"m1".to_vec(), b"m2".to_vec()],
+            "every message survives the stall, in order, once"
         );
     }
 

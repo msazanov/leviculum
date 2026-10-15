@@ -1752,16 +1752,15 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
         // Codeberg #280: a reliable channel message is proofed to the sender
         // the moment it is delivered or buffered below, so it must not reach a
-        // host sink that will discard it. With no room left, refuse the packet
-        // untouched — no decrypt, no `Channel::receive` (which would consume
-        // the sequence number), no proof. The sender sees an unproofed message
-        // and retransmits; if the host never drains, the channel's retry budget
-        // runs out and the link fails loudly, which is the truth. Same shape as
-        // the rx-ring-full refusal below, one layer further out.
-        if self.channel_delivery_budget == Some(0) {
-            self.update_channel_backpressure(now_ms);
-            return;
-        }
+        // host sink that will discard it. With no room left, the channel keeps
+        // even the next expected message in its bounded rx ring, proven, and
+        // hands it over by `drain_ready_channel_messages` once the host has
+        // room. It used to refuse the packet instead, which spent the sender's
+        // retry budget on the host's pace: every retransmit met the same full
+        // sink and the sender tore the link down (748). The reference receiver
+        // never refuses for a busy application either. A host that never
+        // drains still ends loudly, at the rx-ring-full refusal below.
+        let hold = self.channel_delivery_budget == Some(0);
 
         // 1. Decrypt the envelope data
         let encrypted_data = packet.data.as_slice();
@@ -1789,9 +1788,8 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // #666). A buffered packet sits in the bounded rx ring until the gap
         // before it fills, so the proof promises nothing the core cannot
         // keep, and the sender stops retransmitting what already arrived.
-        // What the channel refuses (ring full, host sink full, malformed) is
-        // not kept and so not proven: the sender's retransmit is its only
-        // copy.
+        // What the channel refuses (ring full, malformed) is not kept and so
+        // not proven: the sender's retransmit is its only copy.
         let mut rx_ring_full = false;
         let proof_packets: Vec<Vec<u8>> = {
             let rtt_ms = link.rtt_ms();
@@ -1800,7 +1798,12 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
             let mut proofs = Vec::new();
 
-            match channel.receive(&plaintext, full_packet_hash) {
+            let received = if hold {
+                channel.receive_held(&plaintext, full_packet_hash)
+            } else {
+                channel.receive(&plaintext, full_packet_hash)
+            };
+            match received {
                 Ok(ReceiveOutcome::Delivered(envelope)) => {
                     crate::tracing::debug!(
                         seq = envelope.sequence,
@@ -1832,7 +1835,10 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                     }
                 }
                 Ok(ReceiveOutcome::Buffered) => {
-                    crate::tracing::debug!("link_mgr: channel message buffered (out-of-order)");
+                    crate::tracing::debug!(
+                        held = hold,
+                        "link_mgr: channel message buffered (out-of-order or held for the host)"
+                    );
                     if let Some(p) =
                         Self::build_channel_proof_from_hash(link, &link_id, &full_packet_hash)
                     {
@@ -1859,6 +1865,9 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         };
 
         // 3. Post-processing (link borrow released)
+        if hold {
+            self.update_channel_backpressure(now_ms);
+        }
         self.drain_ready_channel_messages(link_id);
         if rx_ring_full {
             self.update_rx_ring_full(now_ms);
@@ -1959,14 +1968,15 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     }
 
     /// Update the host-backpressure counter with a rate-limited warning
-    /// (Codeberg #280). Unlike a drop counter this reports a *refusal*: the
-    /// message was not accepted and not proofed, so the sender still owns it.
+    /// (Codeberg #280). Unlike a drop counter this reports a *hold*: the
+    /// message was kept and proven, and waits in the channel's rx ring until
+    /// the host has room (748).
     fn update_channel_backpressure(&mut self, now_ms: u64) {
         self.channel_backpressure_count += 1;
         let elapsed = now_ms.saturating_sub(self.channel_backpressure_last_log_ms);
         if self.channel_backpressure_last_log_ms == 0 || elapsed >= 5000 {
             crate::tracing::warn!(
-                "link_mgr: channel packet refused — host sink full, {} refused in last {}s (sender will retransmit)",
+                "link_mgr: channel packet held — host sink full, {} held in last {}s (delivered when the host drains)",
                 self.channel_backpressure_count,
                 elapsed / 1000
             );

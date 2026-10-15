@@ -4610,9 +4610,10 @@ async fn run_event_loop(
                 // Codeberg #280: the core proofs a reliable channel message to
                 // the sender at the moment it delivers it, so it must not
                 // deliver more than this sink can actually hand on. Tell it how
-                // much room the data plane has left; at zero it refuses the
-                // packet unproofed and the sender retransmits. Daemon-mode
-                // nodes (`without_events()`) have no sink and no limit.
+                // much room the data plane has left; at zero it keeps the
+                // message in the channel's rx ring and hands it over once
+                // there is room (748). Daemon-mode nodes (`without_events()`)
+                // have no sink and no limit.
                 core.set_channel_delivery_budget(event_sink.as_ref().map(EventSink::data_capacity));
                 let output = core.handle_packet_precomputed_from_peer(
                     prepared.iface,
