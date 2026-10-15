@@ -2022,21 +2022,27 @@ pub(crate) struct DialQueued {
     pub(crate) wait_ms: u64,
 }
 
+/// The advertising interval of the slowest Columba advertiser we know,
+/// which the capability record does not carry (757, 763): lnsd
+/// registers its advertisement without one
+/// (`bluez::register_advertisement`), and BlueZ then advertises at the
+/// kernel's default `le_adv_min_interval` = `le_adv_max_interval` =
+/// 0x0800 × 0.625 ms = 1.28 s (btvirt's `btdev.c` serves the same
+/// 1.28 s). A board advertises at the SoftDevice default 250 ms
+/// (`peripheral::Config`, interval 400). A fresh scan run hears a peer
+/// still on the air for the first time at that peer's next broadcast,
+/// so within this bound of the run starting.
+pub(crate) const PEER_ADV_INTERVAL_MS: u64 = 1_280;
+
 /// How long a queued dial's peer may go unheard by a running scan
-/// before the dial is dropped as `dark` (757): one advertising interval
-/// of the slowest Columba advertiser we know. The capability record
-/// carries no interval, so this is the interval itself: lnsd registers
-/// its advertisement without one (`bluez::register_advertisement`), and
-/// BlueZ then advertises at the kernel's default `le_adv_min_interval`
-/// = `le_adv_max_interval` = 0x0800 × 0.625 ms = 1.28 s (btvirt's
-/// `btdev.c` serves the same 1.28 s); a board advertises at the
-/// SoftDevice default 250 ms (`peripheral::Config`, interval 400). A
-/// peer still on the air has been heard within this bound of the scan
-/// starting; one that has not been, took its advertisement off the air
-/// because its incoming slots filled (`reconcile_advertising`, the
-/// firmware's `ADV_LOCK`), and a dial to it would wait out the 5 s
-/// connect bound for nothing (732, 755).
-pub(crate) const DIAL_DARK_AFTER_MS: u64 = 1_280;
+/// before the dial is dropped as `dark` (757): one
+/// [`PEER_ADV_INTERVAL_MS`]. A peer that has not been heard by then
+/// took its advertisement off the air because its incoming slots filled
+/// (`reconcile_advertising`, the firmware's `ADV_LOCK`), and a dial to
+/// it would wait out the 5 s connect bound for nothing (732, 755).
+/// Until then a due dial whose peer the run has not heard waits
+/// ([`DialQueue::pop_ready`], 763): the run has not judged it yet.
+pub(crate) const DIAL_DARK_AFTER_MS: u64 = PEER_ADV_INTERVAL_MS;
 
 /// Why a queued dial was dropped before it started (757), the
 /// `reason` of `BLE_DIAL_SKIP`.
@@ -2186,19 +2192,29 @@ impl DialQueue {
         })
     }
 
-    /// The dial to start now, if its jitter has been served and no setup
-    /// is in flight. The returned address IS the in-flight setup from
-    /// here on; the caller either spawns the connection or, when the
-    /// re-check refuses it, calls [`Self::release`] so the next dial can
-    /// arm.
+    /// The dial to start now, if its jitter has been served, no setup
+    /// is in flight, and the running scan has judged its peer. The
+    /// returned address IS the in-flight setup from here on; the caller
+    /// either spawns the connection or, when the re-check refuses it,
+    /// calls [`Self::release`] so the next dial can arm.
+    ///
+    /// A due dial whose peer the scan run now on has not heard waits
+    /// (763): a run younger than [`PEER_ADV_INTERVAL_MS`] may simply not
+    /// have reached the peer's next broadcast, and a dial popped then
+    /// goes to a peer neither `stale_full` nor `dark` could judge. The
+    /// wait ends at the first sighting (room: the dial pops; zero: it
+    /// is dropped `stale_full`) or when the run passes
+    /// [`DIAL_DARK_AFTER_MS`] and [`Self::skip_dark_head`] drops it, so
+    /// it is at most the bound minus the run's age. With no run on the
+    /// dial starts as it did before 757.
     pub(crate) fn pop_ready(&mut self, now_ms: u64) -> Option<(Addr, ConnectDecision)> {
         if self.in_flight.is_some() {
             return None;
         }
-        let ready = self
-            .queue
-            .first()
-            .is_some_and(|d| d.deadline_ms.is_some_and(|deadline| now_ms >= deadline));
+        let ready = self.queue.first().is_some_and(|d| {
+            d.deadline_ms.is_some_and(|deadline| now_ms >= deadline)
+                && (d.heard || self.scan_since_ms.is_none())
+        });
         if !ready {
             return None;
         }
@@ -2221,24 +2237,36 @@ impl DialQueue {
     }
 
     /// When the head dial wants to start, for the driver's timer. `None`
-    /// while a setup is in flight or nothing is queued.
+    /// while a setup is in flight or nothing is queued. A head whose
+    /// peer the running scan has not heard is woken no earlier than the
+    /// moment the run can call it dark (763); a sighting before that is
+    /// an event of its own, after which this reads the jitter's end
+    /// again.
     pub(crate) fn next_deadline_ms(&self) -> Option<u64> {
         if self.in_flight.is_some() {
             return None;
         }
-        self.queue.first().and_then(|d| d.deadline_ms)
+        let head = self.queue.first()?;
+        let deadline = head.deadline_ms?;
+        match self.scan_since_ms {
+            Some(since) if !head.heard => Some(deadline.max(since + DIAL_DARK_AFTER_MS + 1)),
+            _ => Some(deadline),
+        }
     }
 
     /// What the running scan knew of the head dial's peer when it is
     /// due (757), for the driver's debug line at the dial start: the
     /// run's age (`None` with no run on), whether it heard the peer,
-    /// and how many peers it had heard in all.
-    pub(crate) fn head_watch(&self, now_ms: u64) -> Option<(Option<u64>, bool, usize)> {
+    /// how many peers it had heard in all, and how long the dial has
+    /// waited past its jitter for the run to hear its peer (763).
+    pub(crate) fn head_watch(&self, now_ms: u64) -> Option<(Option<u64>, bool, usize, u64)> {
         let head = self.queue.first()?;
         Some((
             self.scan_since_ms.map(|since| now_ms.saturating_sub(since)),
             head.heard,
             self.run_heard.len(),
+            head.deadline_ms
+                .map_or(0, |deadline| now_ms.saturating_sub(deadline)),
         ))
     }
 
@@ -4387,6 +4415,9 @@ mod tests {
         let (next, decision, _) = s.next_candidate(closed + 30).expect("the runner-up");
         assert_eq!(next, ADDR_2);
         let b = q.enqueue(next, decision, closed + 30).expect("queues");
+        // The run hears the runner-up with room (763: until then it
+        // would wait for the run to judge it).
+        assert_eq!(q.sighted(&ADDR_2, Some(1), closed + 40), None);
         assert_eq!(
             q.pop_ready(closed + 30 + b.wait_ms),
             Some((ADDR_2, ConnectDecision::InitiateLowerAddress)),
@@ -4532,6 +4563,127 @@ mod tests {
         assert_eq!(q.skip_dark_head(due + 10_000), None);
         assert_eq!(
             q.pop_ready(due + 10_000),
+            Some((ADDR_1, ConnectDecision::InitiateLowerAddress))
+        );
+    }
+
+    /// 763 (a), 757's class 2: a dial due 300 ms into a scan run whose
+    /// peer the run has not heard yet waits instead of popping. The
+    /// peer's next broadcast, at 900 ms, says it is full: the dial is
+    /// dropped `stale_full` and the runner-up goes.
+    #[test]
+    fn a_dial_due_in_a_young_run_waits_and_a_full_peer_is_skipped() {
+        let mut s = ScanScheduler::new(0);
+        let mut q = DialQueue::new(7);
+        let closed = window_choosing_addr_1(&mut s, &mut q);
+        let due = q.next_deadline_ms().expect("armed");
+        let run = due - 300;
+        q.scan_run(true, run);
+        assert_eq!(q.sighted(&ADDR_2, Some(1), run + 100), None);
+
+        assert_eq!(q.skip_dark_head(due), None, "too young to call dark");
+        assert_eq!(q.pop_ready(due), None, "the run has not judged ADDR_1");
+        assert_eq!(
+            q.next_deadline_ms(),
+            Some(run + DIAL_DARK_AFTER_MS + 1),
+            "woken when the run can call it dark, no later"
+        );
+        assert_eq!(q.pop_ready(run + 899), None);
+
+        assert_eq!(
+            q.sighted(&ADDR_1, Some(0), run + 900),
+            Some(DialSkip {
+                addr: ADDR_1,
+                reason: DialSkipReason::StaleFull
+            })
+        );
+        let (next, decision, _) = s.next_candidate(run + 900).expect("the runner-up");
+        assert_eq!(next, ADDR_2);
+        let b = q.enqueue(next, decision, run + 900).expect("queues");
+        assert_eq!(
+            q.pop_ready(run + 900 + b.wait_ms),
+            Some((ADDR_2, ConnectDecision::InitiateLowerAddress)),
+            "the runner-up, heard in this run, goes after its own jitter"
+        );
+        assert!(closed < run, "the run started after the window closed");
+    }
+
+    /// 763 (b): the same wait, but the peer's broadcast at 900 ms says
+    /// it has room. The dial goes then, not at the dark bound.
+    #[test]
+    fn a_dial_waiting_on_a_young_run_goes_when_its_peer_is_heard_with_room() {
+        let mut s = ScanScheduler::new(0);
+        let mut q = DialQueue::new(7);
+        window_choosing_addr_1(&mut s, &mut q);
+        let due = q.next_deadline_ms().expect("armed");
+        let run = due - 300;
+        q.scan_run(true, run);
+
+        assert_eq!(q.pop_ready(due), None);
+        assert_eq!(q.sighted(&ADDR_1, Some(1), run + 900), None);
+        assert_eq!(
+            q.next_deadline_ms(),
+            Some(due),
+            "the timer fires at once, the jitter long served"
+        );
+        assert_eq!(
+            q.pop_ready(run + 900),
+            Some((ADDR_1, ConnectDecision::InitiateLowerAddress))
+        );
+        assert!(run + 900 < run + DIAL_DARK_AFTER_MS);
+    }
+
+    /// 763 (c): a dial whose peer this run already heard pops the moment
+    /// its jitter is served, however young the run.
+    #[test]
+    fn a_dial_whose_peer_the_run_heard_pops_at_once() {
+        let mut s = ScanScheduler::new(0);
+        let mut q = DialQueue::new(7);
+        window_choosing_addr_1(&mut s, &mut q);
+        let due = q.next_deadline_ms().expect("armed");
+        let run = due - 300;
+        q.scan_run(true, run);
+        assert_eq!(q.sighted(&ADDR_1, Some(1), run + 50), None);
+
+        assert_eq!(q.next_deadline_ms(), Some(due));
+        assert_eq!(
+            q.pop_ready(due),
+            Some((ADDR_1, ConnectDecision::InitiateLowerAddress))
+        );
+    }
+
+    /// 763: a peer the young run never hears ends the wait at the dark
+    /// bound, so no dial waits longer than one advertising interval of
+    /// its run, and the run's end lets a waiting dial go as before 757.
+    #[test]
+    fn a_dial_waiting_on_a_young_run_is_dark_at_the_bound_or_goes_when_the_run_ends() {
+        let mut s = ScanScheduler::new(0);
+        let mut q = DialQueue::new(7);
+        window_choosing_addr_1(&mut s, &mut q);
+        let due = q.next_deadline_ms().expect("armed");
+        let run = due - 300;
+        q.scan_run(true, run);
+        let bound = run + DIAL_DARK_AFTER_MS;
+        assert_eq!(q.pop_ready(bound), None);
+        assert_eq!(q.skip_dark_head(bound), None);
+        assert_eq!(
+            q.skip_dark_head(bound + 1),
+            Some(DialSkip {
+                addr: ADDR_1,
+                reason: DialSkipReason::Dark
+            })
+        );
+
+        let mut s = ScanScheduler::new(0);
+        let mut q = DialQueue::new(7);
+        window_choosing_addr_1(&mut s, &mut q);
+        let due = q.next_deadline_ms().expect("armed");
+        q.scan_run(true, due - 300);
+        assert_eq!(q.pop_ready(due), None);
+        q.scan_run(false, due + 100);
+        assert_eq!(q.next_deadline_ms(), Some(due));
+        assert_eq!(
+            q.pop_ready(due + 100),
             Some((ADDR_1, ConnectDecision::InitiateLowerAddress))
         );
     }

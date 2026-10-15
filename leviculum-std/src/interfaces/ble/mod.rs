@@ -1415,15 +1415,16 @@ impl BleTask {
             let Some((addr, _decision)) = dial_queue.pop_ready(now) else {
                 break;
             };
-            if let Some((run_age_ms, heard, run_heard)) = watch {
+            if let Some((run_age_ms, heard, run_heard, waited_ms)) = watch {
                 tracing::debug!(
                     "BLE {}: dial to {} due: scan run {} ms old, peer heard {}, \
-                     {} peers heard in the run",
+                     {} peers heard in the run, waited {} ms for it",
                     self.name,
                     Address(addr),
                     run_age_ms.map_or("-".to_string(), |ms| ms.to_string()),
                     heard,
-                    run_heard
+                    run_heard,
+                    waited_ms
                 );
             }
             if !table.may_dial()
