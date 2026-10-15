@@ -74,6 +74,7 @@ pub(super) fn build(
         adapter: config.device.clone(),
         max_connections,
         central_links,
+        advertise_when_full: config.advertise_when_full.unwrap_or(false),
         min_rssi: config.min_rssi.unwrap_or(defaults.min_rssi),
         discovery_interval,
         enable_central: config.enable_central.unwrap_or(true),
@@ -112,12 +113,14 @@ pub(super) fn build(
     };
     tracing::info!(
         "BLE interface on {} (central={}, peripheral={}, max_links={}, central_links={}, \
-         min_rssi={} dBm, initiate_only={}, accept_only={}, tx_gap_ms={}, fragment_mtu={})",
+         advertise_when_full={}, min_rssi={} dBm, initiate_only={}, accept_only={}, \
+         tx_gap_ms={}, fragment_mtu={})",
         opts.adapter.as_deref().unwrap_or("default adapter"),
         opts.enable_central,
         opts.enable_peripheral,
         opts.max_connections,
         opts.central_links,
+        opts.advertise_when_full,
         opts.min_rssi,
         listed(&opts.initiate_only),
         listed(&opts.accept_only),
@@ -391,6 +394,17 @@ mod tests {
             links::DEFAULT_CENTRAL_LINKS,
             "no key is today's one dial"
         );
+    }
+
+    /// `advertise_when_full` (752) is off unless the key says so.
+    #[test]
+    fn advertise_when_full_defaults_off() {
+        assert!(
+            !BleOptions::default().advertise_when_full,
+            "no key is the boards' dark-when-full gate"
+        );
+        let unset = InterfaceConfig::default();
+        assert_eq!(unset.advertise_when_full, None);
     }
 
     /// A negative or non-finite discovery_interval is refused at build

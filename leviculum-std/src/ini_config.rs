@@ -918,6 +918,11 @@ fn apply_interface_key(iface: &mut InterfaceConfig, key: &str, value: &str) -> R
         // The dial count (#723), a measurement knob; range-checked against
         // `max_connections` when the interface is built.
         "central_links" => iface.central_links = value.parse().ok(),
+        // Stay on the air saying zero when full (752), a measurement knob.
+        // A bool, so a misspelt value is an error rather than off.
+        "advertise_when_full" => {
+            iface.advertise_when_full = Some(parse_bool(key, value)?);
+        }
         // Discovery position and radio keys (D15 of the 2026-10-11
         // shared-instance audit; Python Reticulum.py:857-867, `as_float` for the
         // position, `as_int` for the rest). Published by `descriptor_from_config`;
@@ -1252,6 +1257,28 @@ mod tests {
         assert_eq!(cli.networkname.as_deref(), Some("abc"));
     }
 
+    /// `advertise_when_full` (752) parses both ways, and a value that is
+    /// not a bool refuses the config instead of silently meaning off.
+    #[test]
+    fn test_ble_advertise_when_full_parses_both_ways_and_refuses_garbage() {
+        let section = |value: &str| {
+            parse_ini(&format!(
+                "[interfaces]\n  [[ble]]\n    type = BLEInterface\n    advertise_when_full = {value}\n"
+            ))
+        };
+        for (value, want) in [
+            ("yes", true),
+            ("true", true),
+            ("no", false),
+            ("false", false),
+        ] {
+            let config = section(value).unwrap_or_else(|e| panic!("{value}: {e}"));
+            let ble = config.interfaces.get("ble").expect("ble");
+            assert_eq!(ble.advertise_when_full, Some(want), "{value}");
+        }
+        assert!(section("maybe").is_err(), "garbage is an error");
+    }
+
     /// A `[[BLE Interface]]` section parses with the reference's own key
     /// names (`ble-reticulum@07d94130` `BLEInterface.py`, config parsing), survives the
     /// supported-type filter, and leaves every unset key `None` so the
@@ -1272,6 +1299,7 @@ mod tests {
     tx_gap_ms = 25
     fragment_mtu = 253
     central_links = 2
+    advertise_when_full = yes
 "#,
         )
         .unwrap();
@@ -1291,6 +1319,7 @@ mod tests {
         assert_eq!(ble.tx_gap_ms, Some(25));
         assert_eq!(ble.fragment_mtu, Some(253));
         assert_eq!(ble.central_links, Some(2));
+        assert_eq!(ble.advertise_when_full, Some(true));
 
         // A minimal section leaves the tunables to the builder's defaults.
         let config = parse_ini(
@@ -1312,6 +1341,7 @@ mod tests {
         assert_eq!(ble.tx_gap_ms, None, "unset is the firmware's gap");
         assert_eq!(ble.fragment_mtu, None, "unset is the exchanged MTU");
         assert_eq!(ble.central_links, None, "unset is the one dial");
+        assert_eq!(ble.advertise_when_full, None, "unset is dark when full");
         assert_eq!(
             ble.initiate_only, None,
             "no key is no restriction, not an empty list"

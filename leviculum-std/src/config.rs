@@ -861,7 +861,7 @@ pub struct InterfaceConfig {
     /// open a connection to and nothing else — an unlisted peer that
     /// dials US is served exactly as before. Entries are validated when
     /// the interface is built (`InitiateAllowlist::parse`,
-    /// `leviculum-std/src/interfaces/ble/links.rs:1543`). No reference
+    /// `leviculum-std/src/interfaces/ble/links.rs:1562`). No reference
     /// key: `ble-reticulum` has none, and this changes no wire byte.
     pub initiate_only: Option<Vec<String>>,
     /// Peers whose INCOMING link this interface serves — the symmetric
@@ -896,6 +896,10 @@ pub struct InterfaceConfig {
     /// knob (#723) for rooms whose host nodes dial more than once. No
     /// reference key.
     pub central_links: Option<usize>,
+    /// Keep a full BLE node advertising with zero free slots instead of
+    /// taking the advertisement off the air; absent is off, the boards'
+    /// dark-when-full policy. A measurement knob (752). No reference key.
+    pub advertise_when_full: Option<bool>,
 }
 
 /// A single vport subinterface of an `RNodeMultiInterface`, parsed from a
@@ -1046,6 +1050,7 @@ impl Default for InterfaceConfig {
             tx_gap_ms: None,
             fragment_mtu: None,
             central_links: None,
+            advertise_when_full: None,
         }
     }
 }

@@ -409,6 +409,11 @@ pub(crate) struct LinkTable {
     /// identity arrives as the handshake's 16 bytes, and the driver
     /// does not see that it was a handshake until the table says so.
     accept_only: PeerAllowlist,
+    /// Keep the advertisement on the air with a published zero when the
+    /// incoming slots fill (`advertise_when_full`, 752), instead of the
+    /// firmware's full-is-dark gate. Off by default: a host measurement
+    /// knob, the board has no such switch.
+    advertise_when_full: bool,
 }
 
 impl LinkTable {
@@ -427,7 +432,16 @@ impl LinkTable {
             pending: Vec::new(),
             abandon_reports: Vec::new(),
             accept_only: PeerAllowlist::default(),
+            advertise_when_full: false,
         }
+    }
+
+    /// Stay on the air saying zero free slots when full
+    /// (`advertise_when_full`, 752). Never calling this is the
+    /// firmware's dark-when-full policy.
+    pub(crate) fn with_advertise_when_full(mut self, advertise_when_full: bool) -> Self {
+        self.advertise_when_full = advertise_when_full;
+        self
     }
 
     /// Serve only the peers this list names (`accept_only`). An empty
@@ -507,8 +521,13 @@ impl LinkTable {
     /// mechanism that left the rig's seed-2 room with one unreachable
     /// board (#353). What it does NOT do is widen admission — `admit`
     /// refuses a surplus incoming link by role either way.
+    ///
+    /// `advertise_when_full` (752) keeps a full node on the air with a
+    /// published zero instead: a dialler that reads the fresh record
+    /// skips it (`peer_has_room`), where a dark node leaves every
+    /// dialler on a stale record that still says there is room.
     pub(crate) fn should_advertise(&self) -> bool {
-        self.free_incoming_slots() > 0
+        self.advertise_when_full || self.free_incoming_slots() > 0
     }
 
     pub(crate) fn link_by_addr(&self, addr: &Addr) -> Option<&Link> {
@@ -3495,6 +3514,29 @@ mod tests {
         let expired = t.expire(LINK_TIMEOUT_MS);
         assert_eq!(expired.links.len(), 2);
         assert!(t.should_advertise(), "expiry frees the air too");
+    }
+
+    /// `advertise_when_full` (752): the same walk with the key set keeps
+    /// the node on the air through the full table, and what it publishes
+    /// there is a zero a dialler reads as no room (`peer_has_room`). The
+    /// default (the test above) stays dark.
+    #[test]
+    fn with_advertise_when_full_a_full_table_stays_on_the_air_saying_zero() {
+        use leviculum_ble_tx::free_slots;
+        let mut t = LinkTable::new(OWN, 3, DEFAULT_CENTRAL_LINKS).with_advertise_when_full(true);
+        t.admit(ID_A, ADDR_1, Role::Peripheral, 185, 0);
+        t.admit(ID_B, ADDR_2, Role::Peripheral, 185, 0);
+        assert_eq!(t.free_incoming_slots(), 0, "both incoming slots spent");
+        assert!(t.should_advertise(), "full, and still on the air");
+        let published = free_slots(capability_record(&OWN, t.free_incoming_slots())[3]);
+        assert_eq!(published, Some(0), "the record says zero, not unknown");
+        assert!(!peer_has_room(published), "and a dialler reads it as full");
+
+        let mut dark =
+            LinkTable::new(OWN, 3, DEFAULT_CENTRAL_LINKS).with_advertise_when_full(false);
+        dark.admit(ID_A, ADDR_1, Role::Peripheral, 185, 0);
+        dark.admit(ID_B, ADDR_2, Role::Peripheral, 185, 0);
+        assert!(!dark.should_advertise(), "the key off is the default gate");
     }
 
     #[test]

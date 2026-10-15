@@ -92,6 +92,10 @@ pub(crate) struct BleOptions {
     /// are incoming. [`links::DEFAULT_CENTRAL_LINKS`] unless a host
     /// measurement raised it.
     pub central_links: usize,
+    /// Keep advertising with `free_slots = 0` when the incoming slots
+    /// fill (`advertise_when_full`, 752) rather than going dark. Off —
+    /// the default — is the firmware's `ADV_LOCK` policy.
+    pub advertise_when_full: bool,
     /// Sightings weaker than this are not dialled (reference `min_rssi`).
     pub min_rssi: i16,
     /// Pause between scan windows (reference `discovery_interval`).
@@ -130,6 +134,7 @@ impl Default for BleOptions {
             adapter: None,
             max_connections: links::DEFAULT_MAX_LINKS,
             central_links: links::DEFAULT_CENTRAL_LINKS,
+            advertise_when_full: false,
             min_rssi: -85,
             discovery_interval: Duration::from_secs(5),
             enable_central: true,
@@ -449,7 +454,8 @@ impl BleTask {
             self.opts.max_connections,
             self.opts.central_links,
         )
-        .with_accept_only(self.opts.accept_only.clone());
+        .with_accept_only(self.opts.accept_only.clone())
+        .with_advertise_when_full(self.opts.advertise_when_full);
 
         // Peripheral half. The GATT application lives for the session —
         // live peripheral links keep using it — while the advertisement
@@ -504,7 +510,7 @@ impl BleTask {
 
         tracing::info!(
             "BLE {}: up on {} addr {} name LN-… (peripheral={}, central={}, max_links={}, \
-             central_links={})",
+             central_links={}, advertise_when_full={})",
             self.name,
             adapter.name(),
             Address(local_addr),
@@ -512,6 +518,7 @@ impl BleTask {
             self.opts.enable_central,
             self.opts.max_connections,
             self.opts.central_links,
+            self.opts.advertise_when_full,
         );
         if let Some(lost) = lost {
             tracing::info!(
@@ -1370,7 +1377,8 @@ impl BleTask {
             return;
         }
         // Non-zero by the verdict above, which is a test of exactly this
-        // number.
+        // number, unless `advertise_when_full` (752) keeps a full node on
+        // the air: then zero is what goes out.
         let free_slots = table.free_incoming_slots();
         if adv.as_ref().is_some_and(|a| a.free_slots == free_slots) {
             return;
