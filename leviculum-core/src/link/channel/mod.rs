@@ -383,6 +383,15 @@ impl Channel {
         self.rx_ring.is_empty()
     }
 
+    /// Whether the next expected message is buffered, so a drain would hand
+    /// at least one over (a message held for a full host, 748).
+    pub fn has_in_order_received(&self) -> bool {
+        matches!(
+            self.rx_ring.front(),
+            Some(Some((envelope, _))) if envelope.sequence == self.next_rx_sequence
+        )
+    }
+
     #[cfg(test)]
     pub(crate) fn set_window_for_test(&mut self, w: usize) {
         self.window = w;
@@ -887,6 +896,33 @@ impl Channel {
         }
     }
 
+    /// When `outbound` times out and [`poll`](Self::poll) retransmits it, or
+    /// `None` if it is not awaiting a proof.
+    fn retransmit_due_ms(&self, outbound: &OutboundEnvelope, eff_rtt: u64) -> Option<u64> {
+        if outbound.state != MessageState::Sent {
+            return None;
+        }
+        // Use queue_len from when message was sent, not current tx_ring size.
+        // Prevents death spiral: growing queue → inflated timeout → no retransmit → queue stays.
+        let timeout = calculate_timeout(
+            outbound.tries,
+            eff_rtt,
+            outbound.queue_len_at_send,
+            self.window,
+        );
+        Some(outbound.sent_at_ms.saturating_add(timeout))
+    }
+
+    /// The earliest time [`poll`](Self::poll) has an envelope to time out, so
+    /// the timer can wake for it instead of at the next whole second (749).
+    pub fn next_retransmit_due_ms(&self, rtt_ms: u64) -> Option<u64> {
+        let eff_rtt = self.effective_rtt_ms(rtt_ms);
+        self.tx_ring
+            .iter()
+            .filter_map(|outbound| self.retransmit_due_ms(outbound, eff_rtt))
+            .min()
+    }
+
     /// Poll for timeouts and get actions to take
     ///
     /// Call this periodically to check for timed-out envelopes.
@@ -903,16 +939,8 @@ impl Channel {
         // First pass: collect indices that need processing and their current tries
         let mut timed_out: Vec<(usize, u8)> = Vec::new();
         for (i, outbound) in self.tx_ring.iter().enumerate() {
-            if outbound.state == MessageState::Sent {
-                // Use queue_len from when message was sent, not current tx_ring size.
-                // Prevents death spiral: growing queue → inflated timeout → no retransmit → queue stays.
-                let timeout = calculate_timeout(
-                    outbound.tries,
-                    eff_rtt,
-                    outbound.queue_len_at_send,
-                    self.window,
-                );
-                if now_ms >= outbound.sent_at_ms.saturating_add(timeout) {
+            if let Some(due) = self.retransmit_due_ms(outbound, eff_rtt) {
+                if now_ms >= due {
                     timed_out.push((i, outbound.tries));
                 }
             }

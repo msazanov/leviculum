@@ -7635,6 +7635,142 @@ mod tests {
         );
     }
 
+    /// One timer wake as the std driver schedules it: sleep until the node's
+    /// `next_deadline`, never longer than the 1 s fallback and never less
+    /// than 1 ms (`leviculum-std/src/driver/mod.rs`, `delta.clamp(1, 1000)`).
+    fn driver_wake(node: &mut NodeCore<OsRng, MockClock, NoStorage>) {
+        let now = node.transport().clock().now_ms();
+        let delta = node
+            .next_deadline()
+            .map(|d| d.saturating_sub(now).clamp(1, 1_000))
+            .unwrap_or(1_000);
+        node.transport().clock().advance(delta);
+    }
+
+    /// 749: a channel retransmit leaves when its computed timeout is due, not
+    /// at the next whole second. The link's channel deadline used to be
+    /// `now + 1 s` whenever a channel existed, so the driver slept a second
+    /// and an envelope due after 150 ms went out after 1000 ms: on a lossy
+    /// link every lost envelope cost up to six times its designed wait, and
+    /// `CHANNEL_MAX_TRIES` was spent in five seconds of wall clock.
+    #[test]
+    fn test_channel_retransmit_leaves_when_due_not_on_the_second() {
+        let mut pair = establish_nodecore_link_pair();
+        let sent_at = pair.initiator.transport().clock().now_ms();
+        let _ = pair
+            .initiator
+            .send_on_link(&pair.initiator_link_id, b"due")
+            .unwrap();
+        // SRTT 60 ms: the first timeout is 60 * 2.5 = 150 ms.
+        pair.initiator
+            .link_mut(&pair.initiator_link_id)
+            .unwrap()
+            .channel_mut()
+            .unwrap()
+            .seed_srtt(60);
+
+        let mut retransmitted_at = None;
+        while retransmitted_at.is_none() {
+            driver_wake(&mut pair.initiator);
+            let output = pair.initiator.handle_timeout();
+            if !output.actions.is_empty() {
+                retransmitted_at = Some(pair.initiator.transport().clock().now_ms());
+            }
+            assert!(
+                pair.initiator.transport().clock().now_ms() - sent_at < 10_000,
+                "no retransmit within ten seconds"
+            );
+        }
+        let waited = retransmitted_at.unwrap_or(0) - sent_at;
+        assert!(
+            (150..=150 + crate::constants::CHANNEL_HELD_DRAIN_POLL_MS).contains(&waited),
+            "an envelope due after 150 ms must leave within one granule of it, left after {waited} ms"
+        );
+    }
+
+    /// 749: a message held for a full host sink is handed over within one
+    /// granule of the host having room again, not at the next whole second.
+    /// The driver refreshes the delivery budget only on a packet or on the
+    /// timer, so with the timer at whole seconds a one-slot sink drained one
+    /// held message per second.
+    #[test]
+    fn test_channel_held_message_delivered_soon_after_room_returns() {
+        use crate::transport::InterfaceId;
+
+        let mut pair = establish_nodecore_link_pair();
+        let output = pair
+            .initiator
+            .send_on_link(&pair.initiator_link_id, b"held")
+            .unwrap();
+        let data = extract_broadcast_data(&output);
+
+        pair.responder.set_channel_delivery_budget(Some(0));
+        let output = pair.responder.handle_packet(InterfaceId(0), &data);
+        assert_eq!(output.actions.len(), 1, "held and proven on arrival");
+        let held_at = pair.responder.transport().clock().now_ms();
+        // The host has room again 150 ms after the message was held.
+        let room_at = held_at + 150;
+
+        let mut delivered_at = None;
+        while delivered_at.is_none() {
+            driver_wake(&mut pair.responder);
+            let now = pair.responder.transport().clock().now_ms();
+            pair.responder
+                .set_channel_delivery_budget(Some(usize::from(now >= room_at)));
+            let output = pair.responder.handle_timeout();
+            if output
+                .events
+                .iter()
+                .any(|e| matches!(e, NodeEvent::MessageReceived { .. }))
+            {
+                delivered_at = Some(now);
+            }
+            assert!(now - held_at < 10_000, "not delivered within ten seconds");
+        }
+        let late = delivered_at.unwrap_or(0) - room_at;
+        assert!(
+            late <= crate::constants::CHANNEL_HELD_DRAIN_POLL_MS,
+            "a held message must reach the host within one granule of room returning, came {late} ms late"
+        );
+    }
+
+    /// 749: waking for channel deadlines when they are due costs no wakeup at
+    /// idle. With an established link whose channel has delivered everything,
+    /// a minute of quiet takes no more timer wakes than the 1 s fallback.
+    #[test]
+    fn test_channel_idle_link_adds_no_timer_wakeups() {
+        use crate::transport::InterfaceId;
+
+        let mut pair = establish_nodecore_link_pair();
+        let output = pair
+            .initiator
+            .send_on_link(&pair.initiator_link_id, b"one")
+            .unwrap();
+        let data = extract_broadcast_data(&output);
+        let output = pair.responder.handle_packet(InterfaceId(0), &data);
+        let proof = extract_broadcast_data(&output);
+        let _ = pair.initiator.handle_packet(InterfaceId(0), &proof);
+
+        let mut measured = alloc::vec::Vec::new();
+        for (name, node) in [
+            ("initiator", &mut pair.initiator),
+            ("responder", &mut pair.responder),
+        ] {
+            let start = node.transport().clock().now_ms();
+            let mut wakes = 0u64;
+            while node.transport().clock().now_ms() - start < 60_000 {
+                driver_wake(node);
+                let _ = node.handle_timeout();
+                wakes += 1;
+            }
+            measured.push((name, wakes));
+        }
+        assert!(
+            measured.iter().all(|(_, wakes)| *wakes <= 61),
+            "an idle node must not wake more than once a second; timer wakes in 60 s: {measured:?}"
+        );
+    }
+
     #[test]
     fn test_channel_proof_generated_with_prove_none() {
         use crate::transport::InterfaceId;

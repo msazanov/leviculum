@@ -231,7 +231,7 @@ richer local enum (`LinkCloseReason`,
 the wire carries a reason. Pending requests on a closed link are
 dropped without individual timeout events
 (`remove_pending_requests_for_link`,
-`leviculum-core/src/node/link_management.rs:4587`); Python lets each
+`leviculum-core/src/node/link_management.rs:4597`); Python lets each
 `RequestReceipt` time out on its own clock
 (`reference/Reticulum/RNS/Link.py:1415-1422`). Inert, local API.
 
@@ -638,11 +638,11 @@ additive queue-delay RTO `(max(2.5×rtt, 100 ms) + queue×rtt/window) ×
 `leviculum-core/src/link/channel/mod.rs:98`), window tiers chosen
 directly from RTT thresholds 180/750/2000 ms
 (`update_window_for_rtt`,
-`leviculum-core/src/link/channel/mod.rs:460`), RFC-6298 SRTT with
+`leviculum-core/src/link/channel/mod.rs:469`), RFC-6298 SRTT with
 Karn's rule (`mark_delivered`,
-`leviculum-core/src/link/channel/mod.rs:835`), and send pacing at
+`leviculum-core/src/link/channel/mod.rs:844`), and send pacing at
 `rtt/window` with multiplicative backoff (`recalculate_pacing`,
-`leviculum-core/src/link/channel/mod.rs:1020`) that Python does not
+`leviculum-core/src/link/channel/mod.rs:1048`) that Python does not
 have at all. All of it is our side's transmit discipline over
 identical wire bytes. Class: **deviation ours (deliberate)**.
 
@@ -670,7 +670,7 @@ with a loud refusal (`CHANNEL_RX_RING_MAX`,
 `leviculum-core/src/constants.rs:505`) where Python's deque is
 unbounded, and our backward-sequence acceptance window is half the
 sequence space with a re-prove
-(`Channel::receive`, `leviculum-core/src/link/channel/mod.rs:623`)
+(`Channel::receive`, `leviculum-core/src/link/channel/mod.rs:632`)
 where Python validates against `WINDOW_MAX`
 (`reference/Reticulum/RNS/Channel.py:431-439`) and re-proves via the
 pre-parse prove. Class: **semantic (recovery dynamics), inert on the

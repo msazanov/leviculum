@@ -9,9 +9,9 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use crate::constants::{
-    CHANNEL_DEFAULT_RTT_MS, DATA_RECEIPT_TIMEOUT_MS, KEEPALIVE_INITIATOR_BYTE,
-    LINK_REQUEST_MAX_RETRIES, MODE_AES256_CBC, MS_PER_SECOND, PROOF_DATA_SIZE,
-    TRAFFIC_TIMEOUT_FACTOR, TRAFFIC_TIMEOUT_MIN_MS, TRUNCATED_HASHBYTES,
+    CHANNEL_DEFAULT_RTT_MS, CHANNEL_HELD_DRAIN_POLL_MS, DATA_RECEIPT_TIMEOUT_MS,
+    KEEPALIVE_INITIATOR_BYTE, LINK_REQUEST_MAX_RETRIES, MODE_AES256_CBC, MS_PER_SECOND,
+    PROOF_DATA_SIZE, TRAFFIC_TIMEOUT_FACTOR, TRAFFIC_TIMEOUT_MIN_MS, TRUNCATED_HASHBYTES,
 };
 use crate::destination::{DestinationHash, ProofStrategy};
 use crate::event_scalar::MsOrNone;
@@ -4506,9 +4506,19 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             }
         }
 
-        // Channel retransmit deadlines
-        if self.links.values().any(|l| l.has_channel()) {
-            update(now_ms.saturating_add(MS_PER_SECOND));
+        // Channel deadlines (749): each envelope's computed retransmit time,
+        // and a short look again while a message is held for a full host,
+        // which the core cannot see drain. They used to be rounded up to the
+        // next whole second, so a retry due after 150 ms left after 1000 ms.
+        for link in self.links.values() {
+            if let Some(ch) = link.channel() {
+                if let Some(due) = ch.next_retransmit_due_ms(link.rtt_ms()) {
+                    update(due);
+                }
+                if self.channel_delivery_budget.is_some() && ch.has_in_order_received() {
+                    update(now_ms.saturating_add(CHANNEL_HELD_DRAIN_POLL_MS));
+                }
+            }
         }
 
         // Pending request timeout deadlines

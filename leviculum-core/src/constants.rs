@@ -510,6 +510,12 @@ pub const CHANNEL_RX_RING_MAX: usize = 512;
 /// spends before giving a struggling link up.
 pub const CHANNEL_MAX_TRIES: u8 = 5;
 
+/// How soon the timer looks again at a channel message held for a full host
+/// sink (749). The core cannot see the host drain its sink, so while a
+/// message is held and next in order the node's deadline is this far out
+/// instead of the 1 s fallback; with nothing held it adds no wakeup.
+pub const CHANNEL_HELD_DRAIN_POLL_MS: u64 = 50;
+
 /// RTT threshold for fast links (180ms)
 pub const CHANNEL_RTT_FAST_MS: u64 = 180;
 
