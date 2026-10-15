@@ -491,13 +491,26 @@ impl<T, const N: usize> CandidateTable<T, N> {
     /// Close the window: the best candidate, or `None` for an empty
     /// window (a window is only opened by a first candidate, so both
     /// stacks treat `None` as unreachable-but-handled).
-    pub fn into_best(self) -> Option<(u64, ConnectDecision, T)> {
+    pub fn into_best(mut self) -> Option<(u64, ConnectDecision, T)> {
+        self.pop_best()
+    }
+
+    /// Take the best candidate out and keep the rest, so a caller whose
+    /// choice fell through before it was dialled can take the next one
+    /// from the same window (757: lnsd drops a queued dial whose peer
+    /// turned out full or dark while it waited). The order is the one
+    /// [`into_best`](Self::into_best) closes the window with; ties go
+    /// to the earlier slot, as there.
+    pub fn pop_best(&mut self) -> Option<(u64, ConnectDecision, T)> {
         let order = self.order;
-        self.entries
-            .into_iter()
-            .flatten()
-            .min_by_key(|entry| rank(entry, order))
-            .map(|c| (c.addr, c.decision, c.payload))
+        let (best, _) = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(i, entry)| entry.as_ref().map(|c| (i, rank(c, order))))
+            .min_by_key(|(_, rank)| *rank)?;
+        let c = self.entries[best].take()?;
+        Some((c.addr, c.decision, c.payload))
     }
 }
 
@@ -507,6 +520,20 @@ mod tests {
     use ConnectDecision::*;
 
     type Table = CandidateTable<&'static str, 4>;
+
+    /// 757: popping hands the candidates out in the order the window
+    /// would have chosen them, one at a time, and nothing twice.
+    #[test]
+    fn popping_hands_out_the_window_in_choice_order() {
+        let mut t = Table::new();
+        assert!(t.offer(0x30, None, InitiateLowerAddress, Some(1), "c"));
+        assert!(t.offer(0x10, None, InitiateLowerAddress, Some(1), "a"));
+        assert!(t.offer(0x20, None, InitiateLowerAddress, Some(3), "b"));
+        assert_eq!(t.pop_best(), Some((0x20, InitiateLowerAddress, "b")));
+        assert_eq!(t.pop_best(), Some((0x10, InitiateLowerAddress, "a")));
+        assert_eq!(t.pop_best(), Some((0x30, InitiateLowerAddress, "c")));
+        assert_eq!(t.pop_best(), None);
+    }
 
     #[test]
     fn the_lowest_address_wins_within_a_tier() {
