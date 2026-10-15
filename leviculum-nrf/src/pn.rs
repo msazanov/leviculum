@@ -363,18 +363,18 @@ pub fn apply_config(wire: PnConfigWire) -> crate::telemetry::PendingSave {
 // Constants
 // ---------------------------------------------------------------------------
 
-// The role's first announce after boot and its cadence both moved to
-// `leviculum_announce_policy::AnnounceCadence` (#401): the propagation
-// half and the board's own destination are decided together, because a
-// board whose own announce is withheld is unreachable as a recipient
-// while still usable as a mailbox. The boot delay is still the
-// reference's own (`NODE_ANNOUNCE_DELAY`,
-// `reference/LXMF/LXMF/LXMRouter.py:41`), and the cadence a moving board
-// runs is still the 300 s this role argued from the concept page's drain
-// numbers — a 10-minute hilltop stop still moves a >=30-message delta.
-// What changed is that a board which is NOT moving falls back to the
-// hourly floor instead of paying 300 s forever, and that a slow carrier
-// can stretch either.
+// The role's start announces and its cadence live in
+// `leviculum_announce_policy::AnnounceCadence` (#401), decided together
+// with the board's own destination. The boot delay is the reference's
+// (`NODE_ANNOUNCE_DELAY`, `reference/LXMF/LXMF/LXMRouter.py:41`), and a
+// second announce follows 10 s later as `lxmd`'s deferred start one does
+// (`AnnounceSlot::start_gap_ms`, lnpnd's constant): one boot announce
+// lost to a collision would leave the role invisible until the floor.
+// The cadence a moving board runs is the 300 s this role argued from the
+// concept page's drain numbers — a 10-minute hilltop stop still moves a
+// >=30-message delta; a board which is NOT moving falls back to the
+// hourly floor instead of paying 300 s forever, and a slow carrier can
+// stretch either.
 use leviculum_announce_policy::{AnnounceSlot, Decision};
 
 /// How long the role holds its announce when its store did not mount.

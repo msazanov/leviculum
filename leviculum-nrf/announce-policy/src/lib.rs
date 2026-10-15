@@ -82,12 +82,16 @@ pub const PEER_UP_ANNOUNCE_MIN_INTERVAL_MS: u64 = 15 * 60 * 1_000;
 /// The reference defers its own first management announce to ~15 s after
 /// start (`Transport.last_mgmt_announce` is seeded at
 /// `start - interval + 15`, `reference/Reticulum/RNS/Transport.py:283`),
-/// and this tree matches that for its management destination. Thirty
-/// seconds rather than fifteen, deliberately: on a board both announces
-/// share one half-duplex LoRa radio, and two announces contending for the
-/// same airtime window at boot is the collision the spacing exists to
-/// avoid. Fifteen seconds apart, each has the whole window to itself.
-pub const PERIODIC_ANNOUNCE_INITIAL_DELAY_MS: u64 = 30 * 1_000;
+/// and this tree matches that for its management destination. Later
+/// than fifteen, deliberately: on a board every boot announce shares one
+/// half-duplex LoRa radio, and two announces contending for the same
+/// airtime window at boot is the collision the spacing exists to avoid.
+/// Forty seconds since the propagation role's start pair (20 s and 30 s,
+/// [`PN_ANNOUNCE_INITIAL_DELAY_MS`] and [`PN_START_ANNOUNCE_GAP_MS`]):
+/// at thirty the role's second announce and this one fell due in the
+/// same millisecond. Ten seconds after the pair, as the pair's own two
+/// are apart, each has the whole window to itself.
+pub const PERIODIC_ANNOUNCE_INITIAL_DELAY_MS: u64 = 40 * 1_000;
 
 /// How soon a clock-withheld periodic announce is retried.
 ///

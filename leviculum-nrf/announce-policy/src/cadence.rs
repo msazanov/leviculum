@@ -328,8 +328,9 @@ impl MovementDetector {
 /// Which announce a deadline belongs to.
 ///
 /// One cadence, two emitters. The board's own destination and the
-/// propagation role are decided together and differ in exactly two
-/// respects, both stated here rather than at the call sites.
+/// propagation role are decided together and differ in exactly three
+/// respects, all stated here rather than at the call sites: the boot
+/// offset, the clock gate, and the start pair.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnnounceSlot {
     /// The board's own `lxmf.delivery` destination.
@@ -352,6 +353,27 @@ impl AnnounceSlot {
     #[must_use]
     pub const fn is_clock_gated(self) -> bool {
         matches!(self, Self::Own)
+    }
+
+    /// How long after this slot's first announce the second follows,
+    /// instead of the cadence's interval; `None` for a slot whose
+    /// interval runs from its first.
+    ///
+    /// The propagation role announces twice at start, as `lxmd` does:
+    /// the router's own announce [`PN_ANNOUNCE_INITIAL_DELAY_MS`] after
+    /// start and the daemon's deferred start announce
+    /// [`PN_START_ANNOUNCE_GAP_MS`] later (`lnpnd` runs the same pair off
+    /// the same constants). On a board this matters more than on a host:
+    /// a role whose one boot announce dies in a collision is an invisible
+    /// propagation node until the cadence fires, which on a board that
+    /// does not move is the hourly floor. The board's own announce has no
+    /// pair; it is clock-gated, and a withheld one retries in a minute.
+    #[must_use]
+    pub const fn start_gap_ms(self) -> Option<u64> {
+        match self {
+            Self::Own => None,
+            Self::Propagation => Some(PN_START_ANNOUNCE_GAP_MS),
+        }
     }
 
     /// The `reason=` token of the `[ANNOUNCE] sent` line.
@@ -434,6 +456,12 @@ impl PeriodicAnnounce {
         }
     }
 
+    /// Whether an announce has gone out from this slot since boot.
+    #[must_use]
+    pub const fn has_fired(&self) -> bool {
+        self.last_fired_ms.is_some()
+    }
+
     /// How long until the next poll is worth making. Zero means "now".
     #[must_use]
     pub fn wait_ms(&self, now_ms: u64) -> u64 {
@@ -458,6 +486,15 @@ impl PeriodicAnnounce {
 /// airtime window at boot is the collision the spacing exists to avoid.
 /// One cadence, two deadlines, deliberately offset.
 pub const PN_ANNOUNCE_INITIAL_DELAY_MS: u64 = 20 * 1_000;
+
+/// How long after the propagation role's first start announce the second
+/// follows ([`AnnounceSlot::start_gap_ms`]): `lxmd` runs its deferred
+/// start jobs `DEFFERED_JOBS_DELAY` = 10 s after start
+/// (`reference/LXMF/LXMF/Utilities/lxmd.py:33`, `:501-503`), and that
+/// announce sleeps the same `NODE_ANNOUNCE_DELAY` as the router's own
+/// (`reference/LXMF/LXMF/LXMRouter.py:338-341`), so the two leave 10 s
+/// apart. One constant for both stacks: `lnpnd` derives its own from it.
+pub const PN_START_ANNOUNCE_GAP_MS: u64 = 10 * 1_000;
 
 /// The one cadence both halves of the announce obey.
 ///
@@ -620,8 +657,24 @@ impl AnnounceCadence {
     /// Poll one slot. `clock_ok` is the caller's plausibility answer; it
     /// is only consulted for a slot that is clock-gated
     /// ([`AnnounceSlot::is_clock_gated`]).
+    ///
+    /// The deadline after a slot's FIRST announce is its start gap
+    /// ([`AnnounceSlot::start_gap_ms`]) when it has one, bounded by rule 5
+    /// like any other: on a carrier where the set does not fit the gap,
+    /// the second start announce waits out the budget's spacing. Derived
+    /// from whether the slot has fired, so the pair costs no state.
     pub fn poll(&mut self, slot: AnnounceSlot, now_ms: u64, clock_ok: bool) -> Option<Decision> {
-        let interval = self.interval_ms(now_ms);
+        let interval = match slot.start_gap_ms() {
+            Some(gap) if !self.slot(slot).has_fired() => {
+                let budget = self.budget.min_interval_ms();
+                if budget > gap {
+                    budget
+                } else {
+                    gap
+                }
+            }
+            _ => self.interval_ms(now_ms),
+        };
         let gate = clock_ok || !slot.is_clock_gated();
         self.slot_mut(slot).poll(now_ms, gate, interval)
     }
@@ -651,9 +704,13 @@ impl AnnounceCadence {
     /// How long the caller may sleep before polling this slot.
     #[must_use]
     pub fn wait_ms(&self, slot: AnnounceSlot, now_ms: u64) -> u64 {
+        self.slot(slot).wait_ms(now_ms)
+    }
+
+    fn slot(&self, slot: AnnounceSlot) -> &PeriodicAnnounce {
         match slot {
-            AnnounceSlot::Own => self.own.wait_ms(now_ms),
-            AnnounceSlot::Propagation => self.propagation.wait_ms(now_ms),
+            AnnounceSlot::Own => &self.own,
+            AnnounceSlot::Propagation => &self.propagation,
         }
     }
 
@@ -1240,6 +1297,113 @@ mod tests {
                 "the two announces do not contend for the same window at boot"
             )
         };
+    }
+
+    /// The propagation role announces twice at boot, as `lxmd` does
+    /// (lnpnd's `the_node_announces_twice_at_start_then_on_the_interval`
+    /// is the host half): the router's announce
+    /// [`PN_ANNOUNCE_INITIAL_DELAY_MS`] after boot, the deferred start
+    /// announce [`PN_START_ANNOUNCE_GAP_MS`] after it, then the board's
+    /// cadence from the second. A board whose one boot announce dies in a
+    /// collision is otherwise an invisible propagation node until the
+    /// floor fires, an hour later on a board that does not move.
+    #[test]
+    fn the_propagation_role_announces_twice_at_boot_then_on_the_cadence() {
+        let mut cadence = AnnounceCadence::new();
+        cadence.arm(t0());
+        let first = t0() + PN_ANNOUNCE_INITIAL_DELAY_MS;
+        let second = first + PN_START_ANNOUNCE_GAP_MS;
+        let mut announced = Vec::new();
+        let mut now = t0();
+        let end = second + STILL_ANNOUNCE_INTERVAL_MS;
+        while now <= end {
+            if cadence.poll(AnnounceSlot::Propagation, now, true) == Some(Decision::Announce) {
+                announced.push(now - t0());
+            }
+            now += 1_000;
+        }
+        assert_eq!(
+            announced,
+            vec![
+                first - t0(),
+                second - t0(),
+                second - t0() + STILL_ANNOUNCE_INTERVAL_MS
+            ],
+            "router announce, deferred start announce, then the floor from the second (ms after boot)"
+        );
+    }
+
+    /// The board's own announce is not part of the start pair: it fires
+    /// once at boot and then on the cadence, as before.
+    #[test]
+    fn the_own_announce_has_no_start_pair() {
+        let mut cadence = AnnounceCadence::new();
+        cadence.arm(t0());
+        let first = t0() + crate::PERIODIC_ANNOUNCE_INITIAL_DELAY_MS;
+        assert_eq!(
+            cadence.poll(AnnounceSlot::Own, first, true),
+            Some(Decision::Announce)
+        );
+        assert_eq!(
+            cadence.wait_ms(AnnounceSlot::Own, first),
+            STILL_ANNOUNCE_INTERVAL_MS
+        );
+    }
+
+    /// The second start announce is still an announce rule 5 bounds: on a
+    /// carrier where the set does not fit the gap, it waits out the
+    /// budget's spacing instead.
+    #[test]
+    fn the_start_gap_waits_out_the_budget() {
+        let mut cadence = AnnounceCadence::new();
+        // The slow carrier of `a_slow_phy_stretches_the_fast_cadence`.
+        let budget = DutyBudget {
+            frame_airtime_ms: 7_054,
+            frames_per_set: 2,
+            lawful_duty_e4: 1_000,
+        };
+        assert!(cadence.set_budget(budget));
+        assert!(budget.min_interval_ms() > PN_START_ANNOUNCE_GAP_MS);
+        cadence.arm(t0());
+        let first = t0() + PN_ANNOUNCE_INITIAL_DELAY_MS;
+        assert_eq!(
+            cadence.poll(AnnounceSlot::Propagation, first, true),
+            Some(Decision::Announce)
+        );
+        assert_eq!(
+            cadence.wait_ms(AnnounceSlot::Propagation, first),
+            budget.min_interval_ms()
+        );
+    }
+
+    /// The board's own announce, the role's two start announces and
+    /// nothing else at boot: no two of them due at the same moment, so
+    /// none contends with another for one airtime window.
+    #[test]
+    fn no_two_boot_announces_share_a_deadline() {
+        let mut cadence = AnnounceCadence::new();
+        cadence.arm(t0());
+        let mut boot = Vec::new();
+        let mut now = t0();
+        while now <= t0() + MOVEMENT_SAMPLE_INTERVAL_MS {
+            for slot in [AnnounceSlot::Own, AnnounceSlot::Propagation] {
+                if cadence.poll(slot, now, true) == Some(Decision::Announce) {
+                    boot.push(now - t0());
+                }
+            }
+            now += 1_000;
+        }
+        assert_eq!(
+            boot.len(),
+            3,
+            "the role's start pair and the own announce: {boot:?}"
+        );
+        boot.sort_unstable();
+        assert!(
+            boot.windows(2)
+                .all(|pair| pair[1] - pair[0] >= PN_START_ANNOUNCE_GAP_MS),
+            "each boot announce is at least the pair's own gap from the next: {boot:?}"
+        );
     }
 
     /// The board's own announce is clock-gated; the propagation role's is
