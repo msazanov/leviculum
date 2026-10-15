@@ -354,7 +354,19 @@ the hold stands, a sighting the verdict would dial prints, once per
 hold, `BLE_SCAN_DECISION addr=<a> hint=<hex8|unknown> initiate=0
 rule=backoff until_ms=<n> in_ms=<n> strikes=<n>`; `until_ms` is on the
 interface's own clock (milliseconds since it came up).  The firmware
-prints both lines with the same keys, on its uptime clock.  Its link lifecycle is
+prints both lines with the same keys, on its uptime clock.  Three
+lnsd lines record what ended a dial, so a dial census counts events
+rather than debug prose (758): `BLE_SETUP_TIMEOUT iface=<name>
+addr=<a> after_ms=20000` is a central setup (connect, discovery,
+identity read, subscribe, handshake) that outlived its budget;
+`BLE_CONNECT_UNANSWERED iface=<name> addr=<a> after_ms=5000` is a
+connect nothing answered within the connect bound (732), the
+signature of a peer that went dark after the sighting that chose it;
+both book as `failure=transport`.  `BLE_LINK_REJECT iface=<name>
+peer=<hex8> addr=<a> reason=full origin=incoming|outgoing` is an
+identity handshake refused because the link table had no slot for
+it; the other refusals keep their own names (`BLE_LINK_SELF`,
+`BLE_LINK_DUP`, `BLE_LINK_NOT_ADMITTED`).  Its link lifecycle is
 `BLE_LINK_UP` / `BLE_LINK_DOWN` (with `role=central|peripheral` and
 `peer=<hex8>`, the same hex the firmware logs and the `LN-<hex8>`
 name carries), the admission decisions are the firmware's

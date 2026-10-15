@@ -561,16 +561,16 @@ pub(crate) struct CentralTask {
 
 impl CentralTask {
     pub(crate) async fn run(self) {
-        let failure = match tokio::time::timeout(SETUP_TIMEOUT, self.establish()).await {
-            Ok(Ok(Some(session))) => {
+        let failure = match bounded_setup(&self.iface, self.addr, self.establish()).await {
+            Some(Ok(Some(session))) => {
                 self.session_loop(session).await;
                 None
             }
-            Ok(Ok(None)) => {
+            Some(Ok(None)) => {
                 // Admission refused; the orchestrator logged why.
                 None
             }
-            Ok(Err(e)) => {
+            Some(Err(e)) => {
                 tracing::debug!(
                     "BLE {}: central {} failed: {} ({})",
                     self.iface,
@@ -580,7 +580,7 @@ impl CentralTask {
                 );
                 Some(e.failure)
             }
-            Err(_) => {
+            None => {
                 tracing::debug!("BLE {}: central {} setup timed out", self.iface, self.addr);
                 Some(DialFailure::Transport)
             }
@@ -612,7 +612,10 @@ impl CentralTask {
             }
             Ok::<(), bluer::Error>(())
         };
-        bounded_connect(connect, async { self.adapter.is_powered().await.is_ok() }).await?;
+        bounded_connect(&self.iface, self.addr, connect, async {
+            self.adapter.is_powered().await.is_ok()
+        })
+        .await?;
         self.layout_and_handshake(&device).await
     }
 
@@ -791,13 +794,35 @@ fn connect_failure(source: &bluer::Error, adapter_present: bool) -> DialFailure 
     }
 }
 
+/// A whole central setup under [`SETUP_TIMEOUT`]; `None` when the budget
+/// ran out, which logs `BLE_SETUP_TIMEOUT` (758). The event is the
+/// record a dial census counts; the DEBUG line beside it is prose.
+async fn bounded_setup<T>(
+    iface: &str,
+    addr: Address,
+    setup: impl std::future::Future<Output = T>,
+) -> Option<T> {
+    let outcome = tokio::time::timeout(SETUP_TIMEOUT, setup).await.ok();
+    if outcome.is_none() {
+        tracing::info!(
+            event = "BLE_SETUP_TIMEOUT",
+            iface = %Scalar(iface),
+            addr = %super::hex12(&addr.0),
+            after_ms = SETUP_TIMEOUT.as_millis() as u64,
+        );
+    }
+    outcome
+}
+
 /// The connect step of a central setup under [`CONNECT_TIMEOUT`] (732).
 /// A failed connect is classified by [`connect_failure`], which reads
 /// `adapter_present` only then; a connect that nothing answered is the
 /// air's business (`Transport`), the class the setup timeout gave it
 /// before, so the address's backoff is unchanged and only the wait is
-/// shorter.
+/// shorter. That case logs `BLE_CONNECT_UNANSWERED` (758).
 async fn bounded_connect(
+    iface: &str,
+    addr: Address,
     connect: impl std::future::Future<Output = Result<(), bluer::Error>>,
     adapter_present: impl std::future::Future<Output = bool>,
 ) -> Result<(), SetupError> {
@@ -807,16 +832,30 @@ async fn bounded_connect(
             failure: connect_failure(&source, adapter_present.await),
             source,
         }),
-        Err(_) => Err(SetupError {
-            failure: DialFailure::Transport,
-            source: bluer::Error {
-                kind: bluer::ErrorKind::ConnectionAttemptFailed,
-                message: format!(
-                    "connect not answered within {} s: the peer is not advertising",
-                    CONNECT_TIMEOUT.as_secs()
-                ),
-            },
-        }),
+        Err(_) => {
+            tracing::info!(
+                event = "BLE_CONNECT_UNANSWERED",
+                iface = %Scalar(iface),
+                addr = %super::hex12(&addr.0),
+                after_ms = CONNECT_TIMEOUT.as_millis() as u64,
+            );
+            Err(unanswered_connect())
+        }
+    }
+}
+
+/// The error a connect nothing answered within [`CONNECT_TIMEOUT`] ends
+/// the setup with.
+fn unanswered_connect() -> SetupError {
+    SetupError {
+        failure: DialFailure::Transport,
+        source: bluer::Error {
+            kind: bluer::ErrorKind::ConnectionAttemptFailed,
+            message: format!(
+                "connect not answered within {} s: the peer is not advertising",
+                CONNECT_TIMEOUT.as_secs()
+            ),
+        },
     }
 }
 
@@ -1164,7 +1203,7 @@ mod tests {
         let start = tokio::time::Instant::now();
         let outcome = tokio::time::timeout(
             SETUP_TIMEOUT,
-            bounded_connect(std::future::pending(), async { true }),
+            bounded_connect("ble0", ADDR, std::future::pending(), async { true }),
         )
         .await;
         let Ok(Err(e)) = outcome else {
@@ -1173,6 +1212,47 @@ mod tests {
         assert_eq!(e.failure, DialFailure::Transport);
         assert_eq!(start.elapsed(), CONNECT_TIMEOUT);
         assert!(CONNECT_TIMEOUT < SETUP_TIMEOUT);
+    }
+
+    /// 758: a connect nothing answered logs one `BLE_CONNECT_UNANSWERED`
+    /// with the bound it waited, and a connect answered inside the bound
+    /// logs none.
+    #[tokio::test(start_paused = true)]
+    async fn an_unanswered_connect_logs_one_event() {
+        let (buf, _guard) = crate::test_support::log_capture::capture_logs();
+        let _ = bounded_connect("ble0", ADDR, std::future::pending(), async { true }).await;
+        let _ = bounded_connect("ble0", ADDR, async { Ok(()) }, async { true }).await;
+        let text = crate::test_support::log_capture::captured(&buf);
+        let lines: Vec<&str> = text
+            .lines()
+            .filter(|l| l.contains("BLE_CONNECT_UNANSWERED"))
+            .collect();
+        assert_eq!(lines.len(), 1, "{text}");
+        for field in ["iface=ble0", "addr=c00000000001", "after_ms=5000"] {
+            assert!(lines[0].contains(field), "{field} missing: {}", lines[0]);
+        }
+    }
+
+    /// 758: a setup that outlives its budget logs one `BLE_SETUP_TIMEOUT`
+    /// with the budget, and a setup that finishes inside it logs none.
+    #[tokio::test(start_paused = true)]
+    async fn a_setup_past_its_budget_logs_one_event() {
+        let (buf, _guard) = crate::test_support::log_capture::capture_logs();
+        let start = tokio::time::Instant::now();
+        assert!(bounded_setup("ble0", ADDR, std::future::pending::<()>())
+            .await
+            .is_none());
+        assert_eq!(start.elapsed(), SETUP_TIMEOUT);
+        assert_eq!(bounded_setup("ble0", ADDR, async { 7 }).await, Some(7));
+        let text = crate::test_support::log_capture::captured(&buf);
+        let lines: Vec<&str> = text
+            .lines()
+            .filter(|l| l.contains("BLE_SETUP_TIMEOUT"))
+            .collect();
+        assert_eq!(lines.len(), 1, "{text}");
+        for field in ["iface=ble0", "addr=c00000000001", "after_ms=20000"] {
+            assert!(lines[0].contains(field), "{field} missing: {}", lines[0]);
+        }
     }
 
     /// 732: the bound does not cut a connect the peer answers inside it,
@@ -1184,6 +1264,8 @@ mod tests {
             tokio::time::sleep(late).await;
             Ok(())
         };
-        assert!(bounded_connect(connect, async { true }).await.is_ok());
+        assert!(bounded_connect("ble0", ADDR, connect, async { true })
+            .await
+            .is_ok());
     }
 }

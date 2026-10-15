@@ -1101,6 +1101,22 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "BLE_DIAL_SKIP",
         required_keys: &["iface", "peer", "reason"],
     },
+    // 758: the dial outcomes a room's dial census counts. A central setup
+    // that outlived its budget, a connect nothing answered within its
+    // bound (732), and an admission refused because the link table is
+    // full; `after_ms` is the bound that ran out.
+    EventSchema {
+        name: "BLE_SETUP_TIMEOUT",
+        required_keys: &["iface", "addr", "after_ms"],
+    },
+    EventSchema {
+        name: "BLE_CONNECT_UNANSWERED",
+        required_keys: &["iface", "addr", "after_ms"],
+    },
+    EventSchema {
+        name: "BLE_LINK_REJECT",
+        required_keys: &["iface", "peer", "addr", "reason", "origin"],
+    },
     EventSchema {
         name: "BLE_PEER_UP",
         required_keys: &["iface", "peer"],

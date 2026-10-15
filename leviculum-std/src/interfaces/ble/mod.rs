@@ -1914,11 +1914,23 @@ impl BleTask {
                 old_silence_ms = old_silence_ms,
                 old_data_silence_ms = %leviculum_ble_tx::DataSilence(old_data_silence_ms),
             ),
-            Admission::RejectFull => tracing::info!(
-                "BLE {}: link limit reached, rejecting {}",
-                self.name,
-                hex12(addr)
-            ),
+            // The record a dial census counts (758); the prose line
+            // before it stays for a reader.
+            Admission::RejectFull => {
+                tracing::info!(
+                    "BLE {}: link limit reached, rejecting {}",
+                    self.name,
+                    hex12(addr)
+                );
+                tracing::info!(
+                    event = "BLE_LINK_REJECT",
+                    iface = %Scalar(&self.name),
+                    peer = %hex8(identity),
+                    addr = %hex12(addr),
+                    reason = "full",
+                    origin = role.origin_as_str(),
+                );
+            }
             // The one refusal a run has to be able to SEE: without a
             // line here a measuring host that turned strangers away
             // would look exactly like a host nobody tried, and "the
@@ -2026,5 +2038,79 @@ struct AbortOnDrop(tokio::task::JoinHandle<()>);
 impl Drop for AbortOnDrop {
     fn drop(&mut self) {
         self.0.abort();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::log_capture::{capture_logs, captured};
+
+    fn task(name: &str) -> BleTask {
+        let (incoming_tx, _) = mpsc::channel(1);
+        let (peer_event_tx, _) = mpsc::channel(1);
+        BleTask {
+            id: InterfaceId(0),
+            name: name.to_string(),
+            opts: BleOptions::default(),
+            identity_hash: [0x0E; 16],
+            incoming_tx,
+            peer_event_tx,
+            counters: Arc::new(InterfaceCounters::new()),
+            ready: ReadySignal::new(),
+        }
+    }
+
+    /// 758: a refusal for a full table is one `BLE_LINK_REJECT` line, in
+    /// either role, so a dial census counts events instead of prose.
+    #[test]
+    fn a_full_table_refusal_logs_one_link_reject() {
+        for (role, origin) in [
+            (Role::Central, "origin=outgoing"),
+            (Role::Peripheral, "origin=incoming"),
+        ] {
+            let (buf, _guard) = capture_logs();
+            task("ble0").log_rejection(
+                Admission::RejectFull,
+                role,
+                &[0xA1; 16],
+                &[0xC0, 0, 0, 0, 0, 1],
+                0,
+            );
+            let text = captured(&buf);
+            let lines: Vec<&str> = text
+                .lines()
+                .filter(|l| l.contains("BLE_LINK_REJECT"))
+                .collect();
+            assert_eq!(lines.len(), 1, "{text}");
+            // The fmt subscriber quotes a `&str` value; the event-log file does not.
+            let line = lines[0].replace('"', "");
+            for field in [
+                "iface=ble0",
+                "peer=a1a1a1a1",
+                "addr=c00000000001",
+                "reason=full",
+                origin,
+            ] {
+                assert!(line.contains(field), "{field} missing: {line}");
+            }
+        }
+    }
+
+    /// 758: the other refusals have their own events and print no
+    /// `BLE_LINK_REJECT`, so the count is the full-table refusals alone.
+    #[test]
+    fn other_refusals_log_no_link_reject() {
+        let (buf, _guard) = capture_logs();
+        for admission in [Admission::RejectSelf, Admission::RejectNotAdmitted] {
+            task("ble0").log_rejection(
+                admission,
+                Role::Peripheral,
+                &[0xA1; 16],
+                &[0xC0, 0, 0, 0, 0, 1],
+                1,
+            );
+        }
+        assert!(!captured(&buf).contains("BLE_LINK_REJECT"));
     }
 }
