@@ -146,6 +146,9 @@ leviculum-lxmf = { path = "../leviculum-lxmf" }
 # lnmsg's engine (docs/src/concepts/lnmsg-architecture.md §3).
 leviculum-std = { path = "../leviculum-std" }
 leviculum-core = { path = "../leviculum-core" }
+# The start-announce pair's two delays, stated once for both stacks: the
+# board's propagation role runs the same pair off the same constants.
+leviculum-announce-policy = { path = "../leviculum-nrf/announce-policy" }
 clap = { version = "4", features = ["derive"] }
 tokio.workspace = true
 tracing.workspace = true

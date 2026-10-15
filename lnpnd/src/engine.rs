@@ -58,8 +58,8 @@ use crate::validation::{
 
 /// The reference announces the propagation destination 20 s after the role
 /// comes up (`NODE_ANNOUNCE_DELAY`, `reference/LXMF/LXMF/LXMRouter.py:41`,
-/// applied in `announce_propagation_node` `:338-341`).
-pub const ANNOUNCE_DELAY_SECS: u64 = 20;
+/// applied in `announce_propagation_node` `:338-341`); the board's role too.
+pub const ANNOUNCE_DELAY_SECS: u64 = leviculum_announce_policy::PN_ANNOUNCE_INITIAL_DELAY_MS / 1000;
 
 /// How long after the router's start announce the daemon's deferred one
 /// follows when `[propagation] announce_at_start` is on: `lxmd` runs its
@@ -67,8 +67,8 @@ pub const ANNOUNCE_DELAY_SECS: u64 = 20;
 /// (`reference/LXMF/LXMF/Utilities/lxmd.py:33`, `:501-503`), and that
 /// announce sleeps the same `NODE_ANNOUNCE_DELAY` as the router's own
 /// (`reference/LXMF/LXMF/LXMRouter.py:338-341`), so the two leave 10 s
-/// apart.
-pub const START_ANNOUNCE_GAP_SECS: u64 = 10;
+/// apart. One constant with the board's role, which sends the same pair.
+pub const START_ANNOUNCE_GAP_SECS: u64 = leviculum_announce_policy::PN_START_ANNOUNCE_GAP_MS / 1000;
 
 /// Default re-announce cadence: `lxmd`'s default config announces the node
 /// every 360 minutes (`announce_interval = 360`,

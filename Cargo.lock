@@ -2315,6 +2315,7 @@ dependencies = [
  "clap",
  "futures",
  "hex",
+ "leviculum-announce-policy",
  "leviculum-core",
  "leviculum-lxmf",
  "leviculum-std",
