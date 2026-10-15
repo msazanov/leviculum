@@ -495,6 +495,23 @@ impl<T, const N: usize> CandidateTable<T, N> {
         self.pop_best()
     }
 
+    /// Take `addr` out of the window, `true` if it was held (757: a
+    /// peer that now says it is full, or whose dial was just dropped,
+    /// must not be chosen on the count it advertised before).
+    pub fn remove(&mut self, addr: u64) -> bool {
+        match self
+            .entries
+            .iter_mut()
+            .find(|entry| entry.as_ref().is_some_and(|c| c.addr == addr))
+        {
+            Some(slot) => {
+                *slot = None;
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Take the best candidate out and keep the rest, so a caller whose
     /// choice fell through before it was dialled can take the next one
     /// from the same window (757: lnsd drops a queued dial whose peer
@@ -520,6 +537,18 @@ mod tests {
     use ConnectDecision::*;
 
     type Table = CandidateTable<&'static str, 4>;
+
+    /// 757: a removed candidate is not chosen; the rest are, in order.
+    #[test]
+    fn a_removed_candidate_is_not_chosen() {
+        let mut t = Table::new();
+        assert!(t.offer(0x10, None, InitiateLowerAddress, Some(3), "a"));
+        assert!(t.offer(0x20, None, InitiateLowerAddress, Some(1), "b"));
+        assert!(t.remove(0x10));
+        assert!(!t.remove(0x10), "only once");
+        assert_eq!(t.seen(), 1);
+        assert_eq!(t.into_best(), Some((0x20, InitiateLowerAddress, "b")));
+    }
 
     /// 757: popping hands the candidates out in the order the window
     /// would have chosen them, one at a time, and nothing twice.

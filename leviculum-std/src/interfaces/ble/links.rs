@@ -1812,6 +1812,20 @@ impl ScanScheduler {
         Some((addr, decision, seen))
     }
 
+    /// Take `addr` out of the open window and the last closed one's
+    /// runners-up (757): a sighting says the peer is full, or its
+    /// queued dial was dropped, and neither window may choose it on
+    /// the count it advertised before.
+    pub(crate) fn forget(&mut self, addr: &Addr) {
+        let value = addr_value_display(addr);
+        if let Some((_, table)) = self.window.as_mut() {
+            table.remove(value);
+        }
+        if let Some((table, _)) = self.rest.as_mut() {
+            table.remove(value);
+        }
+    }
+
     /// The window's choice is being dialled: its runners-up are not
     /// wanted any more (757).
     pub(crate) fn forget_rest(&mut self) {
@@ -4372,6 +4386,36 @@ mod tests {
             None,
             "heard in a run it joined"
         );
+    }
+
+    /// 757: the two refusals the first knob-arm room still had. A peer
+    /// that says it is full leaves the open window it was collected
+    /// into with room (dialler 15 chose peer 0 that way 0.35 s after
+    /// skipping it), and the runners-up of a later window (dialler 15
+    /// re-queued peer 19 from them in the same millisecond as its skip).
+    #[test]
+    fn a_peer_that_says_it_is_full_leaves_both_windows() {
+        let mut s = ScanScheduler::new(0);
+        let mut q = DialQueue::new(7);
+        let closed = window_choosing_addr_1(&mut s, &mut q);
+        // The runner-up ADDR_2 fills.
+        s.forget(&ADDR_2);
+        assert_eq!(s.next_candidate(closed), None, "not from the runners-up");
+        // An open window collected ADDR_3 and ADDR_2 with room.
+        for addr in [ADDR_3, ADDR_2] {
+            s.offer(
+                addr,
+                None,
+                ConnectDecision::InitiateLowerAddress,
+                Some(1),
+                closed,
+            );
+        }
+        s.forget(&ADDR_2);
+        let (addr, _, seen) = s
+            .poll(closed + SCAN_WINDOW_COLLECT_MS)
+            .expect("window closes");
+        assert_eq!((addr, seen), (ADDR_3, 1), "not from the open window");
     }
 
     /// 757 (b): a peer still seen with room, or with no count at all,

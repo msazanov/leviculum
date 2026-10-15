@@ -1004,6 +1004,12 @@ impl BleTask {
                 if let Some(skip) = dial_queue.sighted(&addr.0, decision.free_slots, now) {
                     self.dial_skipped(skip, scheduler, table, dial_queue, backoff_until, now);
                 }
+                // A peer that says it is full also leaves any window
+                // that collected it with room: the filter below keeps
+                // this sighting out, but not the earlier one (757).
+                if !links::peer_has_room(decision.free_slots) {
+                    scheduler.forget(&addr.0);
+                }
                 // Who we are WILLING to dial (`initiate_only`), as
                 // opposed to who the sort says dials whom. A pure
                 // function of the address and the advertised hint, both
@@ -1364,6 +1370,7 @@ impl BleTask {
             peer = %hex12(&skip.addr),
             reason = skip.reason.as_str(),
         );
+        scheduler.forget(&skip.addr);
         while let Some((addr, decision, seen)) = scheduler.next_candidate(now) {
             if self.queue_choice(table, dial_queue, backoff_until, addr, decision, seen, now) {
                 break;
