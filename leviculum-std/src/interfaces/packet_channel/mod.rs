@@ -64,12 +64,26 @@ impl Default for PacketChannelOptions {
 pub trait PacketSource: Send + 'static {
     /// The next whole datagram. `Err` ends the interface. Must be cancel-safe.
     fn recv(&mut self) -> impl Future<Output = io::Result<Vec<u8>>> + Send;
+
+    /// A datagram that is already waiting, without parking. `None` = nothing ready (or not supported).
+    /// Lets the interface task move a burst through one wakeup instead of one per packet.
+    fn try_recv(&mut self) -> Option<io::Result<Vec<u8>>> {
+        None
+    }
 }
 
 /// Sending half of the carrier.
 pub trait PacketSink: Send + 'static {
     /// Send one datagram now, without waiting for the peer. See the module docs for the error contract.
     fn send(&mut self, packet: &[u8]) -> io::Result<()>;
+}
+
+/// Most packets moved per wakeup of the interface task, each way.
+static BURST_MAX: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(64);
+
+/// Set the per-wakeup burst limit for interfaces created afterwards (1 = one packet per wakeup).
+pub fn set_burst(n: usize) {
+    BURST_MAX.store(n.max(1), std::sync::atomic::Ordering::Relaxed);
 }
 
 pub(crate) struct PacketChannelConfig {
@@ -118,6 +132,7 @@ where
 
     tokio::spawn(async move {
         task_ready.signal_ready();
+        let burst = BURST_MAX.load(Ordering::Relaxed).max(1);
         loop {
             tokio::select! {
                 _ = wait_shutdown(&mut shutdown) => {
@@ -139,6 +154,23 @@ where
                             }
                             Err(mpsc::error::TrySendError::Closed(_)) => return,
                         }
+                        // Burst: whatever the carrier already holds goes through the same wakeup.
+                        for _ in 1..burst {
+                            match source.try_recv() {
+                                Some(Ok(data)) if data.len() <= hw_mtu => {
+                                    task_counters.rx_bytes.fetch_add(data.len() as u64, Ordering::Relaxed);
+                                    match incoming_tx.try_send(IncomingPacket { data }) {
+                                        Ok(()) => {}
+                                        Err(mpsc::error::TrySendError::Full(_)) => {
+                                            RX_QUEUE_DROPPED.fetch_add(1, Ordering::Relaxed);
+                                        }
+                                        Err(mpsc::error::TrySendError::Closed(_)) => return,
+                                    }
+                                }
+                                Some(Ok(_)) => {}
+                                Some(Err(_)) | None => break,
+                            }
+                        }
                     }
                     Err(e) => {
                         tracing::debug!("Packet-channel interface {}: receive ended: {}", name, e);
@@ -146,20 +178,32 @@ where
                     }
                 },
                 outgoing = outgoing_rx.recv() => match outgoing {
-                    Some(pkt) => match sink.send(&pkt.data) {
-                        Ok(()) => {
-                            task_counters.tx_bytes.fetch_add(pkt.data.len() as u64, Ordering::Relaxed);
+                    Some(first) => {
+                        // Burst: the first packet plus everything already queued behind it, handed to the carrier back to back
+                        // so it can coalesce them (QUIC builds one GSO send from several queued datagrams).
+                        let mut next = Some(first);
+                        let mut n = 0;
+                        while let Some(pkt) = next.take() {
+                            match sink.send(&pkt.data) {
+                                Ok(()) => {
+                                    task_counters.tx_bytes.fetch_add(pkt.data.len() as u64, Ordering::Relaxed);
+                                }
+                                Err(e) if is_drop_not_fatal(&e) => {
+                                    TX_REFUSED.fetch_add(1, Ordering::Relaxed);
+                                    task_counters.tx_queue_drops.fetch_add(1, Ordering::Relaxed);
+                                    task_counters.tx_dropped_bytes.fetch_add(pkt.data.len() as u64, Ordering::Relaxed);
+                                }
+                                Err(e) => {
+                                    tracing::debug!("Packet-channel interface {}: send failed, detaching: {}", name, e);
+                                    return;
+                                }
+                            }
+                            n += 1;
+                            if n < burst {
+                                next = outgoing_rx.try_recv().ok();
+                            }
                         }
-                        Err(e) if is_drop_not_fatal(&e) => {
-                            TX_REFUSED.fetch_add(1, Ordering::Relaxed);
-                            task_counters.tx_queue_drops.fetch_add(1, Ordering::Relaxed);
-                            task_counters.tx_dropped_bytes.fetch_add(pkt.data.len() as u64, Ordering::Relaxed);
-                        }
-                        Err(e) => {
-                            tracing::debug!("Packet-channel interface {}: send failed, detaching: {}", name, e);
-                            return;
-                        }
-                    },
+                    }
                     None => return,
                 },
             }
