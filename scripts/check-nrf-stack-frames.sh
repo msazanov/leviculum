@@ -8,9 +8,14 @@
 # oversized frame therefore silently eats the whole margin.
 #
 # That is exactly what happened: `Box::new(builder.build(..))` materialised a
-# by-value `NodeCore` (>40 KB with the inline `EmbeddedStorage`) twice in
-# `main`'s poll frame — 94 720 B, 74 % of the stack, leaving ~13 KB of margin.
-# `NodeCoreBuilder::build_boxed` removed it. This gate keeps it removed.
+# by-value `NodeCore` (31 704 B today with the inline `EmbeddedStorage`) twice
+# in `main`'s poll frame — 94 720 B, 74 % of the stack, leaving ~13 KB of
+# margin. `NodeCoreBuilder::build_boxed` removed it, but only because the
+# compiler elides the `Box::new` argument temporary, which Rust does not
+# promise (the measurement is in that function's doc). This gate keeps it
+# removed: the limit sits below the node box, so a single by-value `NodeCore`
+# in any frame fails here, and `check_limit` refuses a limit that would
+# admit one.
 #
 # Reads the frame-allocating `sub sp` immediates straight out of the linked
 # ELF, so it measures the shipped binary rather than a source-level proxy.
@@ -26,6 +31,27 @@ set -euo pipefail
 LIMIT="${1:-16384}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 NRF="$ROOT/leviculum-nrf"
+
+# The limit is what stands between a non-elided `NodeCore` temporary and the
+# SoftDevice floor, so it must stay below the node box. Read from the constant
+# the firmware asserts `size_of` against at compile time, so it is the size the
+# bins actually box.
+check_limit() {
+    local node_box
+    node_box="$(sed -n 's/^pub const NODE_BOX_BYTES: usize = \([0-9_]*\);$/\1/p' \
+        "$NRF/heap-budget/src/lib.rs" | tr -d _)"
+    if [ -z "$node_box" ]; then
+        echo "[stack-frames] FAIL: NODE_BOX_BYTES not found in heap-budget/src/lib.rs" >&2
+        return 1
+    fi
+    if [ "$LIMIT" -ge "$node_box" ]; then
+        echo "[stack-frames] FAIL: limit ${LIMIT} B >= node box ${node_box} B:" \
+            "a by-value NodeCore would fit in one frame unseen"
+        return 1
+    fi
+    echo "[stack-frames] ok   limit ${LIMIT} B < node box ${node_box} B"
+}
+check_limit
 # Not "$NRF/target": cargo puts the ELF wherever CARGO_TARGET_DIR says, and a
 # gate that looks in the wrong place reports "missing ELF" after a build that
 # worked. See scripts/cargo-target-dir.sh.

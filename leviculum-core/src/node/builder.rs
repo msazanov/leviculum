@@ -370,19 +370,35 @@ impl NodeCoreBuilder {
 
     /// Build the NodeCore straight into a heap allocation.
     ///
-    /// Same result as `Box::new(builder.build(..))`, but the value is never
-    /// held as a by-value local of this function: the allocation is made
-    /// first and the post-construction configuration (`respond_to_probes`,
-    /// `remote_management`) runs through the box. `build()` cannot do that —
-    /// it owns a `NodeCore` local it mutates before returning, which forces
-    /// the caller's frame to carry a full-size temporary plus the return
-    /// slot.
+    /// Same result as `Box::new(builder.build(..))`, but the
+    /// post-construction configuration (`respond_to_probes`,
+    /// `remote_management`) runs through the box rather than on a
+    /// `NodeCore` local. `build()` cannot do that: it owns a local it
+    /// mutates before returning, which forces the caller's frame to carry a
+    /// full-size temporary plus the return slot.
     ///
     /// That matters on embedded, where `S` is an inline-storage type: with
-    /// `EmbeddedStorage` a `NodeCore` is >40 KB, and `Box::new(build(..))`
-    /// put two of those on the T114's 128 KB stack (a 94 KB `main` frame,
-    /// leaving ~13 KB of margin and corrupting SoftDevice RAM on the deeper
-    /// paths). Drivers with a large `S` must use this instead of `build()`.
+    /// `EmbeddedStorage` a `NodeCore` is 31 704 B on the boards
+    /// (`leviculum_heap_budget::NODE_BOX_BYTES`), and `Box::new(build(..))`
+    /// put two of those on the T114's stack (a 94 KB `main` frame, leaving
+    /// ~13 KB of margin and corrupting SoftDevice RAM on the deeper paths).
+    /// Drivers with a large `S` must use this instead of `build()`.
+    ///
+    /// What this function does NOT do is guarantee the value never touches
+    /// the stack. `Box::new(expr)` evaluates `expr` as a by-value temporary
+    /// and moves it; building it in the allocation is an optimisation the
+    /// compiler may skip. It is a measurement, not a language guarantee,
+    /// that it does not: rustc 1.97.1, the firmware's release profile
+    /// (`opt-level = "z"`, LTO, one codegen unit), `t114` and `rak4631`
+    /// alike — `arm-none-eabi-objdump -d` of the ELF shows one
+    /// `box_new_uninit` of 31 704 B in the main task, every field then
+    /// stored through the returned pointer, and a main-task frame of
+    /// 11 504 B (`sub.w sp, sp, #11456` plus `sub sp, #48`). Wrapping the
+    /// argument in `core::hint::black_box` to force the temporary grows
+    /// that frame to 41 472 B. `just nrf-stack-frames` pins it: its frame
+    /// limit sits below `NODE_BOX_BYTES` and the script asserts it stays
+    /// there, so a toolchain or profile change that stops eliding the copy
+    /// fails the gate instead of the board.
     pub fn build_boxed<R, Clk, S>(
         self,
         mut rng: R,

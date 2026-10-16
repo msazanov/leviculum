@@ -161,12 +161,15 @@ let mut node = builder.build_boxed(rng, EmbassyClock, EmbeddedStorage::new());
 
 `build` consumes the builder and the platform triple and returns the
 `NodeCore<R, C, S>`. A driver with an inline-storage `S` must not call it:
-use `build_boxed` (`leviculum-core/src/node/builder.rs:386`), which allocates
-first and configures through the box. `Box::new(builder.build(..))` holds a
-full-size `NodeCore` as a by-value local on the way into the box, and with
-`EmbeddedStorage` that is upwards of 40 KB twice over — it gave the T114 a
+use `build_boxed` (`leviculum-core/src/node/builder.rs:402`), which
+configures through the box. `Box::new(builder.build(..))` holds a full-size
+`NodeCore` as a by-value local on the way into the box, and with
+`EmbeddedStorage` that was upwards of 40 KB twice over — it gave the T114 a
 94 KB `main` frame on a 128 KB stack and corrupted SoftDevice RAM on the
-deeper paths.
+deeper paths. `build_boxed` still passes the value through `Box::new`, whose
+argument Rust may materialise on the stack; that the firmware build elides it
+is measured, not guaranteed, and `just nrf-stack-frames` holds it (the
+measurement is in the function's doc).
 
 ## Implementing the platform traits
 

@@ -379,8 +379,12 @@ The frame it was written for: `Box::new(builder.build(..))` materialised
 a by-value `NodeCore` — over 40 KB once `EmbeddedStorage`'s inline
 collections are counted — twice in `main`'s poll frame. 94 720 B, 74 % of
 the stack, ~13 KB of margin left for the whole call tree.
-`NodeCoreBuilder::build_boxed` allocates first and configures through the
-box, which drops that frame to 12 672 B.
+`NodeCoreBuilder::build_boxed` configures through the box, which drops
+that frame to 12 672 B. It does so only because the compiler builds the
+`Box::new` argument straight into the allocation, which Rust does not
+promise; the gate's limit is therefore held below the node box
+(`NODE_BOX_BYTES`, 31 704 B), so a build that stops eliding the copy puts
+one whole `NodeCore` in a frame and fails here.
 
 The gate prefers `arm-none-eabi-objdump` and falls back to the rustup
 `llvm-tools` `llvm-objdump`; `install-ci.sh` installs the latter.
