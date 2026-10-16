@@ -146,6 +146,24 @@ libc = "0.2"
 # Testing
 proptest = "1"
 
+# Debug and test builds carry line tables only, not the full DWARF (#381).
+# Every test binary statically links the same stack and repeated the same
+# debuginfo, three quarters of each binary (sizes in MiB, 2026-10-16):
+#
+#   binary              full DWARF  no debuginfo  stripped  line tables
+#   deps/mvr-*          257         61            36        110
+#   deps/lxmf_node-*    230         55            33         94
+#   debug/lnsd          221         52            31         91
+#
+# All test executables of the workspace together: 26.0 GiB before, 9.5
+# GiB with line tables; those above 50 MB went from 128 to 102.
+#
+# What a red test needs is the panic backtrace with file:line, and that
+# lives in .debug_line, which this level keeps. For a debugger session,
+# build with `--config profile.dev.debug=2`. [profile.test] inherits this.
+[profile.dev]
+debug = "line-tables-only"
+
 # Crypto libs are unusably slow without optimizations (constant-time field
 # arithmetic, scalar multiplication). Build them at max opt even in debug.
 [profile.dev.package.curve25519-dalek]
