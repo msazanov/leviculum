@@ -280,7 +280,16 @@ fn encode_payload(
     }
     o
 }
-/// Decode `[timestamp, title, content, fields (, stamp)]`.
+/// Decode `[timestamp, title, content, fields (, stamp, ...)]`.
+///
+/// The accept set is the reference's (`LXMessage.py:755-762`): with more
+/// than four elements, element 4 is the stamp whatever its length, every
+/// element after it is dropped unread, and the signature covers the re-pack
+/// of the first four. A sixth element a later LXMF adds, or a stamp of a
+/// length we never generate, is therefore delivered as Python delivers it;
+/// whether the stamp is any good is the stamp check's question, not the
+/// decoder's. [`Message::set_stamp`] keeps refusing lengths we never
+/// generate, because that is our own output.
 ///
 /// `payload[0]` is read as any MessagePack number, not only float64. The
 /// reference takes `unpacked_payload[0]` with no type check at all
@@ -293,7 +302,7 @@ fn encode_payload(
 fn decode_payload(d: &[u8]) -> Result<Payload, MessageError> {
     let mut p = 0;
     let n = msgpack::array_len(d, &mut p)?;
-    if !(4..=5).contains(&n) {
+    if n < 4 {
         return Err(MessageError::InvalidFormat);
     }
     let ts = msgpack::read_number(d, &mut p).map_err(|_| MessageError::InvalidTimestamp)?;
@@ -305,12 +314,12 @@ fn decode_payload(d: &[u8]) -> Result<Payload, MessageError> {
         let k = msgpack::read_int(d, &mut p)?;
         fields.push((k, msgpack::raw(d, &mut p)?.to_vec()))
     }
-    let stamp = if n == 5 {
-        let s = msgpack::read_bin(d, &mut p)?;
-        if s.len() != 16 && s.len() != 32 {
-            return Err(MessageError::InvalidFormat);
+    let stamp = if n > 4 {
+        let s = msgpack::read_bin(d, &mut p)?.to_vec();
+        for _ in 5..n {
+            msgpack::skip(d, &mut p)?;
         }
-        Some(s.to_vec())
+        Some(s)
     } else {
         None
     };
@@ -324,7 +333,7 @@ fn decode_payload(d: &[u8]) -> Result<Payload, MessageError> {
     // encoder produced, and a stamped one survives only if the writer's
     // encoding is what `msgpack.packb` would emit — which is why the numeric
     // family, not just the value, is carried through the re-pack.
-    let signed = if n == 5 {
+    let signed = if n > 4 {
         encode_payload(ts, &title, &content, &fields, None)
     } else {
         d.to_vec()
@@ -367,5 +376,94 @@ mod tests {
         )
         .unwrap();
         assert_eq!(u.verification, Verification::Valid);
+    }
+
+    /// A Direct-method wire message whose payload is `payload`, signed the
+    /// way `LXMessage.py:753-764` verifies it: over the re-pack of the first
+    /// four elements, which the caller passes as `signed_payload`.
+    fn signed_wire(id: &Identity, payload: &[u8], signed_payload: &[u8]) -> Vec<u8> {
+        let mut hashed = Vec::new();
+        hashed.extend_from_slice(&[1; 16]);
+        hashed.extend_from_slice(&[2; 16]);
+        hashed.extend_from_slice(signed_payload);
+        let mut signed = hashed.clone();
+        signed.extend_from_slice(&full_hash(&hashed));
+        let mut wire = Vec::new();
+        wire.extend_from_slice(&[1; 16]);
+        wire.extend_from_slice(&[2; 16]);
+        wire.extend_from_slice(&id.sign(&signed).unwrap());
+        wire.extend_from_slice(payload);
+        wire
+    }
+
+    /// `[timestamp, title, content, {}]` followed by `extra`, with the array
+    /// header counting four plus `extra_count`.
+    fn payload_with(extra_count: usize, extra: &[u8]) -> Vec<u8> {
+        let mut o = Vec::new();
+        msgpack::array(&mut o, 4 + extra_count);
+        msgpack::f64(&mut o, 1_700_000_000.0);
+        msgpack::bin(&mut o, b"Hi");
+        msgpack::bin(&mut o, b"Hello");
+        msgpack::map(&mut o, 0);
+        o.extend_from_slice(extra);
+        o
+    }
+
+    fn identity() -> Identity {
+        let private: Vec<u8> = (0..64).collect();
+        Identity::from_private_key_bytes(&private).unwrap()
+    }
+
+    /// L-0048: Python takes element 4 as the stamp whatever its length
+    /// (`LXMessage.py:755-757`); a 24-byte stamp is delivered there.
+    #[test]
+    fn stamp_of_any_length_is_accepted_as_python_does() {
+        let id = identity();
+        let mut extra = Vec::new();
+        msgpack::bin(&mut extra, &[7; 24]);
+        let wire = signed_wire(&id, &payload_with(1, &extra), &payload_with(0, &[]));
+
+        let u = Message::unpack(&wire, None, Some(&id), DeliveryMethod::Direct).unwrap();
+        assert_eq!(u.verification, Verification::Valid);
+        assert_eq!(u.stamp.as_deref(), Some(&[7u8; 24][..]));
+        assert_eq!(u.pack(), wire);
+    }
+
+    /// L-0048: Python drops every element past the stamp
+    /// (`LXMessage.py:758`, `unpacked_payload[:4]`) and verifies over the
+    /// first four, so a sixth element a future LXMF adds is delivered there.
+    #[test]
+    fn elements_past_the_stamp_are_ignored_as_python_does() {
+        let id = identity();
+        let mut extra = Vec::new();
+        msgpack::bin(&mut extra, &[9; 32]);
+        msgpack::string(&mut extra, "future");
+        let wire = signed_wire(&id, &payload_with(2, &extra), &payload_with(0, &[]));
+
+        let u = Message::unpack(&wire, None, Some(&id), DeliveryMethod::Direct).unwrap();
+        assert_eq!(u.verification, Verification::Valid);
+        assert_eq!(u.stamp.as_deref(), Some(&[9u8; 32][..]));
+        assert_eq!(u.content, b"Hello");
+    }
+
+    /// Our own output keeps the stamp lengths we generate.
+    #[test]
+    fn set_stamp_still_refuses_lengths_we_never_generate() {
+        let mut m = Message::create(
+            [1; 16],
+            [2; 16],
+            &identity(),
+            1_700_000_000.0,
+            b"Hi".to_vec(),
+            b"Hello".to_vec(),
+            Vec::new(),
+            DeliveryMethod::Direct,
+        )
+        .unwrap();
+        assert_eq!(
+            m.set_stamp(alloc::vec![0; 24]),
+            Err(MessageError::InvalidFormat)
+        );
+        assert!(m.set_stamp(alloc::vec![0; 32]).is_ok());
     }
 }
