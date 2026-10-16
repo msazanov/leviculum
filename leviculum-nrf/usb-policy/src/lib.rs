@@ -195,10 +195,12 @@ const _: () = assert!(control_envelope_ms() <= LNSD_CONFIG_ACK_TIMEOUT_MS);
 
 /// Incomplete-frame timeout on the transport CDC port. A property of the
 /// serial line, not of the LoRa modulation: [`frame_timeout_margin`] is the
-/// arithmetic its comment carries. Python uses 100 ms but also sets
-/// low_latency mode, so frames arrive as bulk USB packets; without it,
-/// byte-by-byte delivery needs more time, and 500 ms gives a 34x margin for a
-/// 167-byte frame at 115200. [`read_timeout_ms`] applies it.
+/// arithmetic its comment carries. Python's serial interfaces use 100 ms
+/// (`SerialInterface.py:96`, `KISSInterface.py:116`) and set no low-latency
+/// mode on the port (neither calls `set_low_latency_mode`); 500 ms
+/// gives a 34x margin for a 167-byte frame at 115200, so a frame the host
+/// reads in several pieces still completes well inside it.
+/// [`read_timeout_ms`] applies it.
 pub const FRAME_TIMEOUT_MS: u64 = 500;
 
 /// The one lawful delay of a config apply: the retune defers to a frame that

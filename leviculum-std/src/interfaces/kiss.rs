@@ -457,13 +457,6 @@ async fn kiss_reconnect_task(
 ) {
     let mut has_connected_before = false;
     loop {
-        // Batch USB CDC-ACM writes into bulk transfers instead of byte-by-byte,
-        // so KISS frames do not arrive one byte at a time (same fix serial.rs
-        // applies via pyserial's set_low_latency_mode). Best-effort.
-        let _ = std::process::Command::new("stty")
-            .args(["-F", &config.port, "low_latency"])
-            .output();
-
         let builder = tokio_serial::new(&config.port, config.speed)
             .data_bits(config.data_bits)
             .stop_bits(config.stop_bits)
