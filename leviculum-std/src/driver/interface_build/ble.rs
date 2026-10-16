@@ -50,31 +50,14 @@ pub(super) fn build(
         }
     }
     let max_connections = config.max_connections.unwrap_or(links::DEFAULT_MAX_LINKS);
-    // A measurement knob (#723): how many of the links a host dials.
-    // Refused rather than clamped outside 1..=3 and outside the total's
-    // room for one incoming link, so a room log never claims a dial
-    // count the table did not run.
-    let central_links = match config.central_links {
-        Some(n)
-            if (1..=links::MAX_CENTRAL_LINKS).contains(&n)
-                && n <= max_connections.saturating_sub(1) =>
-        {
-            n
-        }
-        Some(bad) => {
-            return Err(Error::Config(format!(
-                "BLEInterface central_links must be between 1 and {} and below \
-                 max_connections ({max_connections}), got {bad}",
-                links::MAX_CENTRAL_LINKS
-            )));
-        }
-        None => links::DEFAULT_CENTRAL_LINKS,
-    };
+    let central_links = resolve_central_links(config.central_links, max_connections)?;
     let opts = BleOptions {
         adapter: config.device.clone(),
         max_connections,
         central_links,
-        advertise_when_full: config.advertise_when_full.unwrap_or(false),
+        advertise_when_full: config
+            .advertise_when_full
+            .unwrap_or(BleOptions::default().advertise_when_full),
         min_rssi: config.min_rssi.unwrap_or(defaults.min_rssi),
         discovery_interval,
         enable_central: config.enable_central.unwrap_or(true),
@@ -129,6 +112,30 @@ pub(super) fn build(
             .map_or_else(|| "exchanged".to_string(), |cap| cap.to_string()),
     );
     Ok(Built::Handles(vec![handle]))
+}
+
+/// How many of the `max_connections` links a host dials (#723), two
+/// unless the key says otherwise (770). Refused rather than clamped
+/// outside 1..=3 and outside the total's room for one incoming link, so
+/// a room log never claims a dial count the table did not run. Unset
+/// under a small `max_connections` keeps the shape that key had before
+/// the default moved: one incoming slot survives at 2, and 1 is one dial
+/// as it always was.
+fn resolve_central_links(key: Option<usize>, max_connections: usize) -> Result<usize, Error> {
+    match key {
+        Some(n)
+            if (1..=links::MAX_CENTRAL_LINKS).contains(&n)
+                && n <= max_connections.saturating_sub(1) =>
+        {
+            Ok(n)
+        }
+        Some(bad) => Err(Error::Config(format!(
+            "BLEInterface central_links must be between 1 and {} and below \
+             max_connections ({max_connections}), got {bad}",
+            links::MAX_CENTRAL_LINKS
+        ))),
+        None => Ok(links::DEFAULT_CENTRAL_LINKS.min(max_connections.saturating_sub(1).max(1))),
+    }
 }
 
 #[cfg(test)]
@@ -392,16 +399,41 @@ mod tests {
         assert_eq!(
             BleOptions::default().central_links,
             links::DEFAULT_CENTRAL_LINKS,
-            "no key is today's one dial"
+            "no key is the host default"
         );
     }
 
-    /// `advertise_when_full` (752) is off unless the key says so.
+    /// Unset, `central_links` is two dials (770) under the default total,
+    /// and never takes a small `max_connections`' last incoming slot:
+    /// one dial at 2 and at 1, as those caps ran before the default moved.
     #[test]
-    fn advertise_when_full_defaults_off() {
+    fn an_unset_central_links_is_two_dials_and_leaves_an_incoming_slot() {
+        assert_eq!(links::DEFAULT_CENTRAL_LINKS, 2);
+        let resolved = |max| resolve_central_links(None, max).ok();
+        assert_eq!(
+            resolved(links::DEFAULT_MAX_LINKS),
+            Some(2),
+            "two out, two in"
+        );
+        assert_eq!(resolved(3), Some(2));
+        assert_eq!(resolved(2), Some(1), "one incoming slot survives");
+        assert_eq!(resolved(1), Some(1), "one dial, as before");
+        assert_eq!(
+            resolve_central_links(Some(1), 4).ok(),
+            Some(1),
+            "the board's shape"
+        );
+    }
+
+    /// `advertise_when_full` (752) is on unless the key says so (770);
+    /// `false` is the boards' dark-when-full gate, which
+    /// `an_incoming_full_table_goes_dark_and_a_freed_slot_re_advertises`
+    /// keeps covered.
+    #[test]
+    fn advertise_when_full_defaults_on() {
         assert!(
-            !BleOptions::default().advertise_when_full,
-            "no key is the boards' dark-when-full gate"
+            BleOptions::default().advertise_when_full,
+            "no key keeps a full host on the air saying zero"
         );
         let unset = InterfaceConfig::default();
         assert_eq!(unset.advertise_when_full, None);

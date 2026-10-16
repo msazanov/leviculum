@@ -90,10 +90,13 @@ does not scale to a dense mesh, which is the motivation for `ble-leviculum`.
 ### Incoming link slots and the slot-contention policy
 
 An LNode accepts three incoming (peripheral-role) links and initiates
-one outgoing (central-role) link (#372), and since #432 lnsd has the
-same shape: `max_connections` (default 4) still means the total, and
-inside it one slot is this node's own dial and `max_connections - 1`
-are incoming. Before #432 the budget was undivided, and a node that
+one outgoing (central-role) link (#372), and since #432 lnsd splits
+its budget the same way: `max_connections` (default 4) still means the
+total, and inside it `central_links` slots are this node's own dials
+and `max_connections - central_links` are incoming. Since 770 a host
+dials twice by default (two out, two in) and stays on the air when
+full (`advertise_when_full`); `central_links = 1` with
+`advertise_when_full = false` is the board's shape. Before #432 the budget was undivided, and a node that
 filled it in either direction both stopped advertising and stopped
 dialling. That is how the rig's `regression/ble_room_10 --seed 2` room
 ended ABSORBING: nine boards formed eighteen links among themselves,
@@ -216,9 +219,9 @@ Three properties keep it honest:
 lnsd publishes the count too, since #432. Until the asymmetric cap it
 did not, and the reason was not modesty: its capacity was one budget
 shared by both roles, so a number in the boards' units would have been
-a different quantity wearing the same bits. With one outgoing slot and
-`max_connections - 1` incoming, lnsd's free-incoming count IS a board's
-free-incoming count, and it goes on the air from one shared builder
+a different quantity wearing the same bits. With the outgoing slots
+split off and the rest incoming, lnsd's free-incoming count IS a
+board's free-incoming count (at two dials it simply tops out at two), and it goes on the air from one shared builder
 (`links.rs`'s `capability_record` against the firmware's, the same two
 calls) — so a peer can tell an lnsd record from a board's by the count
 in it and by nothing else. BlueZ cannot edit a live record, so a

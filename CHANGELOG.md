@@ -400,6 +400,12 @@ Toolchain: Rust 1.97.1
 
 ### Changed
 
+- An lnsd Bluetooth interface now links to two neighbours of its own and
+  stays visible when its incoming slots are full (`central_links = 2`,
+  `advertise_when_full = true`), so a room of twenty PC nodes settles to
+  diameter 4 instead of 8 to 11 with no dial left unanswered; set both keys
+  to `1` and `false` for a board's behaviour (refs #723).
+
 - lnsd holds its memory flat on long-running transport nodes: it runs on the
   mimalloc allocator instead of musl's mallocng, in the packages and in every
   build from source (Leviculum#766, refs #437). On a field transport node the

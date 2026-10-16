@@ -89,12 +89,16 @@ pub(crate) struct BleOptions {
     /// Simultaneous link cap, both roles counted together.
     pub max_connections: usize,
     /// Outgoing links inside that cap (`central_links`, #723); the rest
-    /// are incoming. [`links::DEFAULT_CENTRAL_LINKS`] unless a host
-    /// measurement raised it.
+    /// are incoming. [`links::DEFAULT_CENTRAL_LINKS`] (two) unless the
+    /// key says otherwise; `central_links = 1` is the board's shape.
     pub central_links: usize,
     /// Keep advertising with `free_slots = 0` when the incoming slots
-    /// fill (`advertise_when_full`, 752) rather than going dark. Off —
-    /// the default — is the firmware's `ADV_LOCK` policy.
+    /// fill (`advertise_when_full`, 752) rather than going dark. On by
+    /// default since 770: the twenty-node rooms left 7 dials unanswered
+    /// on nodes gone dark behind a stale record, and none with it on.
+    /// Off is the firmware's `ADV_LOCK` policy, which a board keeps until
+    /// Columba reads `free_slots`; set it off where lnsd should behave
+    /// like a board.
     pub advertise_when_full: bool,
     /// Sightings weaker than this are not dialled (reference `min_rssi`).
     pub min_rssi: i16,
@@ -134,7 +138,7 @@ impl Default for BleOptions {
             adapter: None,
             max_connections: links::DEFAULT_MAX_LINKS,
             central_links: links::DEFAULT_CENTRAL_LINKS,
-            advertise_when_full: false,
+            advertise_when_full: true,
             min_rssi: -85,
             discovery_interval: Duration::from_secs(5),
             enable_central: true,
