@@ -197,13 +197,12 @@ pub unsafe extern "C" fn lev_identity_save_file(
                 return LEV_ERR_CRYPTO;
             }
         };
-        let tmp = format!("{path}.tmp");
-        if let Err(e) = std::fs::write(&tmp, bytes.as_slice()) {
-            set_last_error(format!("write {tmp}: {e}"));
-            return LEV_ERR_IO;
-        }
-        if let Err(e) = std::fs::rename(&tmp, path) {
-            set_last_error(format!("rename to {path}: {e}"));
+        // Owner-only from creation, so the key is never readable to others
+        // between the write and the rename (L-0039).
+        if let Err(e) =
+            leviculum_std::atomic_write_secret(std::path::Path::new(path), bytes.as_slice())
+        {
+            set_last_error(format!("write {path}: {e}"));
             return LEV_ERR_IO;
         }
         LEV_OK

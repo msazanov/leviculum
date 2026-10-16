@@ -10,7 +10,7 @@ use leviculum_core::constants::{RATCHET_SIZE, TRUNCATED_HASHBYTES};
 use leviculum_core::ratchet_store::{KnownRatchetEntry, RatchetStore};
 
 use crate::error::Error;
-use crate::storage::{atomic_write, hex_decode, hex_encode, note_unreadable_entry};
+use crate::storage::{atomic_write_secret, hex_decode, hex_encode, note_unreadable_entry};
 
 pub(crate) const RATCHETS_DIR: &str = "ratchets";
 pub(crate) const RATCHETKEYS_DIR: &str = "ratchetkeys";
@@ -82,10 +82,16 @@ impl FileRatchetStore {
         }
     }
 
+    /// Owner-only, like the files in it: `ratchetkeys/` holds private keys.
     fn ensure_dir(dir: &Path) {
         if !dir.exists() {
-            let _ = std::fs::create_dir_all(dir);
+            let _ = crate::storage::create_secret_dir_all(dir);
         }
+    }
+
+    fn write(path: &Path, data: &[u8]) -> core::result::Result<(), Error> {
+        atomic_write_secret(path, data)
+            .map_err(|e| Error::Storage(format!("{}: {e}", path.display())))
     }
 }
 
@@ -160,7 +166,7 @@ impl RatchetStore for FileRatchetStore {
         Self::ensure_dir(&self.ratchets_dir);
         let hex_name = hex_encode(dest_hash);
         let data = encode_known_ratchet(&entry.ratchet, entry.received_at_secs);
-        atomic_write(&self.ratchets_dir.join(&hex_name), &data)
+        Self::write(&self.ratchets_dir.join(&hex_name), &data)
     }
 
     fn load_dest_ratchet_keys(
@@ -219,7 +225,7 @@ impl RatchetStore for FileRatchetStore {
     ) -> core::result::Result<(), Error> {
         Self::ensure_dir(&self.ratchetkeys_dir);
         let hex_name = hex_encode(dest_hash);
-        atomic_write(&self.ratchetkeys_dir.join(&hex_name), serialized)
+        Self::write(&self.ratchetkeys_dir.join(&hex_name), serialized)
     }
 }
 
@@ -268,5 +274,43 @@ mod tests {
 
         let keys = store.load_dest_ratchet_keys().expect("load ratchet keys");
         assert_eq!(keys, vec![(dest, b"private ratchet key".to_vec())]);
+    }
+
+    /// L-0039: a ratchet key is a private key, so its file and the
+    /// directories the store creates for it are owner-only; they used to
+    /// inherit the umask (0644 files, 0755 directories on Debian).
+    #[cfg(unix)]
+    #[test]
+    fn ratchet_files_and_dirs_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut store = FileRatchetStore::new(dir.path());
+        let dest = [0x5Cu8; TRUNCATED_HASHBYTES];
+        store
+            .save_known_ratchet(
+                &dest,
+                &KnownRatchetEntry {
+                    ratchet: [0x42; RATCHET_SIZE],
+                    received_at_secs: 1_700_000_000.0,
+                },
+            )
+            .expect("save ratchet");
+        store
+            .save_dest_ratchet_keys(&dest, b"private ratchet key")
+            .expect("save ratchet key");
+
+        let name = hex_encode(&dest);
+        let mode = |p: &Path| std::fs::metadata(p).expect("stat").permissions().mode() & 0o777;
+        for (path, want) in [
+            (store.ratchets_dir.join(&name), 0o600),
+            (store.ratchetkeys_dir.join(&name), 0o600),
+            (store.ratchets_dir.clone(), 0o700),
+            (store.ratchetkeys_dir.clone(), 0o700),
+        ] {
+            let got = mode(&path);
+            println!("{}: mode {got:o}", path.display());
+            assert_eq!(got, want, "{} mode {got:o}", path.display());
+        }
     }
 }

@@ -48,7 +48,8 @@ pub fn load_or_create(path: &Path) -> std::io::Result<Identity> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(path, encoded)?;
+    // Owner-only from creation (L-0039).
+    leviculum_std::atomic_write_secret(path, &encoded)?;
     Ok(identity)
 }
 
@@ -77,6 +78,27 @@ mod tests {
         // A second load returns the persisted identity, not a new one.
         let reloaded = load_or_create(&path).unwrap();
         assert_eq!(reloaded.hash(), minted.hash());
+    }
+
+    /// L-0039: the identity file holds the private key, so it is
+    /// owner-only from creation, including when it replaces a corrupt one.
+    #[cfg(unix)]
+    #[test]
+    fn minted_identity_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("identity");
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+
+        load_or_create(&path).unwrap();
+        println!("{}: mode {:o}", path.display(), mode(&path));
+        assert_eq!(mode(&path), 0o600);
+
+        std::fs::write(&path, b"not an identity record").unwrap();
+        load_or_create(&path).unwrap();
+        println!("{} (replaced): mode {:o}", path.display(), mode(&path));
+        assert_eq!(mode(&path), 0o600);
     }
 
     #[test]

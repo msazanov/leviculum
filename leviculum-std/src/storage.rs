@@ -112,7 +112,8 @@ impl Storage {
         let base_path = base_path.as_ref().to_path_buf();
 
         // Create directories if they don't exist
-        std::fs::create_dir_all(&base_path)
+        // Owner-only when created here: the directory holds the private keys.
+        create_secret_dir_all(&base_path)
             .map_err(|e| Error::Storage(format!("Failed to create storage dir: {e}")))?;
 
         let mut inner = MemoryStorage::with_caps(caps);
@@ -302,6 +303,54 @@ pub(crate) fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
     std::fs::rename(&temp_path, path)
         .map_err(|e| Error::Storage(format!("Failed to rename temp file: {e}")))?;
     Ok(())
+}
+
+/// Open `path` as a fresh file for a secret: owner-only (0600) on Unix from
+/// the moment it exists, never widened by the umask and never chmodded after
+/// the fact, so no reader can open it in between (L-0039). A file already at
+/// `path` is removed first; `create_new` then refuses to follow a link
+/// planted there in the meantime.
+pub fn create_secret_file(path: &Path) -> std::io::Result<std::fs::File> {
+    match std::fs::remove_file(path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+        _ => {}
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
+/// Create `path` and any missing parents owner-only (0700 on Unix), for a
+/// directory that will hold secrets. Directories that already exist keep the
+/// mode they have.
+pub fn create_secret_dir_all(path: &Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        builder.mode(0o700);
+    }
+    builder.create(path)
+}
+
+/// `atomic_write` for a secret: the `.tmp` file is created through
+/// [`create_secret_file`], so the mode is set before a byte is written and
+/// the rename carries it into place. The private keys of a node (its
+/// identity, its ratchet keys) go through here; the RPC authkey of a shared
+/// instance is the hash of `transport_identity`, so a readable identity
+/// file hands out the control socket too.
+pub fn atomic_write_secret(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+
+    let temp_path = path.with_extension("tmp");
+    create_secret_file(&temp_path)?.write_all(data)?;
+    std::fs::rename(&temp_path, path)
 }
 
 /// Current Unix timestamp in seconds (f64), matching Python `time.time()`.
@@ -1514,6 +1563,22 @@ mod tests {
             assert!(CoreStorage::get_identity(&storage, &[0x01; TRUNCATED_HASHBYTES]).is_some());
             assert!(CoreStorage::get_identity(&storage, &[0x02; TRUNCATED_HASHBYTES]).is_some());
         }
+    }
+
+    /// L-0039: the storage directory holds `transport_identity` and the
+    /// ratchet keys, so a directory the store creates is owner-only. One that
+    /// already exists keeps its mode.
+    #[cfg(unix)]
+    #[test]
+    fn a_storage_dir_the_store_creates_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let parent = tempfile::tempdir().unwrap();
+        let path = parent.path().join("storage");
+        Storage::new(&path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        println!("{}: mode {mode:o}", path.display());
+        assert_eq!(mode, 0o700);
     }
 
     #[test]

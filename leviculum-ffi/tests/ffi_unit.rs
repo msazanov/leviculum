@@ -162,6 +162,26 @@ fn identity_file_roundtrip() {
     }
 }
 
+/// L-0039: the saved file holds the private key, so it is owner-only.
+#[cfg(unix)]
+#[test]
+fn identity_file_is_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("id");
+    let path = cstr(file.to_str().unwrap());
+    let id = Identity::generate();
+    assert_eq!(
+        unsafe { lev_identity_save_file(id.0, path.as_ptr()) },
+        LEV_OK
+    );
+
+    let mode = std::fs::metadata(&file).unwrap().permissions().mode() & 0o777;
+    println!("{}: mode {mode:o}", file.display());
+    assert_eq!(mode, 0o600);
+}
+
 #[test]
 fn identity_null_and_buffer_guards() {
     unsafe {

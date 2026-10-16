@@ -187,13 +187,9 @@ fn load_or_create_identity(path: &Path) -> Result<Identity, String> {
                 std::fs::create_dir_all(parent)
                     .map_err(|e| format!("{}: {e}", parent.display()))?;
             }
-            std::fs::write(path, encoded).map_err(|e| format!("{}: {e}", path.display()))?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt as _;
-                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-                    .map_err(|e| format!("{}: {e}", path.display()))?;
-            }
+            // Owner-only from creation, not chmodded after (L-0039).
+            leviculum_std::atomic_write_secret(path, &encoded)
+                .map_err(|e| format!("{}: {e}", path.display()))?;
             Ok(identity)
         }
         Err(error) => Err(format!("{}: {error}", path.display())),
@@ -653,6 +649,21 @@ mod cli_tests {
             delivery_hash(&second).expect("hash"),
             "a restart must not change the address boards were flashed with"
         );
+    }
+
+    /// L-0039: the identity is a private key, so it is owner-only from
+    /// creation rather than chmodded after the write.
+    #[cfg(unix)]
+    #[test]
+    fn the_minted_identity_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("identity");
+        load_or_create_identity(&path).expect("mint");
+        let mode = std::fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
+        println!("{}: mode {mode:o}", path.display());
+        assert_eq!(mode, 0o600);
     }
 
     /// `lnflash` asks for "32 hex characters"; this is where they come from.

@@ -112,14 +112,9 @@ fn mint(path: &Path) -> Result<(Identity, Provenance), IdentityError> {
     let private = identity
         .private_key_bytes()
         .map_err(|_| IdentityError::NotStorable)?;
-    std::fs::write(path, private).map_err(io_err)?;
-    // Private key material: owner-only, as `lnpnd` writes its own
-    // (`lnpnd/src/identity.rs`).
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(io_err)?;
-    }
+    // Private key material: owner-only from creation, not chmodded after,
+    // as `lnpnd` writes its own (`lnpnd/src/identity.rs`, L-0039).
+    leviculum_std::atomic_write_secret(path, &private).map_err(io_err)?;
     Ok((identity, Provenance::Created))
 }
 
@@ -143,6 +138,21 @@ mod tests {
             minted.hash(),
             "a restart must keep the address the first start published"
         );
+    }
+
+    /// L-0039: the identity is a private key, so it is owner-only from
+    /// creation rather than chmodded after the write.
+    #[cfg(unix)]
+    #[test]
+    fn the_minted_identity_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(IDENTITY_FILE);
+        load_or_create(&path).expect("a first start mints");
+        let mode = std::fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
+        println!("{}: mode {mode:o}", path.display());
+        assert_eq!(mode, 0o600);
     }
 
     /// The other half of the contract: nothing is shared between storage

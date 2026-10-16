@@ -147,6 +147,15 @@ same directory as the daemon and derive the same RPC authkey from its
 has to be told about it — but note that `--storage` moves the daemon
 alone, and the clients then still follow the config.
 
+The storage directory holds private keys (`transport_identity` and
+`ratchetkeys/`), and the RPC authkey is the hash of `transport_identity`,
+so the daemon writes them owner-only (0600) and creates the storage and
+ratchet directories 0700 (`atomic_write_secret`, `storage.rs`). A
+directory or file that already exists keeps its mode: a node set up
+before this release should run `chmod 600 <storage>/transport_identity`
+and `chmod -R go= <storage>/ratchetkeys` once. A client tool run as
+another user can then no longer read the identity, which is the point.
+
 `flush_interval` and `keepalive_interval` are Leviculum tuning
 extensions — Python Reticulum ignores them. Battery-powered or SD-card
 deployments may want a longer `flush_interval`; slow links benefit from

@@ -654,6 +654,15 @@ Toolchain: Rust 1.97.1
 
 ### Fixed
 
+- Private keys are written owner-only: `transport_identity`, the ratchet
+  keys, and the identities of lnomad, lntd, lnpnd, the LXMF node and the C
+  API are created 0600, and the storage and ratchet directories the daemon
+  creates are 0700. Before, they took the umask (0644 on Debian), and the
+  shared instance's RPC authkey is derived from `transport_identity`.
+  Existing files are not rewritten: on a running node, run
+  `chmod 600 <storage>/transport_identity` and
+  `chmod -R go= <storage>/ratchetkeys` (L-0039).
+
 - An `ifac_size` above 512 bits is a startup error naming the key; it used
   to panic the daemon on the first packet (L-0038).
 

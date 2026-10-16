@@ -80,9 +80,10 @@ impl IdentityStore for FileIdentityStore {
             .private_key_bytes()
             .map_err(|e| std::io::Error::other(format!("{:?}", e)))?;
 
+        // Owner-only from creation (L-0039): the rename carries the mode in.
         let tmp_path = self.path.with_extension("tmp");
         {
-            let mut f = std::fs::File::create(&tmp_path)?;
+            let mut f = crate::storage::create_secret_file(&tmp_path)?;
             f.write_all(&bytes)?;
             f.sync_data()?;
         }
@@ -103,5 +104,30 @@ impl IdentityStore for FileIdentityStore {
             std::fs::File::open(dir)?.sync_all()?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// L-0039: the identity is the node's private key, and the shared
+    /// instance's RPC authkey is its hash, so the file must be owner-only.
+    /// It used to inherit the umask (0644 on Debian).
+    #[cfg(unix)]
+    #[test]
+    fn saved_identity_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut store = FileIdentityStore::new(dir.path());
+        store
+            .save(&crate::generate_identity())
+            .expect("save identity");
+
+        let path = dir.path().join(IDENTITY_FILE);
+        let mode = std::fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
+        println!("{}: mode {mode:o}", path.display());
+        assert_eq!(mode, 0o600, "transport_identity mode {mode:o}");
     }
 }
