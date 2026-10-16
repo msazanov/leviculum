@@ -690,3 +690,18 @@ async fn test_control_line_over_bound_is_refused() {
         .unwrap();
     assert_eq!(after, None);
 }
+
+/// L-0054: `count=0` is refused at the control socket; no rule is stored.
+#[tokio::test]
+async fn test_control_socket_count_zero_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock_path = dir.path().join("proxy.sock");
+    let engine = spawn_control_ready(&sock_path).await;
+
+    let resp = control_cmd(&sock_path, "rule add drop count=0").await;
+    assert_eq!(resp, "ERR count must be at least 1");
+    assert!(engine.lock().await.list_rules().is_empty());
+
+    let resp = control_cmd(&sock_path, "rule add drop count=1").await;
+    assert!(resp.starts_with("OK "), "Got: {resp}");
+}

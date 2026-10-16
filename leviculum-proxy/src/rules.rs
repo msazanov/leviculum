@@ -289,6 +289,15 @@ impl RuleEngine {
 
         let rule = &mut self.rules[idx];
 
+        // An exhausted count acts on nothing. The control socket refuses
+        // count=0, but a direct caller may still build one: forward the frame
+        // and drop the rule instead of acting and then underflowing.
+        if rule.remaining == Some(0) {
+            self.rules.remove(idx);
+            self.forwarded += 1;
+            return FrameDecision::Forward;
+        }
+
         // If skip > 0, forward the frame and decrement skip
         if rule.skip > 0 {
             rule.skip -= 1;
@@ -329,7 +338,7 @@ impl RuleEngine {
 
         // Decrement remaining count, auto-remove at 0
         if let Some(ref mut remaining) = rule.remaining {
-            *remaining -= 1;
+            *remaining = remaining.saturating_sub(1);
             if *remaining == 0 {
                 self.rules.remove(idx);
             }
@@ -795,5 +804,34 @@ mod tests {
             engine.evaluate(&large_frame, Direction::AToB),
             FrameDecision::Drop
         ));
+    }
+
+    /// L-0054: a rule built with `count: Some(0)` (the control socket refuses
+    /// it, a direct caller need not) acts on no frame and removes itself; the
+    /// count can never underflow to u32::MAX and drop every frame.
+    #[test]
+    fn count_zero_rule_acts_on_no_frame() {
+        let spec = RuleSpec {
+            action: Action::Drop,
+            count: Some(0),
+            ..RuleSpec::default()
+        };
+        assert_eq!(dropped_indices(spec, 10), Vec::<usize>::new());
+
+        let mut engine = RuleEngine::new();
+        engine.add_rule_spec(RuleSpec {
+            action: Action::Drop,
+            count: Some(0),
+            ..RuleSpec::default()
+        });
+        let frame = KissFrame {
+            command: 0x00,
+            payload: vec![1],
+        };
+        assert!(matches!(
+            engine.evaluate(&frame, Direction::AToB),
+            FrameDecision::Forward
+        ));
+        assert!(engine.list_rules().is_empty());
     }
 }

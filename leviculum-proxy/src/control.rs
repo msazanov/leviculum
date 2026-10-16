@@ -228,6 +228,9 @@ async fn parse_rule_add(args: &[&str], engine: &Arc<Mutex<RuleEngine>>) -> Strin
             }
         } else if let Some(val) = arg.strip_prefix("count=") {
             match val.parse::<u32>() {
+                // A zero count would act on no frame; refuse it rather than
+                // store a rule whose meaning depends on evaluate's guard.
+                Ok(0) => return "ERR count must be at least 1".to_string(),
                 Ok(n) => count = Some(n),
                 Err(_) => return format!("ERR invalid count: {val}"),
             }
