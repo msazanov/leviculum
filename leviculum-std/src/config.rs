@@ -725,6 +725,13 @@ pub struct InterfaceConfig {
     /// can be named where the interface is built rather than silently
     /// resolving to the wrong multicast group.
     pub multicast_address_type: Option<String>,
+    /// Cap on the AutoInterface peer table (review finding L-0040). Unset
+    /// inherits 128; zero is refused where the interface is built.
+    pub max_peers: Option<usize>,
+    /// Per-source AutoInterface admission interval in seconds: one new peer
+    /// per source address per interval (L-0040). Unset inherits 5; zero
+    /// turns the limit off.
+    pub peer_admission_interval: Option<u64>,
 
     // Announce-rate limiting (Codeberg #92). Python: Reticulum.py:798-821.
     // The target/grace/penalty keys drive per-destination rebroadcast rate
@@ -1019,6 +1026,8 @@ impl Default for InterfaceConfig {
             ignored_devices: None,
             multicast_loopback: None,
             multicast_address_type: None,
+            max_peers: None,
+            peer_admission_interval: None,
             announce_rate_target: None,
             announce_rate_penalty: None,
             announce_rate_grace: None,

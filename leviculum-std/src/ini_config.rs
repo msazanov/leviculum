@@ -837,6 +837,10 @@ fn apply_interface_key(iface: &mut InterfaceConfig, key: &str, value: &str) -> R
         // would otherwise put the node in a group of its own, discovering
         // nobody and logging nothing.
         "multicast_address_type" => iface.multicast_address_type = Some(value.to_string()),
+        // Peer-table bounds (review finding L-0040). No Python equivalent:
+        // Python's AutoInterface keeps every peer it is told about.
+        "max_peers" => iface.max_peers = value.parse().ok(),
+        "peer_admission_interval" => iface.peer_admission_interval = value.parse().ok(),
         "flow_control" => iface.flow_control = Some(parse_bool(key, value)?),
         "airtime_limit_short" => iface.airtime_limit_short = value.parse().ok(),
         "airtime_limit_long" => iface.airtime_limit_long = value.parse().ok(),

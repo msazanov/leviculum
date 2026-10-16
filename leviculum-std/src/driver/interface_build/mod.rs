@@ -949,4 +949,51 @@ mod tests {
             "the refusal names the key and the value: {msg}"
         );
     }
+
+    /// L-0040, the config path of the two peer-table knobs: absent keys
+    /// inherit the defaults, set keys reach the orchestrator's config.
+    #[test]
+    fn auto_peer_table_knobs_reach_the_orchestrator() {
+        use crate::interfaces::auto_interface::{
+            DEFAULT_MAX_PEERS, DEFAULT_PEER_ADMISSION_INTERVAL_SECS,
+        };
+        use std::time::Duration;
+
+        fn resolve(section: &str) -> crate::interfaces::auto_interface::AutoInterfaceConfig {
+            let config = crate::ini_config::parse_ini(section).expect("config parses");
+            let iface = config.interfaces.get("Auto").expect("auto section");
+            auto::auto_config_from(iface).expect("section resolves")
+        }
+
+        let default = resolve("[interfaces]\n  [[Auto]]\n    type = AutoInterface\n");
+        assert_eq!(default.max_peers, DEFAULT_MAX_PEERS);
+        assert_eq!(
+            default.peer_admission_interval,
+            Duration::from_secs(DEFAULT_PEER_ADMISSION_INTERVAL_SECS)
+        );
+
+        let set = resolve(
+            "[interfaces]\n  [[Auto]]\n    type = AutoInterface\n \
+             max_peers = 16\n    peer_admission_interval = 0\n",
+        );
+        assert_eq!(set.max_peers, 16);
+        assert_eq!(set.peer_admission_interval, Duration::ZERO);
+    }
+
+    /// A cap of zero would refuse every peer; the build names it instead.
+    #[test]
+    fn auto_build_refuses_zero_max_peers() {
+        let owner = CtxOwner::new();
+        let config = InterfaceConfig {
+            name: "Auto".to_string(),
+            interface_type: "AutoInterface".to_string(),
+            max_peers: Some(0),
+            ..Default::default()
+        };
+
+        let Err(err) = build_interface(0, &config, &owner.ctx(), &AutoPeerCount::default()) else {
+            panic!("max_peers = 0 must not build");
+        };
+        assert!(err.to_string().contains("max_peers"), "{err}");
+    }
 }

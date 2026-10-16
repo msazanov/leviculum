@@ -31,6 +31,19 @@ pub(super) fn auto_config_from(config: &InterfaceConfig) -> Result<AutoInterface
         })?,
     };
 
+    // A cap of zero would refuse every peer, which is a node that discovers
+    // nobody and only says so in a refusal line; name it at startup instead.
+    let max_peers = match config.max_peers {
+        None => crate::interfaces::auto_interface::DEFAULT_MAX_PEERS,
+        Some(0) => {
+            return Err(Error::Config(format!(
+                "interface '{}': max_peers must be at least 1",
+                config.name
+            )))
+        }
+        Some(n) => n,
+    };
+
     Ok(AutoInterfaceConfig {
         group_id: config
             .group_id
@@ -51,6 +64,12 @@ pub(super) fn auto_config_from(config: &InterfaceConfig) -> Result<AutoInterface
         ignored_devices: config.ignored_devices.clone(),
         multicast_loopback: config.multicast_loopback.unwrap_or(true),
         multicast_address_type,
+        max_peers,
+        peer_admission_interval: std::time::Duration::from_secs(
+            config
+                .peer_admission_interval
+                .unwrap_or(crate::interfaces::auto_interface::DEFAULT_PEER_ADMISSION_INTERVAL_SECS),
+        ),
     })
 }
 

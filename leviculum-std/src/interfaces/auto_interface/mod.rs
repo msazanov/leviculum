@@ -9,7 +9,7 @@ pub(crate) mod orchestrator;
 
 use std::io;
 use std::net::{Ipv6Addr, SocketAddrV6};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use tokio::net::UdpSocket;
@@ -48,6 +48,30 @@ pub(crate) const NIC_RETRY_INTERVAL_SECS: f64 = 10.0;
 /// At [`NIC_RETRY_INTERVAL_SECS`] that is one line per 5 minutes, so a host
 /// that never gets a NIC keeps saying so without filling the log.
 pub(crate) const NIC_WAIT_WARN_EVERY: u64 = 30;
+
+/// Default cap on the peer table (`max_peers`, review finding L-0040).
+///
+/// Every peer costs a spawned send task, two 64-slot channels and a routable core interface that each announce fans out
+/// over, and discovery is unauthenticated: the token is a hash of a public
+/// default group id and the sender's own address. A home LAN carries tens of
+/// Reticulum instances, a busy hackspace or event segment perhaps a hundred;
+/// 128 leaves that headroom and still bounds what one hostile host on the
+/// segment can make us allocate. Python's `self.peers` has no cap; the cap
+/// is invisible on the wire, a refused peer simply is not routed to.
+pub(crate) const DEFAULT_MAX_PEERS: usize = 128;
+
+/// Default per-source admission interval in seconds
+/// (`peer_admission_interval`, L-0040): one source address registers at
+/// most one new peer per interval.
+///
+/// The token does not cover the data port, so without it one host mints a
+/// peer per packet by naming a fresh port each time. Five seconds is about
+/// three [`ANNOUNCE_INTERVAL_SECS`], so a flood is slowed to one peer per
+/// five seconds per address, while a legitimate second instance on the
+/// same host, refused at its first announce, is admitted on the first one
+/// after the interval, far inside the [`PEERING_TIMEOUT_SECS`] its
+/// neighbours give it.
+pub(crate) const DEFAULT_PEER_ADMISSION_INTERVAL_SECS: u64 = 5;
 
 /// Deduplication cache capacity (number of entries)
 pub(crate) const DEDUP_CACHE_SIZE: usize = 48;
@@ -144,6 +168,14 @@ pub struct AutoInterfaceConfig {
     /// Defaults to `Temporary`, which is the group Python joins when the key
     /// is absent, so an existing deployment keeps the group it has.
     pub multicast_address_type: MulticastAddressType,
+    /// Most peers this interface keeps at once (L-0040). A discovery from a
+    /// new peer past the cap is refused, and `AUTO_PEER_REFUSED
+    /// reason=cap` says so. Defaults to 128 (`DEFAULT_MAX_PEERS`).
+    pub max_peers: usize,
+    /// At most one new peer per source address per this interval (L-0040);
+    /// `Duration::ZERO` turns the limit off. Defaults to
+    /// five seconds (`DEFAULT_PEER_ADMISSION_INTERVAL_SECS`).
+    pub peer_admission_interval: Duration,
 }
 
 impl Default for AutoInterfaceConfig {
@@ -157,6 +189,8 @@ impl Default for AutoInterfaceConfig {
             ignored_devices: None,
             multicast_loopback: true,
             multicast_address_type: MulticastAddressType::Temporary,
+            max_peers: DEFAULT_MAX_PEERS,
+            peer_admission_interval: Duration::from_secs(DEFAULT_PEER_ADMISSION_INTERVAL_SECS),
         }
     }
 }

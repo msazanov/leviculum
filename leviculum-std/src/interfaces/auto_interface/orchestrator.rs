@@ -40,6 +40,8 @@ struct PeerInfo {
     scope_id: u32,
     /// Last time we heard from this peer (discovery or data)
     last_heard: Instant,
+    /// When this peer was admitted; the per-source admission limit reads it
+    registered_at: Instant,
     /// Last time we sent a reverse peering token to this peer
     last_reverse_peering: Instant,
     /// Channel to push incoming data to the event loop.
@@ -47,6 +49,108 @@ struct PeerInfo {
     incoming_tx: mpsc::Sender<IncomingPacket>,
     /// Shared I/O counters (same Arc is in the InterfaceHandle)
     counters: Arc<InterfaceCounters>,
+}
+
+/// Least time between two `AUTO_PEER_REFUSED` lines. A flood refuses every
+/// packet; the event names the first and counts the rest in `suppressed`.
+const PEER_REFUSED_EVENT_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Why a discovery from a new peer was not admitted (L-0040).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PeerRefusal {
+    /// The peer table holds `max_peers` already.
+    Cap,
+    /// This source address registered a peer less than one admission
+    /// interval ago.
+    Rate,
+}
+
+impl PeerRefusal {
+    fn as_str(self) -> &'static str {
+        match self {
+            PeerRefusal::Cap => "cap",
+            PeerRefusal::Rate => "rate",
+        }
+    }
+}
+
+/// Admission control for the peer table (review finding L-0040).
+///
+/// Discovery is unauthenticated and the peer key carries a port the sender
+/// picks, so the table is bounded here, where the medium is known: a cap on
+/// its size and one new peer per source address per interval. The
+/// per-source check scans the table for the newest registration from the
+/// address instead of keeping a table of its own, so admission control adds
+/// no state a flood of spoofed addresses could grow. Known peers are never
+/// refused; eviction stays with the peering timeout.
+struct PeerAdmission {
+    max_peers: usize,
+    interval: Duration,
+    /// When the last `AUTO_PEER_REFUSED` line went out
+    last_refused_event: Option<Instant>,
+    /// Refusals since that line, reported by the next one
+    suppressed: u64,
+}
+
+impl PeerAdmission {
+    fn new(config: &AutoInterfaceConfig) -> Self {
+        Self {
+            max_peers: config.max_peers,
+            interval: config.peer_admission_interval,
+            last_refused_event: None,
+            suppressed: 0,
+        }
+    }
+
+    /// Whether a new peer from `src_addr` may register now.
+    fn check(
+        &self,
+        peers: &HashMap<(Ipv6Addr, u16), PeerInfo>,
+        src_addr: Ipv6Addr,
+        now: Instant,
+    ) -> Result<(), PeerRefusal> {
+        if peers.len() >= self.max_peers {
+            return Err(PeerRefusal::Cap);
+        }
+        if !self.interval.is_zero()
+            && peers.iter().any(|((addr, _), p)| {
+                *addr == src_addr && now.duration_since(p.registered_at) < self.interval
+            })
+        {
+            return Err(PeerRefusal::Rate);
+        }
+        Ok(())
+    }
+
+    /// Say that a peer was refused, at most once per
+    /// [`PEER_REFUSED_EVENT_INTERVAL`]; the refusals in between are counted.
+    fn refused(
+        &mut self,
+        reason: PeerRefusal,
+        src_addr: Ipv6Addr,
+        port: u16,
+        nic: &str,
+        peers: usize,
+        now: Instant,
+    ) {
+        if let Some(last) = self.last_refused_event {
+            if now.duration_since(last) < PEER_REFUSED_EVENT_INTERVAL {
+                self.suppressed += 1;
+                return;
+            }
+        }
+        tracing::warn!(
+            event = "AUTO_PEER_REFUSED",
+            reason = reason.as_str(),
+            src = %src_addr,
+            port = port,
+            nic = nic,
+            peers = peers,
+            suppressed = self.suppressed,
+        );
+        self.last_refused_event = Some(now);
+        self.suppressed = 0;
+    }
 }
 
 /// Everything one NIC owns: its identity, its three sockets, and the
@@ -452,6 +556,7 @@ where
     // - Cross-machine Python peers (send from ephemeral port → ip-only)
     // Removal path: peers are removed on timeout in the peer_job_timer branch.
     let mut peers: HashMap<(Ipv6Addr, u16), PeerInfo> = HashMap::new();
+    let mut admission = PeerAdmission::new(&config);
 
     // Deduplication cache for data packets received on multiple NICs
     let mut dedup = DeduplicationCache::new();
@@ -494,6 +599,7 @@ where
                     &group_tag,
                     &instance_nonce,
                     &mut peers,
+                    &mut admission,
                     &peer_count_tx,
                     &next_id,
                     &new_iface_tx,
@@ -520,6 +626,7 @@ where
                     &group_tag,
                     &instance_nonce,
                     &mut peers,
+                    &mut admission,
                     &peer_count_tx,
                     &next_id,
                     &new_iface_tx,
@@ -715,6 +822,7 @@ fn handle_discovery_packet(
     group_tag: &Option<String>,
     instance_nonce: &[u8; NONCE_SIZE],
     peers: &mut HashMap<(Ipv6Addr, u16), PeerInfo>,
+    admission: &mut PeerAdmission,
     peer_count_tx: &watch::Sender<usize>,
     next_id: &Arc<AtomicUsize>,
     new_iface_tx: &mpsc::Sender<InterfaceHandle>,
@@ -770,6 +878,21 @@ fn handle_discovery_packet(
     // Known peer, refresh
     if let Some(peer) = peers.get_mut(&peer_key) {
         peer.last_heard = Instant::now();
+        return;
+    }
+
+    // New peer: admitted only under the cap and the per-source interval,
+    // before anything is allocated for it
+    let now = Instant::now();
+    if let Err(reason) = admission.check(peers, src_addr, now) {
+        admission.refused(
+            reason,
+            src_addr,
+            peer_data_port,
+            &nic.name,
+            peers.len(),
+            now,
+        );
         return;
     }
 
@@ -833,13 +956,13 @@ fn handle_discovery_packet(
         teardown: None,
     };
 
-    let now = Instant::now();
     peers.insert(
         peer_key,
         PeerInfo {
             nic_name: nic.name.clone(),
             scope_id: nic.index,
             last_heard: now,
+            registered_at: now,
             last_reverse_peering: now,
             incoming_tx,
             counters,
@@ -907,6 +1030,7 @@ async fn peer_send_task(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::log_capture::{capture_logs, captured};
     use socket2::{Domain, Protocol, SockAddr, Type};
 
     /// The nonce every test NIC bakes into its announce datagram. Any value
@@ -1048,6 +1172,7 @@ mod tests {
             nic_name: "eth0".to_string(),
             scope_id: 2,
             last_heard: Instant::now(),
+            registered_at: Instant::now(),
             last_reverse_peering: Instant::now(),
             incoming_tx: tx,
             counters: Arc::new(InterfaceCounters::new()),
@@ -1130,6 +1255,7 @@ mod tests {
         /// data socket nor a `nic_states` map.
         nic: Nic,
         peers: HashMap<(Ipv6Addr, u16), PeerInfo>,
+        admission: PeerAdmission,
         peer_count_tx: watch::Sender<usize>,
         _peer_count_rx: watch::Receiver<usize>,
         next_id: Arc<AtomicUsize>,
@@ -1146,10 +1272,12 @@ mod tests {
             let config = AutoInterfaceConfig::default();
             let group_tag = group_name_tag(&config.group_id);
             let nic = fake_nic("eth0", "fe80::1", 1, &config.group_id);
+            let admission = PeerAdmission::new(&config);
             Self {
                 config,
                 nic,
                 peers: HashMap::new(),
+                admission,
                 peer_count_tx,
                 _peer_count_rx,
                 next_id: Arc::new(AtomicUsize::new(100)),
@@ -1169,6 +1297,7 @@ mod tests {
                 &self.group_tag,
                 &self.our_nonce,
                 &mut self.peers,
+                &mut self.admission,
                 &self.peer_count_tx,
                 &self.next_id,
                 &self.new_iface_tx,
@@ -1307,6 +1436,182 @@ mod tests {
             .new_iface_rx
             .try_recv()
             .expect("should register interface");
+    }
+
+    /// A valid discovery packet for `src`, from a peer instance (not our
+    /// nonce), naming `data_port` as the port it listens on.
+    fn peer_discovery(
+        ctx: &DiscoveryTestCtx,
+        src: Ipv6Addr,
+        data_port: u16,
+    ) -> [u8; DISCOVERY_PACKET_SIZE] {
+        let token = make_discovery_token(&ctx.config.group_id, &src.to_string());
+        build_discovery_packet(&token, &[0x99u8; NONCE_SIZE], data_port)
+    }
+
+    /// L-0040, per source: the discovery token covers only the group and
+    /// the source address, never the data port, so one host that computed
+    /// its token once can name a fresh port in every packet. Each new
+    /// `(address, port)` key used to cost a peer: two channels, a spawned
+    /// send task and a routable core interface. One host on the segment may
+    /// mint at most one new peer per admission interval.
+    #[tokio::test]
+    async fn test_one_source_cannot_mint_a_peer_per_port() {
+        let mut ctx = DiscoveryTestCtx::new();
+        let src: Ipv6Addr = "fe80::66".parse().unwrap();
+
+        const PORTS: u16 = 32;
+        for i in 0..PORTS {
+            let pkt = peer_discovery(&ctx, src, 50000 + i);
+            ctx.call(&pkt, src);
+            // Drain like the driver does, so the hand-over channel's own
+            // capacity cannot stand in for the bound under test.
+            while ctx.new_iface_rx.try_recv().is_ok() {}
+        }
+
+        assert_eq!(
+            ctx.peers.len(),
+            1,
+            "{PORTS} ports from one source inside one admission interval must \
+             register one peer"
+        );
+    }
+
+    /// The per-source interval delays a second instance on the same host,
+    /// it does not lock it out: once the first peer's registration is one
+    /// interval old, the next port from that address is admitted.
+    #[tokio::test]
+    async fn test_same_source_admitted_again_after_the_interval() {
+        let mut ctx = DiscoveryTestCtx::new();
+        let src: Ipv6Addr = "fe80::66".parse().unwrap();
+
+        let first = peer_discovery(&ctx, src, 42671);
+        ctx.call(&first, src);
+        let second = peer_discovery(&ctx, src, 42672);
+        ctx.call(&second, src);
+        assert_eq!(ctx.peers.len(), 1, "the second port is inside the interval");
+
+        // Age the first registration past the interval instead of sleeping.
+        let aged = Instant::now() - ctx.config.peer_admission_interval;
+        for p in ctx.peers.values_mut() {
+            p.registered_at = aged;
+        }
+        ctx.call(&second, src);
+        assert_eq!(ctx.peers.len(), 2, "one interval later it is admitted");
+        assert!(ctx.peers.contains_key(&(src, 42672)));
+    }
+
+    /// The per-source limit is per source: distinct hosts that appear
+    /// together are all admitted.
+    #[tokio::test]
+    async fn test_distinct_sources_are_admitted_together() {
+        let mut ctx = DiscoveryTestCtx::new();
+        for i in 0..5u16 {
+            let src = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0x100 + i);
+            let pkt = peer_discovery(&ctx, src, ctx.config.data_port);
+            ctx.call(&pkt, src);
+        }
+        assert_eq!(ctx.peers.len(), 5);
+    }
+
+    /// L-0040, the table as a whole: spoofed link-local sources pass the
+    /// per-source limit one each, so only a cap bounds the table. Past it a
+    /// new peer is refused before anything is allocated for it, the refusal
+    /// is said once (rate-limited, the rest counted in `suppressed`), and a
+    /// peer already in the table keeps being refreshed.
+    #[tokio::test]
+    async fn test_peer_table_is_capped_and_says_so() {
+        let (logs, guard) = capture_logs();
+        let mut ctx = DiscoveryTestCtx::new();
+        const CAP: usize = 4;
+        ctx.admission.max_peers = CAP;
+        let src = |i: u16| Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0x200 + i);
+
+        const SOURCES: u16 = 40;
+        for i in 0..SOURCES {
+            let pkt = peer_discovery(&ctx, src(i), ctx.config.data_port);
+            ctx.call(&pkt, src(i));
+            while ctx.new_iface_rx.try_recv().is_ok() {}
+        }
+        assert_eq!(ctx.peers.len(), CAP, "the table stops at max_peers");
+        assert_eq!(
+            ctx.next_id.load(Ordering::Relaxed),
+            100 + CAP,
+            "a refused peer gets no interface id"
+        );
+
+        // A known peer is refreshed, never refused.
+        let key = (src(0), ctx.config.data_port);
+        let before = Instant::now() - Duration::from_secs(1);
+        ctx.peers.get_mut(&key).expect("admitted").last_heard = before;
+        let pkt = peer_discovery(&ctx, src(0), ctx.config.data_port);
+        ctx.call(&pkt, src(0));
+        assert!(ctx.peers[&key].last_heard > before);
+
+        drop(guard);
+        let logs = captured(&logs);
+        let lines: Vec<&str> = logs
+            .lines()
+            .filter(|l| l.contains("event=\"AUTO_PEER_REFUSED\""))
+            .collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "36 refusals inside one event interval are one line\n{logs}"
+        );
+        let line = lines[0];
+        for want in [
+            "reason=\"cap\"",
+            "src=fe80::204",
+            "port=42671",
+            "nic=\"eth0\"",
+            "peers=4",
+            "suppressed=0",
+        ] {
+            assert!(line.contains(want), "missing {want} in {line}");
+        }
+        assert_eq!(
+            ctx.admission.suppressed,
+            u64::from(SOURCES) - CAP as u64 - 1
+        );
+    }
+
+    /// The refusal line carries the reason: one source flooding ports is
+    /// refused for `rate`, with the table far below the cap.
+    #[tokio::test]
+    async fn test_rate_refusal_names_its_reason() {
+        let (logs, guard) = capture_logs();
+        let mut ctx = DiscoveryTestCtx::new();
+        let src: Ipv6Addr = "fe80::66".parse().unwrap();
+        for port in [42671u16, 42672] {
+            let pkt = peer_discovery(&ctx, src, port);
+            ctx.call(&pkt, src);
+        }
+        drop(guard);
+        let logs = captured(&logs);
+        let line = logs
+            .lines()
+            .find(|l| l.contains("event=\"AUTO_PEER_REFUSED\""))
+            .unwrap_or_else(|| panic!("no AUTO_PEER_REFUSED\n{logs}"));
+        assert!(line.contains("reason=\"rate\""), "{line}");
+        assert!(line.contains("port=42672"), "{line}");
+        assert!(line.contains("peers=1"), "{line}");
+    }
+
+    /// `peer_admission_interval = 0` turns the per-source limit off; the
+    /// cap still holds.
+    #[tokio::test]
+    async fn test_zero_admission_interval_disables_the_rate_limit() {
+        let mut ctx = DiscoveryTestCtx::new();
+        ctx.admission.interval = Duration::ZERO;
+        ctx.admission.max_peers = 6;
+        let src: Ipv6Addr = "fe80::66".parse().unwrap();
+        for i in 0..10u16 {
+            let pkt = peer_discovery(&ctx, src, 50000 + i);
+            ctx.call(&pkt, src);
+            while ctx.new_iface_rx.try_recv().is_ok() {}
+        }
+        assert_eq!(ctx.peers.len(), 6);
     }
 
     #[tokio::test]

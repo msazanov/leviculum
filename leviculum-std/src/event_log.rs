@@ -694,6 +694,14 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "RNODE_TX_QUEUE_DROP",
         required_keys: &["iface", "frames", "depth", "reason"],
     },
+    // AutoInterface refused a new peer (review finding L-0040): `reason`
+    // is `cap` (the table holds `max_peers`) or `rate` (this source
+    // registered a peer inside `peer_admission_interval`). Rate-limited to
+    // one line per 10 s; `suppressed` counts the refusals in between.
+    EventSchema {
+        name: "AUTO_PEER_REFUSED",
+        required_keys: &["reason", "src", "port", "nic", "peers", "suppressed"],
+    },
     // `lnmsg`, the LXMF messenger. Its emitting sites are in `lnmsg/src/events.rs`
     // rather than in this workspace member: the catalogue is one global list by
     // design (the layer looks a name up here whatever crate raised it), and a
