@@ -654,6 +654,9 @@ Toolchain: Rust 1.97.1
 
 ### Fixed
 
+- An `ifac_size` above 512 bits is a startup error naming the key; it used
+  to panic the daemon on the first packet (L-0038).
+
 - lnpnd proves a client's upload about 3 ms after it arrives over a LAN or
   a local shared instance, inside the receipt timeout a stock Python client
   gives it (leviculum#709). It used to prove in 26 to 50 ms, and a stock

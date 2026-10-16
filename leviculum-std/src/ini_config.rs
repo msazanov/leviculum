@@ -887,12 +887,20 @@ fn apply_interface_key(iface: &mut InterfaceConfig, key: &str, value: &str) -> R
         // its per-type DEFAULT_IFAC_SIZE (Reticulum.py:747-750). Mirror that
         // guard exactly, otherwise a sub-8-bit value would round down to 0
         // bytes and silently disable IFAC where Python keeps it enabled.
+        // Above 512 bits (the 64-byte Ed25519 signature the IFAC is cut
+        // from) is a startup error: we panicked on the first packet's slice,
+        // Python's slice clamps and its interface then drops every packet
+        // (L-0038).
         "ifac_size" => {
-            iface.ifac_size = value
-                .parse::<usize>()
-                .ok()
-                .filter(|&bits| bits >= 8)
-                .map(|bits| bits / 8)
+            const MAX_BITS: usize = leviculum_core::constants::ED25519_SIGNATURE_SIZE * 8;
+            let bits = value.parse::<usize>().ok();
+            if let Some(bits) = bits.filter(|&bits| bits > MAX_BITS) {
+                return Err(format!(
+                    "ifac_size = {bits} is above the {MAX_BITS}-bit maximum (the \
+                     Ed25519 signature the access code is cut from)"
+                ));
+            }
+            iface.ifac_size = bits.filter(|&bits| bits >= 8).map(|bits| bits / 8)
         }
         // BLEInterface (Columba ble-reticulum): the reference's own key
         // names (`ble-reticulum@07d94130`, `BLEInterface.py`, config
@@ -2154,6 +2162,30 @@ mod tests {
         // the interface default size (16 bytes for TCP).
         let ifac = leviculum_core::ifac::IfacConfig::new(iface.networkname.as_deref(), None, 16);
         assert!(ifac.is_ok());
+    }
+
+    #[test]
+    fn test_parse_ifac_size_above_signature_refused() {
+        // L-0038: the IFAC is cut from a 64-byte signature, so more than 512
+        // bits panicked on the first packet. The parser refuses it at startup
+        // and names the key and the bound; 512 itself is accepted.
+        let ini = |bits: &str| {
+            format!(
+                "[interfaces]\n  [[Big IFAC]]\n    type = TCPClientInterface\n    \
+                 target_host = 127.0.0.1\n    target_port = 4242\n    \
+                 network_name = mynet\n    ifac_size = {bits}\n"
+            )
+        };
+        let err = parse_ini(&ini("520")).unwrap_err();
+        assert!(
+            err.contains("ifac_size") && err.contains("512"),
+            "refusal must name the key and the bound: {err}"
+        );
+        let max = parse_ini(&ini("512")).unwrap();
+        assert_eq!(
+            max.interfaces.get("Big IFAC").expect("iface").ifac_size,
+            Some(64)
+        );
     }
 
     #[test]

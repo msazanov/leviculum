@@ -38,7 +38,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::constants::{IDENTITY_KEY_SIZE, IFAC_MIN_SIZE, IFAC_SALT};
+use crate::constants::{ED25519_SIGNATURE_SIZE, IDENTITY_KEY_SIZE, IFAC_MIN_SIZE, IFAC_SALT};
 use crate::crypto::{derive_key, full_hash};
 use crate::identity::Identity;
 
@@ -47,6 +47,8 @@ use crate::identity::Identity;
 pub enum IfacError {
     /// IFAC size is below minimum
     SizeTooSmall,
+    /// IFAC size is above the Ed25519 signature length it is cut from
+    SizeTooLarge,
     /// Packet is too short to contain IFAC
     PacketTooShort,
     /// IFAC verification failed
@@ -61,6 +63,7 @@ impl core::fmt::Display for IfacError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             IfacError::SizeTooSmall => write!(f, "IFAC size below minimum"),
+            IfacError::SizeTooLarge => write!(f, "IFAC size above signature length"),
             IfacError::PacketTooShort => write!(f, "Packet too short for IFAC"),
             IfacError::VerificationFailed => write!(f, "IFAC verification failed"),
             IfacError::MissingIfacFlag => write!(f, "Missing IFAC flag"),
@@ -98,7 +101,8 @@ impl IfacConfig {
     /// # Arguments
     /// * `netname` - Optional network name
     /// * `netkey` - Optional network passphrase
-    /// * `ifac_size` - Size of IFAC in bytes (minimum: IFAC_MIN_SIZE)
+    /// * `ifac_size` - Size of IFAC in bytes (`IFAC_MIN_SIZE` to
+    ///   `ED25519_SIGNATURE_SIZE`, 1 to 64)
     ///
     /// # Returns
     /// * `Ok(IfacConfig)` if at least one of netname/netkey is provided
@@ -111,6 +115,17 @@ impl IfacConfig {
     /// 4. Hash the concatenation
     /// 5. Use HKDF to derive 64-byte key
     /// 6. Create Ed25519 identity from the key
+    ///
+    /// # Size ceiling
+    /// The IFAC is the tail of a 64-byte Ed25519 signature, so a larger
+    /// size has nothing to cut from: `apply_ifac` and `verify_ifac` would
+    /// underflow the slice and panic on the first packet. Python checks no
+    /// ceiling either, but its slice clamps (`sign(raw)[-ifac_size:]`,
+    /// `Transport.py:1056`): the tag it sends is 64 bytes while the receiver
+    /// reads `ifac_size`, so every packet fails verification and the
+    /// interface carries nothing, silently. Refusing here moves that failure
+    /// to startup, where the config validation reports it. No wire byte
+    /// changes, since no size that can work is refused.
     pub fn new(
         netname: Option<&str>,
         netkey: Option<&str>,
@@ -118,6 +133,9 @@ impl IfacConfig {
     ) -> Result<Self, IfacError> {
         if ifac_size < IFAC_MIN_SIZE {
             return Err(IfacError::SizeTooSmall);
+        }
+        if ifac_size > ED25519_SIGNATURE_SIZE {
+            return Err(IfacError::SizeTooLarge);
         }
 
         // Build ifac_origin by concatenating hashes
@@ -320,6 +338,24 @@ mod tests {
     fn test_ifac_size_too_small() {
         let result = IfacConfig::new(Some("test"), None, 0);
         assert_eq!(result.unwrap_err(), IfacError::SizeTooSmall);
+    }
+
+    /// L-0038: the IFAC is the tail of a 64-byte Ed25519 signature, so a
+    /// size above that underflowed the slice in `apply_ifac` and panicked
+    /// on the first packet instead of failing at startup.
+    #[test]
+    fn test_ifac_size_above_signature_refused() {
+        let result = IfacConfig::new(Some("test"), None, ED25519_SIGNATURE_SIZE + 1);
+        assert_eq!(result.unwrap_err(), IfacError::SizeTooLarge);
+    }
+
+    #[test]
+    fn test_ifac_size_at_signature_length_roundtrips() {
+        let config = IfacConfig::new(Some("test"), None, ED25519_SIGNATURE_SIZE).unwrap();
+        let original = vec![0x00, 0x01, 0x02, 0x03, 0x04, 0x05];
+        let masked = config.apply_ifac(&original).unwrap();
+        assert_eq!(masked.len(), original.len() + ED25519_SIGNATURE_SIZE);
+        assert_eq!(config.verify_ifac(&masked).unwrap(), original);
     }
 
     #[test]
