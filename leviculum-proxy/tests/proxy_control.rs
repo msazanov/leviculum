@@ -580,3 +580,113 @@ async fn test_control_socket_max_size() {
 
     let _ = std::fs::remove_file(&sock_path);
 }
+
+/// Spawn the control socket at `sock_path` and wait until a `stats` round
+/// trip succeeds. The answer only comes from the accept loop, which starts
+/// after the socket's mode is set, so a caller may inspect the mode at once.
+async fn spawn_control_ready(sock_path: &std::path::Path) -> Arc<Mutex<RuleEngine>> {
+    let engine = Arc::new(Mutex::new(RuleEngine::new()));
+    let engine_clone = Arc::clone(&engine);
+    let sock = sock_path.to_path_buf();
+    tokio::spawn(async move {
+        let _ = run_control_socket(&sock, engine_clone).await;
+    });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if tokio::net::UnixStream::connect(sock_path).await.is_ok() {
+            let resp = control_cmd(sock_path, "stats").await;
+            assert!(resp.starts_with("OK {"), "Got: {resp}");
+            return engine;
+        }
+        assert!(Instant::now() < deadline, "control socket never came up");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// L-0042 (a): a regular file at the control path is not unlinked. The bind
+/// refuses with an error that names the path, and the file keeps its content.
+#[tokio::test]
+async fn test_control_path_regular_file_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("results.json");
+    std::fs::write(&path, b"measurement data").unwrap();
+
+    let engine = Arc::new(Mutex::new(RuleEngine::new()));
+    let outcome =
+        tokio::time::timeout(Duration::from_secs(2), run_control_socket(&path, engine)).await;
+
+    let err = match outcome {
+        Ok(Err(e)) => e,
+        Ok(Ok(())) => panic!("control socket returned Ok over a regular file"),
+        Err(_) => panic!("control socket bound over a regular file and kept running"),
+    };
+    assert!(
+        err.to_string().contains(&path.display().to_string()),
+        "error does not name the path: {err}"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), b"measurement data");
+}
+
+/// L-0042 (a): a stale socket left by an earlier run is removed and rebound.
+#[tokio::test]
+async fn test_control_path_stale_socket_is_replaced() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ctl.sock");
+    drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
+    assert!(
+        path.exists(),
+        "a dropped listener leaves its socket file behind"
+    );
+
+    spawn_control_ready(&path).await;
+}
+
+/// L-0042 (b): the bound socket is 0600, whatever the umask.
+#[tokio::test]
+async fn test_control_socket_mode_is_0600() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ctl.sock");
+    spawn_control_ready(&path).await;
+
+    let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "control socket mode is {mode:o}");
+}
+
+/// L-0042 (c): a line longer than the bound is refused, not buffered: the
+/// peer gets an error and the connection closes without a newline ever
+/// arriving. A line of exactly the bound is still a command.
+#[tokio::test]
+async fn test_control_line_over_bound_is_refused() {
+    use lora_proxy::control::MAX_CONTROL_LINE;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ctl.sock");
+    spawn_control_ready(&path).await;
+
+    // Exactly the bound: "stats" padded with blanks, which the parser skips.
+    let at_bound = format!("{:<width$}", "stats", width = MAX_CONTROL_LINE);
+    let resp = control_cmd(&path, &at_bound).await;
+    assert!(resp.starts_with("OK {"), "Got: {resp}");
+
+    // One past the bound, no newline, write half left open.
+    let stream = tokio::net::UnixStream::connect(&path).await.unwrap();
+    let (reader, mut writer) = stream.into_split();
+    writer
+        .write_all(&vec![b'x'; MAX_CONTROL_LINE + 1])
+        .await
+        .unwrap();
+    let mut lines = BufReader::new(reader).lines();
+    let resp = tokio::time::timeout(Duration::from_secs(2), lines.next_line())
+        .await
+        .expect("an over-long line is still being buffered")
+        .unwrap()
+        .unwrap_or_default();
+    assert!(resp.starts_with("ERR line exceeds"), "Got: {resp}");
+    let after = tokio::time::timeout(Duration::from_secs(2), lines.next_line())
+        .await
+        .expect("connection still open after an over-long line")
+        .unwrap();
+    assert_eq!(after, None);
+}

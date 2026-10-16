@@ -1,23 +1,41 @@
+use std::io::{Error, ErrorKind};
+use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::Path;
 use std::sync::Arc;
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
 use crate::rules::{Action, Direction, Filter, RuleEngine, RuleSpec, DEFAULT_LOSS_SEED};
 
+/// Longest command line the control socket accepts, newline excluded.
+///
+/// The longest legitimate command is a `rule add` with every option at its
+/// type's widest value: 187 bytes with `count=`, 197 with a 20-digit `rate=`
+/// instead. The longest one any periculum scenario sends today is 83 bytes.
+/// 1024 leaves five times the widest form and still caps what a peer that
+/// never sends a newline can make the proxy buffer.
+pub const MAX_CONTROL_LINE: usize = 1024;
+
 pub async fn run_control_socket(
     path: &Path,
     engine: Arc<Mutex<RuleEngine>>,
 ) -> std::io::Result<()> {
-    let _ = std::fs::remove_file(path);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    remove_stale_socket(path)?;
 
     let listener = UnixListener::bind(path)?;
+    // Any peer that can connect can add or clear fault rules, so only the
+    // owner may. Binding first and narrowing the mode after leaves a window
+    // in which another local user could connect; it is acceptable here
+    // because the proxy is rig tooling started by the operator, the window
+    // closes before the first accept, and the risk this guards against is a
+    // stray process on a shared rig host, not one racing the bind.
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     info!(path = %path.display(), "Control socket listening");
 
     loop {
@@ -31,20 +49,58 @@ pub async fn run_control_socket(
     }
 }
 
+/// Remove a socket an earlier run left at `path`. Anything else there is
+/// refused rather than unlinked: the path comes from the command line, and a
+/// typo must not delete the operator's file.
+fn remove_stale_socket(path: &Path) -> std::io::Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_socket() => std::fs::remove_file(path),
+        Ok(_) => Err(Error::new(
+            ErrorKind::AlreadyExists,
+            format!(
+                "control path {} exists and is not a socket; refusing to remove it",
+                path.display()
+            ),
+        )),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
 async fn handle_connection(
     stream: tokio::net::UnixStream,
     engine: Arc<Mutex<RuleEngine>>,
 ) -> std::io::Result<()> {
     let (reader, mut writer) = stream.into_split();
-    let mut lines = BufReader::new(reader).lines();
+    let mut reader = BufReader::new(reader);
+    let mut buf = Vec::new();
 
-    while let Some(line) = lines.next_line().await? {
-        let response = process_command(&line, &engine).await;
+    loop {
+        buf.clear();
+        // One byte past the bound tells a line of exactly the bound, whose
+        // newline is that byte, from one that is too long.
+        let n = (&mut reader)
+            .take(MAX_CONTROL_LINE as u64 + 1)
+            .read_until(b'\n', &mut buf)
+            .await?;
+        if n == 0 {
+            return Ok(());
+        }
+        if buf.last() == Some(&b'\n') {
+            buf.pop();
+            if buf.last() == Some(&b'\r') {
+                buf.pop();
+            }
+        } else if n > MAX_CONTROL_LINE {
+            let response = format!("ERR line exceeds {MAX_CONTROL_LINE} bytes\n");
+            writer.write_all(response.as_bytes()).await?;
+            return Ok(());
+        }
+        let line = std::str::from_utf8(&buf).map_err(|e| Error::new(ErrorKind::InvalidData, e))?;
+        let response = process_command(line, &engine).await;
         writer.write_all(response.as_bytes()).await?;
         writer.write_all(b"\n").await?;
     }
-
-    Ok(())
 }
 
 async fn process_command(line: &str, engine: &Arc<Mutex<RuleEngine>>) -> String {
