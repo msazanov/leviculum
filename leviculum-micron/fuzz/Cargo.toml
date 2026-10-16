@@ -1,0 +1,36 @@
+# Fuzz harness for the micron (.mu) markup parser. Detached from the parent
+# workspace (own `[workspace]` table) because it builds only on nightly with
+# libFuzzer/ASan and is excluded from `just standard`. Build/run with the glibc
+# host target, not the workspace musl default:
+#   cargo +nightly fuzz run <target> --target x86_64-unknown-linux-gnu
+#
+# Separate from `leviculum-core/fuzz/` and `leviculum-std/fuzz/` because the
+# parser under test lives in its own crate, and the markup it reads is a remote
+# node's page: lnomad hands whatever a peer served straight to `parse`.
+[package]
+name = "leviculum-micron-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.leviculum-micron]
+path = ".."
+
+# Detach from the repo workspace: nightly-only, not a workspace member.
+[workspace]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "micron_parse"
+path = "fuzz_targets/micron_parse.rs"
+test = false
+doc = false
+bench = false

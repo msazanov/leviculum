@@ -40,7 +40,7 @@ The msgpack readers in `src/msgpack.rs` (including the recursive
 ## Run them
 
 ```sh
-just fuzz                    # every target in both fuzz crates, 60 s each
+just fuzz                    # every target in every fuzz crate, 60 s each
 just fuzz hdlc_deframe       # one target
 just fuzz --seconds 900      # the budget a scheduled run wants
 just fuzz-nightly            # the scheduled run: FUZZ_SECS (120 s) per target

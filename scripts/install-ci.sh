@@ -79,11 +79,12 @@ fi
 # wire-parser fuzz targets (`just fuzz`, `just fuzz-nightly`, `just
 # fuzz-regress`, scripts/run-fuzz.sh, Codeberg #290 and #23).
 #
-# WHERE THE TARGETS ARE: eight of them, in two crates. Seven under
+# WHERE THE TARGETS ARE: nine of them, in three crates. Seven under
 # leviculum-core/fuzz (packet_unpack, announce_from_packet, discovery_announce,
-# kiss_deframe, hdlc_deframe, ifac_verify, resource_advertisement_unpack) and
-# one under leviculum-std/fuzz (sam_parse, the I2P SAM bridge). One binary and
-# one toolchain serve both directories, so they get ONE note here: until
+# kiss_deframe, hdlc_deframe, ifac_verify, resource_advertisement_unpack), one
+# under leviculum-std/fuzz (sam_parse, the I2P SAM bridge) and one under
+# leviculum-micron/fuzz (micron_parse, the page markup lnomad renders). One
+# binary and one toolchain serve every directory, so they get ONE note here: until
 # 2026-09-27 #290 and #23 each carried their own `command -v cargo-fuzz`
 # block, and a host without the tool printed the same missing dependency twice
 # with two different hints.
@@ -120,7 +121,8 @@ if ! command -v cargo-fuzz >/dev/null 2>&1; then
     echo "[install-ci] Note: optional test dependency 'cargo-fuzz' not found"
     echo "[install-ci] Hint: cargo install cargo-fuzz && rustup toolchain install nightly"
     echo "[install-ci]       (no Debian package; needed for 'just fuzz' over"
-    echo "[install-ci]        leviculum-core/fuzz and leviculum-std/fuzz, and"
+    echo "[install-ci]        leviculum-core/fuzz, leviculum-std/fuzz and"
+    echo "[install-ci]        leviculum-micron/fuzz, and"
     echo "[install-ci]        'just fuzz-selftest' / 'just fuzz-regress' skip"
     echo "[install-ci]        without it -- see docs/src/development-testing.md)"
 fi

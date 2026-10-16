@@ -35,7 +35,8 @@ system packages must be installed (all apt-installable on Debian):
   --ignored`). Enable the bridge with `sam.enabled = true` in
   `/etc/i2pd/i2pd.conf` and start the `i2pd` service.
 - **cargo-fuzz** + **nightly** (optional) — drive the wire-format parser fuzz
-  harness under `leviculum-core/fuzz` and `leviculum-std/fuzz` (see [Fuzzing
+  harness under `leviculum-core/fuzz`, `leviculum-std/fuzz` and
+  `leviculum-micron/fuzz` (see [Fuzzing
   the wire parsers](#fuzzing-the-wire-parsers)). Not part of any tier; install with
   `cargo install cargo-fuzz && rustup toolchain install nightly`.
 - **just**, **cargo**, **flock**, **notify-send** — build/CI plumbing.
@@ -330,17 +331,21 @@ announce/link setup. Requirements and overrides:
 
 The functions that parse UNTRUSTED bytes off the wire (packet, resource
 advertisement, discovery announce app-data, announce field-slicer, IFAC,
-HDLC/KISS deframers, I2P SAM reply lines) have a coverage-guided fuzz harness
+HDLC/KISS deframers, I2P SAM reply lines, micron page markup) have a coverage-guided fuzz harness
 (cargo-fuzz / libFuzzer). A parser that panics, overflows, hangs, or OOMs on
 malformed input is a remote DoS, so each target asserts graceful `Err`/`None`.
 
-There are two detached fuzz crates, one per library crate that owns a parser:
+There are three detached fuzz crates, one per library crate that owns a parser:
 
 - `leviculum-core/fuzz` — `packet_unpack`, `resource_advertisement_unpack`,
   `discovery_announce`, `announce_from_packet`, `ifac_verify`, `hdlc_deframe`,
   `kiss_deframe`.
 - `leviculum-std/fuzz` — `sam_parse` (the I2P SAM reply-line parser and the
   base64/destination decoders it feeds).
+- `leviculum-micron/fuzz` — `micron_parse` (the `.mu` markup parser lnomad
+  feeds a remote node's page to; beyond not panicking it asserts that no
+  control character survives into the document and that every anchor and
+  heading index names a block that exists).
 
 `announce_from_packet` (the `ReceivedAnnounce::from_packet` field-slicer) and
 `sam_parse` were added in Codeberg #108 alongside the #23 targets. Both reach
@@ -349,7 +354,7 @@ crate, so no fuzz-only surface leaks into the normal public API.
 
 ### Running them
 
-`just fuzz` runs every target in both crates; `scripts/run-fuzz.sh` is what it
+`just fuzz` runs every target in every fuzz crate; `scripts/run-fuzz.sh` is what it
 calls. Until Codeberg #290 there was no recipe, no CI step and no schedule, so
 the targets were run by nobody — and three defects found by hand in September
 2026 sit exactly on top of three of them: unbounded msgpack recursion (#263)
