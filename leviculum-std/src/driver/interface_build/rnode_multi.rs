@@ -110,6 +110,10 @@ pub(super) fn build(
                 ))
             },
         )?;
+        let bandwidth = super::rnode_wire_bandwidth(
+            &format!("RNodeMultiInterface subinterface '{}'", sub.name),
+            bandwidth,
+        );
 
         let id = first_id.take().unwrap_or_else(|| {
             InterfaceId(

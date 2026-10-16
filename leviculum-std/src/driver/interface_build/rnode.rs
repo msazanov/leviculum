@@ -70,6 +70,7 @@ pub(super) fn build(
 
     leviculum_core::rnode::validate_config(frequency, bandwidth, tx_power, sf, cr)
         .map_err(|e| Error::Config(format!("RNodeInterface: {}", e)))?;
+    let bandwidth = super::rnode_wire_bandwidth("RNodeInterface", bandwidth);
 
     let st_alock = config.airtime_limit_short.map(|p| (p * 100.0) as u16);
     let lt_alock = resolve_lt_alock(config.airtime_limit_long, frequency);

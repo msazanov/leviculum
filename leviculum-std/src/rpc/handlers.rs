@@ -3844,7 +3844,7 @@ mod tests {
 
     // Codeberg #140: the reported interface type must come from the transport
     // the interface was built over, not from its name. The driver names a
-    // configured RNode `rnode_<idx>` (driver/interface_build/rnode.rs:81) —
+    // configured RNode `rnode_<idx>` (driver/interface_build/rnode.rs:82) —
     // a peer/instance label that matches none of `interface_type`'s name
     // prefixes, so a LoRa radio is reported as the generic "Interface". That
     // is not only a wrong medium column in rnstatus: `itype` also picks the

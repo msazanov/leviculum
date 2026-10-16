@@ -854,10 +854,10 @@ pub fn validate_config(freq: u32, bw: u32, txp: u8, sf: u8, cr: u8) -> Result<()
     if !(FREQ_MIN..=FREQ_MAX).contains(&freq) {
         return Err(ConfigError::FrequencyOutOfRange);
     }
-    // Valid LoRa bandwidths (Hz)
-    match bw {
-        7800 | 10400 | 15600 | 20800 | 31250 | 41700 | 62500 | 125000 | 250000 | 500000 => {}
-        _ => return Err(ConfigError::InvalidBandwidth),
+    // Either spelling of a bandwidth, from the one table the board's
+    // register lookup also reads (L-0007, `sx126x::BANDWIDTH_TABLE`).
+    if crate::sx126x::bandwidth_row(bw).is_none() {
+        return Err(ConfigError::InvalidBandwidth);
     }
     if txp > MAX_TX_POWER {
         return Err(ConfigError::TxPowerOutOfRange);

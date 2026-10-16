@@ -521,19 +521,115 @@ pub const BANDWIDTHS_HZ: [u32; 10] = [
 /// stated — rather than refusing a value that every RNS config file in the
 /// world spells that way.
 pub fn canonical_bandwidth_hz(bw_hz: u32) -> Option<u32> {
-    match bw_hz {
-        7_800 | 7_810 => Some(7_810),
-        10_400 | 10_420 => Some(10_420),
-        15_600 | 15_630 => Some(15_630),
-        20_800 | 20_830 => Some(20_830),
-        31_250 => Some(31_250),
-        41_670 | 41_700 => Some(41_670),
-        62_500 => Some(62_500),
-        125_000 => Some(125_000),
-        250_000 => Some(250_000),
-        500_000 => Some(500_000),
-        _ => None,
-    }
+    bandwidth_row(bw_hz).map(|row| row.sx1262_hz)
+}
+
+/// Map a configured bandwidth onto the spelling an RNode answers, or `None`
+/// for one no LoRa modem offers.
+///
+/// RNode_Firmware programs the bandwidth by threshold and then reports the
+/// one it programmed back from its own table, in the SX127x spelling on both
+/// of its radio drivers (`getSignalBandwidth`, `reference/RNode_Firmware/
+/// sx127x.cpp:397` and `sx126x.cpp:768`; `setBandwidth` reads it back into
+/// `lora_bw`, `Utilities.h:1419`). The host compares that echo for equality,
+/// so an RNode is sent the spelling it will echo. The thresholds are why the
+/// SX1262 spelling must not reach it raw: `sbw <= 7.8E3` is false for 7810,
+/// which an RNode would program as 10.4 kHz.
+pub fn sx127x_bandwidth_hz(bw_hz: u32) -> Option<u32> {
+    bandwidth_row(bw_hz).map(|row| row.sx127x_hz)
+}
+
+/// One physical LoRa bandwidth: its two spellings and the register each
+/// part programs for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BandwidthRow {
+    /// The SX127x spelling Python-RNS and RNode_Firmware use.
+    pub sx127x_hz: u32,
+    /// The SX1262 spelling (datasheet Table 14-47).
+    pub sx1262_hz: u32,
+    /// SX127x `RegModemConfig1` (0x1D) bits 7:4, as
+    /// `reference/RNode_Firmware/sx127x.cpp:414-438` writes them.
+    pub sx127x_reg: u8,
+    /// SX1262 `SetModulationParams` BW byte (datasheet Table 14-47).
+    pub sx1262_code: u8,
+}
+
+/// The one bandwidth table. Every lookup the host and the board make reads
+/// it: [`canonical_bandwidth_hz`], [`sx127x_bandwidth_hz`],
+/// [`bandwidth_code`], [`bandwidth_hz_of_code`], and through them
+/// `rnode::validate_config` and the firmware's `from_wire_config`
+/// (L-0007). Five rows carry two spellings of one register; the difference,
+/// at most 30 Hz, is below what either part resolves.
+pub const BANDWIDTH_TABLE: [BandwidthRow; 10] = [
+    BandwidthRow {
+        sx127x_hz: 7_800,
+        sx1262_hz: 7_810,
+        sx127x_reg: 0x0,
+        sx1262_code: 0x00,
+    },
+    BandwidthRow {
+        sx127x_hz: 10_400,
+        sx1262_hz: 10_420,
+        sx127x_reg: 0x1,
+        sx1262_code: 0x08,
+    },
+    BandwidthRow {
+        sx127x_hz: 15_600,
+        sx1262_hz: 15_630,
+        sx127x_reg: 0x2,
+        sx1262_code: 0x01,
+    },
+    BandwidthRow {
+        sx127x_hz: 20_800,
+        sx1262_hz: 20_830,
+        sx127x_reg: 0x3,
+        sx1262_code: 0x09,
+    },
+    BandwidthRow {
+        sx127x_hz: 31_250,
+        sx1262_hz: 31_250,
+        sx127x_reg: 0x4,
+        sx1262_code: 0x02,
+    },
+    BandwidthRow {
+        sx127x_hz: 41_700,
+        sx1262_hz: 41_670,
+        sx127x_reg: 0x5,
+        sx1262_code: 0x0A,
+    },
+    BandwidthRow {
+        sx127x_hz: 62_500,
+        sx1262_hz: 62_500,
+        sx127x_reg: 0x6,
+        sx1262_code: 0x03,
+    },
+    BandwidthRow {
+        sx127x_hz: 125_000,
+        sx1262_hz: 125_000,
+        sx127x_reg: 0x7,
+        sx1262_code: 0x04,
+    },
+    BandwidthRow {
+        sx127x_hz: 250_000,
+        sx1262_hz: 250_000,
+        sx127x_reg: 0x8,
+        sx1262_code: 0x05,
+    },
+    BandwidthRow {
+        sx127x_hz: 500_000,
+        sx1262_hz: 500_000,
+        sx127x_reg: 0x9,
+        sx1262_code: 0x06,
+    },
+];
+
+/// The row either spelling names, or `None`. Exact matches only: a
+/// tolerance would drift onto the neighbours of a legitimate value.
+pub fn bandwidth_row(bw_hz: u32) -> Option<BandwidthRow> {
+    BANDWIDTH_TABLE
+        .iter()
+        .find(|row| row.sx127x_hz == bw_hz || row.sx1262_hz == bw_hz)
+        .copied()
 }
 
 /// The SX1262 register code for a bandwidth in [`BANDWIDTHS_HZ`]
@@ -544,39 +640,30 @@ pub fn canonical_bandwidth_hz(bw_hz: u32) -> Option<u32> {
 /// a config whose bandwidth has no code is answered Invalid
 /// (`leviculum-nrf/src/usb.rs`, leviculum#413 row 306): `parse_radio_config`
 /// checks only the spreading factor and the coding rate, so this is the
-/// board's one refusal of a bandwidth.
+/// board's one refusal of a bandwidth. The host canonicalises before it
+/// sends (`serial_radio_config`), so only a foreign host reaches the refusal.
 pub const fn bandwidth_code(bw_hz: u32) -> Option<u8> {
-    match bw_hz {
-        7_810 => Some(0x00),
-        10_420 => Some(0x08),
-        15_630 => Some(0x01),
-        20_830 => Some(0x09),
-        31_250 => Some(0x02),
-        41_670 => Some(0x0A),
-        62_500 => Some(0x03),
-        125_000 => Some(0x04),
-        250_000 => Some(0x05),
-        500_000 => Some(0x06),
-        _ => None,
+    let mut i = 0;
+    while i < BANDWIDTH_TABLE.len() {
+        if BANDWIDTH_TABLE[i].sx1262_hz == bw_hz {
+            return Some(BANDWIDTH_TABLE[i].sx1262_code);
+        }
+        i += 1;
     }
+    None
 }
 
 /// The bandwidth in Hz a [`bandwidth_code`] programs, or 0 for a code the
 /// table does not hold.
 pub const fn bandwidth_hz_of_code(code: u8) -> u32 {
-    match code {
-        0x00 => 7_810,
-        0x08 => 10_420,
-        0x01 => 15_630,
-        0x09 => 20_830,
-        0x02 => 31_250,
-        0x0A => 41_670,
-        0x03 => 62_500,
-        0x04 => 125_000,
-        0x05 => 250_000,
-        0x06 => 500_000,
-        _ => 0,
+    let mut i = 0;
+    while i < BANDWIDTH_TABLE.len() {
+        if BANDWIDTH_TABLE[i].sx1262_code == code {
+            return BANDWIDTH_TABLE[i].sx1262_hz;
+        }
+        i += 1;
     }
+    0
 }
 
 // ---------------------------------------------------------------------------
@@ -1669,26 +1756,54 @@ mod tests {
         assert_eq!(canonical_bandwidth_hz(41_700), Some(41_670));
     }
 
-    /// The drift guard L-0007 is about, in the direction that costs a board:
-    /// everything [`crate::rnode::validate_config`] lets through has to have
-    /// an SX1262 register code, or the host is again accepting a bandwidth an
-    /// LNode refuses in silence. Driven over the domain rather than a list,
-    /// so a value added to the validator alone fails here.
-    ///
-    /// The converse does not hold and is not asserted: `validate_config`
-    /// refuses the five SX1262 spellings, which is a loud, named config error
-    /// rather than a silent PHY mismatch, and widening it would have to come
-    /// with the matching RNode-side canonicalisation — an RNode echoes the
-    /// SX127x spelling back and `validate_radio_config` compares the echo for
-    /// equality.
+    /// The drift guard L-0007 is about, both ways: `validate_config` reads
+    /// the same table the register lookups do, so everything it lets through
+    /// has an SX1262 register code and an RNode spelling, and every spelling
+    /// in the table is accepted. Driven over the domain rather than a list,
+    /// so a value added to one side alone fails here.
     #[test]
-    fn everything_the_host_accepts_has_a_register_code() {
+    fn the_host_accepts_exactly_the_bandwidth_table() {
         for bw in (0u32..=600_000).step_by(10) {
-            if crate::rnode::validate_config(868_000_000, bw, 17, 8, 5).is_ok() {
-                assert!(
-                    canonical_bandwidth_hz(bw).is_some(),
-                    "BW{bw} passes validate_config but has no SX1262 register code"
-                );
+            let accepted = crate::rnode::validate_config(868_000_000, bw, 17, 8, 5).is_ok();
+            let code = canonical_bandwidth_hz(bw).and_then(bandwidth_code);
+            assert_eq!(
+                accepted,
+                code.is_some(),
+                "BW{bw}: validate_config and the SX1262 register table disagree"
+            );
+            assert_eq!(accepted, sx127x_bandwidth_hz(bw).is_some(), "BW{bw}");
+        }
+    }
+
+    /// L-0007: five bandwidths have an SX127x and an SX1262 spelling of the
+    /// same register. A config is written for either part, so the host takes
+    /// both; each interface path then sends the spelling its board answers.
+    #[test]
+    fn validate_config_accepts_both_spellings_of_every_bandwidth() {
+        for bw in [
+            7_800u32, 7_810, 10_400, 10_420, 15_600, 15_630, 20_800, 20_830, 31_250, 41_700,
+            41_670, 62_500, 125_000, 250_000, 500_000,
+        ] {
+            assert_eq!(
+                crate::rnode::validate_config(868_000_000, bw, 17, 8, 5),
+                Ok(()),
+                "BW{bw} is a spelling of a LoRa bandwidth"
+            );
+        }
+    }
+
+    /// The table's own invariants: each register appears once per part, the
+    /// SX1262 spellings are [`BANDWIDTHS_HZ`] in order, and the SX127x
+    /// registers count 0..=9 in the order RNode_Firmware's threshold ladder
+    /// assigns them (`reference/RNode_Firmware/sx127x.cpp:414-438`).
+    #[test]
+    fn the_bandwidth_table_is_one_to_one() {
+        for (i, row) in BANDWIDTH_TABLE.iter().enumerate() {
+            assert_eq!(row.sx1262_hz, BANDWIDTHS_HZ[i]);
+            assert_eq!(row.sx127x_reg as usize, i);
+            assert!(row.sx127x_hz.abs_diff(row.sx1262_hz) <= 30, "{row:?}");
+            for other in &BANDWIDTH_TABLE[i + 1..] {
+                assert_ne!(row.sx1262_code, other.sx1262_code);
             }
         }
     }

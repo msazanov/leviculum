@@ -143,9 +143,55 @@ pub(super) fn build_interface(
     }
 }
 
+/// The bandwidth an RNode is sent: the SX127x spelling of the configured
+/// value, which is the one the firmware echoes back and the bring-up compares
+/// for equality (L-0007). `validate_config` accepts both spellings; an SX1262
+/// spelling sent raw would mismatch the echo, and below 10.4 kHz program the
+/// next bandwidth up. A value outside the table is left for `validate_config`
+/// to refuse by name.
+pub(super) fn rnode_wire_bandwidth(name: &str, bandwidth: u32) -> u32 {
+    let wire = leviculum_core::sx126x::sx127x_bandwidth_hz(bandwidth).unwrap_or(bandwidth);
+    if wire != bandwidth {
+        tracing::info!(
+            "{}: bandwidth {} Hz is the SX1262 spelling of the RNode's {} Hz, the same \
+             register on both parts; sending {} Hz, which the RNode echoes",
+            name,
+            bandwidth,
+            wire,
+            wire
+        );
+    }
+    wire
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// L-0007: every spelling an operator may write reaches an RNode as the
+    /// one RNode_Firmware's `getSignalBandwidth` reports for the register it
+    /// programs (`reference/RNode_Firmware/sx126x.cpp:768`, the same values
+    /// in `sx127x.cpp:397`), so the bring-up's equality check holds.
+    #[test]
+    fn an_rnode_is_sent_the_bandwidth_spelling_it_echoes() {
+        const RNODE_ECHOES_HZ: [u32; 10] = [
+            7_800, 10_400, 15_600, 20_800, 31_250, 41_700, 62_500, 125_000, 250_000, 500_000,
+        ];
+        for (sx1262, sx127x) in [
+            (7_810, 7_800),
+            (10_420, 10_400),
+            (15_630, 15_600),
+            (20_830, 20_800),
+            (41_670, 41_700),
+        ] {
+            assert_eq!(rnode_wire_bandwidth("t", sx1262), sx127x);
+            assert_eq!(rnode_wire_bandwidth("t", sx127x), sx127x);
+        }
+        for bw in RNODE_ECHOES_HZ {
+            assert_eq!(rnode_wire_bandwidth("t", bw), bw, "BW{bw} moved");
+        }
+        assert_eq!(rnode_wire_bandwidth("t", 100_000), 100_000);
+    }
 
     /// Owned wiring a test `InterfaceBuildCtx` borrows from.
     struct CtxOwner {
