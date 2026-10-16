@@ -33,7 +33,7 @@ Commit re-validates what could have changed while the build ran
 unlocked: link gone, a transfer raced in, or the link re-keyed (#66) —
 the last returns the retryable `ResourceError::LinkStateChanged` and
 the caller rebuilds once. The std driver calls the three phases itself
-(`leviculum-std/src/driver/mod.rs:3711`).
+(`leviculum-std/src/driver/mod.rs:3679`).
 
 `NodeCore::send_resource` still exists as the composed single call
 (`leviculum-core/src/node/mod.rs:1573`) because no_std and FFI callers
@@ -192,7 +192,7 @@ reads a little above the send table at the same size; the gap is under
 It is recorded here rather than in the issue because this page is where
 a caller looks for it, and because a number that lives only in a tracker
 cannot be cited from the tree: `PROCESSOR_TICK_BUDGET`
-(`leviculum-std/src/driver/processor.rs:181`) is set against this
+(`leviculum-std/src/driver/processor.rs:183`) is set against this
 measurement, and until it was written down the only number behind a
 public constant could not be traced at all.
 
@@ -206,7 +206,7 @@ run behind the async driver expose the phase split; the composed form
 stays for the embedded caller.
 
 **Anything the driver runs inside its event loop.** The loop's
-`dispatch_output` (`leviculum-std/src/driver/mod.rs:5755`) routes
+`dispatch_output` (`leviculum-std/src/driver/mod.rs:5710`) routes
 actions to interfaces and forwards events. Work done there blocks not
 just the lock but interface I/O dispatch — strictly worse than the
 mutex case. The in-loop `/status` responder
@@ -216,14 +216,14 @@ back a `TickOutput`, return.
 
 **Two things the loop's callees may never do.** They may not `.await`,
 and they may not call back into the driver's public async API: those
-methods end in `action_dispatch_tx.send(output).await` on a bounded
-channel that the same loop drains, so a full channel deadlocks the
-node.
+methods wait for room on a bounded channel that the same loop drains
+(`action_dispatch_tx.reserve().await` in `dispatch_committed`), so a
+full channel deadlocks the node.
 
 Those are one rule, not two, and knowing which way round matters when
 you have to enforce it. The second is a consequence of the first: an
 `async fn` called and not awaited builds a future and drops it, sends
-nothing and blocks nothing. The deadlock needs the bounded-channel send
+nothing and blocks nothing. The deadlock needs the bounded-channel wait
 to *complete*, and only `.await` can complete it. So a callee expressed
 as a synchronous `fn` has both prohibitions closed at once, which is
 what the in-driver core processor (#196) is built on — see
@@ -258,7 +258,7 @@ check is worth.
 
 53 of them are on `ReticulumNode` — plain synchronous `pub fn`s that
 open by locking the core, of which `has_path`
-(`leviculum-std/src/driver/mod.rs:3147`) is
+(`leviculum-std/src/driver/mod.rs:3144`) is
 `self.inner.lock_recover().has_path(dest_hash)` and entirely typical.
 The other five are on `PacketSender` and `LinkHandle`, which matters
 more than the count suggests: those are the two handles a callee is
@@ -357,7 +357,7 @@ The emission can. Until #418 the event-log layer wrote each line with
 a blocking `write(2)`, flushed, under a process-global mutex, on the
 thread that emitted it — and the event loop emits while it holds the
 core mutex (`apply_inbound`,
-`leviculum-std/src/driver/mod.rs:4599`). A `write(2)` to a USB disk
+`leviculum-std/src/driver/mod.rs:4554`). A `write(2)` to a USB disk
 under writeback throttling blocks for seconds, so the loop stopped,
 and everything that wanted the core queued behind it. That is why the
 symptom was total silence rather than a missing log line.
@@ -385,7 +385,7 @@ informatively:
 | event | where | says |
 | --- | --- | --- |
 | `ANN_SLOW` | `handle_announce` (`leviculum-core/src/transport.rs:6305`) | announce handling itself took ≥ 100 ms |
-| `CORE_STALL` | `spawn_core_stall_watchdog` (`leviculum-std/src/driver/mod.rs:4400`) | an outside thread waited ≥ 250 ms for the core lock |
+| `CORE_STALL` | `spawn_core_stall_watchdog` (`leviculum-std/src/driver/mod.rs:4355`) | an outside thread waited ≥ 250 ms for the core lock |
 | `EVENT_LOG_WRITE_SLOW` | `writer_loop` (`leviculum-std/src/event_log.rs:1646`) | one batch write to the log file took ≥ 50 ms |
 
 `CORE_STALL` without `ANN_SLOW` means the loop was stopped by

@@ -90,16 +90,11 @@ impl LinkHandle {
             return Err(Error::NotRunning);
         }
 
-        let output = {
+        super::dispatch_committed(&self.action_dispatch_tx, || {
             let mut core = self.inner.lock_recover();
-            core.send_on_link(&self.link_id, data)?
-        };
-
-        self.action_dispatch_tx
-            .send(output)
-            .await
-            .map_err(|_| Error::NotRunning)?;
-        Ok(())
+            Ok(((), core.send_on_link(&self.link_id, data)?))
+        })
+        .await
     }
 
     /// Send data on this link, absorbing pacing delays and busy conditions
@@ -113,31 +108,26 @@ impl LinkHandle {
                 return Err(Error::NotRunning);
             }
 
-            let result = {
+            let result = super::dispatch_committed(&self.action_dispatch_tx, || {
                 let mut core = self.inner.lock_recover();
-                core.send_on_link(&self.link_id, data)
-            };
+                Ok(((), core.send_on_link(&self.link_id, data)?))
+            })
+            .await;
 
             match result {
-                Ok(output) => {
-                    self.action_dispatch_tx
-                        .send(output)
-                        .await
-                        .map_err(|_| Error::NotRunning)?;
-                    return Ok(());
-                }
-                Err(SendError::PacingDelay { ready_at_ms }) => {
+                Ok(()) => return Ok(()),
+                Err(Error::Send(SendError::PacingDelay { ready_at_ms })) => {
                     let now_ms = self.inner.lock_recover().now_ms();
                     let delay = ready_at_ms.saturating_sub(now_ms);
                     if delay > 0 {
                         tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
                     }
                 }
-                Err(SendError::Busy) => {
+                Err(Error::Send(SendError::Busy)) => {
                     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 }
                 Err(other) => {
-                    return Err(Error::Send(other));
+                    return Err(other);
                 }
             }
         }
@@ -148,18 +138,16 @@ impl LinkHandle {
         if self.closed {
             return Ok(());
         }
-        self.closed = true;
-
-        let output = {
+        // Marked closed only once the call returns: an abort while it waits
+        // for room in the dispatch channel leaves the link open in the core,
+        // and the handle has to agree.
+        let result = super::dispatch_committed(&self.action_dispatch_tx, || {
             let mut core = self.inner.lock_recover();
-            core.close_link(&self.link_id)
-        };
-
-        self.action_dispatch_tx
-            .send(output)
-            .await
-            .map_err(|_| Error::NotRunning)?;
-        Ok(())
+            Ok(((), core.close_link(&self.link_id)))
+        })
+        .await;
+        self.closed = true;
+        result
     }
 }
 
@@ -234,6 +222,56 @@ mod tests {
         // Second close is a no-op
         handle.close().await.unwrap();
         assert!(handle.is_closed());
+    }
+
+    /// L-0059: a caller aborted while it waits on a full dispatch channel
+    /// must leave core and channel consistent. Either the abort lands before
+    /// the core moved (link still there, nothing enqueued) or after the
+    /// enqueue (link gone, its close output in the channel). Committing the
+    /// close and then losing the output is the defect: the link is removed
+    /// and LinkClosed plus the LINKCLOSE bytes never reach the event loop.
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_link_handle_close_aborted_on_full_channel_loses_nothing() {
+        let (inner, _, _, _td) = make_node_and_inner();
+        let identity = leviculum_core::Identity::generate(&mut rand_core::OsRng);
+        let signing_key = identity.ed25519_verifying().to_bytes();
+        let dest_hash = leviculum_core::DestinationHash::new([0x42; 16]);
+        let (link_id, _, connect_output) = inner
+            .lock_recover()
+            .connect(dest_hash, &signing_key)
+            .expect("connect");
+        drop(connect_output);
+        assert_eq!(inner.lock_recover().link_count(), 1);
+
+        // A dispatch channel that is already full: the event loop is stalled.
+        let (tx, mut rx) = mpsc::channel::<TickOutput>(1);
+        tx.try_send(TickOutput::empty()).expect("fill the one slot");
+
+        let mut handle = LinkHandle::new(link_id, Arc::clone(&inner), tx);
+        let task = tokio::spawn(async move { handle.close().await });
+        // Let the task run until it parks on the full channel.
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !task.is_finished(),
+            "close must be parked on the full channel"
+        );
+        task.abort();
+        let _ = task.await;
+
+        let link_count = inner.lock_recover().link_count();
+        let mut queued = 0;
+        while rx.try_recv().is_ok() {
+            queued += 1;
+        }
+        // One output is the filler. A second one is the close, if it was
+        // enqueued at all.
+        let close_enqueued = queued == 2;
+        assert!(
+            (link_count == 1 && !close_enqueued) || (link_count == 0 && close_enqueued),
+            "core and dispatch channel disagree: link_count={link_count}, outputs queued={queued}"
+        );
     }
 
     #[tokio::test]

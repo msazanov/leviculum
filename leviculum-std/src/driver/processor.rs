@@ -22,9 +22,10 @@
 //!
 //! * [`CoreProcessor::on_event`] and [`CoreProcessor::on_tick`] are
 //!   synchronous `fn`s. A `.await` in either body does not compile, which
-//!   forecloses the driver's public async API: those methods end in
-//!   `action_dispatch_tx.send(output).await` on a bounded channel the same
-//!   loop drains, and only an `.await` can complete that send.
+//!   forecloses the driver's public async API: those methods wait for room
+//!   on a bounded channel the same loop drains
+//!   (`action_dispatch_tx.reserve().await` in `super::dispatch_committed`),
+//!   and only an `.await` can complete that wait.
 //! * The handle is `&mut StdNodeCore` — the sans-io core, which owns no
 //!   channel to the loop and has no async surface at all. Every type that can
 //!   reach `action_dispatch_tx` ([`super::PacketSender`],
@@ -40,9 +41,10 @@
 //! A processor's own struct may hold anything, and the hole is wider and much
 //! duller than the async API. It is **not** primarily
 //! `futures::executor::block_on` over a smuggled [`super::PacketSender`]: that
-//! sender releases the core lock before its `.await`
-//! (`leviculum-std/src/driver/sender.rs:92-107`), so such a call does not reach
-//! the bounded channel at all. It deadlocks earlier, on the mutex.
+//! sender takes the core lock only after its `.await` has reserved room in
+//! the channel (`leviculum-std/src/driver/sender.rs:92-104`), so whenever the
+//! channel has room, which is nearly always, such a call gets past the
+//! channel and deadlocks on the mutex.
 //!
 //! And no `block_on` is needed to get there. 58 public methods of this crate
 //! open by taking the core lock: 53 on [`super::ReticulumNode`] —

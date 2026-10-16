@@ -2813,7 +2813,7 @@ pub enum TransportError {
     NoPath,
     /// Target interface is pacing, retry no earlier than `ready_at_ms`.
     /// Mirrors `ChannelError::PacingDelay` / `SendError::PacingDelay` so
-    /// async callers (see `driver/stream.rs:127`) can `sleep_until` to
+    /// async callers (see `driver/stream.rs:119`) can `sleep_until` to
     /// the exact ready time instead of polling.
     PacingDelay { ready_at_ms: u64 },
     /// Packet parsing error

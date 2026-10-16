@@ -8,7 +8,7 @@
 //! functions and blocks`.
 //!
 //! Why that error and not a neighbouring one: the deadlock this route
-//! describes needs the driver's `action_dispatch_tx.send(output).await` to
+//! describes needs the driver's `action_dispatch_tx.reserve().await` to
 //! *complete*. Building the future and dropping it sends nothing and blocks
 //! nothing. `.await` is the only construct that can complete it, so E0728 is
 //! the error that closes this route; an E0599 here would only mean the method

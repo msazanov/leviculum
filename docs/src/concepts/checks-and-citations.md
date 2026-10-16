@@ -322,7 +322,7 @@ thing needs no prose written at all.
 identifier proximity. A sentence that attributes a number to a document
 by name carries neither, so it sailed through — and that is not a rare
 shape. `PROCESSOR_TICK_BUDGET`
-(`leviculum-std/src/driver/processor.rs:181`) was justified with "The
+(`leviculum-std/src/driver/processor.rs:183`) was justified with "The
 number comes off `docs/src/concepts/core-lock-budget.md`" and then named
 126.6 ms. The figure occurred exactly once in the whole tree: in that
 comment. The measurement was real — taken in the #196 design pass — but

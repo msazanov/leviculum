@@ -464,11 +464,11 @@ classifies, and seven of the event types LXMF needs, including
 `PacketReceived` and `LinkDataReceived`, are `EventClass::Data` and
 therefore droppable under load. A processor fed from `take_event_receiver`
 "would silently lose inbound messages with nothing underneath to retransmit
-them" (`leviculum-std/src/driver/processor.rs:191-199`, "Where the events
+them" (`leviculum-std/src/driver/processor.rs:193-201`, "Where the events
 come from").
 
 So the messenger must register a `CoreProcessor`
-(`leviculum-std/src/driver/processor.rs:274-302`) on the builder, and the
+(`leviculum-std/src/driver/processor.rs:276-304`) on the builder, and the
 LXMF router lives inside the driver's tick, under the core mutex. That
 carries hard obligations:
 
@@ -481,7 +481,7 @@ carries hard obligations:
   proof-of-work jobs and shutdown are all channel sends
   (`leviculum-lxmf-node/src/processor.rs:15-30`).
 - `PROCESSOR_TICK_BUDGET` is 5 ms per hook call
-  (`leviculum-std/src/driver/processor.rs:181`), reported rather than
+  (`leviculum-std/src/driver/processor.rs:183`), reported rather than
   enforced. Message packing costs about 0.8 ms and unpacking with signature
   verification about 3.2 ms for 1 MiB, per
   [The core lock budget](core-lock-budget.md). `NodeCore::send_resource`

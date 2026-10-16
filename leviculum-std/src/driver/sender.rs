@@ -91,20 +91,16 @@ impl PacketSender {
     /// The truncated packet hash, usable for tracking delivery proofs.
     pub async fn send(&self, data: &[u8]) -> Result<[u8; TRUNCATED_HASHBYTES], Error> {
         let first_hop_timeout_ms = self.first_hop_timeout_ms().await;
-        let (packet_hash, output) = {
+        super::dispatch_committed(&self.action_dispatch_tx, || {
             let mut core = self.inner.lock_recover();
             // Python prices the receipt with the daemon's answer
             // (Packet.py:433-434); the core takes it before the send.
             if let Some(ms) = first_hop_timeout_ms {
                 core.record_shared_instance_first_hop_timeout(&self.dest_hash, ms);
             }
-            core.send_single_packet(&self.dest_hash, data)?
-        };
-        self.action_dispatch_tx
-            .send(output)
-            .await
-            .map_err(|_| Error::NotRunning)?;
-        Ok(packet_hash)
+            Ok(core.send_single_packet(&self.dest_hash, data)?)
+        })
+        .await
     }
 
     /// [`send`](Self::send), additionally reporting the packed wire length of
@@ -120,20 +116,18 @@ impl PacketSender {
         data: &[u8],
     ) -> Result<([u8; TRUNCATED_HASHBYTES], usize), Error> {
         let first_hop_timeout_ms = self.first_hop_timeout_ms().await;
-        let (packet_hash, wire_len, output) = {
+        super::dispatch_committed(&self.action_dispatch_tx, || {
             let mut core = self.inner.lock_recover();
             // Python prices the receipt with the daemon's answer
             // (Packet.py:433-434); the core takes it before the send.
             if let Some(ms) = first_hop_timeout_ms {
                 core.record_shared_instance_first_hop_timeout(&self.dest_hash, ms);
             }
-            core.send_single_packet_measured(&self.dest_hash, data)?
-        };
-        self.action_dispatch_tx
-            .send(output)
-            .await
-            .map_err(|_| Error::NotRunning)?;
-        Ok((packet_hash, wire_len))
+            let (packet_hash, wire_len, output) =
+                core.send_single_packet_measured(&self.dest_hash, data)?;
+            Ok(((packet_hash, wire_len), output))
+        })
+        .await
     }
 }
 

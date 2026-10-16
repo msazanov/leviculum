@@ -2825,19 +2825,16 @@ impl ReticulumNode {
         let first_hop_timeout_ms = self.shared_instance_first_hop_timeout_ms(dest_hash).await;
         // Request link from NodeCore. A refusal by the configured link cap
         // (`max_links`, #388) surfaces as `Error::Link(TableFull)`.
-        let (link_id, _was_routed, output) = {
+        let link_id = dispatch_committed(&self.action_dispatch_tx, || {
             let mut inner = self.inner.lock_recover();
-            inner.connect_with_first_hop_timeout(
+            let (link_id, _was_routed, output) = inner.connect_with_first_hop_timeout(
                 *dest_hash,
                 dest_signing_key,
                 first_hop_timeout_ms,
-            )?
-        };
-        // Send output to event loop for dispatch (backpressure, waits if full)
-        self.action_dispatch_tx
-            .send(output)
-            .await
-            .map_err(|_| Error::NotRunning)?;
+            )?;
+            Ok((link_id, output))
+        })
+        .await?;
 
         Ok(LinkHandle::new(
             link_id,
@@ -3179,15 +3176,11 @@ impl ReticulumNode {
         &self,
         dest_hash: &leviculum_core::DestinationHash,
     ) -> Result<(), Error> {
-        let output = {
+        dispatch_committed(&self.action_dispatch_tx, || {
             let mut inner = self.inner.lock_recover();
-            inner.request_path_unthrottled(dest_hash)
-        };
-        self.action_dispatch_tx
-            .send(output)
-            .await
-            .map_err(|_| Error::NotRunning)?;
-        Ok(())
+            Ok(((), inner.request_path_unthrottled(dest_hash)))
+        })
+        .await
     }
 
     /// [`request_path`](Self::request_path) under the transport's
@@ -3197,15 +3190,11 @@ impl ReticulumNode {
         &self,
         dest_hash: &leviculum_core::DestinationHash,
     ) -> Result<(), Error> {
-        let output = {
+        dispatch_committed(&self.action_dispatch_tx, || {
             let mut inner = self.inner.lock_recover();
-            inner.request_path(dest_hash)
-        };
-        self.action_dispatch_tx
-            .send(output)
-            .await
-            .map_err(|_| Error::NotRunning)?;
-        Ok(())
+            Ok(((), inner.request_path(dest_hash)))
+        })
+        .await
     }
 
     /// Wait until a path to `dest_hash` is known, actively re-issuing a
@@ -3516,16 +3505,14 @@ impl ReticulumNode {
         dest_hash: &leviculum_core::DestinationHash,
         app_data: Option<&[u8]>,
     ) -> Result<(), Error> {
-        let output = self
-            .inner
-            .lock_recover()
-            .announce_destination(dest_hash, app_data)?;
-        // Send output to event loop for dispatch (backpressure, waits if full)
-        self.action_dispatch_tx
-            .send(output)
-            .await
-            .map_err(|_| Error::NotRunning)?;
-        Ok(())
+        dispatch_committed(&self.action_dispatch_tx, || {
+            let output = self
+                .inner
+                .lock_recover()
+                .announce_destination(dest_hash, app_data)?;
+            Ok(((), output))
+        })
+        .await
     }
 
     /// Close a link gracefully
@@ -3535,15 +3522,11 @@ impl ReticulumNode {
     /// # Arguments
     /// * `link_id` - The link ID of the link to close
     pub async fn close_link(&self, link_id: &LinkId) -> Result<(), Error> {
-        let output = {
+        dispatch_committed(&self.action_dispatch_tx, || {
             let mut inner = self.inner.lock_recover();
-            inner.close_link(link_id)
-        };
-        self.action_dispatch_tx
-            .send(output)
-            .await
-            .map_err(|_| Error::NotRunning)?;
-        Ok(())
+            Ok(((), inner.close_link(link_id)))
+        })
+        .await
     }
 
     /// Identify our identity to the link peer.
@@ -3554,15 +3537,11 @@ impl ReticulumNode {
         link_id: &LinkId,
         identity: &leviculum_core::Identity,
     ) -> Result<(), Error> {
-        let output = {
+        dispatch_committed(&self.action_dispatch_tx, || {
             let mut inner = self.inner.lock_recover();
-            inner.identify_link(link_id, identity)?
-        };
-        self.action_dispatch_tx
-            .send(output)
-            .await
-            .map_err(|_| Error::NotRunning)?;
-        Ok(())
+            Ok(((), inner.identify_link(link_id, identity)?))
+        })
+        .await
     }
 
     /// Get the remote identity for a link, if the peer has identified.
@@ -3608,17 +3587,13 @@ impl ReticulumNode {
         data: Option<&[u8]>,
         timeout_ms: Option<u64>,
     ) -> Result<[u8; 16], Error> {
-        let (request_id, output) = {
+        dispatch_committed(&self.action_dispatch_tx, || {
             let mut inner = self.inner.lock_recover();
             inner
                 .send_request(link_id, path, data, timeout_ms)
-                .map_err(Error::Request)?
-        };
-        self.action_dispatch_tx
-            .send(output)
-            .await
-            .map_err(|_| Error::NotRunning)?;
-        Ok(request_id)
+                .map_err(Error::Request)
+        })
+        .await
     }
 
     /// Send a response to a received request.
@@ -3630,17 +3605,14 @@ impl ReticulumNode {
         request_id: &[u8; 16],
         response_data: &[u8],
     ) -> Result<(), Error> {
-        let output = {
+        dispatch_committed(&self.action_dispatch_tx, || {
             let mut inner = self.inner.lock_recover();
-            inner
+            let output = inner
                 .send_response(link_id, request_id, response_data)
-                .map_err(Error::Request)?
-        };
-        self.action_dispatch_tx
-            .send(output)
-            .await
-            .map_err(|_| Error::NotRunning)?;
-        Ok(())
+                .map_err(Error::Request)?;
+            Ok(((), output))
+        })
+        .await
     }
 
     /// Answer a received request with a response Resource, for responses
@@ -3656,19 +3628,17 @@ impl ReticulumNode {
         request_id: &[u8; 16],
         response_data: &[u8],
     ) -> Result<(), Error> {
-        let output = {
-            let mut inner = self.inner.lock_recover();
-            let (_resource_hash, output) = inner
-                .send_response_resource(link_id, request_id, response_data)
-                .map_err(Error::Resource)?;
-            output
-        };
-        self.completions.note_send_began(*link_id);
-        self.action_dispatch_tx
-            .send(output)
-            .await
-            .map_err(|_| Error::NotRunning)?;
-        Ok(())
+        dispatch_committed(&self.action_dispatch_tx, || {
+            let (_resource_hash, output) = {
+                let mut inner = self.inner.lock_recover();
+                inner
+                    .send_response_resource(link_id, request_id, response_data)
+                    .map_err(Error::Resource)?
+            };
+            self.completions.note_send_began(*link_id);
+            Ok(((), output))
+        })
+        .await
     }
 
     /// Send a file-style response to a received request: a response Resource
@@ -3682,19 +3652,17 @@ impl ReticulumNode {
         data: &[u8],
         metadata: &[u8],
     ) -> Result<(), Error> {
-        let output = {
-            let mut inner = self.inner.lock_recover();
-            let (_resource_hash, output) = inner
-                .send_file_response(link_id, request_id, data, metadata)
-                .map_err(Error::Resource)?;
-            output
-        };
-        self.completions.note_send_began(*link_id);
-        self.action_dispatch_tx
-            .send(output)
-            .await
-            .map_err(|_| Error::NotRunning)?;
-        Ok(())
+        dispatch_committed(&self.action_dispatch_tx, || {
+            let (_resource_hash, output) = {
+                let mut inner = self.inner.lock_recover();
+                inner
+                    .send_file_response(link_id, request_id, data, metadata)
+                    .map_err(Error::Resource)?
+            };
+            self.completions.note_send_began(*link_id);
+            Ok(((), output))
+        })
+        .await
     }
 
     // Resource Transfer API
@@ -3726,7 +3694,7 @@ impl ReticulumNode {
         // If the link re-keys mid-build (#66), commit refuses the stale
         // ciphertext with LinkStateChanged; rebuild once against fresh params.
         let mut attempts = 0;
-        let (resource_hash, output) = loop {
+        loop {
             let params = {
                 let inner = self.inner.lock_recover();
                 inner
@@ -3741,25 +3709,27 @@ impl ReticulumNode {
                 &mut rand_core::OsRng,
             )
             .map_err(Error::Resource)?;
-            let committed = {
-                let mut inner = self.inner.lock_recover();
-                inner.commit_resource_send(prepared)
-            };
+            let committed = dispatch_committed(&self.action_dispatch_tx, || {
+                let (resource_hash, output) = {
+                    let mut inner = self.inner.lock_recover();
+                    inner
+                        .commit_resource_send(prepared)
+                        .map_err(Error::Resource)?
+                };
+                self.completions.note_send_began(*link_id);
+                Ok((resource_hash, output))
+            })
+            .await;
             match committed {
-                Ok(pair) => break pair,
-                Err(leviculum_core::resource::ResourceError::LinkStateChanged) if attempts == 0 => {
+                Err(Error::Resource(leviculum_core::resource::ResourceError::LinkStateChanged))
+                    if attempts == 0 =>
+                {
                     attempts += 1;
                     continue;
                 }
-                Err(e) => return Err(Error::Resource(e)),
+                result => return result,
             }
-        };
-        self.completions.note_send_began(*link_id);
-        self.action_dispatch_tx
-            .send(output)
-            .await
-            .map_err(|_| Error::NotRunning)?;
-        Ok(resource_hash)
+        }
     }
 
     /// Set the resource acceptance strategy for a link.
@@ -3782,30 +3752,22 @@ impl ReticulumNode {
     ///
     /// Call this after receiving a `NodeEvent::ResourceAdvertised` event.
     pub async fn accept_resource(&self, link_id: &LinkId) -> Result<(), Error> {
-        let output = {
+        dispatch_committed(&self.action_dispatch_tx, || {
             let mut inner = self.inner.lock_recover();
-            inner.accept_resource(link_id).map_err(Error::Resource)?
-        };
-        self.action_dispatch_tx
-            .send(output)
-            .await
-            .map_err(|_| Error::NotRunning)?;
-        Ok(())
+            Ok(((), inner.accept_resource(link_id).map_err(Error::Resource)?))
+        })
+        .await
     }
 
     /// Reject a pending resource advertisement on a link.
     ///
     /// Call this after receiving a `NodeEvent::ResourceAdvertised` event.
     pub async fn reject_resource(&self, link_id: &LinkId) -> Result<(), Error> {
-        let output = {
+        dispatch_committed(&self.action_dispatch_tx, || {
             let mut inner = self.inner.lock_recover();
-            inner.reject_resource(link_id).map_err(Error::Resource)?
-        };
-        self.action_dispatch_tx
-            .send(output)
-            .await
-            .map_err(|_| Error::NotRunning)?;
-        Ok(())
+            Ok(((), inner.reject_resource(link_id).map_err(Error::Resource)?))
+        })
+        .await
     }
 
     /// Send a single (fire-and-forget) packet to a destination
@@ -3825,20 +3787,16 @@ impl ReticulumNode {
         data: &[u8],
     ) -> Result<[u8; TRUNCATED_HASHBYTES], Error> {
         let first_hop_timeout_ms = self.shared_instance_first_hop_timeout_ms(dest_hash).await;
-        let (packet_hash, output) = {
+        dispatch_committed(&self.action_dispatch_tx, || {
             let mut inner = self.inner.lock_recover();
             // Python prices the receipt with the daemon's answer
             // (Packet.py:433-434); the core takes it before the send.
             if let Some(ms) = first_hop_timeout_ms {
                 inner.record_shared_instance_first_hop_timeout(dest_hash, ms);
             }
-            inner.send_single_packet(dest_hash, data)?
-        };
-        self.action_dispatch_tx
-            .send(output)
-            .await
-            .map_err(|_| Error::NotRunning)?;
-        Ok(packet_hash)
+            Ok(inner.send_single_packet(dest_hash, data)?)
+        })
+        .await
     }
 
     /// Send a delivery proof for a previously received packet, after a
@@ -3849,22 +3807,19 @@ impl ReticulumNode {
         packet_hash: &[u8; 32],
         dest_hash: &DestinationHash,
     ) -> Result<(), Error> {
-        let output = {
+        dispatch_committed(&self.action_dispatch_tx, || {
             let mut inner = self.inner.lock_recover();
-            inner
+            let output = inner
                 .send_proof(packet_hash, dest_hash)
                 .map_err(|e| match e {
                     leviculum_core::transport::TransportError::NoPath => {
                         Error::Send(leviculum_core::SendError::NoPath)
                     }
                     other => Error::Config(format!("proof send failed: {other:?}")),
-                })?
-        };
-        self.action_dispatch_tx
-            .send(output)
-            .await
-            .map_err(|_| Error::NotRunning)?;
-        Ok(())
+                })?;
+            Ok(((), output))
+        })
+        .await
     }
 
     /// Create a PacketSender for a destination
@@ -3956,20 +3911,19 @@ impl ReticulumNode {
         dest_signing_key: &[u8; 32],
     ) -> Result<(LinkHandle, LinkEstablishedFuture), Error> {
         let first_hop_timeout_ms = self.shared_instance_first_hop_timeout_ms(dest_hash).await;
-        let (link_id, _was_routed, output) = {
-            let mut inner = self.inner.lock_recover();
-            inner.connect_with_first_hop_timeout(
-                *dest_hash,
-                dest_signing_key,
-                first_hop_timeout_ms,
-            )?
-        };
-        let established = self.completions.register_link_established(link_id);
-        if self.action_dispatch_tx.send(output).await.is_err() {
-            // The request never left; Drop unregisters the waiter.
-            drop(established);
-            return Err(Error::NotRunning);
-        }
+        let (link_id, established) = dispatch_committed(&self.action_dispatch_tx, || {
+            let (link_id, _was_routed, output) = {
+                let mut inner = self.inner.lock_recover();
+                inner.connect_with_first_hop_timeout(
+                    *dest_hash,
+                    dest_signing_key,
+                    first_hop_timeout_ms,
+                )?
+            };
+            let established = self.completions.register_link_established(link_id);
+            Ok(((link_id, established), output))
+        })
+        .await?;
         Ok((
             LinkHandle::new(
                 link_id,
@@ -4000,7 +3954,7 @@ impl ReticulumNode {
         // Same phased build as send_resource (leviculum#29): CPU work
         // off-lock, one rebuild on a mid-build re-key (#66).
         let mut attempts = 0;
-        let (resource_hash, output) = loop {
+        loop {
             let params = {
                 let inner = self.inner.lock_recover();
                 inner
@@ -4015,28 +3969,30 @@ impl ReticulumNode {
                 &mut rand_core::OsRng,
             )
             .map_err(Error::Resource)?;
-            let committed = {
-                let mut inner = self.inner.lock_recover();
-                inner.commit_resource_send(prepared)
-            };
+            let committed = dispatch_committed(&self.action_dispatch_tx, || {
+                let (resource_hash, output) = {
+                    let mut inner = self.inner.lock_recover();
+                    inner
+                        .commit_resource_send(prepared)
+                        .map_err(Error::Resource)?
+                };
+                self.completions.note_send_began(*link_id);
+                let sent = self
+                    .completions
+                    .register_resource_sent(resource_hash, *link_id);
+                Ok(((resource_hash, sent), output))
+            })
+            .await;
             match committed {
-                Ok(pair) => break pair,
-                Err(leviculum_core::resource::ResourceError::LinkStateChanged) if attempts == 0 => {
+                Err(Error::Resource(leviculum_core::resource::ResourceError::LinkStateChanged))
+                    if attempts == 0 =>
+                {
                     attempts += 1;
                     continue;
                 }
-                Err(e) => return Err(Error::Resource(e)),
+                result => return result,
             }
-        };
-        self.completions.note_send_began(*link_id);
-        let sent = self
-            .completions
-            .register_resource_sent(resource_hash, *link_id);
-        if self.action_dispatch_tx.send(output).await.is_err() {
-            drop(sent);
-            return Err(Error::NotRunning);
         }
-        Ok((resource_hash, sent))
     }
 
     /// [`send_request`](Self::send_request) plus a future for the response.
@@ -4054,20 +4010,19 @@ impl ReticulumNode {
         data: Option<&[u8]>,
         timeout_ms: Option<u64>,
     ) -> Result<([u8; 16], RequestResponseFuture), Error> {
-        let (request_id, output) = {
-            let mut inner = self.inner.lock_recover();
-            inner
-                .send_request(link_id, path, data, timeout_ms)
-                .map_err(Error::Request)?
-        };
-        let response = self
-            .completions
-            .register_request_response(request_id, *link_id);
-        if self.action_dispatch_tx.send(output).await.is_err() {
-            drop(response);
-            return Err(Error::NotRunning);
-        }
-        Ok((request_id, response))
+        dispatch_committed(&self.action_dispatch_tx, || {
+            let (request_id, output) = {
+                let mut inner = self.inner.lock_recover();
+                inner
+                    .send_request(link_id, path, data, timeout_ms)
+                    .map_err(Error::Request)?
+            };
+            let response = self
+                .completions
+                .register_request_response(request_id, *link_id);
+            Ok(((request_id, response), output))
+        })
+        .await
     }
 
     /// Await establishment of a link by id, after the fact.
@@ -6494,6 +6449,41 @@ fn kind_from_interface_type(interface_type: &str) -> leviculum_core::traits::Int
         "LocalInterface" | "LocalServerInterface" | "LocalClientInterface" => InterfaceKind::Local,
         _ => InterfaceKind::Unknown,
     }
+}
+
+/// Commit a core change and hand its [`TickOutput`] to the event loop as one
+/// step a cancelled caller cannot split (L-0059).
+///
+/// Every public async entry that mutates the core goes through here. The
+/// order is reserve, commit, enqueue: `reserve().await` is the only
+/// cancellation point and it comes before `commit` runs, and
+/// [`mpsc::Permit::send`] is synchronous and infallible. A caller aborted or
+/// timed out while it waits for room therefore leaves the core untouched,
+/// and one that got past the reservation has its output in the channel.
+/// Committing first and then awaiting `send(output)` lost the output on such
+/// a cancel while the core kept the change: a receipt armed for a packet
+/// that never left, a link removed whose LINKCLOSE was never sent.
+///
+/// `commit` takes the core lock itself and releases it before returning, so
+/// the lock is never held across an await and each entry's own acquisition
+/// stays visible to the core-lock census. Work that must follow the commit
+/// but precede the dispatch (registering a completion waiter) goes inside
+/// `commit`, after the lock is dropped. A refused commit (`Err`) drops the
+/// reservation and enqueues nothing.
+///
+/// Fails with [`Error::NotRunning`] before `commit` runs when the event loop
+/// is gone or has closed the channel for shutdown.
+pub(crate) async fn dispatch_committed<T>(
+    action_dispatch_tx: &mpsc::Sender<TickOutput>,
+    commit: impl FnOnce() -> Result<(T, TickOutput), Error>,
+) -> Result<T, Error> {
+    let permit = action_dispatch_tx
+        .reserve()
+        .await
+        .map_err(|_| Error::NotRunning)?;
+    let (value, output) = commit()?;
+    permit.send(output);
+    Ok(value)
 }
 
 /// The first hop's timeout toward `dest_hash` as the shared instance
