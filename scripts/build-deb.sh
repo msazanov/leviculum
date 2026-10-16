@@ -21,6 +21,12 @@
 # Usage:
 #   scripts/build-deb.sh amd64
 #   scripts/build-deb.sh arm64
+#   LEVICULUM_ALLOC=system scripts/build-deb.sh amd64
+#
+# lnsd runs on mimalloc, leviculum-cli's default feature (#437, 766).
+# LEVICULUM_ALLOC=system builds the leviculum and leviculum-heapacct packages'
+# lnsd on the libc allocator instead (`--no-default-features`), for a node that
+# has to be compared against the old build; anything else is refused.
 #
 # Expects scripts/deb-stamp.sh to have run. The versions are read from
 # its stamp files rather than derived here, so an amd64 + arm64 pair
@@ -89,9 +95,18 @@ done
     echo "error: .build-id missing — run scripts/deb-stamp.sh first" >&2
     exit 1
 }
+LEVICULUM_ALLOC="${LEVICULUM_ALLOC:-mimalloc}"
+case "$LEVICULUM_ALLOC" in
+mimalloc) alloc_args=() ;;
+system) alloc_args=(--no-default-features) ;;
+*)
+    echo "error: LEVICULUM_ALLOC=${LEVICULUM_ALLOC}; want mimalloc or system" >&2
+    exit 2
+    ;;
+esac
 LEVICULUM_BUILD_ID="$(cat .build-id)"
 export LEVICULUM_BUILD_ID
-echo "[build-deb] ${ARCH} (${TRIPLE}) build-id=${LEVICULUM_BUILD_ID}"
+echo "[build-deb] ${ARCH} (${TRIPLE}) build-id=${LEVICULUM_BUILD_ID} lnsd allocator=${LEVICULUM_ALLOC}"
 
 # Render docs/src/man/*.1.md to roff under target/man/, which the three
 # .deb manifests install from. The Markdown is the single source: mdbook
@@ -126,6 +141,30 @@ for bin in "${BINS[@]}"; do
 done
 "${build_cmd[@]}" --release --target "$TRIPLE" "${bin_args[@]}"
 
+# The allocator is read off the bytes, like the heap-accounting marker below:
+# an arm64 binary cannot be run here. lnsd logs `Allocator: mimalloc` at
+# startup only when it was built on mimalloc, so a package that would ship
+# lnsd on the wrong allocator fails here instead of on a field node a day
+# later, as resident memory nobody can account for.
+mimalloc_marker='Allocator: mimalloc'
+release_dir="$TARGET/$TRIPLE/release"
+if [ "$LEVICULUM_ALLOC" = system ]; then
+    "${build_cmd[@]}" --release --target "$TRIPLE" -p leviculum-cli --bin lnsd --no-default-features
+fi
+require_allocator() {
+    local bin="$release_dir/$1"
+    if [ "$LEVICULUM_ALLOC" = mimalloc ]; then
+        grep -qaF "$mimalloc_marker" "$bin" || {
+            echo "error: $bin is not built on mimalloc (no '$mimalloc_marker')" >&2
+            exit 1
+        }
+    elif grep -qaF "$mimalloc_marker" "$bin"; then
+        echo "error: $bin carries '$mimalloc_marker' under LEVICULUM_ALLOC=system" >&2
+        exit 1
+    fi
+}
+require_allocator lnsd
+
 # One --deb-version per package: the three are versioned independently,
 # so a single shared version string would be wrong for at least two of
 # them.
@@ -145,11 +184,12 @@ done
 # The heap-accounting variant of the leviculum package (Codeberg #437): the
 # same six binaries, with lnsd rebuilt under `--features heap-accounting` so
 # its SIGUSR1 census subtracts MEASURED live bytes instead of the model. The
-# feature puts leviculum_std's CountingAllocator in front of the system
-# allocator, which only counts and forwards every call, so the CPU cost is
-# bounded and fixed: three relaxed atomic adds per allocation and one per
-# free, independent of heap size or uptime (heap_accounting.rs module docs;
-# `heap-gap-bench --alloc-overhead` measures it per allocation).
+# feature puts leviculum_std's counting shim in front of the allocator the
+# plain lnsd runs (LEVICULUM_ALLOC), which only counts and forwards every
+# call, so the CPU cost is bounded and fixed: three relaxed atomic adds per
+# allocation and one per free, independent of heap size or uptime
+# (heap_accounting.rs module docs; `heap-gap-bench --alloc-overhead` measures
+# it per allocation).
 #
 # Only lnsd is rebuilt, in the same target directory so only leviculum-std
 # and leviculum-cli recompile. Cargo uplifts the instrumented binary over
@@ -160,7 +200,6 @@ done
 #
 # lnpnd gets the same treatment for its own heapacct variant (550), below the
 # two lnsd ones, so both plain binaries are saved and put back together.
-release_dir="$TARGET/$TRIPLE/release"
 instrumented_bins=(lnsd lnpnd)
 plain_dir="$(mktemp -d)"
 for bin in "${instrumented_bins[@]}"; do
@@ -202,22 +241,24 @@ require_symtab() {
 # and the startup line exists only in a heap-accounting build.
 heapacct_marker='Heap accounting: on'
 env "${instrumented_env[@]}" "${build_cmd[@]}" --release --target "$TRIPLE" -p leviculum-cli --bin lnsd \
-    --features heap-accounting
+    "${alloc_args[@]}" --features heap-accounting
 require_symtab
 grep -qaF "$heapacct_marker" "$release_dir/lnsd" || {
     echo "error: lnsd built with --features heap-accounting does not carry the feature" >&2
     exit 1
 }
+require_allocator lnsd
 heapacct_version="$(cat .deb-version-leviculum-cli)+heapacct"
 cargo deb -p leviculum-cli --variant heapacct --target "$TRIPLE" --no-build --no-strip \
     --deb-version "$heapacct_version"
 debs+=("$TARGET/debian/leviculum-heapacct_${heapacct_version}_${ARCH}.deb")
 
-# The same instrumented lnsd on mimalloc (508), so the soak node can hold one
-# census against the other and tell whether the allocator is what keeps the
-# freed memory. `--features heap-accounting,alloc-mimalloc` wraps mimalloc in
-# the counting shim; the binary must carry both startup lines.
-mimalloc_marker='Allocator: mimalloc'
+# The same instrumented lnsd on mimalloc whatever LEVICULUM_ALLOC says (508),
+# so the soak node can hold one census against the other and tell whether the
+# allocator is what keeps the freed memory. Under the default it is the same
+# build as leviculum-heapacct, kept because nodes run it under this name.
+# `--features heap-accounting,alloc-mimalloc` wraps mimalloc in the counting
+# shim; the binary must carry both startup lines.
 env "${instrumented_env[@]}" "${build_cmd[@]}" --release --target "$TRIPLE" -p leviculum-cli --bin lnsd \
     --features heap-accounting,alloc-mimalloc
 require_symtab
@@ -250,10 +291,11 @@ debs+=("$TARGET/debian/lnpnd-heapacct_${lnpnd_heapacct_version}_${ARCH}.deb")
 
 restore_plain_bins
 trap - EXIT
-if grep -qaF "$heapacct_marker" "$release_dir/lnsd" || grep -qaF "$mimalloc_marker" "$release_dir/lnsd"; then
+if grep -qaF "$heapacct_marker" "$release_dir/lnsd"; then
     echo "error: the plain lnsd was not restored after the heap-accounting builds" >&2
     exit 1
 fi
+require_allocator lnsd
 if grep -qaF "$heapacct_marker" "$release_dir/lnpnd"; then
     echo "error: the plain lnpnd was not restored after the heap-accounting build" >&2
     exit 1

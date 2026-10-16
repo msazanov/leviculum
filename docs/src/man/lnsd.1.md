@@ -71,7 +71,7 @@ The three configuration directories are tried in that order, matching Python-Ret
 
 The SIGUSR1 dump lists the estimated size of every tracked table, the `=== Total estimated ===` line, the process RSS, and three sections that say where the rest of the memory sits.
 
-`=== Allocator ===` prints glibc's own balance sheet (`mallinfo2`: arena, ordblks, hblks, hblkhd, uordblks, fordblks, keepcost) and the thread count. The shipped musl-static builds run musl's mallocng, which keeps no such totals, so there the section says it is unavailable and only the thread count is measured.
+`=== Allocator ===` prints glibc's own balance sheet (`mallinfo2`: arena, ordblks, hblks, hblkhd, uordblks, fordblks, keepcost) and the thread count. The shipped musl-static builds have no `mallinfo2` and run lnsd on mimalloc rather than the libc allocator, so there the section says it is unavailable and only the thread count is measured. The startup log line `Allocator:` and the `+mimalloc` in `lnsd --version` say which allocator a binary runs.
 
 `=== Mappings ===` buckets the process's anonymous writable mappings by size (under 64 KiB, 64 KiB to 1 MiB, 1 to 8 MiB, 8 to 64 MiB, above) with count and bytes per bucket, then names the ten largest by address. Thread stacks show up as regions of about 2 MiB each, so a growing count in one bucket points at an owner class without a debugger.
 

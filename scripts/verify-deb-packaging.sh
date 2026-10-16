@@ -330,6 +330,26 @@ echo
 check_package leviculum leviculum-cli lnsd lnstest lncp lnstatus lnprobe lnpath
 contains "$CONFFILES" "/etc/reticulum/config" "registers /etc/reticulum/config as a conffile"
 contains "$CONTENTS" "lnsd.service" "ships the lnsd systemd unit"
+# lnsd ships on mimalloc (#437, 766). Read off the packaged bytes rather than
+# run, so an arm64 package is checked from an amd64 host too; the startup
+# line is in the binary only when it was built on mimalloc. LEVICULUM_ALLOC=
+# system is build-deb.sh's knob and inverts the check.
+check_lnsd_allocator() {
+    local deb tmp want="${LEVICULUM_ALLOC:-mimalloc}"
+    deb="$(find_deb leviculum)"
+    [ -n "$deb" ] || return 0
+    tmp="$(mktemp -d)"
+    dpkg-deb -x "$deb" "$tmp"
+    if grep -qaF 'Allocator: mimalloc' "$tmp/usr/bin/lnsd"; then
+        [ "$want" = mimalloc ] && pass "lnsd is built on mimalloc" \
+            || fail "lnsd is built on mimalloc under LEVICULUM_ALLOC=${want}"
+    else
+        [ "$want" = system ] && pass "lnsd is built on the libc allocator (LEVICULUM_ALLOC=system)" \
+            || fail "lnsd is not built on mimalloc (no 'Allocator: mimalloc' in /usr/bin/lnsd)"
+    fi
+    rm -rf "$tmp"
+}
+check_lnsd_allocator
 rm -rf "$CTRL_DIR"
 echo
 

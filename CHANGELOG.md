@@ -400,6 +400,16 @@ Toolchain: Rust 1.97.1
 
 ### Changed
 
+- lnsd holds its memory flat on long-running transport nodes: it runs on the
+  mimalloc allocator instead of musl's mallocng, in the packages and in every
+  build from source (Leviculum#766, refs #437). On a field transport node the
+  memory mallocng kept beside the live heap grew by about 400 MB in a day; on
+  mimalloc it stayed between 103 and 108 MB from 3.5 h to 11 h of uptime.
+  `lnsd --version` ends its version in `+mimalloc` and the startup log says
+  `Allocator: mimalloc`. `cargo build -p leviculum-cli --bin lnsd
+  --no-default-features` builds lnsd on the libc allocator, and
+  `LEVICULUM_ALLOC=system` makes `scripts/build-deb.sh` package that build.
+
 - A link initiator sends the RTT packet once, as Python-RNS does
   (`Link.py:440-442`). It used to resend it up to five times at ten-second
   intervals until anything came back on the link. A Python responder runs its

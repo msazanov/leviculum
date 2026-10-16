@@ -24,10 +24,11 @@
 //! and produces the same group layout as one without it. What it adds is two relaxed atomics per call —
 //! `heap-gap-bench --alloc-overhead` measures what that costs.
 //!
-//! Changing the allocator is a separate, deliberate experiment (508): the
-//! `alloc-mimalloc` lnsd puts [`crate::heap_accounting::CountingOver`] in
-//! front of mimalloc, the same counting over a different allocator, so its
-//! census compares with this one's.
+//! Changing the allocator was a separate, deliberate experiment (508), and
+//! its answer is now lnsd's default (766): the `alloc-mimalloc` lnsd puts
+//! [`crate::heap_accounting::CountingOver`] in front of mimalloc, the same
+//! counting over a different allocator, so its census compares with that of
+//! an lnsd built without the feature, which counts over the libc allocator.
 //!
 //! # Users
 //!

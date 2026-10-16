@@ -9,9 +9,9 @@
 //! three sections are the measurements that tell the two apart:
 //!
 //! * `=== Allocator ===` is the allocator's own balance sheet (glibc
-//!   `mallinfo2()`), plus the thread count. musl's mallocng, which the
-//!   shipped musl-static builds run, has no such call, and the section says
-//!   so instead of printing zeros.
+//!   `mallinfo2()`), plus the thread count. musl has no such call, and the
+//!   shipped musl-static lnsd runs mimalloc rather than libc's allocator
+//!   anyway (#437), so there the section says so instead of printing zeros.
 //! * `=== Mappings ===` buckets the anonymous writable regions of
 //!   `/proc/self/maps` by size. Allocator arenas, large mmapped allocations
 //!   and thread stacks each land in a recognisable size class, and the ten
@@ -229,7 +229,7 @@ pub fn render_allocator(view: Option<AllocatorView>, threads: Option<u64>) -> St
             let _ = writeln!(out, "=== Allocator: no mallinfo2 on this libc ===");
             let _ = writeln!(
                 out,
-                "allocator: unavailable (musl mallocng keeps no totals; read the Mappings section)"
+                "allocator: unavailable (no libc totals to read; read the Mappings section)"
             );
         }
     }

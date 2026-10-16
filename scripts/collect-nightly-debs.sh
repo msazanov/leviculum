@@ -26,8 +26,8 @@
 #
 # Runs in debian:bookworm-slim in .woodpecker/nightly.yml, so it uses only
 # what that image has plus the git the step apt-installs: bash, coreutils
-# (cat/cp/head/ls/mkdir/rm/sha256sum), sed, tar, gzip, git. No cargo, no
-# python3, no curl, no jq. `scripts/test-collect-nightly-debs.sh` holds
+# (cat/cp/head/ls/mkdir/rm/sha256sum), grep, sed, tar, gzip, git. No cargo,
+# no python3, no curl, no jq. `scripts/test-collect-nightly-debs.sh` holds
 # that list by running this script with a PATH that has nothing else on it.
 #
 # Produces, for each of leviculum, lnomad, lblogd and lnpnd, and each of amd64
@@ -194,6 +194,25 @@ EOF
     rm -rf "$stage"
     (cd "$DIST" && sha256sum "$name.tar.gz" >"$name.tar.gz.sha256")
 }
+
+# lnsd ships on mimalloc (#437, 766), and a tarball is the one artefact no
+# build-deb.sh check reads: it packs whatever lnsd sits in the release
+# directory. The startup line `Allocator: mimalloc` is in the binary only when
+# it was built on mimalloc, so its bytes say which allocator the tarball would
+# ship. LEVICULUM_ALLOC=system is build-deb.sh's knob, honoured here the same
+# way.
+mimalloc_marker='Allocator: mimalloc'
+for triple in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
+    lnsd_bin="$TARGET/$triple/release/lnsd"
+    if [ "${LEVICULUM_ALLOC:-mimalloc}" = system ]; then
+        continue
+    fi
+    grep -qaF "$mimalloc_marker" "$lnsd_bin" || {
+        echo "error: ${lnsd_bin} is not built on mimalloc (no '${mimalloc_marker}')" >&2
+        echo "       build it with scripts/build-deb.sh, or set LEVICULUM_ALLOC=system for both steps" >&2
+        exit 1
+    }
+done
 
 pack_bin_tarball leviculum amd64 x86_64-unknown-linux-musl README.md lnsd lnstest lncp lnstatus lnprobe lnpath
 pack_bin_tarball leviculum arm64 aarch64-unknown-linux-musl README.md lnsd lnstest lncp lnstatus lnprobe lnpath

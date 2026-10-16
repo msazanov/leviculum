@@ -15,7 +15,9 @@
 # So the environment is the assertion. The script runs with a PATH holding
 # ONLY the tools bookworm-slim ships plus the git that step apt-installs:
 #
-#   bash coreutils(cat cp head ls mkdir rm sha256sum) dirname sed tar gzip git
+#   bash coreutils(cat cp head ls mkdir rm sha256sum) dirname grep sed tar gzip git
+#
+# (grep is Essential in Debian, so the slim image has it.)
 #
 # There is no cargo on it, no python3, no curl and no jq, and a symlink farm
 # is how that is proven rather than asserted — a future commit that reaches
@@ -52,7 +54,7 @@ fail() { echo "  FAIL: $*"; failures=$((failures + 1)); }
 #
 # Every tool the script may use, and nothing else. `command -v` resolves
 # against the real PATH here; the farm is what the script under test sees.
-TOOLS=(bash cat cp dirname git gzip head ls mkdir rm sed sha256sum tar)
+TOOLS=(bash cat cp dirname git grep gzip head ls mkdir rm sed sha256sum tar)
 BIN="$WORK/bin"
 mkdir -p "$BIN"
 for t in "${TOOLS[@]}"; do
@@ -145,6 +147,9 @@ EOF
             for b in "${BINS_AMD[@]}"; do
                 echo "real ${b} ${triple}" > "$EXT_TARGET/$triple/release/$b"
             done
+            # The startup line a mimalloc lnsd carries (766); the
+            # lnsd-on-libc case below takes it out again.
+            echo "Allocator: mimalloc" >> "$EXT_TARGET/$triple/release/lnsd"
         done
     fi
 
@@ -177,8 +182,8 @@ EOF
         || { echo "could not build the fixture git repo"; exit 1; }
 }
 
-run_collect() {
-    ( cd "$TREE" && PATH="$BIN" LEVICULUM_BUILD_ID="fixture-build" \
+run_collect() {  # [VAR=value ...] passed to the script's environment
+    ( cd "$TREE" && env PATH="$BIN" LEVICULUM_BUILD_ID="fixture-build" "$@" \
         bash "$TREE/scripts/collect-nightly-debs.sh" ) > "$TREE/../out" 2>&1
     echo $? > "$TREE/../rc"
 }
@@ -243,7 +248,7 @@ lev="$stage/leviculum-nightly-amd64"
 for b in lnsd lnstest lncp lnstatus lnprobe lnpath; do
     [ -f "$lev/bin/$b" ] || fail "leviculum tarball is missing bin/$b"
 done
-got="$(cat "$lev/bin/lnsd" 2>/dev/null)"
+got="$(head -n1 "$lev/bin/lnsd" 2>/dev/null)"
 [ "$got" = "real lnsd x86_64-unknown-linux-musl" ] \
     || fail "leviculum tarball carries '${got}' as bin/lnsd — the tree-local decoy"
 for d in README.md LICENSE THIRD-PARTY-NOTICES CHANGELOG.md; do
@@ -325,6 +330,26 @@ run_collect
 [ "$(rc)" != "0" ] || fail "exit 0 with no rendered book"
 out | grep -q 'build-docs-tarball' \
     || fail "the failure does not name scripts/build-docs-tarball.sh"
+[ "$failures" -eq "$before" ] || dumpout
+
+# --- Case: an lnsd on the libc allocator ----------------------------------
+#
+# 766: lnsd ships on mimalloc, and the tarball packs whatever lnsd the release
+# directory holds. One built without the default feature, on one arch only,
+# must stop the step; under LEVICULUM_ALLOC=system the same tree is collected.
+echo "[case] lnsd-on-libc"
+before=$failures
+setup lnsd-on-libc
+echo "real lnsd aarch64-unknown-linux-musl" \
+    > "$EXT_TARGET/aarch64-unknown-linux-musl/release/lnsd"
+run_collect
+[ "$(rc)" != "0" ] || fail "exit 0 with an arm64 lnsd not built on mimalloc"
+out | grep -q 'aarch64-unknown-linux-musl/release/lnsd is not built on mimalloc' \
+    || fail "the failure does not name the binary and the allocator"
+[ -e "$TREE/dist/leviculum-nightly-arm64.tar.gz" ] \
+    && fail "the libc lnsd was packed into a tarball before the step stopped"
+run_collect LEVICULUM_ALLOC=system
+[ "$(rc)" = "0" ] || fail "exit $(rc) under LEVICULUM_ALLOC=system, expected 0"
 [ "$failures" -eq "$before" ] || dumpout
 
 # --- Case: nobody stamped the target directory ----------------------------

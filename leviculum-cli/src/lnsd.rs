@@ -35,11 +35,11 @@ use leviculum_std::Reticulum;
 static ALLOC: leviculum_std::heap_accounting::CountingAllocator =
     leviculum_std::heap_accounting::CountingAllocator;
 
-/// mimalloc instead of the libc allocator, under the default-off
-/// `alloc-mimalloc` feature (508). Retention, not an uncounted owner, is what
-/// the soak node's census found between live heap and resident set, and the
-/// allocator is one of the two things that can move it; this is the build
-/// that measures whether it does. Counted, in the same shim, when
+/// mimalloc instead of the libc allocator, under the `alloc-mimalloc`
+/// feature, default since 766. Retention, not an uncounted owner, is what the
+/// soak node's census found between live heap and resident set (#437): musl's
+/// mallocng let it grow by about 400 MB a day, mimalloc held it flat (508
+/// built the variant that measured it). Counted, in the same shim, when
 /// `heap-accounting` is on too, so the two variants' censuses compare.
 #[cfg(all(feature = "heap-accounting", feature = "alloc-mimalloc"))]
 #[global_allocator]
@@ -155,8 +155,12 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         info!("Heap accounting: on, SIGUSR1 reports measured live bytes beside the estimate");
         leviculum_std::heap_accounting::configure_sampler_from_env();
     }
+    // Both ways, so a field node's journal names its allocator whichever
+    // build it runs; build-deb.sh reads the mimalloc line off the binary.
     #[cfg(feature = "alloc-mimalloc")]
     info!("Allocator: mimalloc");
+    #[cfg(not(feature = "alloc-mimalloc"))]
+    info!("Allocator: system (libc)");
     if args.service {
         info!("Service mode (-s): logging to stdout for systemd/journald capture");
     }

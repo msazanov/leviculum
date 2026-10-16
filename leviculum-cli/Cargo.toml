@@ -48,10 +48,10 @@ path = "src/lntd.rs"
 name = "auto-crossmachine-test"
 path = "src/bin/auto_crossmachine_test.rs"
 
-# Off by default, and it has to stay that way: a node built without it is
-# byte-identical to one built before the feature existed (verified by
-# sha256 on the musl-static `lnsd`, 2026-09-21). With it, `lnsd` installs
-# `leviculum_std::heap_accounting::CountingAllocator` in front of the system
+# `heap-accounting` is off by default, and it has to stay that way: a node
+# built without it is byte-identical to one built before the feature existed
+# (verified by sha256 on the musl-static `lnsd`, 2026-09-21). With it, `lnsd`
+# puts `leviculum_std::heap_accounting`'s counting shim in front of its
 # allocator and the SIGUSR1 dump gains a MEASURED live-bytes line beside the
 # modelled one — which is what a field node needs, because the modelled
 # figure over-reported live data by 1.92x at the heap bench's table shape and
@@ -59,15 +59,22 @@ path = "src/bin/auto_crossmachine_test.rs"
 #
 #   cargo build --release -p leviculum-cli --bin lnsd --features heap-accounting
 [features]
-default = []
+# mimalloc is the default allocator of `lnsd` (#437, 766): on the soak node
+# musl's mallocng let the gap between live heap and resident set grow by about
+# 400 MB a day under load, where the same daemon on mimalloc held it flat at
+# 103 to 108 MB between 3.5 h and 11 h of uptime. Default rather than
+# package-only, so the integration tests and mvrs run the allocator the field
+# runs. `--no-default-features` builds lnsd on the libc allocator;
+# scripts/build-deb.sh does so under LEVICULUM_ALLOC=system.
+default = ["alloc-mimalloc"]
 # Forwarded so the census gap line in leviculum-std subtracts the measured
 # live bytes; the global allocator itself is installed in src/lnsd.rs.
 heap-accounting = ["leviculum-std/heap-accounting"]
-# Off by default (508). `lnsd` runs on mimalloc instead of the libc
-# allocator: the soak node's resident set was 517 MB over 104 MB live after
-# 3.5 h, the rest kept by musl's mallocng under ~26 000 allocations a second,
-# and this is the build that measures whether another allocator keeps less.
-# With `heap-accounting` as well, the counting shim wraps mimalloc
+# On by default since 766; added default-off in 508 as the experiment that
+# measured it. `lnsd` runs on mimalloc instead of the libc allocator: the soak
+# node's resident set was 517 MB over 104 MB live after 3.5 h, the rest kept
+# by musl's mallocng under ~26 000 allocations a second. With
+# `heap-accounting` as well, the counting shim wraps mimalloc
 # (`heap_accounting::CountingOver`), so the census still reports live bytes.
 alloc-mimalloc = ["dep:mimalloc"]
 
@@ -85,7 +92,7 @@ rand_core.workspace = true
 rmpv.workspace = true
 sha2.workspace = true
 serde_json = "1"
-# `alloc-mimalloc` only; see the feature.
+# `alloc-mimalloc` only, which is a default feature; see it.
 mimalloc = { version = "0.1", optional = true, default-features = false }
 # `lnstest diag` re-serialises the (secret-redacted) Config to TOML for the bundle.
 toml.workspace = true

@@ -61,10 +61,11 @@
 //! # The allocator this measures
 //!
 //! The workspace builds for `x86_64-unknown-linux-musl` by default
-//! (`.cargo/config.toml`), so a plain `cargo build` gives the same mallocng
-//! the field nodes run. The target triple is printed on the header line;
-//! a run on a glibc target measures a different allocator and is not
-//! comparable to a musl one.
+//! (`.cargo/config.toml`), so a plain `cargo build` gives musl's mallocng,
+//! which a field node's lnsd ran until mimalloc became its default (766) and
+//! still runs when built without `alloc-mimalloc`. The target triple is
+//! printed on the header line; a run on a glibc target measures a different
+//! allocator and is not comparable to a musl one.
 //!
 //! A **gnu** build is nonetheless worth having, for one reason: valgrind's
 //! massif works on it and cannot work on the musl-static binary (symbol
@@ -162,7 +163,8 @@ use leviculum_std::heap_accounting::{
 
 /// The measurement itself. It counts, it does not replace: every call is
 /// forwarded to the system allocator with the layout it arrived with, so
-/// this binary runs the same mallocng a daemon does. See
+/// this binary runs the same mallocng a daemon built on the libc allocator
+/// does. See
 /// [`leviculum_std::heap_accounting`] for why the counted number and not the
 /// dump's modelled one is what `rss / live` may be built on.
 #[global_allocator]
