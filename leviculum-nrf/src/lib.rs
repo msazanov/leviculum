@@ -941,6 +941,56 @@ pub fn log_panic_count() {
     );
 }
 
+/// The boot diagnostics every board binary logs once USB is up, in one
+/// place so the bins cannot drift apart again: the RAK4631 bin once logged
+/// neither the reset reason nor the stack trajectory the T114 did (review
+/// finding L-0031), on the board that needed them most. All lines are
+/// critical, so they pass the runtime-drain gate and land in the persistent
+/// tail before any host is attached.
+///
+/// In order: the boot stack watermark, the panic count, how far the
+/// previous boot got and what reset it (both from
+/// [`boot_trace::capture`] at the top of `main`, where POWER was still
+/// ours; after `Softdevice::enable` it belongs to the SD), the boot count
+/// (the half of that question retained RAM cannot answer across a power
+/// loss, #380), the IRQ priorities, the post-mortem block, and last
+/// boot's persistent tail as `[PERSISTENT_LOG]` lines.
+pub fn log_boot_diagnostics(
+    boot: &boot_trace::Captured,
+    boot_count: &boot_count::Recorded,
+    hardfault_pm: Option<&HardfaultPostMortem>,
+    panic_pm: Option<&PanicPostMortem>,
+    persistent_log: Option<log::PersistentLogSnapshot>,
+) {
+    log_stack("boot");
+    log_panic_count();
+    boot_trace::log_prev(boot);
+    log_reset_reason(boot.reset_reason);
+    boot_count::log_banner(boot_count);
+    log_irq_priorities();
+    // Shared boot/query formatter: the same block is retrievable at any
+    // later time via the debug-port query (`p` byte, postmortem_query).
+    log_postmortems(hardfault_pm, panic_pm);
+    if let Some(snap) = persistent_log {
+        // Which lines of last boot's tail are replayed:
+        // `leviculum_boot_trace::tail::replay_lines`.
+        for line in
+            leviculum_boot_trace::tail::replay_lines(&snap.bytes[..snap.len], snap.went_round)
+        {
+            crate::log_critical!("[PERSISTENT_LOG] {}", line);
+        }
+    }
+}
+
+/// The periodic diagnostics every board binary runs: `[HEAP]` every 30 s
+/// and `[STACK]` every 2 s. Shared with [`log_boot_diagnostics`] for the
+/// same reason: a board that does not spawn the stack watermark replays
+/// no stack trajectory after a crash.
+pub fn spawn_diagnostics_tasks(spawner: &embassy_executor::Spawner) {
+    spawner.must_spawn(heap_watermark_task());
+    spawner.must_spawn(stack_watermark_task());
+}
+
 /// Emit the post-mortem block: `[HARDFAULT_PMRT]` and/or `[PANIC_PMRT]`
 /// plus `[PANIC_PMRT_TAIL]`. One formatter for the boot replay of both
 /// BSPs and the debug-port query — capture parsers key on these exact

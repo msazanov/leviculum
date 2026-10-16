@@ -124,31 +124,13 @@ async fn main(spawner: Spawner) {
     log_critical!("leviculum T114 booting");
     log_critical!("[FW_BUILD] {}", leviculum_nrf::FW_BUILD_STAMP);
     log_critical!("[TIME_SOURCE] source={}", leviculum_nrf::time_source_str());
-    leviculum_nrf::log_stack("boot");
-    leviculum_nrf::log_panic_count();
-    // Boot-loop instrumentation: how far did the previous boot get, and
-    // what kind of reset got us here? Both values were captured by
-    // `boot_trace::capture` at the top of main (POWER was still ours
-    // there; after Softdevice::enable it belongs to the SD).
-    leviculum_nrf::boot_trace::log_prev(&boot);
-    leviculum_nrf::log_reset_reason(boot.reset_reason);
-    // ...and how many boots there have been, which is the half of that
-    // question retained RAM cannot answer across a power loss (#380).
-    leviculum_nrf::boot_count::log_banner(&boot_count);
-    leviculum_nrf::log_irq_priorities();
-
-    // Shared boot/query formatter — the same block is retrievable at any
-    // later time via the debug-port query (`p` byte, postmortem_query).
-    leviculum_nrf::log_postmortems(hardfault_pm.as_ref(), panic_pm.as_ref());
-    if let Some(snap) = persistent_log {
-        // Which lines of last boot's tail are replayed:
-        // `leviculum_boot_trace::tail::replay_lines`.
-        for line in
-            leviculum_boot_trace::tail::replay_lines(&snap.bytes[..snap.len], snap.went_round)
-        {
-            log_critical!("[PERSISTENT_LOG] {}", line);
-        }
-    }
+    leviculum_nrf::log_boot_diagnostics(
+        &boot,
+        &boot_count,
+        hardfault_pm.as_ref(),
+        panic_pm.as_ref(),
+        persistent_log,
+    );
 
     // VEXT (P0.21) carries BOTH the TFT chain and the L76K receiver, so
     // it belongs to neither task; the binary raises it here, as the
@@ -267,8 +249,7 @@ async fn main(spawner: Spawner) {
     info!("[BOOT] path_table_initial_len={}", initial_path_len);
     spawner.must_spawn(boot_log_repeater(initial_path_len));
     spawner.must_spawn(fw_build_banner(media_src));
-    spawner.must_spawn(leviculum_nrf::heap_watermark_task());
-    spawner.must_spawn(leviculum_nrf::stack_watermark_task());
+    leviculum_nrf::spawn_diagnostics_tasks(&spawner);
 
     if !identity_loaded {
         use leviculum_core::identity_store::IdentityStore;

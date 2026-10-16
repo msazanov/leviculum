@@ -118,15 +118,15 @@ if id_store.load() => Some(identity)   -> "Identity loaded from flash"
 else                                   -> generate new, then save
 ```
 
-(`leviculum-nrf/src/bin/t114.rs:165-275`,
-`leviculum-nrf/src/bin/rak4631.rs:198-308`. The identity lives on the
+(`leviculum-nrf/src/bin/t114.rs:147-256`,
+`leviculum-nrf/src/bin/rak4631.rs:175-284`. The identity lives on the
 board's `identity_flash_page`, e.g. `0xEC000` on the T114,
 `leviculum-nrf/src/boards/t114.rs:177`.) Flashing new firmware rewrites
 the program region but leaves that page intact, so the node keeps its
 address. You can confirm the loaded identity on the debug port: the boot
 log prints `Identity loaded from flash`
-(`leviculum-nrf/src/bin/t114.rs:231`) and an `[IDENTITY]` line with the
-full hash (`leviculum-nrf/src/bin/t114.rs:610`, and again on the 5 s
+(`leviculum-nrf/src/bin/t114.rs:213`) and an `[IDENTITY]` line with the
+full hash (`leviculum-nrf/src/bin/t114.rs:591`, and again on the 5 s
 banner). Both are on the boot-critical log path, so attaching after the
 board has come up still shows them (Codeberg #234).
 
@@ -180,7 +180,7 @@ If the board enumerates nothing on USB after a flash or a bad image:
    [Structured event logs](../structured-event-logs.md). The same port
    replays the previous boot's HardFault/panic post-mortem and the
    persistent log: look for `[HARDFAULT_PMRT]`, `[PANIC_PMRT]`, and
-   `[PERSISTENT_LOG]` (`leviculum-nrf/src/bin/t114.rs:142-151`;
+   `[PERSISTENT_LOG]` (`leviculum-nrf/src/lib.rs:973-982`;
    `leviculum-nrf/README.md:59-60`).
 4. **Only now force the bootloader manually.** On a T114, double-tap
    RESET to get the UF2 drive regardless of the running image

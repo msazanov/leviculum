@@ -306,17 +306,52 @@ fn the_firmware_still_emits_the_shapes_these_parsers_expect() {
         "the [HEAP] field order or spelling changed in leviculum-nrf/src/lib.rs"
     );
     // The banner format string lives in the shared helper (48f34f6 moved it
-    // out of the BSP bins); each bin must still invoke it at boot.
+    // out of the BSP bins), and so does the whole boot-diagnostics block and
+    // the periodic watermarks: each bin must still invoke both helpers. The
+    // RAK4631 bin once logged no reset reason and spawned no `[STACK]`
+    // watermark (review finding L-0031), so all three bins are checked.
     assert!(
         lib.contains("[PANIC_COUNT] total="),
         "leviculum-nrf/src/lib.rs no longer emits the [PANIC_COUNT] banner"
     );
-    for bin in ["bin/t114.rs", "bin/rak4631.rs"] {
+    let boot_diag = fn_body(&lib, "pub fn log_boot_diagnostics(");
+    for call in [
+        "log_panic_count()",
+        "log_reset_reason(",
+        "log_stack(\"boot\")",
+    ] {
         assert!(
-            nrf_source(bin).contains("log_panic_count()"),
-            "leviculum-nrf/src/{bin} no longer emits the [PANIC_COUNT] banner at boot"
+            boot_diag.contains(call),
+            "log_boot_diagnostics no longer calls {call}"
         );
     }
+    let spawn = fn_body(&lib, "pub fn spawn_diagnostics_tasks(");
+    assert!(
+        spawn.contains("stack_watermark_task()") && spawn.contains("heap_watermark_task()"),
+        "spawn_diagnostics_tasks no longer spawns both watermark tasks"
+    );
+    for bin in ["bin/t114.rs", "bin/rak4631.rs", "bin/solarnode.rs"] {
+        let src = nrf_source(bin);
+        assert!(
+            src.contains("leviculum_nrf::log_boot_diagnostics("),
+            "leviculum-nrf/src/{bin} no longer logs the shared boot diagnostics"
+        );
+        assert!(
+            src.contains("leviculum_nrf::spawn_diagnostics_tasks(&spawner)"),
+            "leviculum-nrf/src/{bin} no longer spawns the shared diagnostics tasks"
+        );
+    }
+}
+
+/// The text of the function whose signature starts with `sig`, up to the
+/// first line that closes it at column 0.
+fn fn_body<'a>(src: &'a str, sig: &str) -> &'a str {
+    let start = src
+        .find(sig)
+        .unwrap_or_else(|| panic!("leviculum-nrf/src/lib.rs has no `{sig}`"));
+    let rest = &src[start..];
+    let end = rest.find("\n}\n").map_or(rest.len(), |i| i + 3);
+    &rest[..end]
 }
 
 /// The uptime stamp of a captured line: its LAST `t=` field.

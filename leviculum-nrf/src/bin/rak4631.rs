@@ -139,36 +139,13 @@ async fn main(spawner: Spawner) {
     // the three settled states treats it like no line at all.
     #[cfg(feature = "gnss")]
     log_critical!("[GNSS_PRESENCE] state=detecting baud=9600");
-    leviculum_nrf::log_stack("boot");
-    leviculum_nrf::log_panic_count();
-    // Boot-loop instrumentation (ledger local-pocket-dark-d66209e): how
-    // far did the previous boot get, and what kind of reset got us here?
-    // Both values come from `boot_trace::capture` at the top of main —
-    // this bin never reported RESETREAS before the breadcrumbs landed.
-    leviculum_nrf::boot_trace::log_prev(&boot);
-    leviculum_nrf::log_reset_reason(boot.reset_reason);
-    // ...and how many boots there have been, which is the half of that
-    // question retained RAM cannot answer across a power loss (#380).
-    leviculum_nrf::boot_count::log_banner(&boot_count);
-    leviculum_nrf::log_irq_priorities();
-
-    // Shared boot/query formatter — the same block is retrievable at any
-    // later time via the debug-port query (`p` byte, postmortem_query).
-    leviculum_nrf::log_postmortems(hardfault_pm.as_ref(), panic_pm.as_ref());
-    // Persistent-log replay from previous boot's last ~2 KiB. Each
-    // line is emitted as a `[PERSISTENT_LOG]`-prefixed critical line
-    // so it lands ahead of the runtime flood. After this block, the
-    // PERSISTENT_TAIL ring is implicitly cleared (the tail mirror's
-    // first write of THIS boot will reset it).
-    if let Some(snap) = persistent_log {
-        // Which lines of last boot's tail are replayed:
-        // `leviculum_boot_trace::tail::replay_lines`.
-        for line in
-            leviculum_boot_trace::tail::replay_lines(&snap.bytes[..snap.len], snap.went_round)
-        {
-            log_critical!("[PERSISTENT_LOG] {}", line);
-        }
-    }
+    leviculum_nrf::log_boot_diagnostics(
+        &boot,
+        &boot_count,
+        hardfault_pm.as_ref(),
+        panic_pm.as_ref(),
+        persistent_log,
+    );
 
     // Power up baseboard peripherals (OLED, GNSS, LIS3DH, NCP5623).
     //
@@ -300,8 +277,7 @@ async fn main(spawner: Spawner) {
     info!("[BOOT] path_table_initial_len={}", initial_path_len);
     spawner.must_spawn(boot_log_repeater(initial_path_len));
     spawner.must_spawn(fw_build_banner(media_src));
-    spawner.must_spawn(leviculum_nrf::heap_watermark_task());
-    spawner.must_spawn(diag_mem_log());
+    leviculum_nrf::spawn_diagnostics_tasks(&spawner);
 
     if !identity_loaded {
         use leviculum_core::identity_store::IdentityStore;
@@ -1411,23 +1387,6 @@ async fn fw_build_banner(media_src: leviculum_nrf::media::Source) {
         leviculum_nrf::media::log_banner(media_src);
         leviculum_nrf::name::log_banner();
         leviculum_nrf::identity::log_banner();
-    }
-}
-
-/// Diagnostic: log stack and heap headroom every 5 s. Lets us see if
-/// the executor-hang under load correlates with stack creeping toward
-/// zero (overflow → HardFault) or heap exhaustion. Logs once per period
-/// regardless; cheap.
-#[embassy_executor::task]
-async fn diag_mem_log() {
-    loop {
-        Timer::after(Duration::from_secs(5)).await;
-        let stack = leviculum_nrf::stack_min_free();
-        let (hu, hf) = leviculum_nrf::heap_stats();
-        info!(
-            "[DIAG_MEM] stack_min_free={} heap_used={} heap_free={}",
-            stack, hu, hf
-        );
     }
 }
 
