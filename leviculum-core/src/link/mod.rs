@@ -1566,6 +1566,11 @@ impl Link {
         self.last_outbound_ms = now_ms;
     }
 
+    /// Clock milliseconds of the last recorded outbound packet, 0 before any.
+    pub fn last_outbound_ms(&self) -> u64 {
+        self.last_outbound_ms
+    }
+
     /// Record that we sent a keepalive (clock milliseconds)
     pub fn record_keepalive_sent(&mut self, now_ms: u64) {
         self.last_keepalive_ms = now_ms;

@@ -548,3 +548,85 @@ fn cancel_ends_only_the_resource_it_names() {
         Some(payload(7, 3000).as_slice())
     );
 }
+
+/// 796: both refusal paths stamp the link's last outbound in clock
+/// milliseconds. `accept_resource` handed `refuse_incoming_resource` the
+/// time in seconds, so a refusal there recorded a last outbound 1000x too
+/// early; `handle_resource_adv` handed it milliseconds.
+#[test]
+fn both_refusal_paths_record_outbound_in_milliseconds() {
+    const REFUSAL_MS: u64 = 3_600_000;
+    let mut pair = establish(1);
+    let receiver_link = *pair.receiver.links.keys().next().expect("receiver link");
+
+    // A waits for the application.
+    pair.receiver
+        .links
+        .get_mut(&receiver_link)
+        .expect("receiver link")
+        .set_resource_strategy(ResourceStrategy::AcceptApp);
+    let (_hash_a, adv_a) = pair.advertise(&payload(7, 3000));
+    let parked = pair
+        .receiver
+        .handle_packet(InterfaceId(pair.r_iface), &adv_a);
+    assert!(parked
+        .events
+        .iter()
+        .any(|e| matches!(e, NodeEvent::ResourceAdvertised { .. })));
+
+    // The link's one slot fills meanwhile. No wire sequence does that
+    // today: a link with a parked advertisement ignores every other one,
+    // so the slot is filled by hand, with a transfer built from A's own
+    // advertisement.
+    let receiver = &mut pair.receiver;
+    let link = receiver.links.get_mut(&receiver_link).expect("link");
+    let adv = link.pending_resource_adv().expect("parked").clone();
+    let (filler, _req) = crate::resource::incoming::IncomingResource::from_advertisement(
+        &adv,
+        link.mdu(),
+        crate::resource::resource_sdu(link.negotiated_mtu()),
+        TEST_TIME_MS,
+        receiver.max_incoming_resource_size,
+        receiver.resource_window_policy,
+    )
+    .expect("filler transfer");
+    link.push_incoming_resource(filler);
+
+    // The application accepts A into the full link: refused.
+    pair.advance(REFUSAL_MS - pair.now_ms());
+    assert!(matches!(
+        pair.receiver.accept_resource(&receiver_link),
+        Err(ResourceError::TransferInProgress)
+    ));
+    let link = pair.receiver.links.get(&receiver_link).expect("link");
+    assert_eq!(
+        link.last_outbound_ms(),
+        REFUSAL_MS,
+        "accept_resource's refusal records the clock in milliseconds"
+    );
+
+    // B arrives at the full link: refused on arrival.
+    pair.advance(1_000);
+    pair.park();
+    let (hash_b, adv_b) = pair.advertise(&payload(11, 2000));
+    let answer_b = action_data(
+        &pair
+            .receiver
+            .handle_packet(InterfaceId(pair.r_iface), &adv_b),
+    );
+    assert_eq!(
+        answer_b
+            .iter()
+            .filter(|p| is_context(p, PacketContext::ResourceRcl))
+            .filter(|p| pair.named_resource(p) == Some(hash_b))
+            .count(),
+        1,
+        "B is refused (A's refusal may ride along in the same output)"
+    );
+    let link = pair.receiver.links.get(&receiver_link).expect("link");
+    assert_eq!(
+        link.last_outbound_ms(),
+        REFUSAL_MS + 1_000,
+        "handle_resource_adv's refusal records the clock in milliseconds"
+    );
+}

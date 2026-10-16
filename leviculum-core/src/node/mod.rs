@@ -2331,12 +2331,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // `handle_resource_adv` refuses one it has no room for, so the
         // sender is not left advertising into silence (Codeberg #657).
         if link.incoming_resource_count() >= self.max_incoming_resources_per_link {
-            self.refuse_incoming_resource(
-                link_id,
-                &resource_hash,
-                now_ms / crate::constants::MS_PER_SECOND,
-                "incoming_full",
-            );
+            self.refuse_incoming_resource(link_id, &resource_hash, now_ms, "incoming_full");
             return Err(ResourceError::TransferInProgress);
         }
         let link_mdu = link.mdu();
