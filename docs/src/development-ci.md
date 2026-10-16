@@ -14,11 +14,29 @@ pipelines are below them.
 |------|------|---------|--------|------------|
 | 0 | `fast` | pre-push hook | ~3 min | fmt + clippy (host + nrf firmware workspace, both BSPs) + the firmware stack-frame gate + rustdoc gate + the [third-party notice guard](concepts/licensing-and-notices.md) + the pre-push guard selftest + workspace lib tests |
 | 1 | `standard` | on demand: `just standard`, once per batch | ~15 min (first run: 20-40 min cold compile) | Tier 0 + every integration-test target in the tree (the ones needing a flag or their own feature set by name, the rest computed by `scripts/standard-integ.sh`) + TCP-hub endurance smoke soak (see [Soak and endurance](soak-and-endurance.md)) + the `status_parity` two-daemon suite + the ignored-test census |
-| 2 | `extensive` | on demand: `systemctl --user start leviculum-ci-tier2.service` | ~30-90 min | Tier 1 + the periculum `conformance/` and `regression/` corpora (docker) |
-| 3 | `nightly` | systemd timer 02:00 daily | ~2-6h | Tier 2 + LNode flash-from-HEAD + the periculum `hardware/` corpus |
+| 2 | `extensive` | on demand: `systemctl --user start leviculum-ci-tier2.service`; scheduled as the tier-2 nightly, 03:37 daily | ~30-90 min | Tier 1 + the periculum `conformance/` and `regression/` corpora (docker) |
+| 3 | `nightly` (the recipe, not the nightly run) | the rig's hourly cadence of targeted hardware scenarios, plus a full run before a release | ~2-6h full | Tier 2 + LNode flash-from-HEAD + the periculum `hardware/` corpus |
 
-Each tier runs everything from the lower tiers as well, so a green
-nightly proves the entire stack.
+Each tier runs everything from the lower tiers as well. Three different
+things are called "nightly", and each proves something different:
+
+- **The tier-2 nightly** (03:37 daily on the nightly host, a fresh clone of
+  `origin/master`) runs `just complete`, `just fuzz-nightly` and the
+  periculum `conformance/` and `regression/` corpora, whose nodes run in
+  containers on their own network namespaces. A green or attributed night
+  proves the whole workspace test suite, the fuzz targets and the two
+  docker corpora on the commit it tested, and signs a
+  `refs/nightly/green/*` ref for it. It flashes no board and radiates
+  nothing.
+- **The published build** is the forge's `nightly.yml`, on its cron at
+  04:00 UTC (06:00 CEST) or fired early by the green ref (see [What fires
+  the publish](#what-fires-the-publish)). It proves that `just ci-gate`
+  passes and that the .debs and the lnflash bundle build, and it publishes
+  only a commit a green ref covers. It runs no corpus.
+- **Tier 3** is the only one that touches radios: the hourly rig cadence
+  of targeted hardware scenarios, and the full `hardware/` corpus
+  (`just nightly`) before a release. Only a full run proves the stack on
+  real boards; an hourly cell proves its own scenario.
 
 `just guards` is not in this table because it is not a tier: it is the
 coder-side subset of Tier 0's sub-ten-second guards and censuses (~20 s warm),

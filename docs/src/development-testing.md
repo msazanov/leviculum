@@ -10,8 +10,9 @@ automation details.
 - **Per batch of work**: run `just standard` (Tier 1) yourself. Nothing
   starts it for you.
 - **Pushing**: Tier 0 runs automatically and blocks on fail.
-- **Daily**: Tier 3 (02:00) runs via systemd. Tier 2 is on demand —
-  nothing starts it for you.
+- **Daily**: the tier-2 nightly (03:37) runs on the nightly host over a
+  fresh clone of `origin/master`. Tier 3 has no daily run: the rig runs
+  targeted hardware scenarios hourly and the full corpus before a release.
 - **Suite overview**: `just status`.
 
 ## Prerequisites (system tools)
@@ -52,11 +53,20 @@ up from scratch.
 |------|-----------------------------------|-----------------|-----------|-------|
 | 0    | on `git push` (hook)              | `just fast`     | ~3 min    | fmt + clippy + workspace lib tests |
 | 1    | on demand, once per batch[^t1]     | `just standard` | ~15 min (40 min cold[^cold]) | Tier 0 + core/tests + ffi + proxy + rnsd_interop |
-| 2    | on demand: `systemctl --user start leviculum-ci-tier2.service`[^t2] | `just extensive` | 30–90 min | Tier 1 + periculum `conformance/` + `regression/` |
-| 3    | 02:00 daily (systemd timer)       | `just nightly`  | 2–6 h     | Tier 2 + LNode flash-from-HEAD + periculum `hardware/` |
+| 2    | on demand: `systemctl --user start leviculum-ci-tier2.service`[^t2]; the tier-2 nightly, 03:37 daily | `just extensive` | 30–90 min | Tier 1 + periculum `conformance/` + `regression/` |
+| 3    | hourly targeted rig scenarios; the full corpus before a release | `just nightly`  | 2–6 h full | Tier 2 + LNode flash-from-HEAD + periculum `hardware/` |
 
-Each tier includes every lower tier, so a green nightly proves the
-whole stack.
+Each tier includes every lower tier. "Nightly" names three things; they
+prove different things. The tier-2 nightly (03:37) runs `just complete`,
+`just fuzz-nightly` and the `conformance/` and `regression/` corpora in
+containers on their own network namespaces: green, it proves the
+workspace, the fuzz targets and the docker corpora on the commit it
+tested, and nothing about radios. The published build is the forge's
+`nightly.yml` (cron 04:00 UTC, 06:00 CEST, or fired by the night's green
+ref): it proves `just ci-gate` and the package builds, and publishes only
+a commit a green night covers. Tier 3, despite its recipe being called
+`just nightly`, is the hourly rig cadence plus a full hardware run before
+a release, and only that full run speaks for the stack on real boards.
 
 `just guards` is not a fifth tier: it is the coder pass's standing gate —
 run beside `cargo fmt`, `cargo clippy -D warnings` and
