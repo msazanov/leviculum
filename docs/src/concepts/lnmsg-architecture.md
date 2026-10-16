@@ -78,7 +78,7 @@ effect interpreter `run_effects` at `:5783-5889`. `update` mutates rather
 than returning a new model, and effects are plain data, not closures. That
 combination is what makes the 245 in-file unit tests possible: build a
 `Model`, feed a synthetic `AppEvent::Key`, assert on the model and on the
-returned `Vec<Effect>`, with no IO anywhere (`lnomad/src/tui.rs:6228`
+returned `Vec<Effect>`, with no IO anywhere (`lnomad/src/tui.rs:6268`
 onwards; helpers at `:6238-6251`). The view is tested against
 `ratatui::backend::TestBackend` (`:6232`, `:7055`), and the `--print` path
 has byte-identical golden files (`lnomad/tests/render_golden.rs:18-37`).
@@ -89,13 +89,13 @@ anything else for a messenger, and the answer is yes.
 announces with no user action. The chain is: an announce sink installed
 before the session is shared so nothing is missed at startup
 (`set_announce_sink`, `lnomad/src/fetch.rs:225-227`, wiring comment at
-`lnomad/src/tui.rs:5995-5998`), a non-blocking unbounded send on every
+`lnomad/src/tui.rs:6010-6013`), a non-blocking unbounded send on every
 recorded announce (`note_announce`, `lnomad/src/fetch.rs:369-389`), a
 dedicated background task parked on the shared session in 250 ms lock
-slices (`spawn_discovery`, `lnomad/src/tui.rs:5721-5762`), and a
+slices (`spawn_discovery`, `lnomad/src/tui.rs:5736-5777`), and a
 `tokio::select!` arm that folds the result into the model
-(`lnomad/src/tui.rs:6154-6156`). The main loop has five arms
-(`lnomad/src/tui.rs:6058-6161`), and the timer arm is conditionally enabled
+(`lnomad/src/tui.rs:6169-6171`). The main loop has five arms
+(`lnomad/src/tui.rs:6073-6176`), and the timer arm is conditionally enabled
 (`, if animate` at `:6157`, driven by `needs_tick()` at `:1018-1021`) so an
 idle browser does not wake eight times a second.
 
@@ -104,7 +104,7 @@ idle browser does not wake eight times a second.
 and a binary `identity`. Everything else is RAM. The write path is
 `fs::write` with no atomic rename, no fsync, and errors deliberately
 ignored (`lnomad/src/bookmarks.rs:124-130`, effect handler at
-`lnomad/src/tui.rs:5879-5885`), and load treats corrupt exactly like
+`lnomad/src/tui.rs:5894-5900`), and load treats corrupt exactly like
 missing (`lnomad/src/bookmarks.rs:116-121`). For bookmarks that is a
 defensible trade. For a message store it is data loss.
 
@@ -156,7 +156,7 @@ or URL error (`lnomad/src/main.rs:174`, `:188`, `:222`, `:238`).
 `lnomad` has no settings file at all. `--config` points at the *Reticulum*
 config directory; the `lnomad/` directory holds only data. The theme is
 auto-detected via OSC 11 before raw mode is entered
-(`lnomad/src/tui.rs:5956-5963`) and toggled at runtime with `t`; theme
+(`lnomad/src/tui.rs:5971-5978`) and toggled at runtime with `t`; theme
 colours are hard-coded (`lnomad/src/theme.rs:112-193`).
 
 **The handoff that already exists.** `lnomad` recognises `lxmf@<hash>`
@@ -615,7 +615,7 @@ Three specific things `lnomad` does that must change:
    per keystroke. Lay out the visible window plus a margin, and cache per
    message keyed by `(message_id, width, theme)`.
 3. **The timer must run.** `lnomad` disables its tick when idle
-   (`lnomad/src/tui.rs:6157`). A messenger has relative timestamps, a sync
+   (`lnomad/src/tui.rs:6172`). A messenger has relative timestamps, a sync
    schedule and retry deadlines. A one-second tick when there is anything
    pending, and a slower one otherwise, driven by `next_deadline()`
    (`leviculum-lxmf/src/router.rs:2009`).
