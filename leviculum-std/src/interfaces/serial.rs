@@ -1237,52 +1237,6 @@ pub fn radio_pricing_phy(
     }
 }
 
-/// Run `stty -F <port> low_latency`, reporting failure instead of
-/// swallowing it (L-0023).
-///
-/// Failure modes: stty not spawnable (missing binary), or stty exiting
-/// non-zero (non-Linux stty syntax, nonexistent device, EPERM). The `Err`
-/// carries stty's own stderr so the operator sees its diagnosis.
-fn set_low_latency(port: &str) -> Result<(), String> {
-    match std::process::Command::new("stty")
-        .args(["-F", port, "low_latency"])
-        .output()
-    {
-        Err(e) => Err(format!("stty not runnable: {e}")),
-        Ok(out) if out.status.success() => Ok(()),
-        Ok(out) => Err(format!(
-            "stty exited with {}: {}",
-            out.status,
-            String::from_utf8_lossy(&out.stderr).trim()
-        )),
-    }
-}
-
-/// Whether `port` is a pseudo-terminal, decided by the device it names.
-///
-/// A pty has no `low_latency` flag and moves whatever is written in one read,
-/// so the stty call fails there and the warning about degraded USB CDC-ACM
-/// framing would be wrong (778: every serial cell that runs lnsd on a PTY pair
-/// logged it). The device number decides, through any symlink (a test's
-/// `socat` link, a udev alias): Unix98 pty slaves are character devices with
-/// majors 136 to 143. Only when the path cannot be stat'ed does the
-/// `/dev/pts/` prefix stand in for it.
-#[cfg(unix)]
-fn is_pty(port: &str) -> bool {
-    use std::os::unix::fs::{FileTypeExt, MetadataExt};
-    match std::fs::metadata(port) {
-        Ok(meta) => {
-            meta.file_type().is_char_device() && (136..=143).contains(&libc::major(meta.rdev()))
-        }
-        Err(_) => port.starts_with("/dev/pts/"),
-    }
-}
-
-#[cfg(not(unix))]
-fn is_pty(_port: &str) -> bool {
-    false
-}
-
 /// Reconnect wrapper for serial port connections.
 ///
 /// Owns channel endpoints across reconnection cycles. On port loss, waits
@@ -1297,45 +1251,11 @@ async fn serial_reconnect_task(
     credit: Option<Arc<Mutex<super::airtime::AirtimeCredit>>>,
 ) {
     let mut has_connected_before = false;
-    // The low-latency warn (or, on a pty, the debug line saying why it is
-    // skipped) fires once per task, not once per reconnect
-    // cycle: the condition (missing stty, non-Linux stty syntax, EPERM on
-    // the device) is static for the process lifetime, and the reconnect
-    // loop ticks every RECONNECT_INTERVAL against a dead port.
-    let mut low_latency_warned = false;
     loop {
-        // Set low_latency mode so USB CDC-ACM traffic moves in full bulk
-        // transfers instead of byte-by-byte. Observed on the T114 rig
-        // (dfc3fb5): without it, HDLC frames trickled in one byte at a time
-        // and the receiver's frame timeout discarded most frames. The mode
-        // is load-bearing for LoRa-over-serial throughput, so a failure to
-        // set it is an operator-visible finding, not a shrug (L-0023).
-        // pyserial OFFERS this as set_low_latency_mode(); Python-RNS never
-        // calls it, so this is rig-driven, not reference parity.
-        if is_pty(&config.port) {
-            if !low_latency_warned {
-                low_latency_warned = true;
-                tracing::debug!(
-                    "Serial interface {}: {} is a pty, which has no low_latency flag; not setting it",
-                    name,
-                    config.port
-                );
-            }
-        } else if let Err(e) = set_low_latency(&config.port) {
-            if !low_latency_warned {
-                low_latency_warned = true;
-                tracing::warn!(
-                    "Serial interface {}: could not set low_latency on {}: {} — \
-                     expect degraded HDLC framing on USB CDC-ACM",
-                    name,
-                    config.port,
-                    e.replace('\n', " ")
-                );
-            }
-        } else {
-            low_latency_warned = false;
-        }
-
+        // No low_latency is set on the port (780). GNU stty has no such
+        // setting, cdc_acm does not consult ASYNC_LOW_LATENCY, and HDLC framing
+        // on the LNodes measured correct without it (serial_link_basic in 776;
+        // rig run 2026-10-09T17-05-24Z, lora_solarnode_lncp_bidir GREEN).
         let builder = tokio_serial::new(&config.port, config.speed)
             .data_bits(config.data_bits)
             .stop_bits(config.stop_bits)
@@ -2409,78 +2329,6 @@ pub(crate) fn parse_stop_bits(n: u8) -> tokio_serial::StopBits {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// L-0023: the stty result carries the diagnosis; discarding it (the
-    /// old `let _ =`) hid every failure of a mode the comment above calls
-    /// load-bearing. A device that cannot exist must yield the error the
-    /// reconnect loop warns with.
-    #[test]
-    fn low_latency_failure_is_reported_not_swallowed() {
-        let err = set_low_latency("/dev/nonexistent-lnode-l0023")
-            .expect_err("a nonexistent device cannot accept low_latency");
-        assert!(
-            err.contains("stty"),
-            "the error must name the failing tool: {err}"
-        );
-    }
-
-    /// 778: the low_latency decision follows the device. USB serial adapters
-    /// are never ptys, by name alone when the device is absent and by device
-    /// number when it is present.
-    #[test]
-    fn pty_classification_by_name() {
-        assert!(is_pty("/dev/pts/0"));
-        assert!(is_pty("/dev/pts/nonexistent-778"));
-        assert!(!is_pty("/dev/ttyACM0"));
-        assert!(!is_pty("/dev/ttyUSB0"));
-        assert!(!is_pty("/dev/nonexistent-778"));
-    }
-
-    /// A real pty slave is a pty, and so is a symlink to one under a name
-    /// that does not look like one, which is how the serial cells and socat
-    /// name their ports. A regular file is not.
-    #[cfg(unix)]
-    #[test]
-    fn pty_classification_by_device() {
-        use std::os::fd::FromRawFd;
-        let mut master: libc::c_int = -1;
-        let mut slave: libc::c_int = -1;
-        // SAFETY: both out-pointers are live locals; null name, termios and
-        // winsize are allowed and mean "do not report / use defaults".
-        let rc = unsafe {
-            libc::openpty(
-                &mut master,
-                &mut slave,
-                std::ptr::null_mut(),
-                std::ptr::null(),
-                std::ptr::null(),
-            )
-        };
-        assert_eq!(rc, 0, "openpty: {}", std::io::Error::last_os_error());
-        // SAFETY: openpty returned two fresh descriptors that nothing else owns.
-        let (_master, slave) = unsafe {
-            (
-                std::fs::File::from_raw_fd(master),
-                std::fs::File::from_raw_fd(slave),
-            )
-        };
-        let slave_path = std::fs::read_link(format!(
-            "/proc/self/fd/{}",
-            std::os::fd::AsRawFd::as_raw_fd(&slave)
-        ))
-        .expect("slave path");
-        let slave_path = slave_path.to_str().expect("utf-8 path");
-        assert!(is_pty(slave_path), "{slave_path} is a pty slave");
-
-        let dir = tempfile::tempdir().expect("tempdir");
-        let link = dir.path().join("ttyV0");
-        std::os::unix::fs::symlink(slave_path, &link).expect("symlink");
-        assert!(is_pty(link.to_str().expect("utf-8 path")));
-
-        let plain = dir.path().join("plain");
-        std::fs::write(&plain, b"").expect("file");
-        assert!(!is_pty(plain.to_str().expect("utf-8 path")));
-    }
 
     /// An LNode is lawful out of the box: with no `airtime_limit_long` in
     /// the config, the frequency's own ETSI sub-band limit is what gets

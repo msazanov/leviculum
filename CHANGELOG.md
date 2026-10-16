@@ -654,6 +654,11 @@ Toolchain: Rust 1.97.1
 
 ### Fixed
 
+- Opening a serial interface no longer warns that it could not set
+  `low_latency`: GNU stty has no such setting, so the call never set
+  anything, and the warning about degraded HDLC framing was wrong on every
+  open.
+
 - Private keys are written owner-only: `transport_identity`, the ratchet
   keys, and the identities of lnomad, lntd, lnpnd, the LXMF node and the C
   API are created 0600, and the storage and ratchet directories the daemon
