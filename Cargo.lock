@@ -779,22 +779,6 @@ checksum = "61803da095bee82a81bb1a452ecc25d3b2f1416d1897eb86430c6159ef717c17"
 
 [[package]]
 name = "crossterm"
-version = "0.28.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "829d955a0bb380ef178a640b91779e3987da38c9aea133b20614cfed8cdea9c6"
-dependencies = [
- "bitflags 2.13.0",
- "crossterm_winapi",
- "mio",
- "parking_lot",
- "rustix 0.38.44",
- "signal-hook",
- "signal-hook-mio",
- "winapi",
-]
-
-[[package]]
-name = "crossterm"
 version = "0.29.0"
 dependencies = [
  "bitflags 2.13.0",
@@ -2286,7 +2270,7 @@ name = "lnomad"
 version = "0.1.1"
 dependencies = [
  "clap",
- "crossterm 0.29.0",
+ "crossterm",
  "futures",
  "hex",
  "image",
@@ -3224,7 +3208,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "567584a3b0e6a8203c23de40b4861497266725eb5363dbfd18a1edd603cca9f0"
 dependencies = [
  "cfg-if",
- "crossterm 0.29.0",
+ "crossterm",
  "instability",
  "ratatui-core",
 ]
@@ -3980,10 +3964,8 @@ dependencies = [
 [[package]]
 name = "termbg"
 version = "0.6.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8bf44577a1adf3dfd7fec3b8763074467e27b2ad35ff9157bc3f0a51bb0a3dd4"
 dependencies = [
- "crossterm 0.28.1",
+ "crossterm",
  "log",
  "mockall",
  "scopeguard",

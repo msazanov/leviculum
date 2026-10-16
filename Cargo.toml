@@ -56,14 +56,22 @@ default-members = [
 # `cargo test --workspace` on any machine require that fork. It carries its
 # own workspace, Cargo.lock, .cargo/config.toml and rust-toolchain.toml.
 # Build with: just build-esp32  (or `cargo build --release` inside it)
-exclude = ["leviculum-nrf", "leviculum-esp", "vendor/crossterm"]
+exclude = ["leviculum-nrf", "leviculum-esp", "vendor/crossterm", "vendor/termbg"]
 
 # Vendored, minimally-patched crossterm 0.29.0. The patch exposes mouse side
 # buttons (X buttons 8/9) as MouseButton::Back / MouseButton::Forward, which
-# upstream crossterm swallows in parse_cb. Both lnomad and ratatui-crossterm
-# resolve to crossterm 0.29.0, so this replaces it everywhere.
+# upstream crossterm swallows in parse_cb. lnomad, ratatui-crossterm and termbg
+# all resolve to crossterm 0.29.0, so this replaces it everywhere.
+#
+# termbg is vendored for that reason alone: 0.6.2, the newest release, asks
+# for crossterm 0.28 and so linked a second, unpatched registry crossterm
+# into lnomad, with its own stdin event reader for the OSC 11 background query.
+# vendor/termbg is the published 0.6.2 with one line changed, its crossterm
+# requirement raised to 0.29 (the API it uses did not change). Drop the patch
+# once a termbg release asks for 0.29 itself.
 [patch.crates-io]
 crossterm = { path = "vendor/crossterm" }
+termbg = { path = "vendor/termbg" }
 
 [workspace.package]
 # The development window, not a release. Every build between 0.9.0 and

@@ -30,9 +30,9 @@ longest root wins, an exact `src_path` match beats all). In an attributed file:
     packages whose lib target has doctests enabled.
 
 Files outside every workspace package are out of scope exactly as they are for
-the binary census: vendor/crossterm, leviculum-nrf and leviculum-esp are their
-own workspaces (Cargo.toml `exclude`), and nothing in this repository's pin
-file describes them.
+the binary census: vendor/crossterm, vendor/termbg, leviculum-nrf and
+leviculum-esp sit outside the workspace (Cargo.toml `exclude`), and nothing in
+this repository's pin file describes them.
 
 THE ONE WAY IT CAN DIFFER FROM THE BINARY COUNT
 
