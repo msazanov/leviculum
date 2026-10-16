@@ -507,7 +507,9 @@ Its `instance_name` must match the config's `[node] instance_name`.
 
 Point DNS A/AAAA records for every name in `domains` at the machine. The
 TLS-ALPN-01 challenge means Let's Encrypt must reach port 443 on those names;
-no port 80 challenge plumbing exists, port 80 only serves redirects.
+no port 80 challenge plumbing exists, port 80 only serves redirects. A
+redirect goes only to a name in `domains`: a request whose Host is not in
+the list is sent to the first one.
 
 ### Ports 80 and 443
 

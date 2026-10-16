@@ -73,8 +73,9 @@ pub enum WebError {
 /// Let's Encrypt settings, present exactly when HTTPS is wanted.
 #[derive(Clone, Debug)]
 pub struct AcmeSettings {
-    /// Domains the certificate covers; the first one doubles as the redirect
-    /// target when a request carries no Host header.
+    /// Domains the certificate covers. They are also the only names the
+    /// plain-HTTP redirect sends a client to; the first one serves a request
+    /// whose Host is missing or not in this list.
     pub domains: Vec<String>,
     /// Persistent directory caching the ACME account key and certificates.
     /// Losing it forces re-issuance on every start, which burns Let's
@@ -383,7 +384,7 @@ async fn serve_https(
         .acceptor(acceptor)
         .serve(router.into_make_service());
 
-    let redirect = redirect_router(https_bind.port(), acme.domains[0].clone());
+    let redirect = redirect_router(https_bind.port(), acme.domains.clone());
     let http_listener = tokio::net::TcpListener::bind(http_bind)
         .await
         .map_err(|source| WebError::Bind {
@@ -400,24 +401,44 @@ async fn serve_https(
 }
 
 /// The redirect-only router served on the plain-HTTP listener: every request
-/// gets a 301 to its `https://` equivalent.
-fn redirect_router(https_port: u16, fallback_host: String) -> Router {
+/// gets a 301 to its `https://` equivalent on one of the configured `domains`.
+///
+/// The response says `Vary: Host` and `Cache-Control: no-store`: its target
+/// depends on the Host header, so no intermediary may serve it to a request
+/// for another name.
+fn redirect_router(https_port: u16, domains: Vec<String>) -> Router {
     Router::new().fallback(move |headers: HeaderMap, uri: Uri| {
-        let target = redirect_target(&headers, &uri, https_port, &fallback_host);
-        async move { (StatusCode::MOVED_PERMANENTLY, [(header::LOCATION, target)]) }
+        let target = redirect_target(&headers, &uri, https_port, &domains);
+        async move {
+            (
+                StatusCode::MOVED_PERMANENTLY,
+                [
+                    (header::LOCATION, target),
+                    (header::VARY, "Host".to_string()),
+                    (header::CACHE_CONTROL, "no-store".to_string()),
+                ],
+            )
+        }
     })
 }
 
-/// The `https://` URL a plain-HTTP request redirects to: the request's Host
-/// (sans port, falling back to the first configured domain), the HTTPS port
-/// unless it is the default 443, and the original path and query.
-fn redirect_target(headers: &HeaderMap, uri: &Uri, https_port: u16, fallback_host: &str) -> String {
-    let host = headers
+/// The `https://` URL a plain-HTTP request redirects to: the configured
+/// domain the request's Host names (port stripped, compared case-
+/// insensitively), the first configured domain for a missing or foreign
+/// Host, the HTTPS port unless it is the default 443, and the original path
+/// and query. The Host is never reflected: a request naming a domain this
+/// server does not hold a certificate for would otherwise be sent anywhere.
+/// `serve_https` refuses an empty `domains` list before it gets here.
+fn redirect_target(headers: &HeaderMap, uri: &Uri, https_port: u16, domains: &[String]) -> String {
+    let requested = headers
         .get(header::HOST)
         .and_then(|v| v.to_str().ok())
-        .map(host_without_port)
-        .filter(|h| !h.is_empty())
-        .unwrap_or(fallback_host);
+        .map(host_without_port);
+    let host = requested
+        .and_then(|h| domains.iter().find(|d| d.eq_ignore_ascii_case(h)))
+        .or_else(|| domains.first())
+        .map(String::as_str)
+        .unwrap_or_default();
     let path = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
     if https_port == 443 {
         format!("https://{host}{path}")
@@ -606,7 +627,7 @@ mod tests {
 
     #[tokio::test]
     async fn redirect_router_301s_to_https() {
-        let response = redirect_router(443, "blog.example".to_string())
+        let response = redirect_router(443, vec!["blog.example".to_string()])
             .oneshot(
                 Request::builder()
                     .uri("/posts/hello-world?x=1")
@@ -623,34 +644,73 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn redirect_router_ignores_foreign_host() {
+        let response = redirect_router(443, vec!["blog.example".to_string()])
+            .oneshot(
+                Request::builder()
+                    .uri("/x?y=1")
+                    .header(header::HOST, "evil.example")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::MOVED_PERMANENTLY);
+        assert_eq!(
+            response.headers()[header::LOCATION],
+            "https://blog.example/x?y=1"
+        );
+    }
+
+    #[tokio::test]
+    async fn redirect_router_forbids_caching() {
+        let response = redirect_router(443, vec!["blog.example".to_string()])
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.headers()[header::VARY], "Host");
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    }
+
     #[test]
     fn redirect_target_shapes() {
         let uri: Uri = "/a/b?q=1".parse().unwrap();
+        let domains = vec!["blog.example".to_string(), "Other.Example".to_string()];
         let mut headers = HeaderMap::new();
 
-        // No Host header: fall back to the configured domain.
+        // No Host header: fall back to the first configured domain.
         assert_eq!(
-            redirect_target(&headers, &uri, 443, "blog.example"),
+            redirect_target(&headers, &uri, 443, &domains),
             "https://blog.example/a/b?q=1"
         );
 
-        // Host with port: port stripped, default HTTPS port omitted.
+        // Configured Host with port, other case: port stripped, the
+        // configured spelling used, default HTTPS port omitted.
         headers.insert(header::HOST, "other.example:8080".parse().unwrap());
         assert_eq!(
-            redirect_target(&headers, &uri, 443, "blog.example"),
-            "https://other.example/a/b?q=1"
+            redirect_target(&headers, &uri, 443, &domains),
+            "https://Other.Example/a/b?q=1"
         );
 
         // Non-default HTTPS port is appended.
         assert_eq!(
-            redirect_target(&headers, &uri, 8443, "blog.example"),
-            "https://other.example:8443/a/b?q=1"
+            redirect_target(&headers, &uri, 8443, &domains),
+            "https://Other.Example:8443/a/b?q=1"
         );
 
-        // IPv6 literal keeps its brackets, loses its port.
+        // A Host not in the list is never reflected.
+        headers.insert(header::HOST, "evil.example".parse().unwrap());
+        assert_eq!(
+            redirect_target(&headers, &uri, 443, &domains),
+            "https://blog.example/a/b?q=1"
+        );
+
+        // A configured IPv6 literal keeps its brackets, loses its port.
+        let v6 = vec!["[::1]".to_string()];
         headers.insert(header::HOST, "[::1]:8080".parse().unwrap());
         assert_eq!(
-            redirect_target(&headers, &uri, 443, "blog.example"),
+            redirect_target(&headers, &uri, 443, &v6),
             "https://[::1]/a/b?q=1"
         );
     }
