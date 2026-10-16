@@ -22,7 +22,7 @@
 //! Bug #32 spike: the previous unconditional direct-register-access
 //! version cycled the device every ~26 s with a SoftDevice MEMACC panic.
 
-use leviculum_sd_policy::{rand_error_action, RandAction};
+use leviculum_sd_policy::{rand_error_action, wait_for_pool, RandAction, RAND_STALL_SPINS};
 use rand_core::{CryptoRng, RngCore};
 
 /// Hardware RNG that prefers the SoftDevice's CSPRNG syscall, with a
@@ -84,45 +84,44 @@ impl RawHwRng {
     ///
     /// This is a busy-wait: `fill` is reached through the sync
     /// `RngCore` trait (NodeCore owns the RNG), so yielding to the
-    /// executor is not an option here. The wait is bounded only by a
-    /// diagnostic: after `STALL_LOG_SPINS` polls without a single byte
-    /// appearing, log once and keep polling — returning weak randomness
-    /// is not acceptable, and the direct register path would
-    /// MEMACC-fault the SoftDevice. A permanently dry pool means the
-    /// SoftDevice itself is broken; the log makes that stall
-    /// attributable.
+    /// executor is not an option here. Returning weak randomness is not
+    /// acceptable either, and the direct register path would
+    /// MEMACC-fault the SoftDevice. So after `RAND_STALL_SPINS` polls
+    /// without a single byte (`leviculum_sd_policy::wait_for_pool`), the
+    /// wait panics with `rng pool stalled: SoftDevice gave no bytes for
+    /// 1000000 spins`.
+    ///
+    /// A panic beats spinning on: the spin runs on the single
+    /// thread-mode executor and parks every task, among them
+    /// `usb::debug_writer_task`, the only drain of the log ring, so a
+    /// stall log line written here never left the board and the node was
+    /// a silent hang (review finding L-0030). The panic handler writes
+    /// the message into the retained post-mortem record and soft-resets;
+    /// the next boot's `log_boot_diagnostics` prints `[PANIC_COUNT]` one
+    /// higher and the message as `[PANIC_PMRT] len=.. total=..
+    /// msg=panicked at src/rng.rs:<line>:<col>:\nrng pool stalled: ...`
+    /// (the newline escaped by `log::EscapeCtrl`), followed by the same
+    /// text on its `[PANIC_PMRT_TAIL]` line; the `p` debug query replays
+    /// the block later.
     fn wait_consume(dest: &mut [u8]) -> usize {
-        // ~10^6 iterations, each at least a syscall round trip — a
-        // deliberately generous multiple of the ~120 µs/byte refill
-        // interval, so the log can only mean "the pool is not refilling
-        // at all", never "the pool is merely slow".
-        const STALL_LOG_SPINS: u32 = 1_000_000;
-        let mut spins: u32 = 0;
-        loop {
+        let polled = wait_for_pool(RAND_STALL_SPINS, || {
             let mut avail: u8 = 0;
             unsafe { nrf_softdevice_s140::sd_rand_application_bytes_available_get(&mut avail) };
-            if avail > 0 {
-                let take = (avail as usize).min(dest.len());
-                let ret = unsafe {
-                    nrf_softdevice_s140::sd_rand_application_vector_get(
-                        dest.as_mut_ptr(),
-                        take as u8,
-                    )
-                };
-                if ret == 0 {
-                    return take;
-                }
-                // Lost a race for the just-counted bytes (or another
-                // transient error): fall through and poll again.
+            if avail == 0 {
+                cortex_m::asm::nop();
+                return None;
             }
-            spins = spins.saturating_add(1);
-            if spins == STALL_LOG_SPINS {
-                crate::log::log_fmt(
-                    "[RNG ] ",
-                    format_args!("sd_rand pool not refilling, still waiting"),
-                );
-            }
-            cortex_m::asm::nop();
+            let take = (avail as usize).min(dest.len());
+            let ret = unsafe {
+                nrf_softdevice_s140::sd_rand_application_vector_get(dest.as_mut_ptr(), take as u8)
+            };
+            // A non-zero return lost a race for the just-counted bytes
+            // (or hit another transient error): poll again.
+            (ret == 0).then_some(take)
+        });
+        match polled {
+            Ok(taken) => taken,
+            Err(stalled) => panic!("{}", stalled),
         }
     }
 

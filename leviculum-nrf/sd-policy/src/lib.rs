@@ -56,6 +56,62 @@ pub fn rand_error_action(error_code: u32, sd_enabled: bool) -> RandAction {
     }
 }
 
+/// Polls of an empty pool after which [`wait_for_pool`] gives up.
+///
+/// About 10^6 iterations, each at least one syscall round trip: a
+/// deliberately generous multiple of the ~120 µs/byte refill interval, so
+/// running out can only mean "the pool is not refilling at all", never
+/// "the pool is merely slow".
+pub const RAND_STALL_SPINS: u32 = 1_000_000;
+
+/// The pool stayed dry for a whole spin budget: the SoftDevice's CSPRNG
+/// is not refilling. Its `Display` is the panic message the firmware
+/// writes into the post-mortem record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PoolStalled {
+    /// Polls that returned no byte before giving up.
+    pub spins: u32,
+}
+
+impl core::fmt::Display for PoolStalled {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "rng pool stalled: SoftDevice gave no bytes for {} spins",
+            self.spins
+        )
+    }
+}
+
+/// The [`RandAction::Wait`] loop: call `poll` until it yields at least
+/// one byte, and return that count, or give up after `budget` polls that
+/// yielded none.
+///
+/// `poll` reads the available-byte count and consumes what is there; it
+/// returns `None` (or `Some(0)`) when the pool was empty or a race for the
+/// counted bytes was lost. Both count against the budget: a pool that
+/// never lets a byte through is stalled whatever the reason.
+///
+/// The loop is bounded because the caller cannot yield: it is reached
+/// through the sync `RngCore` trait on the single thread-mode executor,
+/// so an unbounded spin parks every task, including the one that drains
+/// the log to the host (review finding L-0030).
+pub fn wait_for_pool(
+    budget: u32,
+    mut poll: impl FnMut() -> Option<usize>,
+) -> Result<usize, PoolStalled> {
+    let mut spins: u32 = 0;
+    loop {
+        if let Some(taken) = poll().filter(|&n| n > 0) {
+            return Ok(taken);
+        }
+        spins = spins.saturating_add(1);
+        if spins >= budget {
+            return Err(PoolStalled { spins });
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -122,5 +178,48 @@ mod tests {
         ] {
             assert_ne!(rand_error_action(code, true), RandAction::Direct);
         }
+    }
+    /// L-0030: a pool that never refills ends the wait, after exactly the
+    /// budget, instead of spinning forever.
+    #[test]
+    fn a_pool_that_never_refills_stalls_after_the_budget() {
+        let mut polls = 0u32;
+        let got = wait_for_pool(1000, || {
+            polls += 1;
+            None
+        });
+        assert_eq!(got, Err(PoolStalled { spins: 1000 }));
+        assert_eq!(polls, 1000);
+    }
+
+    #[test]
+    fn a_pool_that_refills_late_returns_what_it_gave() {
+        let mut polls = 0u32;
+        let got = wait_for_pool(1000, || {
+            polls += 1;
+            (polls == 999).then_some(7)
+        });
+        assert_eq!(got, Ok(7));
+    }
+
+    /// A lost race (`Some(0)`) is a poll without a byte and counts.
+    #[test]
+    fn lost_races_count_against_the_budget() {
+        assert_eq!(wait_for_pool(3, || Some(0)), Err(PoolStalled { spins: 3 }));
+    }
+
+    /// The panic message the next boot replays as `[PANIC_PMRT]`.
+    #[test]
+    fn the_stall_names_itself_in_the_panic_message() {
+        let msg = format!(
+            "{}",
+            PoolStalled {
+                spins: RAND_STALL_SPINS
+            }
+        );
+        assert_eq!(
+            msg,
+            "rng pool stalled: SoftDevice gave no bytes for 1000000 spins"
+        );
     }
 }
