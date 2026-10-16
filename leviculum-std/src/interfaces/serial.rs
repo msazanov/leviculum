@@ -1258,6 +1258,31 @@ fn set_low_latency(port: &str) -> Result<(), String> {
     }
 }
 
+/// Whether `port` is a pseudo-terminal, decided by the device it names.
+///
+/// A pty has no `low_latency` flag and moves whatever is written in one read,
+/// so the stty call fails there and the warning about degraded USB CDC-ACM
+/// framing would be wrong (778: every serial cell that runs lnsd on a PTY pair
+/// logged it). The device number decides, through any symlink (a test's
+/// `socat` link, a udev alias): Unix98 pty slaves are character devices with
+/// majors 136 to 143. Only when the path cannot be stat'ed does the
+/// `/dev/pts/` prefix stand in for it.
+#[cfg(unix)]
+fn is_pty(port: &str) -> bool {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    match std::fs::metadata(port) {
+        Ok(meta) => {
+            meta.file_type().is_char_device() && (136..=143).contains(&libc::major(meta.rdev()))
+        }
+        Err(_) => port.starts_with("/dev/pts/"),
+    }
+}
+
+#[cfg(not(unix))]
+fn is_pty(_port: &str) -> bool {
+    false
+}
+
 /// Reconnect wrapper for serial port connections.
 ///
 /// Owns channel endpoints across reconnection cycles. On port loss, waits
@@ -1272,7 +1297,8 @@ async fn serial_reconnect_task(
     credit: Option<Arc<Mutex<super::airtime::AirtimeCredit>>>,
 ) {
     let mut has_connected_before = false;
-    // The low-latency warn fires once per task, not once per reconnect
+    // The low-latency warn (or, on a pty, the debug line saying why it is
+    // skipped) fires once per task, not once per reconnect
     // cycle: the condition (missing stty, non-Linux stty syntax, EPERM on
     // the device) is static for the process lifetime, and the reconnect
     // loop ticks every RECONNECT_INTERVAL against a dead port.
@@ -1286,7 +1312,16 @@ async fn serial_reconnect_task(
         // set it is an operator-visible finding, not a shrug (L-0023).
         // pyserial OFFERS this as set_low_latency_mode(); Python-RNS never
         // calls it, so this is rig-driven, not reference parity.
-        if let Err(e) = set_low_latency(&config.port) {
+        if is_pty(&config.port) {
+            if !low_latency_warned {
+                low_latency_warned = true;
+                tracing::debug!(
+                    "Serial interface {}: {} is a pty, which has no low_latency flag; not setting it",
+                    name,
+                    config.port
+                );
+            }
+        } else if let Err(e) = set_low_latency(&config.port) {
             if !low_latency_warned {
                 low_latency_warned = true;
                 tracing::warn!(
@@ -1294,7 +1329,7 @@ async fn serial_reconnect_task(
                      expect degraded HDLC framing on USB CDC-ACM",
                     name,
                     config.port,
-                    e
+                    e.replace('\n', " ")
                 );
             }
         } else {
@@ -2387,6 +2422,64 @@ mod tests {
             err.contains("stty"),
             "the error must name the failing tool: {err}"
         );
+    }
+
+    /// 778: the low_latency decision follows the device. USB serial adapters
+    /// are never ptys, by name alone when the device is absent and by device
+    /// number when it is present.
+    #[test]
+    fn pty_classification_by_name() {
+        assert!(is_pty("/dev/pts/0"));
+        assert!(is_pty("/dev/pts/nonexistent-778"));
+        assert!(!is_pty("/dev/ttyACM0"));
+        assert!(!is_pty("/dev/ttyUSB0"));
+        assert!(!is_pty("/dev/nonexistent-778"));
+    }
+
+    /// A real pty slave is a pty, and so is a symlink to one under a name
+    /// that does not look like one, which is how the serial cells and socat
+    /// name their ports. A regular file is not.
+    #[cfg(unix)]
+    #[test]
+    fn pty_classification_by_device() {
+        use std::os::fd::FromRawFd;
+        let mut master: libc::c_int = -1;
+        let mut slave: libc::c_int = -1;
+        // SAFETY: both out-pointers are live locals; null name, termios and
+        // winsize are allowed and mean "do not report / use defaults".
+        let rc = unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        };
+        assert_eq!(rc, 0, "openpty: {}", std::io::Error::last_os_error());
+        // SAFETY: openpty returned two fresh descriptors that nothing else owns.
+        let (_master, slave) = unsafe {
+            (
+                std::fs::File::from_raw_fd(master),
+                std::fs::File::from_raw_fd(slave),
+            )
+        };
+        let slave_path = std::fs::read_link(format!(
+            "/proc/self/fd/{}",
+            std::os::fd::AsRawFd::as_raw_fd(&slave)
+        ))
+        .expect("slave path");
+        let slave_path = slave_path.to_str().expect("utf-8 path");
+        assert!(is_pty(slave_path), "{slave_path} is a pty slave");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let link = dir.path().join("ttyV0");
+        std::os::unix::fs::symlink(slave_path, &link).expect("symlink");
+        assert!(is_pty(link.to_str().expect("utf-8 path")));
+
+        let plain = dir.path().join("plain");
+        std::fs::write(&plain, b"").expect("file");
+        assert!(!is_pty(plain.to_str().expect("utf-8 path")));
     }
 
     /// An LNode is lawful out of the box: with no `airtime_limit_long` in
