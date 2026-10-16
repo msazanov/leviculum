@@ -5532,12 +5532,27 @@ impl ImageStore {
     /// Drop the current page's pictures and stop its transfer queue. The
     /// cache is deliberately untouched: it exists precisely to outlive the
     /// page that filled it.
-    fn reset(&mut self) {
-        if let Some(task) = self.task.take() {
+    ///
+    /// Returns the aborted transfer task. Abort only requests cancellation:
+    /// the task's future, and the session clone it holds, is dropped later
+    /// by the runtime. A caller that needs the clone gone awaits the handle,
+    /// as [`ImageStore::stop`] does; a navigation does not, and drops it.
+    fn reset(&mut self) -> Option<tokio::task::JoinHandle<()>> {
+        let task = self.task.take();
+        if let Some(task) = &task {
             task.abort();
         }
         self.generation = self.generation.wrapping_add(1);
         self.entries.clear();
+        task
+    }
+
+    /// [`ImageStore::reset`], then wait until the aborted transfer task is
+    /// gone, so the session clone it held is dropped when this returns.
+    async fn stop(&mut self) {
+        if let Some(task) = self.reset() {
+            let _ = task.await;
+        }
     }
 
     /// Take a fetched payload, encode it if this terminal can draw it, and
@@ -6167,16 +6182,41 @@ pub async fn run_tui(
         handle.abort();
         let _ = handle.await;
     }
-    images.reset();
+    images.stop().await;
     discovery.abort();
     let _ = discovery.await;
     drop(tx);
-    if let Ok(mutex) = Arc::try_unwrap(session) {
-        let _ = mutex.into_inner().close().await;
-    }
+    let leaked = close_session(session).await;
 
     guard.restore_now()?;
+    if let Some(message) = leaked {
+        eprintln!("{message}");
+    }
     result
+}
+
+/// Close the session at teardown, after every task that held a clone of it
+/// has been awaited.
+///
+/// If a clone survives anyway, the unwrap fails; the node is then stopped
+/// through the lock with [`Session::shutdown`], which needs no ownership, and
+/// the returned line says so. It is printed once the terminal is restored,
+/// because a line written into the alternate screen is lost with it.
+async fn close_session(session: Arc<Mutex<Session>>) -> Option<String> {
+    match Arc::try_unwrap(session) {
+        Ok(mutex) => {
+            let _ = mutex.into_inner().close().await;
+            None
+        }
+        Err(shared) => {
+            let holders = Arc::strong_count(&shared) - 1;
+            let _ = shared.lock().await.shutdown().await;
+            Some(format!(
+                "lnomad: error: {holders} task(s) still held the session at exit; \
+                 the node was stopped through the shared lock"
+            ))
+        }
+    }
 }
 
 /// Translate a crossterm event into an [`AppEvent`], dropping the ones the UI
@@ -11872,6 +11912,30 @@ Text unter dem Bild.
         let (events, pending) = store.take_cached(requests.clone(), &m);
         assert!(events.is_empty());
         assert_eq!(pending.len(), 1);
+    }
+
+    /// L-0056: teardown unwraps the session Arc, so every task holding a clone
+    /// must be gone first. An image task that is only aborted still holds its
+    /// clone until the runtime drops the future; awaiting the handle is what
+    /// guarantees the drop.
+    #[tokio::test]
+    async fn stopping_the_store_releases_the_image_tasks_session_clone() {
+        let shared = Arc::new(Mutex::new(()));
+        let mut store = ImageStore::default();
+        let clone = shared.clone();
+        store.task = Some(tokio::spawn(async move {
+            let _held = clone;
+            std::future::pending::<()>().await;
+        }));
+        // Let the task start and park, as it would inside a transfer.
+        tokio::task::yield_now().await;
+
+        store.stop().await;
+
+        assert!(
+            Arc::try_unwrap(shared).is_ok(),
+            "the image task still holds the session after teardown"
+        );
     }
 
     #[test]

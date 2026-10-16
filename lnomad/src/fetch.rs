@@ -561,6 +561,12 @@ impl Session {
     /// Close any link still held, then stop the node and tear down the
     /// connection.
     pub async fn close(mut self) -> Result<(), FetchError> {
+        self.shutdown().await
+    }
+
+    /// What [`Session::close`] does, through a borrow: for a session that is
+    /// shared and cannot be taken by value at teardown.
+    pub async fn shutdown(&mut self) -> Result<(), FetchError> {
         self.close_current_link().await;
         self.node
             .stop()
