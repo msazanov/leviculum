@@ -1648,7 +1648,7 @@ impl LxmfRouter {
         // not force an idle host to write storage every processing interval.
         self.next_job_ms = now_ms.saturating_add(PROCESSING_INTERVAL_MS);
         // Oldest message first. `outbound` is keyed by the message ID, which is
-        // `SHA-256(destination || source || payload)` (`message.rs:127-132`), so
+        // `SHA-256(destination || source || payload)` (`message.rs:130-135`), so
         // its `BTreeMap` order is a content hash — unrelated to the order the
         // messages were written. Without this sort, a batch that waited for a
         // path and then came due together is handed to the link in hash order,

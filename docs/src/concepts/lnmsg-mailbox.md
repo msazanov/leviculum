@@ -192,7 +192,7 @@ them can be doing it on purpose.
 
 Two further facts a UI must not paper over. `Message::verification` can be
 `Unverified` when the source identity has never been announced to us
-(`leviculum-lxmf/src/message.rs:229-231`), and such messages **are
+(`leviculum-lxmf/src/message.rs:232-234`), and such messages **are
 delivered to the application anyway**
 (`leviculum-lxmf/src/router.rs:1477-1480`). And the router discards the
 display name from announces entirely, so **the client must maintain its own

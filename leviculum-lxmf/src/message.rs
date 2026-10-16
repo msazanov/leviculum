@@ -47,6 +47,8 @@ pub enum MessageError {
     InvalidTimestamp,
     /// A caller asked us to sign a timestamp that is `NaN` or infinite.
     NonFiniteTimestamp,
+    /// `payload[4]` was neither bytes (a stamp) nor `nil` (no stamp).
+    InvalidStamp,
 }
 impl core::fmt::Display for MessageError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -58,6 +60,7 @@ impl core::fmt::Display for MessageError {
             Self::WrongDestination => write!(f, "message is for another destination"),
             Self::InvalidTimestamp => write!(f, "message timestamp is not a number"),
             Self::NonFiniteTimestamp => write!(f, "message timestamp is not finite"),
+            Self::InvalidStamp => write!(f, "message stamp is neither bytes nor nil"),
         }
     }
 }
@@ -283,7 +286,8 @@ fn encode_payload(
 /// Decode `[timestamp, title, content, fields (, stamp, ...)]`.
 ///
 /// The accept set is the reference's (`LXMessage.py:755-762`): with more
-/// than four elements, element 4 is the stamp whatever its length, every
+/// than four elements, element 4 is the stamp whatever its length (`nil`
+/// there is no stamp; any other non-bin type is refused), every
 /// element after it is dropped unread, and the signature covers the re-pack
 /// of the first four. A sixth element a later LXMF adds, or a stamp of a
 /// length we never generate, is therefore delivered as Python delivers it;
@@ -315,11 +319,27 @@ fn decode_payload(d: &[u8]) -> Result<Payload, MessageError> {
         fields.push((k, msgpack::raw(d, &mut p)?.to_vec()))
     }
     let stamp = if n > 4 {
-        let s = msgpack::read_bin(d, &mut p)?.to_vec();
+        // Python takes element 4 whatever its type (`LXMessage.py:755-762`),
+        // so a writer that packs `None` there means no stamp. Anything else
+        // that is not bytes cannot be a stamp, and the error says so.
+        let s = match msgpack::peek_kind(d, p)? {
+            msgpack::Kind::Nil => {
+                msgpack::read_nil(d, &mut p)?;
+                None
+            }
+            _ => Some(
+                msgpack::read_bin(d, &mut p)
+                    .map_err(|e| match e {
+                        msgpack::Error::Type => MessageError::InvalidStamp,
+                        other => other.into(),
+                    })?
+                    .to_vec(),
+            ),
+        };
         for _ in 5..n {
             msgpack::skip(d, &mut p)?;
         }
-        Some(s)
+        s
     } else {
         None
     };
@@ -444,6 +464,31 @@ mod tests {
         assert_eq!(u.verification, Verification::Valid);
         assert_eq!(u.stamp.as_deref(), Some(&[9u8; 32][..]));
         assert_eq!(u.content, b"Hello");
+    }
+
+    /// Python takes element 4 whatever its type (`LXMessage.py:755-762`):
+    /// a writer that packs `None` there has a message delivered, unstamped,
+    /// and signed over the first four. Any other non-bin element 4 is still
+    /// refused, and the error says it was the stamp.
+    #[test]
+    fn nil_stamp_is_no_stamp_and_other_types_are_refused() {
+        let id = identity();
+        let mut nil = Vec::new();
+        msgpack::nil(&mut nil);
+        let wire = signed_wire(&id, &payload_with(1, &nil), &payload_with(0, &[]));
+
+        let u = Message::unpack(&wire, None, Some(&id), DeliveryMethod::Direct).unwrap();
+        assert_eq!(u.verification, Verification::Valid);
+        assert_eq!(u.stamp, None);
+        assert_eq!(u.content, b"Hello");
+
+        let mut int = Vec::new();
+        msgpack::uint(&mut int, 7);
+        let wire = signed_wire(&id, &payload_with(1, &int), &payload_with(0, &[]));
+        assert_eq!(
+            Message::unpack(&wire, None, Some(&id), DeliveryMethod::Direct),
+            Err(MessageError::InvalidStamp)
+        );
     }
 
     /// Our own output keeps the stamp lengths we generate.
