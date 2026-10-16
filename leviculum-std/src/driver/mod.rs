@@ -4942,13 +4942,26 @@ async fn run_event_loop(
             _ = shutdown.changed() => {
                 if *shutdown.borrow() {
                     tracing::info!("Node shutdown requested");
+                    // Close the intake first (L-0058). The flush below awaits,
+                    // and an open channel would accept outputs during it that
+                    // the break then discards, with Ok already returned to the
+                    // caller. Closed, every later send fails with NotRunning
+                    // before its commit, and a slot reserved before the close
+                    // is still honoured.
+                    action_dispatch_rx.close();
                     // Drain any TickOutputs still queued in action_dispatch_rx
                     // (e.g. a responder close_link enqueued just before stop()/
                     // drop) and dispatch them to the interfaces. Breaking here
                     // without draining would discard those outputs undispatched
                     // — including the SendPacket close bytes AND the LinkClosed
                     // event riding in the same output — which is the #77 loss.
-                    while let Ok(output) = action_dispatch_rx.try_recv() {
+                    // `recv` rather than `try_recv`: after the close it returns
+                    // None only once every reserved slot has been sent or
+                    // released, where `try_recv` reports Empty while a caller
+                    // still holds one and would miss its output. A slot is
+                    // held only across a synchronous commit
+                    // (`dispatch_committed`), so this wait is that long.
+                    while let Some(output) = action_dispatch_rx.recv().await {
                         // Shutting down; there is no next poll to bring forward.
                         let _ = dispatch_output(
                             output,
@@ -10119,6 +10132,104 @@ mod tests {
             entries.contains_key(&[0x0A; TRUNCATED_HASHBYTES]),
             "the shutdown flush must put the identity on disk"
         );
+    }
+
+    /// L-0058: an output the dispatch channel accepts during the shutdown
+    /// flush must be dispatched, or the send must fail. The flush waits on
+    /// an interface queue nobody reads, which holds the window open for the
+    /// whole flush bound; a send landing in it used to return Ok and be
+    /// discarded when the loop broke, while the core kept what the caller
+    /// committed.
+    #[tokio::test(flavor = "current_thread")]
+    async fn send_during_shutdown_flush_is_dispatched_or_refused() {
+        fn send_packet(byte: u8) -> TickOutput {
+            let mut output = TickOutput::empty();
+            output
+                .actions
+                .push(leviculum_core::transport::Action::SendPacket {
+                    peer: None,
+                    iface: InterfaceId(0),
+                    data: vec![byte; 32],
+                });
+            output
+        }
+
+        let (core, _td) = shared_test_core();
+        let mut harness = spawn_flush_loop(Arc::clone(&core), 3600);
+
+        // A frame the interface never reads keeps the flush waiting.
+        harness
+            .action_tx
+            .send(send_packet(0xA1))
+            .await
+            .expect("loop is live");
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(harness.out_rx.len(), 1, "the first frame is queued");
+
+        harness.shutdown_tx.send(true).expect("loop is live");
+        // Let the loop take the shutdown branch and park in the flush.
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert!(!harness.loop_handle.is_finished(), "the flush is waiting");
+
+        let late = harness.action_tx.send(send_packet(0xB2)).await;
+        harness.loop_handle.await.expect("loop exits cleanly");
+
+        let mut frames = Vec::new();
+        while let Ok(frame) = harness.out_rx.try_recv() {
+            frames.push(frame.data[0]);
+        }
+        match late {
+            Ok(()) => assert!(
+                frames.contains(&0xB2),
+                "the send during the flush returned Ok but its frame was discarded; frames: {frames:x?}"
+            ),
+            Err(_) => assert_eq!(frames, vec![0xA1], "only the first frame went out"),
+        }
+    }
+
+    /// L-0058, the other half: a caller that reserved its dispatch slot
+    /// before the shutdown closed the channel is mid-commit, and its output
+    /// must still go out. A drain that stops at the first empty `try_recv`
+    /// breaks before the slot is used and discards the output.
+    #[tokio::test(flavor = "current_thread")]
+    async fn slot_reserved_before_shutdown_is_dispatched() {
+        let (core, _td) = shared_test_core();
+        let mut harness = spawn_flush_loop(Arc::clone(&core), 3600);
+
+        let permit = harness.action_tx.reserve().await.expect("loop is live");
+        harness.shutdown_tx.send(true).expect("loop is live");
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !harness.loop_handle.is_finished(),
+            "shutdown waits for the reserved slot"
+        );
+        assert!(
+            harness.action_tx.try_send(TickOutput::empty()).is_err(),
+            "the channel is closed to new sends"
+        );
+
+        let mut output = TickOutput::empty();
+        output
+            .actions
+            .push(leviculum_core::transport::Action::SendPacket {
+                peer: None,
+                iface: InterfaceId(0),
+                data: vec![0xC3; 32],
+            });
+        permit.send(output);
+        harness.loop_handle.await.expect("loop exits cleanly");
+
+        let frame = harness
+            .out_rx
+            .try_recv()
+            .expect("the reserved output went out");
+        assert_eq!(frame.data, vec![0xC3; 32].into());
     }
 
     /// The hourly deaf window this lane removes: a SendPacket pushed while
