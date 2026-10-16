@@ -2,7 +2,8 @@
 
 What `just lnflash-bundle` assembles the bundle's `firmware/` directory
 from. Everything here except the manifest is a file that travels to the
-user unchanged; nothing here is linked into the binary.
+user unchanged; nothing here is linked into a shipped binary (the test
+binaries embed the SoftDevice, see below).
 
 ## Why these files are in the repo at all
 
@@ -32,7 +33,7 @@ variant does not.
 
 ## The two rules that shape this directory
 
-**The SoftDevice is never linked into the binary.** Clause 4 restricts
+**The SoftDevice is never linked into a shipped binary.** Clause 4 restricts
 what the software may be used for and clause 5 forbids modification,
 decompilation and disassembly. AGPL-3.0 permits no such additional
 restrictions on the combined work, so an `include_bytes!` of this blob
@@ -41,6 +42,15 @@ binary is ordinary aggregation and does not have that problem. Our own
 firmware travels the same way — being ours it could be embedded, but one
 uniform payload layout beats a split where some images live inside the
 binary and others outside.
+
+Only the test binaries embed it: `lnflash/tests/vendored_softdevice.rs`,
+`lnflash/tests/cli.rs` and a `#[cfg(test)]` module in `lnflash/src/flow.rs` each
+`include_str!` the hex, so the parsers and the flash flow run against the
+real image. A test binary is built on our machines and distributed to
+nobody. The guard is
+`lnflash/tests/vendored_softdevice.rs::the_shipped_binary_does_not_embed_the_softdevice`:
+it reads the `lnflash` binary cargo builds from the shipped sources and
+fails if it carries the hex text or the decoded image.
 
 **The licence cannot be left behind.** A `remedy` entry in the manifest
 carries a mandatory `license` field, and the manifest loader rejects an

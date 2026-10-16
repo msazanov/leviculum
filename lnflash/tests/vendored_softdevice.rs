@@ -137,3 +137,46 @@ fn the_vendored_licence_travels_with_the_vendored_blob() {
     assert!(licence.contains("Copyright (c) 2007 - 2020, Nordic Semiconductor ASA"));
     assert!(!licence.trim().is_empty());
 }
+
+/// Whether `needle` occurs anywhere in `hay`.
+fn contains(hay: &[u8], needle: &[u8]) -> bool {
+    hay.windows(needle.len()).any(|w| w == needle)
+}
+
+#[test]
+fn the_shipped_binary_does_not_embed_the_softdevice() {
+    // The licence rule of `payload/README.md`: the SoftDevice travels beside
+    // the binary, never inside it, because clauses 4 and 5 of its licence
+    // cannot become part of one work with AGPL code. The test binaries do
+    // embed it (this file, `tests/cli.rs` and a `#[cfg(test)]` in
+    // `src/flow.rs`), so the check is on the `lnflash` binary itself, which
+    // cargo builds from the same sources a release build compiles.
+    //
+    // Three forms an embedding could take, each looked for: the hex text
+    // (`include_str!`), and the decoded image as raw bytes or inside UF2
+    // blocks (`include_bytes!` of a converted file). The byte windows are
+    // 64 bytes inside one 256-byte UF2 payload, so they match either way.
+    let binary = std::fs::read(env!("CARGO_BIN_EXE_lnflash")).expect("the lnflash binary");
+
+    let records: Vec<&str> = SOFTDEVICE_HEX.lines().collect();
+    for record in [records[1], records[records.len() / 2]] {
+        assert!(record.len() > 40, "{record:?} is a data record");
+        assert!(
+            !contains(&binary, record.as_bytes()),
+            "the lnflash binary carries the SoftDevice hex record {record}"
+        );
+    }
+
+    let image = &spans()[1];
+    for addr in [0x1100u32, 0x3000, 0x1_0000, 0x2_0000] {
+        let at = (addr - image.start) as usize;
+        let window = &image.data[at..at + 64];
+        // A window of erased flash would match any padding; these do not.
+        let distinct: std::collections::BTreeSet<_> = window.iter().collect();
+        assert!(distinct.len() > 16, "the window at {addr:#x} is not code");
+        assert!(
+            !contains(&binary, window),
+            "the lnflash binary carries the SoftDevice's bytes at {addr:#x}"
+        );
+    }
+}
