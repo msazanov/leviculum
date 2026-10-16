@@ -29,7 +29,9 @@ use crate::link::LinkId;
 use crate::node::{NodeCore, NodeCoreBuilder, NodeEvent};
 use crate::packet::{Packet, PacketContext};
 use crate::resource::outgoing::OutgoingResource;
-use crate::resource::{ResourceError, ResourceStrategy, HASHMAP_IS_EXHAUSTED};
+use crate::resource::{
+    ResourceAdvertisement, ResourceError, ResourceStrategy, HASHMAP_IS_EXHAUSTED,
+};
 use crate::test_utils::{MockClock, MockInterface, TEST_TIME_MS};
 use crate::traits::{Clock, NoStorage};
 use crate::transport::{Action, InterfaceId, TickOutput};
@@ -291,6 +293,104 @@ fn advertisement_beyond_the_bound_is_refused_with_rcl() {
         "the sender learns the refusal at once: {:?}",
         out.events
     );
+}
+
+/// The sender's advertisement `adv`, re-sealed with the compressed flag set,
+/// as a Python sender emits it whenever bz2 shrinks the data
+/// (`reference/Reticulum/RNS/Resource.py:248`). This build's own sender
+/// compresses only with the `compression` feature, so the flag is forged.
+fn mark_compressed(pair: &Pair, adv: &[u8]) -> Vec<u8> {
+    let link = pair.sender.links.get(&pair.sender_link).expect("link");
+    let packet = Packet::unpack(adv).expect("advertisement packet");
+    let mut plain = std::vec![0u8; packet.data.len()];
+    let len = link
+        .decrypt(packet.data.as_slice(), &mut plain)
+        .expect("decrypt advertisement");
+    plain.truncate(len);
+    let mut parsed = ResourceAdvertisement::unpack(&plain).expect("advertisement");
+    parsed.flags.compressed = true;
+    link.build_data_packet_with_context(&parsed.pack(), PacketContext::ResourceAdv, &mut OsRng)
+        .expect("re-sealed advertisement")
+}
+
+/// Review finding L-0028: without the `compression` feature (every board
+/// build) a compressed advertisement is refused with an RCL before any part
+/// is requested, and the sender fails it at once, instead of the whole
+/// transfer crossing the air to fail at assembly.
+#[cfg(not(feature = "compression"))]
+#[test]
+fn compressed_advertisement_is_refused_without_the_feature() {
+    let mut pair = establish(crate::resource::RESOURCE_MAX_INCOMING_PER_LINK);
+    let (hash, adv) = pair.advertise(&payload(7, 3000));
+    let adv = mark_compressed(&pair, &adv);
+    let iface = InterfaceId(pair.r_iface);
+    #[cfg(feature = "tracing")]
+    let answer = {
+        let (answer, logs) = crate::test_log_capture::with_captured_logs(|| {
+            pair.receiver.handle_packet(iface, &adv)
+        });
+        let line = logs
+            .lines()
+            .find(|l| l.contains("RESOURCE_ADV_REFUSED"))
+            .expect("the refusal emits RESOURCE_ADV_REFUSED");
+        assert!(line.contains("reason=\"compressed\""), "{line}");
+        answer
+    };
+    #[cfg(not(feature = "tracing"))]
+    let answer = pair.receiver.handle_packet(iface, &adv);
+    assert!(
+        !answer
+            .events
+            .iter()
+            .any(|e| matches!(e, NodeEvent::ResourceTransferStarted { .. })),
+        "no transfer starts: {:?}",
+        answer.events
+    );
+    let answer = action_data(&answer);
+    assert_eq!(count_context(&answer, PacketContext::ResourceReq), 0);
+    assert_eq!(
+        count_context(&answer, PacketContext::ResourceRcl),
+        1,
+        "the advertisement is refused, not requested"
+    );
+    assert_eq!(pair.named_resource(&answer[0]), Some(hash));
+    let out = pair.deliver_to_sender(&answer[0]);
+    assert!(
+        out.events.iter().any(|e| matches!(
+            e,
+            NodeEvent::ResourceFailed {
+                resource_hash,
+                error: ResourceError::RejectedByRemote,
+                is_sender: true,
+                ..
+            } if *resource_hash == hash
+        )),
+        "the sender learns the refusal at once: {:?}",
+        out.events
+    );
+}
+
+/// With the feature (every host build) the same advertisement is taken:
+/// the refusal is for a build that cannot decompress, nothing else.
+#[cfg(feature = "compression")]
+#[test]
+fn compressed_advertisement_is_requested_with_the_feature() {
+    let mut pair = establish(crate::resource::RESOURCE_MAX_INCOMING_PER_LINK);
+    let (hash, adv) = pair.advertise(&payload(7, 3000));
+    let adv = mark_compressed(&pair, &adv);
+    let answer = pair.receiver.handle_packet(InterfaceId(pair.r_iface), &adv);
+    assert!(
+        answer.events.iter().any(|e| matches!(
+            e,
+            NodeEvent::ResourceTransferStarted { resource_hash, is_sender: false, .. }
+                if *resource_hash == hash
+        )),
+        "the receiver starts the transfer: {:?}",
+        answer.events
+    );
+    let answer = action_data(&answer);
+    assert_eq!(count_context(&answer, PacketContext::ResourceReq), 1);
+    assert_eq!(count_context(&answer, PacketContext::ResourceRcl), 0);
 }
 
 /// What [`drive`] saw: the data the receiver completed, by hash, the

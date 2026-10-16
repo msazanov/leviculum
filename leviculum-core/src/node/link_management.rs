@@ -2898,7 +2898,20 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         if strategy != ResourceStrategy::AcceptNone
             && link.incoming_resource_count() >= self.max_incoming_resources_per_link
         {
-            self.refuse_incoming_resource(&link_id, &adv.resource_hash, now_ms);
+            self.refuse_incoming_resource(&link_id, &adv.resource_hash, now_ms, "incoming_full");
+            return;
+        }
+        // Without the `compression` feature (every board build: bz2 needs
+        // megabytes against a 96 KiB heap) a compressed resource could only
+        // fail at assembly, after every part had crossed the air. Refuse it
+        // here instead, before the first request, so the sender fails it at
+        // once (review finding L-0028). Python senders compress whenever it
+        // shrinks the data (`reference/Reticulum/RNS/Resource.py:248`).
+        if strategy != ResourceStrategy::AcceptNone
+            && adv.flags.compressed
+            && !cfg!(feature = "compression")
+        {
+            self.refuse_incoming_resource(&link_id, &adv.resource_hash, now_ms, "compressed");
             return;
         }
         let resource_hash = adv.resource_hash;
@@ -3015,18 +3028,20 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.reset_pending_requests_on_link(&link_id, now_ms);
     }
 
-    /// Refuse an advertised resource because its link already carries
-    /// `max_incoming_resources_per_link` incoming ones: a receiver cancel
-    /// (RCL) naming it, the reply `Resource.reject` sends
+    /// Refuse an advertised resource this node would take but cannot: a
+    /// receiver cancel (RCL) naming it, the reply `Resource.reject` sends
     /// (`reference/Reticulum/RNS/Resource.py:157-161`), so the sender fails
-    /// it at once. Ignoring it left the sender re-advertising into silence
-    /// until its whole advertisement budget ran out (Codeberg #657, audit
-    /// D12).
+    /// it at once. `reason` is the event's `reason` key: `incoming_full`
+    /// when the link already carries `max_incoming_resources_per_link`
+    /// incoming ones, `compressed` when this build cannot decompress it.
+    /// Ignoring it left the sender re-advertising into silence until its
+    /// whole advertisement budget ran out (Codeberg #657, audit D12).
     pub(super) fn refuse_incoming_resource(
         &mut self,
         link_id: &LinkId,
         resource_hash: &[u8; 32],
         now_ms: u64,
+        reason: &'static str,
     ) {
         let Some(link) = self.links.get_mut(link_id) else {
             return;
@@ -3035,7 +3050,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             event = "RESOURCE_ADV_REFUSED",
             rh = %HexFmt(&resource_hash[..4]),
             link = %HexShort(link_id.as_bytes()),
-            reason = "incoming_full",
+            reason = reason,
             held = link.incoming_resource_count(),
         );
         match link.build_data_packet_with_context(

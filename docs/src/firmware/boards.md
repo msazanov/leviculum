@@ -41,6 +41,19 @@ transport-enabled `lnsd`.
 (`enable_transport` (`leviculum-nrf/src/bin/t114.rs:169`),
 `leviculum-nrf/src/bin/rak4631.rs:197`)
 
+A board does not accept compressed resources. The firmware builds
+`leviculum-core` without its `compression` feature
+(`leviculum-nrf/Cargo.toml:17`), because bz2 decompression needs
+megabytes of working memory against a 96 KiB heap. A board therefore
+refuses a compressed advertisement at once with a receiver cancel, before
+it requests a single part, and the sender fails that transfer immediately
+(`handle_resource_adv`, `leviculum-core/src/node/link_management.rs:2732`;
+the refusal logs `RESOURCE_ADV_REFUSED reason=compressed` where tracing is
+compiled in). A Python sender compresses by default whenever bz2 shrinks
+the data (`auto_compress=True`, `reference/Reticulum/RNS/Resource.py:248`);
+to send a resource a board can take, pass `auto_compress=False` to
+`RNS.Resource(...)` for that resource.
+
 ## Hardware coverage
 
 We build one firmware per **pinout family**, not per product. A family is

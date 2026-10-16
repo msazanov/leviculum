@@ -2335,6 +2335,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 link_id,
                 &resource_hash,
                 now_ms / crate::constants::MS_PER_SECOND,
+                "incoming_full",
             );
             return Err(ResourceError::TransferInProgress);
         }
