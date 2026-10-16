@@ -207,7 +207,6 @@ embedded-alloc = "0.7"
 # Static initialization
 static_cell = "2"
 
-tracing-core = { version = "0.1", default-features = false }
 rand_core = { version = "0.6", default-features = false }
 heapless = { version = "0.9", default-features = false }
 embedded-storage = "0.3"

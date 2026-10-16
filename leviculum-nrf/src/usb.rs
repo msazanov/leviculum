@@ -273,7 +273,7 @@ async fn usb_task(mut usb: UsbDevice<'static, UsbDriver>) {
 /// The debug port's writer. Each wake is `leviculum_usb_policy::drain_wake`:
 /// write the log ring out while a host holds DTR up, never without one, and
 /// open the runtime-drain gate on the first host or after 30 s headless, so
-/// the LoRa task and the tracing subscriber stop dropping their output.
+/// the LoRa task and the other `log_fmt` callers stop dropping their output.
 #[embassy_executor::task]
 async fn debug_writer_task(mut cdc: cdc_acm::Sender<'static, UsbDriver>) {
     use embassy_time::{with_timeout, Duration, Instant};

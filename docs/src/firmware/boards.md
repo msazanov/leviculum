@@ -31,15 +31,15 @@ runs an event-driven main loop that dispatches packets between them:
 
 (Interface registration and MTUs:
 `set_interface_name` (`leviculum-nrf/src/bin/t114.rs:270-287`) and
-`leviculum-nrf/src/bin/rak4631.rs:314-355`. The main loop selecting over
+`leviculum-nrf/src/bin/rak4631.rs:313-354`. The main loop selecting over
 the three RX sources plus a timer deadline begins at
-`leviculum-nrf/src/bin/t114.rs:600`.)
+`leviculum-nrf/src/bin/t114.rs:599`.)
 
 Transport routing is enabled in the node builder, so an LNode forwards
 packets and serves paths for other peers, exactly like a
 transport-enabled `lnsd`.
-(`enable_transport` (`leviculum-nrf/src/bin/t114.rs:188`),
-`leviculum-nrf/src/bin/rak4631.rs:221`)
+(`enable_transport` (`leviculum-nrf/src/bin/t114.rs:187`),
+`leviculum-nrf/src/bin/rak4631.rs:220`)
 
 ## Hardware coverage
 
@@ -399,7 +399,7 @@ name = "solarnode"
 path = "src/bin/solarnode.rs"
 ```
 
-(`leviculum-nrf/Cargo.toml:412-422`)
+(`leviculum-nrf/Cargo.toml:411-421`)
 
 The board-support-package (BSP) features select the runtime for a given
 board. Exactly one BSP feature must be enabled per build; a
@@ -408,25 +408,25 @@ board. Exactly one BSP feature must be enabled per build; a
 
 | Feature | Effect | Cite |
 |---------|--------|------|
-| `bsp-t114` | T114 BSP (+ SoftDevice BLE + status display + GNSS + battery) | `leviculum-nrf/Cargo.toml:351` |
-| `bsp-rak4631` | RAK4631 BSP (+ SoftDevice BLE) | `leviculum-nrf/Cargo.toml:335` |
-| `bsp-solarnode` | SenseCAP Solar Node P1-Pro BSP (+ SoftDevice BLE + battery + GNSS). No display | `leviculum-nrf/Cargo.toml:372` |
-| `display` | SSD1306 OLED, probed at run time | `leviculum-nrf/Cargo.toml:374` |
-| `gnss` | NMEA0183 GNSS (ZOE-M8Q on the V2 baseboard, L76K on the T114 and the Solar Node) | `leviculum-nrf/Cargo.toml:375` |
-| `battery` | pack-voltage monitor: the `BATTERY` log line, the panel's voltage and, on the V2, the telemetry field. Unconditional under `bsp-t114` (the divider is on every T114) and under `bsp-solarnode` (it is on the XIAO module), opt-in on the V2 via `rak-baseboard` | `leviculum-nrf/Cargo.toml:381` |
-| `rak-baseboard` | aggregate of `display` + `gnss` + `battery` | `leviculum-nrf/Cargo.toml:382` |
+| `bsp-t114` | T114 BSP (+ SoftDevice BLE + status display + GNSS + battery) | `leviculum-nrf/Cargo.toml:350` |
+| `bsp-rak4631` | RAK4631 BSP (+ SoftDevice BLE) | `leviculum-nrf/Cargo.toml:334` |
+| `bsp-solarnode` | SenseCAP Solar Node P1-Pro BSP (+ SoftDevice BLE + battery + GNSS). No display | `leviculum-nrf/Cargo.toml:371` |
+| `display` | SSD1306 OLED, probed at run time | `leviculum-nrf/Cargo.toml:373` |
+| `gnss` | NMEA0183 GNSS (ZOE-M8Q on the V2 baseboard, L76K on the T114 and the Solar Node) | `leviculum-nrf/Cargo.toml:374` |
+| `battery` | pack-voltage monitor: the `BATTERY` log line, the panel's voltage and, on the V2, the telemetry field. Unconditional under `bsp-t114` (the divider is on every T114) and under `bsp-solarnode` (it is on the XIAO module), opt-in on the V2 via `rak-baseboard` | `leviculum-nrf/Cargo.toml:380` |
+| `rak-baseboard` | aggregate of `display` + `gnss` + `battery` | `leviculum-nrf/Cargo.toml:381` |
 
 > **Note on BLE:** Both firmware entry points register a BLE interface
 > and call `leviculum_nrf::ble::init`
-> (`leviculum-nrf/src/bin/t114.rs:367`,
-> `leviculum-nrf/src/bin/rak4631.rs:422`). The Cargo `softdevice`
+> (`leviculum-nrf/src/bin/t114.rs:366`,
+> `leviculum-nrf/src/bin/rak4631.rs:421`). The Cargo `softdevice`
 > feature, and therefore the BLE stack, is pulled in by *both* BSP
-> features (`leviculum-nrf/Cargo.toml:335`,
+> features (`leviculum-nrf/Cargo.toml:334`,
 > `leviculum-nrf/Cargo.toml:188`).
 
 The baseboard peripherals are each gated behind their own Cargo feature
-(`leviculum-nrf/Cargo.toml:374-382`) and spawned only when that feature
-is on (`leviculum-nrf/src/bin/rak4631.rs:354-385`). Because each of them
+(`leviculum-nrf/Cargo.toml:373-381`) and spawned only when that feature
+is on (`leviculum-nrf/src/bin/rak4631.rs:353-384`). Because each of them
 either probes for its hardware or degrades to nothing when it is absent,
 the aggregate build is what we ship for the whole family rather than a
 Pocket-V2-only image.
@@ -510,7 +510,7 @@ RNode configuration on the same LoRa network.
 (`leviculum-nrf/README.md:8`. The profile the firmware loads at boot,
 `eu_medium` (`leviculum-nrf/src/lora.rs:470-499`), applied at
 `leviculum-nrf/src/bin/t114.rs:305` and
-`leviculum-nrf/src/bin/rak4631.rs:414`.)
+`leviculum-nrf/src/bin/rak4631.rs:413`.)
 
 See [Flashing](flashing.md) for how to build and write these binaries to
 a board, and [Recovery](recovery.md) for the bootloader-entry details.

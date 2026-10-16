@@ -1080,7 +1080,6 @@ dependencies = [
  "sequential-storage",
  "ssd1306",
  "static_cell",
- "tracing-core",
 ]
 
 [[package]]
@@ -1653,12 +1652,6 @@ dependencies = [
  "quote",
  "unicode-ident",
 ]
-
-[[package]]
-name = "tracing-core"
-version = "0.1.36"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
 
 [[package]]
 name = "typenum"

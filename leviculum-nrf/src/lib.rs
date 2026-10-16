@@ -232,19 +232,6 @@ pub mod gnss;
 #[cfg(feature = "display")]
 pub mod led;
 
-/// Install the tracing subscriber that routes `leviculum-core` log events
-/// to the CDC-ACM debug port via LOG_CHANNEL.
-///
-/// Call once at startup before any tracing macros fire. Without this,
-/// all `tracing::debug!()` / `tracing::info!()` etc. from leviculum-core
-/// are silently dropped (no subscriber registered).
-pub fn init_tracing() {
-    use tracing_core::dispatcher;
-    let subscriber = log::TracingSubscriber;
-    let dispatch = dispatcher::Dispatch::new(subscriber);
-    let _ = dispatcher::set_global_default(dispatch);
-}
-
 use core::mem::MaybeUninit;
 use embedded_alloc::LlffHeap as Heap;
 

@@ -377,17 +377,14 @@ fn the_firmware_stamps_every_line_with_board_uptime() {
         log.contains("embassy_time::Instant::now().as_millis()"),
         "leviculum-nrf/src/log.rs no longer reads board uptime for the t= stamp"
     );
-    // Uniform: both formatting paths — the `log_fmt*` one and the tracing
-    // subscriber's hand-built line — close through the shared shaper. A
-    // stamp on some lines and not others is a trap for whoever reads the
-    // log next.
+    // Uniform: the one formatting path, `log_fmt*`, closes through the
+    // shared shaper. A stamp on some lines and not others is a trap for
+    // whoever reads the log next. (A second path, the tracing subscriber's
+    // hand-built line, was deleted with the subscriber: the firmware builds
+    // leviculum-core without `tracing`, so it never ran.)
     assert!(
         log.contains("leviculum_log_line::format_line("),
         "log_fmt/log_fmt_critical no longer shape their line through leviculum-log-line"
-    );
-    assert!(
-        log.contains("leviculum_log_line::finish("),
-        "the tracing subscriber no longer appends the t= stamp"
     );
     // The stamp is meaningful in every logging context only because RTC1 is
     // already running when the first line is written. Both entry points start

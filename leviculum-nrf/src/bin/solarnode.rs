@@ -68,7 +68,6 @@ async fn main(spawner: Spawner) {
     let mut p = embassy_nrf::init(config);
 
     init_heap();
-    leviculum_nrf::init_tracing();
 
     // Boot diagnostics from the previous run. Read before the first log
     // call of this boot: `take_persistent_log` must snapshot the PREVIOUS

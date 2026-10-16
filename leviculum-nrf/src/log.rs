@@ -48,7 +48,7 @@ pub static RUNTIME_DRAIN_OPEN: AtomicBool = AtomicBool::new(false);
 pub static RUNTIME_DROPPED: AtomicUsize = AtomicUsize::new(0);
 
 /// Lock-free ring buffer for log output.
-/// Single producer (log_fmt / tracing subscriber), single consumer (USB debug writer).
+/// Single producer (log_fmt), single consumer (USB debug writer).
 pub struct LogRing {
     buf: core::cell::UnsafeCell<[u8; LOG_RING_SIZE]>,
     write_pos: AtomicUsize,
@@ -250,8 +250,7 @@ macro_rules! warn {
 /// Log a boot/panic-critical message that bypasses the
 /// `RUNTIME_DRAIN_OPEN` gate. Use only for output that must reach
 /// the host before DTR-assert (boot banners, NVIC dump, PMRT replay,
-/// `[BUG32_RAM]`-style probes); routine info!/warn!/tracing-debug
-/// stays gated.
+/// `[BUG32_RAM]`-style probes); routine info!/warn! stays gated.
 #[macro_export]
 macro_rules! log_critical {
     ($($arg:tt)*) => {
@@ -363,106 +362,5 @@ pub fn open_runtime_drain() {
             "[LOG_GATE] ",
             format_args!("opened, dropped {} runtime lines pre-attach", dropped),
         );
-    }
-}
-
-// Tracing subscriber
-/// Minimal tracing subscriber that routes `leviculum-core` log events
-/// to the ring buffer via log_fmt.
-pub struct TracingSubscriber;
-
-impl tracing_core::Subscriber for TracingSubscriber {
-    fn enabled(&self, metadata: &tracing_core::Metadata<'_>) -> bool {
-        metadata.level() <= &tracing_core::Level::DEBUG
-    }
-
-    fn new_span(&self, _: &tracing_core::span::Attributes<'_>) -> tracing_core::span::Id {
-        tracing_core::span::Id::from_u64(1)
-    }
-
-    fn record(&self, _: &tracing_core::span::Id, _: &tracing_core::span::Record<'_>) {}
-    fn record_follows_from(&self, _: &tracing_core::span::Id, _: &tracing_core::span::Id) {}
-    fn enter(&self, _: &tracing_core::span::Id) {}
-    fn exit(&self, _: &tracing_core::span::Id) {}
-
-    fn event(&self, event: &tracing_core::Event<'_>) {
-        // Tracing events are runtime-class (leviculum-core's transport
-        // layer). Gate them on the RUNTIME_DRAIN_OPEN flag so they
-        // don't lap the boot-critical scrollback before the host attaches.
-        if !RUNTIME_DRAIN_OPEN.load(Ordering::Relaxed) {
-            RUNTIME_DROPPED.fetch_add(1, Ordering::Relaxed);
-            return;
-        }
-        let metadata = event.metadata();
-        let level = match *metadata.level() {
-            tracing_core::Level::ERROR => "ERROR",
-            tracing_core::Level::WARN => " WARN",
-            tracing_core::Level::INFO => " INFO",
-            tracing_core::Level::DEBUG => "DEBUG",
-            tracing_core::Level::TRACE => "TRACE",
-        };
-
-        // Stamp first, so it is the moment the event happened rather
-        // than the moment its (unbounded) field list finished
-        // formatting.
-        let stamp = uptime_ms();
-        let mut buf = [0u8; 1024];
-        let mut len = 0usize;
-
-        // The tail of the buffer belongs to the stamp and the CRLF; the
-        // prefix and the fields share what is left. Same reservation
-        // `format_line` makes for `log_fmt`, and for the same reason: a
-        // truncated stamp is a wrong measurement, a truncated field list
-        // is only a shorter one.
-        {
-            let limit = leviculum_log_line::body_limit(buf.len());
-            let mut w = leviculum_log_line::Sink::new(&mut buf[..limit], &mut len);
-            let _ = core::fmt::Write::write_fmt(
-                &mut w,
-                format_args!("[{}] {}: ", level, metadata.target()),
-            );
-        }
-        {
-            let limit = leviculum_log_line::body_limit(buf.len());
-            event.record(&mut TracingVisitor {
-                buf: &mut buf[..limit],
-                len: &mut len,
-            });
-        }
-        let len = leviculum_log_line::finish(&mut buf, len, stamp);
-
-        LOG_RING.write(&buf[..len]);
-        PERSISTENT_TAIL.write(&buf[..len]);
-        LOG_SIGNAL.signal(());
-    }
-}
-
-/// Visitor that formats tracing event fields into a buffer.
-struct TracingVisitor<'a> {
-    buf: &'a mut [u8],
-    len: &'a mut usize,
-}
-
-impl tracing_core::field::Visit for TracingVisitor<'_> {
-    // Not for behaviour — no event in the firmware graph records an f64
-    // field today — but for the vtable: the default record_f64 forwards
-    // the value as &dyn Debug, and that f64-Debug vtable alone kept
-    // core's whole flt2dec apparatus (dragon, grisu, their power tables,
-    // ~13 KiB) linked into both images. Fixed-point at 1e-6 keeps any
-    // future float field readable without inviting the tables back.
-    fn record_f64(&mut self, field: &tracing_core::field::Field, value: f64) {
-        let mut w = leviculum_log_line::Sink::new(self.buf, self.len);
-        let _ = core::fmt::Write::write_fmt(&mut w, format_args!(" {}=", field.name()));
-        let _ = leviculum_log_line::write_f64_micro(&mut w, value);
-    }
-
-    fn record_debug(&mut self, field: &tracing_core::field::Field, value: &dyn core::fmt::Debug) {
-        let mut w = leviculum_log_line::Sink::new(self.buf, self.len);
-        if field.name() == "message" {
-            let _ = core::fmt::Write::write_fmt(&mut w, format_args!("{:?}", value));
-        } else {
-            let _ =
-                core::fmt::Write::write_fmt(&mut w, format_args!(" {}={:?}", field.name(), value));
-        }
     }
 }

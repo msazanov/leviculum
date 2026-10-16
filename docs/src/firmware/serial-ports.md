@@ -85,10 +85,24 @@ picocom /dev/leviculum-debug -b 115200
 On the debug port you will see the boot banner, the firmware git SHA and
 the periodic diagnostics the firmware emits: the `[FW_BUILD]` banner
 every 5 s, the `[STACK]` watermark lines, and the LoRa TX/RX events.
-(`fw_build_banner`, `leviculum-nrf/src/bin/t114.rs:1338-1349`, for the
+(`fw_build_banner`, `leviculum-nrf/src/bin/t114.rs:1337-1348`, for the
 banner task.) Do
 **not** point `lnsd` at the debug port; it carries log text, not HDLC
 frames.
+
+**leviculum-core's own log events do not exist on a board.** The firmware
+builds the core without its `tracing` feature, so every `debug!`/`warn!` in
+the core compiles to nothing, and the firmware installs no subscriber for
+them. Enabling it was measured on 2026-10-16: +166 596 B of flash on the
+T114 (+166 316 B on the RAK4631) against a 44 500 B (38 280 B) gap to the
+boot-record page, and +4 536 B of static RAM taken from the stack. What the
+board says about the core it says itself, from the `NodeEvent` stream
+(`leviculum-nrf/src/events.rs`): the `LINK_REFUSED`,
+`ANNOUNCE_LEARNED_NOT_RELAYED`, `ANN_TX` and `PKT_RELAY` event lines and the
+budgeted `[DROP]` lines, plus the periodic `[TRANSPORT]` counter line
+(`leviculum-nrf/src/transport_stats.rs`). A core event a bench needs on a
+board gets a line there; looking for a `[DEBUG] leviculum_core` line in a
+capture finds nothing, by construction.
 
 The hashes a prober needs are among them, on one line:
 
@@ -285,7 +299,7 @@ the board again is quicker.
 
 The probe destination is the only addressed service the firmware
 offers. Remote management is not enabled on the standalone binary
-(`leviculum-nrf/src/bin/t114.rs:168` sets `respond_to_probes` and
+(`leviculum-nrf/src/bin/t114.rs:167` sets `respond_to_probes` and
 nothing else), so `rnstatus -R` and `rnpath -R` have no responder;
 `rncp`, `rnsh` and `rnx` have no counterpart either. What the board
 does beyond that — forwarding announces, answering path requests,
