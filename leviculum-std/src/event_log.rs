@@ -1053,6 +1053,12 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
     // LOCK_DEPTH_OVERFLOW says the tripwire went inactive on a thread;
     // REENTRANT_LOCK is the tripwire firing, emitted immediately before the
     // panic so the line survives whatever the panic machinery does next.
+    // A config key took lnsd's default where rnsd's differs (`config.rs`,
+    // `ReticulumConfig::log_defaulted_keys`, L-0015): once at daemon startup.
+    EventSchema {
+        name: "CONFIG_DEFAULT",
+        required_keys: &["key", "value", "rnsd"],
+    },
     EventSchema {
         name: "LOCK_DEPTH_OVERFLOW",
         required_keys: &["max_depth", "tripwire"],

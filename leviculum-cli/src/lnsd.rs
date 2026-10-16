@@ -174,6 +174,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         Config::default()
     };
+    config.reticulum.log_defaulted_keys();
 
     // Storage precedence: --storage > config `storage_path` > <config_dir>/storage.
     // The resolved path is written back so the builder, the log line above and

@@ -48,8 +48,19 @@ pub struct ReticulumConfig {
     ///
     /// Defaults to `true`, daemon use enables transport.
     /// Python Reticulum defaults to `false` (library use), but lnsd is a daemon.
+    /// The same file without the key therefore gives a transport node under
+    /// lnsd and a leaf under rnsd; [`Self::enable_transport_defaulted`] is
+    /// what lets the daemon say so instead of differing silently (L-0015).
     #[serde(default = "default_true")]
     pub enable_transport: bool,
+
+    /// `enable_transport` was not written in the config, so
+    /// [`Self::enable_transport`] is the built-in default. `true` for a
+    /// default-constructed config (no file at all); [`Config::load`] clears it
+    /// when the INI or TOML file names the key. Read by
+    /// [`Self::log_defaulted_keys`].
+    #[serde(skip, default = "default_true")]
+    pub enable_transport_defaulted: bool,
     /// Send packet proofs in the implicit form, the 64-byte signature alone,
     /// instead of the explicit 96-byte packet hash plus signature (RNS
     /// default true, Reticulum.py:257,575-578; read by `Identity.prove`,
@@ -347,6 +358,22 @@ pub struct ReticulumConfig {
 }
 
 impl ReticulumConfig {
+    /// Say, once at daemon startup, which keys took a default that rnsd
+    /// would not take. Today that is `enable_transport` alone: lnsd defaults
+    /// it to `true`, rnsd to `false` (`Reticulum.py:254`, flipped only by an
+    /// explicit key at 517-519), so an operator or an A/B harness that left
+    /// the key out learns from the log that the two daemons differ here.
+    pub fn log_defaulted_keys(&self) {
+        if self.enable_transport_defaulted {
+            tracing::info!(
+                event = "CONFIG_DEFAULT",
+                key = "enable_transport",
+                value = self.enable_transport,
+                rnsd = false,
+            );
+        }
+    }
+
     /// The `default_ar_*` keys as the core's node-wide announce-rate fill
     /// ([`leviculum_core::transport::TransportConfig::default_announce_rate`]).
     pub fn default_announce_rate(&self) -> leviculum_core::transport::AnnounceRateConfig {
@@ -465,6 +492,7 @@ impl Default for ReticulumConfig {
     fn default() -> Self {
         Self {
             enable_transport: true,
+            enable_transport_defaulted: true,
             use_implicit_proof: true,
             loglevel: None,
             shared_instance: false,
@@ -1127,6 +1155,18 @@ impl InterfaceConfig {
     }
 }
 
+/// Parse a TOML config, recording whether it names `enable_transport`: serde
+/// fills an absent key from its default and keeps no trace of having done so.
+fn config_from_toml(content: &str) -> std::result::Result<Config, toml::de::Error> {
+    let mut config: Config = toml::from_str(content)?;
+    let table: toml::Table = toml::from_str(content)?;
+    config.reticulum.enable_transport_defaulted = table
+        .get("reticulum")
+        .and_then(|r| r.get("enable_transport"))
+        .is_none();
+    Ok(config)
+}
+
 impl Config {
     /// Load configuration from a file
     ///
@@ -1142,7 +1182,7 @@ impl Config {
 
         // Explicit .toml extension → TOML only
         let mut config = if path.extension().is_some_and(|e| e == "toml") {
-            toml::from_str(&content).map_err(|e| {
+            config_from_toml(&content).map_err(|e| {
                 Error::Config(format!(
                     "Failed to parse TOML config {}: {e}",
                     path.display()
@@ -1166,7 +1206,7 @@ impl Config {
             // alone reads as nonsense to someone who copied an rnsd config.
             // Discarding the TOML error here (`or_else(|_| ...)`) was half of
             // why a broken file used to reach the daemon silently.
-            toml::from_str(&content).or_else(|toml_err| {
+            config_from_toml(&content).or_else(|toml_err| {
                 crate::ini_config::parse_ini(&content).map_err(|ini_err| {
                     Error::Config(format!(
                         "Failed to parse config {}: not valid Reticulum INI ({ini_err}) \
@@ -1403,6 +1443,72 @@ mod tests {
         assert!(
             !lora_off.resolve_ingress_control(),
             "explicit off disables the limiter on a shared-medium iface"
+        );
+    }
+
+    /// L-0015: a config without `enable_transport` records that the key was
+    /// defaulted, in both formats, and one naming the key does not.
+    #[test]
+    fn enable_transport_defaulted_is_recorded_per_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let cases = [
+            ("absent.ini", "[reticulum]\n  share_instance = No\n", true),
+            (
+                "present.ini",
+                "[reticulum]\n  enable_transport = True\n",
+                false,
+            ),
+            (
+                "absent.toml",
+                "[reticulum]\nuse_implicit_proof = true\n",
+                true,
+            ),
+            (
+                "present.toml",
+                "[reticulum]\nenable_transport = false\n",
+                false,
+            ),
+        ];
+        for (name, text, defaulted) in cases {
+            let path = dir.path().join(name);
+            std::fs::write(&path, text).unwrap();
+            let config = Config::load(&path).unwrap();
+            assert_eq!(
+                config.reticulum.enable_transport_defaulted, defaulted,
+                "{name}: defaulted flag"
+            );
+        }
+        assert!(Config::default().reticulum.enable_transport_defaulted);
+    }
+
+    /// L-0015: the startup line names the default lnsd took and rnsd's, and
+    /// says nothing when the key was written.
+    #[test]
+    fn log_defaulted_keys_emits_config_default_only_when_defaulted() {
+        let evlog = crate::test_support::event_log::init_event_log();
+        let count = || {
+            evlog
+                .dump()
+                .into_iter()
+                .filter(|l| l.starts_with("CONFIG_DEFAULT"))
+                .collect::<Vec<_>>()
+        };
+
+        let explicit = crate::ini_config::parse_ini("[reticulum]\n  enable_transport = True\n")
+            .unwrap()
+            .reticulum;
+        explicit.log_defaulted_keys();
+        assert!(count().is_empty(), "explicit key: {:?}", count());
+
+        let absent = crate::ini_config::parse_ini("[reticulum]\n")
+            .unwrap()
+            .reticulum;
+        absent.log_defaulted_keys();
+        let lines = count();
+        assert!(
+            matches!(lines.as_slice(), [line]
+                if line.contains(" key=enable_transport rnsd=false value=true ")),
+            "absent key: one CONFIG_DEFAULT line naming both defaults: {lines:?}"
         );
     }
 

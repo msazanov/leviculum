@@ -89,7 +89,7 @@ and `a_configured_rpc_key_wins_over_the_identity_file`.
 the platforms where rnsd acts on it.** Python, on any platform, moves
 BOTH channels to TCP loopback (37428/37429 or the configured ports)
 when the key says `tcp` (`reference/Reticulum/RNS/Reticulum.py:683-694`).
-We parse and store the key (`leviculum-std/src/ini_config.rs:417-426`)
+We parse and store the key (`leviculum-std/src/ini_config.rs:418-426`)
 and apply its socket-override rule, but on Unix the daemon serves the
 abstract AF_UNIX pair regardless; only the Windows build reads the
 ports (the AF_INET path was compiled for Windows only, and the field's
@@ -521,22 +521,22 @@ depths, invalid lines refuse the whole file exactly as `rnsd` panics
 on them (`parse_ini`, `leviculum-std/src/ini_config.rs:209-211`,
 against `reference/Reticulum/RNS/Reticulum.py:328-333`), inline
 comments and quote stripping to ConfigObj's own rules
-(`strip_value`, `leviculum-std/src/ini_config.rs:1095`); the config
+(`strip_value`, `leviculum-std/src/ini_config.rs:1096`); the config
 directory lookup order `/etc/reticulum` → `~/.config/reticulum` →
 `~/.reticulum` (`resolve_config_dir`,
-`leviculum-std/src/config.rs:1241`, against
+`leviculum-std/src/config.rs:1281`, against
 `reference/Reticulum/RNS/Reticulum.py:229-236`); `ifac_size` in bits
-with the ≥ 8 floor (`leviculum-std/src/ini_config.rs:894-904`,
+with the ≥ 8 floor (`leviculum-std/src/ini_config.rs:895-905`,
 against `reference/Reticulum/RNS/Reticulum.py:747-750`) and the
 per-type default IFAC sizes pinned class by class
 (`default_ifac_size`, `leviculum-std/src/driver/mod.rs:578`);
 `announce_cap` kept only in (0, 100]
-(`leviculum-std/src/ini_config.rs:870-872`, against
+(`leviculum-std/src/ini_config.rs:871-873`, against
 `reference/Reticulum/RNS/Reticulum.py:819-822`); `bitrate` gated on
-MINIMUM_BITRATE (`leviculum-std/src/ini_config.rs:768-772`);
+MINIMUM_BITRATE (`leviculum-std/src/ini_config.rs:769-773`);
 Backbone-to-TCP normalization including the `port`/`remote`/
 `listen_on` aliases (`normalize_backbone_interface`,
-`leviculum-std/src/ini_config.rs:1010`, against
+`leviculum-std/src/ini_config.rs:1011`, against
 `reference/Reticulum/RNS/Reticulum.py:960-972`); the three UDP config
 forms of leviculum#279 — single `port`, bind-only, forward-only, plus
 the `device` broadcast fill — each built and pinned end to end from
@@ -548,10 +548,10 @@ tests at `:327`, against
 receive-bound caveat documented where it lives
 (`leviculum-std/src/interfaces/udp.rs:21-26`); both `mode` spellings
 including Python's `interface_mode = gateway` copy/paste bug handled
-as a strict superset (`leviculum-std/src/ini_config.rs:873-881`,
+as a strict superset (`leviculum-std/src/ini_config.rs:874-882`,
 against `reference/Reticulum/RNS/Reticulum.py:717-745`); and the rule
 that an unknown key never makes lnsd refuse a config rnsd loads
-(`leviculum-std/src/ini_config.rs:651-655`).
+(`leviculum-std/src/ini_config.rs:652-656`).
 
 **D12 — three defaults flip against a config that omits the key, and
 each flips a different layer of the daemon.** All three are
@@ -561,7 +561,7 @@ daemon:
 
 1. **`share_instance`** — Python defaults true
    (`reference/Reticulum/RNS/Reticulum.py:287`); ours defaults false
-   (`leviculum-std/src/config.rs:63-68`, resolved unchanged by the
+   (`leviculum-std/src/config.rs:74-79`, resolved unchanged by the
    builder, `leviculum-std/src/driver/builder.rs:850-852`). A config
    that never names the key gives rnsd a shared instance and lnsd
    none: every Python tool answers "No shared RNS instance available"
@@ -569,14 +569,14 @@ daemon:
    non-drop-in position.
 2. **`enable_transport`** — Python defaults false
    (`reference/Reticulum/RNS/Reticulum.py:254`); ours defaults true
-   (`leviculum-std/src/config.rs:51-52`, "lnsd is a daemon"). This
+   (`leviculum-std/src/config.rs:54-55`, "lnsd is a daemon"). This
    one is mesh-visible: a key-less config makes lnsd retransmit
    announces and serve path requests where rnsd stays a leaf.
 3. **Per-interface `enabled`** — Python synthesizes an interface only
    when `enabled` or `interface_enabled` is explicitly true and skips
    the section otherwise
    (`reference/Reticulum/RNS/Reticulum.py:950` and `:1056`); ours
-   defaults the field true (`leviculum-std/src/config.rs:524-525`), so
+   defaults the field true (`leviculum-std/src/config.rs:552-553`), so
    a section with no `enabled` key is live under lnsd and dead under
    rnsd.
 
@@ -585,7 +585,7 @@ field docs, 3 looks like a serde-default convenience that nothing
 argues against the reference (the INI path inherits it silently).
 Mitigation in practice: every config we ship or generate writes all
 three keys explicitly (`example_config`,
-`leviculum-cli/src/lnsd.rs:369`). Bears on: the drop-in goal; any
+`leviculum-cli/src/lnsd.rs:370`). Bears on: the drop-in goal; any
 stranger's minimal config. Test: drop-in — a config of nothing but
 `[interfaces]` with one keyless section, both daemons, compare
 `rnstatus` reachability, transport state, and interface count.
@@ -626,7 +626,7 @@ refuses like the invalid-line arm does.
 
 *Fixed in 2d3eec85.* `parse_bool` accepts ConfigObj's eight spellings
 in any case and refuses everything else, the empty value included
-(`leviculum-std/src/ini_config.rs:1071`); the refusal stops the parse
+(`leviculum-std/src/ini_config.rs:1072`); the refusal stops the parse
 with the line, the key and the value named, as the invalid-line arm
 does: `config line 2: enable_transport = 'maybe' is neither true nor
 false (yes/no, true/false, on/off, 1/0)`. The same holds in interface
@@ -655,7 +655,7 @@ discoverable interface with latitude/longitude on both daemons, read
 the announce on a third node.
 
 *Fixed in 2d3eec85.* The seven keys have arms
-(`leviculum-std/src/ini_config.rs:944-950`) and reach the descriptor:
+(`leviculum-std/src/ini_config.rs:945-951`) and reach the descriptor:
 the position and the stamp cost for every discoverable type, the three
 radio keys for a KISS interface, which becomes discoverable with them
 (`descriptor_from_config`, `leviculum-std/src/discovery.rs:64`, the
@@ -683,7 +683,7 @@ transport-enabled interface's announce-rate enforcement
 `:830-833`), and the `ic_*`/`ec_pr_freq`/`egress_control` family
 tunes the ingress/egress limiters globally
 (`reference/Reticulum/RNS/Reticulum.py:635-677`). We honour the
-per-interface spellings (`leviculum-std/src/ini_config.rs:856-866`)
+per-interface spellings (`leviculum-std/src/ini_config.rs:857-867`)
 but the global ones fall into the catch-all, so our
 transport-enabled defaults are the hardcoded 3600/0/5
 (`leviculum-std/src/rpc/mod.rs:956-967` pins them). A config that
@@ -696,7 +696,7 @@ the `(t:...)` suffix.
 *Fixed in a26157d1*, for the keys that have a seam, and named for the
 rest. The three `default_ar_*` keys are read with Python's validation
 and its `or` fallback, so 0 keeps the default for the target and the
-grace (`leviculum-std/src/ini_config.rs:606`), and become the core's
+grace (`leviculum-std/src/ini_config.rs:607`), and become the core's
 node-wide fill (`TransportConfig::default_announce_rate`,
 `leviculum-core/src/transport.rs:1046`, applied in
 `resolve_announce_rate`, `leviculum-core/src/transport.rs:196`); an
@@ -713,7 +713,7 @@ held-announce cap the boards already size. The remaining tunings,
 `ic_burst_penalty`, `ic_held_release_interval` and `ec_pr_freq`, run as
 constants in our limiter, globally and per interface alike; each is now
 named at WARN as read but not honoured
-(`leviculum-std/src/ini_config.rs:635`) instead of dropped in silence.
+(`leviculum-std/src/ini_config.rs:636`) instead of dropped in silence.
 Making them tunable is a change to the core limiter with its own tests,
 not a config seam. Measuring this with the reference `rnstatus -A`
 turned up a neighbour: the accepted IPC client's row rendered the fill
@@ -731,10 +731,10 @@ of 3600/0/5, now one of two cases); and by unit tests per key.
 
 Deliberate, documented deviations, re-confirmed as stated: our
 `discover_interfaces` defaults true against Python's false, collecting
-being locally observable only (`leviculum-std/src/config.rs:220-235`);
+being locally observable only (`leviculum-std/src/config.rs:231-246`);
 ingress control defaults off for dial-out point-to-point types where
 Python is flat-true (`ingress_control_default_for_type`,
-`leviculum-std/src/config.rs:1098`); the discoverable-mode promotion
+`leviculum-std/src/config.rs:1126`); the discoverable-mode promotion
 fills only an UNSET mode where Python overrides an explicit one
 (`promote_discoverable_modes`, `leviculum-std/src/ini_config.rs:374`).
 Also ignored without a current consumer: `link_mtu_discovery` (no
@@ -792,7 +792,7 @@ rather than misleading.
    direction the sentence does not mean — lnsd accepts bool spellings
    rnsd refuses (D14). The same page's own key table states the
    `share_instance` default `false` honestly (its row,
-   `docs/src/guide/configuration.md:109`), so the document contradicts
+   `docs/src/guide/configuration.md:110`), so the document contradicts
    its own opening paragraph. *Rewritten in e5f78966*: the paragraph now
    says what the drop-in holds, and a second one says where it does
    not (D12, D2, D14); D1 is fixed in the same commit. D2 is fixed in
