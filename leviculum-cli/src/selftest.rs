@@ -212,7 +212,10 @@ struct SharedState {
     // Link id of the link B actually established (the re-keyed retry that won,
     // when the first proof was lost). Used to mint the responder handle.
     established_link_b: Mutex<Option<LinkId>>,
-    // Phase flag: true during single-packet phase
+    // Phase flag: true once the single-packet phase has opened. It does not
+    // classify messages, each carries its own phase tag; it only attributes
+    // a frame that failed to parse (and so carries no tag) to the corrupt
+    // counter of the phase that is running.
     single_packet_phase: AtomicBool,
     // Link death detection
     link_dead: AtomicBool,
@@ -3824,6 +3827,29 @@ mod tests {
         record_received_message(&mut stats, &single, 5_000, true, false);
         assert_eq!(stats.sp_recv_a, 1);
         assert_eq!(stats.recv_a, 0);
+    }
+
+    /// L-0010: the drain and the verdict read the same single-packet
+    /// counters, so a late link message must not close the gap left by a
+    /// single packet that was really lost. Five single packets sent, four
+    /// arrive, one link retransmit lands after the phase flipped: the
+    /// tally stays at four and one is still outstanding.
+    #[test]
+    fn a_late_link_message_cannot_mask_a_lost_single_packet() {
+        let mut stats = SelftestStats::new();
+        stats.sp_sent_a = 5;
+        for seq in 0..4 {
+            let single = build_message(Phase::SinglePacket, "ba", seq, 100);
+            record_received_message(&mut stats, &single, 200, true, true);
+        }
+        let late = build_message(Phase::Link, "ba", 10_007, 100);
+        record_received_message(&mut stats, &late, 3_600, true, true);
+
+        let expected = stats.sp_sent_a + stats.sp_sent_b;
+        let received = stats.sp_recv_a + stats.sp_recv_b;
+        assert_eq!(received, 4);
+        assert_eq!(expected.saturating_sub(received), 1);
+        assert_eq!(stats.recv_a, 1);
     }
 
     #[test]
