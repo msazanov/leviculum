@@ -255,3 +255,79 @@ fn concurrent_processes_are_never_handed_the_same_port() {
          no longer demonstrating anything"
     );
 }
+
+/// Set on a probe child; names the file it writes `state_dir()` to.
+const STATE_DIR_OUT_ENV: &str = "LEVICULUM_PORT_ALLOC_STATE_DIR_OUT";
+
+/// Probe entry point for [`counter_lives_outside_tmpdir_without_a_login_env`];
+/// a no-op in an ordinary suite run.
+#[test]
+fn port_alloc_state_dir_probe() {
+    if let Some(out) = std::env::var_os(STATE_DIR_OUT_ENV) {
+        let dir = port_alloc::state_dir();
+        std::fs::write(&out, dir.as_os_str().as_encoded_bytes()).expect("probe writes its dir");
+    }
+}
+
+/// The counter is state shared by every test binary of a run, so it must not
+/// land in the run's `TMPDIR`: `scripts/tmp-leftovers.sh` takes whatever is
+/// left there as the run's leak. Cron sets neither `XDG_RUNTIME_DIR` nor
+/// `USER`, and until 778 that put the counter at
+/// `$TMPDIR/leviculum-test-ports-unknown`, which refused a push of 31 gated
+/// commits on 2026-10-16. A real child process with exactly that environment,
+/// because `state_dir()` reads the process environment and a test cannot
+/// clear it for itself without racing its sibling tests.
+#[test]
+fn counter_lives_outside_tmpdir_without_a_login_env() {
+    let tmpdir = tempfile::tempdir().expect("child TMPDIR");
+    let out_dir = tempfile::tempdir().expect("probe output dir");
+    let out = out_dir.path().join("state-dir");
+    let status = Command::new(std::env::current_exe().expect("current test binary"))
+        .args(["--exact", "--test-threads=1", "port_alloc_state_dir_probe"])
+        .env_remove("XDG_RUNTIME_DIR")
+        .env_remove("USER")
+        .env_remove(port_alloc::STATE_DIR_ENV)
+        .env("TMPDIR", tmpdir.path())
+        .env(STATE_DIR_OUT_ENV, &out)
+        // Kept off the parent's stream for the manifest's sake, as above.
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("spawn probe");
+    assert!(status.success(), "probe exited {status:?}");
+    let dir = PathBuf::from(std::fs::read_to_string(&out).expect("probe output"));
+
+    assert!(
+        !dir.starts_with(tmpdir.path()),
+        "the port counter resolves inside the run's TMPDIR: {}",
+        dir.display()
+    );
+    assert!(
+        !dir.to_string_lossy().contains("unknown"),
+        "the port counter is named from a missing environment: {}",
+        dir.display()
+    );
+}
+
+/// The fallback order of [`port_alloc::state_dir_from`], independent of the
+/// environment this suite happens to run in.
+#[test]
+fn state_dir_fallback_order() {
+    assert_eq!(
+        port_alloc::state_dir_from(Some("/x".into()), Some("/y".into()), Some(1000)),
+        PathBuf::from("/x")
+    );
+    assert_eq!(
+        port_alloc::state_dir_from(None, Some("/y".into()), Some(1000)),
+        PathBuf::from("/y/leviculum-test-ports")
+    );
+    // A uid with no /run/user directory on any host.
+    assert_eq!(
+        port_alloc::state_dir_from(None, None, Some(4_000_000_000)),
+        PathBuf::from("/tmp/leviculum-test-ports-4000000000")
+    );
+    assert_eq!(
+        port_alloc::state_dir_from(None, None, None),
+        PathBuf::from("/tmp/leviculum-test-ports")
+    );
+}

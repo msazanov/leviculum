@@ -98,20 +98,60 @@ static CHUNK_STATE: Mutex<Chunk> = Mutex::new(Chunk { next: 0, end: 0 });
 
 /// Directory holding the shared counter.
 ///
-/// `XDG_RUNTIME_DIR` is preferred: it is per-user, on tmpfs, and cleaned by
-/// the session, so a stale counter cannot outlive a reboot. The fallback
-/// carries the user name because `/tmp` is shared and a counter file owned by
-/// another user is unopenable, which would fail every test run on the host
-/// with a permission error rather than a port error.
+/// [`STATE_DIR_ENV`] wins, then `XDG_RUNTIME_DIR`: per-user, on tmpfs, and
+/// cleaned by the session, so a stale counter cannot outlive a reboot.
+///
+/// Without either, the directory is keyed by the uid, never by a name from
+/// the environment: cron sets neither `XDG_RUNTIME_DIR` nor `USER`, and the
+/// key has to be per-user because `/tmp` is shared and a counter file owned by
+/// another user is unopenable, which would fail every run on the host with a
+/// permission error rather than a port error. `/run/user/<uid>` is taken when
+/// it exists, which is the directory a login session would have named, so a
+/// cron run and a shell run on the same host share one counter.
+///
+/// The fallback root is `/tmp` and not `temp_dir()`, because `temp_dir()`
+/// honours `TMPDIR`. The counter is state shared across the test binaries of
+/// one run and across runs, so it outlives every run by design, while
+/// `scripts/tmp-leftovers.sh` points `TMPDIR` at a fresh directory and takes
+/// whatever a run leaves there as its leak. Inside that directory the counter
+/// refused a push of 31 gated commits on 2026-10-16 (778).
 pub fn state_dir() -> PathBuf {
-    if let Some(dir) = std::env::var_os(STATE_DIR_ENV) {
+    state_dir_from(
+        std::env::var_os(STATE_DIR_ENV),
+        std::env::var_os("XDG_RUNTIME_DIR"),
+        current_uid(),
+    )
+}
+
+/// [`state_dir`] with its inputs as arguments. `uid` is `None` only where
+/// `/proc/self` is unreadable; the directory is then still outside `TMPDIR`,
+/// just not keyed per user.
+pub fn state_dir_from(
+    override_dir: Option<std::ffi::OsString>,
+    xdg_runtime_dir: Option<std::ffi::OsString>,
+    uid: Option<u32>,
+) -> PathBuf {
+    if let Some(dir) = override_dir {
         return PathBuf::from(dir);
     }
-    if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
+    if let Some(dir) = xdg_runtime_dir {
         return PathBuf::from(dir).join("leviculum-test-ports");
     }
-    let user = std::env::var("USER").unwrap_or_else(|_| "unknown".to_string());
-    std::env::temp_dir().join(format!("leviculum-test-ports-{user}"))
+    let Some(uid) = uid else {
+        return PathBuf::from("/tmp/leviculum-test-ports");
+    };
+    let run_user = PathBuf::from(format!("/run/user/{uid}"));
+    if run_user.is_dir() {
+        return run_user.join("leviculum-test-ports");
+    }
+    PathBuf::from(format!("/tmp/leviculum-test-ports-{uid}"))
+}
+
+/// The uid this process runs as, read from the owner of `/proc/self`, which
+/// needs no `libc` in the crates that include this file.
+fn current_uid() -> Option<u32> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata("/proc/self").ok().map(|m| m.uid())
 }
 
 /// Path of the shared counter file.

@@ -19,6 +19,10 @@
 # "/tmp" bypasses TMPDIR, and the diff is where such a path would show up.
 # It is not part of the verdict for the reason above.
 #
+# The one path the suite keeps on purpose is the test port counter, and it lives
+# outside TMPDIR: $XDG_RUNTIME_DIR, /run/user/<uid> or /tmp, keyed by uid
+# (leviculum-std/tests/support/port_alloc.rs, state_dir; 778). No exclusion here.
+#
 # Exit 0 = the suite passed and left nothing in its TMPDIR.
 # Exit 1 = it left entries (named), or the suite itself failed.
 set -euo pipefail
