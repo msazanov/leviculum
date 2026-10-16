@@ -728,6 +728,9 @@ pub struct InterfaceConfig {
     /// Cap on the AutoInterface peer table (review finding L-0040). Unset
     /// inherits 128; zero is refused where the interface is built.
     pub max_peers: Option<usize>,
+    /// Cap on the AutoInterface peers one source address holds (L-0040).
+    /// Unset inherits 4; zero is refused where the interface is built.
+    pub max_peers_per_source: Option<usize>,
     /// Per-source AutoInterface admission interval in seconds: one new peer
     /// per source address per interval (L-0040). Unset inherits 5; zero
     /// turns the limit off.
@@ -1027,6 +1030,7 @@ impl Default for InterfaceConfig {
             multicast_loopback: None,
             multicast_address_type: None,
             max_peers: None,
+            max_peers_per_source: None,
             peer_admission_interval: None,
             announce_rate_target: None,
             announce_rate_penalty: None,

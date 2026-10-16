@@ -60,6 +60,8 @@ const PEER_REFUSED_EVENT_INTERVAL: Duration = Duration::from_secs(10);
 enum PeerRefusal {
     /// The peer table holds `max_peers` already.
     Cap,
+    /// This source address holds `max_peers_per_source` peers already.
+    Source,
     /// This source address registered a peer less than one admission
     /// interval ago.
     Rate,
@@ -69,6 +71,7 @@ impl PeerRefusal {
     fn as_str(self) -> &'static str {
         match self {
             PeerRefusal::Cap => "cap",
+            PeerRefusal::Source => "source",
             PeerRefusal::Rate => "rate",
         }
     }
@@ -78,13 +81,14 @@ impl PeerRefusal {
 ///
 /// Discovery is unauthenticated and the peer key carries a port the sender
 /// picks, so the table is bounded here, where the medium is known: a cap on
-/// its size and one new peer per source address per interval. The
-/// per-source check scans the table for the newest registration from the
-/// address instead of keeping a table of its own, so admission control adds
-/// no state a flood of spoofed addresses could grow. Known peers are never
-/// refused; eviction stays with the peering timeout.
+/// its size, a cap on the peers one source address holds, and one new peer
+/// per source address per interval. The per-source checks scan the table
+/// for the address's peers instead of keeping a table of their own, so
+/// admission control adds no state a flood of spoofed addresses could grow.
+/// Known peers are never refused; eviction stays with the peering timeout.
 struct PeerAdmission {
     max_peers: usize,
+    max_peers_per_source: usize,
     interval: Duration,
     /// When the last `AUTO_PEER_REFUSED` line went out
     last_refused_event: Option<Instant>,
@@ -96,6 +100,7 @@ impl PeerAdmission {
     fn new(config: &AutoInterfaceConfig) -> Self {
         Self {
             max_peers: config.max_peers,
+            max_peers_per_source: config.max_peers_per_source,
             interval: config.peer_admission_interval,
             last_refused_event: None,
             suppressed: 0,
@@ -112,11 +117,18 @@ impl PeerAdmission {
         if peers.len() >= self.max_peers {
             return Err(PeerRefusal::Cap);
         }
-        if !self.interval.is_zero()
-            && peers.iter().any(|((addr, _), p)| {
-                *addr == src_addr && now.duration_since(p.registered_at) < self.interval
-            })
-        {
+        let mut from_source = 0usize;
+        let mut recent = false;
+        for ((addr, _), p) in peers {
+            if *addr == src_addr {
+                from_source += 1;
+                recent |= now.duration_since(p.registered_at) < self.interval;
+            }
+        }
+        if from_source >= self.max_peers_per_source {
+            return Err(PeerRefusal::Source);
+        }
+        if recent {
             return Err(PeerRefusal::Rate);
         }
         Ok(())
@@ -1030,6 +1042,7 @@ async fn peer_send_task(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::interfaces::auto_interface::DEFAULT_MAX_PEERS_PER_SOURCE;
     use crate::test_support::log_capture::{capture_logs, captured};
     use socket2::{Domain, Protocol, SockAddr, Type};
 
@@ -1501,6 +1514,61 @@ mod tests {
         assert!(ctx.peers.contains_key(&(src, 42672)));
     }
 
+    /// L-0040, per source over time: the interval only slows one host down.
+    /// A host that keeps refreshing the peers it minted gained one more per
+    /// interval until the global cap, so it owned the whole table in about
+    /// ten minutes. One source holds at most `max_peers_per_source` peers,
+    /// however many intervals pass; past that it is refused for `source`.
+    #[tokio::test]
+    async fn test_one_source_holds_at_most_a_handful_of_peers() {
+        let (logs, guard) = capture_logs();
+        let mut ctx = DiscoveryTestCtx::new();
+        let src: Ipv6Addr = "fe80::66".parse().unwrap();
+
+        const INTERVALS: u16 = 20;
+        for i in 0..INTERVALS {
+            // Age every registration past the interval instead of sleeping,
+            // so each port lands in an interval of its own.
+            let aged = Instant::now() - ctx.config.peer_admission_interval;
+            for p in ctx.peers.values_mut() {
+                p.registered_at = aged;
+            }
+            let pkt = peer_discovery(&ctx, src, 50000 + i);
+            ctx.call(&pkt, src);
+            while ctx.new_iface_rx.try_recv().is_ok() {}
+        }
+        assert_eq!(
+            ctx.peers.len(),
+            DEFAULT_MAX_PEERS_PER_SOURCE,
+            "{INTERVALS} intervals from one source must leave it the per-source cap"
+        );
+
+        // Its known peers still refresh.
+        let key = (src, 50000);
+        let before = Instant::now() - Duration::from_secs(1);
+        ctx.peers.get_mut(&key).expect("admitted").last_heard = before;
+        let pkt = peer_discovery(&ctx, src, 50000);
+        ctx.call(&pkt, src);
+        assert!(ctx.peers[&key].last_heard > before);
+
+        // Another host is still admitted.
+        let other: Ipv6Addr = "fe80::67".parse().unwrap();
+        let pkt = peer_discovery(&ctx, other, ctx.config.data_port);
+        ctx.call(&pkt, other);
+        assert_eq!(ctx.peers.len(), 5);
+
+        drop(guard);
+        let logs = captured(&logs);
+        let line = logs
+            .lines()
+            .find(|l| l.contains("event=\"AUTO_PEER_REFUSED\""))
+            .unwrap_or_else(|| panic!("no AUTO_PEER_REFUSED\n{logs}"));
+        assert!(line.contains("reason=\"source\""), "{line}");
+        assert!(line.contains("port=50004"), "{line}");
+        assert!(line.contains("peers=4"), "{line}");
+        assert_eq!(ctx.admission.suppressed, u64::from(INTERVALS) - 4 - 1);
+    }
+
     /// The per-source limit is per source: distinct hosts that appear
     /// together are all admitted.
     #[tokio::test]
@@ -1605,6 +1673,7 @@ mod tests {
         let mut ctx = DiscoveryTestCtx::new();
         ctx.admission.interval = Duration::ZERO;
         ctx.admission.max_peers = 6;
+        ctx.admission.max_peers_per_source = 10;
         let src: Ipv6Addr = "fe80::66".parse().unwrap();
         for i in 0..10u16 {
             let pkt = peer_discovery(&ctx, src, 50000 + i);

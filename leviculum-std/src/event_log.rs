@@ -695,8 +695,9 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         required_keys: &["iface", "frames", "depth", "reason"],
     },
     // AutoInterface refused a new peer (review finding L-0040): `reason`
-    // is `cap` (the table holds `max_peers`) or `rate` (this source
-    // registered a peer inside `peer_admission_interval`). Rate-limited to
+    // is `cap` (the table holds `max_peers`), `source` (this source holds
+    // `max_peers_per_source`) or `rate` (this source registered a peer
+    // inside `peer_admission_interval`). Rate-limited to
     // one line per 10 s; `suppressed` counts the refusals in between.
     EventSchema {
         name: "AUTO_PEER_REFUSED",

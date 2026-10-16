@@ -840,6 +840,7 @@ fn apply_interface_key(iface: &mut InterfaceConfig, key: &str, value: &str) -> R
         // Peer-table bounds (review finding L-0040). No Python equivalent:
         // Python's AutoInterface keeps every peer it is told about.
         "max_peers" => iface.max_peers = value.parse().ok(),
+        "max_peers_per_source" => iface.max_peers_per_source = value.parse().ok(),
         "peer_admission_interval" => iface.peer_admission_interval = value.parse().ok(),
         "flow_control" => iface.flow_control = Some(parse_bool(key, value)?),
         "airtime_limit_short" => iface.airtime_limit_short = value.parse().ok(),

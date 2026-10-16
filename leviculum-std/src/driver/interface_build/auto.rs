@@ -43,6 +43,17 @@ pub(super) fn auto_config_from(config: &InterfaceConfig) -> Result<AutoInterface
         }
         Some(n) => n,
     };
+    // Zero per source refuses every peer the same way.
+    let max_peers_per_source = match config.max_peers_per_source {
+        None => crate::interfaces::auto_interface::DEFAULT_MAX_PEERS_PER_SOURCE,
+        Some(0) => {
+            return Err(Error::Config(format!(
+                "interface '{}': max_peers_per_source must be at least 1",
+                config.name
+            )))
+        }
+        Some(n) => n,
+    };
 
     Ok(AutoInterfaceConfig {
         group_id: config
@@ -65,6 +76,7 @@ pub(super) fn auto_config_from(config: &InterfaceConfig) -> Result<AutoInterface
         multicast_loopback: config.multicast_loopback.unwrap_or(true),
         multicast_address_type,
         max_peers,
+        max_peers_per_source,
         peer_admission_interval: std::time::Duration::from_secs(
             config
                 .peer_admission_interval

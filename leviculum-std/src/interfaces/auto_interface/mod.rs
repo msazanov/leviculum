@@ -60,6 +60,17 @@ pub(crate) const NIC_WAIT_WARN_EVERY: u64 = 30;
 /// is invisible on the wire, a refused peer simply is not routed to.
 pub(crate) const DEFAULT_MAX_PEERS: usize = 128;
 
+/// Default cap on the peers one source address holds
+/// (`max_peers_per_source`, follow-up to L-0040).
+///
+/// The admission interval only slows one host down: refreshing the peers it
+/// has minted, it gains one more per interval and owns the whole table in
+/// about ten minutes, crowding out every real neighbour. A host runs a
+/// handful of Reticulum instances at most, each on its own data port, so
+/// four admits every legitimate same-host setup and leaves a hostile host
+/// four slots out of [`DEFAULT_MAX_PEERS`].
+pub(crate) const DEFAULT_MAX_PEERS_PER_SOURCE: usize = 4;
+
 /// Default per-source admission interval in seconds
 /// (`peer_admission_interval`, L-0040): one source address registers at
 /// most one new peer per interval.
@@ -172,6 +183,10 @@ pub struct AutoInterfaceConfig {
     /// new peer past the cap is refused, and `AUTO_PEER_REFUSED
     /// reason=cap` says so. Defaults to 128 (`DEFAULT_MAX_PEERS`).
     pub max_peers: usize,
+    /// Most peers one source address holds at once. A discovery from a new
+    /// peer past it is refused, and `AUTO_PEER_REFUSED reason=source` says
+    /// so. Defaults to 4 (`DEFAULT_MAX_PEERS_PER_SOURCE`).
+    pub max_peers_per_source: usize,
     /// At most one new peer per source address per this interval (L-0040);
     /// `Duration::ZERO` turns the limit off. Defaults to
     /// five seconds (`DEFAULT_PEER_ADMISSION_INTERVAL_SECS`).
@@ -190,6 +205,7 @@ impl Default for AutoInterfaceConfig {
             multicast_loopback: true,
             multicast_address_type: MulticastAddressType::Temporary,
             max_peers: DEFAULT_MAX_PEERS,
+            max_peers_per_source: DEFAULT_MAX_PEERS_PER_SOURCE,
             peer_admission_interval: Duration::from_secs(DEFAULT_PEER_ADMISSION_INTERVAL_SECS),
         }
     }

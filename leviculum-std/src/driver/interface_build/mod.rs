@@ -955,7 +955,7 @@ mod tests {
     #[test]
     fn auto_peer_table_knobs_reach_the_orchestrator() {
         use crate::interfaces::auto_interface::{
-            DEFAULT_MAX_PEERS, DEFAULT_PEER_ADMISSION_INTERVAL_SECS,
+            DEFAULT_MAX_PEERS, DEFAULT_MAX_PEERS_PER_SOURCE, DEFAULT_PEER_ADMISSION_INTERVAL_SECS,
         };
         use std::time::Duration;
 
@@ -967,6 +967,7 @@ mod tests {
 
         let default = resolve("[interfaces]\n  [[Auto]]\n    type = AutoInterface\n");
         assert_eq!(default.max_peers, DEFAULT_MAX_PEERS);
+        assert_eq!(default.max_peers_per_source, DEFAULT_MAX_PEERS_PER_SOURCE);
         assert_eq!(
             default.peer_admission_interval,
             Duration::from_secs(DEFAULT_PEER_ADMISSION_INTERVAL_SECS)
@@ -974,9 +975,11 @@ mod tests {
 
         let set = resolve(
             "[interfaces]\n  [[Auto]]\n    type = AutoInterface\n \
-             max_peers = 16\n    peer_admission_interval = 0\n",
+             max_peers = 16\n    max_peers_per_source = 2\n    \
+             peer_admission_interval = 0\n",
         );
         assert_eq!(set.max_peers, 16);
+        assert_eq!(set.max_peers_per_source, 2);
         assert_eq!(set.peer_admission_interval, Duration::ZERO);
     }
 
@@ -995,5 +998,22 @@ mod tests {
             panic!("max_peers = 0 must not build");
         };
         assert!(err.to_string().contains("max_peers"), "{err}");
+    }
+
+    /// Zero peers per source refuses every peer too; the build names it.
+    #[test]
+    fn auto_build_refuses_zero_max_peers_per_source() {
+        let owner = CtxOwner::new();
+        let config = InterfaceConfig {
+            name: "Auto".to_string(),
+            interface_type: "AutoInterface".to_string(),
+            max_peers_per_source: Some(0),
+            ..Default::default()
+        };
+
+        let Err(err) = build_interface(0, &config, &owner.ctx(), &AutoPeerCount::default()) else {
+            panic!("max_peers_per_source = 0 must not build");
+        };
+        assert!(err.to_string().contains("max_peers_per_source"), "{err}");
     }
 }
