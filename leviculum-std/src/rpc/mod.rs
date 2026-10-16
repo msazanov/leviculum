@@ -59,6 +59,55 @@ pub(crate) fn spawn_rpc_server(
     discovery_storage: Option<std::path::PathBuf>,
     radio_cache: SharedPacketRadioCache,
 ) -> Result<(), std::io::Error> {
+    spawn_rpc_server_with_limits(
+        instance_name,
+        transport,
+        core,
+        authkey,
+        start_time,
+        iface_stats_map,
+        inventory,
+        auto_peer_count,
+        discovery_storage,
+        radio_cache,
+        RpcServerLimits::default(),
+    )
+}
+
+/// How long the server gives one connection, and how many it serves at once.
+#[derive(Debug, Clone, Copy)]
+struct RpcServerLimits {
+    /// Wall-clock cap on one connection, handshake to last response.
+    timeout: std::time::Duration,
+    /// Connections served at once; the next one is refused.
+    max_inflight: usize,
+}
+
+impl Default for RpcServerLimits {
+    fn default() -> Self {
+        Self {
+            timeout: RPC_SERVER_TIMEOUT,
+            max_inflight: RPC_MAX_INFLIGHT,
+        }
+    }
+}
+
+/// [`spawn_rpc_server`] with explicit [`RpcServerLimits`], which the tests
+/// shorten so they wait on a timer of milliseconds rather than seconds.
+#[allow(clippy::too_many_arguments)]
+fn spawn_rpc_server_with_limits(
+    instance_name: &str,
+    transport: &SharedInstanceTransport,
+    core: Arc<Mutex<StdNodeCore>>,
+    authkey: impl Into<Arc<[u8]>>,
+    start_time: std::time::Instant,
+    iface_stats_map: InterfaceStatsMap,
+    inventory: SharedInventory,
+    auto_peer_count: AutoPeerCount,
+    discovery_storage: Option<std::path::PathBuf>,
+    radio_cache: SharedPacketRadioCache,
+    limits: RpcServerLimits,
+) -> Result<(), std::io::Error> {
     let authkey = authkey.into();
     let endpoint = transport.endpoint(&format!("rns/{}/rpc", instance_name));
     let listener = endpoint.bind()?;
@@ -76,6 +125,7 @@ pub(crate) fn spawn_rpc_server(
             auto_peer_count,
             discovery_storage,
             radio_cache,
+            limits,
         )
         .await;
     });
@@ -83,7 +133,54 @@ pub(crate) fn spawn_rpc_server(
     Ok(())
 }
 
-/// Accept loop: spawns a task per connection.
+/// The peer of an accepted connection, as far as the socket can name it: the
+/// TCP source port, or on Linux the pid behind a Unix socket.
+fn peer_label(stream: &IpcStream, peer_port: Option<u16>) -> String {
+    if let Some(port) = peer_port {
+        return format!("tcp port {port}");
+    }
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    if let IpcStream::Unix(s) = stream {
+        if let Some(pid) = s.peer_cred().ok().and_then(|cred| cred.pid()) {
+            return format!("pid {pid}");
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    let _ = stream;
+    "unix peer".to_string()
+}
+
+/// At most one `RPC_CONN_REFUSED` line per this interval. A client in a loop
+/// against a full server would otherwise write one line per attempt.
+const RPC_REFUSED_WARN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Rate limit on the refusal warning: no refusal goes uncounted, but the
+/// lines carrying the count are at least [`RPC_REFUSED_WARN_INTERVAL`] apart.
+#[derive(Debug, Default)]
+struct RefusalWarn {
+    last_line: Option<std::time::Instant>,
+    unreported: u64,
+}
+
+impl RefusalWarn {
+    /// Count one refusal at `now`; `Some(n)` when a line is due, `n` being
+    /// the refusals since the previous line, this one included.
+    fn refuse(&mut self, now: std::time::Instant) -> Option<u64> {
+        self.unreported += 1;
+        let due = self
+            .last_line
+            .is_none_or(|last| now.duration_since(last) >= RPC_REFUSED_WARN_INTERVAL);
+        if !due {
+            return None;
+        }
+        self.last_line = Some(now);
+        Some(std::mem::take(&mut self.unreported))
+    }
+}
+
+/// Accept loop: spawns a task per connection, at most
+/// [`RpcServerLimits::max_inflight`] at once, each bounded by
+/// [`RpcServerLimits::timeout`].
 #[allow(clippy::too_many_arguments)]
 async fn rpc_accept_loop(
     listener: IpcListener,
@@ -95,9 +192,12 @@ async fn rpc_accept_loop(
     auto_peer_count: AutoPeerCount,
     discovery_storage: Option<std::path::PathBuf>,
     radio_cache: SharedPacketRadioCache,
+    limits: RpcServerLimits,
 ) {
+    let inflight = Arc::new(tokio::sync::Semaphore::new(limits.max_inflight));
+    let mut refusals = RefusalWarn::default();
     loop {
-        let (stream, _peer_port) = match listener.accept().await {
+        let (stream, peer_port) = match listener.accept().await {
             Ok(conn) => conn,
             Err(e) => {
                 tracing::warn!("RPC accept error: {}", e);
@@ -105,6 +205,22 @@ async fn rpc_accept_loop(
             }
         };
 
+        // The permit moves into the task and is released when it ends, by
+        // completion, error or timeout alike.
+        let Ok(permit) = Arc::clone(&inflight).try_acquire_owned() else {
+            if let Some(n) = refusals.refuse(std::time::Instant::now()) {
+                tracing::warn!(
+                    event = "RPC_CONN_REFUSED",
+                    reason = "inflight",
+                    n,
+                    cap = limits.max_inflight,
+                );
+            }
+            drop(stream);
+            continue;
+        };
+
+        let peer = peer_label(&stream, peer_port);
         let core = Arc::clone(&core);
         let stats_map = Arc::clone(&iface_stats_map);
         let inventory = Arc::clone(&inventory);
@@ -113,7 +229,8 @@ async fn rpc_accept_loop(
         let radio_cache = Arc::clone(&radio_cache);
         let authkey = Arc::clone(&authkey);
         tokio::spawn(async move {
-            if let Err(e) = handle_rpc_connection(
+            let _permit = permit;
+            let served = handle_rpc_connection(
                 stream,
                 &core,
                 &authkey,
@@ -123,10 +240,15 @@ async fn rpc_accept_loop(
                 &peer_count,
                 discovery_storage.as_deref(),
                 &radio_cache,
-            )
-            .await
-            {
-                tracing::debug!("RPC connection error: {}", e);
+            );
+            match tokio::time::timeout(limits.timeout, served).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => tracing::debug!("RPC connection error: {}", e),
+                Err(_elapsed) => tracing::debug!(
+                    "RPC connection from {} dropped: not served within {} s",
+                    peer,
+                    limits.timeout.as_secs_f32()
+                ),
             }
         });
     }
@@ -260,6 +382,26 @@ pub(crate) fn first_hop_timeout_ms_from_answer(answer: &serde_json::Value) -> Op
 /// different RPC dialect — e.g. a Python `rnsd` that hits an error handling an
 /// unexpected request and sends no response at all.
 const RPC_CLIENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Wall-clock cap on one server-side connection, handshake to last response.
+///
+/// A real client finishes in well under a second: the handshake is two
+/// round trips on a local socket and the request follows at once, and the
+/// largest answer (`path_table` on a busy transport) is a few MiB written
+/// to a local reader. The client itself gives up after
+/// [`RPC_CLIENT_TIMEOUT`], so nothing a well-behaved client sends is still
+/// coming after twice that. What this bounds is a peer that connects and
+/// says nothing, which until L-0037 held its task and its stream forever.
+const RPC_SERVER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Connections the RPC server serves at once; the next is closed unanswered.
+///
+/// Each client tool holds one connection for the length of one command, so
+/// every tool on a host plus `rnstatus` in a tight loop stays in single
+/// figures. 64 leaves an order of magnitude over that and still caps what a
+/// flood of idle connections can hold, together with [`RPC_SERVER_TIMEOUT`]
+/// which frees every slot within ten seconds.
+const RPC_MAX_INFLIGHT: usize = 64;
 
 /// Connect to the RPC server, perform handshake, send request, receive response.
 ///
@@ -1401,6 +1543,158 @@ mod tests {
         assert!(
             elapsed < RPC_CLIENT_TIMEOUT + std::time::Duration::from_secs(3),
             "took far longer than the timeout: {elapsed:?}"
+        );
+    }
+
+    /// The refusal warning counts every refusal but writes at most one line
+    /// per [`RPC_REFUSED_WARN_INTERVAL`].
+    #[test]
+    fn refusal_warning_is_rate_limited_and_counts_every_refusal() {
+        let t0 = std::time::Instant::now();
+        let mut warn = RefusalWarn::default();
+        assert_eq!(warn.refuse(t0), Some(1));
+        assert_eq!(warn.refuse(t0 + std::time::Duration::from_secs(1)), None);
+        assert_eq!(warn.refuse(t0 + std::time::Duration::from_secs(2)), None);
+        assert_eq!(warn.refuse(t0 + RPC_REFUSED_WARN_INTERVAL), Some(3));
+        assert_eq!(
+            warn.refuse(t0 + RPC_REFUSED_WARN_INTERVAL * 2),
+            Some(1),
+            "the count restarts after each line"
+        );
+    }
+
+    /// A server with `limits` on a fresh instance name; returns the name to
+    /// dial, the key it is keyed with, and what must outlive the test.
+    fn spawn_limited_server(
+        tag: &str,
+        limits: RpcServerLimits,
+    ) -> (String, [u8; 32], Arc<Mutex<StdNodeCore>>, tempfile::TempDir) {
+        let (core, storage) = make_test_core(false);
+        let authkey = derive_authkey(&core);
+        let id = RPC_TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let instance_name = format!("rpctest_{tag}_{}_{id}", std::process::id());
+        spawn_rpc_server_with_limits(
+            &instance_name,
+            &SharedInstanceTransport::default(),
+            Arc::clone(&core),
+            authkey,
+            std::time::Instant::now(),
+            empty_stats_map(),
+            crate::interfaces::inventory::InterfaceInventory::shared(),
+            AutoPeerCount::default(),
+            None,
+            radio_cache::shared(),
+            limits,
+        )
+        .unwrap();
+        (format!("rns/{instance_name}/rpc"), authkey, core, storage)
+    }
+
+    /// Read `stream` until the server closes it or `within` passes. `Some`
+    /// with the byte count read if it closed, `None` if it is still open.
+    async fn closed_within(stream: &mut IpcStream, within: std::time::Duration) -> Option<usize> {
+        use tokio::io::AsyncReadExt;
+        let drain = async {
+            let mut total = 0;
+            let mut buf = [0u8; 256];
+            loop {
+                match stream.read(&mut buf).await {
+                    Ok(0) | Err(_) => return total,
+                    Ok(n) => total += n,
+                }
+            }
+        };
+        tokio::time::timeout(within, drain).await.ok()
+    }
+
+    /// L-0037: a peer that connects and sends nothing is dropped once
+    /// [`RpcServerLimits::timeout`] passes, rather than holding its task and
+    /// its stream for as long as it likes.
+    #[tokio::test]
+    async fn rpc_server_drops_a_connection_that_never_answers() {
+        let limits = RpcServerLimits {
+            timeout: std::time::Duration::from_millis(300),
+            max_inflight: RPC_MAX_INFLIGHT,
+        };
+        let (name, _authkey, _core, _storage) = spawn_limited_server("idle", limits);
+        let mut idle = SharedInstanceTransport::default()
+            .endpoint(&name)
+            .connect()
+            .unwrap();
+        let closed = closed_within(
+            &mut idle,
+            limits.timeout + std::time::Duration::from_secs(1),
+        )
+        .await;
+        assert!(
+            closed.is_some(),
+            "a mute connection is still open {:?} after it arrived",
+            limits.timeout + std::time::Duration::from_secs(1)
+        );
+    }
+
+    /// L-0037: with [`RpcServerLimits::max_inflight`] connections held idle,
+    /// the next one is closed at once without a challenge, and once the idle
+    /// ones time out a real request is served again.
+    #[tokio::test]
+    async fn rpc_server_refuses_connections_beyond_the_inflight_cap() {
+        use tokio::io::AsyncReadExt;
+        let evlog = crate::test_support::event_log::init_event_log();
+        let limits = RpcServerLimits {
+            timeout: std::time::Duration::from_millis(800),
+            max_inflight: 4,
+        };
+        let (name, authkey, _core, _storage) = spawn_limited_server("cap", limits);
+        let endpoint = SharedInstanceTransport::default().endpoint(&name);
+
+        // Each idle connection is in flight once the server has sent it its
+        // challenge; reading the first bytes of it makes that ordering certain.
+        let mut idle = Vec::new();
+        for _ in 0..limits.max_inflight {
+            let mut stream = endpoint.connect().unwrap();
+            let mut buf = [0u8; 4];
+            let n = tokio::time::timeout(std::time::Duration::from_secs(1), stream.read(&mut buf))
+                .await
+                .expect("an idle connection within the cap gets its challenge")
+                .unwrap();
+            assert!(n > 0, "the server closed a connection within the cap");
+            idle.push(stream);
+        }
+
+        // Zero bytes is what tells refused from served: a served connection
+        // gets its challenge first, and is still open here or, past the
+        // timeout, closed with the challenge read.
+        let mut over = endpoint.connect().unwrap();
+        assert_eq!(
+            closed_within(&mut over, limits.timeout).await,
+            Some(0),
+            "the connection past the cap must be closed at once, before any challenge"
+        );
+        let refused: Vec<String> = evlog
+            .dump()
+            .into_iter()
+            .filter(|l| l.starts_with("RPC_CONN_REFUSED"))
+            .collect();
+        assert!(
+            matches!(refused.as_slice(), [line] if line.contains(" cap=4 n=1 reason=inflight ")),
+            "the refusal must be said once, with its reason and count: {refused:?}"
+        );
+        crate::assert_no_schema_violations!(evlog);
+
+        for stream in &mut idle {
+            assert!(
+                closed_within(stream, limits.timeout + std::time::Duration::from_secs(1))
+                    .await
+                    .is_some(),
+                "an idle connection outlived the server timeout"
+            );
+        }
+
+        let request = pickle_dict(vec![(pickle_str_key("get"), pickle_str("link_count"))]);
+        let response = rpc_client_call(&name, &authkey, &request).await;
+        assert!(
+            matches!(response, Ok(Value::I64(0))),
+            "a real request after the idle ones timed out must be served: {response:?}"
         );
     }
 

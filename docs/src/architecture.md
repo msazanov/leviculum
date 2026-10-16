@@ -167,6 +167,11 @@ Python CLI → Unix socket → RPC server (multiprocessing.connection, pickle)
   → pickle response → CLI
 ```
 
+The server serves at most 64 connections at once and gives each 10 s from
+accept to last response; a connection past the cap is closed unanswered and
+counted in a rate-limited `RPC_CONN_REFUSED` warning, so idle connections
+cannot hang `rnstatus` against `lnsd`.
+
 The shared-instance socket and this RPC channel are what make `lnsd` a
 drop-in for `rnsd`; see
 [Python-RNS Compatibility](concepts/python-rns-compatibility.md).

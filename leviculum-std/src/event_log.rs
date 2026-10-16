@@ -1061,6 +1061,13 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "REENTRANT_LOCK",
         required_keys: &["mutex", "held_depth"],
     },
+    // The shared-instance RPC server refused a connection (`rpc/mod.rs`,
+    // L-0037): `reason=inflight` when RPC_MAX_INFLIGHT are already being
+    // served. Rate-limited; `n` counts the refusals since the previous line.
+    EventSchema {
+        name: "RPC_CONN_REFUSED",
+        required_keys: &["reason", "n", "cap"],
+    },
     // The RNode interface's vport teardown (#316 family): one line per
     // sub-interface whose queue was abandoned when its incoming side closed.
     EventSchema {
