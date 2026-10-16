@@ -358,6 +358,87 @@ async fn test_single_packet_proof_round_trip_via_node() {
     rust_node.stop().await.expect("Failed to stop node");
 }
 
+/// Python sends a single packet to a Rust PROVE_ALL destination and its
+/// PacketReceipt turns DELIVERED: Python's `PacketReceipt.validate_proof`
+/// (`Packet.py:498-530`) accepts the proof Rust emits. `use_implicit_proof`
+/// selects the form (L-0051): implicit, the 64-byte signature alone, or
+/// explicit, packet hash plus signature.
+async fn python_validates_rust_single_packet_proof(use_implicit_proof: bool) {
+    let daemon = TestDaemon::start().await.expect("Failed to start daemon");
+
+    let mut config = leviculum_std::Config::default();
+    config.reticulum.use_implicit_proof = use_implicit_proof;
+    let storage = crate::common::temp_storage("python_validates_rust_proof", "node");
+    let mut rust_node = leviculum_std::driver::ReticulumNodeBuilder::new()
+        .config(config)
+        .add_tcp_client(daemon.rns_addr())
+        .storage_path(storage.path().to_path_buf())
+        .build()
+        .await
+        .expect("Failed to build node");
+    rust_node.start().await.expect("Failed to start node");
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    let mut dest = Destination::new(
+        Some(Identity::generate(&mut OsRng)),
+        Direction::In,
+        DestinationType::Single,
+        "proof_test",
+        &["python_validates"],
+    )
+    .expect("Failed to create destination");
+    dest.set_proof_strategy(ProofStrategy::All);
+    let dest_hash = *dest.hash();
+    rust_node.register_destination(dest);
+    rust_node
+        .announce_destination(&dest_hash, Some(b"prove-all"))
+        .await
+        .expect("Announce should succeed");
+    let found = crate::common::wait_for_node_reannounce_on_daemon(
+        &daemon,
+        &dest_hash,
+        &rust_node,
+        b"prove-all",
+        Duration::from_secs(10),
+    )
+    .await;
+    assert!(found, "Python daemon should learn path to Rust destination");
+
+    let (receipt_id, _) = daemon
+        .send_single_packet_tracked(&hex::encode(dest_hash.as_bytes()), b"prove me")
+        .await
+        .expect("Python send should succeed");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut status = String::new();
+    while tokio::time::Instant::now() < deadline {
+        status = daemon
+            .get_receipt_status(&receipt_id)
+            .await
+            .expect("get_receipt_status");
+        if status != "SENT" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        status, "DELIVERED",
+        "Python must validate the Rust proof (use_implicit_proof={use_implicit_proof})"
+    );
+
+    rust_node.stop().await.expect("Failed to stop node");
+}
+
+#[tokio::test]
+async fn test_python_validates_rust_implicit_proof() {
+    python_validates_rust_single_packet_proof(true).await;
+}
+
+#[tokio::test]
+async fn test_python_validates_rust_explicit_proof() {
+    python_validates_rust_single_packet_proof(false).await;
+}
+
 /// Test that Python daemon with PROVE_NONE does not send proofs
 #[tokio::test]
 async fn test_python_prove_none_no_proof() {

@@ -227,6 +227,14 @@ impl NodeCoreBuilder {
         self
     }
 
+    /// Whether packet proofs this node sends are implicit (signature only,
+    /// the default) or explicit (packet hash + signature). See
+    /// [`TransportConfig::use_implicit_proof`](crate::transport::TransportConfig::use_implicit_proof).
+    pub fn use_implicit_proof(mut self, implicit: bool) -> Self {
+        self.transport_config.use_implicit_proof = implicit;
+        self
+    }
+
     /// Set LRPROOF hop-asymmetry handling (#38). `true` (default) rewrites a
     /// mismatching forwarded proof to the frozen count; `false` selects the
     /// reference-exact strict check that DROPS on mismatch, arming the healing

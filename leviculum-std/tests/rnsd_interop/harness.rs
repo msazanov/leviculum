@@ -1637,6 +1637,34 @@ impl TestDaemon {
         Ok(())
     }
 
+    /// Send a single packet like [`Self::send_single_packet`] and keep its
+    /// PacketReceipt for [`Self::get_receipt_status`]. Returns
+    /// `(receipt_id, packet_hash)`.
+    pub async fn send_single_packet_tracked(
+        &self,
+        dest_hash: &str,
+        data: &[u8],
+    ) -> Result<(String, String), HarnessError> {
+        let result = self
+            .query(
+                "send_single_packet",
+                serde_json::json!({
+                    "dest_hash": dest_hash,
+                    "data": hex::encode(data),
+                    "track": true,
+                }),
+            )
+            .await?;
+        let field = |name: &str| {
+            result
+                .get(name)
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .ok_or_else(|| HarnessError::ParseError(format!("Missing {name}")))
+        };
+        Ok((field("receipt_id")?, field("packet_hash")?))
+    }
+
     /// Register a PLAIN destination (no identity, unencrypted broadcast).
     ///
     /// Returns the destination hash (hex string).

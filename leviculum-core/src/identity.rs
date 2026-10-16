@@ -261,6 +261,24 @@ impl Identity {
         Ok(proof)
     }
 
+    /// Create the implicit proof for a packet hash
+    ///
+    /// The signature over `packet_hash` alone, 64 bytes: Python's default
+    /// proof form (`Identity.prove`, Identity.py:966-970, while
+    /// `use_implicit_proof` is true). It names no packet; the proof packet
+    /// carrying it is addressed to the truncated packet hash
+    /// (`ProofDestination`, Packet.py:391-394), and the receiver checks the
+    /// signature against its receipt's full hash (Packet.py:522-530).
+    ///
+    /// # Errors
+    /// Returns `NoPrivateKey` if this identity has no signing key.
+    pub fn create_implicit_proof(
+        &self,
+        packet_hash: &[u8; 32],
+    ) -> Result<[u8; crate::constants::IMPLICIT_PROOF_SIZE], IdentityError> {
+        self.sign(packet_hash)
+    }
+
     /// Verify a proof against a packet hash
     ///
     /// # Arguments

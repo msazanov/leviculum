@@ -1005,6 +1005,7 @@ impl ReticulumNodeBuilder {
                     .unwrap_or(config.reticulum.max_links),
             )
             .path_entries_dump(config.reticulum.path_entries_dump)
+            .use_implicit_proof(config.reticulum.use_implicit_proof)
             .path_choice(config.reticulum.path_choice.to_core())
             .mgmt_announce_interval_ms(
                 config
@@ -1345,6 +1346,24 @@ mod tests {
             .expect("build_sync failed");
         let core = crate::sync_ext::MutexRecover::lock_recover(&*node.inner);
         assert_eq!(core.transport_config().mgmt_announce_interval_ms, 7_000);
+    }
+
+    /// L-0051: `use_implicit_proof` reaches the core's proof form instead of
+    /// being parsed and dropped; unset keeps the reference default, implicit.
+    #[test]
+    fn test_builder_use_implicit_proof_from_config() {
+        let implicit = |ini: &str| {
+            let td = tempfile::tempdir().expect("tempdir");
+            let node = ReticulumNodeBuilder::new()
+                .config(crate::ini_config::parse_ini(ini).expect("parse"))
+                .storage_path(td.path().to_path_buf())
+                .build_sync()
+                .expect("build_sync failed");
+            let core = crate::sync_ext::MutexRecover::lock_recover(&*node.inner);
+            core.transport_config().use_implicit_proof
+        };
+        assert!(implicit("[reticulum]\n"));
+        assert!(!implicit("[reticulum]\n  use_implicit_proof = No\n"));
     }
 
     /// D16 of the 2026-10-11 shared-instance audit: the global tuning keys

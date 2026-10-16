@@ -456,7 +456,7 @@ fn apply_reticulum_key(config: &mut ReticulumConfig, key: &str, value: &str) -> 
         "respond_to_probes" => {
             config.respond_to_probes = parse_bool(key, value)?;
         }
-        // Whether links prove implicitly (RNS default true, Reticulum.py:575-578).
+        // Whether packet proofs are implicit (RNS default true, Reticulum.py:575-578).
         // Filled on the TOML path via serde; add it to the INI path too so a
         // stock rnsd config that sets it is honoured rather than silently dropped.
         "use_implicit_proof" => {

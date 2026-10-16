@@ -1061,6 +1061,19 @@ pub struct TransportConfig {
     /// (745). Timing only: the requests and their order are unchanged.
     /// Four bytes, because the boards pin `NodeCore`'s size (`NODE_BOX_BYTES`).
     pub link_establishment_timeout_ms: Option<NonZeroU32>,
+    /// Whether a packet proof this node sends for one of its destinations is
+    /// the implicit form, the 64-byte signature alone, or the explicit form,
+    /// the 32-byte packet hash followed by the signature (Python's
+    /// `[reticulum] use_implicit_proof`, Reticulum.py:257,575-578, read by
+    /// `Identity.prove`, Identity.py:966-970). Default `true`, the reference
+    /// default. Both stacks accept both forms (`Packet.py:498-530`, and
+    /// `Transport::handle_proof` here), so this is wire-compatible either
+    /// way; the implicit form is 32 bytes shorter on every proof.
+    ///
+    /// Proofs over a link stay explicit whatever this says, as in the
+    /// reference (`Link.prove_packet`, Link.py:383-391): Python validates
+    /// a link proof as explicit unconditionally (`Packet.py:452`).
+    pub use_implicit_proof: bool,
 }
 
 impl Default for TransportConfig {
@@ -1088,6 +1101,7 @@ impl Default for TransportConfig {
             default_announce_rate: AnnounceRateConfig::default(),
             default_egress_control: false,
             link_establishment_timeout_ms: None,
+            use_implicit_proof: true,
         }
     }
 }
@@ -3665,16 +3679,27 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         receiving_interface: Option<usize>,
         receiving_peer: Option<[u8; TRUNCATED_HASHBYTES]>,
     ) -> Result<(), TransportError> {
-        let proof_data = identity
-            .create_proof(packet_hash)
-            .map_err(|_| TransportError::NoPath)?; // Use NoPath for simplicity
-
-        // Proof destination = truncated PACKET hash (not the destination hash).
-        // Relay nodes route proofs back via the reverse_transport_table, which is
-        // keyed by truncated packet hash. Python: ProofDestination.hash = packet.get_hash()[:16]
+        // Proof destination = truncated PACKET hash (not the destination hash),
+        // for both proof forms. Relay nodes route proofs back via the
+        // reverse_transport_table, which is keyed by truncated packet hash, and
+        // an implicit proof is matched to its receipt by it alone.
+        // Python: ProofDestination.hash = packet.get_hash()[:16]
         let mut proof_dest = [0u8; TRUNCATED_HASHBYTES];
         proof_dest.copy_from_slice(&packet_hash[..TRUNCATED_HASHBYTES]);
-        let packet = build_proof_packet(&proof_dest, &proof_data);
+
+        // Implicit (signature only) or explicit (hash + signature), as
+        // Identity.prove chooses (Identity.py:966-970).
+        let packet = if self.config.use_implicit_proof {
+            let proof_data = identity
+                .create_implicit_proof(packet_hash)
+                .map_err(|_| TransportError::NoPath)?; // Use NoPath for simplicity
+            build_proof_packet(&proof_dest, &proof_data)
+        } else {
+            let proof_data = identity
+                .create_proof(packet_hash)
+                .map_err(|_| TransportError::NoPath)?;
+            build_proof_packet(&proof_dest, &proof_data)
+        };
         crate::tracing::debug!(
             event = "PROOF_GEN",
             for_pkt = %HexShort(&proof_dest),
@@ -5686,7 +5711,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// recall source is the cached announce for the destination
     /// (`get_announce_cache`, keyed by destination hash, holding the raw announce
     /// whose payload starts with the 64-byte public key), the same source the
-    /// link-request path uses at transport.rs:4081. A destination with no cached
+    /// link-request path uses at transport.rs:4106. A destination with no cached
     /// announce cannot be associated with an identity, so it is left untouched,
     /// exactly as Python keeps a path whose `Identity.recall` returns `None`.
     ///
@@ -6487,7 +6512,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             path_response = is_path_response,
         );
 
-        // Gate on the already-incremented hops (transport.rs:1653 ran in the
+        // Gate on the already-incremented hops (transport.rs:1667 ran in the
         // inbound path before handle_announce, and local-client/shared-instance
         // accounting has already been applied there). Announces whose hop count
         // exceeds max_hops are neither stored in the path table nor scheduled
@@ -11591,7 +11616,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // Emit the STORED path-table count, matching Python
                 // Transport.py:2956 (`packet.hops = path_table[dst][IDX_PT_HOPS]`).
                 // The cached raw's hop byte is the PRE-increment wire value
-                // (`stored - 1`): the receipt increment (`transport.rs:2597`) only
+                // (`stored - 1`): the receipt increment (`transport.rs:2611`) only
                 // touches the in-memory packet, never the raw buffer stashed by
                 // `set_announce_cache`. Using it here would put `stored - 1` on the
                 // wire and every peer that learns via this response would be one hop
@@ -17816,7 +17841,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // `random_blobs` (transport.rs:7233), a deliberate anti-replay
+            // `random_blobs` (transport.rs:7258), a deliberate anti-replay
             // extension — so the blob count is not a rejection indicator.)
             transport
                 .clock
@@ -23409,6 +23434,89 @@ mod tests {
             );
         }
 
+        /// The proof `send_proof` puts on the wire for `packet_hash`, from a
+        /// transport built with `use_implicit_proof`.
+        fn emitted_proof(use_implicit_proof: bool, identity: &Identity) -> Packet {
+            let config = TransportConfig {
+                use_implicit_proof,
+                ..TransportConfig::default()
+            };
+            let mut transport = Transport::new(
+                config,
+                MockClock::new(TEST_TIME_MS),
+                MemoryStorage::with_defaults(),
+                Identity::generate(&mut OsRng),
+            );
+            let idx = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
+            transport
+                .send_proof(
+                    &[0xAA; 32],
+                    &[0x42; TRUNCATED_HASHBYTES],
+                    identity,
+                    Some(idx),
+                    None,
+                )
+                .unwrap();
+            let data = transport
+                .drain_actions()
+                .into_iter()
+                .find_map(|a| match a {
+                    Action::SendPacket { data, .. } => Some(data),
+                    _ => None,
+                })
+                .expect("send_proof must emit the proof");
+            Packet::unpack(&data).unwrap()
+        }
+
+        /// L-0051: the default proof is Python's default, the implicit form
+        /// (`Identity.py:966-970`: `proof_data = signature` while
+        /// `should_use_implicit_proof()`, which is true unless the config
+        /// says otherwise, `Reticulum.py:257,575-578`). It carries the
+        /// signature alone and is addressed to the truncated packet hash
+        /// (`ProofDestination`, `Packet.py:391-394`), which is how
+        /// `PacketReceipt.validate_proof` (`Packet.py:522-530`) checks it:
+        /// 64 bytes, the destination identity's signature over the full
+        /// packet hash.
+        #[test]
+        fn send_proof_defaults_to_the_implicit_form() {
+            let identity = Identity::generate(&mut OsRng);
+            let packet_hash = [0xAA; 32];
+            let proof = emitted_proof(TransportConfig::default().use_implicit_proof, &identity);
+
+            assert_eq!(
+                proof.data.as_slice().len(),
+                crate::constants::IMPLICIT_PROOF_SIZE
+            );
+            assert_eq!(
+                proof.destination_hash[..],
+                packet_hash[..TRUNCATED_HASHBYTES]
+            );
+            assert!(identity
+                .verify(&packet_hash, proof.data.as_slice())
+                .unwrap());
+        }
+
+        /// With `use_implicit_proof = false` the proof is the explicit form
+        /// (`Identity.py:970`: `packet.packet_hash + signature`), which
+        /// `Packet.py:499-504` checks by the leading hash and the signature
+        /// after it.
+        #[test]
+        fn send_proof_explicit_when_implicit_proof_is_off() {
+            let identity = Identity::generate(&mut OsRng);
+            let packet_hash = [0xAA; 32];
+            let proof = emitted_proof(false, &identity);
+
+            assert_eq!(
+                proof.data.as_slice().len(),
+                crate::constants::PROOF_DATA_SIZE
+            );
+            assert_eq!(
+                proof.destination_hash[..],
+                packet_hash[..TRUNCATED_HASHBYTES]
+            );
+            assert!(identity.verify_proof(proof.data.as_slice(), &packet_hash));
+        }
+
         #[test]
         fn test_request_path_produces_action() {
             let mut transport = test_transport();
@@ -24027,7 +24135,7 @@ mod tests {
         // (PATHFINDER_MAX_HOPS=128) must NOT be stored in the path table nor
         // scheduled for rebroadcast, mirroring Python RNS Transport.py:1750
         // (`local_and_hops_condition = packet.hops < PATHFINDER_M+1`, M=128).
-        // The inbound path increments hops once (transport.rs:1653) before
+        // The inbound path increments hops once (transport.rs:1667) before
         // handle_announce, so `packet.hops` inside the handler is already the
         // post-increment value — same accounting as the RNS gate.
         #[test]

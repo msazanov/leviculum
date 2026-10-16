@@ -50,7 +50,11 @@ pub struct ReticulumConfig {
     /// Python Reticulum defaults to `false` (library use), but lnsd is a daemon.
     #[serde(default = "default_true")]
     pub enable_transport: bool,
-    /// Use implicit proof for link identification
+    /// Send packet proofs in the implicit form, the 64-byte signature alone,
+    /// instead of the explicit 96-byte packet hash plus signature (RNS
+    /// default true, Reticulum.py:257,575-578; read by `Identity.prove`,
+    /// Identity.py:966-970). Proofs over a link stay explicit either way.
+    /// See `TransportConfig::use_implicit_proof`.
     #[serde(default = "default_true")]
     pub use_implicit_proof: bool,
     /// RNS `[logging] loglevel` (0-7), parsed from the INI config for drop-in

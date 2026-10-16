@@ -161,7 +161,7 @@ let mut node = builder.build_boxed(rng, EmbassyClock, EmbeddedStorage::new());
 
 `build` consumes the builder and the platform triple and returns the
 `NodeCore<R, C, S>`. A driver with an inline-storage `S` must not call it:
-use `build_boxed` (`leviculum-core/src/node/builder.rs:378`), which allocates
+use `build_boxed` (`leviculum-core/src/node/builder.rs:386`), which allocates
 first and configures through the box. `Box::new(builder.build(..))` holds a
 full-size `NodeCore` as a by-value local on the way into the box, and with
 `EmbeddedStorage` that is upwards of 40 KB twice over — it gave the T114 a

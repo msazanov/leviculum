@@ -1707,8 +1707,20 @@ class TestDaemon:
                 # Build and send the packet
                 data_bytes = bytes.fromhex(data_hex)
                 packet = RNS.Packet(out_dest, data_bytes)
-                packet.send()
+                receipt = packet.send()
 
+                if params.get("track"):
+                    # Keep the PacketReceipt so the Rust side can watch
+                    # Python validate its proof via get_receipt_status.
+                    if not receipt:
+                        return {"error": "packet.send() returned no receipt"}
+                    receipt_id = str(self.next_receipt_id)
+                    self.next_receipt_id += 1
+                    self.packet_receipts[receipt_id] = receipt
+                    return {"result": {
+                        "receipt_id": receipt_id,
+                        "packet_hash": receipt.hash.hex(),
+                    }}
                 return {"result": "sent"}
             except Exception as e:
                 return {"error": f"Failed to send single packet: {str(e)}"}
