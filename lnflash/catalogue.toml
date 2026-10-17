@@ -52,6 +52,11 @@ family    = "nrf52840"
 candidate_usb = ["1209:0001", "239a:8071"]
 
 [board.t114.flashing]
+level     = "verified"
+# `verified`: we own this board and run it. `expected`: wiring checked against
+# the vendor reference, never run by us, and lnflash writes it only after a
+# person says yes to exactly that (docs/src/firmware/boards.md, "How to read
+# the tables"). Required, so no entry can leave the question open.
 transport = "uf2-msc"
 # Tried in order. The touch only exists if the running firmware implements it;
 # ours does, stock Meshtastic does not, so the double-tap is a real fallback.
@@ -65,6 +70,15 @@ info_uf2_board_id = "HT-n5262"
 # mounting, never what board it is.
 bootloader_usb    = ["239a:0071"]
 msc_label         = "HT-n5262"
+# A hint, not a decision. Heltec publishes HT-n5262 for the Mesh Node T114, for
+# MeshSolar and for the Mesh Pocket, and only the first may take this image:
+# the Mesh Pocket wires its radio differently, and on MeshSolar our status LED
+# is the battery controller's shutdown input (docs/src/firmware/boards.md,
+# family B). The identifier belongs to a bootloader shared across models
+# (docs/src/concepts/lnode-flashing.md, "Four axes"), so a match is written
+# only under --board t114 or after a person names the board at the prompt.
+board_id_shared   = true
+board_id_models   = ["Heltec Mesh Node T114", "Heltec MeshSolar", "Heltec Mesh Pocket"]
 
 [board.t114.flashing.flash]
 # The bootloader generates CURRENT.UF2 from exactly this window, which is how
@@ -97,6 +111,10 @@ family    = "nrf52840"
 candidate_usb = ["1209:0002"]
 
 [board.rak4631.flashing]
+# Our Pocket V2 and a bare module. Every other carrier of the RAK4630 rides on
+# this entry and this level, because the Board-ID and the radio wiring both
+# belong to the module (docs/src/firmware/boards.md, family A).
+level     = "verified"
 transport = "uf2-msc"
 # Same two, same order, and for the same reason as the T114: our firmware
 # answers the touch, stock Meshtastic does not.

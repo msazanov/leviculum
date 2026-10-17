@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 use crate::entry;
 use crate::envelope::SessionReply;
 use crate::infouf2::InfoUf2;
-use crate::manifest::{self, Board, Catalogue, Flashing, Manifest, Payload, Payloads};
+use crate::manifest::{self, Board, Catalogue, Flashing, Level, Manifest, Payload, Payloads};
 use crate::radio::{self, RadioChoice, RadioPlan, RadioSettings};
 use crate::softdevice::{self, Version, VersionReq};
 use crate::telemetry::{self, TelemetryPlan};
@@ -75,6 +75,29 @@ pub enum Error {
         asked: String,
         found: String,
         board_id: String,
+    },
+    #[error(
+        "the board on {port} says it is {board_id:?}, and that Board-ID is published by {}. \
+         Only the first takes the {board} image, and the others drive the wrong pins with it. \
+         Nothing was written. If this is a {}, pass --board {board}.",
+        models.join(", "),
+        models.first().map(String::as_str).unwrap_or("board that entry describes")
+    )]
+    AmbiguousBoardId {
+        port: String,
+        board_id: String,
+        board: String,
+        models: Vec<String>,
+    },
+    #[error(
+        "the board on {port} is {board}, which lnflash knows at level {level}: its wiring was \
+         checked against the vendor's reference, but we have never run this hardware. Writing \
+         it needs a yes at the prompt, and --yes does not give one. Nothing was written."
+    )]
+    NeedsConfirmation {
+        port: String,
+        board: String,
+        level: &'static str,
     },
     #[error("the board on {port} never appeared in its bootloader")]
     NoBootloader { port: String },
@@ -174,7 +197,67 @@ impl<'m> Confirmed<'m> {
 /// "lnflash knows no board with that ID" and "this bundle carries no image
 /// for it" have different remedies, and telling a user the wrong one sends
 /// them after the wrong file.
+///
+/// A match is not always the whole decision (Codeberg #262). Where the
+/// catalogue says the `Board-ID` is shared by several models, the match is a
+/// hint, and it is written only under `--board` or after the person at the
+/// prompt names the board. Where the catalogue's level is `expected`, the
+/// person has to say yes to a question stating that we have never run that
+/// hardware. Both go through [`Ui::ask`], which answers nothing under
+/// `--yes`, so an unattended run refuses rather than consents.
 pub fn confirm_identity<'m>(
+    catalogue: &'m Catalogue,
+    manifest: &'m Manifest,
+    info: &InfoUf2,
+    port: &str,
+    asked_for: Option<&str>,
+    ui: &mut dyn Ui,
+) -> Result<Confirmed<'m>, Error> {
+    let confirmed = resolve_identity(catalogue, manifest, info, port, asked_for)?;
+    let name = confirmed.name();
+    let identify = &confirmed.flashing().identify;
+    if identify.board_id_shared && asked_for.is_none() {
+        let models = &identify.board_id_models;
+        let ours = models.first().map(String::as_str).unwrap_or(name);
+        let answer = ui.ask(&format!(
+            "{port}: Board-ID {:?} is published by {}, and only the first takes the {name} \
+             image. Type {name} if this is a {ours}:",
+            identify.info_uf2_board_id,
+            models.join(", ")
+        ))?;
+        if !answer.is_some_and(|a| a.trim().eq_ignore_ascii_case(name)) {
+            return Err(Error::AmbiguousBoardId {
+                port: port.to_string(),
+                board_id: identify.info_uf2_board_id.clone(),
+                board: name.to_string(),
+                models: models.clone(),
+            });
+        }
+    }
+    let level = confirmed.flashing().level;
+    if level == Level::Expected {
+        let answer = ui.ask(&format!(
+            "{port}: {name} is at level {}: its wiring matches the vendor's reference, but we \
+             have never run this hardware. Type yes to write it anyway:",
+            level.as_str()
+        ))?;
+        if !answer.is_some_and(|a| a.trim().eq_ignore_ascii_case("yes")) {
+            return Err(Error::NeedsConfirmation {
+                port: port.to_string(),
+                board: name.to_string(),
+                level: level.as_str(),
+            });
+        }
+    }
+    Ok(confirmed)
+}
+
+/// The match alone, with no question asked. [`confirm_identity`] is the way
+/// in for a session; this is also what re-confirms a drive that reappeared
+/// after the SoftDevice remedy, where the person has already answered for
+/// this board in this session and asking again would only teach them to
+/// answer without reading.
+fn resolve_identity<'m>(
     catalogue: &'m Catalogue,
     manifest: &'m Manifest,
     info: &InfoUf2,
@@ -2263,7 +2346,7 @@ fn resolve(
 
     let drive = Drive::open(&block)?;
     let info = drive.info()?;
-    let confirmed = confirm_identity(catalogue, manifest, &info, &port, opts.board.as_deref())?;
+    let confirmed = confirm_identity(catalogue, manifest, &info, &port, opts.board.as_deref(), ui)?;
     ui.say(&format!(
         "{port}: confirmed {} — Board-ID {:?}, bootloader {}",
         confirmed.name(),
@@ -2388,7 +2471,7 @@ fn resolve(
         // Identity is confirmed again rather than carried over: this is a
         // fresh mount of a drive that reappeared, and the rule is the rule.
         let info = drive.info()?;
-        confirm_identity(catalogue, manifest, &info, &port, Some(confirmed.name()))?;
+        resolve_identity(catalogue, manifest, &info, &port, Some(confirmed.name()))?;
         let after = read_installed(&drive, &info);
         ui.say(&format!("{port}: SoftDevice now {}", after.describe()));
 
@@ -3000,6 +3083,7 @@ mod tests {
     use super::*;
     use crate::infouf2;
     use crate::manifest::load;
+    use crate::ui::testing::Fake;
     use std::fs;
     use tempfile::TempDir;
 
@@ -3211,6 +3295,7 @@ convert = "hex-to-uf2"
             &infouf2::parse(T114_INFO),
             "3-2.4",
             None,
+            &mut Fake::typing(&["t114"]),
         )
         .unwrap();
         assert_eq!(confirmed.name(), "t114");
@@ -3234,6 +3319,7 @@ convert = "hex-to-uf2"
             &infouf2::parse(RAK_INFO),
             "3-2.4",
             None,
+            &mut Fake::default(),
         )
         .unwrap_err();
         assert!(
@@ -3256,6 +3342,7 @@ convert = "hex-to-uf2"
             &infouf2::parse(RAK_INFO),
             "3-2.3.4.4",
             None,
+            &mut Fake::default(),
         )
         .unwrap();
         assert_eq!(confirmed.name(), "rak4631");
@@ -3270,7 +3357,8 @@ convert = "hex-to-uf2"
             &manifest,
             &infouf2::parse(T114_INFO),
             "3-2.4",
-            None,
+            Some("t114"),
+            &mut Fake::default(),
         )
         .unwrap();
         assert_eq!(t114.name(), "t114");
@@ -3293,6 +3381,7 @@ convert = "hex-to-uf2"
             &infouf2::parse(T114_INFO),
             "3-2.4",
             Some("rak4631"),
+            &mut Fake::default(),
         )
         .unwrap_err();
         assert!(matches!(err, Error::WrongBoard { .. }), "{err}");
@@ -3310,6 +3399,7 @@ convert = "hex-to-uf2"
             &infouf2::parse(T114_INFO),
             "3-2.4",
             Some("rak4631"),
+            &mut Fake::default(),
         )
         .unwrap_err();
         assert!(matches!(err, Error::WrongBoard { .. }));
@@ -3321,11 +3411,169 @@ convert = "hex-to-uf2"
                 &manifest,
                 &infouf2::parse(T114_INFO),
                 "3-2.4",
-                Some("t114")
+                Some("t114"),
+                &mut Fake::default()
             )
             .unwrap()
             .name(),
             "t114"
+        );
+    }
+
+    /// The two-board bundle with the RAK entry at level `expected`, standing
+    /// in for a carrier we have checked against its vendor reference and
+    /// never run.
+    fn expected_rak_bundle() -> (TempDir, Catalogue, Manifest) {
+        let (dir, _, _) = two_board_bundle();
+        let catalogue = Catalogue::builtin_with(
+            "family A).\nlevel     = \"verified\"",
+            "family A).\nlevel     = \"expected\"",
+        )
+        .unwrap();
+        let manifest = load(dir.path(), &catalogue).unwrap();
+        (dir, catalogue, manifest)
+    }
+
+    #[test]
+    fn an_ht_n5262_with_no_board_named_is_refused_as_a_hint() {
+        // Codeberg #262: Heltec publishes HT-n5262 for three models and only
+        // one takes our image. With nobody at the prompt to name it, the run
+        // stops and says which models it could be and what to pass.
+        let (_dir, catalogue, manifest) = bundle();
+        let mut ui = Fake::default();
+        let err = confirm_identity(
+            &catalogue,
+            &manifest,
+            &infouf2::parse(T114_INFO),
+            "3-2.4",
+            None,
+            &mut ui,
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::AmbiguousBoardId { .. }), "{err:?}");
+        let text = format!("{err}");
+        for needle in [
+            "Heltec Mesh Node T114, Heltec MeshSolar, Heltec Mesh Pocket",
+            "Nothing was written",
+            "If this is a Heltec Mesh Node T114, pass --board t114",
+        ] {
+            assert!(text.contains(needle), "{needle:?} missing from: {text}");
+        }
+        // The person was asked, by name, before being refused.
+        assert!(ui
+            .transcript()
+            .contains("Type t114 if this is a Heltec Mesh Node T114"));
+    }
+
+    #[test]
+    fn an_ht_n5262_under_yes_alone_is_refused() {
+        // `--yes` agrees to writing, not to knowing which board this is.
+        let (_dir, catalogue, manifest) = bundle();
+        let err = confirm_identity(
+            &catalogue,
+            &manifest,
+            &infouf2::parse(T114_INFO),
+            "3-2.4",
+            None,
+            &mut crate::ui::Assumed::new(true),
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::AmbiguousBoardId { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn naming_another_model_at_the_prompt_refuses_the_ht_n5262() {
+        let (_dir, catalogue, manifest) = bundle();
+        let err = confirm_identity(
+            &catalogue,
+            &manifest,
+            &infouf2::parse(T114_INFO),
+            "3-2.4",
+            None,
+            &mut Fake::typing(&["Mesh Pocket"]),
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::AmbiguousBoardId { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn an_ht_n5262_under_board_t114_is_confirmed_without_a_question() {
+        // Naming the board on the command line is the person saying which
+        // model it is, so the hint becomes a decision and nobody is asked.
+        let (_dir, catalogue, manifest) = bundle();
+        let mut ui = Fake::default();
+        let confirmed = confirm_identity(
+            &catalogue,
+            &manifest,
+            &infouf2::parse(T114_INFO),
+            "3-2.4",
+            Some("t114"),
+            &mut ui,
+        )
+        .unwrap();
+        assert_eq!(confirmed.name(), "t114");
+        assert!(ui.said.is_empty(), "{}", ui.transcript());
+    }
+
+    #[test]
+    fn a_verified_board_with_its_own_board_id_is_confirmed_without_a_question() {
+        let (_dir, catalogue, manifest) = two_board_bundle();
+        let mut ui = Fake::default();
+        let confirmed = confirm_identity(
+            &catalogue,
+            &manifest,
+            &infouf2::parse(RAK_INFO),
+            "3-2.3.4.4",
+            None,
+            &mut ui,
+        )
+        .unwrap();
+        assert_eq!(confirmed.name(), "rak4631");
+        assert_eq!(confirmed.flashing().level, Level::Verified);
+        assert!(ui.said.is_empty(), "{}", ui.transcript());
+    }
+
+    #[test]
+    fn an_expected_board_is_refused_without_an_explicit_yes() {
+        let (_dir, catalogue, manifest) = expected_rak_bundle();
+        let info = infouf2::parse(RAK_INFO);
+        // Nobody answering, `--yes`, and `--board` naming it all refuse:
+        // none of them is a person saying yes to hardware we never ran.
+        for (asked, ui) in [
+            (None, &mut Fake::default() as &mut dyn Ui),
+            (None, &mut crate::ui::Assumed::new(true)),
+            (Some("rak4631"), &mut Fake::default()),
+            (None, &mut Fake::typing(&["y"])),
+        ] {
+            let err =
+                confirm_identity(&catalogue, &manifest, &info, "3-2.3.4.4", asked, ui).unwrap_err();
+            assert!(matches!(err, Error::NeedsConfirmation { .. }), "{err:?}");
+            let text = format!("{err}");
+            assert!(text.contains("rak4631"), "{text}");
+            assert!(text.contains("level expected"), "{text}");
+            assert!(text.contains("never run this hardware"), "{text}");
+            assert!(text.contains("Nothing was written"), "{text}");
+        }
+    }
+
+    #[test]
+    fn an_expected_board_is_confirmed_after_a_yes_to_a_question_that_says_so() {
+        let (_dir, catalogue, manifest) = expected_rak_bundle();
+        let mut ui = Fake::typing(&["yes"]);
+        let confirmed = confirm_identity(
+            &catalogue,
+            &manifest,
+            &infouf2::parse(RAK_INFO),
+            "3-2.3.4.4",
+            None,
+            &mut ui,
+        )
+        .unwrap();
+        assert_eq!(confirmed.name(), "rak4631");
+        assert!(
+            ui.transcript().contains("we have never run this hardware"),
+            "{}",
+            ui.transcript()
         );
     }
 
@@ -3334,13 +3582,27 @@ convert = "hex-to-uf2"
         let (_dir, catalogue, manifest) = bundle();
         let info = infouf2::parse("UF2 Bootloader 0.9.0\r\nDate: Jul  9 2024\r\n");
         assert!(matches!(
-            confirm_identity(&catalogue, &manifest, &info, "3-2.4", None),
+            confirm_identity(
+                &catalogue,
+                &manifest,
+                &info,
+                "3-2.4",
+                None,
+                &mut Fake::default()
+            ),
             Err(Error::NoBoardId { .. })
         ));
         // An empty value is the same as no value: it confirms nothing.
         let blank = infouf2::parse("Board-ID:  \r\n");
         assert!(matches!(
-            confirm_identity(&catalogue, &manifest, &blank, "3-2.4", None),
+            confirm_identity(
+                &catalogue,
+                &manifest,
+                &blank,
+                "3-2.4",
+                None,
+                &mut Fake::default()
+            ),
             Err(Error::NoBoardId { .. })
         ));
     }
@@ -3471,7 +3733,8 @@ convert = "hex-to-uf2"
             &manifest,
             &infouf2::parse(T114_INFO),
             "3-2.4",
-            None,
+            Some("t114"),
+            &mut Fake::default(),
         )
         .unwrap();
         let remedy = &confirmed
@@ -3496,7 +3759,8 @@ convert = "hex-to-uf2"
             &manifest,
             &infouf2::parse(T114_INFO),
             "3-2.4",
-            None,
+            Some("t114"),
+            &mut Fake::default(),
         )
         .unwrap();
         fs::write(dir.path().join("t114/app.uf2"), b"tampered").unwrap();
@@ -3534,7 +3798,8 @@ convert = "hex-to-uf2"
             &manifest,
             &infouf2::parse(T114_INFO),
             "3-2.4",
-            None,
+            Some("t114"),
+            &mut Fake::default(),
         )
         .unwrap();
         let err = prepare(&confirmed.payloads().app, &manifest.root, &confirmed).unwrap_err();

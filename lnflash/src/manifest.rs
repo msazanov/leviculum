@@ -243,6 +243,10 @@ pub struct Board {
 /// (docs/src/concepts/lnode-flashing.md, "Four axes").
 #[derive(Debug, Clone, Deserialize)]
 pub struct Flashing {
+    /// How well we know this hardware. Required: a board whose entry does
+    /// not say whether we have ever run it must not load, because the
+    /// default either way is a claim nobody made (Codeberg #262).
+    pub level: Level,
     pub transport: Transport,
     pub entry: Vec<Entry>,
     pub identify: Identify,
@@ -254,6 +258,28 @@ pub struct Flashing {
     /// button on the outside of the case.
     #[serde(default)]
     pub double_tap: DoubleTap,
+}
+
+/// How well we know a board we write to, in the terms
+/// `docs/src/firmware/boards.md` ("How to read the tables") uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Level {
+    /// We own this board and run it.
+    Verified,
+    /// Wiring checked against the vendor reference, never run by us. A
+    /// write needs a person to say yes to exactly that, and `--yes` is not
+    /// that person.
+    Expected,
+}
+
+impl Level {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Level::Verified => "verified",
+            Level::Expected => "expected",
+        }
+    }
 }
 
 /// Per-board wording for the one instruction in this tool a human has to act
@@ -288,6 +314,19 @@ pub struct Identify {
     /// user; never used to decide anything.
     #[serde(default)]
     pub msc_label: Option<String>,
+    /// The `Board-ID` is published by more than one model, so a match is a
+    /// hint and not a write decision: the vendor bound the identifier to a
+    /// bootloader shared across models while the wiring belongs to the model
+    /// (docs/src/concepts/lnode-flashing.md, "Four axes"). The flow then
+    /// needs `--board` or a person naming the board before it writes.
+    #[serde(default)]
+    pub board_id_shared: bool,
+    /// The models known to publish the same `Board-ID`, in the words the
+    /// refusal names them with, the one this entry's image is for first.
+    /// Stated exactly when `board_id_shared` is, so the refusal always has
+    /// names to give.
+    #[serde(default)]
+    pub board_id_models: Vec<String>,
 }
 
 /// Flash geometry, as measured from the bootloader's own `CURRENT.UF2`.
@@ -468,6 +507,21 @@ impl Catalogue {
         Self::parse(CATALOGUE_TOML, Path::new(CATALOGUE_NAME))
     }
 
+    /// The compiled-in catalogue with one substring replaced, so a test that
+    /// mutates a field is mutating the real thing.
+    ///
+    /// It asserts the substring was there. A `replace` that matches nothing
+    /// returns the input unchanged, and a test fed unchanged input passes for
+    /// the one reason that proves nothing.
+    #[cfg(test)]
+    pub(crate) fn builtin_with(from: &str, to: &str) -> Result<Self, Error> {
+        assert!(
+            CATALOGUE_TOML.contains(from),
+            "the catalogue no longer contains {from:?}, so this test mutates nothing"
+        );
+        Self::parse(&CATALOGUE_TOML.replace(from, to), Path::new(CATALOGUE_NAME))
+    }
+
     fn parse(text: &str, path: &Path) -> Result<Self, Error> {
         let catalogue: Self = toml::from_str(text).map_err(|source| Error::Toml {
             path: path.to_path_buf(),
@@ -492,6 +546,10 @@ impl Catalogue {
     /// makes a control-only entry unreachable from the write path rather
     /// than merely unlikely to be reached: there is no `Board-ID` on such an
     /// entry to match in the first place.
+    ///
+    /// Where the entry says `board_id_shared`, what comes back is a hint:
+    /// the lookup still resolves, and whether the match may carry a write is
+    /// decided in `flow::confirm_identity`, which asks for the model by name.
     pub fn board_for_id(&self, board_id: &str) -> Option<(&str, &Board, &Flashing)> {
         self.board.iter().find_map(|(name, board)| {
             let flashing = board.flashing()?;
@@ -622,6 +680,15 @@ fn validate_catalogue(catalogue: &Catalogue, path: &Path) -> Result<(), Error> {
             return Err(bad(format!(
                 "board {name}: flashing.identify.info_uf2_board_id is empty, so no board could \
                  ever be confirmed and no write could ever be safe"
+            )));
+        }
+        // A shared ID without the models that share it would refuse with no
+        // names, and names without the flag would be a list nothing reads.
+        let identify = &flashing.identify;
+        if identify.board_id_shared != !identify.board_id_models.is_empty() {
+            return Err(bad(format!(
+                "board {name}: flashing.identify.board_id_shared and board_id_models are stated \
+                 together or not at all"
             )));
         }
         if flashing.entry.is_empty() {
@@ -785,18 +852,9 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
-    /// The compiled-in catalogue with one substring replaced, so a test that
-    /// mutates a field is mutating the real thing.
-    ///
-    /// It asserts the substring was there. A `replace` that matches nothing
-    /// returns the input unchanged, and a validation test fed unchanged input
-    /// passes for the one reason that proves nothing.
+    /// See [`Catalogue::builtin_with`].
     fn mutated_catalogue(from: &str, to: &str) -> Result<Catalogue, Error> {
-        assert!(
-            CATALOGUE_TOML.contains(from),
-            "the catalogue no longer contains {from:?}, so this test mutates nothing"
-        );
-        Catalogue::parse(&CATALOGUE_TOML.replace(from, to), Path::new(CATALOGUE_NAME))
+        Catalogue::builtin_with(from, to)
     }
 
     fn catalogue() -> Catalogue {
@@ -1109,7 +1167,20 @@ convert = "hex-to-uf2"
     #[test]
     fn a_board_is_looked_up_by_the_id_the_bootloader_published() {
         let catalogue = catalogue();
-        assert_eq!(catalogue.board_for_id("HT-n5262").unwrap().0, "t114");
+        // HT-n5262 still resolves, but as a hint: the entry says the ID is
+        // shared, and the decision whether a match may be written moves to
+        // `flow::confirm_identity` (Codeberg #262).
+        let (name, _, t114) = catalogue.board_for_id("HT-n5262").unwrap();
+        assert_eq!(name, "t114");
+        assert!(t114.identify.board_id_shared);
+        assert_eq!(
+            t114.identify.board_id_models.first().map(String::as_str),
+            Some("Heltec Mesh Node T114")
+        );
+        // The RAK's ID belongs to the module that also carries the wiring,
+        // so it is exact.
+        let (_, _, rak) = catalogue.board_for_id("WisBlock-RAK4631-Board").unwrap();
+        assert!(!rak.identify.board_id_shared);
         assert_eq!(
             catalogue.board_for_id("WisBlock-RAK4631-Board").unwrap().0,
             "rak4631"
@@ -1118,6 +1189,43 @@ convert = "hex-to-uf2"
         assert!(catalogue.board_for_id("HT-n5262-something").is_none());
         assert!(catalogue.board_for_id("WisBlock-RAK4631").is_none());
         assert!(catalogue.board_for_id("RAK4631").is_none());
+    }
+
+    #[test]
+    fn a_flashable_board_that_does_not_say_how_well_we_know_it_will_not_load() {
+        // Codeberg #262: the level is required, so an entry cannot reach the
+        // write path without saying whether we have ever run that hardware.
+        let err = mutated_catalogue(
+            "[board.t114.flashing]\nlevel     = \"verified\"\n",
+            "[board.t114.flashing]\n",
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::Toml { .. }), "{err}");
+        assert!(format!("{err}").contains("level"), "{err}");
+        // ...and a level that is neither of the two words is no level.
+        let err = mutated_catalogue(
+            "[board.t114.flashing]\nlevel     = \"verified\"",
+            "[board.t114.flashing]\nlevel     = \"probably\"",
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::Toml { .. }), "{err}");
+        // Both current entries are boards we own and run.
+        let catalogue = catalogue();
+        for name in catalogue.flashable_names() {
+            let level = catalogue.board(name).unwrap().flashing().unwrap().level;
+            assert_eq!(level, Level::Verified, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_shared_board_id_without_the_models_that_share_it_will_not_load() {
+        // The refusal names the models, so the flag cannot stand without them.
+        let err = mutated_catalogue("board_id_models   = [", "unused_models   = [").unwrap_err();
+        assert!(format!("{err}").contains("board_id_shared"), "{err}");
+        // Nor can names stand without the flag: a list nothing reads.
+        let err =
+            mutated_catalogue("board_id_shared   = true", "board_id_shared   = false").unwrap_err();
+        assert!(format!("{err}").contains("board_id_models"), "{err}");
     }
 
     #[test]
