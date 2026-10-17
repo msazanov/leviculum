@@ -117,6 +117,11 @@ Verified against Meshtastic's own variant definitions under
 numbers, and against the RAK4630 datasheet quoted in
 `variants/nrf52840/rak4631/variant.h`.
 
+`lnflash` flashes the Pocket Mini, and every other carrier in this table,
+on its one `rak4631` entry at level `verified`, because the `Board-ID`
+belongs to the RAK4630 module and so does the wiring that level vouches
+for.
+
 The non-radio pins this build drives were checked the same way, and they
 hold up: the two LEDs on `P1.03` and `P1.04` are the module's own, and
 `P0.13` / `P0.14` carry I2C and `P0.15` / `P0.16` the first serial port on
@@ -192,13 +197,14 @@ radio pinout turned out to be the easy half.
 > that is a hazard rather than an inconvenience.** Meshtastic records the
 > same bootloader product string `HT-n5262` for the T114, for MeshSolar
 > and for the Heltec Mesh Pocket, whose radio is wired differently and
-> which is not covered here. Both our tools match that string exactly
-> (`board_for_id` (`lnflash/src/manifest.rs:495`),
-> `leviculum-nrf/tools/uf2-runner.sh:108`), so if the `INFO_UF2.TXT`
-> `Board-ID` is identical too, neither can tell a Mesh Pocket from a
-> T114. We cannot check that without the hardware. Until someone does,
-> treat a `HT-n5262` match as a family hint and confirm the model by
-> other means before writing.
+> which is not covered here. Both our tools match that string exactly,
+> so if the `INFO_UF2.TXT` `Board-ID` is identical too, neither can tell
+> a Mesh Pocket from a T114. We cannot check that without the hardware,
+> so `lnflash` treats a `HT-n5262` match as a family hint: the catalogue
+> entry says `board_id_shared = true`, and a match is written only under
+> `--board t114` or after the person at the prompt names the board
+> (Codeberg #262). `leviculum-nrf/tools/uf2-runner.sh` keeps the plain
+> match, because it only flashes the rig boards we own.
 >
 > This is the general rule behind both this warning and the XIAO case
 > below: **a `Board-ID` is only a safe key when it is bound to the same

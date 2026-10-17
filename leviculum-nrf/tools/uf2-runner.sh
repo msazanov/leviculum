@@ -105,6 +105,9 @@ fi
 BOARD_VID="${LEVICULUM_USB_VID:-1209}"
 BOARD_PID="${LEVICULUM_USB_PID:-0001}"
 BOARD_NAME="${LEVICULUM_BOARD_NAME:-T114}"
+# HT-n5262 is shared by three Heltec models and only the T114 takes this image.
+# lnflash treats it as a hint and asks (Codeberg #262); this runner keeps the
+# plain match because it only flashes the rig boards we own.
 BOOTLOADER_BOARD_ID="${LEVICULUM_UF2_BOARD_ID:-HT-n5262}"
 DOUBLE_TAP_HINT="${LEVICULUM_DOUBLE_TAP_HINT:-}"
 

@@ -29,7 +29,7 @@ the rule above: the product string is application data, not evidence.
 
 **Bootloader (UF2/DFU).** A different USB ID entirely, which is why an
 application-ID match can never be true while a board sits in DFU
-(`leviculum-nrf/tools/uf2-runner.sh:279`). Measured on the rig:
+(`leviculum-nrf/tools/uf2-runner.sh:282`). Measured on the rig:
 
 | board | bootloader USB ID | mass-storage label |
 | --- | --- | --- |
@@ -480,7 +480,7 @@ tests equality first and the swap only as an alternative, so a board
 that keeps its serial is matched as readily as one that swaps
 it. The older runner is unaffected because it
 only compares serials in application mode
-(`leviculum-nrf/tools/uf2-runner.sh:287`).
+(`leviculum-nrf/tools/uf2-runner.sh:290`).
 
 **Writing needs root.** The mass-storage device appears as `/dev/sdX`
 owned `root:disk`. Automounting assumes a desktop stack that a headless
@@ -492,11 +492,11 @@ tool, but it cannot write the drive unprivileged.
 the moment the final UF2 block lands, while the filesystem still wants
 to flush metadata, producing `device offline error ... lost async page
 write`. This is the normal completion path, not a failure
-(`leviculum-nrf/tools/uf2-runner.sh:234`).
+(`leviculum-nrf/tools/uf2-runner.sh:237`).
 
 **A copy returning 0 does not mean the flash took.** Verify that the
 application re-enumerated and that the bootloader drive is gone
-(`leviculum-nrf/tools/uf2-runner.sh:308`). Stronger still, read the
+(`leviculum-nrf/tools/uf2-runner.sh:311`). Stronger still, read the
 periodic `[FW_BUILD]` banner off the debug port and compare the git SHA,
 as `scripts/flash-lnodes-from-head.sh:113` does.
 
@@ -583,6 +583,17 @@ ask rather than to write the more likely of two images. The cost of
 getting this wrong is not a failed flash but a board driving the wrong
 pins, which on hardware carrying a power amplifier is a repair rather
 than a retry.
+
+`lnflash` states the first case in its catalogue: the T114 entry carries
+`board_id_shared = true` and `board_id_models`, and `confirm_identity`
+refuses a match on such an ID as `AmbiguousBoardId` unless `--board`
+named the board or the person at the prompt types its name. The same
+place asks a second question. Every flashable entry states a required
+`level`, `verified` or `expected` in the terms of
+[Supported Boards](../firmware/boards.md), and an `expected` board is
+written only after an explicit yes to a question saying we have never
+run that hardware. `--yes` answers neither question, so an unattended
+run refuses instead of guessing (Codeberg #262).
 
 The cheaper answer, where it is available, is to make the ambiguity stop
 mattering. The RAK4631 looks like the same problem, since the bare
