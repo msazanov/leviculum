@@ -9,6 +9,8 @@ name = "leviculum-core-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2021"
+# A detached workspace, so `license.workspace = true` has nothing to inherit.
+license = "AGPL-3.0-or-later"
 
 [package.metadata]
 cargo-fuzz = true

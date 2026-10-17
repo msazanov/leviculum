@@ -141,6 +141,10 @@ are taken under Apache-2.0 where it is offered. Both are satisfied by
 reproducing them here; Apache-2.0 is simply explicit (§4) about what a
 binary distribution must carry, where MIT leaves it to be inferred.
 
+The submodules and the crates vendored into the source tree are listed,
+with their licences and whether they reach a binary, in THIRD-PARTY.md
+at the root of the source repository.
+
 Generated from Cargo.lock by scripts/gen-notices.py — do not edit by
 hand. Regenerate with `just notices`.
 """

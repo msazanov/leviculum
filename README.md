@@ -223,3 +223,6 @@ pip install --user ziglang
 ## License
 
 AGPL-3.0-or-later. See [LICENSE](LICENSE) for the full text.
+[THIRD-PARTY.md](THIRD-PARTY.md) names the other licences in the tree: the
+`reference/` submodules (read by tests, never built or shipped) and the
+patched crates under `vendor/`.
