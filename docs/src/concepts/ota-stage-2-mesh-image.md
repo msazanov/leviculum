@@ -19,17 +19,18 @@ costs hours of a channel everybody else is also using.
 
 The nRF52840 has 1 MB of internal flash and it is already spoken for.
 The SoftDevice sits at the bottom, the bootloader at the top, and what
-is left is the application window: origin `0x27000`, length `0xB2000` —
-729 088 B, 712 KiB (`FLASH`, `leviculum-nrf/memory.x:84`). Above it the
-boot record takes a page (`BOOT`, `leviculum-nrf/memory.x:108`, Codeberg
+is left is the application window: origin `0x27000`, length `0xB0000` —
+720 896 B, 704 KiB (`FLASH`, `leviculum-nrf/memory.x:86`). Above it the
+calendar checkpoint ring takes two pages (`TIME`, Codeberg #166), the
+boot record a page (`BOOT`, `leviculum-nrf/memory.x:110`, Codeberg
 #380) and the record store sixteen more (`STORE`,
-`leviculum-nrf/memory.x:91`, Codeberg #384), then the three persistence
+`leviculum-nrf/memory.x:93`, Codeberg #384), then the three persistence
 pages.
 
 The image that `lnflash` wrote to a T114 on 2026-09-24 was 2 419 UF2
 blocks of 256 payload bytes: **619 264 B, 605 KiB**. A staged second copy
 beside the running one needs 1 238 528 B, 1 210 KiB. That does not fit in
-712 KiB, and it does not fit even if the boot record and the record store
+704 KiB, and it does not fit even if the time ring, the boot record and the record store
 are given up and the whole writable window above the SoftDevice is
 claimed: `0x27000` to `0xEA000` is 798 720 B, 780 KiB
 ([Flashing an LNode](lnode-flashing.md), "What a UF2 is allowed to
@@ -261,7 +262,7 @@ application window, and the only correct behaviour on the next boot is to
 copy again from the same source. That means "a copy is in progress" is
 itself a flash record, written before the first erase, in a page the
 copier never erases — the boot record's neighbourhood
-(`BOOT`, `leviculum-nrf/memory.x:108`) is the shape, for the same reason
+(`BOOT`, `leviculum-nrf/memory.x:110`) is the shape, for the same reason
 the boot record chose it: it must survive a power loss, which is the case
 it exists for.
 

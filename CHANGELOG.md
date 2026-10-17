@@ -20,6 +20,14 @@ Toolchain: Rust 1.97.1
 
 ### Added
 
+- A clockless LNode keeps the time it learned from traffic across a power
+  cycle (#166 item 4). The calendar is appended at most hourly to a
+  two-page ring at `0xD7000` (the image window shrinks by 8 KiB) and
+  restored at boot as `restored-floor`: a floor at the birth rank, so the
+  board stamps near the time it went dark instead of at its build
+  timestamp, and the first credible announce still heals it in one step.
+  `[TIME_RESTORE]` / `[TIME_RESTORE_REFUSED]` say what boot found.
+
 - A sub-slot offset for the CSMA acquisition draw, OFF by default
   (leviculum#438): a uniform `[0, slot)` ms on top of the slotted wait, so
   two senders that draw the same slot no longer key on the same

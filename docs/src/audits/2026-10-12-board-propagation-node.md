@@ -368,7 +368,7 @@ priced in `ROLE_BUDGET_BYTES`.
 
 **D9 — the store is 64 KiB of flash in ≤ 4 042 B records, against
 lnpnd's 500 MB default.** The region is one linker number
-(`memory.x:91`, 16 pages); a record never straddles a page
+(`memory.x:93`, 16 pages); a record never straddles a page
 (`MAX_BODY`, `leviculum-nrf/record-log/src/lib.rs:229` = 4096 − 12 −
 42), and the peer records share the region. lnpnd defaults to 500 MB
 (`message_storage_limit`, `lnpnd/src/config.rs:353`); the reference
@@ -382,7 +382,7 @@ reference too.
 Class: deviation ours (deliberate — §2's endurance design).
 Price to grow: flash pages only, no heap — the scan is memory-mapped.
 Each page added is ~11 more field records; the endurance math
-(`memory.x:68-71`) has 16 pages at 9 years at the measured field
+(`memory.x:69-72`) has 16 pages at 9 years at the measured field
 duty, and more pages only lengthen that. The cost is application
 image room: the region is carved from the top of the application
 window.
@@ -845,7 +845,7 @@ of that at once does not answer the question.
    joined it; the authoritative derivation is the compile assert
    (`leviculum-nrf/heap-budget/src/lib.rs:330-337`, N ≤ 19) and the
    concept page says so
-   (`docs/src/concepts/propagation-node-on-a-board.md:935`). The
+   (`docs/src/concepts/propagation-node-on-a-board.md:936`). The
    cap 16 itself is right; the stated arithmetic beside it is the
    stale draft.
 

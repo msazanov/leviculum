@@ -1070,6 +1070,7 @@ dependencies = [
  "leviculum-settle-budget",
  "leviculum-sync-batch",
  "leviculum-telemetry-policy",
+ "leviculum-time-floor",
  "leviculum-tx-spacing",
  "leviculum-upload-proof",
  "leviculum-usb-policy",
@@ -1164,6 +1165,10 @@ dependencies = [
 
 [[package]]
 name = "leviculum-telemetry-policy"
+version = "0.1.0"
+
+[[package]]
+name = "leviculum-time-floor"
 version = "0.1.0"
 
 [[package]]

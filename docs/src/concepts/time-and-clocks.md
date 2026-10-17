@@ -520,8 +520,13 @@ The seam refuses a value outside the sanity window (a torn or
 foreign record), refuses when a better-ranked anchor already sits
 (a restore never demotes a live source), and never seats a value at
 or below the current calendar, because the anchor never moves
-backwards. No board persists the anchor yet; the seam is what a
-board's checkpoint restores through.
+backwards. The board side is a two-page flash ring at `0xD7000`
+(`leviculum-nrf/src/time_floor.rs`, layout and wear arithmetic in the
+`leviculum-time-floor` crate): the calendar is appended at most hourly,
+only while it ranks 4 or better and has advanced an hour since the last
+record, so the ring only ever holds a value a live source vouched for,
+and the newest valid record is restored before the first announce can
+be heard.
 
 ## Stamping: always author, never ahead of the estimate
 

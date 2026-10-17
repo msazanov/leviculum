@@ -2,15 +2,16 @@
 #
 # Record-store gap gate for the nRF firmware (Codeberg #384).
 #
-# The store's 64 KiB region sits above the firmware image, with the boot-record
-# page (#380) between them (`leviculum-nrf/memory.x`: FLASH ends at 0xD9000,
-# BOOT is 0xD9000-0xDA000, STORE runs 0xDA000-0xEA000). An image that grows into
-# either would erase the board's message store, or its restart count, on the
-# next UF2 flash.
+# The store's 64 KiB region sits above the firmware image, with the calendar
+# checkpoint ring (#166 item 4) and the boot-record page (#380) between them
+# (`leviculum-nrf/memory.x`: FLASH ends at 0xD7000, TIME is 0xD7000-0xD9000,
+# BOOT is 0xD9000-0xDA000, STORE runs 0xDA000-0xEA000). An image that grows
+# into any of them would erase the board's message store, its restart count or
+# its learned time on the next UF2 flash.
 #
-# The GAP this gate prints is therefore measured to the BOOT page, not to the
-# store: the boot page is what the image runs into first, and a gap measured
-# past it would overstate the headroom by exactly one page.
+# The GAP this gate prints is therefore measured to the TIME ring, not to the
+# store: the ring is what the image runs into first, and a gap measured past it
+# would overstate the headroom by its pages.
 #
 # WHAT THE LINKER ALREADY REFUSES, without this gate:
 #   * an image whose sections do not fit FLASH - "section `.text' will not fit
@@ -114,7 +115,7 @@ symbol() { # symbol <elf> <name> -> prints its value, decimal
     value="$("$NM" "$2" | awk -v s="$3" '$3 == s { print $1 }' | head -1)"
     if [ -z "$value" ]; then
         echo "[store-gap] $1: no symbol $3 in the linked ELF." >&2
-        echo "[store-gap] memory.x must define it; see its STORE and BOOT regions." >&2
+        echo "[store-gap] memory.x must define it; see its STORE, BOOT and TIME regions." >&2
         return 1
     fi
     echo $((0x$value))
@@ -126,7 +127,7 @@ build() {
 }
 
 check() {
-    local bin="$1" elf="$OUT/$1" end base store_end boot gap
+    local bin="$1" elf="$OUT/$1" end base store_end boot time time_end gap
     [ -f "$elf" ] || {
         echo "[store-gap] missing ELF: $elf" >&2
         exit 1
@@ -136,17 +137,25 @@ check() {
     base="$(symbol "$bin" "$elf" __srecord_store)"
     store_end="$(symbol "$bin" "$elf" __erecord_store)"
     boot="$(symbol "$bin" "$elf" __sboot_record)"
-    gap=$((boot - end))
+    time="$(symbol "$bin" "$elf" __stime_floor)"
+    time_end="$(symbol "$bin" "$elf" __etime_floor)"
+    gap=$((time - end))
 
-    printf '[store-gap] %-8s image ends %#x, boot record %#x, store %#x..%#x (%d pages), gap %d B (%d KiB)\n' \
-        "$bin" "$end" "$boot" "$base" "$store_end" "$(((store_end - base) / 4096))" \
+    printf '[store-gap] %-8s image ends %#x, time ring %#x..%#x, boot record %#x, store %#x..%#x (%d pages), gap %d B (%d KiB)\n' \
+        "$bin" "$end" "$time" "$time_end" "$boot" "$base" "$store_end" "$(((store_end - base) / 4096))" \
         "$gap" "$((gap / 1024))"
 
-    if [ "$end" -gt "$boot" ]; then
-        echo "[store-gap] FAIL $bin: the image reaches $((end - boot)) B into the boot-record page."
-        echo "[store-gap] That page and the store above it are inside the UF2's writable window,"
+    if [ "$end" -gt "$time" ]; then
+        echo "[store-gap] FAIL $bin: the image reaches $((end - time)) B into the time ring."
+        echo "[store-gap] The ring, the boot page and the store are inside the UF2's writable window,"
         echo "[store-gap] so the next flash would erase them. Move the regions up (impossible"
         echo "[store-gap] past $(printf '%#x' "$USER_FLASH_END")), shrink them, or shrink the image — memory.x."
+        return 1
+    fi
+    if [ "$time_end" -ne "$boot" ]; then
+        echo "[store-gap] FAIL $bin: the time ring ends at $(printf '%#x' "$time_end") and the boot page"
+        echo "[store-gap] starts at $(printf '%#x' "$boot") — the two must be adjacent,"
+        echo "[store-gap] or the gap printed above is not the headroom the image actually has."
         return 1
     fi
     if [ $((boot + 4096)) -ne "$base" ]; then

@@ -96,7 +96,7 @@ package. Its application vector table reads SP `0x20040000` and reset
 vector `0x00051819`, so the image is linked for a flash base around
 `0x51000`. This board's factory bootloader with S140 7.3.0 runs
 applications at `0x27000`, which is the base our own image is linked for
-as well (`leviculum-nrf/memory.x:16`). `rnodeconf` pushes the app-only
+as well (`leviculum-nrf/memory.x:17`). `rnodeconf` pushes the app-only
 package through the factory bootloader (`adafruit-nrfutil dfu serial
 --package … -t 1200`), so it lands at `0x27000`; the bootloader jumps
 there, reads a reset vector pointing into unprogrammed flash, and
@@ -183,8 +183,9 @@ the ordinary mass-storage path, without touching the bootloader.
 `leviculum-nrf/memory.x` used to contradict this, computing safe
 application space as `0xEC000 - 0x27000` (788 KiB) — 8 KiB the
 bootloader would have refused to write. It now links the application
-against the bootloader's own window minus the record store's region and
-the boot-record page, `0xD9000 - 0x27000` = `0xB2000` (712 KiB); the
+against the bootloader's own window minus the record store's region,
+the boot-record page and the calendar checkpoint ring,
+`0xD7000 - 0x27000` = `0xB0000` (704 KiB); the
 image is ~660 KiB, so the change costs nothing today and the gate prints
 the remaining gap on every push (`scripts/check-nrf-store-gap.sh`).
 
@@ -210,15 +211,21 @@ the store, which `memory.x`'s `ASSERT`s make a link error and the gate
 above reports as a number.
 
 The boot record (#380, `0xD9000`, one page) is the same case one page
-further down, and it is where the image now stops: it counts the boots a
+further down: it counts the boots a
 field board made while nobody was watching (`boot_count.rs`), so it has
 to outlive both a power loss and a firmware update. It is protected by
 the same argument as the store and by no other — our `.uf2` carries no
-block for it — and it is deliberately the thing directly above the
-image, so the linker's "will not fit in region `FLASH`" is the first
-thing an over-grown image hits. A foreign image, or a tool that writes
+block for it. A foreign image, or a tool that writes
 blocks up here, erases the page; the record's magic is what makes the
 bytes it leaves read as foreign rather than as a count.
+
+The calendar checkpoint ring (#166 item 4, `0xD7000`, two pages) is the
+same case two pages further down again, and it is where the image now
+stops: a clockless board appends the time it learned from traffic there
+at most hourly and restores it at boot (`time_floor.rs`), so it too has
+to outlive a power loss and a firmware update, on the same argument. The
+linker's "will not fit in region `FLASH`" is the first thing an
+over-grown image hits.
 
 Family IDs seen in practice:
 
@@ -239,7 +246,7 @@ reset button (commit `43d25830`).
 ## The SoftDevice
 
 Our firmware links against S140 v7.x and places its application at
-`0x27000` (`FLASH` `ORIGIN`, `leviculum-nrf/memory.x:84`). A board
+`0x27000` (`FLASH` `ORIGIN`, `leviculum-nrf/memory.x:86`). A board
 carrying S140 6.1.1
 puts the boundary at `0x26000` instead, so the version is not cosmetic.
 
@@ -266,7 +273,7 @@ with what each board's `INFO_UF2.TXT` claims. A tool that cross-checks
 the two is immune to a bootloader too old to report the line at all.
 
 **The image is not part of this repo's source.** The crate dependency
-(`leviculum-nrf/Cargo.toml:253`) supplies Rust bindings, not the blob.
+(`leviculum-nrf/Cargo.toml:259`) supplies Rust bindings, not the blob.
 The authoritative copy is Nordic's own distribution, downloaded
 2026-08-10 to `~/coding/s140_nrf52_730/`, containing
 `s140_nrf52_7.3.0_softdevice.hex` (md5

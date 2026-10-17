@@ -1,0 +1,9 @@
+[package]
+name = "leviculum-time-floor"
+version = "0.1.0"
+edition = "2021"
+authors = ["Lew Palm"]
+license = "AGPL-3.0-or-later"
+description = "The learned calendar's flash checkpoint: an append-only record ring over the TIME pages, the scan that finds the newest valid floor, and the hourly write gate. Host-testable"
+
+[dependencies]

@@ -253,6 +253,16 @@ async fn main(spawner: Spawner) {
     // compile-time twin below fails the build before it can fail a
     // board.
     leviculum_nrf::heap_census::log_budget_and_assert(core::mem::size_of_val(&*node));
+    // Codeberg #166 item 4: the calendar this board learned before it lost
+    // power comes back as a floor at the birth rank, here, before any
+    // interface exists to deliver an announce, so the first one is judged
+    // against it. Printed beside `[TIME_SOURCE]`, which says
+    // `restored-floor` when the seam took it.
+    let mut time_checkpoint =
+        leviculum_nrf::time_floor::Checkpoint::restore_at_boot(|v| node.restore_emission_floor(v));
+    if leviculum_nrf::set_time_source(node.time_source()) {
+        log_critical!("[TIME_SOURCE] source={}", leviculum_nrf::time_source_str());
+    }
     const _: () = assert!(
         leviculum_nrf::heap_census::budget_total(core::mem::size_of::<
             leviculum_core::node::NodeCore<
@@ -481,6 +491,8 @@ async fn main(spawner: Spawner) {
         shared_flash,
         rak4631::CONFIG.radio_config_flash_page,
     );
+    // The calendar checkpoint ring (#166 item 4), on the same handle.
+    leviculum_nrf::time_floor::spawn_store_task(&spawner, shared_flash);
     // Telemetry-target persistence (#236): its own page and its own task,
     // borrowing the same one-and-only SoftDevice flash handle.
     leviculum_nrf::telemetry::spawn_store_task(
@@ -856,6 +868,9 @@ async fn main(spawner: Spawner) {
         if leviculum_nrf::set_time_source(node.time_source()) {
             log_critical!("[TIME_SOURCE] source={}", leviculum_nrf::time_source_str());
         }
+        // Write the calendar back at most hourly once a live source vouched
+        // for it (#166 item 4); the store task does the flash work.
+        time_checkpoint.poll(node.anchor_rank(), node.emission_secs(), node.now_ms());
         match wake {
             Either4::Third(Either4::First(unix_secs)) => {
                 // A host that knows wall time (#238 TYPE_WALL_TIME). The

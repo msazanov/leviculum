@@ -37,7 +37,7 @@ The tree already knows the OTA mode exists, from a direction that had
 nothing to do with flashing: `memory.x` reasons about it because in OTA
 mode the bootloader enables the SoftDevice itself, whose RAM then reaches
 up over the retained band (the `RETAINED` comment,
-`leviculum-nrf/memory.x:142`, and [Recovery](../firmware/recovery.md),
+`leviculum-nrf/memory.x:159`, and [Recovery](../firmware/recovery.md),
 step 2).
 
 **Open, and it must be closed by reading rather than remembering: the
