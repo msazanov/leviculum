@@ -640,11 +640,17 @@ pub struct SendRetry {
     /// Carried so the answer is not thrown away at the boundary: a
     /// driver that re-sends this packet can address the same one peer
     /// the first attempt was addressed to. **No driver reads it yet** —
-    /// lnsd's retry queue is a `VecDeque<Vec<u8>>` per interface, so a
-    /// `BufferFull` retry on a multi-peer interface still floods, which
+    /// lnsd's retry queue keeps the bytes and the [`Self::ph`] tag but not
+    /// this hint, so a `BufferFull` retry on a multi-peer interface still floods, which
     /// is the pre-#376 behaviour and safe. Threading it through that
     /// queue is a driver change, not a core one.
     pub peer: Option<[u8; TRUNCATED_HASHBYTES]>,
+    /// The journey correlator the failed attempt was tagged with
+    /// ([`crate::traits::Interface::tag_next_frame`]), or `None` when the
+    /// journey target is off. A driver that re-sends this packet tags the
+    /// re-send with it, so the interface names the retried frame by the
+    /// same `ph` its `PKT_TX` printed.
+    pub ph: Option<crate::traits::FrameTag>,
 }
 
 /// Result of dispatching actions to interfaces.
@@ -783,6 +789,7 @@ pub fn dispatch_actions<I: crate::traits::AsInterface>(
                                 iface_idx: iface.0,
                                 data: send_data,
                                 peer,
+                                ph: tag,
                             });
                         }
                     }
@@ -5729,7 +5736,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// recall source is the cached announce for the destination
     /// (`get_announce_cache`, keyed by destination hash, holding the raw announce
     /// whose payload starts with the 64-byte public key), the same source the
-    /// link-request path uses at transport.rs:4124. A destination with no cached
+    /// link-request path uses at transport.rs:4131. A destination with no cached
     /// announce cannot be associated with an identity, so it is left untouched,
     /// exactly as Python keeps a path whose `Identity.recall` returns `None`.
     ///
@@ -6530,7 +6537,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             path_response = is_path_response,
         );
 
-        // Gate on the already-incremented hops (transport.rs:1685 ran in the
+        // Gate on the already-incremented hops (transport.rs:1692 ran in the
         // inbound path before handle_announce, and local-client/shared-instance
         // accounting has already been applied there). Announces whose hop count
         // exceeds max_hops are neither stored in the path table nor scheduled
@@ -11634,7 +11641,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // Emit the STORED path-table count, matching Python
                 // Transport.py:2956 (`packet.hops = path_table[dst][IDX_PT_HOPS]`).
                 // The cached raw's hop byte is the PRE-increment wire value
-                // (`stored - 1`): the receipt increment (`transport.rs:2629`) only
+                // (`stored - 1`): the receipt increment (`transport.rs:2636`) only
                 // touches the in-memory packet, never the raw buffer stashed by
                 // `set_announce_cache`. Using it here would put `stored - 1` on the
                 // wire and every peer that learns via this response would be one hop
@@ -17859,7 +17866,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // `random_blobs` (transport.rs:7276), a deliberate anti-replay
+            // `random_blobs` (transport.rs:7283), a deliberate anti-replay
             // extension — so the blob count is not a rejection indicator.)
             transport
                 .clock
@@ -24153,7 +24160,7 @@ mod tests {
         // (PATHFINDER_MAX_HOPS=128) must NOT be stored in the path table nor
         // scheduled for rebroadcast, mirroring Python RNS Transport.py:1750
         // (`local_and_hops_condition = packet.hops < PATHFINDER_M+1`, M=128).
-        // The inbound path increments hops once (transport.rs:1685) before
+        // The inbound path increments hops once (transport.rs:1692) before
         // handle_announce, so `packet.hops` inside the handler is already the
         // post-increment value — same accounting as the RNS gate.
         #[test]

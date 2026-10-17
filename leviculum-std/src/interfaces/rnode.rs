@@ -10274,6 +10274,116 @@ mod tests {
         assert_eq!(PhsField::of((0..9).map(tag)).to_string(), "elided");
     }
 
+    /// 804: a frame its interface refused once with `BufferFull` and the
+    /// driver retried is named on `LORA_TX` by the `ph` its `PKT_TX` printed.
+    /// The refused attempt's tag rides the driver's retry queue beside the
+    /// bytes and tags the re-send, so a retried frame no longer prints
+    /// `ph=-`. Driven from a real core send through the driver's own retry
+    /// functions into the RNode io task.
+    #[tokio::test(start_paused = true)]
+    async fn test_a_retried_frame_is_named_on_lora_tx_by_its_pkt_tx_ph() {
+        use crate::driver::{drain_retry_queues, queue_send_retries};
+        use crate::interfaces::{InterfaceRegistry, ReadySignal};
+        use leviculum_core::transport::{dispatch_actions, Transport, TransportConfig};
+        use std::collections::BTreeMap;
+
+        let (logs, guard) = capture_logs();
+        let mut h = spawn_duty_lock_harness(false, 0);
+
+        // A one-slot outgoing channel, already full: the first attempt is
+        // refused with `BufferFull`.
+        let (_inc_tx, inc_rx) = mpsc::channel(1);
+        let (out_tx, mut out_rx) = mpsc::channel(1);
+        out_tx
+            .try_send(OutgoingPacket {
+                ph: None,
+                peer: None,
+                data: b"filler".to_vec().into(),
+                high_priority: false,
+            })
+            .expect("one free slot");
+        let mut registry = InterfaceRegistry::new();
+        registry.register(InterfaceHandle {
+            next_tag: None,
+            info: InterfaceInfo {
+                id: InterfaceId(0),
+                name: "test_rnode_duty".into(),
+                hw_mtu: None,
+                is_local_client: false,
+                bitrate: None,
+                announce_cap_bitrate: None,
+                tx_jitter_max_ms: None,
+                tx_hold_spread_max_ms: None,
+                acquisition: None,
+                frame_turnaround_ms: None,
+                ifac: None,
+                mode: leviculum_core::traits::InterfaceMode::default(),
+                kind: leviculum_core::traits::InterfaceKind::Unknown,
+                ingress_control: None,
+            },
+            incoming: inc_rx,
+            outgoing: out_tx,
+            counters: Arc::new(InterfaceCounters::new()),
+            credit: None,
+            ready: ReadySignal::ready_immediate(),
+            teardown: None,
+        });
+
+        let mut transport = Transport::new(
+            TransportConfig::default(),
+            crate::clock::SystemClock::new(),
+            leviculum_core::MemoryStorage::with_defaults(),
+            leviculum_core::Identity::generate(&mut rand_core::OsRng),
+        );
+        let data: Vec<u8> = (0u8..40).map(|b| b | 0x40).collect();
+        transport.send_on_interface(0, &data).expect("queued");
+        let result = dispatch_actions(
+            registry.handles_mut_slice(),
+            transport.drain_actions(),
+            &BTreeMap::new(),
+        );
+        assert_eq!(
+            result.retries.len(),
+            1,
+            "the full channel refused the frame"
+        );
+
+        let mut queues = BTreeMap::new();
+        queue_send_retries(
+            result.retries,
+            &mut queues,
+            &mut std::collections::BTreeSet::new(),
+            &mut BTreeMap::new(),
+        );
+        out_rx.try_recv().expect("the filler leaves, a slot opens");
+        drain_retry_queues(&mut queues, &mut registry, 0);
+        let retried = out_rx.try_recv().expect("the retry drained");
+        assert_eq!(&retried.data[..], &data[..]);
+        h.outgoing_tx.send(retried).await.expect("io task alive");
+        h.expect_frame(&data, "the retried frame airs").await;
+
+        drop(guard);
+        let logs = String::from_utf8(logs.lock().unwrap().clone()).expect("utf8 logs");
+        let pkt_tx_ph = logs
+            .lines()
+            .find(|l| l.contains("PKT_TX"))
+            .and_then(|l| l.split_whitespace().find_map(|t| t.strip_prefix("ph=")))
+            .unwrap_or_else(|| panic!("no PKT_TX ph\n--- logs ---\n{logs}"));
+        let tx: Vec<&str> = logs
+            .lines()
+            .filter(|l| l.contains("LORA_TX iface="))
+            .collect();
+        assert_eq!(tx.len(), 1, "one frame aired\n--- logs ---\n{logs}");
+        assert!(
+            tx[0].contains(&format!(
+                "LORA_TX iface=test_rnode_duty len={} ph={pkt_tx_ph}",
+                data.len()
+            )),
+            "the retried frame is named by its PKT_TX ph {pkt_tx_ph}: {}",
+            tx[0]
+        );
+    }
+
     /// Behaviour 7b, the same shape through a second return path: the
     /// firmware announces a reset (`CMD_RESET` 0xF8) on a port that is
     /// otherwise fine. The io task returns just as abruptly, so the held

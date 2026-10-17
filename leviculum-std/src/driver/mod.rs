@@ -140,6 +140,29 @@ const RETRY_QUEUE_CAP: usize = 1024;
 /// 12.5 % of `RETRY_QUEUE_CAP` so the warn fires well before drops do.
 const RETRY_QUEUE_DEPTH_WARN: usize = 128;
 
+/// One frame an interface refused with `BufferFull`, waiting in its retry
+/// queue: the bytes and the journey correlator the refused attempt was
+/// tagged with ([`leviculum_core::transport::SendRetry::ph`]). The drain
+/// tags the re-send with it, so the interface's transmit line names a
+/// retried frame by the same `ph` its `PKT_TX` printed. Opaque here as
+/// everywhere: nothing in the queue reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RetryFrame {
+    pub(crate) data: Vec<u8>,
+    pub(crate) ph: Option<leviculum_core::traits::FrameTag>,
+}
+
+#[cfg(test)]
+impl RetryFrame {
+    /// A frame the core tagged with nothing (the journey target off).
+    fn untagged(data: Vec<u8>) -> Self {
+        Self { data, ph: None }
+    }
+}
+
+/// One interface's `BufferFull` retry queue, oldest first.
+pub(crate) type RetryQueue = VecDeque<RetryFrame>;
+
 /// Total wall-clock budget for the event loop's graceful drain on shutdown
 /// (Codeberg #77). After draining `action_dispatch_rx` and dispatching the
 /// queued outputs (e.g. a responder `close_link`), the loop waits up to this
@@ -4462,7 +4485,7 @@ async fn run_event_loop(
     let mut flush_in_flight: Option<
         tokio::task::JoinHandle<(crate::storage::FlushOutcome, FlushHolds)>,
     > = None;
-    let mut retry_queues: BTreeMap<usize, VecDeque<Vec<u8>>> = BTreeMap::new();
+    let mut retry_queues: BTreeMap<usize, RetryQueue> = BTreeMap::new();
     // Live peer count per multi-peer interface (Codeberg #365), counted
     // from the same ordered Up/Lost channel the path cull and the
     // peer-up decision ride — the interface's LinkTable reports each
@@ -5725,7 +5748,7 @@ fn dispatch_output(
     registry: &mut InterfaceRegistry,
     mut event_sink: Option<&mut EventSink>,
     inner: &Arc<Mutex<StdNodeCore>>,
-    retry_queues: &mut BTreeMap<usize, VecDeque<Vec<u8>>>,
+    retry_queues: &mut BTreeMap<usize, RetryQueue>,
     retry_queue_warned: &mut std::collections::BTreeSet<usize>,
     retry_queue_max_depth: &mut BTreeMap<usize, usize>,
     ifac_configs: &BTreeMap<usize, leviculum_core::ifac::IfacConfig>,
@@ -5794,25 +5817,12 @@ fn dispatch_output(
         completions.observe(ev);
     }
 
-    // Queue SendPacket retries (with cap enforcement)
-    for retry in result.retries {
-        let iface_idx = retry.iface_idx;
-        let queue = retry_queues.entry(iface_idx).or_default();
-        if queue.len() >= RETRY_QUEUE_CAP {
-            queue.pop_front();
-            tracing::warn!(
-                "Retry queue full for iface {}, dropping oldest packet",
-                iface_idx,
-            );
-        }
-        push_retry_with_warn(
-            queue,
-            iface_idx,
-            retry.data,
-            retry_queue_warned,
-            retry_queue_max_depth,
-        );
-    }
+    queue_send_retries(
+        result.retries,
+        retry_queues,
+        retry_queue_warned,
+        retry_queue_max_depth,
+    );
 
     // Remove empty queues to avoid accumulating stale entries.
     // Transport reads per-interface readiness from the
@@ -6125,28 +6135,60 @@ fn record_discovery_announce(
 /// its peer-count mirror on the way down.
 fn forget_interface_retry_state(
     iface_idx: usize,
-    retry_queues: &mut BTreeMap<usize, VecDeque<Vec<u8>>>,
+    retry_queues: &mut BTreeMap<usize, RetryQueue>,
     retry_queue_warned: &mut std::collections::BTreeSet<usize>,
     retry_queue_max_depth: &mut BTreeMap<usize, usize>,
-) -> Option<VecDeque<Vec<u8>>> {
+) -> Option<RetryQueue> {
     retry_queue_warned.remove(&iface_idx);
     retry_queue_max_depth.remove(&iface_idx);
     retry_queues.remove(&iface_idx)
 }
 
-/// Append `data` to the per-interface retry queue. Emit a single
+/// Queue the SendPacket retries a dispatch handed back, each on its
+/// interface's retry queue with the tag its refused attempt carried, and
+/// enforce [`RETRY_QUEUE_CAP`] by dropping the oldest.
+pub(crate) fn queue_send_retries(
+    retries: Vec<leviculum_core::transport::SendRetry>,
+    retry_queues: &mut BTreeMap<usize, RetryQueue>,
+    retry_queue_warned: &mut std::collections::BTreeSet<usize>,
+    retry_queue_max_depth: &mut BTreeMap<usize, usize>,
+) {
+    for retry in retries {
+        let iface_idx = retry.iface_idx;
+        let queue = retry_queues.entry(iface_idx).or_default();
+        if queue.len() >= RETRY_QUEUE_CAP {
+            queue.pop_front();
+            tracing::warn!(
+                "Retry queue full for iface {}, dropping oldest packet",
+                iface_idx,
+            );
+        }
+        push_retry_with_warn(
+            queue,
+            iface_idx,
+            RetryFrame {
+                data: retry.data,
+                ph: retry.ph,
+            },
+            retry_queue_warned,
+            retry_queue_max_depth,
+        );
+    }
+}
+
+/// Append `frame` to the per-interface retry queue. Emit a single
 /// tracing::warn when the queue depth first crosses
 /// `RETRY_QUEUE_DEPTH_WARN`; update the monotonic max-depth high-
 /// watermark and log at info! whenever it increases.
 fn push_retry_with_warn(
-    queue: &mut VecDeque<Vec<u8>>,
+    queue: &mut RetryQueue,
     iface_idx: usize,
-    data: Vec<u8>,
+    frame: RetryFrame,
     warned: &mut std::collections::BTreeSet<usize>,
     max_depth: &mut BTreeMap<usize, usize>,
 ) {
     let len_before = queue.len();
-    queue.push_back(data);
+    queue.push_back(frame);
     if len_before < RETRY_QUEUE_DEPTH_WARN
         && queue.len() == RETRY_QUEUE_DEPTH_WARN
         && !warned.contains(&iface_idx)
@@ -6180,7 +6222,7 @@ fn push_retry_with_warn(
 /// with retry-queued packets still drain at the right moment, no
 /// polling, no fixed 500 ms fallback.
 fn compute_retry_wake_deadline_ms(
-    retry_queues: &BTreeMap<usize, VecDeque<Vec<u8>>>,
+    retry_queues: &BTreeMap<usize, RetryQueue>,
     registry: &InterfaceRegistry,
     now_ms: u64,
 ) -> Option<u64> {
@@ -6189,7 +6231,7 @@ fn compute_retry_wake_deadline_ms(
     for (&iface_idx, queue) in retry_queues.iter() {
         let Some(front) = queue.front() else { continue };
         if let Some(handle) = registry.handles().iter().find(|h| h.id().0 == iface_idx) {
-            let slot = handle.next_slot_ms(front.len(), now_ms);
+            let slot = handle.next_slot_ms(front.data.len(), now_ms);
             // Only count slots strictly in the future; ready slots don't
             // need waking, they'd drain at the next normal dispatch tick.
             if slot > now_ms {
@@ -6214,29 +6256,31 @@ fn compute_retry_wake_deadline_ms(
 /// backchannel cache is conservative for smaller packets, and the
 /// drain's finer granularity recovers that headroom. Extracted so it
 /// is unit-testable without spinning up the full driver.
-fn drain_retry_queues(
-    retry_queues: &mut BTreeMap<usize, VecDeque<Vec<u8>>>,
+pub(crate) fn drain_retry_queues(
+    retry_queues: &mut BTreeMap<usize, RetryQueue>,
     registry: &mut InterfaceRegistry,
     now_ms: u64,
 ) {
     use leviculum_core::traits::Interface;
     for (iface_idx, queue) in retry_queues.iter_mut() {
         let iface_id = InterfaceId(*iface_idx);
-        while let Some(data) = queue.front() {
+        while let Some(frame) = queue.front() {
             if let Some(handle) = registry
                 .handles_mut_slice()
                 .iter_mut()
                 .find(|h| h.id() == iface_id)
             {
-                if handle.next_slot_ms(data.len(), now_ms) > now_ms {
+                if handle.next_slot_ms(frame.data.len(), now_ms) > now_ms {
                     // Interface not yet ready for THIS packet size, leave
                     // it at the front, try next dispatch tick (driver-local
                     // wake in E3 will fire at the computed slot).
                     break;
                 }
                 // Retry queue only holds SendPacket data (directed traffic),
-                // which is always high priority.
-                match handle.try_send_prioritized(data, true) {
+                // which is always high priority. Tagged again as the first
+                // attempt was, so the retried frame is named by its `ph`.
+                handle.tag_next_frame(frame.ph);
+                match handle.try_send_prioritized(&frame.data, true) {
                     Ok(()) => {
                         queue.pop_front();
                     }
@@ -7612,7 +7656,7 @@ mod tests {
         };
 
         let mut registry = InterfaceRegistry::new();
-        let mut retry_queues: BTreeMap<usize, VecDeque<Vec<u8>>> = BTreeMap::new();
+        let mut retry_queues: BTreeMap<usize, RetryQueue> = BTreeMap::new();
         let mut retry_queue_warned: std::collections::BTreeSet<usize> =
             std::collections::BTreeSet::new();
         let mut retry_queue_max_depth: BTreeMap<usize, usize> = BTreeMap::new();
@@ -7702,7 +7746,7 @@ mod tests {
             teardown: None,
         });
 
-        let mut retry_queues: BTreeMap<usize, VecDeque<Vec<u8>>> = BTreeMap::new();
+        let mut retry_queues: BTreeMap<usize, RetryQueue> = BTreeMap::new();
         let mut retry_queue_warned: std::collections::BTreeSet<usize> =
             std::collections::BTreeSet::new();
         let mut retry_queue_max_depth: BTreeMap<usize, usize> = BTreeMap::new();
@@ -8364,25 +8408,43 @@ mod tests {
     /// Subsequent pushes beyond the threshold do NOT re-insert.
     #[test]
     fn push_retry_warns_once_when_crossing_warn_depth() {
-        let mut q: VecDeque<Vec<u8>> = VecDeque::new();
+        let mut q: RetryQueue = VecDeque::new();
         let mut warned: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
         let mut max_depth: BTreeMap<usize, usize> = BTreeMap::new();
         // Fill up to one below the warn threshold → never warns.
         for _ in 0..(RETRY_QUEUE_DEPTH_WARN - 1) {
-            push_retry_with_warn(&mut q, 1, vec![0u8; 8], &mut warned, &mut max_depth);
+            push_retry_with_warn(
+                &mut q,
+                1,
+                RetryFrame::untagged(vec![0u8; 8]),
+                &mut warned,
+                &mut max_depth,
+            );
         }
         assert!(
             !warned.contains(&1),
             "below-threshold depth must not trigger warn"
         );
         // Push one more → crosses threshold.
-        push_retry_with_warn(&mut q, 1, vec![0u8; 8], &mut warned, &mut max_depth);
+        push_retry_with_warn(
+            &mut q,
+            1,
+            RetryFrame::untagged(vec![0u8; 8]),
+            &mut warned,
+            &mut max_depth,
+        );
         assert!(
             warned.contains(&1),
             "reaching RETRY_QUEUE_DEPTH_WARN must trigger warn"
         );
         // Push past threshold → already warned, set membership unchanged (idempotent).
-        push_retry_with_warn(&mut q, 1, vec![0u8; 8], &mut warned, &mut max_depth);
+        push_retry_with_warn(
+            &mut q,
+            1,
+            RetryFrame::untagged(vec![0u8; 8]),
+            &mut warned,
+            &mut max_depth,
+        );
         assert!(warned.contains(&1));
         assert_eq!(warned.len(), 1, "no duplicate entries");
     }
@@ -8392,11 +8454,17 @@ mod tests {
     /// to re-emit.
     #[test]
     fn push_retry_rewarns_after_queue_drains_below_warn_depth() {
-        let mut q: VecDeque<Vec<u8>> = VecDeque::new();
+        let mut q: RetryQueue = VecDeque::new();
         let mut warned: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
         let mut max_depth: BTreeMap<usize, usize> = BTreeMap::new();
         for _ in 0..RETRY_QUEUE_DEPTH_WARN {
-            push_retry_with_warn(&mut q, 2, vec![0u8; 8], &mut warned, &mut max_depth);
+            push_retry_with_warn(
+                &mut q,
+                2,
+                RetryFrame::untagged(vec![0u8; 8]),
+                &mut warned,
+                &mut max_depth,
+            );
         }
         assert!(warned.contains(&2));
         // Drain below the warn threshold (simulate: clear queue,
@@ -8411,7 +8479,13 @@ mod tests {
         assert!(!warned.contains(&2));
         // Rebuild to threshold → warn re-emitted.
         for _ in 0..RETRY_QUEUE_DEPTH_WARN {
-            push_retry_with_warn(&mut q, 2, vec![0u8; 8], &mut warned, &mut max_depth);
+            push_retry_with_warn(
+                &mut q,
+                2,
+                RetryFrame::untagged(vec![0u8; 8]),
+                &mut warned,
+                &mut max_depth,
+            );
         }
         assert!(warned.contains(&2));
     }
@@ -8420,21 +8494,39 @@ mod tests {
     /// interface index.
     #[test]
     fn push_retry_tracks_monotonic_max_depth() {
-        let mut q: VecDeque<Vec<u8>> = VecDeque::new();
+        let mut q: RetryQueue = VecDeque::new();
         let mut warned: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
         let mut max_depth: BTreeMap<usize, usize> = BTreeMap::new();
         for _ in 0..5 {
-            push_retry_with_warn(&mut q, 3, vec![0u8; 4], &mut warned, &mut max_depth);
+            push_retry_with_warn(
+                &mut q,
+                3,
+                RetryFrame::untagged(vec![0u8; 4]),
+                &mut warned,
+                &mut max_depth,
+            );
         }
         assert_eq!(max_depth.get(&3), Some(&5));
         // Drain the queue manually; max_depth must NOT regress.
         q.clear();
         // A single push after drain puts len=1, watermark stays at 5.
-        push_retry_with_warn(&mut q, 3, vec![0u8; 4], &mut warned, &mut max_depth);
+        push_retry_with_warn(
+            &mut q,
+            3,
+            RetryFrame::untagged(vec![0u8; 4]),
+            &mut warned,
+            &mut max_depth,
+        );
         assert_eq!(max_depth.get(&3), Some(&5), "watermark must be monotonic");
         // Re-fill past the old watermark → grows.
         for _ in 0..10 {
-            push_retry_with_warn(&mut q, 3, vec![0u8; 4], &mut warned, &mut max_depth);
+            push_retry_with_warn(
+                &mut q,
+                3,
+                RetryFrame::untagged(vec![0u8; 4]),
+                &mut warned,
+                &mut max_depth,
+            );
         }
         assert_eq!(max_depth.get(&3), Some(&11));
     }
@@ -8444,7 +8536,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn compute_retry_wake_none_when_queues_empty() {
         let registry = InterfaceRegistry::new();
-        let retry_queues: BTreeMap<usize, VecDeque<Vec<u8>>> = BTreeMap::new();
+        let retry_queues: BTreeMap<usize, RetryQueue> = BTreeMap::new();
         assert_eq!(
             compute_retry_wake_deadline_ms(&retry_queues, &registry, 1_000),
             None
@@ -8491,7 +8583,7 @@ mod tests {
         retry_queues
             .entry(0usize)
             .or_insert_with(VecDeque::new)
-            .push_back(vec![1, 2, 3]);
+            .push_back(RetryFrame::untagged(vec![1, 2, 3]));
         assert_eq!(
             compute_retry_wake_deadline_ms(&retry_queues, &registry, 1_000),
             None,
@@ -8552,11 +8644,11 @@ mod tests {
         retry_queues
             .entry(0usize)
             .or_insert_with(VecDeque::new)
-            .push_back(vec![0u8; 500]);
+            .push_back(RetryFrame::untagged(vec![0u8; 500]));
         retry_queues
             .entry(1usize)
             .or_insert_with(VecDeque::new)
-            .push_back(vec![0u8; 500]);
+            .push_back(RetryFrame::untagged(vec![0u8; 500]));
 
         let iface0_slot = {
             let handles = registry.handles();
@@ -8649,15 +8741,15 @@ mod tests {
         });
 
         // Queue one packet on each interface.
-        let mut retry_queues: BTreeMap<usize, VecDeque<Vec<u8>>> = BTreeMap::new();
+        let mut retry_queues: BTreeMap<usize, RetryQueue> = BTreeMap::new();
         retry_queues
             .entry(1)
             .or_default()
-            .push_back(vec![0xAA; 100]);
+            .push_back(RetryFrame::untagged(vec![0xAA; 100]));
         retry_queues
             .entry(2)
             .or_default()
-            .push_back(vec![0xBB; 100]);
+            .push_back(RetryFrame::untagged(vec![0xBB; 100]));
 
         drain_retry_queues(&mut retry_queues, &mut registry, 0);
 
@@ -8705,11 +8797,11 @@ mod tests {
             ready: crate::interfaces::ReadySignal::ready_immediate(),
             teardown: None,
         });
-        let mut retry_queues: BTreeMap<usize, VecDeque<Vec<u8>>> = BTreeMap::new();
+        let mut retry_queues: BTreeMap<usize, RetryQueue> = BTreeMap::new();
         let queue = retry_queues.entry(0).or_default();
-        queue.push_back(vec![1, 2, 3]);
-        queue.push_back(vec![4, 5, 6]);
-        queue.push_back(vec![7, 8, 9]);
+        queue.push_back(RetryFrame::untagged(vec![1, 2, 3]));
+        queue.push_back(RetryFrame::untagged(vec![4, 5, 6]));
+        queue.push_back(RetryFrame::untagged(vec![7, 8, 9]));
 
         drain_retry_queues(&mut retry_queues, &mut registry, 0);
 
@@ -10993,7 +11085,7 @@ mod tests {
 mod interface_retry_state_teardown_tests {
     use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-    use super::forget_interface_retry_state;
+    use super::{forget_interface_retry_state, RetryFrame, RetryQueue};
 
     /// THE pin: after teardown, nothing keyed by the departed id is
     /// left in any of the three maps, and the surviving interface is
@@ -11003,9 +11095,15 @@ mod interface_retry_state_teardown_tests {
         let departing = 7usize;
         let staying = 8usize;
 
-        let mut queues: BTreeMap<usize, VecDeque<Vec<u8>>> = BTreeMap::new();
-        queues.insert(departing, VecDeque::from(vec![vec![0xAAu8; 4]]));
-        queues.insert(staying, VecDeque::from(vec![vec![0xBBu8; 4]]));
+        let mut queues: BTreeMap<usize, RetryQueue> = BTreeMap::new();
+        queues.insert(
+            departing,
+            VecDeque::from(vec![RetryFrame::untagged(vec![0xAAu8; 4])]),
+        );
+        queues.insert(
+            staying,
+            VecDeque::from(vec![RetryFrame::untagged(vec![0xBBu8; 4])]),
+        );
 
         let mut warned: BTreeSet<usize> = BTreeSet::new();
         warned.insert(departing);
@@ -11047,7 +11145,7 @@ mod interface_retry_state_teardown_tests {
     /// it ever warned; teardown must not depend on the queue existing.
     #[test]
     fn teardown_is_total_even_with_no_queue_left() {
-        let mut queues: BTreeMap<usize, VecDeque<Vec<u8>>> = BTreeMap::new();
+        let mut queues: BTreeMap<usize, RetryQueue> = BTreeMap::new();
         let mut warned: BTreeSet<usize> = BTreeSet::new();
         let mut max_depth: BTreeMap<usize, usize> = BTreeMap::new();
         max_depth.insert(5, 11);
