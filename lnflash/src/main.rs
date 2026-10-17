@@ -44,9 +44,13 @@ struct Cli {
     #[arg(long, value_name = "PATH")]
     bundle: Option<PathBuf>,
 
-    /// Only flash this board, and refuse if what is attached is another one.
+    /// The board models present, repeatable (--board t114 --board rak4631).
+    /// A board whose model is not named is skipped and nothing is written to
+    /// it. A Board-ID that several models share is written without a
+    /// question only when its model is named, so this is the way to flash
+    /// boards one owns unattended under --yes.
     #[arg(long, value_name = "NAME")]
-    board: Option<String>,
+    board: Vec<String>,
 
     /// Report what is attached and what would happen. Changes nothing — not
     /// even rebooting a board into its bootloader, which is already a change.
@@ -1000,7 +1004,7 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         None => Sysfs::new(SYSFS_USB_DEVICES),
     };
     let opts = Options {
-        board: cli.board.clone(),
+        boards: cli.board.clone(),
         dry_run: cli.dry_run,
         radio,
         telemetry,

@@ -252,6 +252,52 @@ pub fn confirm_identity<'m>(
     Ok(confirmed)
 }
 
+/// [`confirm_identity`] against the boards a run named with `--board`
+/// (Codeberg #262).
+///
+/// The list says which models are present, so a shared Board-ID whose entry
+/// is in it is decided without a question, which is the one way through for
+/// an unattended run on boards one owns. A board whose entry is not in it is
+/// skipped with a line saying so, and `Ok(None)` comes back: nothing is
+/// written to it and it is not a refusal. With no board named this is
+/// exactly [`confirm_identity`] with nothing asked for.
+///
+/// The decision is taken on the bootloader's `Board-ID`, never on the USB ID
+/// the board was found by, so a skipped board has already been rebooted into
+/// its bootloader and stays there.
+pub fn confirm_named<'m>(
+    catalogue: &'m Catalogue,
+    manifest: &'m Manifest,
+    info: &InfoUf2,
+    port: &str,
+    named: &[String],
+    ui: &mut dyn Ui,
+) -> Result<Option<Confirmed<'m>>, Error> {
+    if named.is_empty() {
+        return confirm_identity(catalogue, manifest, info, port, None, ui).map(Some);
+    }
+    // An ID that is missing or unknown falls through to confirm_identity,
+    // which names the problem; only a board we can name can be skipped.
+    let found = info
+        .board_id()
+        .map(str::trim)
+        .and_then(|id| catalogue.board_for_id(id))
+        .map(|(name, _, _)| name);
+    match found {
+        Some(name) if !named.iter().any(|n| n == name) => {
+            ui.say(&format!(
+                "{port}: Board-ID {:?} is {name}, which is not among the boards named with \
+                 --board ({}). Skipped: nothing was written, and it is still in its \
+                 bootloader.\n",
+                info.board_id().map(str::trim).unwrap_or(""),
+                named.join(", ")
+            ));
+            Ok(None)
+        }
+        found => confirm_identity(catalogue, manifest, info, port, found, ui).map(Some),
+    }
+}
+
 /// The match alone, with no question asked. [`confirm_identity`] is the way
 /// in for a session; this is also what re-confirms a drive that reappeared
 /// after the SoftDevice remedy, where the person has already answered for
@@ -470,8 +516,10 @@ pub fn describe_image(label: &str, image: &Image, writable_start: u32) -> String
 /// How the tool was asked to behave.
 #[derive(Debug, Clone)]
 pub struct Options {
-    /// Only touch this board, and refuse if what is attached is another one.
-    pub board: Option<String>,
+    /// The boards present, by catalogue name (`--board`, repeatable). Empty
+    /// means none was named, and every shared Board-ID is asked about. A
+    /// board whose entry is not in a non-empty list is left alone.
+    pub boards: Vec<String>,
     /// Inspect and report; change nothing, and do not even reboot a board
     /// into its bootloader, which is itself a change to somebody's device.
     pub dry_run: bool,
@@ -495,7 +543,7 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         Self {
-            board: None,
+            boards: Vec::new(),
             dry_run: false,
             appear_within: entry::BOOTLOADER_APPEARS_WITHIN,
             banner_budget: verify::FRESH_BANNER_BUDGET,
@@ -663,7 +711,7 @@ pub fn run(
     // `--board` is the only handle a user has for saying which board a run is
     // for, so a name this tool does not flash is answered before the bus is
     // read at all — and the boards offered instead are the flashable ones.
-    if let Some(asked) = &opts.board {
+    for asked in &opts.boards {
         match catalogue.board(asked) {
             Ok(board) => board.require_flashing(asked).map(|_| ())?,
             Err(_) => {
@@ -713,17 +761,32 @@ pub fn run(
     }
     ui.say("");
 
+    Ok(each_candidate(&candidates, ui, |ui, candidate| {
+        resolve(catalogue, manifest, sysfs, ui, opts, candidate)
+    }))
+}
+
+/// The loop over the bus, apart from what is done to each board so a test
+/// can drive it with boards that are not there.
+///
+/// One board's refusal must not abandon the others: with several devices
+/// attached each is its own decision. A refused board is said and left out
+/// of the outcomes, so the exit code is decided by the boards that were
+/// written (`main.rs`, `exit_code`).
+fn each_candidate(
+    candidates: &[Candidate],
+    ui: &mut dyn Ui,
+    mut step: impl FnMut(&mut dyn Ui, &Candidate) -> Result<Option<Outcome>, Error>,
+) -> Vec<Outcome> {
     let mut outcomes = Vec::new();
     for candidate in candidates {
-        match resolve(catalogue, manifest, sysfs, ui, opts, &candidate) {
+        match step(ui, candidate) {
             Ok(Some(outcome)) => outcomes.push(outcome),
             Ok(None) => {}
-            // One board's refusal must not abandon the others: with several
-            // devices attached each is its own decision.
             Err(err) => ui.say(&format!("{}: {err}\n", candidate.device.name)),
         }
     }
-    Ok(outcomes)
+    outcomes
 }
 
 /// One running board a configure session can talk to: where its transport
@@ -2346,7 +2409,10 @@ fn resolve(
 
     let drive = Drive::open(&block)?;
     let info = drive.info()?;
-    let confirmed = confirm_identity(catalogue, manifest, &info, &port, opts.board.as_deref(), ui)?;
+    let Some(confirmed) = confirm_named(catalogue, manifest, &info, &port, &opts.boards, ui)?
+    else {
+        return Ok(None);
+    };
     ui.say(&format!(
         "{port}: confirmed {} — Board-ID {:?}, bootloader {}",
         confirmed.name(),
@@ -4769,5 +4835,128 @@ convert = "hex-to-uf2"
         assert!(said.contains("would enter the bootloader"));
         assert!(said.contains("rebooting a board is already a change"));
         assert!(ui.answers.len() == 8, "nothing should have been confirmed");
+    }
+
+    /// The rig's bus for #262: a T114 and a RAK, both in their bootloaders,
+    /// and what each bootloader publishes.
+    fn t114_and_rak() -> Vec<(Candidate, &'static str)> {
+        [
+            ("3-2.4", 0x0071, "t114", T114_INFO),
+            ("3-2.3.4.4", 0x0029, "rak4631", RAK_INFO),
+        ]
+        .into_iter()
+        .map(|(port, pid, hint, info)| {
+            let device = crate::usb::Device {
+                name: port.to_string(),
+                id: crate::usb::UsbId::new(0x239a, pid),
+                serial: None,
+                manufacturer: None,
+                product: None,
+                interfaces: Vec::new(),
+            };
+            let candidate = Candidate {
+                device,
+                in_bootloader: true,
+                hint: hint.to_string(),
+            };
+            (candidate, info)
+        })
+        .collect()
+    }
+
+    /// Runs the bus loop over [`t114_and_rak`] with `--board` set to `named`,
+    /// and stops each board at the identity decision: a confirmed board
+    /// becomes an outcome naming it, which is the point a real run writes.
+    /// The ui is [`Fake::agreeing`], which answers like `--yes` (every
+    /// confirm yes, every question unanswered) and keeps the transcript.
+    fn flash_t114_and_rak(named: &[&str]) -> (Vec<Outcome>, Fake) {
+        let (_dir, catalogue, manifest) = two_board_bundle();
+        let bus = t114_and_rak();
+        let candidates: Vec<Candidate> = bus.iter().map(|(c, _)| c.clone()).collect();
+        let named: Vec<String> = named.iter().map(|n| n.to_string()).collect();
+        let mut ui = Fake::agreeing();
+        let outcomes = each_candidate(&candidates, &mut ui, |ui, candidate| {
+            let info = bus
+                .iter()
+                .find(|(c, _)| c.device.name == candidate.device.name)
+                .map(|(_, info)| infouf2::parse(info))
+                .unwrap();
+            let port = &candidate.device.name;
+            Ok(
+                confirm_named(&catalogue, &manifest, &info, port, &named, ui)?.map(|confirmed| {
+                    Outcome {
+                        port: port.clone(),
+                        board: confirmed.name().to_string(),
+                        softdevice_installed: None,
+                        application_written: None,
+                        verdict: None,
+                        radio: None,
+                        telemetry: None,
+                    }
+                }),
+            )
+        });
+        (outcomes, ui)
+    }
+
+    fn boards(outcomes: &[Outcome]) -> Vec<&str> {
+        outcomes.iter().map(|o| o.board.as_str()).collect()
+    }
+
+    #[test]
+    fn under_yes_alone_the_t114_is_refused_and_the_rak_is_still_written() {
+        // 830 item 1, the rig's `lnflash --bundle B --yes` after 828: the
+        // T114's refusal is said on its own line and does not abandon the
+        // bus, so the RAK reaches the write. The refused T114 is not an
+        // outcome, so the exit code is the RAK's alone.
+        let (outcomes, ui) = flash_t114_and_rak(&[]);
+        assert_eq!(boards(&outcomes), ["rak4631"]);
+        let said = ui.transcript();
+        assert!(
+            said.contains("3-2.4: the board on 3-2.4 says it is \"HT-n5262\""),
+            "{said}"
+        );
+        assert!(said.contains("pass --board t114"), "{said}");
+    }
+
+    #[test]
+    fn naming_both_boards_under_yes_writes_both_without_a_question() {
+        let (outcomes, ui) = flash_t114_and_rak(&["t114", "rak4631"]);
+        assert_eq!(boards(&outcomes), ["t114", "rak4631"]);
+        assert!(ui.said.is_empty(), "{}", ui.transcript());
+    }
+
+    #[test]
+    fn naming_only_the_rak_writes_it_and_skips_the_t114_with_a_line() {
+        let (outcomes, ui) = flash_t114_and_rak(&["rak4631"]);
+        assert_eq!(boards(&outcomes), ["rak4631"]);
+        let said = ui.transcript();
+        for needle in [
+            "3-2.4: Board-ID \"HT-n5262\" is t114, which is not among the boards named with \
+             --board (rak4631)",
+            "Skipped: nothing was written",
+        ] {
+            assert!(said.contains(needle), "{needle:?} missing from: {said}");
+        }
+        // Skipped, not refused: no error line and no question.
+        assert!(!said.contains("Type t114"), "{said}");
+        assert!(!said.contains("asked to flash"), "{said}");
+    }
+
+    #[test]
+    fn a_named_board_at_level_expected_is_still_asked_under_yes() {
+        // --board says which model is present; it is not the yes to hardware
+        // we never ran, and neither is --yes.
+        let (_dir, catalogue, manifest) = expected_rak_bundle();
+        let err = confirm_named(
+            &catalogue,
+            &manifest,
+            &infouf2::parse(RAK_INFO),
+            "3-2.3.4.4",
+            &["t114".to_string(), "rak4631".to_string()],
+            &mut Fake::agreeing(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::NeedsConfirmation { .. }), "{err:?}");
     }
 }

@@ -468,6 +468,34 @@ fn asking_to_flash_the_solar_node_by_name_is_refused_before_the_bus_is_read() {
 }
 
 #[test]
+fn every_repeated_board_name_is_answered_before_the_bus_is_read() {
+    // `--board` is repeatable (#262), and a name this tool does not flash
+    // is refused wherever it stands in the list, not only first.
+    let bundle = unpacked_bundle();
+    let out = run(
+        &[
+            "--bundle",
+            &bundle.path().display().to_string(),
+            "--board",
+            "t114",
+            "--board",
+            "solarnode",
+            "--yes",
+            "--sysfs",
+            &fixture_sysfs().display().to_string(),
+        ],
+        None,
+    );
+    assert!(!out.status.success(), "{}", stdout(&out));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("does not flash solarnode by manifest"),
+        "{err}"
+    );
+    assert!(!stdout(&out).contains("Found"), "{}", stdout(&out));
+}
+
+#[test]
 fn asking_for_a_board_nobody_knows_names_the_ones_that_can_be_flashed() {
     let bundle = unpacked_bundle();
     let out = run(

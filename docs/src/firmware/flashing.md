@@ -81,13 +81,18 @@ otherwise would be lying.
 `--dry-run` reports what is attached and what would happen, changing
 nothing at all, not even rebooting a board into its bootloader.
 `--check-bundle` verifies the bundle's own checksums and exits.
-`--board NAME` refuses to write if what is attached is a different
-board. `--yes` skips confirmation for automation and fails rather than
+`--board NAME` names a board model that is present, and is repeatable
+(`--board t114 --board rak4631`): a board whose model is not named is
+skipped with a line saying so, and nothing is written to it. A Board-ID
+that several models publish (the T114's `HT-n5262`) is written without a
+question only when its model is named, so an unattended flash of boards
+one owns names every model on the bus, for example `lnflash --board t114
+--board rak4631 --yes`. `--yes` skips confirmation for automation and fails rather than
 waits when a board needs the manual double-tap. Radio settings can be
 given at flash time with `--radio-preset` (`eu868`, `us915`, `au915`) or
 the individual `--radio-freq`, `--radio-bw`, `--radio-sf`, `--radio-cr`
 and `--radio-txpower` flags; `--no-radio` leaves the board's stored
-configuration alone. (`lnflash/src/main.rs:42-461`. The board keeps what
+configuration alone. (`lnflash/src/main.rs:42-465`. The board keeps what
 it is given across resets and across the next flash, so this is part of
 the flash rather than a later configuration step.)
 

@@ -25,7 +25,7 @@ The configure sessions (**--set-** *something*) talk to boards that are already 
 :   Where the bundle is. Otherwise $LNFLASH_BUNDLE, then next to the binary, then /usr/share/lnflash.
 
 **--board** *name*
-:   Only flash this board; refuse anything else.
+:   A board model that is present; repeatable. A board whose model is not named is skipped and nothing is written to it. A Board-ID several models share is written without a question only when its model is named, which is how an unattended run under **--yes** flashes boards one owns: **--board t114 --board rak4631 --yes**.
 
 **--dry-run**
 :   Report what is attached and what would happen; change nothing.

@@ -407,6 +407,11 @@ Toolchain: Rust 1.97.1
 
 ### Changed
 
+- `lnflash --board` is repeatable and names the board models present: a
+  shared Board-ID is written without a question when its model is named, a
+  board whose model is not named is skipped, so `--board t114 --board
+  rak4631 --yes` flashes both unattended (refs #262).
+
 - An lnsd Bluetooth interface now links to two neighbours of its own and
   stays visible when its incoming slots are full (`central_links = 2`,
   `advertise_when_full = true`), so a room of twenty PC nodes settles to
