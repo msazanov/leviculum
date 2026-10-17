@@ -1213,6 +1213,13 @@ Toolchain: Rust 1.97.1
   anchor's monotonic half belongs to one process and is never persisted
   (Codeberg #186).
 
+### Removed
+
+- The `leviculum-heapacct-mimalloc` package (Leviculum#806). Since lnsd runs
+  on mimalloc by default (Leviculum#766) it was the same build as
+  `leviculum-heapacct`; a node running it moves to the standard package with
+  `apt install ./leviculum-nightly-arm64.deb`, whose Conflicts removes it.
+
 ## [0.9.0] - 2026-09-18
 
 Toolchain: Rust 1.97.1

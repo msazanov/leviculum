@@ -37,8 +37,8 @@
 # ziglang on PATH (`just _deb-prereqs` installs both), and python3 for
 # the manual pages. Produces target/debian/*_<arch>.deb, which cargo-deb
 # also hardlinks under target/<triple>/debian/: one per crate, plus
-# leviculum-heapacct and leviculum-heapacct-mimalloc, the instrumented
-# variants of the leviculum package, and lnpnd-heapacct, lnpnd's.
+# leviculum-heapacct, the instrumented variant of the leviculum package, and
+# lnpnd-heapacct, lnpnd's.
 
 set -euo pipefail
 
@@ -252,26 +252,6 @@ heapacct_version="$(cat .deb-version-leviculum-cli)+heapacct"
 cargo deb -p leviculum-cli --variant heapacct --target "$TRIPLE" --no-build --no-strip \
     --deb-version "$heapacct_version"
 debs+=("$TARGET/debian/leviculum-heapacct_${heapacct_version}_${ARCH}.deb")
-
-# The same instrumented lnsd on mimalloc whatever LEVICULUM_ALLOC says (508),
-# so the soak node can hold one census against the other and tell whether the
-# allocator is what keeps the freed memory. Under the default it is the same
-# build as leviculum-heapacct, kept because nodes run it under this name.
-# `--features heap-accounting,alloc-mimalloc` wraps mimalloc in the counting
-# shim; the binary must carry both startup lines.
-env "${instrumented_env[@]}" "${build_cmd[@]}" --release --target "$TRIPLE" -p leviculum-cli --bin lnsd \
-    --features heap-accounting,alloc-mimalloc
-require_symtab
-for marker in "$heapacct_marker" "$mimalloc_marker"; do
-    grep -qaF "$marker" "$release_dir/lnsd" || {
-        echo "error: lnsd built with --features heap-accounting,alloc-mimalloc lacks '$marker'" >&2
-        exit 1
-    }
-done
-mimalloc_version="$(cat .deb-version-leviculum-cli)+heapacct+mimalloc"
-cargo deb -p leviculum-cli --variant heapacct-mimalloc --target "$TRIPLE" --no-build --no-strip \
-    --deb-version "$mimalloc_version"
-debs+=("$TARGET/debian/leviculum-heapacct-mimalloc_${mimalloc_version}_${ARCH}.deb")
 
 # lnpnd under `--features heap-accounting` (550), so the soak node's
 # propagation daemon reports measured live bytes the way its lnsd does. Its
