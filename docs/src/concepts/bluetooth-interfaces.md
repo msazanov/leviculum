@@ -246,7 +246,15 @@ its first keepalive) brings the fallback back after one advertising interval (1.
 time the peer's fresh zero needs to reach us), and the refused peer
 sits that interval out, where an ordinary teardown waits out the whole
 30 s clock again. In the twenty-node room on 2026-10-17 one such refusal
-moved the last link of the room out by a full clock (810).
+moved the last link of the room out by a full clock (810). A board reads
+the same refusal by the same rule (`refused_dial` and
+`ScanPhase::note_refused` in `leviculum-nrf/ble-tx/src/admission.rs`,
+the line `BLE_DIAL_REFUSED addr= lived_ms= fallback_in_ms=`): the new
+neighbour's connection had restarted its phase for a whole bound, the
+refusal shortens it to one advertising interval from the teardown, and
+the refusing address sits that interval out. Its scanner rests the scan
+pass pause (5 s) after every dial, so on a board the next fallback
+window opens after that pause, not 30 s after the connection (815).
 Nor does lnsd restart the clock when a dial of its own lands while an
 outgoing slot is still free: the strict phase the dial was made in runs
 on (`ScanScheduler::note_central_up`), and only the link that fills the

@@ -52,11 +52,12 @@ pub mod window;
 
 pub use admission::{
     admit, advertise_pass_pause_ms, connect_failure_condemns, dial_backoff_ms, dial_stage_failure,
-    judge_read_identity, scan_pass_pause_ms, AddrType, Admission, AdvReport, AdvertisePass,
-    BackoffBooked, DeadEnds, DialBackoff, DialFailure, DialStage, Exclusion, Ledgers, Local,
-    Neighbour, PeerAddr, PhaseEvent, PhaseNeighbours, PhasePoll, ReadIdentity, ScanPass, ScanPhase,
-    StageError, ADVERTISE_RETRY_MS, DEAD_END_SLOTS, DEAD_END_TTL_MS, DIAL_BACKOFF_BASE_MS,
-    DIAL_BACKOFF_CAP_MS, DIAL_BACKOFF_SLOTS, PHASE_NEIGHBOUR_SLOTS,
+    judge_read_identity, refused_dial, scan_pass_pause_ms, AddrType, Admission, AdvReport,
+    AdvertisePass, BackoffBooked, DeadEnds, DialBackoff, DialFailure, DialRefusedLine, DialStage,
+    Exclusion, Ledgers, Local, Neighbour, PeerAddr, PhaseEvent, PhaseNeighbours, PhasePoll,
+    ReadIdentity, ScanPass, ScanPhase, StageError, ADVERTISE_RETRY_MS, DEAD_END_SLOTS,
+    DEAD_END_TTL_MS, DIAL_BACKOFF_BASE_MS, DIAL_BACKOFF_CAP_MS, DIAL_BACKOFF_SLOTS,
+    PEER_ADV_INTERVAL_MS, PHASE_NEIGHBOUR_SLOTS, REFUSAL_WINDOW_MS,
 };
 pub use adv::{
     ad_structure_len, free_slots, identity_hint, manufacturer_data, manufacturer_data_with_hint,

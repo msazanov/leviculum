@@ -664,6 +664,10 @@ Toolchain: Rust 1.97.1
   whole 30 s fallback clock: the fallback is back one advertising interval
   later and elects the next candidate (`BLE_DIAL_REFUSED`, refs #723).
 
+- A board's BLE dial that the peer refused full no longer costs a whole
+  30 s fallback clock either: the board reads it by lnsd's rule and dials
+  again after its scan pass pause (`BLE_DIAL_REFUSED`, refs #412).
+
 - Opening a serial interface no longer warns that it could not set
   `low_latency`: GNU stty has no such setting, so the call never set
   anything, and the warning about degraded HDLC framing was wrong on every

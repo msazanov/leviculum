@@ -33,16 +33,17 @@ use leviculum_ble_tx::{
     abort_disconnects, addr_value, admit, advertise_pass_pause_ms, connect_failure_condemns,
     dial_preference, dial_stage_failure, drain_table_refusal, fragment_mtu, identity_hint,
     incoming_verdict, judge_read_identity, judge_supervision_timeout, link_queue_verdict,
-    manufacturer_data_with_hint, parse_peer_advertisement, scan_pass_pause_ms, with_free_slots,
-    AdvReport, AdvertisePass, CandidateTable, CarrierPath, CarrierStep, ChurnLedger, ChurnPolicy,
-    ConnParams, ConnParamsAsk, ConnParamsLine, ConnParamsReq, ConnParamsReqLine, ConnectDecision,
-    DeadEnds, DialBackoff, DialFailure, DialLedger, DialStage, Enqueue, Exclusion, Fill, GattBytes,
-    LedgerPolicy, Ledgers, LinkItem, LinkPhase, LinkRole, LinkUp, LinkVerdict, Local, Origin,
-    OversizeFrom, OversizeLine, PeerAddr, PeerRegistry, PhaseEvent, PhaseNeighbours, ReadIdentity,
-    ScanMode, ScanPass, ScanPhase, StageError, TxGap, ADV_BYTES_USED, CAP_PERIPHERAL_ONLY,
-    DEAD_END_SLOTS, DEAD_END_TTL_MS, DIAL_BACKOFF_SLOTS, GATT_VALUE_MAX, IDENTITY_HINT_LEN,
-    LEGACY_AD_CAPACITY, MANUFACTURER_DATA_HINT_LEN, PERIPH_SLOTS, PHASE_NEIGHBOUR_SLOTS,
-    SCAN_WINDOW_COLLECT_MS, WINDOW_CANDIDATES,
+    manufacturer_data_with_hint, parse_peer_advertisement, refused_dial, scan_pass_pause_ms,
+    with_free_slots, AdvReport, AdvertisePass, CandidateTable, CarrierPath, CarrierStep,
+    ChurnLedger, ChurnPolicy, ConnParams, ConnParamsAsk, ConnParamsLine, ConnParamsReq,
+    ConnParamsReqLine, ConnectDecision, DeadEnds, DialBackoff, DialFailure, DialLedger,
+    DialRefusedLine, DialStage, Enqueue, Exclusion, Fill, GattBytes, LedgerPolicy, Ledgers,
+    LinkItem, LinkPhase, LinkRole, LinkUp, LinkVerdict, Local, Origin, OversizeFrom, OversizeLine,
+    PeerAddr, PeerRegistry, PhaseEvent, PhaseNeighbours, ReadIdentity, ScanMode, ScanPass,
+    ScanPhase, StageError, TxGap, ADV_BYTES_USED, CAP_PERIPHERAL_ONLY, DEAD_END_SLOTS,
+    DEAD_END_TTL_MS, DIAL_BACKOFF_SLOTS, GATT_VALUE_MAX, IDENTITY_HINT_LEN, LEGACY_AD_CAPACITY,
+    MANUFACTURER_DATA_HINT_LEN, PERIPH_SLOTS, PHASE_NEIGHBOUR_SLOTS, SCAN_WINDOW_COLLECT_MS,
+    WINDOW_CANDIDATES,
 };
 use leviculum_core::framing::ble::{
     self as ble_framing, BleDefragmenter, DefragResult, FRAGMENT_HEADER_SIZE, KEEPALIVE_BYTE,
@@ -2370,6 +2371,13 @@ async fn find_peer_to_initiate(
                 }
                 return false;
             }
+            // The eighth (815): the address that refused our last dial
+            // sits one advertising interval out, so the free slot its
+            // record still claims cannot elect it again. Silent: the
+            // refusal's own line says until when.
+            Ok(()) if FALLBACK_CLOCK.lock(|clock| clock.get().skips(peer_value, now_ms)) => {
+                return false;
+            }
             Ok(()) => {}
             Err(Exclusion::LedgerHeld { until_ms }) => {
                 log_dial_held(until_ms, now_ms);
@@ -2599,6 +2607,9 @@ async fn central_link(
     // identity read are the dial's PRICE and what the ledger measures
     // is what the dial BOUGHT.
     let session_from = Instant::now();
+    // Whether the peer delivered one frame, keepalives included, on
+    // this link: a peer that refused it full sends none (815).
+    let heard = Cell::new(false);
 
     let failure = run_central_session(
         &conn,
@@ -2608,6 +2619,7 @@ async fn central_link(
         slot_index,
         conn_handle,
         typed_peer,
+        &heard,
     )
     .await;
 
@@ -2629,17 +2641,51 @@ async fn central_link(
     );
     peer_link_down(slot_index);
     conn_link_down(slot_index);
+    // The new neighbour's connection restarted the strict phase for a
+    // whole bound; a dial the peer refused buys one advertising
+    // interval instead (815, lnsd's 810).
+    if refused_dial(Origin::Outgoing, heard.get(), session_ms) {
+        note_dial_refused(peer_value, session_ms);
+    }
     super::defrag_held_set(slot_index, 0);
     super::session_held_reset(slot_index);
     HVN_DRAIN.release(conn_handle);
     failure
 }
 
+/// Our dial at `peer_value` ended in the peer's refusal
+/// ([`refused_dial`], 815): the strict phase lasts one advertising
+/// interval from now, and the address sits it out
+/// ([`ScanPhase::note_refused`]). One line per refused dial, and a
+/// board dials at most once per scan pass pause, so the line needs no
+/// limiter of its own.
+fn note_dial_refused(peer_value: u64, lived_ms: u64) {
+    let now_ms = Instant::now().as_millis();
+    FALLBACK_CLOCK.lock(|clock| {
+        let mut phase = clock.get();
+        phase.note_refused(peer_value, now_ms);
+        clock.set(phase);
+    });
+    crate::log::log_fmt(
+        "[BLE ] ",
+        format_args!(
+            "{}",
+            DialRefusedLine {
+                addr: peer_value,
+                lived_ms,
+            }
+        ),
+    );
+}
+
 /// Subscribe, handshake, then pump both directions until either side
 /// ends the link. Returns what a give-up before the handshake said
 /// about the peer (579), `None` once the handshake went through. The mirror of [`gatt_events`], with the roles
 /// swapped: inbound is the peer's TX notifications, outbound writes the
-/// peer's RX characteristic.
+/// peer's RX characteristic. Every frame the peer delivers, keepalives
+/// included, sets `heard`, which [`central_link`]'s refusal reading
+/// asks (815).
+#[allow(clippy::too_many_arguments)]
 async fn run_central_session(
     conn: &Connection,
     client: &ReticulumClient,
@@ -2648,6 +2694,7 @@ async fn run_central_session(
     slot_index: usize,
     conn_handle: u16,
     peer: PeerAddr,
+    heard: &Cell<bool>,
 ) -> Option<DialFailure> {
     let peer_value = peer.value;
     // Subscribe to the peer's TX before announcing ourselves, so
@@ -2746,11 +2793,13 @@ async fn run_central_session(
             // expiry reads (#382). Liveness only — the duplicate rule
             // reads the payload clock (#360).
             note_heard(slot_index);
+            heard.set(true);
             return;
         }
         // Real payload: liveness AND the active-use evidence the
         // duplicate rule consults (#360).
         note_data(slot_index);
+        heard.set(true);
         let now = Instant::now().as_millis();
         let mut d = defrag.replace(BleDefragmenter::new());
         let result = process_logged(&mut d, data, now, slot_index);

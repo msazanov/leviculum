@@ -43,9 +43,10 @@
 //! to [`DIAL_BACKOFF_CAP_MS`].
 
 use crate::{
-    rotating_address, should_initiate, ChurnLedger, ConnectDecision, DialLedger, PeerRegistry,
-    ScanMode, IDENTITY_HINT_LEN, SCAN_FALLBACK_AFTER_MS,
+    rotating_address, should_initiate, ChurnLedger, ConnectDecision, DialLedger, Origin,
+    PeerRegistry, ScanMode, IDENTITY_HINT_LEN, SCAN_FALLBACK_AFTER_MS,
 };
+use leviculum_core::framing::ble::KEEPALIVE_INTERVAL_MS;
 
 /// How long a dead-end address is skipped: one that carried our own
 /// identity, one whose duplicate handshake was refused for an actively
@@ -759,10 +760,73 @@ impl<const N: usize> PhaseNeighbours<N> {
 /// #375 part 3).
 ///
 /// The firmware's `FALLBACK_CLOCK` tuple until #496.
+///
+/// One rule sits beside the reset rule (815, lnsd's 810): a dial of
+/// ours the peer refused ([`refused_dial`], [`Self::note_refused`])
+/// starts a strict phase of one [`PEER_ADV_INTERVAL_MS`], not a
+/// fallback clock, and the refusing address sits that interval out
+/// ([`Self::skips`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScanPhase {
     since_ms: u64,
+    /// How long this phase lasts: [`SCAN_FALLBACK_AFTER_MS`], or one
+    /// [`PEER_ADV_INTERVAL_MS`] when a refusal began it (815).
+    bound_ms: u64,
+    /// The address that refused our last dial and the deadline until
+    /// which the scan skips it (815).
+    refused: Option<(u64, u64)>,
     announced: bool,
+}
+
+/// One advertising interval of a peer, Columba's and lnsd's 1.28 s: the
+/// time a peer's fresh record, `free_slots=0` after it filled, needs to
+/// reach a scanner. The strict phase a refused dial starts lasts this
+/// long ([`ScanPhase::note_refused`], 815). lnsd's
+/// `links::PEER_ADV_INTERVAL_MS` is the same number.
+pub const PEER_ADV_INTERVAL_MS: u64 = 1_280;
+
+/// How soon after its admission a dial of ours may end, without one
+/// frame heard from the peer, and still read as the peer's refusal
+/// ([`refused_dial`], 815; lnsd's `REFUSAL_WINDOW_MS`, 810). A full
+/// peer refuses at our handshake and disconnects; the board learns of
+/// it at the disconnect event or at its next write, the transport's
+/// next packet or at the latest its first keepalive, one
+/// [`KEEPALIVE_INTERVAL_MS`] after admission, and a second interval
+/// covers the tick that sends it. A link that heard nothing for that
+/// long bought nothing the strict phase was for, so an ordinary end
+/// read as a refusal costs nothing either.
+pub const REFUSAL_WINDOW_MS: u64 = 2 * KEEPALIVE_INTERVAL_MS;
+
+/// Whether a link, ending now, was a dial of ours the peer refused
+/// (815): our dial ([`Origin::Outgoing`]), not one frame heard from the
+/// peer, keepalives included, and gone within [`REFUSAL_WINDOW_MS`] of
+/// the registry admitting it (`lived_ms`). The peer sends no refusal on
+/// the air; this is what its `BLE_LINK_REJECT reason=full` looks like
+/// from our side.
+#[must_use]
+pub const fn refused_dial(origin: Origin, heard_any: bool, lived_ms: u64) -> bool {
+    matches!(origin, Origin::Outgoing) && !heard_any && lived_ms < REFUSAL_WINDOW_MS
+}
+
+/// The board's `BLE_DIAL_REFUSED` line (815), lnsd's event of the same
+/// name without its `iface`: the refusing address, how long the link
+/// lived after admission, and when the fallback is back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DialRefusedLine {
+    /// The refusing peer's address value.
+    pub addr: u64,
+    /// Admission to teardown.
+    pub lived_ms: u64,
+}
+
+impl core::fmt::Display for DialRefusedLine {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "BLE_DIAL_REFUSED addr={:012x} lived_ms={} fallback_in_ms={}",
+            self.addr, self.lived_ms, PEER_ADV_INTERVAL_MS
+        )
+    }
 }
 
 impl Default for ScanPhase {
@@ -787,16 +851,45 @@ impl ScanPhase {
     pub const fn new() -> Self {
         Self {
             since_ms: 0,
+            bound_ms: SCAN_FALLBACK_AFTER_MS,
+            refused: None,
             announced: false,
         }
     }
 
-    /// Restart the strict phase at `now_ms`.
+    /// Restart the strict phase at `now_ms`, for a whole
+    /// [`SCAN_FALLBACK_AFTER_MS`].
     pub fn reset(&mut self, now_ms: u64) {
         *self = Self {
             since_ms: now_ms,
+            bound_ms: SCAN_FALLBACK_AFTER_MS,
+            refused: self.refused,
             announced: false,
         };
+    }
+
+    /// Our dial at `addr` ended in the peer's refusal ([`refused_dial`],
+    /// 815). The new neighbour's connection had restarted the phase for
+    /// a whole bound; a refusal says nothing about whether the sort
+    /// works here, only that this peer filled first, so the phase now
+    /// lasts one [`PEER_ADV_INTERVAL_MS`] from the teardown, and the
+    /// address is skipped for the same interval so the count it
+    /// advertised before cannot elect it again.
+    pub fn note_refused(&mut self, addr: u64, now_ms: u64) {
+        *self = Self {
+            since_ms: now_ms,
+            bound_ms: PEER_ADV_INTERVAL_MS,
+            refused: Some((addr, now_ms.saturating_add(PEER_ADV_INTERVAL_MS))),
+            announced: false,
+        };
+    }
+
+    /// Whether the scan skips `addr` at `now_ms`: it refused our last
+    /// dial less than one [`PEER_ADV_INTERVAL_MS`] ago (815).
+    #[must_use]
+    pub fn skips(&self, addr: u64, now_ms: u64) -> bool {
+        self.refused
+            .is_some_and(|(refused, until_ms)| refused == addr && now_ms < until_ms)
     }
 
     /// Apply one event under the reset rule; `true` iff it restarted
@@ -813,7 +906,7 @@ impl ScanPhase {
     /// it reads fallback.
     pub fn poll(&mut self, now_ms: u64) -> PhasePoll {
         let elapsed_ms = now_ms.saturating_sub(self.since_ms);
-        if elapsed_ms < SCAN_FALLBACK_AFTER_MS {
+        if elapsed_ms < self.bound_ms {
             return PhasePoll {
                 mode: ScanMode::Strict,
                 announce_ms: None,
@@ -1316,6 +1409,113 @@ mod tests {
         assert!(!connect_failure_condemns(
             ConnectDecision::InitiatePeripheralOnlyPeer
         ));
+    }
+
+    /// 815, lnsd's 810 in the board's vocabulary: a stranded board's
+    /// fallback dial lands on a fixed-addressed peer that fills in the
+    /// same fraction of a second and refuses it full. The new
+    /// neighbour's connection and identity restart the phase, as they
+    /// must for a link that stays; before 815 the refusal's teardown
+    /// (a [`PhaseEvent::ConnDown`]) left that whole bound running, so
+    /// the next fallback came a fallback clock after the connection.
+    /// Now it is back one advertising interval after the teardown, and
+    /// the refusing address sits that interval out.
+    #[test]
+    fn a_refused_dial_costs_one_advertising_interval_not_a_fallback_clock() {
+        let mut phase = ScanPhase::new();
+        let mut seen = PhaseNeighbours::<PHASE_NEIGHBOUR_SLOTS>::new();
+        let peer = PeerAddr {
+            value: BOARD_ABOVE,
+            addr_type: AddrType::RandomStatic,
+        };
+        // Stranded: the bound passes, the window closes on a fallback
+        // verdict, which restarts nothing.
+        let start = SCAN_FALLBACK_AFTER_MS;
+        assert_eq!(phase.poll(start).mode, ScanMode::Fallback);
+        assert!(!phase.note(PhaseEvent::FallbackTarget, start));
+        // The dial lands: a new fixed address, then a new identity.
+        let landed = start + crate::SCAN_WINDOW_COLLECT_MS + 900;
+        assert!(phase.note(PhaseEvent::ConnUp(seen.meet_conn(peer)), landed));
+        let admitted = landed + 300;
+        assert!(phase.note(
+            PhaseEvent::LinkAccepted(seen.meet_link(&identity(7))),
+            admitted
+        ));
+        // The peer refused at our handshake; its teardown reaches us
+        // 2.99 s after admission, nothing heard meanwhile.
+        let gone = admitted + 2_990;
+        assert!(refused_dial(Origin::Outgoing, false, gone - admitted));
+        assert!(!phase.note(PhaseEvent::ConnDown, gone));
+        phase.note_refused(BOARD_ABOVE, gone);
+
+        assert_eq!(
+            phase.poll(gone + PEER_ADV_INTERVAL_MS - 1).mode,
+            ScanMode::Strict,
+            "the refused peer's fresh record is not on the air yet"
+        );
+        assert_eq!(
+            phase.poll(gone + PEER_ADV_INTERVAL_MS),
+            PhasePoll {
+                mode: ScanMode::Fallback,
+                announce_ms: Some(PEER_ADV_INTERVAL_MS),
+            },
+            "one advertising interval, not a fallback clock"
+        );
+        // Inside the interval the refusing address is skipped, whatever
+        // count it still advertises; nobody else is, and past the
+        // interval its fresh record decides again.
+        assert!(phase.skips(BOARD_ABOVE, gone));
+        assert!(phase.skips(BOARD_ABOVE, gone + PEER_ADV_INTERVAL_MS - 1));
+        assert!(!phase.skips(PHONE_RPA, gone));
+        assert!(!phase.skips(BOARD_ABOVE, gone + PEER_ADV_INTERVAL_MS));
+        // An ordinary reset afterwards is a whole bound again.
+        phase.reset(gone + 10_000);
+        assert_eq!(
+            phase.poll(gone + 10_000 + PEER_ADV_INTERVAL_MS).mode,
+            ScanMode::Strict
+        );
+        assert_eq!(
+            phase.poll(gone + 10_000 + SCAN_FALLBACK_AFTER_MS).mode,
+            ScanMode::Fallback
+        );
+    }
+
+    /// 815's classifier: only a dial of ours that ended without one
+    /// frame from the peer inside [`REFUSAL_WINDOW_MS`] of its admission
+    /// reads as a refusal. A link that heard a keepalive or a packet,
+    /// one that lived longer, and a peer's dial into us are ordinary
+    /// teardowns and leave the clock to the reset rule.
+    #[test]
+    fn only_a_short_silent_dial_of_ours_reads_as_a_refusal() {
+        assert!(refused_dial(Origin::Outgoing, false, 0));
+        assert!(refused_dial(Origin::Outgoing, false, REFUSAL_WINDOW_MS - 1));
+        assert!(
+            !refused_dial(Origin::Outgoing, false, REFUSAL_WINDOW_MS),
+            "lived too long"
+        );
+        assert!(
+            !refused_dial(Origin::Outgoing, true, 500),
+            "it heard a frame, a keepalive is one"
+        );
+        assert!(
+            !refused_dial(Origin::Incoming, false, 500),
+            "the peer's dial, not ours"
+        );
+        assert_eq!(REFUSAL_WINDOW_MS, 2 * KEEPALIVE_INTERVAL_MS);
+    }
+
+    /// The board's `BLE_DIAL_REFUSED` line carries lnsd's keys, `iface`
+    /// aside, so one grep reads both stacks.
+    #[test]
+    fn the_refusal_line_names_the_address_and_the_interval() {
+        let line = DialRefusedLine {
+            addr: BOARD_ABOVE,
+            lived_ms: 2_990,
+        };
+        assert_eq!(
+            line.to_string(),
+            "BLE_DIAL_REFUSED addr=c00000009000 lived_ms=2990 fallback_in_ms=1280"
+        );
     }
 
     #[test]
