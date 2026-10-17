@@ -14,7 +14,7 @@
 #   lnpnd_*_{amd64,arm64}.deb
 #   leviculum-heapacct_*_arm64.deb
 # and the lnflash firmware bundle from scripts/lnflash-bundle.sh:
-#   target/lnflash/lnflash-<version>.tar.gz
+#   target/lnflash/lnflash-<stamp>.tar.gz
 # and the rendered book from scripts/build-docs-tarball.sh:
 #   target/docs/leviculum-docs-nightly.tar.gz
 # plus:
@@ -234,11 +234,18 @@ pack_bin_tarball lnpnd arm64 aarch64-unknown-linux-musl README.md lnpnd
 # runner's own architecture.
 #
 # Named exactly, not globbed: target/ survives between runs on a
-# developer machine, so a glob would happily stage last release's
-# bundle. The version comes from the same place the bundle script takes
-# it from, so the two cannot disagree.
-lnflash_version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
-lnflash_src="target/lnflash/lnflash-${lnflash_version}.tar.gz"
+# developer machine, so a glob would happily stage last night's
+# bundle. The stamp comes from the file the bundle script takes it
+# from, .deb-version-leviculum-cli (PUB-0022), so the two cannot
+# disagree, and it carries the commit, so a bundle from another commit
+# is not found rather than shipped.
+[ -r .deb-version-leviculum-cli ] || {
+    echo "error: .deb-version-leviculum-cli missing — run scripts/deb-stamp.sh first" >&2
+    echo "       (the lnflash bundle is named after it)" >&2
+    exit 1
+}
+lnflash_stamp="$(cat .deb-version-leviculum-cli)"
+lnflash_src="target/lnflash/lnflash-${lnflash_stamp}.tar.gz"
 if [ ! -f "$lnflash_src" ]; then
     echo "error: no lnflash bundle at ${lnflash_src}" >&2
     echo "       run scripts/lnflash-bundle.sh first" >&2

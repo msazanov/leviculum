@@ -165,8 +165,13 @@ EOF
 
     # The lnflash bundle is the one artefact that is NOT under the cargo
     # target directory — it is the bundle script's own product and stays
-    # repo-relative, so the tree-local copy here is the real one.
+    # repo-relative, so the tree-local copy here is the real one. It is named
+    # after the leviculum .deb's stamp (PUB-0022); the bare-version name
+    # beside it is what every nightly was called before, and a collector still
+    # reading Cargo.toml would stage that one.
     echo "real lnflash bundle" \
+        > "$TREE/target/lnflash/lnflash-${VER_CLI}${NIGHTLY_SUFFIX}.tar.gz"
+    echo "DECOY unstamped lnflash bundle" \
         > "$TREE/target/lnflash/lnflash-${LNFLASH_VERSION}.tar.gz"
 
     # So is the rendered book (Codeberg #260), for the same reason: it is

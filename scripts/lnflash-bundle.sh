@@ -2,8 +2,8 @@
 # Build the lnflash tarball: a stranger unpacks it on any Linux, runs one
 # binary, and their board ends up running our firmware.
 #
-#     tar xzf lnflash-<version>.tar.gz
-#     cd lnflash-<version>
+#     tar xzf lnflash-<stamp>.tar.gz
+#     cd lnflash-<stamp>
 #     sudo ./lnflash
 #
 # Nothing installed, no repo, no network. This script is the build side of
@@ -11,7 +11,8 @@
 # and nowhere else — a bundle built from a Meshtastic checkout is exactly the
 # hidden dependency our clone-and-deploy policy forbids.
 #
-# Output: target/lnflash/lnflash-<version>.tar.gz
+# Output: target/lnflash/lnflash-<stamp>.tar.gz, where <stamp> is the Debian
+# version the leviculum .deb of the same build carries (see STAMP below).
 #
 #   OUT_DIR    where to write (default target/lnflash)
 #   SKIP_FIRMWARE=1  reuse an already-built firmware ELF instead of building
@@ -80,6 +81,39 @@ VERSION="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
 GIT_SHA="$(git rev-parse --short HEAD)"
 BUILT="$(git log -1 --format=%cs)"
 
+# Which build this bundle is. The bare Cargo version alone made every nightly
+# of a development window the same "0.10.0-dev" on disk, so two bundles a week
+# apart could not be told apart and nobody could say which firmware they had
+# flashed (PUB-0022). The stamp is the leviculum .deb's own version,
+# <version>~nightly.<UTCdate>.<sha7>, and it is READ from the file
+# scripts/deb-stamp.sh wrote rather than derived again: the nightly runs that
+# script in an earlier step, so a derivation here could cross midnight UTC and
+# disagree with the .deb, and collect-nightly-debs.sh finds the tarball by the
+# same file. It names the tarball, the directory inside it, every UF2, the
+# manifest's [bundle] version and the README.
+#
+# A stamp file from another commit is stale (a developer tree keeps it between
+# runs) and a tree that never ran deb-stamp has none; both get the same shape
+# derived here, by deb-stamp's own rules: the commit from CI_COMMIT_SHA or git,
+# the date in UTC, and the pre-release `-` spelled `~`.
+STAMP_SHA="${CI_COMMIT_SHA:-$(git rev-parse HEAD)}"
+STAMP_SHA7="$(printf '%.7s' "$STAMP_SHA")"
+STAMP=""
+if [ -r .deb-version-leviculum-cli ]; then
+    IFS= read -r STAMP <.deb-version-leviculum-cli || true
+    case "$STAMP" in
+    *"~nightly."*".$STAMP_SHA7") ;;
+    *)
+        printf '[lnflash-bundle] %s\n' \
+            "ignoring .deb-version-leviculum-cli ('$STAMP'): it is not from commit $STAMP_SHA7" >&2
+        STAMP=""
+        ;;
+    esac
+fi
+if [ -z "$STAMP" ]; then
+    STAMP="$(printf '%s' "$VERSION" | sed 's/-/~/')~nightly.$(date -u +%Y%m%d).$STAMP_SHA7"
+fi
+
 # Which compiler produced everything in this bundle. A UF2 in somebody's hands
 # could otherwise only be traced back to a compiler by inferring one from a git
 # tag, and the firmware is exactly where that matters: a measured 3264-byte
@@ -101,8 +135,8 @@ if [ "$RUSTC_VERSION" != "$NRF_RUSTC_VERSION" ]; then
     echo "both here before shipping a bundle built by two" >&2
     exit 1
 fi
-STAGE="$OUT_DIR/lnflash-$VERSION"
-TARBALL="$OUT_DIR/lnflash-$VERSION.tar.gz"
+STAGE="$OUT_DIR/lnflash-$STAMP"
+TARBALL="$OUT_DIR/lnflash-$STAMP.tar.gz"
 
 say() { printf '[lnflash-bundle] %s\n' "$*"; }
 
@@ -172,6 +206,17 @@ rm -rf "$STAGE"
 mkdir -p "$STAGE/firmware"
 install -m 0755 "$LNFLASH" "$STAGE/lnflash"
 install -m 0644 "$ROOT/lnflash/payload/README-bundle.md" "$STAGE/README.md"
+# The README is the one file a person opens, so it names the build too.
+cat >>"$STAGE/README.md" <<EOF
+
+## Which build this is
+
+    $STAMP
+
+Built from commit $STAMP_SHA7 (committed $BUILT). The leviculum .deb of the
+same nightly carries the same version, \`lnflash\` names it in its first line,
+and \`firmware/manifest.toml\` records it as the bundle version.
+EOF
 install -m 0644 "$ROOT/LICENSE" "$STAGE/LICENSE"
 # Codeberg #288. The statically linked Rust in this bundle — the lnflash binary
 # and every firmware UF2 — carries MIT- and BSD-licensed crates whose licences
@@ -187,7 +232,7 @@ for record in "${BOARDS[@]}"; do
     IFS='|' read -r name _bin _features stem <<<"$record"
     mkdir -p "$STAGE/firmware/$name"
     install -m 0644 "$OUT_DIR/$name.uf2.tmp" \
-        "$STAGE/firmware/$name/leviculum-$name-$VERSION.uf2"
+        "$STAGE/firmware/$name/leviculum-$name-$STAMP.uf2"
     rm -f "$OUT_DIR/$name.bin.tmp" "$OUT_DIR/$name.uf2.tmp"
     [ -n "$stem" ] || continue
     # The SoftDevice travels as a file with its licence beside it — never
@@ -215,7 +260,7 @@ cat > "$STAGE/firmware/manifest.toml" <<EOF
 # are what stand between a truncated download and somebody's flash.
 
 [bundle]
-version = "$VERSION"
+version = "$STAMP"
 built   = "$BUILT"
 # The compiler that produced every image below and the flasher beside them.
 rustc   = "$RUSTC_VERSION"
@@ -223,7 +268,7 @@ EOF
 
 for record in "${BOARDS[@]}"; do
     IFS='|' read -r name _bin _features stem <<<"$record"
-    image="$name/leviculum-$name-$VERSION.uf2"
+    image="$name/leviculum-$name-$STAMP.uf2"
     cat >> "$STAGE/firmware/manifest.toml" <<EOF
 
 [board.$name.app]
@@ -251,7 +296,7 @@ done
 say "checking the bundle"
 "$STAGE/lnflash" --bundle "$STAGE" --check-bundle
 
-tar -czf "$TARBALL" -C "$OUT_DIR" "lnflash-$VERSION"
+tar -czf "$TARBALL" -C "$OUT_DIR" "lnflash-$STAMP"
 
 # The licence files are asserted against the TARBALL rather than the stage
 # directory, because the tarball is what ships and a `tar` that quietly leaves
@@ -261,17 +306,17 @@ tar -czf "$TARBALL" -C "$OUT_DIR" "lnflash-$VERSION"
 # lawful (Codeberg #288).
 listing="$(tar -tzf "$TARBALL")"
 wanted=(
-    "lnflash-$VERSION/LICENSE"
-    "lnflash-$VERSION/THIRD-PARTY-NOTICES"
+    "lnflash-$STAMP/LICENSE"
+    "lnflash-$STAMP/THIRD-PARTY-NOTICES"
 )
 # Every board's image, and every vendored blob's licence beside it. Derived
 # from the board list rather than written out, so a board added above cannot
 # ship with its image silently missing from the archive.
 for record in "${BOARDS[@]}"; do
     IFS='|' read -r name _bin _features stem <<<"$record"
-    wanted+=("lnflash-$VERSION/firmware/$name/leviculum-$name-$VERSION.uf2")
+    wanted+=("lnflash-$STAMP/firmware/$name/leviculum-$name-$STAMP.uf2")
     [ -n "$stem" ] || continue
-    wanted+=("lnflash-$VERSION/firmware/$name/${stem}_license-agreement.txt")
+    wanted+=("lnflash-$STAMP/firmware/$name/${stem}_license-agreement.txt")
 done
 for want in "${wanted[@]}"; do
     printf '%s\n' "$listing" | grep -qxF "$want" \

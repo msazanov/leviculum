@@ -49,7 +49,7 @@ spawn-coder:
     echo "[spawn-coder] source: $BRIDGE/auto-bug/instructions.md (left in place for re-promotion)"
 
 # Build the lnflash tarball a stranger can unpack and run:
-#   tar xzf lnflash-<version>.tar.gz && cd lnflash-<version> && sudo ./lnflash
+#   tar xzf lnflash-<stamp>.tar.gz && cd lnflash-<stamp> && sudo ./lnflash
 # Contains the musl-static binary, our T114 firmware, Nordic's SoftDevice
 # with Nordic's own licence file beside it, a manifest with checksums, and a
 # user-facing README. Everything comes from this checkout — a bundle built
@@ -324,6 +324,7 @@ nrf-shellcheck:
         packaging/site/lev-receive-nightly packaging/site/lev-unpack-docs scripts/test-site-unpack-docs.sh scripts/build-docs-tarball.sh \
         scripts/collect-nightly-debs.sh scripts/test-collect-nightly-debs.sh \
         scripts/deb-stamp.sh scripts/test-deb-stamp.sh scripts/build-deb.sh scripts/lnflash-bundle.sh \
+        scripts/test-lnflash-bundle.sh \
         scripts/rnode-flash.sh scripts/check-rnode-chip-offsets.sh \
         scripts/install-ci.sh \
         scripts/install-esptool.sh scripts/install-btvirt.sh \
@@ -824,9 +825,16 @@ check-publish-nightly-gate:
 # installs, no cargo and no python3 among them. ~0.5 s, no network, no
 # build. Red against the pre-fix script with exactly the pipeline's own
 # error ("cargo: command not found").
-[doc('Drive the nightly .deb collection step against a fixture tree')]
+#
+# scripts/test-lnflash-bundle.sh joins it because the collector finds the
+# lnflash bundle by its name: the bundle carries the leviculum .deb's stamp
+# (PUB-0022) in its tarball name, its UF2 names and manifest, and its README,
+# and that test runs the real bundle script on a stubbed toolchain from a
+# known commit and asserts all three. ~0.5 s, red against the unstamped script.
+[doc('Drive the nightly packaging and lnflash bundle steps on fixtures')]
 package-selftest:
     @bash scripts/test-collect-nightly-debs.sh
+    @bash scripts/test-lnflash-bundle.sh
 
 # Codeberg #295: "supported" meant two different things on two surfaces. The
 # README named the T114 and the RAK4631 as the supported boards for the
