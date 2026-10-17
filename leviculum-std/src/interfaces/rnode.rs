@@ -4393,6 +4393,16 @@ async fn rnode_multi_io_task<S>(
                     v.vport,
                     v.name
                 );
+                // The single-radio task's LORA_TX, with the vport the frame
+                // went to, so a multi-radio node's journey also ends here.
+                tracing::debug!(
+                    target: "leviculum_std::interfaces::rnode::tx_trace",
+                    "LORA_TX iface={} vport={} len={} ph={}",
+                    v.name,
+                    v.vport,
+                    data.len(),
+                    PhField(ph)
+                );
                 timer_ready = false;
                 if flow_control {
                     // Same query protocol as the single-radio task: close
@@ -9163,11 +9173,16 @@ mod tests {
 
     impl MultiFlowHarness {
         async fn push(&self, subint: usize, payload: &[u8]) {
+            self.push_tagged(subint, payload, None).await;
+        }
+
+        /// [`Self::push`] with the correlator the core would tag it with.
+        async fn push_tagged(&self, subint: usize, payload: &[u8], ph: Option<FrameTag>) {
             self.merged_tx
                 .send(TaggedOutgoing {
                     subint,
                     packet: OutgoingPacket {
-                        ph: None,
+                        ph,
                         peer: None,
                         data: payload.to_vec().into(),
                         high_priority: false,
@@ -10381,6 +10396,42 @@ mod tests {
             )),
             "the retried frame is named by its PKT_TX ph {pkt_tx_ph}: {}",
             tx[0]
+        );
+    }
+
+    /// 804: the multi-vport task names each frame it writes the way the
+    /// single-radio task does, on a `LORA_TX` line with the sub-interface,
+    /// the vport the frame went to and the core's `ph`, so a multi-radio
+    /// node's journey also ends at the interface. An untagged frame prints
+    /// `-`.
+    #[tokio::test(start_paused = true)]
+    async fn test_a_multi_vport_frame_is_named_on_lora_tx_with_its_vport() {
+        const TAG: FrameTag = [0x0a, 0x1b, 0x2c, 0x3d, 0x4e, 0x5f, 0x60, 0x71];
+        let (logs, guard) = capture_logs();
+        let mut h = spawn_multi_flow_harness(false, 0).await;
+        h.push_tagged(1, b"tagged-high", Some(TAG)).await;
+        h.expect_frame(1, b"tagged-high", "the tagged frame airs on vport 1")
+            .await;
+        h.push(0, b"bare").await;
+        h.expect_frame(0, b"bare", "the untagged frame airs on vport 0")
+            .await;
+
+        drop(guard);
+        let logs = String::from_utf8(logs.lock().unwrap().clone()).expect("utf8 logs");
+        let tx: Vec<&str> = logs
+            .lines()
+            .filter(|l| l.contains("LORA_TX iface="))
+            .collect();
+        assert_eq!(tx.len(), 2, "two frames aired\n--- logs ---\n{logs}");
+        assert!(
+            tx[0].contains("LORA_TX iface=multi[high] vport=1 len=11 ph=0a1b2c3d4e5f6071"),
+            "LORA_TX names the vport and the packet: {}",
+            tx[0]
+        );
+        assert!(
+            tx[1].contains("LORA_TX iface=multi[low] vport=0 len=4 ph=-"),
+            "an untagged frame prints ph=-: {}",
+            tx[1]
         );
     }
 
