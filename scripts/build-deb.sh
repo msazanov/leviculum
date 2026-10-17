@@ -109,9 +109,11 @@ export LEVICULUM_BUILD_ID
 echo "[build-deb] ${ARCH} (${TRIPLE}) build-id=${LEVICULUM_BUILD_ID} lnsd allocator=${LEVICULUM_ALLOC}"
 
 # Render docs/src/man/*.1.md to roff under target/man/, which the three
-# .deb manifests install from. The Markdown is the single source: mdbook
-# publishes the same files, so the shipped manual pages and the online
-# documentation cannot drift apart.
+# .deb manifests install from. The Markdown is the single source: the
+# nightly renders the same files with mdbook into the handbook at
+# https://leviculum.network/docs/ and the leviculum-docs-nightly.tar.gz
+# asset (scripts/build-docs-tarball.sh), so the shipped manual pages and
+# the online documentation cannot drift apart.
 #
 # The selftest runs first because nothing downstream reads the roff: a
 # mangled conversion does not fail the build, it ships. It cost a silently

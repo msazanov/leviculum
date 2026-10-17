@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Render the manual pages in docs/src/man/ to roff.
 
-The pages are written once, as Markdown, so that mdbook can publish them
-and the Debian packages can install them. This script is the second half
+The pages are written once, as Markdown, so that the nightly's mdbook
+build (scripts/build-docs-tarball.sh) can publish them and the Debian
+packages can install them. This script is the second half
 of that: it converts the narrow Markdown subset those pages use into
 man(7) roff. It is deliberately not a general Markdown implementation —
 pandoc would be, but it is a large build dependency for six files, and

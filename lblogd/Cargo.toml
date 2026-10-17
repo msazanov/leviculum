@@ -77,7 +77,9 @@ assets = [
     ["../site/pages/*.md", "usr/share/lblogd/pages/", "644"],
     # Rendered from docs/src/man/ by scripts/md2man.py, which the
     # build-deb recipes run before this. The Markdown under docs/ is the
-    # single source: mdbook publishes it and the package installs it, so
+    # single source: the nightly renders it with mdbook into the handbook at
+    # https://leviculum.network/docs/ and the leviculum-docs-nightly.tar.gz
+    # asset (scripts/build-docs-tarball.sh), and the package installs it, so
     # the two can never drift. cargo-deb gzips anything under
     # usr/share/man/ by itself.
     ["../target/man/lblogd.1", "usr/share/man/man1/lblogd.1", "644"],

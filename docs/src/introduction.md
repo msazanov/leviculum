@@ -2,6 +2,25 @@
 
 Leviculum is a Rust implementation of the [Reticulum](https://reticulum.network/) network stack. It is wire-compatible with the Python reference implementation and runs on Linux, macOS, and embedded devices.
 
+## Reading this handbook
+
+The current handbook is online at <https://leviculum.network/docs/>. Every
+nightly build renders it from the Markdown under `docs/src/` and replaces it
+there.
+
+To read it offline, download the same build as a tarball, unpack it and open
+`docs/index.html` in a browser:
+
+```sh
+wget https://leviculum.network/releases/nightly/latest/leviculum-docs-nightly.tar.gz
+# mirror: https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/leviculum-docs-nightly.tar.gz
+tar xzf leviculum-docs-nightly.tar.gz
+xdg-open docs/index.html
+```
+
+From a clone of the repository, `mdbook serve docs` renders the checkout you
+have and serves it on <http://localhost:3000/>.
+
 ## What is Reticulum?
 
 Reticulum is a networking stack for building resilient, encrypted mesh networks over any transport medium. It works over LoRa radios, TCP, UDP, serial links, or anything that can carry bytes. Every node gets a cryptographic identity. Every connection is end-to-end encrypted. No servers, no accounts, no infrastructure required.
