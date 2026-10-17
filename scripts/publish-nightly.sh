@@ -101,6 +101,8 @@ fi
 [ -n "$RUSTC_VERSION" ] || RUSTC_VERSION="unknown"
 
 RELEASE_BODY=$(cat <<EOF
+Current build: \`${BUILD_ID}\` (commit \`${CI_COMMIT_SHA}\`, built with \`${RUSTC_VERSION}\`)
+
 Rolling nightly build. The assets under this release are **replaced on every CI run** — this tag always points at the latest nightly.
 
 **Debian / Ubuntu packages** (statically linked musl, runs on Debian 9+ / Ubuntu 16.04+, no extra packages needed):
@@ -174,11 +176,40 @@ Each asset is published with a matching \`.sha256\` next to it.
 
 **Previous build.** Every asset above is also here once more with \`.previous\` before its extension, for instance \`https://codeberg.org/${CI_REPO}/releases/download/nightly/leviculum-nightly-amd64.previous.deb\` and its \`.previous.deb.sha256\`. That is the build this one replaced, exactly one build older, kept as a fallback should this one misbehave; the next run replaces it in turn. \`dpkg-deb -I leviculum-nightly-amd64.previous.deb\` shows its version, which ends in the date and commit it was built from.
 
-Current build: \`${BUILD_ID}\` (commit \`${CI_COMMIT_SHA}\`, built with \`${RUSTC_VERSION}\`)
-
 Verify with \`lnsd --version\` after install.
 EOF
 )
+
+# The release's name carries the build's date and commit (PUB-0023). Forgejo
+# heads the releases page with the release's creation time, which for a rolling
+# release is the day it was first created and never moves; the name is the
+# line beside it that this script can change. The date is the UTC build date
+# out of the build id (`nightly.<YYYYMMDD>-<sha7>[+<n>]`, scripts/deb-stamp.sh),
+# so a republish of an older dist/ names the day it was built, not the day it
+# went up; an id without one falls back to today.
+#
+# `published_at` would be the better fix and is not available: Forgejo's
+# EditReleaseOption (codeberg.org/swagger.v1.json, Forgejo 16.0.0-dev) accepts
+# tag_name, target_commitish, name, body, draft, prerelease and
+# hide_archive_links, nothing else. Sending it anyway would be worse than
+# leaving it out: the decoder ignores an unknown field, so the PATCH answers
+# 2xx and the date stays where it was, with nothing to fall back on.
+release_name() {  # <build id> <commit sha>
+    local date
+    if [[ "$1" =~ ^nightly\.([0-9]{4})([0-9]{2})([0-9]{2})- ]]; then
+        date="${BASH_REMATCH[1]}-${BASH_REMATCH[2]}-${BASH_REMATCH[3]}"
+    else
+        date="$(date -u +%Y-%m-%d)"
+    fi
+    printf 'Nightly builds, %s (%s)\n' "$date" "${2:0:7}"
+}
+RELEASE_NAME="$(release_name "$BUILD_ID" "$CI_COMMIT_SHA")"
+
+# The PATCH that refreshes an existing release: name and body in one request,
+# so the page never shows one build's name over another build's body.
+release_patch_payload() {  # <name> <body>
+    jq -n --arg name "$1" --arg body "$2" '{name:$name, body:$body}'
+}
 
 # The assets, listed before the first forge request: an empty dist/ is refused
 # without touching the release, and a dry run has everything it reports.
@@ -211,7 +242,8 @@ previous_name() {  # <asset name>
 
 if [ "$DRY_RUN" = "1" ]; then
     echo "[publish] DRY RUN (LEVICULUM_PUBLISH_DRY_RUN=1): no forge request is made."
-    echo "[publish] would refresh the body of release tag=${TAG} on ${CI_REPO}, build ${BUILD_ID}"
+    echo "[publish] would refresh the name and body of release tag=${TAG} on ${CI_REPO}, build ${BUILD_ID}"
+    echo "[publish]   name: ${RELEASE_NAME}"
     for f in "${ASSETS[@]}"; do
         echo "[publish]   would rename $(basename "$f") → $(previous_name "$(basename "$f")"), where the release holds it"
     done
@@ -394,8 +426,9 @@ if [ -z "$release_id" ]; then
     status=$(jq -n \
         --arg tag "$TAG" \
         --arg target "$BRANCH" \
+        --arg name "$RELEASE_NAME" \
         --arg body "$RELEASE_BODY" \
-        '{tag_name:$tag, target_commitish:$target, name:"Nightly Builds", body:$body, draft:false, prerelease:true}' \
+        '{tag_name:$tag, target_commitish:$target, name:$name, body:$body, draft:false, prerelease:true}' \
         | api -X POST -H "$AUTH_HEADER" -H "Content-Type: application/json" \
             "$API/repos/$CI_REPO/releases" -d @-)
     ok "$status" || die "create failed: HTTP $status"
@@ -403,13 +436,11 @@ if [ -z "$release_id" ]; then
     [ -n "$release_id" ] || die "create returned HTTP $status with no release id:"
     echo "[publish] created release id=${release_id}"
 else
-    echo "[publish] found release id=${release_id}, refreshing body"
-    status=$(jq -n \
-        --arg body "$RELEASE_BODY" \
-        '{body:$body}' \
+    echo "[publish] found release id=${release_id}, refreshing name and body"
+    status=$(release_patch_payload "$RELEASE_NAME" "$RELEASE_BODY" \
         | api -X PATCH -H "$AUTH_HEADER" -H "Content-Type: application/json" \
             "$API/repos/$CI_REPO/releases/$release_id" -d @-)
-    ok "$status" || die "body refresh failed: HTTP $status"
+    ok "$status" || die "name and body refresh failed: HTTP $status"
     release_assets_json=$(echo "$release_json" | jq -c '.assets // []')
 fi
 

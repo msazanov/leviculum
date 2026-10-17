@@ -320,10 +320,12 @@ setup() {  # <case> [empty-dist|with-previous]
     fi
 }
 
+# The build id has deb-stamp.sh's shape, with a date that is not today, so a
+# release name taken from the clock instead of the id is visible (PUB-0023).
 run_publish() {
     ( cd "$TREE" && PATH="$BIN:$PATH" \
         CI_REPO="Lew_Palm/leviculum" CI_COMMIT_SHA="deadbeefcafe" \
-        CODEBERG_TOKEN="fixture-token" LEVICULUM_BUILD_ID="fixture-build" \
+        CODEBERG_TOKEN="fixture-token" LEVICULUM_BUILD_ID="${FIXTURE_BUILD_ID:-nightly.20260102-deadbee+3}" \
         bash "$TREE/scripts/publish-nightly.sh" ) > "$FAKE_DIR/out" 2>&1
     echo $? > "$FAKE_DIR/rc"
 }
@@ -384,6 +386,38 @@ fi
 # Defect 1 and defect 2 together: the run must fail, and the previous build's
 # assets must all still be downloadable afterwards — under their own names
 # (#323: the renames are undone) and with the fallback generation beside them.
+# --- Case: the release PATCH names the build -----------------------------
+#
+# PUB-0023: the releases page headed the rolling release with its creation
+# day, months old, because the refresh PATCHed the body alone. The PATCH now
+# carries the name, with the build's date and commit, and the body opens with
+# the `Current build:` line instead of ending with it. The payload is read
+# from the request journal, so this is what the forge received.
+echo "[case] release-patch-names-the-build"
+before=$failures
+setup release-patch
+run_publish
+[ "$(rc)" = "0" ] || fail "exit $(rc), expected 0"
+patch=$(jq -c 'select(has("body"))' "$FAKE_DIR/bodies")
+[ "$(jq -r '.name' <<< "$patch")" = "Nightly builds, 2026-01-02 (deadbee)" ] \
+    || fail "the release PATCH names '$(jq -r '.name' <<< "$patch")', expected the build's date and commit"
+first_line=$(jq -r '.body' <<< "$patch" | head -1)
+[[ "$first_line" == "Current build: \`nightly.20260102-deadbee+3\`"* ]] \
+    || fail "the release body opens with '$first_line', expected the Current build line"
+[ "$(jq -r 'keys | join(",")' <<< "$patch")" = "body,name" ] \
+    || fail "the release PATCH sends $(jq -r 'keys | join(",")' <<< "$patch"), expected body and name only"
+# An id without a date (a hand run) names the day it was published.
+setup release-patch-no-date
+today_before=$(date -u +%Y-%m-%d)
+FIXTURE_BUILD_ID="hand-build" run_publish
+today_after=$(date -u +%Y-%m-%d)
+name=$(jq -r 'select(has("body")) | .name' "$FAKE_DIR/bodies")
+case "$name" in
+    "Nightly builds, $today_before (deadbee)" | "Nightly builds, $today_after (deadbee)") ;;
+    *) fail "an id without a date named the release '$name', expected today" ;;
+esac
+[ "$failures" -eq "$before" ] || dumplog
+
 echo "[case] upload-fails"
 before=$failures
 setup upload-fails with-previous
