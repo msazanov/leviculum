@@ -1520,8 +1520,9 @@ fn settle_handovers(
         if now > front.deadline {
             tracing::debug!(
                 target: "leviculum_std::interfaces::rnode::tx_trace",
-                "LORA_TX_ACCOUNT iface={name} len={} verdict=undecided reason=chtm_late",
-                front.payload_len
+                "LORA_TX_ACCOUNT iface={name} len={} verdict=undecided reason=chtm_late ph={}",
+                front.payload_len,
+                PhField(front.ph)
             );
             continue;
         }
@@ -5856,6 +5857,53 @@ mod tests {
         );
         assert!(
             drops[1].ends_with("reason=no_chtm ph=-"),
+            "an untagged frame prints ph=-: {}",
+            drops[1]
+        );
+    }
+
+    /// 819: a reading that arrives past a pending frame's deadline drops it
+    /// unjudged, and that drop line names the dropped packet the way the
+    /// no_chtm line does (817), so a journey ends there; an untagged frame
+    /// prints `ph=-`.
+    #[test]
+    fn test_a_chtm_late_drop_names_the_dropped_packet() {
+        const LATE: FrameTag = [0x0a, 0x1b, 0x2c, 0x3d, 0x4e, 0x5f, 0x60, 0x71];
+        let counters = InterfaceCounters::new();
+        let (buf, guard) = capture_logs();
+        let mut pendings: VecDeque<PendingHandover> = VecDeque::new();
+        let tagged = |ph| PendingHandover {
+            ph,
+            ..pending(42, false, Duration::from_millis(0))
+        };
+        pendings.push_back(tagged(Some(LATE)));
+        pendings.push_back(tagged(None));
+        let late = settle_handovers(
+            "t",
+            &counters,
+            &mut pendings,
+            &frozen_chtm(),
+            tokio::time::Instant::now() + CHTM_PERIOD + Duration::from_millis(50),
+            unix_ms(),
+        );
+        drop(guard);
+        assert!(late.is_none(), "a late reading re-hands nothing");
+        assert!(pendings.is_empty(), "both frames are dropped unjudged");
+        let logs = captured(&buf);
+        let drops: Vec<&str> = logs
+            .lines()
+            .filter(|l| l.contains("reason=chtm_late"))
+            .collect();
+        assert_eq!(drops.len(), 2, "one line per dropped frame:\n{logs}");
+        assert!(
+            drops[0].contains(
+                "LORA_TX_ACCOUNT iface=t len=42 verdict=undecided reason=chtm_late ph=0a1b2c3d4e5f6071"
+            ),
+            "the tagged frame is dropped and named: {}",
+            drops[0]
+        );
+        assert!(
+            drops[1].ends_with("reason=chtm_late ph=-"),
             "an untagged frame prints ph=-: {}",
             drops[1]
         );

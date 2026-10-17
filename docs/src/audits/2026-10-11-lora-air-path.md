@@ -106,7 +106,7 @@ remainder owed and serves it on the next turn
 `leviculum-nrf/channel-access/src/lib.rs:443-465`;
 `leviculum-nrf/src/lora.rs:2052-2085`) — same shape, same reason. Our
 *host* serves its drawn wait as an uninterruptible sleep
-(`leviculum-std/src/interfaces/rnode.rs:2883-2898`): it cannot sense
+(`leviculum-std/src/interfaces/rnode.rs:2884-2899`): it cannot sense
 the medium, the modem under it can and does. On the air: equivalent
 within one draw. Class: agreement in substance; noted because the three
 spell it differently.
@@ -426,7 +426,7 @@ Verified byte-for-byte against the firmware's indications: CHTM
 cw_min, cw_max; consumed into the hold pricing via `FirmwareCsma`,
 `leviculum-std/src/interfaces/rnode.rs:973` — Python only logs them),
 RSSI/SNR (offset 157, SNR × 0.25; `apply_radio_stat`,
-`leviculum-std/src/interfaces/rnode.rs:2023`, matching
+`leviculum-std/src/interfaces/rnode.rs:2024`, matching
 `reference/Reticulum/RNS/Interfaces/RNodeInterface.py:878-880`), and
 the CMD_READY query protocol
 (`reference/RNode_Firmware/RNode_Firmware.ino:1003-1008`,
@@ -493,7 +493,7 @@ Two asymmetries, neither a defect of ours:
    flush-vs-pop decision and its 14 kbps threshold
    (`tx_hold` docs, `leviculum-std/src/interfaces/rnode.rs:1056-1120`),
    the CHTM-follows-every-drain argument in `apply_radio_stat`
-   (`leviculum-std/src/interfaces/rnode.rs:2050-2132`), the ESP32
+   (`leviculum-std/src/interfaces/rnode.rs:2051-2133`), the ESP32
    `init_channel_stats` reset
    (`docs/src/concepts/regulatory-airtime.md`, against
    `reference/RNode_Firmware/RNode_Firmware.ino:523`), the two-bin

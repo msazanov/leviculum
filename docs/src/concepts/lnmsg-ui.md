@@ -255,7 +255,7 @@ The pieces exist. `leviculum_core::rnode::airtime_ms`
 (`leviculum-core/src/rnode.rs:1701`) are public, interfaces report a
 `bitrate` (`leviculum-std/src/interfaces/mod.rs:643-645`) computed from
 spreading factor, coding rate and bandwidth
-(`compute_bitrate`, `leviculum-std/src/interfaces/rnode.rs:3307`), and
+(`compute_bitrate`, `leviculum-std/src/interfaces/rnode.rs:3308`), and
 `fetch_remote_status` (`leviculum-std/src/remote_status.rs:187`) retrieves
 the interface list from the daemon, which is how `lnstatus` works. Note two
 honesty constraints: `fetch_remote_status` needs the management authkey,
