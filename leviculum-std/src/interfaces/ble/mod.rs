@@ -1153,7 +1153,10 @@ impl BleTask {
                 let (admission, displaced) = table.admit(identity, addr.0, Role::Central, mtu, now);
                 match admission {
                     Admission::Accept => {
-                        scheduler.note_reset(now);
+                        // A connection event, but the clock starts over
+                        // only when no outgoing slot is left (812): with
+                        // one free, the phase it was dialled in runs on.
+                        scheduler.note_central_up(table.may_dial(), now);
                         // The dial landed: the handshake completing ends
                         // the setup, so the queue's one-in-flight slot
                         // frees here (the eager spec's clock keeps

@@ -654,6 +654,12 @@ Toolchain: Rust 1.97.1
 
 ### Fixed
 
+- A BLE dial of lnsd's that lands with an outgoing slot still free no
+  longer restarts the 30 s fallback clock, so a node only fallbacks can
+  link out pays one clock for its outgoing links, not one per link; in
+  the twenty-node room the last link moved from 78 to 119 s to 52 to
+  63 s across three seeds (refs #723).
+
 - A BLE dial that lnsd made and the peer refused full no longer costs a
   whole 30 s fallback clock: the fallback is back one advertising interval
   later and elects the next candidate (`BLE_DIAL_REFUSED`, refs #723).

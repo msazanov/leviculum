@@ -1733,12 +1733,20 @@ fn bad_allowlist_entry(key: &str, entry: &str) -> String {
 /// own [`CandidateTable`], so which peer gets dialled is decided by the
 /// identical code on both stacks.
 ///
-/// One rule is lnsd's alone (810): a dial the peer refused
-/// ([`Self::note_refused`]) starts a strict phase of one
-/// [`PEER_ADV_INTERVAL_MS`], not a fallback clock.
+/// Two rules are lnsd's alone. A dial the peer refused
+/// ([`Self::note_refused`], 810) starts a strict phase of one
+/// [`PEER_ADV_INTERVAL_MS`], not a fallback clock. And a dial of ours
+/// that lands with an outgoing slot still free does not reset the clock
+/// ([`Self::note_central_up`], 812): the phase it was dialled in runs
+/// on, so a node only fallbacks can link out pays one clock for its
+/// outgoing links, not one per link.
 pub(crate) struct ScanScheduler {
     /// When the current strict phase began.
     strict_since_ms: u64,
+    /// The phase's start and bound as the last event set them, which a
+    /// `busy` hold leaves alone (812): what [`Self::note_central_up`]
+    /// resumes when a dial lands with an outgoing slot still free.
+    phase: (u64, u64),
     /// How long this strict phase lasts: [`SCAN_FALLBACK_AFTER_MS`],
     /// or one [`PEER_ADV_INTERVAL_MS`] when a refusal began it (810).
     bound_ms: u64,
@@ -1763,6 +1771,7 @@ impl ScanScheduler {
         Self {
             strict_since_ms: now_ms,
             bound_ms: SCAN_FALLBACK_AFTER_MS,
+            phase: (now_ms, SCAN_FALLBACK_AFTER_MS),
             refused: None,
             announced: false,
             window: None,
@@ -1774,12 +1783,15 @@ impl ScanScheduler {
     /// of ours is in flight or a handshake is pending (either role) —
     /// NOT "any link" (#375 part 3): while true the clock is held at
     /// zero, because the in-flight attempt's outcome is about to reset
-    /// it anyway. The second value is the elapsed time to log as
+    /// it anyway, or, for a dial that lands with an outgoing slot still
+    /// free, to resume the phase the hold leaves untouched (812). The second value is the elapsed time to log as
     /// `BLE_SCAN_FALLBACK`, returned exactly once per strict phase that
     /// reaches the bound.
     pub(crate) fn mode(&mut self, busy: bool, now_ms: u64) -> (ScanMode, Option<u64>) {
         if busy {
-            self.note_reset(now_ms);
+            self.strict_since_ms = now_ms;
+            self.bound_ms = SCAN_FALLBACK_AFTER_MS;
+            self.announced = false;
             return (ScanMode::Strict, None);
         }
         let elapsed = now_ms.saturating_sub(self.strict_since_ms);
@@ -1794,10 +1806,31 @@ impl ScanScheduler {
     /// A connection formed or ended: the strict phase starts over, as
     /// the firmware resets its clock at every connection event and
     /// teardown (#375 §0 — resetting only at identity left a gap the
-    /// rig's fallback fired into).
+    /// rig's fallback fired into). A dial of ours that lands goes
+    /// through [`Self::note_central_up`] instead (812).
     pub(crate) fn note_reset(&mut self, now_ms: u64) {
         self.strict_since_ms = now_ms;
         self.bound_ms = SCAN_FALLBACK_AFTER_MS;
+        self.phase = (now_ms, SCAN_FALLBACK_AFTER_MS);
+        self.announced = false;
+    }
+
+    /// A dial of ours landed (812). With an outgoing slot still free
+    /// the running clock continues: the phase the last event began
+    /// ([`Self::note_reset`], [`Self::note_refused`], a strict-class
+    /// choice) is resumed, as if the dial's `busy` hold had not
+    /// happened, so a node whose strict class cannot reach it pays one
+    /// fallback clock for all its outgoing links, not one per link.
+    /// The landing that fills the last outgoing slot is a connection
+    /// event like any other and resets the clock. A resumed phase that
+    /// is already past its bound announces `BLE_SCAN_FALLBACK` again,
+    /// so the log shows the fallback re-entered at the link-up.
+    pub(crate) fn note_central_up(&mut self, may_dial: bool, now_ms: u64) {
+        if !may_dial {
+            self.note_reset(now_ms);
+            return;
+        }
+        (self.strict_since_ms, self.bound_ms) = self.phase;
         self.announced = false;
     }
 
@@ -1814,6 +1847,7 @@ impl ScanScheduler {
     pub(crate) fn note_refused(&mut self, addr: Addr, now_ms: u64) {
         self.strict_since_ms = now_ms;
         self.bound_ms = PEER_ADV_INTERVAL_MS;
+        self.phase = (now_ms, PEER_ADV_INTERVAL_MS);
         self.announced = false;
         self.refused = Some((addr, now_ms + PEER_ADV_INTERVAL_MS));
         self.forget(&addr);
@@ -3529,6 +3563,88 @@ mod tests {
             s.poll(reopened + 10 + SCAN_WINDOW_COLLECT_MS)
                 .map(|(a, _, _)| a),
             Some(ADDR_1)
+        );
+    }
+
+    /// 812, `ble_room_20` on the 2026-10-17 nightly and in 810's runs:
+    /// node 19, both peripheral slots full at 4.7 s, can link out only
+    /// through fallbacks, and before 812 each of its fallback links
+    /// reset the clock, so it paid one whole 30 s clock per link (links
+    /// at 42 s and 81 s). A dial that lands with an outgoing slot still
+    /// free now leaves the running clock alone: the strict phase that
+    /// began at 0 passed its bound when the first window opened at
+    /// 30 s, so the fallback is open again at the instant the first
+    /// link lands, not 30 s later. The link that fills the last
+    /// outgoing slot resets the clock as before.
+    #[test]
+    fn a_fallback_link_with_an_outgoing_slot_free_keeps_the_clock_running() {
+        let mut s = ScanScheduler::new(0);
+        let mut t = LinkTable::new(OWN, DEFAULT_MAX_LINKS, 2);
+        let start = SCAN_FALLBACK_AFTER_MS;
+        assert_eq!(s.mode(false, start), (ScanMode::Fallback, Some(start)));
+        let fallback = ConnectDecision::InitiateFallback;
+        s.offer(ADDR_1, None, fallback, Some(1), start);
+        let closed = start + SCAN_WINDOW_COLLECT_MS;
+        assert_eq!(s.poll(closed).map(|(a, _, _)| a), Some(ADDR_1));
+        s.forget_rest();
+        // The dial is in flight: the clock is held, as before.
+        assert_eq!(s.mode(true, closed + 500), (ScanMode::Strict, None));
+        let landed = closed + 900;
+        assert_eq!(
+            t.admit(ID_A, ADDR_1, Role::Central, 185, landed).0,
+            Admission::Accept
+        );
+        assert!(t.may_dial(), "one of two outgoing slots is still free");
+        s.note_central_up(t.may_dial(), landed);
+        assert_eq!(
+            s.mode(false, landed),
+            (ScanMode::Fallback, Some(landed)),
+            "the clock that opened the first window is still running"
+        );
+        // The next window elects the next peer at once.
+        s.offer(ADDR_2, None, fallback, Some(1), landed);
+        let closed = landed + SCAN_WINDOW_COLLECT_MS;
+        assert_eq!(s.poll(closed).map(|(a, _, _)| a), Some(ADDR_2));
+        s.forget_rest();
+        // The second link fills the last outgoing slot: the strict
+        // phase starts over, as at every connection event before 812.
+        let landed = closed + 900;
+        assert_eq!(
+            t.admit(ID_B, ADDR_2, Role::Central, 185, landed).0,
+            Admission::Accept
+        );
+        assert!(!t.may_dial());
+        s.note_central_up(t.may_dial(), landed);
+        assert_eq!(
+            s.mode(false, landed + SCAN_FALLBACK_AFTER_MS - 1).0,
+            ScanMode::Strict
+        );
+        assert_eq!(
+            s.mode(false, landed + SCAN_FALLBACK_AFTER_MS),
+            (ScanMode::Fallback, Some(SCAN_FALLBACK_AFTER_MS))
+        );
+    }
+
+    /// 812 resumes the phase that events set, not the one a `busy`
+    /// hold left: a strict-class choice starts the phase, the dial's
+    /// flight holds the clock, and a landing with a slot still free
+    /// counts the bound from the choice, not from the landing.
+    #[test]
+    fn a_landing_with_a_slot_free_resumes_the_phase_the_choice_began() {
+        let mut s = ScanScheduler::new(0);
+        let strict = ConnectDecision::InitiateLowerAddress;
+        s.offer(ADDR_1, None, strict, Some(1), 1_000);
+        let chosen = 1_000 + SCAN_WINDOW_COLLECT_MS;
+        assert_eq!(s.poll(chosen).map(|(a, _, _)| a), Some(ADDR_1));
+        assert_eq!(s.mode(true, chosen + 4_000), (ScanMode::Strict, None));
+        s.note_central_up(true, chosen + 5_000);
+        assert_eq!(
+            s.mode(false, chosen + SCAN_FALLBACK_AFTER_MS - 1).0,
+            ScanMode::Strict
+        );
+        assert_eq!(
+            s.mode(false, chosen + SCAN_FALLBACK_AFTER_MS),
+            (ScanMode::Fallback, Some(SCAN_FALLBACK_AFTER_MS))
         );
     }
 

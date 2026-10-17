@@ -247,6 +247,17 @@ time the peer's fresh zero needs to reach us), and the refused peer
 sits that interval out, where an ordinary teardown waits out the whole
 30 s clock again. In the twenty-node room on 2026-10-17 one such refusal
 moved the last link of the room out by a full clock (810).
+Nor does lnsd restart the clock when a dial of its own lands while an
+outgoing slot is still free: the strict phase the dial was made in runs
+on (`ScanScheduler::note_central_up`), and only the link that fills the
+last outgoing slot is a connection event that resets it, as every
+connection event does on a board. A node whose incoming slots filled
+early and whose strict class cannot reach it links out only through
+fallbacks, and before this it paid one whole clock per fallback link.
+That node sets the twenty-node room's last link in every seed, and on
+2026-10-17 its last link moved from between 77.9 and 118.5 s in the
+nightly's three seeds to between 51.5 and 62.6 s, with the room's shape
+unchanged (812).
 
 Two consequences of dialling against the sort are deliberate:
 
