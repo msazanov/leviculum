@@ -1451,6 +1451,26 @@ struct PendingHandover {
 /// copies forever.
 const PENDING_HANDOVERS_MAX: usize = 8;
 
+/// Records a frame just handed to the modem for settlement by the next
+/// `CMD_STAT_CHTM` ([`settle_handovers`]), dropping the oldest pending one
+/// unjudged when [`PENDING_HANDOVERS_MAX`] are already waiting. A modem that
+/// answers with no CHTM at all cannot be accounted against; it must not cost
+/// memory either. The drop line names the dropped packet's `ph` (817), so a
+/// journey that ends in an unanswered accounting ends on this line.
+fn record_handover(name: &str, pendings: &mut VecDeque<PendingHandover>, handed: PendingHandover) {
+    if pendings.len() >= PENDING_HANDOVERS_MAX {
+        if let Some(dropped) = pendings.pop_front() {
+            tracing::debug!(
+                target: "leviculum_std::interfaces::rnode::tx_trace",
+                "LORA_TX_ACCOUNT iface={name} len={} verdict=undecided reason=no_chtm ph={}",
+                dropped.payload_len,
+                PhField(dropped.ph)
+            );
+        }
+    }
+    pendings.push_back(handed);
+}
+
 /// Settle the frames the modem has not yet accounted for against a
 /// `CMD_STAT_CHTM` that has just arrived, oldest first.
 ///
@@ -3156,42 +3176,35 @@ where
                         rnode::derive_preamble_symbols(sf, cr, bandwidth_hz),
                     );
                     let due = tokio::time::Instant::now() + Duration::from_millis(hold.held_ms);
-                    if pendings.len() >= PENDING_HANDOVERS_MAX {
-                        // A modem that answers with no CHTM at all cannot be
-                        // accounted against; it must not cost memory either.
-                        if let Some(dropped) = pendings.pop_front() {
-                            tracing::debug!(
-                                target: "leviculum_std::interfaces::rnode::tx_trace",
-                                "LORA_TX_ACCOUNT iface={name} len={} verdict=undecided reason=no_chtm",
-                                dropped.payload_len
-                            );
-                        }
-                    }
-                    pendings.push_back(PendingHandover {
-                        data: queued.data,
-                        payload_len: queued.payload_len,
-                        high_priority: queued.high_priority,
-                        ph: queued.ph,
-                        is_rehand: queued.rehand,
-                        enqueued_ms: queued.enqueued_ms,
-                        handed_unix_ms: unix_ms(),
-                        due,
-                        deadline: due + CHTM_PERIOD,
-                        account: AirtimeAccount {
-                            baseline_short,
-                            baseline_long,
-                            // Filled in from the CHTM under judgement; a
-                            // reading identical to the baseline is what the
-                            // accusation is made of, so that is the honest
-                            // initial value.
-                            observed_short: baseline_short,
-                            observed_long: baseline_long,
-                            observed_load_short: 0,
-                            expected_short: expected_airtime_raw(charged_ms),
-                            hold_ms: hold.held_ms,
-                            lock: alock,
+                    record_handover(
+                        &name,
+                        &mut pendings,
+                        PendingHandover {
+                            data: queued.data,
+                            payload_len: queued.payload_len,
+                            high_priority: queued.high_priority,
+                            ph: queued.ph,
+                            is_rehand: queued.rehand,
+                            enqueued_ms: queued.enqueued_ms,
+                            handed_unix_ms: unix_ms(),
+                            due,
+                            deadline: due + CHTM_PERIOD,
+                            account: AirtimeAccount {
+                                baseline_short,
+                                baseline_long,
+                                // Filled in from the CHTM under judgement; a
+                                // reading identical to the baseline is what the
+                                // accusation is made of, so that is the honest
+                                // initial value.
+                                observed_short: baseline_short,
+                                observed_long: baseline_long,
+                                observed_load_short: 0,
+                                expected_short: expected_airtime_raw(charged_ms),
+                                hold_ms: hold.held_ms,
+                                lock: alock,
+                            },
                         },
-                    });
+                    );
                 }
             } else {
                 // Nothing left to send: the burst is over and the channel
@@ -4695,7 +4708,7 @@ mod tests {
     // the test thread. Shared with the `serial` and `local` test modules,
     // which each carried their own copy until Codeberg #290; the shared helper
     // is where that finding's callsite-interest pinning lives.
-    use crate::test_support::log_capture::capture_logs;
+    use crate::test_support::log_capture::{capture_logs, captured};
 
     /// In-process RNode firmware stub over one half of a `tokio::io::duplex`
     /// pair. Answers the detect probe (so firmware validation passes) and echoes
@@ -5799,6 +5812,53 @@ mod tests {
                 ..idle_account()
             },
         }
+    }
+
+    /// 817: a modem that never answers with CHTM fills the pending queue,
+    /// and the handover past [`PENDING_HANDOVERS_MAX`] drops the oldest
+    /// frame unjudged. That drop line names the dropped packet, so a
+    /// journey ends there; an untagged frame prints `ph=-`.
+    #[test]
+    fn test_a_no_chtm_drop_names_the_dropped_packet() {
+        const OLDEST: FrameTag = [0x0a, 0x1b, 0x2c, 0x3d, 0x4e, 0x5f, 0x60, 0x71];
+        let (buf, guard) = capture_logs();
+        let mut pendings: VecDeque<PendingHandover> = VecDeque::new();
+        let tagged = |ph| PendingHandover {
+            ph,
+            ..pending(42, false, Duration::from_secs(1))
+        };
+        record_handover("t", &mut pendings, tagged(Some(OLDEST)));
+        record_handover("t", &mut pendings, tagged(None));
+        for _ in 2..PENDING_HANDOVERS_MAX {
+            record_handover("t", &mut pendings, tagged(Some([0xff; 8])));
+        }
+        assert_eq!(pendings.len(), PENDING_HANDOVERS_MAX);
+        assert!(
+            !captured(&buf).contains("reason=no_chtm"),
+            "nothing is dropped below the cap"
+        );
+        record_handover("t", &mut pendings, tagged(None));
+        record_handover("t", &mut pendings, tagged(None));
+        drop(guard);
+        assert_eq!(pendings.len(), PENDING_HANDOVERS_MAX);
+        let logs = captured(&buf);
+        let drops: Vec<&str> = logs
+            .lines()
+            .filter(|l| l.contains("reason=no_chtm"))
+            .collect();
+        assert_eq!(drops.len(), 2, "one line per dropped frame:\n{logs}");
+        assert!(
+            drops[0].contains(
+                "LORA_TX_ACCOUNT iface=t len=42 verdict=undecided reason=no_chtm ph=0a1b2c3d4e5f6071"
+            ),
+            "the oldest frame is dropped and named: {}",
+            drops[0]
+        );
+        assert!(
+            drops[1].ends_with("reason=no_chtm ph=-"),
+            "an untagged frame prints ph=-: {}",
+            drops[1]
+        );
     }
 
     /// A CHTM that reports the idle account's own ledger back, unmoved.
