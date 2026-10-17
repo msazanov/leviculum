@@ -579,6 +579,15 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
             "until_ms",
         ],
     },
+    // A dial of ours the peer refused (810): central link, no frame
+    // heard, gone `lived_ms` after its admission (under
+    // `REFUSAL_WINDOW_MS`).
+    // The fallback is back `fallback_in_ms` later, one advertising
+    // interval, instead of a whole fallback clock.
+    EventSchema {
+        name: "BLE_DIAL_REFUSED",
+        required_keys: &["iface", "addr", "lived_ms", "fallback_in_ms"],
+    },
     // A sighting the scan decision discarded as no Columba peer (577):
     // `reason` is `no_service_uuid` or `record_without_service_uuid`,
     // the second the #443 signature (our record, but a stored device

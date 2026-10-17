@@ -246,6 +246,13 @@ pub(crate) struct Link {
     /// input; round 2 reports it and consults none of it.
     last_data_ms: Option<u64>,
     last_keepalive_tx_ms: u64,
+    /// When the link was admitted: [`LinkTable::refused_dial`] reads
+    /// how long a dial of ours lived before the peer let it go (810).
+    admitted_ms: u64,
+    /// Whether the peer has delivered any frame since admission,
+    /// keepalives included: a peer that refused the link sends none
+    /// (810).
+    heard_any: bool,
 }
 
 /// A `Vec`'s census figures (597): `(entries, bytes of the entries, bytes
@@ -738,8 +745,24 @@ impl LinkTable {
             last_heard_ms: now_ms,
             last_data_ms: None,
             last_keepalive_tx_ms: now_ms,
+            admitted_ms: now_ms,
+            heard_any: false,
         });
         (Admission::Accept, displaced)
+    }
+
+    /// Whether the link at `addr`, ending now, was a dial of ours the
+    /// peer refused (810): central role, not one frame heard from the
+    /// peer, gone within [`REFUSAL_WINDOW_MS`] of its admission. The
+    /// peer sends no refusal on the air; it disconnects at our
+    /// handshake write (`BLE_LINK_REJECT reason="full"` on its side),
+    /// and this is what that looks like from ours. Returns how long the
+    /// link lived.
+    pub(crate) fn refused_dial(&self, addr: &Addr, now_ms: u64) -> Option<u64> {
+        let link = self.links.iter().find(|l| &l.addr == addr)?;
+        let lived_ms = now_ms.saturating_sub(link.admitted_ms);
+        (link.role == Role::Central && !link.heard_any && lived_ms < REFUSAL_WINDOW_MS)
+            .then_some(lived_ms)
     }
 
     /// Remove the link at `addr` (carrier reported it down). Returns what
@@ -859,6 +882,7 @@ impl LinkTable {
         // duplicate rule's abandonment test read — which is why a
         // keepalive-fed idle link outlives a rotated peer's dial (#360).
         link.last_heard_ms = now_ms;
+        link.heard_any = true;
         // Keepalives are still filtered before reassembly.
         if data.len() < FRAGMENT_HEADER_SIZE {
             return Inbound::Keepalive;
@@ -1708,9 +1732,19 @@ fn bad_allowlist_entry(key: &str, entry: &str) -> String {
 /// sightings collect for [`SCAN_WINDOW_COLLECT_MS`] into the firmware's
 /// own [`CandidateTable`], so which peer gets dialled is decided by the
 /// identical code on both stacks.
+///
+/// One rule is lnsd's alone (810): a dial the peer refused
+/// ([`Self::note_refused`]) starts a strict phase of one
+/// [`PEER_ADV_INTERVAL_MS`], not a fallback clock.
 pub(crate) struct ScanScheduler {
     /// When the current strict phase began.
     strict_since_ms: u64,
+    /// How long this strict phase lasts: [`SCAN_FALLBACK_AFTER_MS`],
+    /// or one [`PEER_ADV_INTERVAL_MS`] when a refusal began it (810).
+    bound_ms: u64,
+    /// The peer that refused our last dial and the deadline until which
+    /// no window collects it (810).
+    refused: Option<(Addr, u64)>,
     /// Whether this phase's strict-to-fallback switch was already
     /// announced (`BLE_SCAN_FALLBACK` is logged once per phase).
     announced: bool,
@@ -1728,6 +1762,8 @@ impl ScanScheduler {
     pub(crate) fn new(now_ms: u64) -> Self {
         Self {
             strict_since_ms: now_ms,
+            bound_ms: SCAN_FALLBACK_AFTER_MS,
+            refused: None,
             announced: false,
             window: None,
             rest: None,
@@ -1747,7 +1783,7 @@ impl ScanScheduler {
             return (ScanMode::Strict, None);
         }
         let elapsed = now_ms.saturating_sub(self.strict_since_ms);
-        if elapsed < SCAN_FALLBACK_AFTER_MS {
+        if elapsed < self.bound_ms {
             return (ScanMode::Strict, None);
         }
         let announce = (!self.announced).then_some(elapsed);
@@ -1761,7 +1797,26 @@ impl ScanScheduler {
     /// rig's fallback fired into).
     pub(crate) fn note_reset(&mut self, now_ms: u64) {
         self.strict_since_ms = now_ms;
+        self.bound_ms = SCAN_FALLBACK_AFTER_MS;
         self.announced = false;
+    }
+
+    /// Our dial at `addr` ended in the peer's refusal
+    /// ([`LinkTable::refused_dial`], 810), the teardown the driver
+    /// would otherwise book as [`Self::note_reset`]. A refusal says
+    /// nothing about whether the sort works here, only that this peer
+    /// filled first, so the strict phase it starts lasts one
+    /// [`PEER_ADV_INTERVAL_MS`], the time the peer's fresh
+    /// `free_slots=0` needs to reach us, not a whole fallback clock.
+    /// The peer is taken out of any window and kept out of new ones
+    /// for the same interval, so the count it advertised before cannot
+    /// elect it again: the 757 stale-full skip's fresh-refusal twin.
+    pub(crate) fn note_refused(&mut self, addr: Addr, now_ms: u64) {
+        self.strict_since_ms = now_ms;
+        self.bound_ms = PEER_ADV_INTERVAL_MS;
+        self.announced = false;
+        self.refused = Some((addr, now_ms + PEER_ADV_INTERVAL_MS));
+        self.forget(&addr);
     }
 
     /// An eligible sighting — initiate verdict, every driver filter
@@ -1777,6 +1832,12 @@ impl ScanScheduler {
         free_slots: Option<u8>,
         now_ms: u64,
     ) {
+        if self
+            .refused
+            .is_some_and(|(refused, until)| refused == addr && now_ms < until)
+        {
+            return;
+        }
         let (_, table) = self
             .window
             .get_or_insert_with(|| (now_ms + SCAN_WINDOW_COLLECT_MS, CandidateTable::new()));
@@ -2058,6 +2119,19 @@ pub(crate) const PEER_ADV_INTERVAL_MS: u64 = 1_280;
 /// Until then a due dial whose peer the run has not heard waits
 /// ([`DialQueue::pop_ready`], 763): the run has not judged it yet.
 pub(crate) const DIAL_DARK_AFTER_MS: u64 = PEER_ADV_INTERVAL_MS;
+
+/// How soon after its admission a dial of ours may end, without one
+/// frame heard from the peer, and still read as the peer's refusal
+/// (810, [`LinkTable::refused_dial`]). The peer refuses at our
+/// handshake write and disconnects, and the dialler learns of it only
+/// when its next write to the link fails (`Not connected`): in the
+/// 2026-10-17 rooms the transport's next flood, 2.8 s to 4.0 s after
+/// `BLE_LINK_UP` in five refusals, and in a quiet room at the latest
+/// our first keepalive, one [`KEEPALIVE_INTERVAL_MS`] after admission.
+/// A second interval covers the tick that sends it. A link that heard
+/// nothing for that long has bought nothing the strict phase was for,
+/// so an ordinary end read as a refusal costs nothing either.
+pub(crate) const REFUSAL_WINDOW_MS: u64 = 2 * KEEPALIVE_INTERVAL_MS;
 
 /// Why a queued dial was dropped before it started (757), the
 /// `reason` of `BLE_DIAL_SKIP`.
@@ -3382,6 +3456,130 @@ mod tests {
             ScanMode::Strict,
             "a strict dial proves the sort works and restarts the clock"
         );
+    }
+
+    /// 810, `ble_room_20` seed 2 on the 2026-10-17 nightly: a stranded
+    /// scanner's fallback dial lands on a peer that fills in the same
+    /// fraction of a second and refuses it full. Nobody's fault, and
+    /// before 810 it cost a whole fallback clock, because the teardown
+    /// restarted the strict phase like any other (node 19: refused at
+    /// 45.4 s, next fallback 75.4 s). Now the fallback is back one
+    /// advertising interval after the refusal, the time the refused
+    /// peer's fresh `free_slots=0` needs to reach us, and the window it
+    /// opens elects the next candidate, not the refused peer on the
+    /// count it advertised before.
+    #[test]
+    fn a_refused_dial_costs_one_advertising_interval_not_a_fallback_clock() {
+        let mut s = ScanScheduler::new(0);
+        let mut t = table();
+        // Stranded: the bound passes, the window elects ADDR_1.
+        let start = SCAN_FALLBACK_AFTER_MS;
+        assert_eq!(s.mode(false, start).0, ScanMode::Fallback);
+        let fallback = ConnectDecision::InitiateFallback;
+        s.offer(ADDR_1, None, fallback, Some(1), start);
+        s.offer(ADDR_2, None, fallback, Some(1), start + 1);
+        let closed = start + SCAN_WINDOW_COLLECT_MS;
+        assert_eq!(s.poll(closed).map(|(a, _, _)| a), Some(ADDR_1));
+        s.forget_rest();
+        // The dial lands: a connection event, a fresh strict phase.
+        let landed = closed + 900;
+        assert_eq!(
+            t.admit(ID_A, ADDR_1, Role::Central, 185, landed).0,
+            Admission::Accept
+        );
+        s.note_reset(landed);
+        // The peer refused at our handshake write; its teardown
+        // reaches us 2.99 s later, nothing delivered meanwhile.
+        let gone = landed + 2_990;
+        assert_eq!(t.refused_dial(&ADDR_1, gone), Some(2_990));
+        s.note_refused(ADDR_1, gone);
+
+        assert_eq!(
+            s.mode(false, gone + PEER_ADV_INTERVAL_MS - 1).0,
+            ScanMode::Strict,
+            "the refused peer's fresh record is not on the air yet"
+        );
+        assert_eq!(
+            s.mode(false, gone + PEER_ADV_INTERVAL_MS),
+            (ScanMode::Fallback, Some(PEER_ADV_INTERVAL_MS)),
+            "one advertising interval, not a fallback clock"
+        );
+        // A sighting of the refused peer inside the interval still
+        // carries the free slot it no longer has; it is not collected,
+        // even under a verdict that would outrank every fallback one,
+        // and the window elects the next candidate.
+        let strict = ConnectDecision::InitiateLowerAddress;
+        s.offer(
+            ADDR_1,
+            None,
+            strict,
+            Some(1),
+            gone + PEER_ADV_INTERVAL_MS - 1,
+        );
+        let reopened = gone + PEER_ADV_INTERVAL_MS;
+        s.offer(ADDR_2, None, fallback, Some(1), reopened);
+        assert_eq!(
+            s.poll(reopened + SCAN_WINDOW_COLLECT_MS).map(|(a, _, _)| a),
+            Some(ADDR_2)
+        );
+        // Past the interval the peer is a candidate again; its fresh
+        // record says whether it has room (the driver's own filter).
+        s.offer(ADDR_1, None, fallback, Some(1), reopened + 10);
+        assert_eq!(
+            s.poll(reopened + 10 + SCAN_WINDOW_COLLECT_MS)
+                .map(|(a, _, _)| a),
+            Some(ADDR_1)
+        );
+    }
+
+    /// 810's classifier: only a dial of ours that ended without one
+    /// frame from the peer inside [`REFUSAL_WINDOW_MS`] reads as a
+    /// refusal. A link that heard a keepalive or a packet, one that
+    /// lived longer, and a peer's dial into us are ordinary teardowns
+    /// and restart the strict phase as before.
+    #[test]
+    fn only_a_short_silent_dial_of_ours_reads_as_a_refusal() {
+        let mut t = table();
+        assert_eq!(
+            t.admit(ID_A, ADDR_1, Role::Central, 185, 1_000).0,
+            Admission::Accept
+        );
+        assert_eq!(
+            t.refused_dial(&ADDR_1, 1_000 + REFUSAL_WINDOW_MS - 1),
+            Some(REFUSAL_WINDOW_MS - 1)
+        );
+        assert_eq!(
+            t.refused_dial(&ADDR_1, 1_000 + REFUSAL_WINDOW_MS),
+            None,
+            "lived too long"
+        );
+        // Any frame, a keepalive too, says the peer took the link.
+        let _ = t.central_frame(
+            ADDR_1,
+            &[leviculum_core::framing::ble::KEEPALIVE_BYTE],
+            1_500,
+        );
+        assert_eq!(t.refused_dial(&ADDR_1, 2_000), None, "it heard a keepalive");
+        let mut t = table();
+        assert_eq!(
+            t.admit(ID_A, ADDR_1, Role::Central, 185, 1_000).0,
+            Admission::Accept
+        );
+        let frags = fragment_packet(b"announce bytes", 185);
+        let _ = t.central_frame(ADDR_1, &frags[0], 1_600);
+        assert_eq!(t.refused_dial(&ADDR_1, 2_000), None, "it carried a packet");
+
+        let mut t = table();
+        assert_eq!(
+            t.admit(ID_B, ADDR_2, Role::Peripheral, 185, 1_000).0,
+            Admission::Accept
+        );
+        assert_eq!(
+            t.refused_dial(&ADDR_2, 2_000),
+            None,
+            "the peer's dial, not ours"
+        );
+        assert_eq!(t.refused_dial(&ADDR_1, 2_000), None, "no link at all");
     }
 
     /// 597: a `Vec` row's raw bytes are its entries, its estimate its

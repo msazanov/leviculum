@@ -235,7 +235,18 @@ accept our dial, so the dial could only end in a refusal or, since a
 full node goes dark and a dark node cannot even refuse, in the 20 s
 setup timeout. That is the one place the count gates instead of ranking,
 it gates only our own spending of a dial, and silence is still not
-zero.
+zero. A count can still go stale between the sighting and the
+connection: several searchers elect the same peer in one window, and
+the last to arrive is refused full. lnsd does not book that teardown
+as a fresh strict phase: a dial of its own that ends without one frame
+from the peer within two keepalive intervals of its admission
+(`REFUSAL_WINDOW_MS`, `BLE_DIAL_REFUSED`; the dialler learns of the
+refusal at its next write, the transport's next flood or at the latest
+its first keepalive) brings the fallback back after one advertising interval (1.28 s, the
+time the peer's fresh zero needs to reach us), and the refused peer
+sits that interval out, where an ordinary teardown waits out the whole
+30 s clock again. In the twenty-node room on 2026-10-17 one such refusal
+moved the last link of the room out by a full clock (810).
 
 Two consequences of dialling against the sort are deliberate:
 

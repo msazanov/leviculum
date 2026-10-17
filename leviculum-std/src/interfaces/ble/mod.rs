@@ -1223,7 +1223,25 @@ impl BleTask {
                 // as the firmware resets its clock at teardown. A setup
                 // that timed out or failed frees the queue's slot here
                 // (a completed one already freed it at admission).
-                scheduler.note_reset(now);
+                // Unless the peer refused the dial it had just taken
+                // (810): then the phase lasts one advertising interval,
+                // not a fallback clock, and the peer sits it out.
+                match table
+                    .refused_dial(&addr.0, now)
+                    .filter(|_| failure.is_none())
+                {
+                    Some(lived_ms) => {
+                        tracing::info!(
+                            event = "BLE_DIAL_REFUSED",
+                            iface = %Scalar(&self.name),
+                            addr = %hex12(&addr.0),
+                            lived_ms = lived_ms,
+                            fallback_in_ms = links::PEER_ADV_INTERVAL_MS,
+                        );
+                        scheduler.note_refused(addr.0, now);
+                    }
+                    None => scheduler.note_reset(now),
+                }
                 dial_queue.release(&addr.0, now);
                 central_pipes.remove(&addr.0);
                 if let Some((identity, _, role)) = table.remove_by_addr(&addr.0) {
