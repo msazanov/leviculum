@@ -125,6 +125,19 @@ lint-nrf:
     cd leviculum-nrf && RUSTDOCFLAGS="-D warnings" cargo doc -p leviculum-nrf --no-deps --features bsp-t114
     cd leviculum-nrf && RUSTDOCFLAGS="-D warnings" cargo doc -p leviculum-nrf --no-deps --features bsp-solarnode
 
+[doc('Lint, test and document the LR11xx driver')]
+lint-lr11xx:
+    cd leviculum-lr11xx && cargo clippy --target $(rustc -vV | sed -n 's/host: //p') --all-targets -- -D warnings
+    cd leviculum-lr11xx && cargo fmt --all -- --check
+    cd leviculum-lr11xx && cargo test --target $(rustc -vV | sed -n 's/host: //p')
+    cd leviculum-lr11xx && RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --target $(rustc -vV | sed -n 's/host: //p')
+    cd leviculum-lr11xx && cargo check --target thumbv7em-none-eabihf
+
+# Not in `fast`, for build-esp32's reason: the Xtensa compiler fork is optional per host.
+[doc('Check the LR11xx driver for the ESP32-S3 (needs the esp toolchain)')]
+check-lr11xx-esp32s3:
+    cd leviculum-lr11xx && bash -c '. ~/export-esp.sh && cargo +esp check --target xtensa-esp32s3-none-elf -Z build-std=core,alloc'
+
 # Build the ESP32-class firmware (Heltec WiFi LoRa 32 V4) and package the
 # flash image.
 #
@@ -1308,6 +1321,7 @@ tree-clean-selftest:
 # not-in-guards: lint-nrf -- cargo clippy over three firmware feature sets,
 #   plus the host members' clippy/test and the rustdoc gate for both halves
 #   (#367): minutes cold, and the embedded toolchain is a precondition
+# not-in-guards: lint-lr11xx -- clippy, tests and rustdoc of a separate workspace plus a thumbv7em cross-check, not a guard
 # not-in-guards: nrf-stack-frames -- 50 s (#316), it links the firmware ELFs
 # not-in-guards: nrf-store-gap -- 0.4 s in `fast` only because nrf-stack-frames
 #   linked those ELFs first; 40.3 s standing alone (74ec30ed)
@@ -1416,7 +1430,7 @@ guards: tree-snapshot tree-clean-selftest check-submodules check-third-party che
 # `check-all-targets` dependency compiles those targets but does not lint
 # them, which is exactly the gap.
 [doc('Tier 0 (~3.5 min): the gate every git push runs')]
-fast: tree-snapshot tree-clean-selftest check-submodules check-third-party check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest site-unpack-docs-selftest deb-stamp-selftest lock-contention-selftest toolchain-status-selftest sweep-selftest btvirt-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-test-ports check-ignored-source check-just-docs check-guards-subset check-standard-integ check-config-table-citations prepush-guard check-processor-seam mvr supervised-spawn lint-nrf nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck hw-witness check-fuzz-lock fuzz-selftest fuzz-regress notices-guard doc-touched doc-gate changelog-links core-no-tracing event-catalog m0-build-gate lxmf-embedded-gate i686-usize-gate no-atomic64-gate check-all-targets citation-guard source-invariant-tests tmp-leftovers
+fast: tree-snapshot tree-clean-selftest check-submodules check-third-party check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest site-unpack-docs-selftest deb-stamp-selftest lock-contention-selftest toolchain-status-selftest sweep-selftest btvirt-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-test-ports check-ignored-source check-just-docs check-guards-subset check-standard-integ check-config-table-citations prepush-guard check-processor-seam mvr supervised-spawn lint-nrf lint-lr11xx nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck hw-witness check-fuzz-lock fuzz-selftest fuzz-regress notices-guard doc-touched doc-gate changelog-links core-no-tracing event-catalog m0-build-gate lxmf-embedded-gate i686-usize-gate no-atomic64-gate check-all-targets citation-guard source-invariant-tests tmp-leftovers
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib

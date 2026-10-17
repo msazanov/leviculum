@@ -1,0 +1,22 @@
+[package]
+name = "leviculum-lr11xx"
+version = "0.1.0"
+edition = "2021"
+authors = ["Cedric Rivard"]
+license = "AGPL-3.0-or-later"
+description = "Async no_std driver for Semtech LR11xx (LR1110/LR1120/LR1121) LoRa transceivers"
+
+# Own workspace; consumers resolve embassy-time through their own [patch] tables.
+[workspace]
+
+[dependencies]
+leviculum-core = { path = "../leviculum-core", default-features = false }
+leviculum-rx-arming = { path = "../leviculum-nrf/rx-arming" }
+embedded-hal = "1"
+embedded-hal-async = "1"
+embassy-time = "0.5"
+
+[dev-dependencies]
+# Mock time driver and std critical section for the host sequence tests.
+embassy-time = { version = "0.5", features = ["mock-driver", "generic-queue-8"] }
+critical-section = { version = "1", features = ["std"] }

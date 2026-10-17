@@ -34,6 +34,10 @@ Toolchain: Rust 1.97.1
   millisecond. `LEVICULUM_SUBSLOT_ARM=1` arms it on the RNode host
   interface, the `subslot-offset` feature on the LNode firmware; a rig A/B
   decides whether it becomes the default.
+- leviculum-lr11xx: async no_std driver for Semtech LR11xx LoRa transceivers
+  (LR1110 verified on LR1110MB1DIS), with host sequence tests. Gated in
+  `just fast` (`lint-lr11xx`); `just check-lr11xx-esp32s3` checks the
+  ESP32-S3 build.
 
 - The nightly is built and published by `just nightly-publish` on the
   machine that runs the tier-2 nightly, from the tree that night tested,

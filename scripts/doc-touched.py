@@ -125,6 +125,7 @@ def touched_crates(member_list, paths):
 FOREIGN_WORKSPACES = {
     "leviculum-nrf/": "just lint-nrf",
     "leviculum-esp/": "just build-esp32",
+    "leviculum-lr11xx/": "just lint-lr11xx",
 }
 
 
