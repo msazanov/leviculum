@@ -199,6 +199,7 @@ pub(crate) fn spawn_i2p_client(config: I2pClientConfig) -> InterfaceHandle {
     });
 
     InterfaceHandle {
+        next_tag: None,
         info: InterfaceInfo {
             id,
             name: config.name,
@@ -530,6 +531,7 @@ fn spawn_i2p_accepted(
     });
 
     InterfaceHandle {
+        next_tag: None,
         info: InterfaceInfo {
             id,
             name,

@@ -40,13 +40,13 @@ budget is exhausted. Concretely:
 - **Send-side jitter** — packets are queued, not sent immediately; a
   frame that acquires an idle channel first serves a randomised wait,
   DIFS plus a contention window sized from the radio parameters, so two
-  nodes do not re-collide (`leviculum-std/src/interfaces/rnode.rs:2747-2778`,
+  nodes do not re-collide (`leviculum-std/src/interfaces/rnode.rs:2820-2851`,
   where the TX loop arms it; the ceiling it reports is
-  `compute_jitter_max_ms`, `leviculum-std/src/interfaces/rnode.rs:294-304`).
+  `compute_jitter_max_ms`, `leviculum-std/src/interfaces/rnode.rs:352-362`).
 - **CSMA** — radio-level carrier sensing is handled by the RNode
   firmware on top; the interface hands the modem one frame at a time so
   that CSMA runs for every frame, and none of this reaches the core
-  (`leviculum-std/src/interfaces/rnode.rs:2265-2274`).
+  (`leviculum-std/src/interfaces/rnode.rs:2335-2344`).
 - **Airtime backpressure** — a per-interface credit bucket charges
   every send by its airtime cost and signals `BufferFull` rather than
   flooding the serial queue
@@ -109,6 +109,18 @@ need an exemption, so on today's three call sites the exemption list
 would be longer than the finding, and it would grow with every
 legitimate status field. The rule is stated here and on the enum
 instead.
+
+## The correlation tag beside the bytes
+
+Beside every frame the core hands an interface the packet's journey
+correlator, the `ph` its `PKT_TX` event names
+(`Interface::tag_next_frame`, `leviculum-core/src/traits.rs`; T-0013),
+so the interface's own transmit and drop lines can say which packet
+they were about without parsing the frame. The tag exists for
+correlation only: it carries no meaning for the interface, and nothing
+may branch on it, neither queueing, nor scheduling, nor delivery.
+No guard checks this; like the `InterfaceKind` rule above it is
+stated here and on the trait method instead.
 
 See also: [Storage and Embedding](storage-and-embedding.md) for the
 parallel isolation of persistence and time, and the

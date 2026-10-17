@@ -941,6 +941,7 @@ fn handle_discovery_packet(
     };
 
     let handle = InterfaceHandle {
+        next_tag: None,
         info: InterfaceInfo {
             id,
             name: iface_name.clone(),
@@ -1245,6 +1246,7 @@ mod tests {
         // Send a packet
         outgoing_tx
             .send(OutgoingPacket {
+                ph: None,
                 peer: None,
                 data: b"test data".to_vec().into(),
                 high_priority: false,

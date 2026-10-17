@@ -13,6 +13,7 @@ use crate::event_log::Scalar;
 use leviculum_channel_access::{jitter_slot_ms, ChannelAccess, JITTER_CW_SLOTS, JITTER_DIFS_SLOTS};
 use leviculum_core::framing::kiss::{self, KissDeframeResult, KissDeframer};
 use leviculum_core::rnode;
+use leviculum_core::traits::FrameTag;
 use leviculum_core::transport::InterfaceId;
 use leviculum_queue_budget::{DutyHolds, HoldVerdict};
 use rand_core::RngCore;
@@ -151,11 +152,63 @@ impl RNodeInterfaceConfig {
     }
 }
 
+/// The `ph` key of a transmit or drop line: the packet's journey correlator
+/// as the core tagged it ([`OutgoingPacket::ph`]), or `-` for a frame that
+/// came untagged (the journey target off). The interface prints it and reads
+/// nothing in it (T-0013).
+struct PhField(Option<FrameTag>);
+
+impl std::fmt::Display for PhField {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.0 {
+            Some(ph) => ph.iter().try_for_each(|b| write!(f, "{b:02x}")),
+            None => f.write_str("-"),
+        }
+    }
+}
+
+/// The `phs` key of an abandon summary: every abandoned frame's [`PhField`],
+/// comma-separated, when there are at most [`PHS_LISTED_MAX`] of them, else
+/// `elided` and the line's `frames` count is the whole account. Bounded so a
+/// reconnect that abandons a full queue still logs one short line.
+struct PhsField(Vec<Option<FrameTag>>);
+
+/// The most hashes an abandon summary lists by name.
+const PHS_LISTED_MAX: usize = 8;
+
+impl PhsField {
+    fn of(phs: impl ExactSizeIterator<Item = Option<FrameTag>>) -> Self {
+        if phs.len() > PHS_LISTED_MAX {
+            Self(Vec::new())
+        } else {
+            Self(phs.collect())
+        }
+    }
+}
+
+impl std::fmt::Display for PhsField {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.0.is_empty() {
+            return f.write_str("elided");
+        }
+        for (i, ph) in self.0.iter().enumerate() {
+            if i > 0 {
+                f.write_str(",")?;
+            }
+            write!(f, "{}", PhField(*ph))?;
+        }
+        Ok(())
+    }
+}
+
 /// A framed packet queued for serial transmission
 struct QueuedFrame {
     data: Vec<u8>,
     payload_len: u64,
     high_priority: bool,
+    /// The core's correlator for this packet, printed and never read
+    /// ([`PhField`]).
+    ph: Option<FrameTag>,
     /// Whether this is the one re-hand [`judge_airtime`] buys a frame the
     /// modem consumed without transmitting. Carried on the queue entry so the
     /// frame's second handover knows not to ask for a third.
@@ -212,6 +265,7 @@ fn count_stale_drop(
     age_ms: u32,
     payload_len: u64,
     held_ms: u32,
+    ph: Option<FrameTag>,
 ) {
     counters
         .tx_stale_drops
@@ -223,7 +277,8 @@ fn count_stale_drop(
         .tx_dropped_bytes
         .fetch_add(payload_len, std::sync::atomic::Ordering::Relaxed);
     tracing::warn!(
-        "LORA_TX_STALE iface={iface} age_ms={age_ms} len={payload_len} held_ms={held_ms}"
+        "LORA_TX_STALE iface={iface} age_ms={age_ms} len={payload_len} held_ms={held_ms} ph={}",
+        PhField(ph)
     );
 }
 
@@ -248,7 +303,7 @@ fn pop_live_frame(
     while let Some(frame) = send_queue.pop_front() {
         match holds.verdict(frame.enqueued_ms, now_ms) {
             (HoldVerdict::DropStale { age_ms }, held_ms) => {
-                count_stale_drop(name, counters, age_ms, frame.payload_len, held_ms);
+                count_stale_drop(name, counters, age_ms, frame.payload_len, held_ms, frame.ph);
             }
             _ => return Some(frame),
         }
@@ -262,6 +317,8 @@ struct VportFrame {
     subint: usize,
     data: Arc<[u8]>,
     enqueued_ms: u32,
+    /// [`QueuedFrame::ph`].
+    ph: Option<FrameTag>,
 }
 
 /// [`pop_live_frame`] for the multi-vport queue. A stale frame is counted on
@@ -283,6 +340,7 @@ fn pop_live_vport_frame(
                     age_ms,
                     frame.data.len() as u64,
                     held_ms,
+                    frame.ph,
                 );
             }
             _ => return Some(frame),
@@ -1361,6 +1419,8 @@ struct PendingHandover {
     data: Vec<u8>,
     payload_len: u64,
     high_priority: bool,
+    /// [`QueuedFrame::ph`], carried so a re-hand and a final drop name it.
+    ph: Option<FrameTag>,
     /// Whether this frame IS a re-hand. A frame is re-handed once: a second
     /// silent consume of the same frame is a modem that is not going to send
     /// it, and repeating into that only buys latency for everything behind it.
@@ -1540,6 +1600,7 @@ fn settle_handovers(
                         len = front.payload_len,
                         depth = pendings.len(),
                         reason = "unaccounted_twice",
+                        ph = %PhField(front.ph),
                     );
                     return None;
                 }
@@ -1553,6 +1614,7 @@ fn settle_handovers(
                     data: front.data,
                     payload_len: front.payload_len,
                     high_priority: front.high_priority,
+                    ph: front.ph,
                     rehand: true,
                     enqueued_ms: front.enqueued_ms,
                 });
@@ -2126,6 +2188,7 @@ fn abandon_send_queue(
         return;
     }
     let abandoned_bytes: u64 = send_queue.iter().map(|f| f.payload_len).sum();
+    let phs = PhsField::of(send_queue.iter().map(|f| f.ph));
     send_queue.clear();
     counters
         .tx_queue_drops
@@ -2139,6 +2202,7 @@ fn abandon_send_queue(
         frames = abandoned,
         depth = 0,
         reason = reason,
+        phs = %phs,
     );
 }
 
@@ -2165,6 +2229,7 @@ fn refuse_queued_duplicate<'a>(
     mut queued: impl Iterator<Item = &'a [u8]>,
     frame: &[u8],
     payload_len: usize,
+    ph: Option<FrameTag>,
 ) -> bool {
     if !queued.any(|q| q == frame) {
         return false;
@@ -2172,7 +2237,10 @@ fn refuse_queued_duplicate<'a>(
     counters
         .tx_queue_dedup
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    tracing::info!("LORA_TX_DEDUP iface={name} len={payload_len} queued={depth}");
+    tracing::info!(
+        "LORA_TX_DEDUP iface={name} len={payload_len} queued={depth} ph={}",
+        PhField(ph)
+    );
     true
 }
 
@@ -2193,6 +2261,7 @@ fn abandon_multi_send_queue(
     if abandoned == 0 {
         return;
     }
+    let phs = PhsField::of(send_queue.iter().map(|f| f.ph));
     for frame in send_queue.drain(..) {
         vports[frame.subint]
             .counters
@@ -2209,6 +2278,7 @@ fn abandon_multi_send_queue(
         frames = abandoned,
         depth = 0,
         reason = reason,
+        phs = %phs,
     );
 }
 
@@ -2679,6 +2749,7 @@ where
                             send_queue.iter().map(|f| f.data.as_slice()),
                             &frame,
                             pkt.data.len(),
+                            pkt.ph,
                         ) {
                             continue;
                         }
@@ -2701,6 +2772,7 @@ where
                                     len = dropped.payload_len,
                                     depth = send_queue.len(),
                                     reason = "queue_full",
+                                    ph = %PhField(dropped.ph),
                                 );
                             }
                         }
@@ -2708,6 +2780,7 @@ where
                             data: frame,
                             payload_len: pkt.data.len() as u64,
                             high_priority,
+                            ph: pkt.ph,
                             rehand: false,
                             enqueued_ms: stamp_ms(clock_epoch),
                         };
@@ -2994,8 +3067,9 @@ where
                 // of the rest of the rnode logs.
                 tracing::debug!(
                     target: "leviculum_std::interfaces::rnode::tx_trace",
-                    "LORA_TX iface={name} len={}",
-                    queued.payload_len
+                    "LORA_TX iface={name} len={} ph={}",
+                    queued.payload_len,
+                    PhField(queued.ph)
                 );
 
                 timer_ready = false;
@@ -3097,6 +3171,7 @@ where
                         data: queued.data,
                         payload_len: queued.payload_len,
                         high_priority: queued.high_priority,
+                        ph: queued.ph,
                         is_rehand: queued.rehand,
                         enqueued_ms: queued.enqueued_ms,
                         handed_unix_ms: unix_ms(),
@@ -3560,6 +3635,7 @@ where
     });
 
     InterfaceHandle {
+        next_tag: None,
         info: InterfaceInfo {
             id,
             name,
@@ -4168,6 +4244,7 @@ async fn rnode_multi_io_task<S>(
                                 .map(|queued| &queued.data[..]),
                             &tagged.packet.data,
                             tagged.packet.data.len(),
+                            tagged.packet.ph,
                         ) {
                             continue;
                         }
@@ -4194,6 +4271,7 @@ async fn rnode_multi_io_task<S>(
                                     len = shed.data.len(),
                                     depth = send_queue.len(),
                                     reason = "queue_full",
+                                    ph = %PhField(shed.ph),
                                 );
                             }
                         }
@@ -4201,6 +4279,7 @@ async fn rnode_multi_io_task<S>(
                             subint: tagged.subint,
                             data: tagged.packet.data,
                             enqueued_ms: stamp_ms(clock_epoch),
+                            ph: tagged.packet.ph,
                         });
                     }
                     None => {
@@ -4275,6 +4354,7 @@ async fn rnode_multi_io_task<S>(
                 subint,
                 data,
                 enqueued_ms,
+                ph,
             }) =
                 pop_live_vport_frame(vports, &mut send_queue, &duty_holds, stamp_ms(clock_epoch))
             {
@@ -4287,6 +4367,7 @@ async fn rnode_multi_io_task<S>(
                         subint,
                         data,
                         enqueued_ms,
+                        ph,
                     });
                     abandon_multi_send_queue(name, vports, &mut send_queue, "serial_write_error");
                     return;
@@ -4297,6 +4378,7 @@ async fn rnode_multi_io_task<S>(
                         subint,
                         data,
                         enqueued_ms,
+                        ph,
                     });
                     abandon_multi_send_queue(name, vports, &mut send_queue, "serial_flush_error");
                     return;
@@ -4487,6 +4569,7 @@ pub(crate) fn spawn_rnode_multi_interface(
         let bitrate = rnode::compute_bitrate(sub.sf, sub.cr, sub.bandwidth);
 
         handles.push(InterfaceHandle {
+            next_tag: None,
             info: InterfaceInfo {
                 id: sub.id,
                 name: sub.name.clone(),
@@ -4727,6 +4810,7 @@ mod tests {
         handle
             .outgoing
             .send(OutgoingPacket {
+                ph: None,
                 peer: None,
                 data: b"outbound-over-channel".to_vec().into(),
                 high_priority: false,
@@ -5127,6 +5211,7 @@ mod tests {
         handle
             .outgoing
             .send(OutgoingPacket {
+                ph: None,
                 peer: None,
                 data: test_data.to_vec().into(),
                 high_priority: false,
@@ -5689,6 +5774,7 @@ mod tests {
     fn pending(payload_len: u64, is_rehand: bool, due_in: Duration) -> PendingHandover {
         let due = tokio::time::Instant::now() + due_in;
         PendingHandover {
+            ph: None,
             data: rnode::build_data_frame(&vec![0xAA; payload_len as usize]),
             payload_len,
             high_priority: false,
@@ -6070,6 +6156,7 @@ mod tests {
         for payload in [b"one".as_slice(), b"two".as_slice(), b"three".as_slice()] {
             outgoing_tx
                 .send(OutgoingPacket {
+                    ph: None,
                     peer: None,
                     data: payload.to_vec().into(),
                     high_priority: true,
@@ -6144,6 +6231,7 @@ mod tests {
         let released = tokio::time::Instant::now();
         outgoing_tx
             .send(OutgoingPacket {
+                ph: None,
                 peer: None,
                 data: b"four".to_vec().into(),
                 high_priority: true,
@@ -6245,6 +6333,7 @@ mod tests {
         let start = tokio::time::Instant::now();
         outgoing_tx
             .send(OutgoingPacket {
+                ph: None,
                 peer: None,
                 data: b"announce".to_vec().into(),
                 high_priority: false,
@@ -6258,6 +6347,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(wait / 2)).await;
         outgoing_tx
             .send(OutgoingPacket {
+                ph: None,
                 peer: None,
                 data: b"linkrequest".to_vec().into(),
                 high_priority: true,
@@ -6466,6 +6556,7 @@ mod tests {
         // `send_single_msg(ep_a)` / `send_single_msg(ep_b)` pair.
         let start = tokio::time::Instant::now();
         let directed = || OutgoingPacket {
+            ph: None,
             peer: None,
             data: b"ratchet".to_vec().into(),
             high_priority: true,
@@ -7697,6 +7788,7 @@ mod tests {
         let payload = b"hello";
         outgoing_tx
             .send(OutgoingPacket {
+                ph: None,
                 peer: None,
                 data: payload.to_vec().into(),
                 high_priority: false,
@@ -8105,6 +8197,7 @@ mod tests {
         for p in payloads.iter() {
             outgoing_tx
                 .send(OutgoingPacket {
+                    ph: None,
                     peer: None,
                     data: p.to_vec().into(),
                     high_priority: false,
@@ -8422,6 +8515,7 @@ mod tests {
             .send(TaggedOutgoing {
                 subint: 0,
                 packet: OutgoingPacket {
+                    ph: None,
                     peer: None,
                     data: b"ping0".to_vec().into(),
                     high_priority: false,
@@ -8454,6 +8548,7 @@ mod tests {
             .send(TaggedOutgoing {
                 subint: 1,
                 packet: OutgoingPacket {
+                    ph: None,
                     peer: None,
                     data: b"ping1".to_vec().into(),
                     high_priority: false,
@@ -8545,6 +8640,7 @@ mod tests {
             .send(TaggedOutgoing {
                 subint: 0,
                 packet: OutgoingPacket {
+                    ph: None,
                     peer: None,
                     data: b"nope".to_vec().into(),
                     high_priority: false,
@@ -8666,6 +8762,7 @@ mod tests {
                     .send(TaggedOutgoing {
                         subint,
                         packet: OutgoingPacket {
+                            ph: None,
                             peer: None,
                             data: data.to_vec().into(),
                             high_priority: false,
@@ -8836,6 +8933,7 @@ mod tests {
             .send(TaggedOutgoing {
                 subint: 0,
                 packet: OutgoingPacket {
+                    ph: None,
                     peer: None,
                     data: b"bootstrap".to_vec().into(),
                     high_priority: false,
@@ -8858,6 +8956,7 @@ mod tests {
                 .send(TaggedOutgoing {
                     subint: 1,
                     packet: OutgoingPacket {
+                        ph: None,
                         peer: None,
                         data: format!("v1-{i:03}").into_bytes().into(),
                         high_priority: false,
@@ -8871,6 +8970,7 @@ mod tests {
                 .send(TaggedOutgoing {
                     subint: 0,
                     packet: OutgoingPacket {
+                        ph: None,
                         peer: None,
                         data: format!("v0-{i:03}").into_bytes().into(),
                         high_priority: false,
@@ -9067,6 +9167,7 @@ mod tests {
                 .send(TaggedOutgoing {
                     subint,
                     packet: OutgoingPacket {
+                        ph: None,
                         peer: None,
                         data: payload.to_vec().into(),
                         high_priority: false,
@@ -9351,6 +9452,7 @@ mod tests {
         for p in payloads.iter() {
             outgoing_tx
                 .send(OutgoingPacket {
+                    ph: None,
                     peer: None,
                     data: p.to_vec().into(),
                     high_priority: false,
@@ -9594,8 +9696,14 @@ mod tests {
 
     impl DutyLockHarness {
         async fn push(&self, payload: &[u8]) {
+            self.push_tagged(payload, None).await;
+        }
+
+        /// [`Self::push`] with the correlator the core would tag it with.
+        async fn push_tagged(&self, payload: &[u8], ph: Option<FrameTag>) {
             self.outgoing_tx
                 .send(OutgoingPacket {
+                    ph,
                     peer: None,
                     data: payload.to_vec().into(),
                     high_priority: false,
@@ -10110,6 +10218,60 @@ mod tests {
         drop(guard);
         let logs = String::from_utf8(logs.lock().unwrap().clone()).expect("utf8 logs");
         assert_single_abandon_event(&logs, "serial_eof", HELD);
+    }
+
+    /// T-0013: the interface's own lines name the packet. A frame the core
+    /// tagged is logged with that `ph` on `LORA_TX` when it is written to the
+    /// modem, so a journey no longer ends at the core's `PKT_TX`; frames
+    /// abandoned at EOF are named on the summary drop line, an untagged one
+    /// as `-`. The interface prints the tag and reads nothing in it.
+    #[tokio::test(start_paused = true)]
+    async fn test_a_tagged_frame_is_named_on_lora_tx_and_on_the_eof_drop() {
+        const AIRED: FrameTag = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
+        const HELD: FrameTag = [0xde, 0xad, 0xbe, 0xef, 0x00, 0x01, 0x02, 0x03];
+        let (logs, guard) = capture_logs();
+        let mut h = spawn_duty_lock_harness(true, 0);
+        h.push_tagged(b"bootstrap", Some(AIRED)).await;
+        h.expect_frame(b"bootstrap", "bootstrap frame ships ungated")
+            .await;
+        // The gate is closed now: these two stay in the task-local queue.
+        h.push_tagged(b"held-tagged", Some(HELD)).await;
+        h.push(b"held-untagged").await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        h.end_session(StubEnd::Eof).await;
+
+        drop(guard);
+        let logs = String::from_utf8(logs.lock().unwrap().clone()).expect("utf8 logs");
+        let tx: Vec<&str> = logs
+            .lines()
+            .filter(|l| l.contains("LORA_TX iface="))
+            .collect();
+        assert_eq!(tx.len(), 1, "one frame aired\n--- logs ---\n{logs}");
+        assert!(
+            tx[0].contains("LORA_TX iface=test_rnode_duty len=9 ph=1122334455667788"),
+            "LORA_TX names the packet it wrote: {}",
+            tx[0]
+        );
+        assert_single_abandon_event(&logs, "serial_eof", 2);
+        let drop_line = logs
+            .lines()
+            .find(|l| l.contains("event=\"RNODE_TX_QUEUE_DROP\""))
+            .expect("checked by assert_single_abandon_event");
+        assert!(
+            drop_line.contains("phs=deadbeef00010203,-"),
+            "the drop line names each abandoned packet: {drop_line}"
+        );
+    }
+
+    /// An abandon summary lists at most eight hashes and elides the rest to
+    /// the `frames` count beside it, so a full queue still logs one short line.
+    #[test]
+    fn test_abandon_summary_lists_eight_hashes_and_elides_more() {
+        let tag = |i: u8| Some([i; 8]);
+        let eight = PhsField::of((0..8).map(tag)).to_string();
+        assert_eq!(eight.split(',').count(), 8, "{eight}");
+        assert!(eight.starts_with("0000000000000000,0101010101010101,"));
+        assert_eq!(PhsField::of((0..9).map(tag)).to_string(), "elided");
     }
 
     /// Behaviour 7b, the same shape through a second return path: the

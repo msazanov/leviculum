@@ -421,6 +421,7 @@ pub(crate) fn spawn_kiss_interface(config: KissInterfaceConfig) -> InterfaceHand
     });
 
     InterfaceHandle {
+        next_tag: None,
         info: InterfaceInfo {
             id,
             name: handle_name,
@@ -621,6 +622,7 @@ mod tests {
         let payload = vec![FEND, 0x11, FESC, TFEND, TFESC, 0x00, FEND, 0xDB, 0x42];
         a_out_tx
             .send(OutgoingPacket {
+                ph: None,
                 peer: None,
                 data: payload.clone().into(),
                 high_priority: false,
@@ -704,6 +706,7 @@ mod tests {
 
         a_out_tx
             .send(OutgoingPacket {
+                ph: None,
                 peer: None,
                 data: announce_bytes.clone().into(),
                 high_priority: false,
@@ -844,6 +847,7 @@ mod tests {
 
         a_out_tx
             .send(OutgoingPacket {
+                ph: None,
                 peer: None,
                 data: announce_bytes.clone().into(),
                 high_priority: false,
@@ -891,6 +895,7 @@ mod tests {
         let payload = vec![FEND, 0x11, FESC, TFEND, TFESC, 0x00, FEND, 0xDB, 0x42];
         a_out_tx
             .send(OutgoingPacket {
+                ph: None,
                 peer: None,
                 data: payload.clone().into(),
                 high_priority: false,
@@ -931,6 +936,7 @@ mod tests {
         // head is already at the peer.
         out_tx
             .send(OutgoingPacket {
+                ph: None,
                 peer: None,
                 data: vec![0x42u8; 64 * 1024].into(),
                 high_priority: false,

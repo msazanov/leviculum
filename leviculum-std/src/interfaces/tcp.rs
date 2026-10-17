@@ -262,6 +262,7 @@ pub(crate) fn spawn_tcp_interface_from_stream(
     });
 
     InterfaceHandle {
+        next_tag: None,
         info: InterfaceInfo {
             id,
             name,
@@ -517,6 +518,7 @@ pub(crate) fn spawn_tcp_client_with_reconnect(config: TcpClientConfig) -> Interf
     });
 
     InterfaceHandle {
+        next_tag: None,
         info: InterfaceInfo {
             id,
             name: config.name,
@@ -1768,6 +1770,7 @@ mod tests {
         let payload = vec![0x42u8; 1 << 20];
         outgoing_tx
             .send(OutgoingPacket {
+                ph: None,
                 data: payload.into(),
                 high_priority: false,
                 peer: None,

@@ -611,6 +611,12 @@ pub(crate) struct OutgoingPacket {
     /// there is no BLE interface, so nothing reads it there.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub peer: Option<[u8; leviculum_core::constants::TRUNCATED_HASHBYTES]>,
+    /// The packet's journey correlator, the `ph` the core's `PKT_TX` named
+    /// for these bytes, or `None` when the core computed none (T-0013).
+    /// Opaque to every interface: the RNode interface prints it on its
+    /// transmit and drop lines so a tool can say WHICH packet went out or
+    /// died, and nothing may branch on it.
+    pub ph: Option<leviculum_core::traits::FrameTag>,
 }
 
 /// Metadata describing a registered interface
@@ -769,6 +775,11 @@ pub(crate) struct InterfaceHandle {
     /// departure; a socket dies with the process, so every socket-backed
     /// interface ships `None`.
     pub teardown: Option<CarrierTeardown>,
+    /// The tag `dispatch_actions` handed for the frame it is about to send
+    /// ([`leviculum_core::traits::Interface::tag_next_frame`]), taken by
+    /// the next enqueue whatever its outcome, so it never outlives the one
+    /// frame it names.
+    pub next_tag: Option<leviculum_core::traits::FrameTag>,
 }
 
 /// One interface's carrier-teardown hook: the driver sends the ack
@@ -826,6 +837,10 @@ impl leviculum_core::traits::Interface for InterfaceHandle {
         self.enqueue(len, || frame.share(), None, high_priority)
     }
 
+    fn tag_next_frame(&mut self, ph: Option<leviculum_core::traits::FrameTag>) {
+        self.next_tag = ph;
+    }
+
     fn frame_turnaround_ms(&self) -> u64 {
         // The interface stated it at spawn from the PHY it programmed;
         // absent means a medium with no post-TX wait.
@@ -867,6 +882,7 @@ impl InterfaceHandle {
         peer: Option<&[u8; leviculum_core::constants::TRUNCATED_HASHBYTES]>,
         high_priority: bool,
     ) -> Result<(), InterfaceError> {
+        let ph = self.next_tag.take();
         // Airtime-credit check for constrained interfaces. LoRa-Serial
         // populates `credit`; TCP/UDP/Local leave it `None` and skip the
         // charge entirely. See `airtime.rs` for the bucket semantics.
@@ -880,6 +896,7 @@ impl InterfaceHandle {
             data: data(),
             high_priority,
             peer: peer.copied(),
+            ph,
         }) {
             Ok(()) => Ok(()),
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => Err(InterfaceError::BufferFull),
@@ -1007,6 +1024,7 @@ mod tests {
         let (_inc_tx, inc_rx) = mpsc::channel(4);
         let (out_tx, out_rx) = mpsc::channel(4);
         let handle = InterfaceHandle {
+            next_tag: None,
             info: InterfaceInfo {
                 id: InterfaceId(id),
                 name: format!("test-{id}"),
@@ -1216,6 +1234,25 @@ mod tests {
         assert!(h.credit.is_none());
         h.try_send_prioritized(&[1, 2, 3, 4], false)
             .expect("no credit → should succeed via mpsc");
+    }
+
+    /// T-0013: the tag `dispatch_actions` hands before a send rides the
+    /// channel beside that frame's bytes, and only that frame's: the next
+    /// send, untagged, carries none, so a tag can never name the wrong
+    /// packet on an interface's transmit line.
+    #[test]
+    fn a_frame_tag_rides_with_its_frame_and_no_further() {
+        use leviculum_core::traits::Interface;
+        let (mut h, mut rx) = make_handle(9);
+        let tag = [0xa1, 0xb2, 0xc3, 0xd4, 0xe5, 0xf6, 0x07, 0x18];
+        h.tag_next_frame(Some(tag));
+        h.try_send_prioritized(&[1, 2, 3], true).expect("accepted");
+        h.try_send_prioritized(&[4, 5, 6], true).expect("accepted");
+        let first = rx.try_recv().expect("first frame queued");
+        let second = rx.try_recv().expect("second frame queued");
+        assert_eq!(&first.data[..], &[1, 2, 3]);
+        assert_eq!(first.ph, Some(tag));
+        assert_eq!(second.ph, None, "the tag named one frame, not the next");
     }
 
     /// try_send_prioritized on a LoRa handle with fresh credit succeeds

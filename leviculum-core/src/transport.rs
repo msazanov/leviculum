@@ -726,6 +726,17 @@ impl core::fmt::Display for DispatchLoss<'_> {
     }
 }
 
+/// The correlator [`dispatch_actions`] tags a frame with for its interface
+/// ([`crate::traits::Interface::tag_next_frame`]), or `None` when the journey
+/// target is off: the frame is then hashed nowhere on its way out, as before.
+fn frame_tag(data: &[u8]) -> Option<crate::traits::FrameTag> {
+    if crate::tracing::enabled!(target: PKT_EVENT_TARGET, crate::tracing::Level::DEBUG) {
+        Some(ph8(&packet_hash(data)))
+    } else {
+        None
+    }
+}
+
 pub fn dispatch_actions<I: crate::traits::AsInterface>(
     interfaces: &mut [I],
     actions: Vec<Action>,
@@ -737,6 +748,9 @@ pub fn dispatch_actions<I: crate::traits::AsInterface>(
     for action in actions {
         match action {
             Action::SendPacket { iface, data, peer } => {
+                // Hashed before the IFAC wrap, so the tag is the `ph` this
+                // frame's `PKT_TX` named (T-0013).
+                let tag = frame_tag(&data);
                 let send_data = match ifac_configs.get(&iface.0) {
                     Some(cfg) => match cfg.apply_ifac(&data) {
                         Ok(wrapped) => wrapped,
@@ -761,6 +775,7 @@ pub fn dispatch_actions<I: crate::traits::AsInterface>(
                     // `peer` rides along as the delivery hint (Codeberg
                     // #376): a multi-peer interface serves the one link it
                     // names, every other interface ignores it.
+                    iface_obj.tag_next_frame(tag);
                     if let Err(e) = iface_obj.try_send_to_peer(&send_data, peer.as_ref(), true) {
                         errors.push((iface, e));
                         if matches!(e, crate::traits::InterfaceError::BufferFull) {
@@ -805,6 +820,8 @@ pub fn dispatch_actions<I: crate::traits::AsInterface>(
             } => {
                 // One frame for every interface: an interface that must own
                 // the bytes shares it instead of copying it (513).
+                // One hash for every interface the broadcast reaches.
+                let tag = frame_tag(&data);
                 let mut frame = crate::traits::SharedFrame::new(data);
                 for slot in interfaces.iter_mut() {
                     let iface_obj = slot.as_interface();
@@ -837,6 +854,7 @@ pub fn dispatch_actions<I: crate::traits::AsInterface>(
                         None => None,
                     };
                     // Broadcast = announce rebroadcasts → normal priority
+                    iface_obj.tag_next_frame(tag);
                     let result = match (spare_one_link, wrapped) {
                         (Some(peer), wrapped) => {
                             let bytes = wrapped.as_deref().unwrap_or(frame.as_bytes());
@@ -5711,7 +5729,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// recall source is the cached announce for the destination
     /// (`get_announce_cache`, keyed by destination hash, holding the raw announce
     /// whose payload starts with the 64-byte public key), the same source the
-    /// link-request path uses at transport.rs:4106. A destination with no cached
+    /// link-request path uses at transport.rs:4124. A destination with no cached
     /// announce cannot be associated with an identity, so it is left untouched,
     /// exactly as Python keeps a path whose `Identity.recall` returns `None`.
     ///
@@ -6512,7 +6530,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             path_response = is_path_response,
         );
 
-        // Gate on the already-incremented hops (transport.rs:1667 ran in the
+        // Gate on the already-incremented hops (transport.rs:1685 ran in the
         // inbound path before handle_announce, and local-client/shared-instance
         // accounting has already been applied there). Announces whose hop count
         // exceeds max_hops are neither stored in the path table nor scheduled
@@ -11616,7 +11634,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // Emit the STORED path-table count, matching Python
                 // Transport.py:2956 (`packet.hops = path_table[dst][IDX_PT_HOPS]`).
                 // The cached raw's hop byte is the PRE-increment wire value
-                // (`stored - 1`): the receipt increment (`transport.rs:2611`) only
+                // (`stored - 1`): the receipt increment (`transport.rs:2629`) only
                 // touches the in-memory packet, never the raw buffer stashed by
                 // `set_announce_cache`. Using it here would put `stored - 1` on the
                 // wire and every peer that learns via this response would be one hop
@@ -17841,7 +17859,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // `random_blobs` (transport.rs:7258), a deliberate anti-replay
+            // `random_blobs` (transport.rs:7276), a deliberate anti-replay
             // extension — so the blob count is not a rejection indicator.)
             transport
                 .clock
@@ -24135,7 +24153,7 @@ mod tests {
         // (PATHFINDER_MAX_HOPS=128) must NOT be stored in the path table nor
         // scheduled for rebroadcast, mirroring Python RNS Transport.py:1750
         // (`local_and_hops_condition = packet.hops < PATHFINDER_M+1`, M=128).
-        // The inbound path increments hops once (transport.rs:1667) before
+        // The inbound path increments hops once (transport.rs:1685) before
         // handle_announce, so `packet.hops` inside the handler is already the
         // post-increment value — same accounting as the RNS gate.
         #[test]
@@ -33970,6 +33988,102 @@ mod tests {
             assert!(result.retries.is_empty());
             // But should still log the error
             assert_eq!(result.errors.len(), 1);
+        }
+    }
+
+    /// T-0013: the interface is handed the `ph` the core's `PKT_TX` names
+    /// for the frame, beside the bytes, so its own transmit and drop lines
+    /// can name the packet without parsing it. A directed send tags its one
+    /// interface, a broadcast tags every interface it reaches with the same
+    /// value, and the tag is taken from the bytes BEFORE the IFAC wrap,
+    /// which is what `PKT_TX` hashed. The capture needs `tracing`; without
+    /// it the journey target does not exist and no frame is tagged.
+    #[cfg(feature = "tracing")]
+    mod frame_tag_tests {
+        use super::*;
+        use crate::test_utils::{test_transport, MockInterface};
+        extern crate alloc;
+        extern crate std;
+        use alloc::format;
+        use alloc::vec;
+
+        /// The value `PKT_TX ph=` printed in `logs`, the first one.
+        fn pkt_tx_ph(logs: &str) -> std::string::String {
+            let line = logs
+                .lines()
+                .find(|l| l.contains("PKT_TX"))
+                .unwrap_or_else(|| panic!("no PKT_TX line\n--- logs ---\n{logs}"));
+            let ph = line
+                .split_whitespace()
+                .find_map(|t| t.strip_prefix("ph="))
+                .unwrap_or_else(|| panic!("PKT_TX without ph: {line}"));
+            ph.into()
+        }
+
+        fn hex(tag: Option<crate::traits::FrameTag>) -> std::string::String {
+            let tag = tag.unwrap_or_else(|| panic!("the frame went out untagged"));
+            format!("{}", HexShort(&tag))
+        }
+
+        #[test]
+        fn a_directed_send_is_tagged_with_its_pkt_tx_ph() {
+            let mut transport = test_transport();
+            // Header type 1, so the hashable part differs from the raw
+            // bytes: a tag hashed from the wrong slice would not match.
+            let data: Vec<u8> = (0u8..40).map(|b| b | 0x40).collect();
+            let (actions, logs) = crate::test_log_capture::with_captured_logs(|| {
+                transport.push_packet(0, data.clone(), None, None);
+                let actions = transport.drain_actions();
+                let mut iface = MockInterface::new("lora", 0);
+                let mut ifaces: Vec<&mut dyn crate::traits::Interface> = vec![&mut iface];
+                let result = dispatch_actions(&mut ifaces, actions, &BTreeMap::new());
+                assert!(result.errors.is_empty(), "the mock accepts every frame");
+                iface.tags
+            });
+            assert_eq!(actions.len(), 1, "one send, one tag");
+            assert_eq!(hex(actions[0]), pkt_tx_ph(&logs));
+        }
+
+        #[test]
+        fn a_broadcast_tags_every_interface_with_the_same_ph() {
+            let mut transport = test_transport();
+            let data: Vec<u8> = (0u8..40).collect();
+            let ((a, b), logs) = crate::test_log_capture::with_captured_logs(|| {
+                transport.push_broadcast(data.clone(), None, None, Vec::new(), None);
+                let actions = transport.drain_actions();
+                let mut a = MockInterface::new("a", 0);
+                let mut b = MockInterface::new("b", 1);
+                let mut ifaces: Vec<&mut dyn crate::traits::Interface> = vec![&mut a, &mut b];
+                let result = dispatch_actions(&mut ifaces, actions, &BTreeMap::new());
+                assert!(result.errors.is_empty(), "the mock accepts every frame");
+                (a.tags, b.tags)
+            });
+            let want = pkt_tx_ph(&logs);
+            assert_eq!(a.len(), 1);
+            assert_eq!(b.len(), 1);
+            assert_eq!(hex(a[0]), want);
+            assert_eq!(hex(b[0]), want);
+        }
+
+        #[test]
+        fn the_tag_names_the_packet_not_its_ifac_wrapping() {
+            let data: Vec<u8> = (0u8..40).collect();
+            let mut ifac = BTreeMap::new();
+            ifac.insert(0, IfacConfig::new(Some("net"), Some("pass"), 16).unwrap());
+            let (tags, _) = crate::test_log_capture::with_captured_logs(|| {
+                let mut iface = MockInterface::new("lora", 0);
+                let mut ifaces: Vec<&mut dyn crate::traits::Interface> = vec![&mut iface];
+                let actions = vec![Action::SendPacket {
+                    peer: None,
+                    iface: InterfaceId(0),
+                    data: data.clone(),
+                }];
+                let result = dispatch_actions(&mut ifaces, actions, &ifac);
+                assert!(result.errors.is_empty(), "the mock accepts every frame");
+                assert_ne!(iface.sent[0], data, "the frame went out wrapped");
+                iface.tags
+            });
+            assert_eq!(tags, vec![Some(ph8(&packet_hash(&data)))]);
         }
     }
 

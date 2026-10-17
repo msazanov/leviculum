@@ -239,6 +239,11 @@ impl<'a, 'b> AsInterface for &'a mut (dyn Interface + 'b) {
     }
 }
 
+/// The journey correlator `dispatch_actions` hands an interface beside a
+/// frame ([`Interface::tag_next_frame`]): the leading bytes of the packet
+/// hash, the same `ph` the core's `PKT_TX` event names.
+pub type FrameTag = [u8; crate::transport::PKT_PH_BYTES];
+
 /// One broadcast frame on its way to several interfaces.
 ///
 /// `dispatch_actions` hands every interface of a broadcast the same
@@ -441,6 +446,22 @@ pub trait Interface {
     ) -> Result<(), InterfaceError> {
         let _ = (data, peer, high_priority);
         Ok(())
+    }
+
+    /// The journey correlator of the frame the next `try_send*` call on
+    /// this interface hands over, or `None` when the core computed none
+    /// (the journey target is off, T-0013).
+    ///
+    /// `dispatch_actions` calls it immediately before every send. The tag
+    /// is the `ph` the core's `PKT_TX` names, taken from the bytes before
+    /// any IFAC wrapping, so an interface can name the packet on its own
+    /// transmit and drop lines without parsing the frame. It is opaque
+    /// metadata for logging and counters: it carries no meaning for the
+    /// interface, and no queueing, scheduling or delivery decision may
+    /// read it. The default ignores it, which is right for every
+    /// interface that logs no per-frame line.
+    fn tag_next_frame(&mut self, ph: Option<FrameTag>) {
+        let _ = ph;
     }
 
     /// Wall-clock time (ms) at which this interface will next accept a

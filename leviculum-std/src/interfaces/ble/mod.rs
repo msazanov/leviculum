@@ -294,6 +294,7 @@ pub(crate) fn spawn_ble_interface(
     tokio::spawn(task.run(outgoing_rx, teardown_rx));
 
     InterfaceHandle {
+        next_tag: None,
         info,
         incoming: incoming_rx,
         outgoing: outgoing_tx,

@@ -52,6 +52,8 @@ pub(crate) struct MockInterface {
     /// What this mock carrier charges one frame for the next, ms. Zero (the
     /// trait default) unless a test models a medium with a post-TX wait.
     pub(crate) frame_turnaround_ms: u64,
+    /// Every tag `dispatch_actions` handed before a send, in order.
+    pub(crate) tags: Vec<Option<crate::traits::FrameTag>>,
 }
 
 impl MockInterface {
@@ -63,6 +65,7 @@ impl MockInterface {
             online: true,
             reject_sends: false,
             frame_turnaround_ms: 0,
+            tags: Vec::new(),
         }
     }
 
@@ -96,6 +99,9 @@ impl Interface for MockInterface {
     }
     fn frame_turnaround_ms(&self) -> u64 {
         self.frame_turnaround_ms
+    }
+    fn tag_next_frame(&mut self, ph: Option<crate::traits::FrameTag>) {
+        self.tags.push(ph);
     }
 }
 

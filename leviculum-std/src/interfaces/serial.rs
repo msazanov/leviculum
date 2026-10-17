@@ -472,6 +472,7 @@ pub(crate) fn spawn_serial_interface(config: SerialInterfaceConfig) -> Interface
     });
 
     InterfaceHandle {
+        next_tag: None,
         info: InterfaceInfo {
             id,
             name: handle_name,
@@ -3515,6 +3516,7 @@ mod tests {
         // head is already at the peer.
         outgoing_tx
             .send(OutgoingPacket {
+                ph: None,
                 data: vec![0x42u8; 64 * 1024].into(),
                 high_priority: false,
                 peer: None,

@@ -76,6 +76,7 @@ where
     });
 
     InterfaceHandle {
+        next_tag: None,
         info: InterfaceInfo {
             id,
             name: config.name,

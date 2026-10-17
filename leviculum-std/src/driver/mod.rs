@@ -6858,6 +6858,7 @@ mod tests {
             let (_inc_tx, inc_rx) = mpsc::channel(1);
             let (out_tx, _out_rx) = mpsc::channel(1);
             InterfaceHandle {
+                next_tag: None,
                 info: InterfaceInfo {
                     id: InterfaceId(7),
                     name: "udp_7".into(),
@@ -7676,6 +7677,7 @@ mod tests {
         // socket died with frames in flight).
         drop(out_rx);
         registry.register(InterfaceHandle {
+            next_tag: None,
             info: InterfaceInfo {
                 id: InterfaceId(12),
                 name: "tcp_server/dead".into(),
@@ -8461,6 +8463,7 @@ mod tests {
         let (_inc_tx, inc_rx) = tokio::sync::mpsc::channel(4);
         let (out_tx, _out_rx) = tokio::sync::mpsc::channel(4);
         registry.register(InterfaceHandle {
+            next_tag: None,
             info: InterfaceInfo {
                 id: InterfaceId(0),
                 name: "ready".into(),
@@ -8517,6 +8520,7 @@ mod tests {
             let (_inc_tx, inc_rx) = tokio::sync::mpsc::channel(4);
             let (out_tx, _out_rx) = tokio::sync::mpsc::channel(4);
             registry.register(InterfaceHandle {
+                next_tag: None,
                 info: InterfaceInfo {
                     id: InterfaceId(idx),
                     name: format!("lora-{idx}"),
@@ -8590,6 +8594,7 @@ mod tests {
         let (_li, l_inc_rx) = tokio::sync::mpsc::channel(4);
         let (l_out_tx, mut l_out_rx) = tokio::sync::mpsc::channel(4);
         registry.register(InterfaceHandle {
+            next_tag: None,
             info: InterfaceInfo {
                 id: InterfaceId(1),
                 name: "lora".into(),
@@ -8618,6 +8623,7 @@ mod tests {
         let (_pi, p_inc_rx) = tokio::sync::mpsc::channel(4);
         let (p_out_tx, mut p_out_rx) = tokio::sync::mpsc::channel(4);
         registry.register(InterfaceHandle {
+            next_tag: None,
             info: InterfaceInfo {
                 id: InterfaceId(2),
                 name: "plain".into(),
@@ -8675,6 +8681,7 @@ mod tests {
         let (_pi, p_inc_rx) = tokio::sync::mpsc::channel(4);
         let (p_out_tx, mut p_out_rx) = tokio::sync::mpsc::channel(4);
         registry.register(InterfaceHandle {
+            next_tag: None,
             info: InterfaceInfo {
                 id: InterfaceId(0),
                 name: "tcp".into(),
@@ -8753,6 +8760,7 @@ mod tests {
         // Exhaust to guarantee earliest_fit_time > 0.
         lora_credit.try_charge(500, 0).unwrap();
         let lora_handle = InterfaceHandle {
+            next_tag: None,
             info: InterfaceInfo {
                 id: InterfaceId(1),
                 name: "lora-test".into(),
@@ -8780,6 +8788,7 @@ mod tests {
         let (_plain_inc_tx, plain_inc_rx) = tokio::sync::mpsc::channel(4);
         let (plain_out_tx, _plain_out_rx) = tokio::sync::mpsc::channel(4);
         let plain_handle = InterfaceHandle {
+            next_tag: None,
             info: InterfaceInfo {
                 id: InterfaceId(2),
                 name: "plain-test".into(),
@@ -8861,6 +8870,7 @@ mod tests {
         let credit = AirtimeCredit::new(125_000, 10, 8, 18, 500);
         let expected_airtime = credit.max_airtime_ms();
         let handle = InterfaceHandle {
+            next_tag: None,
             info: InterfaceInfo {
                 id: InterfaceId(1),
                 name: "lora-sf10".into(),
@@ -8922,6 +8932,7 @@ mod tests {
         let (_inc_tx, inc_rx) = tokio::sync::mpsc::channel(4);
         let (out_tx, _out_rx) = tokio::sync::mpsc::channel(4);
         let handle = InterfaceHandle {
+            next_tag: None,
             info: InterfaceInfo {
                 id: InterfaceId(2),
                 name: "tcp-test".into(),
@@ -8983,6 +8994,7 @@ mod tests {
         let (out_tx, _out_rx) = tokio::sync::mpsc::channel(4);
         let credit = Arc::new(Mutex::new(AirtimeCredit::new(125_000, 7, 5, 24, 500)));
         let handle = InterfaceHandle {
+            next_tag: None,
             info: InterfaceInfo {
                 id: InterfaceId(1),
                 name: "lora-reconfig".into(),
@@ -9260,6 +9272,7 @@ mod tests {
         let (_inc_tx, inc_rx) = mpsc::channel(4);
         let (out_tx, out_rx) = mpsc::channel(8);
         registry.register(InterfaceHandle {
+            next_tag: None,
             info: InterfaceInfo {
                 id: InterfaceId(id),
                 name: "test/readable".into(),
@@ -9965,6 +9978,7 @@ mod tests {
         let (in_tx, in_rx) = mpsc::channel(4);
         let (out_tx, out_rx) = mpsc::channel(8);
         registry.register(InterfaceHandle {
+            next_tag: None,
             info: InterfaceInfo {
                 id: InterfaceId(0),
                 name: "test/flush-loop".into(),

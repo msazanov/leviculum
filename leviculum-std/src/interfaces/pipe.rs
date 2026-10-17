@@ -93,6 +93,7 @@ pub(crate) fn spawn_pipe_interface(mut config: PipeInterfaceConfig) -> Interface
     });
 
     InterfaceHandle {
+        next_tag: None,
         info: InterfaceInfo {
             id,
             name: handle_name,

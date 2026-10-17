@@ -258,11 +258,11 @@ The three abstractions you implement to run the core on a platform. Defined in
 
 | Trait | Required methods (selected) | Source |
 |-------|------------------------------|--------|
-| `Clock` | `fn now_ms(&self) -> u64` | `traits.rs:510` |
+| `Clock` | `fn now_ms(&self) -> u64` | `traits.rs:531` |
 | `Storage` | key-value persistence: `has_packet_hash`, `get_path`/`set_path`, link/announce tables, identities, ratchets (large trait) | `traits.rs:196` |
-| `Interface` | `id`, `name`, `mtu`, `is_online`, `fn try_send(&mut self, data: &[u8]) -> Result<(), InterfaceError>` | `traits.rs:354` |
+| `Interface` | `id`, `name`, `mtu`, `is_online`, `fn try_send(&mut self, data: &[u8]) -> Result<(), InterfaceError>` | `traits.rs:359` |
 
-Provided `Storage` implementations: `NoStorage` (`traits.rs:1048`, zero-sized
+Provided `Storage` implementations: `NoStorage` (`traits.rs:1069`, zero-sized
 no-op for stubs and stateless devices), `MemoryStorage`
 (`leviculum-core/src/memory_storage.rs`, BTreeMap-backed with caps), and
 `EmbeddedStorage` (`leviculum-core/src/embedded_storage.rs:91`, `heapless`-backed

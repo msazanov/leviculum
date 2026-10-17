@@ -268,7 +268,7 @@ it waited (Codeberg #433):
   longer than a full frame's airtime plus one re-query interval
   explains (`DutyHolds`, in the same crate). A frame past the cap whose
   wait overlapped such a hold is dropped at dequeue with
-  `LORA_TX_STALE iface=<name> age_ms=<n> len=<n> held_ms=<n>` and
+  `LORA_TX_STALE iface=<name> age_ms=<n> len=<n> held_ms=<n> ph=<hex>` and
   counted as `tx_stale_drops` (also inside `tx_queue_drops`), which
   `lnstatus` shows as `TX stale`. Frames the modem already holds age
   inside it, out of the host's reach.

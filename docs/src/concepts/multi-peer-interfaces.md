@@ -25,10 +25,10 @@ on the interface's side of the boundary.
 
 The listener binds and accepts; every accepted connection becomes its
 own `InterfaceHandle` with its own id, drawn from the shared counter
-(`spawn_tcp_server`, `leviculum-std/src/interfaces/tcp.rs:366`). The
+(`spawn_tcp_server`, `leviculum-std/src/interfaces/tcp.rs:367`). The
 child is built from the already-connected stream
 (`spawn_tcp_interface_from_stream`,
-`leviculum-std/src/interfaces/tcp.rs:433`), inherits IFAC, mode and
+`leviculum-std/src/interfaces/tcp.rs:434`), inherits IFAC, mode and
 ingress control from the listener, and is handed to the event loop,
 which registers it in the routing map like any other interface
 (`registry`, `leviculum-std/src/driver/mod.rs:5086`).
@@ -37,8 +37,8 @@ The listener itself is deliberately **not** in that map. It carries no
 packets, so it would be a send target that cannot send; it is recorded
 in the reporting inventory instead, where the child registers its
 display identity and its parent link (`add_spawned`,
-`leviculum-std/src/interfaces/tcp.rs:420`; `listener_id`,
-`leviculum-std/src/interfaces/tcp.rs:428`). The split between the
+`leviculum-std/src/interfaces/tcp.rs:421`; `listener_id`,
+`leviculum-std/src/interfaces/tcp.rs:429`). The split between the
 routing map and the reporting inventory is the point of that module
 (`interface_names`, `leviculum-std/src/interfaces/inventory.rs:7`).
 
@@ -58,7 +58,7 @@ leaves (`remove_spawned`, `leviculum-std/src/driver/mod.rs:4184`).
   `InterfaceHandle`,
   `leviculum-std/src/interfaces/auto_interface/orchestrator.rs:943`).
 - Every accepted I2P stream becomes a handle
-  (`new_interface_tx`, `leviculum-std/src/interfaces/i2p/mod.rs:496`).
+  (`new_interface_tx`, `leviculum-std/src/interfaces/i2p/mod.rs:497`).
 - Every accepted shared-instance IPC client becomes a handle
   (`add_spawned`, `leviculum-std/src/interfaces/local.rs:221`).
 
@@ -72,7 +72,7 @@ Reticulum interface and one broadcast domain (`BLEInterface`,
 goes through one planner that decides which links get a copy
 (`plan_tx_to`, `leviculum-std/src/interfaces/ble/links.rs:1004`, driven
 from `send_packet`,
-`leviculum-std/src/interfaces/ble/mod.rs:1554`). Since Codeberg #376 the
+`leviculum-std/src/interfaces/ble/mod.rs:1555`). Since Codeberg #376 the
 core supplies the addressee: a path entry carries the identity it was
 learned from (`via_peer`, `leviculum-core/src/storage_types.rs:48`) and
 that identity rides out with the packet. With a hint the planner picks
@@ -84,7 +84,7 @@ makes a board a relay between two of its own links: a broadcast the
 core is re-sending carries the peer it ARRIVED from
 (`exclude_peer`, `leviculum-core/src/transport.rs:558`), and the
 interface serves every link but that one
-(`try_send_excluding_peer`, `leviculum-core/src/traits.rs:436`). The
+(`try_send_excluding_peer`, `leviculum-core/src/traits.rs:441`). The
 default implementation sends nothing, which is exactly what excluding
 the whole interface did, so every single-link carrier is unchanged and
 so is lnsd's BLE interface, whose peripheral role notifies its
@@ -117,7 +117,7 @@ same three in `handle_packet_from_peer`,
 `leviculum-nrf/src/bin/rak4631.rs:1119`), the core stamps the peer onto
 the path entry it installs, and a peer loss culls exactly the paths
 through it (`drop_paths_via_peer`,
-`leviculum-core/src/transport.rs:5635`). So the identity-shaped
+`leviculum-core/src/transport.rs:5653`). So the identity-shaped
 addressing already exists end to end; the only open question is whether
 the *send* side spends an interface object on it.
 
@@ -131,7 +131,7 @@ when it ends,
 including when the dial never connected at all (`CentralGone`,
 `leviculum-std/src/interfaces/ble/bluez.rs:593`), and the orchestrator
 restarts the strict scan phase on that event (`CentralGone`,
-`leviculum-std/src/interfaces/ble/mod.rs:1220`, into `note_reset`,
+`leviculum-std/src/interfaces/ble/mod.rs:1221`, into `note_reset`,
 `leviculum-std/src/interfaces/ble/links.rs:1762`). The firmware restarts
 its strict phase only when a new neighbour links or the strict rule finds
 a target (`note_phase_event`, `leviculum-nrf/src/ble/columba.rs:1802`,
@@ -216,9 +216,9 @@ address one peripheral-role link. lnsd, on BlueZ, cannot.
 
 `NodeCore` holds no interface-keyed collection of its own; every
 per-interface field lives in `Transport`, and there are 24 of them
-(`interface_announce_caps`, `leviculum-core/src/transport.rs:2912`
+(`interface_announce_caps`, `leviculum-core/src/transport.rs:2930`
 through `own_tunnel_ids`,
-`leviculum-core/src/transport.rs:3250` — the `BTreeMap<usize, _>` and
+`leviculum-core/src/transport.rs:3268` — the `BTreeMap<usize, _>` and
 `BTreeSet<usize>` fields in that block).
 
 **Method, and why not `size_of`.** Summing `size_of` over those 24
@@ -226,7 +226,7 @@ value types would be the wrong number by a wide margin in both
 directions: a `BTreeMap` allocates in nodes of up to 11 entries, so the
 first interface pays for a whole node in every map and the next ten pay
 nothing, and several of the values are themselves growable
-(`interface_held_announces`, `leviculum-core/src/transport.rs:3133`, is
+(`interface_held_announces`, `leviculum-core/src/transport.rs:3151`, is
 a map of maps). What the 96 KiB firmware pool actually sees is
 allocator traffic, so that is what was measured: a counting
 `GlobalAlloc` around `System` — the harness already in the tree as
@@ -307,7 +307,7 @@ either way.
 Stack is likewise not per-interface: the send loop iterates, it does not
 recurse. What does scale with the interface count is the broadcast
 fan-out — an announce emits one action per entry in the routing map
-(`interface_names`, `leviculum-core/src/transport.rs:12706`), each
+(`interface_names`, `leviculum-core/src/transport.rs:12724`), each
 carrying a cloned packet. With three BLE children an announce would
 allocate three ~500 B action buffers where today it allocates one that
 `tx_fanout_task` clones per link (`leviculum-nrf/src/ble/mod.rs:523`).
@@ -321,12 +321,12 @@ parent to lean on. Measured against the tree, not assumed:
 | Machinery | Per | Where it belongs |
 |---|---|---|
 | Airtime credit bucket (`AirtimeCredit`, `leviculum-std/src/interfaces/airtime.rs:23`) | **medium** — one radio, one duty cycle | parent |
-| Pre-TX jitter / CSMA deference (`compute_jitter_max_ms`, `leviculum-std/src/interfaces/rnode.rs:298`) | **medium** — contention is on the air | parent |
-| Announce cap and egress slot (`interface_announce_caps`, `leviculum-core/src/transport.rs:2912`; `interface_next_slot_ms`, `leviculum-core/src/transport.rs:3170`) | **medium** — it rations a shared resource | parent (splitting it per link multiplies the budget by the link count) |
-| Max-airtime backchannel (`interface_max_airtime_ms`, `leviculum-core/src/transport.rs:3196`) | **medium** | parent |
-| Advertising and scanning (`reconcile_advertising`, `leviculum-std/src/interfaces/ble/mod.rs:1482`; `ScanScheduler`, `leviculum-std/src/interfaces/ble/links.rs:1711`) | **medium** — one adapter | parent |
+| Pre-TX jitter / CSMA deference (`compute_jitter_max_ms`, `leviculum-std/src/interfaces/rnode.rs:356`) | **medium** — contention is on the air | parent |
+| Announce cap and egress slot (`interface_announce_caps`, `leviculum-core/src/transport.rs:2930`; `interface_next_slot_ms`, `leviculum-core/src/transport.rs:3188`) | **medium** — it rations a shared resource | parent (splitting it per link multiplies the budget by the link count) |
+| Max-airtime backchannel (`interface_max_airtime_ms`, `leviculum-core/src/transport.rs:3214`) | **medium** | parent |
+| Advertising and scanning (`reconcile_advertising`, `leviculum-std/src/interfaces/ble/mod.rs:1483`; `ScanScheduler`, `leviculum-std/src/interfaces/ble/links.rs:1711`) | **medium** — one adapter | parent |
 | IFAC | **medium** — it is a property of the configured section | parent |
-| BLE inter-packet gap (`LinkPacer`, `leviculum-std/src/interfaces/ble/links.rs:1871`) | **link**, except on the shared notify pipe where one pacer serves every subscriber (`leviculum-std/src/interfaces/ble/mod.rs:552`) | child, mostly |
+| BLE inter-packet gap (`LinkPacer`, `leviculum-std/src/interfaces/ble/links.rs:1871`) | **link**, except on the shared notify pipe where one pacer serves every subscriber (`leviculum-std/src/interfaces/ble/mod.rs:553`) | child, mostly |
 | Negotiated MTU and fragmentation state | **link** | child |
 | Keepalive and expiry timers | **link** | child |
 | Byte counters | **link** | child |

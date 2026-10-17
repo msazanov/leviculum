@@ -686,13 +686,17 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
     // io task, #316) report how many whole frames were lost as
     // `frames`. Both entries share the name; a record passes if either
     // shape is fully present (see the any-shape rule in `on_event`).
+    // The core's journey correlator rides on both (T-0013): `ph` names
+    // the one shed frame, `phs` the abandoned ones, comma-separated, up
+    // to eight, `elided` past that; `-` is a frame the core sent
+    // untagged.
     EventSchema {
         name: "RNODE_TX_QUEUE_DROP",
-        required_keys: &["iface", "len", "depth", "reason"],
+        required_keys: &["iface", "len", "depth", "reason", "ph"],
     },
     EventSchema {
         name: "RNODE_TX_QUEUE_DROP",
-        required_keys: &["iface", "frames", "depth", "reason"],
+        required_keys: &["iface", "frames", "depth", "reason", "phs"],
     },
     // AutoInterface refused a new peer (review finding L-0040): `reason`
     // is `cap` (the table holds `max_peers`), `source` (this source holds

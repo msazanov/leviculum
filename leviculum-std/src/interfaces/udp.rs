@@ -331,6 +331,7 @@ fn spawn_udp_interface_inner(
     });
 
     Ok(InterfaceHandle {
+        next_tag: None,
         info: InterfaceInfo {
             id,
             name,
@@ -864,6 +865,7 @@ mod tests {
         handle_a
             .outgoing
             .send(OutgoingPacket {
+                ph: None,
                 peer: None,
                 data: payload.to_vec().into(),
                 high_priority: false,
@@ -882,6 +884,7 @@ mod tests {
         handle_b
             .outgoing
             .send(OutgoingPacket {
+                ph: None,
                 peer: None,
                 data: payload2.to_vec().into(),
                 high_priority: false,
@@ -920,6 +923,7 @@ mod tests {
         handle
             .outgoing
             .send(OutgoingPacket {
+                ph: None,
                 peer: None,
                 data: b"test".to_vec().into(),
                 high_priority: false,
@@ -983,6 +987,7 @@ mod tests {
         handle
             .outgoing
             .send(OutgoingPacket {
+                ph: None,
                 peer: None,
                 data: payload.to_vec().into(),
                 high_priority: false,
@@ -1024,6 +1029,7 @@ mod tests {
         handle
             .outgoing
             .send(OutgoingPacket {
+                ph: None,
                 peer: None,
                 data: payload.to_vec().into(),
                 high_priority: false,
@@ -1080,6 +1086,7 @@ mod tests {
         handle
             .outgoing
             .send(OutgoingPacket {
+                ph: None,
                 peer: None,
                 data: b"undeliverable".to_vec().into(),
                 high_priority: false,
@@ -1119,6 +1126,7 @@ mod tests {
         handle
             .outgoing
             .send(OutgoingPacket {
+                ph: None,
                 peer: None,
                 data: b"outbound".to_vec().into(),
                 high_priority: false,
@@ -1301,6 +1309,7 @@ mod tests {
         handle
             .outgoing
             .send(OutgoingPacket {
+                ph: None,
                 peer: None,
                 data: b"into the void".to_vec().into(),
                 high_priority: false,
@@ -1363,6 +1372,7 @@ mod tests {
             handle
                 .outgoing
                 .send(OutgoingPacket {
+                    ph: None,
                     peer: None,
                     data: b"to old".to_vec().into(),
                     high_priority: false,
@@ -1394,6 +1404,7 @@ mod tests {
             handle
                 .outgoing
                 .send(OutgoingPacket {
+                    ph: None,
                     peer: None,
                     data: b"to new".to_vec().into(),
                     high_priority: false,

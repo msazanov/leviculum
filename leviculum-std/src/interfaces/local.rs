@@ -271,6 +271,7 @@ fn spawn_local_interface_from_stream(
     });
 
     InterfaceHandle {
+        next_tag: None,
         info: InterfaceInfo {
             id,
             name,
@@ -496,6 +497,7 @@ pub(crate) fn spawn_local_client(config: LocalClientConfig) -> Result<InterfaceH
     tokio::spawn(task.run(stream, incoming_tx, outgoing_rx));
 
     Ok(InterfaceHandle {
+        next_tag: None,
         info: InterfaceInfo {
             id: config.id,
             name,
@@ -901,6 +903,7 @@ mod tests {
         handle
             .outgoing
             .send(OutgoingPacket {
+                ph: None,
                 peer: None,
                 data: response.to_vec().into(),
                 high_priority: false,
@@ -1017,6 +1020,7 @@ mod tests {
         client_handle
             .outgoing
             .send(OutgoingPacket {
+                ph: None,
                 peer: None,
                 data: b"client-to-server, packet-sized".to_vec().into(),
                 high_priority: false,
@@ -1034,6 +1038,7 @@ mod tests {
         server_handle
             .outgoing
             .send(OutgoingPacket {
+                ph: None,
                 peer: None,
                 data: b"server-to-client, packet-sized".to_vec().into(),
                 high_priority: false,
@@ -1277,6 +1282,7 @@ mod tests {
         client
             .outgoing
             .send(OutgoingPacket {
+                ph: None,
                 peer: None,
                 data: b"after-the-restart, packet-sized".to_vec().into(),
                 high_priority: false,
@@ -1292,6 +1298,7 @@ mod tests {
         server_handle
             .outgoing
             .send(OutgoingPacket {
+                ph: None,
                 peer: None,
                 data: b"and-back, a packet-sized frame".to_vec().into(),
                 high_priority: false,
@@ -1461,6 +1468,7 @@ mod tests {
         // write_all while the frame's head is already at the peer.
         outgoing_tx
             .send(OutgoingPacket {
+                ph: None,
                 data: vec![0x42u8; 1 << 20].into(),
                 high_priority: false,
                 peer: None,
@@ -1588,6 +1596,7 @@ mod tests {
         client
             .outgoing
             .send(OutgoingPacket {
+                ph: None,
                 data: vec![0x22u8; 40].into(),
                 high_priority: false,
                 peer: None,
