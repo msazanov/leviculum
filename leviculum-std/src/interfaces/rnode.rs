@@ -3162,7 +3162,7 @@ where
                         if let Some(dropped) = pendings.pop_front() {
                             tracing::debug!(
                                 target: "leviculum_std::interfaces::rnode::tx_trace",
-                                "LORA_TX_ACCOUNT iface={name} len={} verdict=undecided                                  reason=no_chtm",
+                                "LORA_TX_ACCOUNT iface={name} len={} verdict=undecided reason=no_chtm",
                                 dropped.payload_len
                             );
                         }
