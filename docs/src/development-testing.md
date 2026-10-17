@@ -32,9 +32,10 @@ system packages must be installed (all apt-installable on Debian):
 - **i2pd** (optional) — provides the SAM bridge on 127.0.0.1:7656 that the
   `I2PInterface` live tests use. The default suite covers `I2PInterface` with an
   in-process mock SAM bridge, so i2pd is not needed to go green; it only gates
-  the `#[ignore]`d live tests (`cargo test -p leviculum-std i2pd_live --
-  --ignored`). Enable the bridge with `sam.enabled = true` in
-  `/etc/i2pd/i2pd.conf` and start the `i2pd` service.
+  the `#[ignore]`d live tests. `just i2p-live` runs them against a private
+  i2pd it starts and stops itself (about a minute from a cold router, network
+  needed); against a running system i2pd, `cargo test -p leviculum-std
+  i2pd_live -- --ignored` with `sam.enabled = true` in `/etc/i2pd/i2pd.conf`.
 - **cargo-fuzz** + **nightly** (optional) — drive the wire-format parser fuzz
   harness under `leviculum-core/fuzz`, `leviculum-std/fuzz` and
   `leviculum-micron/fuzz` (see [Fuzzing

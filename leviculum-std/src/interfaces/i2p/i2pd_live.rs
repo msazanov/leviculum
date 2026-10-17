@@ -1,7 +1,9 @@
 //! Live tests against a real i2pd SAM bridge (`#[ignore]` by default).
 //!
 //! Prerequisite: i2pd running with `sam.enabled = true` (SAM on
-//! 127.0.0.1:7656). See `docs/src/development-testing.md`.
+//! 127.0.0.1:7656, or wherever `LEVICULUM_I2P_SAM` points). See
+//! `docs/src/development-testing.md`. `just i2p-live` starts a private i2pd
+//! for the run (scripts/run-i2p-live.sh) and points the tests at it.
 //!
 //! What is covered here vs the deterministic mock-SAM tests in `tests.rs`:
 //!
@@ -30,8 +32,15 @@ use super::sam::{self, Destination};
 
 const SAM: &str = "127.0.0.1:7656";
 
+/// The SAM bridge under test: `LEVICULUM_I2P_SAM` if set, i2pd's default
+/// otherwise. `just i2p-live` sets it to the private router it starts, so a
+/// system i2pd on the default port is neither used nor disturbed.
+fn sam_addr() -> String {
+    std::env::var("LEVICULUM_I2P_SAM").unwrap_or_else(|_| SAM.to_string())
+}
+
 async fn sam_socket() -> TcpStream {
-    let mut s = TcpStream::connect(SAM)
+    let mut s = TcpStream::connect(sam_addr())
         .await
         .expect("connect to i2pd SAM (is i2pd running with sam.enabled?)");
     sam::handshake(&mut s, sam::SAM_COMMAND_TIMEOUT)

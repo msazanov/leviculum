@@ -2208,3 +2208,14 @@ tmp-leftovers:
 [doc('Check THIRD-PARTY.md names every submodule and vendored crate')]
 check-third-party:
     @python3 scripts/check-third-party.py
+
+# T-0009: the two #[ignore]d live I2P tests (interfaces::i2p::i2pd_live) were
+# the only coverage of I2PInterface against a real SAM bridge, and nothing
+# started the i2pd they need. This starts a private one in a temporary data
+# directory (own SAM and transport ports, every other service off, so a system
+# i2pd is untouched), runs both tests against it and stops it. Needs the
+# network: a cold router reseeds and builds tunnels. Not a tier; the reviewer
+# runs it weekly beside `emulated-corpus`.
+[doc('Run the live I2P tests against a private, freshly started i2pd')]
+i2p-live:
+    bash scripts/run-i2p-live.sh
