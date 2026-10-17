@@ -3,6 +3,21 @@
 Leviculum is an independent reimplementation based on the [Reticulum protocol specification](https://leviculum.network/docs/appendix/reticulum-specification.html).
 It is wire-compatible with Reticulum and runs on Linux, macOS, and embedded devices.
 
+## Bugs and contributions
+
+Report bugs and ask questions at
+<https://codeberg.org/Lew_Palm/leviculum/issues>. A question is an
+ordinary issue; the tracker has no `question` label, so leave the labels
+to the maintainers. When the daemon is
+involved, attach the output of `lnstest diag` (see the
+[quickstart](https://leviculum.network/docs/lnsd-quickstart.html) for the exact command). For
+patches, see [CONTRIBUTING.md](CONTRIBUTING.md).
+
+A suspected security vulnerability is the one thing that does not belong in
+the tracker: an issue is public from the moment it is filed, which hands the
+flaw to everyone who might use it. [SECURITY.md](SECURITY.md) names the
+private contact, the acknowledgement window, and what is in scope.
+
 ## What is Reticulum?
 
 Reticulum is a networking stack for building resilient, encrypted mesh networks over any transport medium. It works over LoRa radios, TCP, UDP, serial links, or anything that can carry bytes. Every node gets a cryptographic identity. Every connection is end-to-end encrypted. No servers, no accounts, no infrastructure required.
@@ -204,19 +219,6 @@ rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
 cargo install cargo-zigbuild cargo-deb
 pip install --user ziglang
 ```
-
-## Bugs and contributions
-
-Report bugs and ask questions at
-<https://codeberg.org/Lew_Palm/leviculum/issues>. When the daemon is
-involved, attach the output of `lnstest diag` (see the
-[quickstart](https://leviculum.network/docs/lnsd-quickstart.html) for the exact command). For
-patches, see [CONTRIBUTING.md](CONTRIBUTING.md).
-
-A suspected security vulnerability is the one thing that does not belong in
-the tracker: an issue is public from the moment it is filed, which hands the
-flaw to everyone who might use it. [SECURITY.md](SECURITY.md) names the
-private contact, the acknowledgement window, and what is in scope.
 
 ## License
 
