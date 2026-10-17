@@ -2142,7 +2142,11 @@ pub(crate) struct DialQueued {
 /// (`peripheral::Config`, interval 400). A fresh scan run hears a peer
 /// still on the air for the first time at that peer's next broadcast,
 /// so within this bound of the run starting.
-pub(crate) const PEER_ADV_INTERVAL_MS: u64 = 1_280;
+///
+/// Imported from the firmware's admission seam (817), like
+/// [`LINK_TIMEOUT_MS`]: the board's refused-dial phase (815) and ours
+/// are one number.
+pub(crate) use leviculum_ble_tx::PEER_ADV_INTERVAL_MS;
 
 /// How long a queued dial's peer may go unheard by a running scan
 /// before the dial is dropped as `dark` (757): one
@@ -2165,7 +2169,10 @@ pub(crate) const DIAL_DARK_AFTER_MS: u64 = PEER_ADV_INTERVAL_MS;
 /// A second interval covers the tick that sends it. A link that heard
 /// nothing for that long has bought nothing the strict phase was for,
 /// so an ordinary end read as a refusal costs nothing either.
-pub(crate) const REFUSAL_WINDOW_MS: u64 = 2 * KEEPALIVE_INTERVAL_MS;
+///
+/// Imported from the firmware's admission seam (817), which bounds the
+/// board's `refused_dial` (815) by the same symbol.
+pub(crate) use leviculum_ble_tx::REFUSAL_WINDOW_MS;
 
 /// Why a queued dial was dropped before it started (757), the
 /// `reason` of `BLE_DIAL_SKIP`.
@@ -3646,6 +3653,23 @@ mod tests {
             s.mode(false, chosen + SCAN_FALLBACK_AFTER_MS),
             (ScanMode::Fallback, Some(SCAN_FALLBACK_AFTER_MS))
         );
+    }
+
+    /// The dial constants are the board's symbols, not a copy of their
+    /// values (817): this file defines neither, it imports both from
+    /// `leviculum_ble_tx`, and their values are the ones the board's
+    /// strict phase and refusal classifier run on.
+    #[test]
+    fn the_dial_constants_are_the_boards_symbols() {
+        let src = include_str!("links.rs");
+        for name in ["PEER_ADV_INTERVAL_MS", "REFUSAL_WINDOW_MS"] {
+            let own = ["const ", name, ":"].concat();
+            let import = ["pub(crate) use leviculum_ble_tx::", name, ";"].concat();
+            assert!(!src.contains(&own), "links.rs defines its own {name}");
+            assert!(src.contains(&import), "links.rs does not import {name}");
+        }
+        assert_eq!(PEER_ADV_INTERVAL_MS, leviculum_ble_tx::PEER_ADV_INTERVAL_MS);
+        assert_eq!(REFUSAL_WINDOW_MS, leviculum_ble_tx::REFUSAL_WINDOW_MS);
     }
 
     /// 810's classifier: only a dial of ours that ended without one

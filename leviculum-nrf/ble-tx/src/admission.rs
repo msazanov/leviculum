@@ -782,12 +782,13 @@ pub struct ScanPhase {
 /// time a peer's fresh record, `free_slots=0` after it filled, needs to
 /// reach a scanner. The strict phase a refused dial starts lasts this
 /// long ([`ScanPhase::note_refused`], 815). lnsd's
-/// `links::PEER_ADV_INTERVAL_MS` is the same number.
+/// `links::PEER_ADV_INTERVAL_MS` imports this one (817).
 pub const PEER_ADV_INTERVAL_MS: u64 = 1_280;
 
 /// How soon after its admission a dial of ours may end, without one
 /// frame heard from the peer, and still read as the peer's refusal
-/// ([`refused_dial`], 815; lnsd's `REFUSAL_WINDOW_MS`, 810). A full
+/// ([`refused_dial`], 815; lnsd's `REFUSAL_WINDOW_MS`, 810, imports
+/// this one, 817). A full
 /// peer refuses at our handshake and disconnects; the board learns of
 /// it at the disconnect event or at its next write, the transport's
 /// next packet or at the latest its first keepalive, one
