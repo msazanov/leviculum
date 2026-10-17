@@ -155,8 +155,8 @@ impl RNodeInterfaceConfig {
 /// The `ph` key of a transmit or drop line: the packet's journey correlator
 /// as the core tagged it ([`OutgoingPacket::ph`]), or `-` for a frame that
 /// came untagged (the journey target off). The interface prints it and reads
-/// nothing in it (T-0013).
-struct PhField(Option<FrameTag>);
+/// nothing in it (T-0013). The serial interface's `SERIAL_TX` prints it too.
+pub(super) struct PhField(pub(super) Option<FrameTag>);
 
 impl std::fmt::Display for PhField {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

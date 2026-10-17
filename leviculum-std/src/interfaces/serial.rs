@@ -19,6 +19,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
+use super::rnode::PhField;
 use super::{IncomingPacket, InterfaceCounters, InterfaceHandle, InterfaceInfo, OutgoingPacket};
 
 /// Python SerialInterface HW_MTU
@@ -1969,6 +1970,17 @@ fn media_keys(prefix: &str, profile: leviculum_core::envelope::MediaProfileWire)
 /// - Frame timeout: partial frames discarded after 100ms of silence (Python parity)
 /// - HW_MTU: deframer buffer exceeding 564 bytes is reset (prevents OOM on embedded)
 ///
+/// Name one frame the port lost before it left this host (`SERIAL_TX`'s
+/// drop line, same target and level).
+fn log_serial_tx_drop(name: &str, pkt: &OutgoingPacket, reason: &str) {
+    tracing::debug!(
+        target: "leviculum_std::interfaces::serial::tx_trace",
+        "SERIAL_TX_DROP iface={name} len={} reason={reason} ph={}",
+        pkt.data.len(),
+        PhField(pkt.ph)
+    );
+}
+
 /// Returns `outgoing_rx` on port loss for reconnect reuse.
 async fn serial_io_task<S>(
     name: String,
@@ -2093,14 +2105,32 @@ where
                         // TCP). On a write error the dying port charges one
                         // frame whose tail never left — bounded by that frame.
                         counters.tx_bytes.fetch_add(frame_buf.len() as u64, Ordering::Relaxed);
+                        // A write or flush error loses this frame with the
+                        // port: the reconnect keeps the channel, not the
+                        // frame in hand. The drop line names it by `ph`, so
+                        // a journey through an LNode-attached host ends here
+                        // and not at the core's `PKT_TX`.
                         if let Err(e) = port.write_all(&frame_buf).await {
                             tracing::debug!("Serial interface {} write error: {}", name, e);
+                            log_serial_tx_drop(&name, &pkt, "write_error");
                             return outgoing_rx;
                         }
                         if let Err(e) = port.flush().await {
                             tracing::debug!("Serial interface {} flush error: {}", name, e);
+                            log_serial_tx_drop(&name, &pkt, "flush_error");
                             return outgoing_rx;
                         }
+                        // The RNode interface's `LORA_TX` for the host ->
+                        // board boundary: the frame has left this host. Its
+                        // own target, DEBUG, so a journey capture can turn
+                        // it on without the rest of the serial logs. `len`
+                        // is the packet, not the HDLC frame, like `LORA_TX`.
+                        tracing::debug!(
+                            target: "leviculum_std::interfaces::serial::tx_trace",
+                            "SERIAL_TX iface={name} len={} ph={}",
+                            pkt.data.len(),
+                            PhField(pkt.ph)
+                        );
                     }
                     None => {
                         tracing::debug!("Serial interface {} outgoing channel closed", name);
@@ -3542,6 +3572,167 @@ mod tests {
         // subscriber the moment this test is done with it.
         task.abort();
         let _ = task.await;
+    }
+
+    /// 821: the serial interface names the frames it writes, the way the
+    /// RNode interface's `LORA_TX` does (802). A tagged frame is named by its
+    /// `ph` on `SERIAL_TX` once it has left for the board, an untagged one as
+    /// `-`, and `len` is the packet, not the HDLC frame around it.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn a_tagged_frame_is_named_on_serial_tx() {
+        const TAGGED: leviculum_core::traits::FrameTag =
+            [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
+        let _guard = serial_io_task_test_guard();
+        let (buf, _log_guard) = crate::test_support::log_capture::capture_logs();
+        let (near, mut far) = tokio::io::duplex(1024);
+        let (incoming_tx, _incoming_rx) = mpsc::channel(8);
+        let (outgoing_tx, outgoing_rx) = mpsc::channel(8);
+        let task = tokio::spawn(serial_io_task(
+            "serial_0".to_string(),
+            near,
+            incoming_tx,
+            outgoing_rx,
+            Arc::new(InterfaceCounters::new()),
+            false,
+        ));
+
+        let mut expected = Vec::new();
+        for (data, ph) in [(&b"tagged-frame"[..], Some(TAGGED)), (&b"plain"[..], None)] {
+            outgoing_tx
+                .send(OutgoingPacket {
+                    ph,
+                    data: data.to_vec().into(),
+                    high_priority: false,
+                    peer: None,
+                })
+                .await
+                .expect("send into task");
+            let mut framed = Vec::new();
+            frame(data, &mut framed);
+            expected.extend(framed);
+        }
+        let mut got = vec![0u8; expected.len()];
+        tokio::time::timeout(Duration::from_secs(5), far.read_exact(&mut got))
+            .await
+            .expect("both frames are written promptly")
+            .expect("the port receives them");
+        assert_eq!(got, expected);
+        // The line follows the flush; the board has the bytes once the task
+        // has had a turn past it.
+        tokio::task::yield_now().await;
+        task.abort();
+        let _ = task.await;
+
+        let logs = crate::test_support::log_capture::captured(&buf);
+        let tx: Vec<&str> = logs.lines().filter(|l| l.contains("SERIAL_TX ")).collect();
+        assert_eq!(tx.len(), 2, "one line per frame\n--- logs ---\n{logs}");
+        assert!(
+            tx[0].ends_with("SERIAL_TX iface=serial_0 len=12 ph=1122334455667788"),
+            "SERIAL_TX names the packet it wrote: {}",
+            tx[0]
+        );
+        assert!(
+            tx[1].ends_with("SERIAL_TX iface=serial_0 len=5 ph=-"),
+            "an untagged frame prints ph=-: {}",
+            tx[1]
+        );
+        assert!(
+            tx[0].contains("leviculum_std::interfaces::serial::tx_trace"),
+            "SERIAL_TX is on its own target: {}",
+            tx[0]
+        );
+    }
+
+    /// A port whose reads never complete and whose writes fail: the write
+    /// path's error with nothing on the read side to end the task first.
+    struct WriteFailsPort;
+
+    impl tokio::io::AsyncRead for WriteFailsPort {
+        fn poll_read(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            _buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Pending
+        }
+    }
+
+    impl tokio::io::AsyncWrite for WriteFailsPort {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            _buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            std::task::Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()))
+        }
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    /// 821: a frame the port loses on a write error is named by its `ph` on
+    /// `SERIAL_TX_DROP` and never on `SERIAL_TX`, so its journey ends at the
+    /// drop and not at the core's handover.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn a_frame_lost_to_a_write_error_is_named_on_the_drop_line() {
+        const TAGGED: leviculum_core::traits::FrameTag =
+            [0xde, 0xad, 0xbe, 0xef, 0x00, 0x01, 0x02, 0x03];
+        let _guard = serial_io_task_test_guard();
+        let (buf, _log_guard) = crate::test_support::log_capture::capture_logs();
+        let (incoming_tx, _incoming_rx) = mpsc::channel(8);
+        let (outgoing_tx, outgoing_rx) = mpsc::channel(8);
+        outgoing_tx
+            .send(OutgoingPacket {
+                ph: Some(TAGGED),
+                data: b"lost-frame".to_vec().into(),
+                high_priority: false,
+                peer: None,
+            })
+            .await
+            .expect("send into channel");
+        // The task returns on the port loss, handing the channel back.
+        let _outgoing_rx = tokio::time::timeout(
+            Duration::from_secs(5),
+            serial_io_task(
+                "serial_0".to_string(),
+                WriteFailsPort,
+                incoming_tx,
+                outgoing_rx,
+                Arc::new(InterfaceCounters::new()),
+                false,
+            ),
+        )
+        .await
+        .expect("a write error ends the io task");
+
+        let logs = crate::test_support::log_capture::captured(&buf);
+        assert!(
+            !logs.contains("SERIAL_TX "),
+            "a lost frame is not reported as written\n--- logs ---\n{logs}"
+        );
+        let drops: Vec<&str> = logs
+            .lines()
+            .filter(|l| l.contains("SERIAL_TX_DROP"))
+            .collect();
+        assert_eq!(drops.len(), 1, "one drop line\n--- logs ---\n{logs}");
+        assert!(
+            drops[0].ends_with(
+                "SERIAL_TX_DROP iface=serial_0 len=10 reason=write_error ph=deadbeef00010203"
+            ),
+            "the drop line names the lost packet: {}",
+            drops[0]
+        );
     }
 
     /// The 2026-09-26 field bring-up in one assertion: the board refused the
