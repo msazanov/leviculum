@@ -13,6 +13,27 @@ pub(super) fn build(
     config: &InterfaceConfig,
     ctx: &InterfaceBuildCtx<'_>,
 ) -> Result<Built, Error> {
+    let plan = plan(idx, config, ctx)?;
+    let port_path = plan.port_path.clone();
+    let vport_count = plan.subinterfaces.len();
+    let handles = crate::interfaces::rnode::spawn_rnode_multi_interface(plan);
+    tracing::info!(
+        "RNodeMulti interface on {} ({} vport subinterfaces)",
+        port_path,
+        vport_count
+    );
+    Ok(Built::Handles(handles))
+}
+
+/// Everything the builder decides, short of spawning: which subinterfaces
+/// exist, under which ids and names, on which radio parameters and airtime
+/// locks, or why the section is refused. Split from [`build`] so the
+/// decisions can be tested without a serial port behind them.
+pub(super) fn plan(
+    idx: usize,
+    config: &InterfaceConfig,
+    ctx: &InterfaceBuildCtx<'_>,
+) -> Result<crate::interfaces::rnode::RNodeMultiInterfaceConfig, Error> {
     let port_path = config
         .port
         .as_ref()
@@ -25,7 +46,7 @@ pub(super) fn build(
         .buffer_size
         .unwrap_or(crate::interfaces::rnode::RNODE_DEFAULT_BUFFER_SIZE);
 
-    let mut subs = Vec::new();
+    let mut subs: Vec<crate::interfaces::rnode::RNodeSubinterfaceParams> = Vec::new();
     // Each enabled [[[subinterface]]] becomes its own logical interface; the
     // first reuses the section index, the rest draw fresh ids.
     let mut first_id = Some(InterfaceId(idx));
@@ -42,6 +63,19 @@ pub(super) fn build(
                 sub.name,
                 vport,
                 leviculum_core::rnode::MAX_SUBINTERFACES - 1
+            )));
+        }
+        // One vport is one radio, so it carries one subinterface. A second
+        // claim would not fail anywhere later: both push their PHY to the same
+        // radio (the last one wins), and the hub routes that vport's receptions
+        // to only one of them (`rnode_multi_reconnect_task`'s vport map), so
+        // the other would transmit on a PHY it does not hold and never hear a
+        // reply. Python-RNS overwrites its vport slot the same way, silently.
+        if let Some(earlier) = subs.iter().find(|s| s.vport == vport) {
+            return Err(Error::Config(format!(
+                "RNodeMultiInterface subinterface '{}' sets vport = {}, which {} already \
+                 holds; each vport is one radio and carries one subinterface",
+                sub.name, vport, earlier.name
             )));
         }
         let frequency: u32 = sub
@@ -144,21 +178,12 @@ pub(super) fn build(
         )));
     }
 
-    let vport_count = subs.len();
-    let handles = crate::interfaces::rnode::spawn_rnode_multi_interface(
-        crate::interfaces::rnode::RNodeMultiInterfaceConfig {
-            name: parent_name.clone(),
-            port_path: port_path.clone(),
-            subinterfaces: subs,
-            flow_control,
-            buffer_size,
-            reconnect_notify: Some(ctx.reconnect_tx.clone()),
-        },
-    );
-    tracing::info!(
-        "RNodeMulti interface on {} ({} vport subinterfaces)",
+    Ok(crate::interfaces::rnode::RNodeMultiInterfaceConfig {
+        name: parent_name,
         port_path,
-        vport_count
-    );
-    Ok(Built::Handles(handles))
+        subinterfaces: subs,
+        flow_control,
+        buffer_size,
+        reconnect_notify: Some(ctx.reconnect_tx.clone()),
+    })
 }

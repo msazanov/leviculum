@@ -578,6 +578,322 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
+    // The multi builder's decisions (T-0007)
+    // ------------------------------------------------------------------
+    //
+    // `rnode_multi::plan` holds every decision the builder makes; `build`
+    // only spawns what it returns. Each refusal it can give has a case, each
+    // naming the key it refuses on, and each shape it can build has one.
+
+    /// A subinterface lawful on its own: BW125 / SF7 / CR4:5 at `frequency`.
+    fn multi_sub(name: &str, vport: u8, frequency: u64) -> crate::config::SubinterfaceConfig {
+        crate::config::SubinterfaceConfig {
+            name: name.to_string(),
+            vport: Some(vport),
+            frequency: Some(frequency),
+            bandwidth: Some(125_000),
+            spreading_factor: Some(7),
+            coding_rate: Some(5),
+            ..Default::default()
+        }
+    }
+
+    fn multi_config(subinterfaces: Vec<crate::config::SubinterfaceConfig>) -> InterfaceConfig {
+        InterfaceConfig {
+            interface_type: "RNodeMultiInterface".to_string(),
+            port: Some("/dev/nonexistent-test-port".to_string()),
+            subinterfaces,
+            ..Default::default()
+        }
+    }
+
+    fn multi_plan(
+        config: &InterfaceConfig,
+    ) -> Result<crate::interfaces::rnode::RNodeMultiInterfaceConfig, Error> {
+        rnode_multi::plan(3, config, &CtxOwner::new().ctx())
+    }
+
+    fn multi_refusal(config: &InterfaceConfig) -> String {
+        match multi_plan(config) {
+            Ok(_) => panic!("the section must be refused"),
+            Err(e) => e.to_string(),
+        }
+    }
+
+    #[test]
+    fn rnode_multi_without_a_port_is_refused() {
+        let mut config = multi_config(vec![multi_sub("a", 0, 869_525_000)]);
+        config.port = None;
+        let msg = multi_refusal(&config);
+        assert!(msg.contains("requires port"), "{msg}");
+    }
+
+    #[test]
+    fn rnode_multi_subinterface_without_a_vport_is_refused() {
+        let mut sub = multi_sub("a", 0, 869_525_000);
+        sub.vport = None;
+        let msg = multi_refusal(&multi_config(vec![sub]));
+        assert!(msg.contains("'a' requires vport"), "{msg}");
+    }
+
+    #[test]
+    fn rnode_multi_vport_past_the_last_radio_is_refused() {
+        let max = leviculum_core::rnode::MAX_SUBINTERFACES;
+        let msg = multi_refusal(&multi_config(vec![multi_sub("a", max, 869_525_000)]));
+        assert!(
+            msg.contains(&format!("'a' vport {max} out of range (0-{})", max - 1)),
+            "{msg}"
+        );
+        // The last vport itself is a radio.
+        assert!(multi_plan(&multi_config(vec![multi_sub("a", max - 1, 869_525_000)])).is_ok());
+    }
+
+    /// Two subinterfaces on one vport would share one radio: the later PHY
+    /// overwrites the earlier, and the hub routes that vport's receptions to
+    /// only one of them. Refused, naming both and the vport.
+    #[test]
+    fn rnode_multi_duplicate_vport_is_refused_naming_both() {
+        let msg = multi_refusal(&multi_config(vec![
+            multi_sub("a", 2, 869_525_000),
+            multi_sub("b", 2, 868_100_000),
+        ]));
+        assert!(
+            msg.contains("'b' sets vport = 2") && msg.contains("rnode_multi_3[a]"),
+            "{msg}"
+        );
+    }
+
+    /// Each PHY key is refused by its own name when it is missing.
+    #[test]
+    fn rnode_multi_subinterface_missing_a_phy_key_is_refused_by_that_key() {
+        type Clear = fn(&mut crate::config::SubinterfaceConfig);
+        let cases: [(&str, Clear); 4] = [
+            ("frequency", |s| s.frequency = None),
+            ("bandwidth", |s| s.bandwidth = None),
+            ("spreadingfactor", |s| s.spreading_factor = None),
+            ("codingrate", |s| s.coding_rate = None),
+        ];
+        for (key, clear) in cases {
+            let mut sub = multi_sub("a", 0, 869_525_000);
+            clear(&mut sub);
+            let msg = multi_refusal(&multi_config(vec![sub]));
+            assert!(msg.contains(&format!("'a' requires {key}")), "{key}: {msg}");
+        }
+    }
+
+    #[test]
+    fn rnode_multi_frequency_past_u32_is_refused() {
+        let msg = multi_refusal(&multi_config(vec![multi_sub("a", 0, 1 << 32)]));
+        assert!(
+            msg.contains("frequency 4294967296 exceeds u32 range"),
+            "{msg}"
+        );
+    }
+
+    /// The RNode wire field is a u8, so a negative `txpower` cannot be sent.
+    #[test]
+    fn rnode_multi_negative_txpower_is_refused() {
+        let mut sub = multi_sub("a", 0, 869_525_000);
+        sub.tx_power = Some(-1);
+        let msg = multi_refusal(&multi_config(vec![sub]));
+        assert!(msg.contains("tx_power -1 out of range (0-37)"), "{msg}");
+    }
+
+    /// The capability check shared with the single builder, attributed to
+    /// the subinterface that failed it.
+    #[test]
+    fn rnode_multi_capability_refusal_names_the_subinterface() {
+        let mut sub = multi_sub("wide", 0, 869_525_000);
+        sub.spreading_factor = Some(13);
+        let msg = multi_refusal(&multi_config(vec![multi_sub("ok", 1, 868_100_000), sub]));
+        assert!(msg.contains("subinterface 'wide':"), "{msg}");
+    }
+
+    #[test]
+    fn rnode_multi_with_no_enabled_subinterface_is_refused() {
+        let mut off = multi_sub("off", 0, 869_525_000);
+        off.enabled = false;
+        for subs in [vec![], vec![off]] {
+            let msg = multi_refusal(&multi_config(subs));
+            assert!(
+                msg.contains("'rnode_multi_3' has no enabled subinterfaces"),
+                "{msg}"
+            );
+        }
+    }
+
+    /// Two vports become two subinterfaces: the first under the section's
+    /// own id, the next drawn from the shared counter, each named after its
+    /// block and carrying its own PHY. A disabled block is skipped entirely:
+    /// it draws no id, and the vport it names stays free.
+    #[test]
+    fn rnode_multi_two_vports_plan_two_subinterfaces_on_their_own_phys() {
+        let owner = CtxOwner::new();
+        let mut off = multi_sub("off", 1, 869_525_000);
+        off.enabled = false;
+        let mut slow = multi_sub("slow", 1, 868_100_000);
+        slow.spreading_factor = Some(12);
+        slow.coding_rate = Some(8);
+        slow.outgoing = false;
+        let mut config = multi_config(vec![off, multi_sub("fast", 0, 869_525_000), slow]);
+        config.flow_control = Some(true);
+        config.buffer_size = Some(7);
+        let plan = match rnode_multi::plan(3, &config, &owner.ctx()) {
+            Ok(plan) => plan,
+            Err(e) => panic!("two lawful vports plan: {e}"),
+        };
+        assert_eq!(plan.name, "rnode_multi_3");
+        assert_eq!(plan.port_path, "/dev/nonexistent-test-port");
+        assert!(plan.flow_control);
+        assert_eq!(plan.buffer_size, 7);
+        let got: Vec<_> = plan
+            .subinterfaces
+            .iter()
+            .map(|s| {
+                (
+                    s.id,
+                    s.name.as_str(),
+                    s.vport,
+                    s.frequency,
+                    s.sf,
+                    s.cr,
+                    s.outgoing,
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (
+                    InterfaceId(3),
+                    "rnode_multi_3[fast]",
+                    0,
+                    869_525_000,
+                    7,
+                    5,
+                    true
+                ),
+                (
+                    InterfaceId(100),
+                    "rnode_multi_3[slow]",
+                    1,
+                    868_100_000,
+                    12,
+                    8,
+                    false
+                ),
+            ]
+        );
+        assert_eq!(
+            owner.next_id.load(std::sync::atomic::Ordering::Relaxed),
+            101,
+            "one id drawn, for the second enabled block only"
+        );
+    }
+
+    /// Each vport's airtime locks come from its own PHY: with no limit set,
+    /// the long-term lock is the lawful duty cycle of that vport's own
+    /// sub-band (10 % at 869.525 MHz, 1 % at 868.1 MHz), and explicit
+    /// percentages are carried per vport in hundredths.
+    #[test]
+    fn rnode_multi_airtime_locks_follow_each_vports_own_phy() {
+        let mut capped = multi_sub("capped", 2, 869_525_000);
+        capped.airtime_limit_short = Some(2.5);
+        capped.airtime_limit_long = Some(0.5);
+        let config = multi_config(vec![
+            multi_sub("p", 0, 869_525_000),
+            multi_sub("m", 1, 868_100_000),
+            capped,
+        ]);
+        let plan = match multi_plan(&config) {
+            Ok(plan) => plan,
+            Err(e) => panic!("three lawful vports plan: {e}"),
+        };
+        let locks: Vec<_> = plan
+            .subinterfaces
+            .iter()
+            .map(|s| (s.st_alock, s.lt_alock))
+            .collect();
+        assert_eq!(
+            locks,
+            vec![(None, Some(1000)), (None, Some(100)), (Some(250), Some(50))]
+        );
+    }
+
+    /// An absent `txpower` is derived from each vport's own frequency and
+    /// marked as derived; an explicit one, 0 included, is taken as written.
+    #[test]
+    fn rnode_multi_txpower_is_derived_per_vport_unless_written() {
+        let mut quiet = multi_sub("quiet", 2, 869_525_000);
+        quiet.tx_power = Some(0);
+        let config = multi_config(vec![
+            multi_sub("p", 0, 869_525_000),
+            multi_sub("m", 1, 868_100_000),
+            quiet,
+        ]);
+        let plan = match multi_plan(&config) {
+            Ok(plan) => plan,
+            Err(e) => panic!("three lawful vports plan: {e}"),
+        };
+        let powers: Vec<_> = plan
+            .subinterfaces
+            .iter()
+            .map(|s| (s.tx_power, s.tx_power_derived))
+            .collect();
+        let derived = |f| leviculum_core::rnode::resolve_tx_power(None, f) as u8;
+        assert_eq!(
+            powers,
+            vec![
+                (derived(869_525_000), true),
+                (derived(868_100_000), true),
+                (0, false)
+            ]
+        );
+    }
+
+    /// An SX1262 spelling of a bandwidth reaches the RNode as the spelling
+    /// it echoes, per vport, as in the single builder.
+    #[test]
+    fn rnode_multi_bandwidth_is_sent_in_the_rnode_spelling() {
+        let mut sub = multi_sub("narrow", 0, 869_525_000);
+        sub.bandwidth = Some(41_670);
+        let plan = match multi_plan(&multi_config(vec![sub])) {
+            Ok(plan) => plan,
+            Err(e) => panic!("BW 41.67 kHz plans: {e}"),
+        };
+        assert_eq!(plan.subinterfaces[0].bandwidth, 41_700);
+    }
+
+    /// What reaches the transport: one interface per vport, under the planned
+    /// names and ids, each reporting the bitrate of its own PHY.
+    #[tokio::test]
+    async fn rnode_multi_build_yields_one_interface_per_vport_with_its_own_bitrate() {
+        let owner = CtxOwner::new();
+        let mut slow = multi_sub("slow", 1, 868_100_000);
+        slow.spreading_factor = Some(12);
+        slow.coding_rate = Some(8);
+        let config = multi_config(vec![multi_sub("fast", 0, 869_525_000), slow]);
+        let handles = match rnode_multi::build(3, &config, &owner.ctx()) {
+            Ok(Built::Handles(handles)) => handles,
+            Ok(_) => panic!("a multi builder returns one handle per vport"),
+            Err(e) => panic!("two lawful vports build: {e}"),
+        };
+        let got: Vec<_> = handles
+            .iter()
+            .map(|h| (h.info.id, h.info.name.as_str(), h.info.bitrate))
+            .collect();
+        let bitrate = |sf, cr| Some(leviculum_core::rnode::compute_bitrate(sf, cr, 125_000));
+        assert_eq!(
+            got,
+            vec![
+                (InterfaceId(3), "rnode_multi_3[fast]", bitrate(7, 5)),
+                (InterfaceId(100), "rnode_multi_3[slow]", bitrate(12, 8)),
+            ]
+        );
+        assert_ne!(bitrate(7, 5), bitrate(12, 8), "the two PHYs are told apart");
+    }
+
+    // ------------------------------------------------------------------
     // The regulatory guard
     // ------------------------------------------------------------------
     //
