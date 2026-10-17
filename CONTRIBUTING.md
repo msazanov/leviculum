@@ -18,14 +18,32 @@ the rule itself is in
 
 ## What a change must pass
 
-`just fast` on every commit (fmt, clippy with `-D warnings`, the
-workspace lib tests, and the submodule, citation and commit-trailer
-gates), `just standard` before pushing anything that touches a core
-type. Protocol- or daemon-touching changes add `periculum run
-conformance`, every scenario green — the corpus grows, so `periculum
-list` prints the live count rather than this file. See
-[Testing](docs/src/development-testing.md) for the tiers and what each
-one owes.
+Four tiers, each including the ones before it:
+
+* **Per batch of work:** `cargo fmt`, `cargo clippy --workspace
+  --all-targets -- -D warnings`, `just guards` (the sub-ten-second
+  guards and censuses, about 20 s) and `cargo test --workspace`; then
+  `just standard` (Tier 1, about 15 minutes warm) once the batch is
+  done.
+* **Before pushing:** `just fast` (Tier 0: fmt, clippy, the rustdoc,
+  citation, submodule and commit-trailer gates and the workspace lib
+  tests). The pre-push hook runs it for you once `scripts/install-ci.sh`
+  has set `core.hooksPath`. A change that touches a core type runs
+  `just standard` first; a protocol- or daemon-touching one adds
+  `periculum run conformance`, every scenario green. The corpus grows,
+  so `periculum list conformance` prints the live count rather than
+  this file.
+* **Nightly:** Tier 2, which is `just complete` (every test in the
+  workspace), `just fuzz-nightly` and the periculum `conformance/` and
+  `regression/` corpora in docker, on the maintainers' host every night.
+  `just extensive` is the same tier on demand. You do not have to run
+  it; a red night is triaged there.
+* **Release:** the full periculum hardware corpus on the LoRa rig
+  (Tier 3, `just nightly`), green or each red attributed, before a tag.
+  That one needs the radios and is the maintainers' job.
+
+[Testing](docs/src/development-testing.md) states what each tier runs,
+how long it takes and what it proves.
 
 Do not commit while tests are red, and do not carry a red test forward
 as a known issue.

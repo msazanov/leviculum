@@ -135,8 +135,8 @@ End of a batch of work:
 just standard                        # Tier 1 (~15 min)
 ```
 
-This is the "15-minute-budget" check that CLAUDE.md expects after
-every task, and typing it is the only thing that runs it.
+This is the 15-minute check the project's test discipline asks for
+after every batch of work, and typing it is the only thing that runs it.
 
 **Never** run a full scenario corpus casually:
 

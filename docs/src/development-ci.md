@@ -2,7 +2,7 @@
 
 Two things run tests here, and they are not the same thing. Four
 local tiers with different time budgets and triggers automate the
-test discipline mandated by `CLAUDE.md`, on the developer's machine —
+project's test discipline ([Testing](development-testing.md)), on the developer's machine —
 no GitHub Actions. On the forge, Woodpecker runs a smaller set on
 every push, because the local tiers are hooks a fresh clone does not
 have and `--no-verify` switches off. The tiers come first; the forge
