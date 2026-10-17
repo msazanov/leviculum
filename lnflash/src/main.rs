@@ -11,7 +11,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use leviculum_core::envelope::{TelemetryTargetWire, TELEMETRY_PROFILE_STATION};
-use lnflash::flow::{self, Options};
+use lnflash::flow::{self, Options, EXIT_FLASH_FAILED, EXIT_UNCONFIRMED};
 use lnflash::manifest;
 use lnflash::radio::{self, RadioChoice, RadioPlan, RadioSettings};
 use lnflash::telemetry::{self, TelemetryPlan};
@@ -1018,10 +1018,11 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         ..Options::default()
     };
 
-    let outcomes = flow::run(&catalogue, &manifest, &sysfs, ui, &opts)?;
-    if outcomes.is_empty() {
-        // Nothing was flashed. That is a clean exit for --dry-run and for an
-        // empty bus, and a failure for a run that was supposed to write.
+    let bus = flow::run(&catalogue, &manifest, &sysfs, ui, &opts)?;
+    if bus.outcomes.is_empty() && bus.refused.is_empty() {
+        // Nothing was flashed and nothing refused. That is a clean exit for
+        // --dry-run and for an empty bus, and a failure for a run that was
+        // supposed to write.
         return Ok(if cli.dry_run {
             ExitCode::SUCCESS
         } else {
@@ -1029,60 +1030,61 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         });
     }
 
-    let good = outcomes.iter().filter(|o| o.is_good()).count();
-    ui.say(&format!(
-        "\n{good} of {} board(s) confirmed running the firmware in this bundle.",
-        outcomes.len()
-    ));
-    for outcome in outcomes.iter().filter(|o| !o.is_good()) {
+    for line in summary(&bus) {
+        ui.say(&line);
+    }
+    let code = bus.exit_code();
+    if code == EXIT_UNCONFIRMED {
         ui.say(&format!(
+            "Exit {EXIT_UNCONFIRMED}: every board took the write and none contradicted it, so \
+             this is not a failed flash — it is a flash nobody could read back. Exit \
+             {EXIT_FLASH_FAILED} is reserved for a board that did not come back, that named a \
+             different build, or that was refused."
+        ));
+    }
+    Ok(ExitCode::from(code))
+}
+
+/// The closing lines of a flash run: how many boards are confirmed out of
+/// those the run was for, what went wrong on each that is not, and the
+/// refused and skipped boards by count and port, kept apart because only
+/// the first fail the run.
+fn summary(bus: &flow::Bus) -> Vec<String> {
+    let good = bus.outcomes.iter().filter(|o| o.is_good()).count();
+    let mut lines = vec![format!(
+        "\n{good} of {} board(s) confirmed running the firmware in this bundle.",
+        bus.outcomes.len() + bus.refused.len()
+    )];
+    for outcome in bus.outcomes.iter().filter(|o| !o.is_good()) {
+        lines.push(format!(
             "  {} ({}): {}",
             outcome.port,
             outcome.board,
             outcome.describe()
         ));
     }
-    let code = exit_code(&outcomes);
-    if code == EXIT_UNCONFIRMED {
-        ui.say(&format!(
-            "Exit {EXIT_UNCONFIRMED}: every board took the write and none contradicted it, so \
-             this is not a failed flash — it is a flash nobody could read back. Exit \
-             {EXIT_FLASH_FAILED} is reserved for a board that did not come back or that named a \
-             different build."
+    if !bus.refused.is_empty() {
+        lines.push(format!(
+            "  {} refused, nothing was written: {}",
+            bus.refused.len(),
+            bus.refused.join(", ")
         ));
     }
-    Ok(ExitCode::from(code))
-}
-
-/// Every board was written and named the build in this bundle.
-const EXIT_CONFIRMED: u8 = 0;
-/// The flash failed: a board did not come back, or came back naming a
-/// different build, or nothing was written to it.
-const EXIT_FLASH_FAILED: u8 = 1;
-/// Every board took the write and none contradicted it, and at least one
-/// could not be read back. Separate from [`EXIT_FLASH_FAILED`] because the
-/// two need different things done about them, and because collapsing them
-/// is what made a good flash stop a script (Codeberg #378).
-const EXIT_UNCONFIRMED: u8 = 2;
-
-/// The worst outcome decides, and a contradiction is worse than an
-/// absence of evidence.
-fn exit_code(outcomes: &[flow::Outcome]) -> u8 {
-    let mut code = EXIT_CONFIRMED;
-    for outcome in outcomes {
-        match outcome.confirmation() {
-            flow::Confirmation::Confirmed => {}
-            flow::Confirmation::Unknown => code = code.max(EXIT_UNCONFIRMED),
-            flow::Confirmation::Failed => return EXIT_FLASH_FAILED,
-        }
+    if !bus.skipped.is_empty() {
+        lines.push(format!(
+            "  {} skipped, not part of this run: {}",
+            bus.skipped.len(),
+            bus.skipped.join(", ")
+        ));
     }
-    code
+    lines
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use leviculum_core::envelope::StoreStormWire;
+    use lnflash::flow::EXIT_CONFIRMED;
 
     use lnflash::transport::Written;
     use lnflash::verify::{Source, Verdict};
@@ -1113,6 +1115,14 @@ mod tests {
             node: PathBuf::from("/dev/ttyACM3"),
             after: std::time::Duration::from_millis(2400),
             board_uptime_ms: Some(7448),
+        }
+    }
+
+    /// A bus on which every board reached the write.
+    fn written(outcomes: &[flow::Outcome]) -> flow::Bus {
+        flow::Bus {
+            outcomes: outcomes.to_vec(),
+            ..flow::Bus::default()
         }
     }
 
@@ -1148,7 +1158,10 @@ mod tests {
 
     #[test]
     fn every_board_confirmed_exits_zero() {
-        assert_eq!(exit_code(&[confirmed(), confirmed()]), EXIT_CONFIRMED);
+        assert_eq!(
+            written(&[confirmed(), confirmed()]).exit_code(),
+            EXIT_CONFIRMED
+        );
     }
 
     #[test]
@@ -1156,27 +1169,92 @@ mod tests {
         // Codeberg #378: this run wrote both boards successfully and
         // stopped the script that chained on it. "Not confirmed" is not
         // "failed", and the exit code has to say which one it is.
-        assert_eq!(exit_code(&[confirmed(), unknown()]), EXIT_UNCONFIRMED);
-        assert_eq!(exit_code(&[unknown()]), EXIT_UNCONFIRMED);
+        assert_eq!(
+            written(&[confirmed(), unknown()]).exit_code(),
+            EXIT_UNCONFIRMED
+        );
+        assert_eq!(written(&[unknown()]).exit_code(), EXIT_UNCONFIRMED);
     }
 
     #[test]
     fn a_board_that_contradicts_the_image_exits_one() {
-        assert_eq!(exit_code(&[wrong_build()]), EXIT_FLASH_FAILED);
-        assert_eq!(exit_code(&[confirmed(), wrong_build()]), EXIT_FLASH_FAILED);
+        assert_eq!(written(&[wrong_build()]).exit_code(), EXIT_FLASH_FAILED);
         assert_eq!(
-            exit_code(&[outcome(true, Some(Verdict::Absent))]),
+            written(&[confirmed(), wrong_build()]).exit_code(),
             EXIT_FLASH_FAILED
         );
-        assert_eq!(exit_code(&[outcome(false, None)]), EXIT_FLASH_FAILED);
+        assert_eq!(
+            written(&[outcome(true, Some(Verdict::Absent))]).exit_code(),
+            EXIT_FLASH_FAILED
+        );
+        assert_eq!(
+            written(&[outcome(false, None)]).exit_code(),
+            EXIT_FLASH_FAILED
+        );
+    }
+
+    #[test]
+    fn a_refused_board_fails_the_run_beside_a_confirmed_one() {
+        // 830 item 1, #262: `--bundle B --yes` with a T114 and a RAK
+        // attached refused the T114 and wrote the RAK, and exited 0, so the
+        // rig's boot proof banked a sha with the T114 left in its bootloader.
+        let bus = flow::Bus {
+            outcomes: vec![confirmed()],
+            refused: vec!["3-2.4".into()],
+            skipped: Vec::new(),
+        };
+        assert_eq!(bus.exit_code(), EXIT_FLASH_FAILED);
+        // A refusal is not an absence of evidence either.
+        let bus = flow::Bus {
+            outcomes: vec![unknown()],
+            ..bus
+        };
+        assert_eq!(bus.exit_code(), EXIT_FLASH_FAILED);
+    }
+
+    #[test]
+    fn a_skipped_board_does_not_fail_the_run() {
+        // Named boards present and this one not among them: the run was not
+        // for it, so the confirmed board alone decides.
+        let bus = flow::Bus {
+            outcomes: vec![confirmed()],
+            refused: Vec::new(),
+            skipped: vec!["3-2.4".into()],
+        };
+        assert_eq!(bus.exit_code(), EXIT_CONFIRMED);
+    }
+
+    #[test]
+    fn the_summary_names_refused_and_skipped_boards_apart() {
+        let bus = flow::Bus {
+            outcomes: vec![confirmed()],
+            refused: vec!["3-2.4".into()],
+            skipped: vec!["3-2.1".into(), "3-2.2".into()],
+        };
+        assert_eq!(
+            summary(&bus),
+            [
+                "\n1 of 2 board(s) confirmed running the firmware in this bundle.",
+                "  1 refused, nothing was written: 3-2.4",
+                "  2 skipped, not part of this run: 3-2.1, 3-2.2",
+            ]
+        );
+        // Neither line appears when there is nothing to name.
+        assert_eq!(summary(&written(&[confirmed()])).len(), 1);
     }
 
     #[test]
     fn a_real_failure_outranks_an_unread_board() {
         // Both in one run: the operator has to reflash, so the exit code
         // must be the one that says so.
-        assert_eq!(exit_code(&[unknown(), wrong_build()]), EXIT_FLASH_FAILED);
-        assert_eq!(exit_code(&[wrong_build(), unknown()]), EXIT_FLASH_FAILED);
+        assert_eq!(
+            written(&[unknown(), wrong_build()]).exit_code(),
+            EXIT_FLASH_FAILED
+        );
+        assert_eq!(
+            written(&[wrong_build(), unknown()]).exit_code(),
+            EXIT_FLASH_FAILED
+        );
     }
 
     #[test]

@@ -86,7 +86,7 @@ On a flash run the three outcomes are kept apart, because they need different th
 :   Every board was written and named the build in this bundle on its debug port.
 
 1
-:   The flash failed: a board never came back, or came back naming a different build, or nothing was written to it.
+:   The flash failed: a board never came back, or came back naming a different build, or nothing was written to it. A board refused on its identity (a shared Board-ID under **--yes** alone, a board at a level that needs a confirmation nobody gave, a Board-ID the catalogue does not know, the wrong model for **--board**) counts as nothing written, and fails the run even when every other board was confirmed: it was rebooted into its bootloader and stays there. A board skipped because the run was not for it (not among the boards named with **--board**, not flashed by this tool, or stopped by **--dry-run**) does not count. The closing summary names refused and skipped boards on separate lines, each with a count and the ports.
 
 2
 :   Every board took the write and none contradicted it, and at least one could not be read back. The firmware is on the board as far as anything here knows; which build it is running is unknown. Read it back again (**--watch**, or re-run the flash) rather than assuming the write failed.

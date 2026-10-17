@@ -707,7 +707,7 @@ pub fn run(
     sysfs: &Sysfs,
     ui: &mut dyn Ui,
     opts: &Options,
-) -> Result<Vec<Outcome>, Error> {
+) -> Result<Bus, Error> {
     // `--board` is the only handle a user has for saying which board a run is
     // for, so a name this tool does not flash is answered before the bus is
     // read at all — and the boards offered instead are the flashable ones.
@@ -752,7 +752,7 @@ pub fn run(
              1200-baud touch, so there is nothing here to knock on.",
         );
         ui.say("Double-tap RESET to hold it in its bootloader, then run this again.");
-        return Ok(Vec::new());
+        return Ok(Bus::default());
     }
 
     ui.say(&format!("Found {} device(s):", candidates.len()));
@@ -766,27 +766,90 @@ pub fn run(
     }))
 }
 
+/// What a run did to every board on the bus.
+///
+/// Refused and skipped boards are kept apart from the outcomes and from each
+/// other because they mean different things to the exit code: a refused
+/// board was put in its bootloader, or was meant to be written, and nothing
+/// was written to it, which fails the run; a skipped board is one this run
+/// was not for (Codeberg #262).
+#[derive(Debug, Clone, Default)]
+pub struct Bus {
+    /// The boards that reached the write.
+    pub outcomes: Vec<Outcome>,
+    /// Ports of the boards whose step ended in an error: an identity that
+    /// was refused, a Board-ID the catalogue does not know, a write that
+    /// never started.
+    pub refused: Vec<String>,
+    /// Ports of the boards left alone on purpose: not named with `--board`,
+    /// not flashed by this tool, or stopped by `--dry-run`.
+    pub skipped: Vec<String>,
+}
+
+/// Every board was written and named the build in this bundle.
+pub const EXIT_CONFIRMED: u8 = 0;
+/// The flash failed: a board did not come back, or came back naming a
+/// different build, or nothing was written to it, which includes a board
+/// whose identity was refused or whose Board-ID is not in the catalogue. A
+/// board skipped because the run was not for it does not count (#262).
+pub const EXIT_FLASH_FAILED: u8 = 1;
+/// Every board took the write and none contradicted it, and at least one
+/// could not be read back. Separate from [`EXIT_FLASH_FAILED`] because the
+/// two need different things done about them, and because collapsing them
+/// is what made a good flash stop a script (Codeberg #378).
+pub const EXIT_UNCONFIRMED: u8 = 2;
+
+impl Bus {
+    /// Whether no board was refused, written or skipped.
+    pub fn is_empty(&self) -> bool {
+        self.outcomes.is_empty() && self.refused.is_empty() && self.skipped.is_empty()
+    }
+
+    /// The process exit code of a flash run. The worst outcome decides, and
+    /// a contradiction is worse than an absence of evidence. A refused board
+    /// is a board left in its bootloader with nothing written, so it fails
+    /// the run however the others went; a skipped one does not count.
+    pub fn exit_code(&self) -> u8 {
+        if !self.refused.is_empty() {
+            return EXIT_FLASH_FAILED;
+        }
+        let mut code = EXIT_CONFIRMED;
+        for outcome in &self.outcomes {
+            match outcome.confirmation() {
+                Confirmation::Confirmed => {}
+                Confirmation::Unknown => code = code.max(EXIT_UNCONFIRMED),
+                Confirmation::Failed => return EXIT_FLASH_FAILED,
+            }
+        }
+        code
+    }
+}
+
 /// The loop over the bus, apart from what is done to each board so a test
 /// can drive it with boards that are not there.
 ///
 /// One board's refusal must not abandon the others: with several devices
-/// attached each is its own decision. A refused board is said and left out
-/// of the outcomes, so the exit code is decided by the boards that were
-/// written (`main.rs`, `exit_code`).
+/// attached each is its own decision. A refused board is said and its port
+/// kept in [`Bus::refused`], so it fails the run without stopping the boards
+/// after it ([`Bus::exit_code`]).
 fn each_candidate(
     candidates: &[Candidate],
     ui: &mut dyn Ui,
     mut step: impl FnMut(&mut dyn Ui, &Candidate) -> Result<Option<Outcome>, Error>,
-) -> Vec<Outcome> {
-    let mut outcomes = Vec::new();
+) -> Bus {
+    let mut bus = Bus::default();
     for candidate in candidates {
+        let port = &candidate.device.name;
         match step(ui, candidate) {
-            Ok(Some(outcome)) => outcomes.push(outcome),
-            Ok(None) => {}
-            Err(err) => ui.say(&format!("{}: {err}\n", candidate.device.name)),
+            Ok(Some(outcome)) => bus.outcomes.push(outcome),
+            Ok(None) => bus.skipped.push(port.clone()),
+            Err(err) => {
+                ui.say(&format!("{port}: {err}\n"));
+                bus.refused.push(port.clone());
+            }
         }
     }
-    outcomes
+    bus
 }
 
 /// One running board a configure session can talk to: where its transport
@@ -4398,7 +4461,7 @@ convert = "hex-to-uf2"
         let (_dir, catalogue, manifest) = bundle();
         let empty = TempDir::new().unwrap();
         let mut ui = crate::ui::testing::Fake::agreeing();
-        let outcomes = run(
+        let bus = run(
             &catalogue,
             &manifest,
             &Sysfs::new(empty.path()),
@@ -4406,7 +4469,7 @@ convert = "hex-to-uf2"
             &Options::default(),
         )
         .unwrap();
-        assert!(outcomes.is_empty());
+        assert!(bus.is_empty());
         let said = ui.transcript();
         assert!(said.contains("No board lnflash knows"));
         assert!(said.contains("t114"));
@@ -4829,8 +4892,10 @@ convert = "hex-to-uf2"
         // Both candidates are reported; the application-mode one stops
         // before the touch, and the bootloader one stops at Drive::open,
         // which needs root. Neither writes.
-        let outcomes = run(&catalogue, &manifest, &sysfs(), &mut ui, &opts).unwrap();
-        assert!(outcomes.is_empty());
+        let bus = run(&catalogue, &manifest, &sysfs(), &mut ui, &opts).unwrap();
+        // A dry run's stop is a skip, never a refusal: it must not fail.
+        assert!(bus.outcomes.is_empty() && bus.refused.is_empty(), "{bus:?}");
+        assert_eq!(bus.exit_code(), EXIT_CONFIRMED);
         let said = ui.transcript();
         assert!(said.contains("would enter the bootloader"));
         assert!(said.contains("rebooting a board is already a change"));
@@ -4866,16 +4931,17 @@ convert = "hex-to-uf2"
 
     /// Runs the bus loop over [`t114_and_rak`] with `--board` set to `named`,
     /// and stops each board at the identity decision: a confirmed board
-    /// becomes an outcome naming it, which is the point a real run writes.
-    /// The ui is [`Fake::agreeing`], which answers like `--yes` (every
+    /// becomes an outcome naming it, which is the point a real run writes,
+    /// and is taken as written and confirmed so the exit code is decided by
+    /// the boards that were not. The ui is [`Fake::agreeing`], which answers like `--yes` (every
     /// confirm yes, every question unanswered) and keeps the transcript.
-    fn flash_t114_and_rak(named: &[&str]) -> (Vec<Outcome>, Fake) {
+    fn flash_t114_and_rak(named: &[&str]) -> (Bus, Fake) {
         let (_dir, catalogue, manifest) = two_board_bundle();
         let bus = t114_and_rak();
         let candidates: Vec<Candidate> = bus.iter().map(|(c, _)| c.clone()).collect();
         let named: Vec<String> = named.iter().map(|n| n.to_string()).collect();
         let mut ui = Fake::agreeing();
-        let outcomes = each_candidate(&candidates, &mut ui, |ui, candidate| {
+        let result = each_candidate(&candidates, &mut ui, |ui, candidate| {
             let info = bus
                 .iter()
                 .find(|(c, _)| c.device.name == candidate.device.name)
@@ -4888,19 +4954,33 @@ convert = "hex-to-uf2"
                         port: port.clone(),
                         board: confirmed.name().to_string(),
                         softdevice_installed: None,
-                        application_written: None,
-                        verdict: None,
+                        application_written: Some(Written {
+                            path: std::path::PathBuf::from("APP.UF2"),
+                            bytes: 1_000_000,
+                            blocks: 1953,
+                            declined: 0,
+                            reboot_error: None,
+                        }),
+                        verdict: Some(Verdict::Confirmed {
+                            git_sha: "daa8b8e".into(),
+                            source: verify::Source {
+                                port: std::path::PathBuf::from("/dev/ttyACM3"),
+                                node: std::path::PathBuf::from("/dev/ttyACM3"),
+                                after: Duration::from_millis(2400),
+                                board_uptime_ms: Some(7448),
+                            },
+                        }),
                         radio: None,
                         telemetry: None,
                     }
                 }),
             )
         });
-        (outcomes, ui)
+        (result, ui)
     }
 
-    fn boards(outcomes: &[Outcome]) -> Vec<&str> {
-        outcomes.iter().map(|o| o.board.as_str()).collect()
+    fn boards(bus: &Bus) -> Vec<&str> {
+        bus.outcomes.iter().map(|o| o.board.as_str()).collect()
     }
 
     #[test]
@@ -4908,9 +4988,12 @@ convert = "hex-to-uf2"
         // 830 item 1, the rig's `lnflash --bundle B --yes` after 828: the
         // T114's refusal is said on its own line and does not abandon the
         // bus, so the RAK reaches the write. The refused T114 is not an
-        // outcome, so the exit code is the RAK's alone.
-        let (outcomes, ui) = flash_t114_and_rak(&[]);
-        assert_eq!(boards(&outcomes), ["rak4631"]);
+        // outcome; 832 keeps its port as refused, which fails the run.
+        let (bus, ui) = flash_t114_and_rak(&[]);
+        assert_eq!(boards(&bus), ["rak4631"]);
+        assert_eq!(bus.refused, ["3-2.4"]);
+        assert!(bus.skipped.is_empty(), "{:?}", bus.skipped);
+        assert_eq!(bus.exit_code(), EXIT_FLASH_FAILED);
         let said = ui.transcript();
         assert!(
             said.contains("3-2.4: the board on 3-2.4 says it is \"HT-n5262\""),
@@ -4921,15 +5004,20 @@ convert = "hex-to-uf2"
 
     #[test]
     fn naming_both_boards_under_yes_writes_both_without_a_question() {
-        let (outcomes, ui) = flash_t114_and_rak(&["t114", "rak4631"]);
-        assert_eq!(boards(&outcomes), ["t114", "rak4631"]);
+        let (bus, ui) = flash_t114_and_rak(&["t114", "rak4631"]);
+        assert_eq!(boards(&bus), ["t114", "rak4631"]);
+        assert!(bus.refused.is_empty() && bus.skipped.is_empty(), "{bus:?}");
+        assert_eq!(bus.exit_code(), EXIT_CONFIRMED);
         assert!(ui.said.is_empty(), "{}", ui.transcript());
     }
 
     #[test]
     fn naming_only_the_rak_writes_it_and_skips_the_t114_with_a_line() {
-        let (outcomes, ui) = flash_t114_and_rak(&["rak4631"]);
-        assert_eq!(boards(&outcomes), ["rak4631"]);
+        let (bus, ui) = flash_t114_and_rak(&["rak4631"]);
+        assert_eq!(boards(&bus), ["rak4631"]);
+        assert_eq!(bus.skipped, ["3-2.4"]);
+        assert!(bus.refused.is_empty(), "{:?}", bus.refused);
+        assert_eq!(bus.exit_code(), EXIT_CONFIRMED);
         let said = ui.transcript();
         for needle in [
             "3-2.4: Board-ID \"HT-n5262\" is t114, which is not among the boards named with \
