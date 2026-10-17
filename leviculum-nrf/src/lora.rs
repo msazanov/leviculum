@@ -1755,6 +1755,9 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
     // parsed and reported, no longer obeyed; see `RadioConfig`).
     let mut access = leviculum_channel_access::ChannelAccess::new(channel_seed);
     access.set_phy(config.bw_hz, config.sf, config.cr_denom);
+    // #438: the sub-slot offset, a build-time arm (`subslot-offset`), off
+    // by default. Off, the draw is the one before it existed, bit for bit.
+    access.set_subslot_offset(cfg!(feature = "subslot-offset"));
 
     let mut pending_tx: Option<QueuedFrame> = None;
     // Frames the host's mute has swallowed since it was set (#410), so the
@@ -2058,10 +2061,12 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
                         "[LORA_JITTER_RESUME] "
                     },
                     format_args!(
-                        "wait_ms={} slot_ms={} band={}",
+                        "wait_ms={} slot_ms={} band={} slot={} offset_ms={}",
                         jitter_ms,
                         access.jitter_slot(),
-                        access.drawn_band()
+                        access.drawn_band(),
+                        access.drawn_slots(),
+                        access.drawn_offset_ms()
                     ),
                 );
                 let rx_ms = leviculum_channel_access::listen_window_ms(jitter_ms);

@@ -88,6 +88,8 @@ pub(super) fn build(
     // arms fails the daemon's configuration rather than falling back to arm
     // 1, which would put a run in the wrong series without saying so.
     let jitter_arm = crate::interfaces::rnode::JitterArm::from_env().map_err(Error::Config)?;
+    // TEMPORARY (#438): the sub-slot offset arm, read and refused the same way.
+    let subslot_arm = crate::interfaces::rnode::SubslotArm::from_env().map_err(Error::Config)?;
 
     // Which residue class and sub-frame position arm 3 will pace this
     // interface in. Resolved here only so the bring-up line can state it —
@@ -116,6 +118,7 @@ pub(super) fn build(
             reconnect_notify: Some(ctx.reconnect_tx.clone()),
             test_drop_direct_ingress: config.test_drop_direct_ingress,
             jitter_arm,
+            subslot_arm,
             // Trace 228: under arm 3 the wait is paid in whole frames, so two
             // ends that draw the same slot count key together. The identity
             // hash puts this end in one of the two residue classes of that
@@ -130,10 +133,11 @@ pub(super) fn build(
     // the run document, so that two arms are two series rather than one
     // pooled average. Renaming or splitting this line breaks that reader, and
     // the two class fields are appended AFTER the arm's digit for the same
-    // reason — that reader takes the digits that follow `jitter_arm=`.
+    // reason — that reader takes the digits that follow `jitter_arm=`. The
+    // #438 `subslot_arm=` is appended last, after both.
     tracing::info!(
         "RNode interface on {} (freq={} Hz, sf={}, bw={} Hz, cr={}, txp={} dBm, jitter_arm={}, \
-         frame_class={}, frame_position={})",
+         frame_class={}, frame_position={}, subslot_arm={})",
         port_path,
         frequency,
         sf,
@@ -143,6 +147,7 @@ pub(super) fn build(
         jitter_arm.digit(),
         frame_class.parity(),
         frame_class.position(),
+        subslot_arm.digit(),
     );
     Ok(Built::Handles(vec![handle]))
 }

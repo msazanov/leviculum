@@ -10,7 +10,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::event_log::Scalar;
-use leviculum_channel_access::{jitter_slot_ms, ChannelAccess, JITTER_CW_SLOTS, JITTER_DIFS_SLOTS};
+use leviculum_channel_access::{
+    jitter_slot_ms, subslot_offset_max_ms, ChannelAccess, JITTER_CW_SLOTS, JITTER_DIFS_SLOTS,
+};
 use leviculum_core::framing::kiss::{self, KissDeframeResult, KissDeframer};
 use leviculum_core::rnode;
 use leviculum_core::traits::FrameTag;
@@ -132,6 +134,9 @@ pub(crate) struct RNodeInterfaceConfig {
     /// TEMPORARY (#347): the acquisition-jitter arm this interface runs,
     /// read from the environment by the builder that refuses a bad value.
     pub jitter_arm: JitterArm,
+    /// TEMPORARY (#438): the sub-slot offset arm, read and refused the same
+    /// way.
+    pub subslot_arm: SubslotArm,
     /// The node's 16-byte identity hash, which with the interface name gives
     /// this interface its [`FrameClass`].
     pub identity_hash: [u8; 16],
@@ -571,6 +576,96 @@ impl JitterArm {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The #438 sub-slot offset arm. TEMPORARY -- see scripts/env-knob-census.txt
+// ---------------------------------------------------------------------------
+
+/// The environment variable that arms the sub-slot offset on an RNode host
+/// interface's acquisition draw.
+pub(crate) const SUBSLOT_ARM_ENV: &str = "LEVICULUM_SUBSLOT_ARM";
+
+/// The two values by name, for the refusal message.
+pub(crate) const SUBSLOT_ARM_CHOICES: &str =
+    "0 (off: the slotted draw as it stands), 1 (on: plus a uniform offset over [0, slot) ms)";
+
+/// Whether the acquisition draw adds a uniform sub-slot offset
+/// (`leviculum_channel_access`, "The sub-slot offset"): the #438 A/B arm,
+/// chosen once per interface build from [`SUBSLOT_ARM_ENV`], default off.
+///
+/// TEMPORARY in the same sense as [`JitterArm`] and for the same reasons:
+/// one binary runs both arms of the series, the bring-up line states which,
+/// and the knob goes when the rig A/B answers. A knob separate from
+/// [`JitterArm`] because it is orthogonal to it: the offset rides on the
+/// slotted draw, which is what arm 1 serves. Arms 3 and 4 re-express the
+/// draw in whole frames from its slot count and discard the offset, arm 2
+/// serves no host wait at all; [`Self::ceiling_ms`] states that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum SubslotArm {
+    /// The slotted draw as it stands, and what a daemon without the variable
+    /// runs.
+    #[default]
+    Off,
+    /// The slotted draw plus a uniform offset over `[0, slot)` ms.
+    On,
+}
+
+impl SubslotArm {
+    /// The digit the bring-up line carries.
+    pub(crate) const fn digit(self) -> u8 {
+        match self {
+            Self::Off => 0,
+            Self::On => 1,
+        }
+    }
+
+    /// Whether the channel-access policy is to draw the offset.
+    pub(crate) const fn armed(self) -> bool {
+        matches!(self, Self::On)
+    }
+
+    /// What the offset can add to the wait `jitter_arm` serves, at this PHY:
+    /// the widest offset under arm 1, and nothing under the arms that do not
+    /// serve the slotted draw. Added to every ceiling this interface
+    /// publishes, so a reported maximum is never one a draw can exceed.
+    pub(crate) fn ceiling_ms(
+        self,
+        jitter_arm: JitterArm,
+        sf: u8,
+        cr: u8,
+        bandwidth_hz: u32,
+    ) -> u64 {
+        match (self, jitter_arm) {
+            (Self::On, JitterArm::AsIs) => subslot_offset_max_ms(bandwidth_hz, sf, cr),
+            _ => 0,
+        }
+    }
+
+    /// The arm one interface build runs. Unset or empty is off; any other
+    /// value than the two digits is refused by naming both, for the reason
+    /// [`JitterArm::from_env`] gives.
+    pub(crate) fn from_env() -> Result<Self, String> {
+        let Some(raw) = std::env::var_os(SUBSLOT_ARM_ENV) else {
+            return Ok(Self::Off);
+        };
+        let text = raw.to_string_lossy();
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return Ok(Self::Off);
+        }
+        Self::parse(trimmed).ok_or_else(|| {
+            format!("{SUBSLOT_ARM_ENV}={trimmed}: expected one of {SUBSLOT_ARM_CHOICES}")
+        })
+    }
+
+    fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "0" => Some(Self::Off),
+            "1" => Some(Self::On),
+            _ => None,
+        }
+    }
+}
+
 /// Where in the whole-frame counts of arm 3 or arm 4 one interface waits:
 /// which half of the counts it draws in, and which quarter of a frame it takes
 /// off the count it lands on.
@@ -846,15 +941,42 @@ fn arm_owed_jitter_ms(
     }
 }
 
+/// The census line of one FRESH acquisition draw (#438), or `None` when the
+/// last ask was the remainder of a draw already part-served:
+///
+/// ```text
+/// LORA_TX_ACQUIRE iface=<name> owed_ms=<served> slot=<N> offset_ms=<M> slot_ms=<S> subslot_arm=<0|1>
+/// ```
+///
+/// `slot` is the contention draw without DIFS and `offset_ms` the sub-slot
+/// offset (0 with the arm off), so a rig run can read which draw keyed and,
+/// for two ends released by one frame-end, whether they tied on the slot and
+/// how far apart the offset put them. `owed_ms` is what the arm actually
+/// serves, which under arms 2 to 4 is not the draw. Emitted on the
+/// `tx_trace` target beside `LORA_TX_ACCOUNT`, at debug.
+fn acquisition_draw_line(name: &str, owed_ms: u64, access: &ChannelAccess) -> Option<String> {
+    access.jitter_was_drawn().then(|| {
+        format!(
+            "LORA_TX_ACQUIRE iface={name} owed_ms={owed_ms} slot={} offset_ms={} slot_ms={} \
+             subslot_arm={}",
+            access.drawn_slots(),
+            access.drawn_offset_ms(),
+            access.jitter_slot(),
+            u8::from(access.subslot_offset()),
+        )
+    })
+}
+
 /// The channel-access policy one RNode transmit path runs: seeded from the
 /// host's entropy, told the modulation whose symbol time sizes its slots.
 ///
 /// Built per connection. A reconnect is a new acquisition — the radio was off
 /// — so it starts owing a fresh wait, which is what a boot-fresh
 /// [`ChannelAccess`] already does.
-fn channel_access_for(bandwidth_hz: u32, sf: u8, cr: u8) -> ChannelAccess {
+fn channel_access_for(bandwidth_hz: u32, sf: u8, cr: u8, subslot: SubslotArm) -> ChannelAccess {
     let mut access = ChannelAccess::new(rand_core::OsRng.next_u32());
     access.set_phy(bandwidth_hz, sf, cr);
+    access.set_subslot_offset(subslot.armed());
     access
 }
 
@@ -2851,6 +2973,12 @@ where
                                 cr,
                                 frame_class,
                             );
+                            if let Some(line) = acquisition_draw_line(&name, owed, &access) {
+                                tracing::debug!(
+                                    target: "leviculum_std::interfaces::rnode::tx_trace",
+                                    "{line}"
+                                );
+                            }
                             if owed == 0 {
                                 timer_ready = true;
                                 tracing::debug!(
@@ -2980,6 +3108,9 @@ where
                     cr,
                     frame_class,
                 );
+                if let Some(line) = acquisition_draw_line(&name, owed, &access) {
+                    tracing::debug!(target: "leviculum_std::interfaces::rnode::tx_trace", "{line}");
+                }
                 if owed == 0 {
                     timer_ready = true;
                 } else {
@@ -3249,6 +3380,8 @@ struct RNodeReconnectCtx {
     test_drop_direct_ingress: bool,
     /// TEMPORARY (#347): which acquisition-jitter arm the io task runs.
     jitter_arm: JitterArm,
+    /// TEMPORARY (#438): whether the io task's draw adds a sub-slot offset.
+    subslot_arm: SubslotArm,
     /// Which residue class of arm 3's whole-frame counts this interface
     /// draws in ([`FrameClass`]). Resolved once per interface, not per
     /// connection: a reconnect must not re-roll it, or two ends that were
@@ -3378,7 +3511,7 @@ async fn rnode_reconnect_task<S, C, Fut>(
                     outgoing_rx,
                     Arc::clone(&counters),
                     ctx.flow_control,
-                    channel_access_for(radio.bandwidth, radio.sf, radio.cr),
+                    channel_access_for(radio.bandwidth, radio.sf, radio.cr, ctx.subslot_arm),
                     radio.bandwidth,
                     radio.sf,
                     radio.cr,
@@ -3464,6 +3597,8 @@ pub(crate) struct RNodeChannelInterfaceConfig {
     pub reconnect_notify: Option<mpsc::Sender<InterfaceId>>,
     /// TEMPORARY (#347): see [`RNodeInterfaceConfig::jitter_arm`].
     pub jitter_arm: JitterArm,
+    /// TEMPORARY (#438): see [`RNodeInterfaceConfig::subslot_arm`].
+    pub subslot_arm: SubslotArm,
     /// See [`RNodeInterfaceConfig::identity_hash`].
     pub identity_hash: [u8; 16],
 }
@@ -3609,12 +3744,22 @@ where
     // TAKES the channel pays under the arm this build runs. A separate number
     // because arm 3 prices its slots in whole frames, so the two are only
     // equal on the arms that do not (#347, trace 223).
-    let acquisition = compute_acquisition_ceiling(
+    let mut acquisition = compute_acquisition_ceiling(
         ctx.jitter_arm,
         ctx.radio.sf,
         ctx.radio.cr,
         ctx.radio.bandwidth,
     );
+    // The #438 offset rides on the slotted wait; a published ceiling a draw
+    // could exceed is the whole of Codeberg #36/#374 again.
+    let subslot_ms = ctx.subslot_arm.ceiling_ms(
+        ctx.jitter_arm,
+        ctx.radio.sf,
+        ctx.radio.cr,
+        ctx.radio.bandwidth,
+    );
+    acquisition.max_ms += subslot_ms;
+    acquisition.full_frame_ms += subslot_ms;
     // Copied out before `ctx` moves, for the same reason: what a full-size
     // frame costs the frame behind it at the PHY this task is about to
     // program. The receiver of a resource over this link floors its part
@@ -3691,9 +3836,11 @@ fn reconnect_ctx_from_radio(
     reconnect_notify: Option<mpsc::Sender<InterfaceId>>,
     test_drop_direct_ingress: bool,
     jitter_arm: JitterArm,
+    subslot_arm: SubslotArm,
     frame_class: FrameClass,
 ) -> RNodeReconnectCtx {
-    let jitter_max_ms = compute_jitter_max_ms(radio.sf, radio.cr, radio.bandwidth);
+    let jitter_max_ms = compute_jitter_max_ms(radio.sf, radio.cr, radio.bandwidth)
+        + subslot_arm.ceiling_ms(jitter_arm, radio.sf, radio.cr, radio.bandwidth);
     RNodeReconnectCtx {
         id,
         name,
@@ -3703,6 +3850,7 @@ fn reconnect_ctx_from_radio(
         jitter_max_ms,
         test_drop_direct_ingress,
         jitter_arm,
+        subslot_arm,
         frame_class,
     }
 }
@@ -3722,6 +3870,7 @@ pub(crate) fn spawn_rnode_interface(config: RNodeInterfaceConfig) -> InterfaceHa
         config.reconnect_notify,
         config.test_drop_direct_ingress,
         config.jitter_arm,
+        config.subslot_arm,
         frame_class,
     );
     let buffer_size = config.buffer_size;
@@ -3757,6 +3906,7 @@ pub(crate) fn spawn_rnode_channel_interface(
         // path never needs it.
         false,
         config.jitter_arm,
+        config.subslot_arm,
         frame_class,
     );
     let buffer_size = config.buffer_size;
@@ -4821,6 +4971,7 @@ mod tests {
                 buffer_size: RNODE_DEFAULT_BUFFER_SIZE,
                 reconnect_notify: None,
                 jitter_arm: JitterArm::AsIs,
+                subslot_arm: SubslotArm::Off,
                 identity_hash: [0u8; 16],
             },
             None,
@@ -4889,6 +5040,7 @@ mod tests {
                 buffer_size: RNODE_DEFAULT_BUFFER_SIZE,
                 reconnect_notify: None,
                 jitter_arm: JitterArm::AsIs,
+                subslot_arm: SubslotArm::Off,
                 identity_hash: [0u8; 16],
             };
         let halves_of = |port: tokio::io::DuplexStream| {
@@ -5215,6 +5367,7 @@ mod tests {
             reconnect_notify: None,
             test_drop_direct_ingress: false,
             jitter_arm: JitterArm::AsIs,
+            subslot_arm: SubslotArm::Off,
             identity_hash: [0u8; 16],
         };
 
@@ -6714,7 +6867,7 @@ mod tests {
         // suite can observe — so a failure here means the seed stopped
         // being entropy, not that the dice were unkind.
         let draws: std::collections::BTreeSet<u64> = (0..32)
-            .map(|_| channel_access_for(BW, SF, CR).acquisition_jitter_ms())
+            .map(|_| channel_access_for(BW, SF, CR, SubslotArm::Off).acquisition_jitter_ms())
             .collect();
         assert!(
             draws.len() > 1,
@@ -7797,6 +7950,118 @@ mod tests {
             arm4.full_frame_ms * JITTER_ACQUISITION_SLOTS,
             arm3.full_frame_ms * ARM_FOUR_FRAME_CEILING,
             "and so is the full-frame figure the resource timeout floors on"
+        );
+    }
+
+    /// The #438 selector: the two digits, nothing else, off by default.
+    #[test]
+    fn the_subslot_selector_takes_two_values_and_refuses_the_rest() {
+        assert_eq!(SubslotArm::parse("0"), Some(SubslotArm::Off));
+        assert_eq!(SubslotArm::parse("1"), Some(SubslotArm::On));
+        assert_eq!(SubslotArm::default(), SubslotArm::Off);
+        assert_eq!((SubslotArm::Off.digit(), SubslotArm::On.digit()), (0, 1));
+        assert!(!SubslotArm::Off.armed() && SubslotArm::On.armed());
+        for refused in ["2", "", " ", "on", "true", "01", "-1"] {
+            assert_eq!(SubslotArm::parse(refused), None, "{refused:?}");
+        }
+        assert!(SUBSLOT_ARM_CHOICES.contains("0 (") && SUBSLOT_ARM_CHOICES.contains("1 ("));
+    }
+
+    /// The offset is published only where it is served: under arm 1, as one
+    /// slot less a millisecond; arms 2 to 4 discard it, and off adds nothing.
+    #[test]
+    fn the_subslot_ceiling_is_one_slot_less_a_ms_under_arm_one_only() {
+        let (sf, cr, bw) = (7, 5, 250_000);
+        let slot = jitter_slot_ms(bw, sf, cr);
+        assert_eq!(slot, 24);
+        assert_eq!(
+            SubslotArm::On.ceiling_ms(JitterArm::AsIs, sf, cr, bw),
+            slot - 1
+        );
+        for arm in [
+            JitterArm::ModemOnly,
+            JitterArm::FrameSlot,
+            JitterArm::FrameSlotShort,
+        ] {
+            assert_eq!(SubslotArm::On.ceiling_ms(arm, sf, cr, bw), 0, "{arm:?}");
+        }
+        for arm in [
+            JitterArm::AsIs,
+            JitterArm::ModemOnly,
+            JitterArm::FrameSlot,
+            JitterArm::FrameSlotShort,
+        ] {
+            assert_eq!(SubslotArm::Off.ceiling_ms(arm, sf, cr, bw), 0, "{arm:?}");
+        }
+    }
+
+    /// Arm 1 serves the draw with its offset; arms 3 and 4 rebuild the wait
+    /// from the slot count and so serve the same wait armed or not.
+    #[test]
+    fn the_offset_is_served_by_arm_one_and_discarded_by_the_frame_arms() {
+        let (sf, cr, bw) = (7, 5, 62_500);
+        let class = FrameClass::new(0, 1);
+        let mut seed = TEST_ACCESS_SEED;
+        for _ in 0..200 {
+            seed = seed.wrapping_mul(0x9E37_79B9).wrapping_add(1);
+            let mut armed = ChannelAccess::new(seed);
+            armed.set_phy(bw, sf, cr);
+            armed.set_subslot_offset(true);
+            let owed = arm_owed_jitter_ms(JitterArm::AsIs, &mut armed, 100, bw, sf, cr, class);
+            let slot = armed.jitter_slot();
+            assert_eq!(
+                owed,
+                (JITTER_DIFS_SLOTS + armed.drawn_slots()) * slot + armed.drawn_offset_ms()
+            );
+            assert!(armed.drawn_offset_ms() < slot);
+        }
+        for arm in [JitterArm::FrameSlot, JitterArm::FrameSlotShort] {
+            let mut seed = TEST_ACCESS_SEED;
+            for _ in 0..200 {
+                seed = seed.wrapping_mul(0x9E37_79B9).wrapping_add(1);
+                let mut armed = ChannelAccess::new(seed);
+                armed.set_phy(bw, sf, cr);
+                armed.set_subslot_offset(true);
+                let with = arm_owed_jitter_ms(arm, &mut armed, 100, bw, sf, cr, class);
+                let mut unarmed = ChannelAccess::new(seed);
+                unarmed.set_phy(bw, sf, cr);
+                let without = arm_owed_jitter_ms(arm, &mut unarmed, 100, bw, sf, cr, class);
+                // Same seed, same first number: the same slot count.
+                assert_eq!(armed.drawn_slots(), unarmed.drawn_slots());
+                assert_eq!(with, without, "{arm:?} seed {seed:#x}");
+            }
+        }
+    }
+
+    /// The census line names the draw on a fresh acquisition and stays
+    /// silent on a resumed one.
+    #[test]
+    fn the_acquisition_census_line_names_slot_and_offset() {
+        let mut access = ChannelAccess::new(TEST_ACCESS_SEED);
+        access.set_phy(250_000, 7, 5);
+        access.set_subslot_offset(true);
+        let owed = access.acquisition_jitter_ms();
+        let line = acquisition_draw_line("rnode_0", owed, &access).expect("a fresh draw");
+        assert_eq!(
+            line,
+            format!(
+                "LORA_TX_ACQUIRE iface=rnode_0 owed_ms={owed} slot={} offset_ms={} slot_ms=24 \
+                 subslot_arm=1",
+                access.drawn_slots(),
+                access.drawn_offset_ms()
+            )
+        );
+        // Asked again without a release: the remainder, not a draw.
+        let _ = access.acquisition_jitter_ms();
+        assert_eq!(acquisition_draw_line("rnode_0", owed, &access), None);
+
+        let mut off = ChannelAccess::new(TEST_ACCESS_SEED);
+        off.set_phy(250_000, 7, 5);
+        let owed = off.acquisition_jitter_ms();
+        let line = acquisition_draw_line("rnode_0", owed, &off).expect("a fresh draw");
+        assert!(
+            line.ends_with(" offset_ms=0 slot_ms=24 subslot_arm=0"),
+            "{line}"
         );
     }
 

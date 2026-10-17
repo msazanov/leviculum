@@ -2280,9 +2280,11 @@ impl ReticulumNode {
                 // to prevent, whatever carries its bytes.
                 let jitter_arm =
                     crate::interfaces::rnode::JitterArm::from_env().map_err(Error::Config)?;
+                let subslot_arm =
+                    crate::interfaces::rnode::SubslotArm::from_env().map_err(Error::Config)?;
                 tracing::info!(
                     "{}: channel-backed RNode (freq={} Hz, sf={}, bw={} Hz, cr={}, txp={} dBm, \
-                     jitter_arm={})",
+                     jitter_arm={}, subslot_arm={})",
                     iface_name,
                     spec.frequency,
                     spec.sf,
@@ -2290,6 +2292,7 @@ impl ReticulumNode {
                     spec.cr,
                     spec.tx_power as i8,
                     jitter_arm.digit(),
+                    subslot_arm.digit(),
                 );
                 let handle = crate::interfaces::rnode::spawn_rnode_channel_interface(
                     crate::interfaces::rnode::RNodeChannelInterfaceConfig {
@@ -2307,6 +2310,7 @@ impl ReticulumNode {
                         buffer_size: spec.buffer_size,
                         reconnect_notify: Some(reconnect_tx.clone()),
                         jitter_arm,
+                        subslot_arm,
                         identity_hash: self.identity_hash(),
                     },
                     // Construction-time interface: lives for the node's
@@ -2579,6 +2583,8 @@ impl ReticulumNode {
         // `initialize_interfaces` — one selector, read once per interface
         // build, refused rather than defaulted.
         let jitter_arm = crate::interfaces::rnode::JitterArm::from_env().map_err(Error::Config)?;
+        let subslot_arm =
+            crate::interfaces::rnode::SubslotArm::from_env().map_err(Error::Config)?;
 
         // Spawn the interface task on the node's own runtime — an external
         // caller (e.g. a PyO3 host thread) has no tokio context of its own.
@@ -2600,6 +2606,7 @@ impl ReticulumNode {
                     buffer_size: config.buffer_size,
                     reconnect_notify: reconnect_tx,
                     jitter_arm,
+                    subslot_arm,
                     identity_hash: self.identity_hash(),
                 },
                 Some(shutdown_rx),

@@ -283,6 +283,15 @@ ble-dial-ledger-off = []
 # so the rig can attribute a capture difference to the penalty alone.
 ble-churn-penalty-off = []
 
+# The #438 sub-slot offset (order 824): enabling the feature arms
+# `ChannelAccess::set_subslot_offset`, a uniform [0, slot) ms added to every
+# fresh acquisition wait so two equal slot draws no longer key on the same
+# millisecond. OFF by default until the rig A/B decides it. A feature and not
+# an `lnflash --set-...` knob: the knob system is a persisted config record
+# with a wire layout, and an A/B arm that is removed or made unconditional
+# once the series answers must not leave a field in it.
+subslot-offset = []
+
 # BSP selection — exactly one must be enabled. Mutex enforced via
 # `compile_error!` in `lib.rs`. Both go through `softdevice` below and
 # therefore share one critical-section impl, the SoftDevice-aware one

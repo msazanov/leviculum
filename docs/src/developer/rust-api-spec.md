@@ -67,22 +67,22 @@ as `leviculum_std::ReticulumNode`. Selected methods:
 | Signature | Purpose |
 |-----------|---------|
 | `async fn start(&mut self) -> Result<(), Error>` — `driver/mod.rs:1818` | Spawn the event loop, bring interfaces up |
-| `async fn stop(&mut self) -> Result<(), Error>` — `driver/mod.rs:2418` | Stop and flush |
-| `fn is_running(&self) -> bool` — `driver/mod.rs:2500` | Loop state |
-| `fn register_destination(&self, destination: Destination)` — `driver/mod.rs:2508` | Make a local destination reachable (consumes it) |
-| `async fn announce_destination(&self, dest_hash: &DestinationHash, app_data: Option<&[u8]>) -> …` — `driver/mod.rs:3526` | Announce a registered destination |
-| `async fn connect(&self, dest_hash: &DestinationHash, dest_signing_key: &[u8; 32]) -> Result<LinkHandle, Error>` — `driver/mod.rs:2843` | Open a link; returns a pending handle |
-| `fn link_handle(&self, link_id: &LinkId) -> LinkHandle` — `driver/mod.rs:2945` | Writable handle for an already-established inbound link |
-| `fn packet_sender(&self, dest_hash: &DestinationHash) -> PacketSender` — `driver/mod.rs:3852` | Single-packet send handle |
-| `async fn send_single_packet(&self, …) -> …` — `driver/mod.rs:3807` | Send one unreliable datagram |
-| `fn take_event_receiver(&mut self) -> Option<EventReceiver>` — `driver/mod.rs:2961` | Take the event stream, once |
-| `fn identity_hash(&self) -> [u8; 16]` — `driver/mod.rs:3094` | The node's own identity hash |
-| `fn has_path(&self, dest_hash: &DestinationHash) -> bool` — `driver/mod.rs:3167` | Whether a path is known |
-| `fn hops_to(&self, dest_hash: &DestinationHash) -> Option<u8>` — `driver/mod.rs:3313` | Hop count to a destination |
-| `async fn request_path(&self, dest_hash: &DestinationHash) -> Result<(), Error>` — `driver/mod.rs:3198` | Send a PATH_REQUEST; result arrives as `PathFound` |
-| `fn get_identity(&self, dest_hash: &DestinationHash) -> Option<Identity>` — `driver/mod.rs:3176` | Identity learned from an announce (its signing key feeds `connect`) |
-| `fn transport_stats(&self) -> TransportStats` — `driver/mod.rs:3428` | `rnstatus`-style counters |
-| `fn is_transport_enabled(&self) -> bool` — `driver/mod.rs:3891` | Relay mode flag |
+| `async fn stop(&mut self) -> Result<(), Error>` — `driver/mod.rs:2422` | Stop and flush |
+| `fn is_running(&self) -> bool` — `driver/mod.rs:2504` | Loop state |
+| `fn register_destination(&self, destination: Destination)` — `driver/mod.rs:2512` | Make a local destination reachable (consumes it) |
+| `async fn announce_destination(&self, dest_hash: &DestinationHash, app_data: Option<&[u8]>) -> …` — `driver/mod.rs:3533` | Announce a registered destination |
+| `async fn connect(&self, dest_hash: &DestinationHash, dest_signing_key: &[u8; 32]) -> Result<LinkHandle, Error>` — `driver/mod.rs:2850` | Open a link; returns a pending handle |
+| `fn link_handle(&self, link_id: &LinkId) -> LinkHandle` — `driver/mod.rs:2952` | Writable handle for an already-established inbound link |
+| `fn packet_sender(&self, dest_hash: &DestinationHash) -> PacketSender` — `driver/mod.rs:3859` | Single-packet send handle |
+| `async fn send_single_packet(&self, …) -> …` — `driver/mod.rs:3814` | Send one unreliable datagram |
+| `fn take_event_receiver(&mut self) -> Option<EventReceiver>` — `driver/mod.rs:2968` | Take the event stream, once |
+| `fn identity_hash(&self) -> [u8; 16]` — `driver/mod.rs:3101` | The node's own identity hash |
+| `fn has_path(&self, dest_hash: &DestinationHash) -> bool` — `driver/mod.rs:3174` | Whether a path is known |
+| `fn hops_to(&self, dest_hash: &DestinationHash) -> Option<u8>` — `driver/mod.rs:3320` | Hop count to a destination |
+| `async fn request_path(&self, dest_hash: &DestinationHash) -> Result<(), Error>` — `driver/mod.rs:3205` | Send a PATH_REQUEST; result arrives as `PathFound` |
+| `fn get_identity(&self, dest_hash: &DestinationHash) -> Option<Identity>` — `driver/mod.rs:3183` | Identity learned from an announce (its signing key feeds `connect`) |
+| `fn transport_stats(&self) -> TransportStats` — `driver/mod.rs:3435` | `rnstatus`-style counters |
+| `fn is_transport_enabled(&self) -> bool` — `driver/mod.rs:3898` | Relay mode flag |
 
 The stable, curated facade `leviculum_std::api` — `NodeBuilder` (`leviculum-std/src/api/mod.rs:60`),
 `Node` (`leviculum-std/src/api/mod.rs:238`) — re-projects this surface with core internals

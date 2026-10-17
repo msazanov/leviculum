@@ -20,6 +20,13 @@ Toolchain: Rust 1.97.1
 
 ### Added
 
+- A sub-slot offset for the CSMA acquisition draw, OFF by default
+  (leviculum#438): a uniform `[0, slot)` ms on top of the slotted wait, so
+  two senders that draw the same slot no longer key on the same
+  millisecond. `LEVICULUM_SUBSLOT_ARM=1` arms it on the RNode host
+  interface, the `subslot-offset` feature on the LNode firmware; a rig A/B
+  decides whether it becomes the default.
+
 - The nightly is built and published by `just nightly-publish` on the
   machine that runs the tier-2 nightly, from the tree that night tested,
   after a green night (leviculum#517, refs #260). The forge pipeline keeps

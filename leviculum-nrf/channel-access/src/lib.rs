@@ -101,6 +101,37 @@
 //! [`widest_acquisition_wait_ms`] and the post-TX window it sizes still
 //! budget a band-1 peer; a peer above 7 % airtime can key up later than
 //! that window. Widening it is a separate radio-behaviour change.
+//!
+//! # The sub-slot offset (#438, arm off by default)
+//!
+//! The draw above is slotted: fourteen equally likely whole slots. Two
+//! senders released by one frame-end serve the same DIFS, so their
+//! stagger is `|cw_a - cw_b|` whole slots, and an equal draw puts both
+//! key-ups on the same millisecond. Order 823 read 324 shared transitions
+//! from six full hardware runs: at SF7/BW250, 23 of 290 co-releases
+//! (7.9 %, Wilson 95 % CI 5.3 to 11.6 %) met inside the preamble, against
+//! 1/14 = 7.14 % for "only an equal draw kills" and 20.4 % for "a
+//! one-slot stagger kills too", which the data rejects at 5.2 sd. The
+//! modem heard every 24 ms stagger; the kills sit at 0 to 7 ms. The blind
+//! window is a fraction of a slot, and two equal draws collide only
+//! because nothing separates them inside it.
+//!
+//! The arm ([`ChannelAccess::set_subslot_offset`]) adds a second,
+//! independent draw to every fresh acquisition: a uniform offset over
+//! `[0, slot)` ms, on top of DIFS plus the slots. Two equal slot draws
+//! then still collide only when their offsets land within the blind
+//! window of each other, about `blind / slot` (7/24 at BW250), so the
+//! equal-draw kill rate falls from 1/14 to about 1/48 without one extra
+//! slot of window; the mean wait grows by half a slot, the widest by
+//! [`subslot_offset_max_ms`]. Where the blind window is a whole slot or
+//! more (the preamble at SF8 and SF10 can be) the offset buys nothing,
+//! and it costs nothing more there either.
+//!
+//! The reference firmware does not do this. It is a deviation under the
+//! project's deviation rule: wire and semantics unchanged (a wait inside
+//! one slot), Priority 1 improved by the measured kill mode. It ships OFF
+//! until the rig A/B decides it; off, the random stream is the one an
+//! access always drew, bit for bit.
 
 pub mod load;
 
@@ -210,6 +241,18 @@ pub fn jitter_slot_ms(bw_hz: u32, sf: u8, cr_denom: u8) -> u64 {
 /// not a typical wait; the mean is DIFS plus half the window.
 pub fn widest_acquisition_wait_ms(bw_hz: u32, sf: u8, cr_denom: u8) -> u64 {
     (JITTER_DIFS_SLOTS + JITTER_CW_SLOTS as u64 - 1) * jitter_slot_ms(bw_hz, sf, cr_denom)
+}
+
+/// The widest sub-slot offset an armed access adds to a fresh acquisition
+/// wait: one CSMA slot less a millisecond, because the offset is drawn
+/// uniformly over `[0, slot)` ([`ChannelAccess::set_subslot_offset`]).
+///
+/// Not part of [`widest_acquisition_wait_ms`]: the arm is off by default,
+/// and the windows sized on that figure stay what they were until the rig
+/// A/B decides the arm. A caller that publishes a ceiling for an armed
+/// access adds this term itself.
+pub fn subslot_offset_max_ms(bw_hz: u32, sf: u8, cr_denom: u8) -> u64 {
+    jitter_slot_ms(bw_hz, sf, cr_denom).saturating_sub(1)
 }
 
 /// Ceiling on the post-TX receive window, in ms. A bound on how long one
@@ -346,6 +389,9 @@ pub struct ChannelAccess {
     jitter_was_drawn: bool,
     band: u8,
     drawn_band: u8,
+    subslot: bool,
+    drawn_slots: u64,
+    drawn_offset_ms: u64,
     attempt: u8,
     cw: u8,
 }
@@ -378,6 +424,9 @@ impl ChannelAccess {
             jitter_was_drawn: false,
             band: 1,
             drawn_band: 1,
+            subslot: false,
+            drawn_slots: 0,
+            drawn_offset_ms: 0,
             attempt: 0,
             cw: CAD_CW_INITIAL,
         }
@@ -406,6 +455,32 @@ impl ChannelAccess {
     /// `[LORA_JITTER]` and `[LORA_CSMA_TX]` lines.
     pub const fn drawn_band(&self) -> u8 {
         self.drawn_band
+    }
+
+    /// Arm or disarm the sub-slot offset ([`subslot_offset_max_ms`], the
+    /// crate docs' "The sub-slot offset"). Takes effect at the next fresh
+    /// draw. Off is the policy as it was, to the bit: an access never told
+    /// draws exactly the stream it drew before the arm existed.
+    pub fn set_subslot_offset(&mut self, on: bool) {
+        self.subslot = on;
+    }
+
+    /// Whether the sub-slot offset is armed.
+    pub const fn subslot_offset(&self) -> bool {
+        self.subslot
+    }
+
+    /// The contention slots the current acquisition drew (`random(cw_min,
+    /// cw_max)`, without DIFS), for the census line that has to say which
+    /// draw keyed.
+    pub const fn drawn_slots(&self) -> u64 {
+        self.drawn_slots
+    }
+
+    /// The sub-slot offset the current acquisition drew, in ms; `0` with the
+    /// arm off.
+    pub const fn drawn_offset_ms(&self) -> u64 {
+        self.drawn_offset_ms
     }
 
     /// The channel was yielded back (a post-TX listening window ran, or is
@@ -447,8 +522,18 @@ impl ChannelAccess {
             // Band 1 is `% JITTER_CW_SLOTS` from 0, the draw it always was,
             // so the random stream of an unbanded access is unchanged.
             let draw = (cw_min + xorshift32(&mut self.rng) % (cw_max - cw_min)) as u64;
+            // The sub-slot offset is a second draw from the same stream, taken
+            // only when armed: with the arm off the stream (and with it the
+            // CAD backoff ladder behind this draw) is the one it always was.
+            let offset = if self.subslot && self.jitter_slot_ms > 0 {
+                xorshift32(&mut self.rng) as u64 % self.jitter_slot_ms
+            } else {
+                0
+            };
             self.drawn_band = self.band;
-            self.jitter_remaining_ms = (JITTER_DIFS_SLOTS + draw) * self.jitter_slot_ms;
+            self.drawn_slots = draw;
+            self.drawn_offset_ms = offset;
+            self.jitter_remaining_ms = (JITTER_DIFS_SLOTS + draw) * self.jitter_slot_ms + offset;
             self.jitter_was_drawn = true;
         } else {
             self.jitter_was_drawn = false;
@@ -1330,5 +1415,150 @@ mod tests {
         assert_eq!(widest, (JITTER_DIFS_SLOTS + 58) * JITTER_SLOT_MAX_MS);
         assert!(widest <= LISTEN_WINDOW_MAX_MS, "{widest}");
         assert_eq!(listen_window_ms(widest), widest as u32);
+    }
+
+    // --- The sub-slot offset (#438) -------------------------------------
+
+    /// The draws a seeded access makes over sixteen acquisitions, each
+    /// followed by one busy CAD: `[wait_ms, backoff_slots, ...]`.
+    fn acquisition_trace(access: &mut ChannelAccess) -> [u64; 32] {
+        let mut out = [0u64; 32];
+        for pair in out.chunks_mut(2) {
+            access.channel_released();
+            pair[0] = access.acquisition_jitter_ms();
+            access.begin_packet();
+            pair[1] = match access.cad_busy() {
+                Verdict::Backoff { slots } => slots,
+                other => panic!("one busy CAD cannot exhaust the budget: {other:?}"),
+            };
+        }
+        out
+    }
+
+    #[test]
+    fn with_the_arm_off_the_draws_are_the_ones_before_it_existed() {
+        // Recorded off the code BEFORE the arm was added (order 824), seed
+        // 0x1234_5678 at SF7/BW250 (24 ms slot). The busy CAD after every
+        // acquisition pins the stream behind the draw too: an arm that took
+        // a random number while off would shift every backoff here.
+        const GOLDEN: [u64; 32] = [
+            168, 1, 192, 0, 48, 1, 312, 1, 264, 1, 192, 0, 96, 1, 144, 1, 240, 1, 216, 0, 264, 0,
+            240, 1, 144, 1, 96, 1, 96, 1, 336, 0,
+        ];
+        let mut never_told = ChannelAccess::new(0x1234_5678);
+        never_told.set_phy(250_000, 7, 5);
+        assert_eq!(acquisition_trace(&mut never_told), GOLDEN);
+
+        let mut told_off = ChannelAccess::new(0x1234_5678);
+        told_off.set_phy(250_000, 7, 5);
+        told_off.set_subslot_offset(true);
+        told_off.set_subslot_offset(false);
+        assert_eq!(acquisition_trace(&mut told_off), GOLDEN);
+        assert_eq!(told_off.drawn_offset_ms(), 0);
+    }
+
+    /// `n` fresh acquisitions of an armed access: `(slots, offset_ms, wait_ms)`.
+    fn armed_draws(seed: u32, bw: u32, sf: u8, n: usize) -> impl Iterator<Item = (u64, u64, u64)> {
+        let mut access = ChannelAccess::new(seed);
+        access.set_phy(bw, sf, 5);
+        access.set_subslot_offset(true);
+        (0..n).map(move |_| {
+            access.channel_released();
+            let wait = access.acquisition_jitter_ms();
+            (access.drawn_slots(), access.drawn_offset_ms(), wait)
+        })
+    }
+
+    #[test]
+    fn an_armed_wait_is_the_slotted_draw_plus_its_offset() {
+        let slot = jitter_slot_ms(250_000, 7, 5);
+        let mut first_of_slot: [Option<(u64, u64)>; JITTER_CW_SLOTS as usize] =
+            [None; JITTER_CW_SLOTS as usize];
+        let mut separated = 0;
+        for (slots, offset, wait) in armed_draws(0x1234_5678, 250_000, 7, 2_000) {
+            assert_eq!(wait, (JITTER_DIFS_SLOTS + slots) * slot + offset);
+            // Two acquisitions that drew the same slot differ by exactly
+            // their offsets: the tie the arm exists to break.
+            match first_of_slot[slots as usize] {
+                None => first_of_slot[slots as usize] = Some((offset, wait)),
+                Some((first_offset, first_wait)) => {
+                    assert_eq!(wait.abs_diff(first_wait), offset.abs_diff(first_offset));
+                    if offset != first_offset {
+                        separated += 1;
+                    }
+                }
+            }
+        }
+        // 1986 same-slot repeats; with 24 offsets about 1/24 of them land on
+        // the first one's offset. All but a handful must be apart.
+        assert!(separated > 1_800, "{separated}");
+    }
+
+    #[test]
+    fn the_offset_never_reaches_a_slot_at_any_slot_width() {
+        // The fast floor, the bench floor, between the clamps, the ceiling.
+        for (bw, sf, slot) in [
+            (500_000, 5, 6),
+            (250_000, 7, 24),
+            (125_000, 10, 98),
+            (125_000, 12, 100),
+        ] {
+            assert_eq!(jitter_slot_ms(bw, sf, 5), slot);
+            assert_eq!(subslot_offset_max_ms(bw, sf, 5), slot - 1);
+            let widest = armed_draws(0xC0FF_EE01, bw, sf, 10_000)
+                .map(|(_, offset, _)| offset)
+                .max();
+            // Every value is reached, the top one included, and none past it.
+            assert_eq!(widest, Some(slot - 1), "slot {slot}");
+        }
+    }
+
+    #[test]
+    fn the_offset_is_flat_over_the_slot_with_mean_half_a_slot() {
+        let slot = jitter_slot_ms(250_000, 7, 5) as usize;
+        const N: usize = 10_000;
+        let mut counts = [0u32; 24];
+        let mut sum = 0u64;
+        for (_, offset, _) in armed_draws(0x0BAD_5EED, 250_000, 7, N) {
+            counts[offset as usize] += 1;
+            sum += offset;
+        }
+        // Whole milliseconds over [0, slot): the mean is (slot - 1) / 2 =
+        // 11.5 ms, half a slot less the half millisecond the integer draw
+        // rounds away. Its standard error over 10 000 draws is 0.07 ms.
+        let mean = sum as f64 / N as f64;
+        assert!(
+            (mean - (slot as f64 - 1.0) / 2.0).abs() < 0.3,
+            "mean {mean}"
+        );
+        // Flat: chi-square over the 24 values, 23 degrees of freedom, below
+        // the p = 0.001 critical value 49.73.
+        let expected = N as f64 / slot as f64;
+        let chi2: f64 = counts
+            .iter()
+            .map(|&c| (c as f64 - expected) * (c as f64 - expected) / expected)
+            .sum();
+        assert!(chi2 < 49.73, "chi2 {chi2} counts {counts:?}");
+    }
+
+    #[test]
+    fn the_offset_is_independent_of_the_slot_it_follows() {
+        // The offset is the next number of the same xorshift stream as the
+        // slot draw. Were the two correlated, the offsets of two equal slot
+        // draws would cluster and the tie would survive. Chi-square over the
+        // 14 x 24 joint cells, 335 degrees of freedom: below the p = 0.001
+        // critical value, about 422.
+        const N: usize = 50_000;
+        let mut joint = [[0u32; 24]; JITTER_CW_SLOTS as usize];
+        for (slots, offset, _) in armed_draws(0x5EED_1438, 250_000, 7, N) {
+            joint[slots as usize][offset as usize] += 1;
+        }
+        let expected = N as f64 / (JITTER_CW_SLOTS as f64 * 24.0);
+        let chi2: f64 = joint
+            .iter()
+            .flatten()
+            .map(|&c| (c as f64 - expected) * (c as f64 - expected) / expected)
+            .sum();
+        assert!(chi2 < 422.0, "chi2 {chi2}");
     }
 }
