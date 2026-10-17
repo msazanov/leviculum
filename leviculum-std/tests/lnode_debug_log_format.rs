@@ -1,7 +1,7 @@
 //! Codeberg #65 instrumentation contract: the shape of the LNode debug lines
 //! the host side greps.
 //!
-//! The firmware emits two line shapes on the CDC-ACM debug console:
+//! The firmware emits these line shapes on the CDC-ACM debug console:
 //!
 //! ```text
 //! [INFO!] [PANIC_COUNT] total=<u32> t=<ms>                  (boot banner, once per boot)
@@ -13,6 +13,7 @@
 //! [SX_RX_TEARDOWN] site=<tag> preamble=<0|1> header=<0|1> rxdone=<0|1> armed_ms=<u32> waited_ms=<u64>
 //! [SX_RX_HARVEST] site=<tag> preamble=<0|1> header=<0|1> rxdone=<0|1> armed_ms=<u32> waited_ms=<u64>
 //! [SX_TX_DEFER] waited_ms=<u64> reason=<preamble|header> outcome=<frame|timeout|abandoned|false_preamble>
+//! [BLE ] BLE_DIAL_REFUSED addr=<12 hex> lived_ms=<u64> fallback_in_ms=<u64>  (a dial of ours the peer refused)
 //! ```
 //!
 //! The adopt/teardown pair is read as a rate against each other: an
@@ -1523,5 +1524,113 @@ fn the_time_source_banner_mirrors_the_node_rather_than_the_seeding_sites() {
         "leviculum-nrf/src/lib.rs::set_time_source no longer reports whether the \
          recorded source changed, which is what lets the main-loop mirror log the \
          transition once (Codeberg #398)"
+    );
+}
+
+/// The board's dial-refusal line (815): `[BLE ] BLE_DIAL_REFUSED
+/// addr=<12 hex> lived_ms=<u64> fallback_in_ms=<u64>`, then the uptime stamp.
+///
+/// Returns `(addr, lived_ms, fallback_in_ms)`. All three are required: the
+/// address says which peer refused, `lived_ms` is the evidence that it was a
+/// refusal at all (gone inside the refusal window), and `fallback_in_ms` is
+/// what the refusal cost the board.
+fn parse_dial_refused(line: &str) -> Option<(u64, u64, u64)> {
+    let idx = line.find("BLE_DIAL_REFUSED ")?;
+    let rest = &line[idx + "BLE_DIAL_REFUSED ".len()..];
+    let (mut addr, mut lived, mut fallback) = (None, None, None);
+    for token in rest.split_whitespace() {
+        let (key, value) = token.split_once('=')?;
+        match key {
+            "addr" if value.len() == 12 => addr = Some(u64::from_str_radix(value, 16).ok()?),
+            "addr" => return None,
+            "lived_ms" => lived = Some(value.parse().ok()?),
+            "fallback_in_ms" => fallback = Some(value.parse().ok()?),
+            _ => {} // the ` t=` stamp, and anything appended after it
+        }
+    }
+    Some((addr?, lived?, fallback?))
+}
+
+/// The refusal line parses as the board writes it, and as lnsd's event of
+/// the same name reads, `iface` aside: one grep reads both stacks.
+#[test]
+fn the_dial_refused_line_parses() {
+    assert_eq!(
+        parse_dial_refused(
+            "[BLE ] BLE_DIAL_REFUSED addr=c00000009000 lived_ms=2990 fallback_in_ms=1280 t=48211"
+        ),
+        Some((0xc000_0000_9000, 2_990, 1_280))
+    );
+    assert_eq!(
+        parse_dial_refused(
+            "[INFO!] [PERSISTENT_LOG] [BLE ] BLE_DIAL_REFUSED addr=c00000009000 \
+             lived_ms=12 fallback_in_ms=1280 t=9 t=2"
+        ),
+        Some((0xc000_0000_9000, 12, 1_280))
+    );
+    // A missing key is a parse failure, not a default.
+    assert_eq!(
+        parse_dial_refused("[BLE ] BLE_DIAL_REFUSED addr=c00000009000 lived_ms=2990 t=1"),
+        None
+    );
+    assert_eq!(
+        parse_dial_refused("[BLE ] BLE_DIAL_REFUSED addr=c00000009000 fallback_in_ms=1280 t=1"),
+        None
+    );
+    // The address is the full six bytes, zero-padded, the shape lnsd's
+    // `hex12` writes; a short one is a firmware that moved.
+    assert_eq!(
+        parse_dial_refused("[BLE ] BLE_DIAL_REFUSED addr=9000 lived_ms=1 fallback_in_ms=1280"),
+        None
+    );
+}
+
+/// The firmware still emits the refusal line, in the grammar the parser
+/// above reads and with lnsd's keys. The format string lives in the host-
+/// testable `ble-tx` crate (`DialRefusedLine`), the emission in the board's
+/// BLE module; both are pinned, and the keys are checked against lnsd's own
+/// catalogue entry so the two stacks cannot drift apart unnoticed.
+#[test]
+fn the_firmware_still_emits_the_dial_refused_line() {
+    let admission = {
+        let path: PathBuf = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace root")
+            .join("leviculum-nrf/ble-tx/src/admission.rs");
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+    };
+    const FORMAT: &str = "BLE_DIAL_REFUSED addr={:012x} lived_ms={} fallback_in_ms={}";
+    assert!(
+        admission.contains(&format!("\"{FORMAT}\"")),
+        "the BLE_DIAL_REFUSED field order or spelling changed in \
+         leviculum-nrf/ble-tx/src/admission.rs; parse_dial_refused above still \
+         expects `{FORMAT}`"
+    );
+    let columba = nrf_source("ble/columba.rs");
+    let body = body_after(
+        &columba,
+        "ble/columba.rs",
+        "fn note_dial_refused(",
+        "the refusal helper",
+    );
+    assert!(
+        body.contains(r#""[BLE ] ""#) && body.contains("DialRefusedLine {"),
+        "leviculum-nrf/src/ble/columba.rs::note_dial_refused no longer writes \
+         DialRefusedLine under the `[BLE ] ` tag"
+    );
+    let lnsd = leviculum_std::event_log::EVENT_CATALOG
+        .iter()
+        .find(|e| e.name == "BLE_DIAL_REFUSED")
+        .expect("lnsd's catalogue has a BLE_DIAL_REFUSED entry");
+    let lnsd_keys: Vec<&str> = lnsd
+        .required_keys
+        .iter()
+        .copied()
+        .filter(|k| *k != "iface")
+        .collect();
+    assert_eq!(
+        lnsd_keys,
+        ["addr", "lived_ms", "fallback_in_ms"],
+        "lnsd's BLE_DIAL_REFUSED keys, iface aside, are no longer the board's"
     );
 }
