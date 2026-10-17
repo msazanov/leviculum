@@ -1763,6 +1763,16 @@ pub enum TimeSource {
     /// cursor. It also never counts as a plausible wall clock, never
     /// issues tickets, and never caps adoption.
     BuildFloor,
+    /// Rank 5, the birth rank. A floor a clockless board persisted before
+    /// it lost power and restored at boot (Codeberg #166 item 4), seated by
+    /// [`Transport::restore_emission_floor`]. The value is a lower bound,
+    /// never a claim about now: the board cannot know how long it was off.
+    /// So every rank-keyed predicate treats it exactly as the birth anchor
+    /// (unbounded first adoption, no tickets, not a plausible wall clock)
+    /// and only the source word differs. What it buys is a better birth
+    /// value: a board that heard real time once stamps near it after a
+    /// reboot instead of at its build timestamp.
+    RestoredFloor,
 }
 
 impl TimeSource {
@@ -1775,6 +1785,7 @@ impl TimeSource {
             TimeSource::PlatformClock => "platform-clock",
             TimeSource::Overheard => "overheard",
             TimeSource::BuildFloor => "build-floor",
+            TimeSource::RestoredFloor => "restored-floor",
         }
     }
 
@@ -1783,14 +1794,15 @@ impl TimeSource {
     /// The model's predicates compare ranks, never anchor values: rank 5 is
     /// the birth state where first adoption is unbounded and tickets are
     /// refused, and ranks 1 to 3 are the arms that end the cold-start cost
-    /// outright.
+    /// outright. Both birth sources, the build floor and a restored floor,
+    /// share rank 5.
     pub fn rank(&self) -> u8 {
         match self {
             TimeSource::Gnss => 1,
             TimeSource::Host => 2,
             TimeSource::PlatformClock => 3,
             TimeSource::Overheard => 4,
-            TimeSource::BuildFloor => 5,
+            TimeSource::BuildFloor | TimeSource::RestoredFloor => BIRTH_ANCHOR_RANK,
         }
     }
 }
@@ -5358,6 +5370,41 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         true
     }
 
+    /// Restore a floor a clockless board persisted before a power cycle
+    /// (Codeberg #166 item 4) as a [`TimeSource::RestoredFloor`] anchor.
+    ///
+    /// The stored value is a floor, never a claim about now, so it is
+    /// seated at the birth rank: the first credible announce after boot is
+    /// still adopted unbounded and heals the calendar in one step, where a
+    /// restore through [`Self::set_wall_time_unix_secs`] would take a
+    /// better rank and crawl at the per-announce cap. What the restore
+    /// changes is only the birth VALUE: until that announce arrives the
+    /// board stamps from the restored floor instead of its build
+    /// timestamp.
+    ///
+    /// Refused (returns `false`, nothing changes) when the value is outside
+    /// the sanity window every source passes, when a better-ranked anchor
+    /// already sits (a platform clock, an injection, an overheard
+    /// announce: a restore never demotes a live source), or when the value
+    /// is not above the current calendar, because the anchor never moves
+    /// backwards.
+    pub fn restore_emission_floor(&mut self, unix_secs: u64) -> bool {
+        if !(EMISSION_SANITY_FLOOR_SECS..=EMISSION_LEARN_CEILING_SECS).contains(&unix_secs) {
+            crate::tracing::warn!(unix_secs, "Refused implausible restored emission floor");
+            return false;
+        }
+        if self.anchor_rank() < BIRTH_ANCHOR_RANK {
+            return false;
+        }
+        let now_ms = self.clock.now_ms();
+        if unix_secs <= self.emission_secs(now_ms) {
+            return false;
+        }
+        self.emission_floor = Some((unix_secs, now_ms));
+        self.time_source = TimeSource::RestoredFloor;
+        true
+    }
+
     /// Which source seated the current calendar anchor (Codeberg #166 item
     /// 3, #247). [`TimeSource::BuildFloor`] while none has.
     ///
@@ -5416,10 +5463,11 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// would route a cold node into the bounded branch and reinstate the
     /// #161 §1 crawl of one day per announce.
     ///
-    /// Unlike the persisted offset in microReticulum (which the #155
-    /// commit message overstated as the same pattern), the learned anchor
-    /// is in-memory only: after a reboot a clockless node is back at its
-    /// build floor until the first validated announce re-seeds it.
+    /// The learned anchor itself is in-memory only. A platform that
+    /// persists it (Codeberg #166 item 4) brings it back through
+    /// [`Self::restore_emission_floor`] at the birth rank, so after a
+    /// reboot a clockless node stamps from that floor, and the first
+    /// validated announce still re-seeds it in one step.
     fn learn_emission_timebase(&mut self, emitted_secs: u64, now_ms: u64) {
         if self.clock.wall_unix_secs().is_some() {
             return;
@@ -5736,7 +5784,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// recall source is the cached announce for the destination
     /// (`get_announce_cache`, keyed by destination hash, holding the raw announce
     /// whose payload starts with the 64-byte public key), the same source the
-    /// link-request path uses at transport.rs:4131. A destination with no cached
+    /// link-request path uses at transport.rs:4143. A destination with no cached
     /// announce cannot be associated with an identity, so it is left untouched,
     /// exactly as Python keeps a path whose `Identity.recall` returns `None`.
     ///
@@ -11641,7 +11689,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // Emit the STORED path-table count, matching Python
                 // Transport.py:2956 (`packet.hops = path_table[dst][IDX_PT_HOPS]`).
                 // The cached raw's hop byte is the PRE-increment wire value
-                // (`stored - 1`): the receipt increment (`transport.rs:2636`) only
+                // (`stored - 1`): the receipt increment (`transport.rs:2648`) only
                 // touches the in-memory packet, never the raw buffer stashed by
                 // `set_announce_cache`. Using it here would put `stored - 1` on the
                 // wire and every peer that learns via this response would be one hop
@@ -17866,7 +17914,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // `random_blobs` (transport.rs:7283), a deliberate anti-replay
+            // `random_blobs` (transport.rs:7331), a deliberate anti-replay
             // extension — so the blob count is not a rejection indicator.)
             transport
                 .clock
@@ -24585,33 +24633,25 @@ mod tests {
             );
         }
 
-        // Codeberg #166 item 4: what it would cost to persist the learned
-        // timebase across a reboot and restore it as an ordinary anchor.
-        // The issue asks a clockless LNode — a solar relay with neither
-        // GNSS nor a host — to carry its floor over a power cycle so it
-        // stops re-emitting uptime seconds after every boot. The stored
-        // value can only ever be a FLOOR: the node cannot know how long it
-        // was off, so it must still adopt upward from the first credible
-        // announce.
+        // Codeberg #166 item 4: a clockless LNode, a solar relay with
+        // neither GNSS nor a host, carries its learned floor over a power
+        // cycle so it stops re-emitting its build timestamp after every
+        // boot. The stored value can only ever be a FLOOR: the node cannot
+        // know how long it was off, so it must still adopt upward from the
+        // first credible announce, and in ONE step, exactly as a node
+        // without persistence does.
         //
-        // Restored through the only seam that exists today it arrives as a
-        // host injection, which is rank 2 — so the node is past the birth
-        // anchor the moment it boots, lands in the bounded branch, and
-        // crawls back to real time at EMISSION_LEARN_MAX_ADVANCE_SECS per
-        // announce, where the same node without persistence recovers in one
-        // step.
-        //
-        // This measures the crawl instead of asserting it. Since #247 the
-        // unbounded branch keys on the anchor's RANK, so item 4's remaining
-        // work is naming the rank a restored floor deserves — a persisted
-        // birth anchor is not a host's claim to know wall time — not
-        // loosening a value test.
+        // c0e19bbf measured the wrong seam: restored through the host seam
+        // the floor takes rank 2, the bounded branch applies, and a 90-day
+        // stale floor climbs one day per announce. The arms below keep that
+        // contrast: `restore_emission_floor` seats the birth rank and heals
+        // in one step, the host seam still crawls.
         #[test]
-        fn test_restored_stale_floor_crawls_where_an_absent_floor_recovers() {
+        fn test_restored_stale_floor_heals_in_one_step_where_a_host_seam_crawls() {
             use crate::constants::EMISSION_LEARN_MAX_ADVANCE_SECS;
             use crate::destination::{Destination, DestinationType, Direction};
 
-            // The credible announce both arms hear, and how long the relay
+            // The credible announce every arm hears, and how long the relay
             // was powered off before it heard it.
             const OFF_SECS: u64 = 90 * 86_400;
             let now_secs = REAL_UNIX_SECS;
@@ -24632,43 +24672,109 @@ mod tests {
             )
             .unwrap();
 
-            // Arm A — today: nothing persisted, so the node boots at uptime
-            // seconds and one credible announce recovers it completely.
+            // Arm A: nothing persisted, one credible announce recovers.
             let mut fresh = make_transport_enabled();
             let _fresh_if = fresh.register_interface(Box::new(MockInterface::new("if0", 1)));
             let a1 = make_announce_raw_for_dest(&dest, 1, now_secs);
             fresh.process_incoming(0, &a1).unwrap();
             let now = fresh.clock.now_ms();
-            assert_eq!(
-                fresh.emission_secs(now),
-                now_secs,
-                "at the birth anchor the first adoption is unbounded"
-            );
+            assert_eq!(fresh.emission_secs(now), now_secs);
 
-            // Arm B — with item 4 done naively: the stored floor is seated
-            // at boot, then the same announce arrives.
+            // Arm B: the floor restored through its own seam. Before any
+            // announce the board stamps from the floor, not the build
+            // timestamp, and still sits at the birth rank.
             let mut restored = make_transport_enabled();
             let _restored_if = restored.register_interface(Box::new(MockInterface::new("if0", 1)));
-            assert!(restored.set_wall_time_unix_secs(stored_floor, TimeSource::Host));
+            assert!(restored.restore_emission_floor(stored_floor));
+            let now = restored.clock.now_ms();
+            assert_eq!(restored.emission_secs(now), stored_floor);
+            assert_eq!(restored.anchor_rank(), BIRTH_ANCHOR_RANK);
+            assert_eq!(restored.time_source(), TimeSource::RestoredFloor);
             let a2 = make_announce_raw_for_dest(&dest, 1, now_secs);
             restored.process_incoming(0, &a2).unwrap();
             let now = restored.clock.now_ms();
             assert_eq!(
                 restored.emission_secs(now),
-                stored_floor + EMISSION_LEARN_MAX_ADVANCE_SECS,
-                "a restored floor arrives through the host seam and takes its \
-                 rank, so the same announce advances it by the per-announce cap \
-                 instead of recovering it"
+                now_secs,
+                "a restored floor is a birth anchor: the first credible \
+                 announce is adopted unbounded and heals it in one step"
             );
+            assert_eq!(restored.time_source(), TimeSource::Overheard);
 
-            // The cost, stated as the number the rig scenario would count:
-            // announces to climb back, one day of advance each.
+            // Arm C: the same floor through the host seam, the c0e19bbf
+            // measurement. Rank 2, bounded branch, one day per announce.
+            let mut host = make_transport_enabled();
+            let _host_if = host.register_interface(Box::new(MockInterface::new("if0", 1)));
+            assert!(host.set_wall_time_unix_secs(stored_floor, TimeSource::Host));
+            let a3 = make_announce_raw_for_dest(&dest, 1, now_secs);
+            host.process_incoming(0, &a3).unwrap();
+            let now = host.clock.now_ms();
             assert_eq!(
-                OFF_SECS / EMISSION_LEARN_MAX_ADVANCE_SECS,
-                90,
-                "one announce per day of downtime — at a 30 min LoRa cadence \
-                 the relay stamps behind real time for ~45 h after a season \
-                 off, against one announce interval with no persistence"
+                host.emission_secs(now),
+                stored_floor + EMISSION_LEARN_MAX_ADVANCE_SECS,
+                "the host seam takes rank 2 and crawls at the per-announce cap"
+            );
+        }
+
+        // Codeberg #166 item 4: the restore passes the same sanity window
+        // as every source. A floor below the build floor or above the learn
+        // ceiling is a torn or foreign record, not a floor.
+        #[test]
+        fn test_restored_floor_outside_the_window_is_refused() {
+            use crate::constants::{EMISSION_LEARN_CEILING_SECS, EMISSION_SANITY_FLOOR_SECS};
+            let mut transport = make_transport_enabled();
+            assert!(!transport.restore_emission_floor(EMISSION_SANITY_FLOOR_SECS - 1));
+            assert!(!transport.restore_emission_floor(1_000_000));
+            assert!(!transport.restore_emission_floor(EMISSION_LEARN_CEILING_SECS + 1));
+            assert_eq!(transport.time_source(), TimeSource::BuildFloor);
+            let now = transport.clock.now_ms();
+            assert_eq!(
+                transport.emission_secs(now),
+                crate::constants::BUILD_UNIX_SECS + now / 1000
+            );
+        }
+
+        // Codeberg #166 item 4: a restore never demotes a live source and
+        // never moves the anchor backwards.
+        #[test]
+        fn test_restored_floor_never_demotes_a_better_rank_nor_moves_back() {
+            // A better-ranked anchor already sits: refused, provenance kept.
+            let mut seeded = make_transport_enabled();
+            assert!(seeded.set_wall_time_unix_secs(REAL_UNIX_SECS, TimeSource::Host));
+            assert!(!seeded.restore_emission_floor(REAL_UNIX_SECS + 86_400));
+            assert_eq!(seeded.time_source(), TimeSource::Host);
+            let now = seeded.clock.now_ms();
+            assert_eq!(seeded.emission_secs(now), REAL_UNIX_SECS);
+
+            // Not above the current calendar: refused. The birth anchor
+            // reads BUILD_UNIX_SECS plus uptime, so the build floor itself
+            // (inside the window) is not above it.
+            let mut birth = make_transport_enabled();
+            let now = birth.clock.now_ms();
+            let current = birth.emission_secs(now);
+            assert!(!birth.restore_emission_floor(current));
+            assert_eq!(birth.time_source(), TimeSource::BuildFloor);
+
+            // A second, higher restore advances a restored floor; a lower
+            // one does not move it back.
+            assert!(birth.restore_emission_floor(REAL_UNIX_SECS));
+            assert!(!birth.restore_emission_floor(REAL_UNIX_SECS - 3_600));
+            let now = birth.clock.now_ms();
+            assert_eq!(birth.emission_secs(now), REAL_UNIX_SECS);
+            assert!(birth.restore_emission_floor(REAL_UNIX_SECS + 3_600));
+            assert_eq!(birth.time_source(), TimeSource::RestoredFloor);
+        }
+
+        // Codeberg #166 item 4: the restored source has its own word and
+        // the birth rank, so `[TIME_SOURCE]` tells it apart from a cold
+        // build floor while every rank-keyed predicate does not.
+        #[test]
+        fn test_restored_floor_has_its_own_word_and_the_birth_rank() {
+            assert_eq!(TimeSource::RestoredFloor.as_str(), "restored-floor");
+            assert_eq!(TimeSource::RestoredFloor.rank(), BIRTH_ANCHOR_RANK);
+            assert_eq!(
+                TimeSource::RestoredFloor.rank(),
+                TimeSource::BuildFloor.rank()
             );
         }
 

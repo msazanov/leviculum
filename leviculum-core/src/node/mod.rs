@@ -976,6 +976,13 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.transport.set_wall_time_unix_secs(unix_secs, source)
     }
 
+    /// Restore a floor persisted across a power cycle at the birth rank
+    /// (Codeberg #166 item 4). Returns whether it was seated; see
+    /// `Transport::restore_emission_floor` for the refusals.
+    pub fn restore_emission_floor(&mut self, unix_secs: u64) -> bool {
+        self.transport.restore_emission_floor(unix_secs)
+    }
+
     /// Which source seated the current emission timebase anchor
     /// (Codeberg #166 item 3).
     pub fn time_source(&self) -> crate::transport::TimeSource {

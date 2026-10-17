@@ -622,6 +622,7 @@ const TIME_SOURCE_HOST: u8 = 1;
 const TIME_SOURCE_OVERHEARD: u8 = 2;
 const TIME_SOURCE_BUILD_FLOOR: u8 = 3;
 const TIME_SOURCE_PLATFORM_CLOCK: u8 = 4;
+const TIME_SOURCE_RESTORED_FLOOR: u8 = 5;
 
 /// Record the time source for the status banner. Returns whether the
 /// recorded source CHANGED, so a caller that runs on every pass can log the
@@ -642,6 +643,7 @@ pub fn set_time_source(source: leviculum_core::transport::TimeSource) -> bool {
         TimeSource::Host => TIME_SOURCE_HOST,
         TimeSource::Overheard => TIME_SOURCE_OVERHEARD,
         TimeSource::BuildFloor => TIME_SOURCE_BUILD_FLOOR,
+        TimeSource::RestoredFloor => TIME_SOURCE_RESTORED_FLOOR,
         // No nRF board offers a platform wall clock (EmbassyClock keeps the
         // trait default of None), so this arm is unreachable here; it is
         // spelled out rather than wildcarded so a board that grows an RTC
@@ -660,6 +662,7 @@ pub fn time_source_str() -> &'static str {
         TIME_SOURCE_HOST => TimeSource::Host.as_str(),
         TIME_SOURCE_OVERHEARD => TimeSource::Overheard.as_str(),
         TIME_SOURCE_PLATFORM_CLOCK => TimeSource::PlatformClock.as_str(),
+        TIME_SOURCE_RESTORED_FLOOR => TimeSource::RestoredFloor.as_str(),
         _ => TimeSource::BuildFloor.as_str(),
     }
 }

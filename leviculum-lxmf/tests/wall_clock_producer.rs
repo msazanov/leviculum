@@ -274,6 +274,29 @@ fn clockless_node_refuses_to_issue_a_ticket_a_peer_would_discard() {
     );
 }
 
+/// A restored floor (Codeberg #166 item 4) is a birth anchor with a better
+/// value: the board stamps from it, but it is a lower bound the board kept
+/// across a power cycle, not a claim about now. So it issues no tickets and
+/// is not a plausible wall clock, exactly like the build floor, even though
+/// its value may sit within days of real time.
+#[test]
+fn restored_floor_issues_no_tickets_and_is_not_a_plausible_wall_clock() {
+    let (mut router, mut node) = clockless_router();
+    let remote = [0x62; 16];
+
+    assert!(node.restore_emission_floor(INJECTED_UNIX));
+    assert_eq!(node.time_source(), TimeSource::RestoredFloor);
+    assert_eq!(node.time_source().as_str(), "restored-floor");
+    assert_eq!(node.anchor_rank(), BIRTH_ANCHOR_RANK);
+    assert_eq!(node.emission_secs(), INJECTED_UNIX);
+    assert!(!node.has_plausible_wall_clock());
+    assert!(matches!(
+        router.issue_ticket_field(&node, remote, &mut OsRng),
+        Err(RouterError::NoWallClock)
+    ));
+    assert_eq!(router.tickets().inbound_secrets(&remote, 0.0).len(), 0);
+}
+
 /// The ticket expiry is `emission_secs + TICKET_EXPIRY`, from the node's
 /// timebase and nothing else.
 ///
