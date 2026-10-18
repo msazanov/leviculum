@@ -201,6 +201,12 @@ pub struct BundleInfo {
     /// the firmware's measured margin is 3264 bytes.
     #[serde(default)]
     pub rustc: Option<String>,
+    /// Extra leviculum-nrf cargo features every image was built with on
+    /// top of its board's own `bsp-*` set — a rig A/B arm such as
+    /// `subslot-offset` (#438). Empty for every default bundle, whose
+    /// manifest carries no such key at all.
+    #[serde(default)]
+    pub features: Vec<String>,
 }
 
 /// One board, as far as talking to it goes. All of it hardware fact, which
@@ -1328,6 +1334,29 @@ convert = "hex-to-uf2"
         f.write_manifest(&text);
         let manifest = f.load().unwrap();
         assert_eq!(manifest.bundle.rustc, None);
+        manifest.verify_all().unwrap();
+    }
+
+    #[test]
+    fn a_default_bundle_has_no_extra_firmware_features() {
+        let manifest = Fixture::new().load().unwrap();
+        assert!(manifest.bundle.features.is_empty());
+    }
+
+    #[test]
+    fn a_bundle_built_with_extra_firmware_features_lists_them() {
+        // `just lnflash-bundle nrf_features=subslot-offset` (#438) writes the
+        // list under [bundle], so the arm a board was flashed with is
+        // readable off the bundle rather than off its directory name alone.
+        let f = Fixture::new();
+        let text = f.manifest_text().replace(
+            "rustc = \"rustc 1.97.1 (a1b2c3d4e 2026-07-01)\"\n",
+            "rustc = \"rustc 1.97.1 (a1b2c3d4e 2026-07-01)\"\nfeatures = [\"subslot-offset\"]\n",
+        );
+        assert!(text.contains("features"), "the key was not added: {text}");
+        f.write_manifest(&text);
+        let manifest = f.load().unwrap();
+        assert_eq!(manifest.bundle.features, vec!["subslot-offset"]);
         manifest.verify_all().unwrap();
     }
 

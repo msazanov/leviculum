@@ -966,9 +966,19 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let manifest = manifest::load(&dir, &catalogue)?;
 
     ui.say(&format!(
-        "lnflash {} — bundle {} from {}, built with {}, carrying {}",
+        "lnflash {} — bundle {}{} from {}, built with {}, carrying {}",
         env!("CARGO_PKG_VERSION"),
         manifest.bundle.version,
+        // A rig A/B arm (#438) has to say which arm it is in the same line
+        // that names the build, or two bundles of one commit read the same.
+        if manifest.bundle.features.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " with firmware features {}",
+                manifest.bundle.features.join(",")
+            )
+        },
         manifest
             .bundle
             .built
