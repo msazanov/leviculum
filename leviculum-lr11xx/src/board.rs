@@ -1,9 +1,16 @@
 //! Per-board transceiver facts; see the README's "Board description".
 
-/// `SetDioAsRfSwitch` bits (`src/lr11xx_system_types.h:244-246`): RFSW0..2 on DIO5..7.
+/// `SetDioAsRfSwitch` bits (`src/lr11xx_system_types.h:244-246`,
+/// `lr11xx_system_rfswitch_cfg_pin_e`): RFSW0..2 on DIO5..7, RFSW3 on
+/// DIO8, RFSW4 on DIO10 (UM.LR1110.W.APP, SetDioAsRfSwitch). The SenseCAP
+/// T1000-E routes its RF switch through DIO8 (Meshtastic
+/// `variants/nrf52840/tracker-t1000-e/rfswitch.h`), so a board on this
+/// driver can need all five.
 pub const RFSW0: u8 = 1 << 0;
 pub const RFSW1: u8 = 1 << 1;
 pub const RFSW2: u8 = 1 << 2;
+pub const RFSW3: u8 = 1 << 3;
+pub const RFSW4: u8 = 1 << 4;
 
 /// `GetVersion` type (`src/lr11xx_system_types.h:314-316`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -580,6 +587,18 @@ mod tests {
     #[should_panic(expected = "empty PA table")]
     fn an_empty_pa_table_is_refused() {
         let _ = PaTable::new(&[], 0);
+    }
+
+    #[test]
+    fn rf_switch_bits_are_the_reference_enums() {
+        // `lr11xx_system_rfswitch_cfg_pin_e`: five lines, one bit each.
+        assert_eq!(RFSW0, 1 << 0);
+        assert_eq!(RFSW1, 1 << 1);
+        assert_eq!(RFSW2, 1 << 2);
+        assert_eq!(RFSW3, 1 << 3);
+        assert_eq!(RFSW4, 1 << 4);
+        // The T1000-E RX pattern (DIO5 + DIO8 high) is expressible.
+        assert_eq!(RFSW0 | RFSW3, 0b0_1001);
     }
 
     #[test]
