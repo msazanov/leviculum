@@ -57,10 +57,10 @@ spawn-coder:
 # policy forbids. Cross-compiles the firmware, so the first run takes
 # minutes; SKIP_FIRMWARE=1 reuses an existing ELF while iterating on the
 # bundle itself. Output under target/lnflash/.
-# `nrf_features=a,b` builds every board image with those leviculum-nrf
-# features on top of its bsp-* set, for a rig A/B arm (#438:
-# `just lnflash-bundle nrf_features=subslot-offset`); the bundle is then
-# named lnflash-<stamp>+a+b and its manifest lists the features. Empty, the
+# `just lnflash-bundle a,b` (positional, as every just knob is) builds each
+# board image with those leviculum-nrf features on top of its bsp-* set, for
+# a rig A/B arm (#438: `just lnflash-bundle subslot-offset`); the bundle is
+# then named lnflash-<stamp>+a+b and its manifest lists the features. Empty, the
 # bundle is byte for byte the default one.
 [doc('Build the lnflash tarball a stranger can unpack and run')]
 lnflash-bundle nrf_features="":
@@ -85,7 +85,7 @@ lint-nrf:
     # `qspi-selftest`, for why), so the line above no longer builds it.
     cd leviculum-nrf && cargo clippy --features bsp-solarnode,qspi-selftest --bin qspi-selftest -- -D warnings
     # The #438 sub-slot offset is an A/B arm a bundle can carry
-    # (`just lnflash-bundle nrf_features=subslot-offset`), so it has to build
+    # (`just lnflash-bundle subslot-offset`), so it has to build
     # on every BSP, not only on the one somebody last flashed it to.
     cd leviculum-nrf && cargo clippy --features bsp-rak4631,rak-baseboard,subslot-offset -- -D warnings
     cd leviculum-nrf && cargo clippy --features bsp-t114,subslot-offset -- -D warnings

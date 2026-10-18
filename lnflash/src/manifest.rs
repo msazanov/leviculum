@@ -1345,7 +1345,7 @@ convert = "hex-to-uf2"
 
     #[test]
     fn a_bundle_built_with_extra_firmware_features_lists_them() {
-        // `just lnflash-bundle nrf_features=subslot-offset` (#438) writes the
+        // `just lnflash-bundle subslot-offset` (#438) writes the
         // list under [bundle], so the arm a board was flashed with is
         // readable off the bundle rather than off its directory name alone.
         let f = Fixture::new();

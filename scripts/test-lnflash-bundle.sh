@@ -16,7 +16,7 @@
 # names a compiler and writes a copying bin2uf2, llvm-objcopy copies, and the
 # lnflash it "builds" accepts --check-bundle. ~1 s, no network, no build.
 #
-# #438 added the NRF_FEATURES knob (`just lnflash-bundle nrf_features=...`) for
+# #438 added the NRF_FEATURES knob (`just lnflash-bundle <features>`) for
 # a rig A/B arm. Without it a bundle must stay what it was, so every default
 # case also asserts the manifest carries no `features` key and every firmware
 # build got its board's bsp-* set and nothing more; the features case asserts
