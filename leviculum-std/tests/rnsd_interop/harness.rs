@@ -3306,8 +3306,12 @@ pub fn run_python_rnstatus_remote(
     let hash_hex = hex_lower_bytes(server_transport_hash);
 
     // Wall-clock guard above the query timeout so a hung request can't wedge
-    // the test. RNS's own request timeout fires the failure callback well
-    // inside this window on the reject path.
+    // the test. On the reject path this guard is what ends the process: a
+    // refused request gets no reply and no proof, and rnstatus's failure
+    // callback is unreachable for packet-sized requests (`request_timed_out`
+    // fires only from status DELIVERED, which a proof-less request never
+    // reaches — RNS `Link.py`, measured against rnsd and lnsd, Codeberg #836),
+    // so the stock client waits forever and exits 124 via the guard.
     let guard_secs = timeout_secs + 15;
 
     let mut cmd = Command::new("timeout");

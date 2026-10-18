@@ -99,10 +99,22 @@ With **-R** it queries a remote transport instance over a link, the way `rnstatu
 :   Transport identity hash of a remote instance to query instead of the local one.
 
 **-i** *file*
-:   Identity used for remote management.
+:   Identity used for remote management. The server checks the identity
+    against its `remote_management_allowed` list, and a request from an
+    identity not on the list is dropped without any reply — no error, no
+    delivery proof, nothing on the wire. The reference behaves the same way
+    (`Link.handle_request` logs the refusal locally and sends nothing), so a
+    refusal is indistinguishable from silence for the client, against any
+    node: `lnsd`, a Python `rnsd`, and an LNode board all refuse this way.
+    `lnstatus` gives up after **-w** and exits 20. The stock Python
+    `rnstatus` has no clock of its own on the request — its **-w** bounds
+    only the path lookup — so a refusal hangs it indefinitely against every
+    server.
 
 **-w** *seconds*
-:   Timeout before giving up on remote queries.
+:   Timeout before giving up on remote queries. A server that refused the
+    management identity never answers (see **-i**), so the refusal surfaces
+    as this timeout.
 
 **-d**, **--discovered**
 :   List interfaces discovered on the network.
@@ -122,7 +134,9 @@ With **-R** it queries a remote transport instance over a link, the way `rnstatu
 :   The status query failed.
 
 **20**
-:   Remote management (**-R**) was requested but the management identity is missing or unusable.
+:   Remote management (**-R**) was requested but the management identity is
+    missing or unusable, or the remote query failed — including the timeout a
+    refused identity surfaces as (see **-i**).
 
 ## EXAMPLES
 

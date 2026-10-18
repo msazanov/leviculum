@@ -218,9 +218,13 @@ async fn test_python_rnstatus_R_against_our_lnsd() {
 }
 
 /// Allow-list enforcement: Python `rnstatus -R` with an identity NOT on the
-/// server's allow-list is refused. Our core drops the `/status` request, so
-/// rnstatus never receives a bundle and exits non-zero (its request-failed /
-/// no-status path) rather than printing a populated status.
+/// server's allow-list is refused. Our core drops the `/status` request
+/// without a reply or a proof — exactly what the reference does
+/// (`Link.handle_request` logs and sends nothing) — so rnstatus never
+/// receives a bundle. The stock client then hangs (its failure callback is
+/// unreachable for packet-sized requests; measured identically against rnsd
+/// and lnsd, Codeberg #836) and the harness's wall-clock guard kills it,
+/// which is the non-zero exit this test asserts.
 #[tokio::test]
 #[allow(non_snake_case)] // name fixed by Codeberg #86 harness spec (rnstatus -R)
 async fn test_python_rnstatus_R_rejected_when_not_allowed() {
@@ -266,8 +270,8 @@ async fn test_python_rnstatus_R_rejected_when_not_allowed() {
     .await;
 
     // Path + link succeed (those are not gated), but the `/status` request from
-    // a disallowed identity is dropped, so rnstatus exits non-zero and prints
-    // no JSON status bundle.
+    // a disallowed identity is dropped, so rnstatus hangs until the harness
+    // guard kills it (exit code None) and prints no JSON status bundle.
     assert_ne!(
         result.code(),
         Some(0),
