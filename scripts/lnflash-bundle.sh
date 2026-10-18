@@ -12,12 +12,20 @@
 # hidden dependency our clone-and-deploy policy forbids.
 #
 # Output: target/lnflash/lnflash-<stamp>.tar.gz, where <stamp> is the Debian
-# version the leviculum .deb of the same build carries (see STAMP below).
+# version the leviculum .deb of the same build carries (see STAMP below), and
+# lnflash-<stamp>+<feature>... when NRF_FEATURES is set.
 #
 #   OUT_DIR    where to write (default target/lnflash)
 #   SKIP_FIRMWARE=1  reuse an already-built firmware ELF instead of building
 #                    it. For iterating on the bundle itself; a release build
 #                    must not use it.
+#   NRF_FEATURES     comma-separated leviculum-nrf cargo features every board
+#                    image is built with on top of its own bsp-* set, for a
+#                    rig A/B arm such as `subslot-offset` (#438). Empty by
+#                    default, and empty changes nothing. Set, it suffixes the
+#                    bundle, its tarball and every UF2 with `+<feature>` and
+#                    the manifest records the list, so a flashed bundle says
+#                    which arm it is.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -135,8 +143,31 @@ if [ "$RUSTC_VERSION" != "$NRF_RUSTC_VERSION" ]; then
     echo "both here before shipping a bundle built by two" >&2
     exit 1
 fi
-STAGE="$OUT_DIR/lnflash-$STAMP"
-TARBALL="$OUT_DIR/lnflash-$STAMP.tar.gz"
+
+# The extra firmware features. Checked for shape rather than trusted: the list
+# goes into file names and into a TOML string, and a bsp-* feature here would
+# give a board a second pinout on top of its own.
+NRF_FEATURES="${NRF_FEATURES:-}"
+case "$NRF_FEATURES" in
+*[!a-z0-9,-]* | ,* | *, | *,,*)
+    echo "NRF_FEATURES='$NRF_FEATURES' is not a comma-separated list of cargo features" >&2
+    exit 1
+    ;;
+esac
+case ",$NRF_FEATURES," in
+*,bsp-*)
+    echo "NRF_FEATURES='$NRF_FEATURES' names a bsp-* feature; every board brings its own" >&2
+    exit 1
+    ;;
+esac
+# `+a+b` for features a,b; nothing at all without them, so the default bundle
+# keeps the name the nightly collector and publish-nightly.sh look for.
+FEATURE_SUFFIX=""
+[ -z "$NRF_FEATURES" ] || FEATURE_SUFFIX="+${NRF_FEATURES//,/+}"
+BUNDLE_NAME="$STAMP$FEATURE_SUFFIX"
+
+STAGE="$OUT_DIR/lnflash-$BUNDLE_NAME"
+TARBALL="$OUT_DIR/lnflash-$BUNDLE_NAME.tar.gz"
 
 say() { printf '[lnflash-bundle] %s\n' "$*"; }
 
@@ -175,6 +206,7 @@ fi
 
 for record in "${BOARDS[@]}"; do
     IFS='|' read -r name bin features _stem <<<"$record"
+    [ -z "$NRF_FEATURES" ] || features="$features,$NRF_FEATURES"
 
     if [ "${SKIP_FIRMWARE:-0}" != 1 ]; then
         say "building the $name firmware ($features)"
@@ -217,6 +249,14 @@ Built from commit $STAMP_SHA7 (committed $BUILT). The leviculum .deb of the
 same nightly carries the same version, \`lnflash\` names it in its first line,
 and \`firmware/manifest.toml\` records it as the bundle version.
 EOF
+if [ -n "$NRF_FEATURES" ]; then
+    cat >>"$STAGE/README.md" <<EOF
+
+This is not the default firmware: every image was built with the extra
+leviculum-nrf features \`$NRF_FEATURES\`, which the manifest records and
+\`lnflash\` names in its first line.
+EOF
+fi
 install -m 0644 "$ROOT/LICENSE" "$STAGE/LICENSE"
 # Codeberg #288. The statically linked Rust in this bundle — the lnflash binary
 # and every firmware UF2 — carries MIT- and BSD-licensed crates whose licences
@@ -232,7 +272,7 @@ for record in "${BOARDS[@]}"; do
     IFS='|' read -r name _bin _features stem <<<"$record"
     mkdir -p "$STAGE/firmware/$name"
     install -m 0644 "$OUT_DIR/$name.uf2.tmp" \
-        "$STAGE/firmware/$name/leviculum-$name-$STAMP.uf2"
+        "$STAGE/firmware/$name/leviculum-$name-$BUNDLE_NAME.uf2"
     rm -f "$OUT_DIR/$name.bin.tmp" "$OUT_DIR/$name.uf2.tmp"
     [ -n "$stem" ] || continue
     # The SoftDevice travels as a file with its licence beside it — never
@@ -265,10 +305,19 @@ built   = "$BUILT"
 # The compiler that produced every image below and the flasher beside them.
 rustc   = "$RUSTC_VERSION"
 EOF
+# Only when set: a default bundle's manifest stays byte for byte what it was.
+if [ -n "$NRF_FEATURES" ]; then
+    IFS=, read -ra extra <<<"$NRF_FEATURES"
+    cat >> "$STAGE/firmware/manifest.toml" <<EOF
+# Extra leviculum-nrf features every image below was built with, on top of
+# its board's own bsp-* set. lnflash names them when it flashes.
+features = [$(printf '"%s", ' "${extra[@]}" | sed 's/, $//')]
+EOF
+fi
 
 for record in "${BOARDS[@]}"; do
     IFS='|' read -r name _bin _features stem <<<"$record"
-    image="$name/leviculum-$name-$STAMP.uf2"
+    image="$name/leviculum-$name-$BUNDLE_NAME.uf2"
     cat >> "$STAGE/firmware/manifest.toml" <<EOF
 
 [board.$name.app]
@@ -296,7 +345,7 @@ done
 say "checking the bundle"
 "$STAGE/lnflash" --bundle "$STAGE" --check-bundle
 
-tar -czf "$TARBALL" -C "$OUT_DIR" "lnflash-$STAMP"
+tar -czf "$TARBALL" -C "$OUT_DIR" "lnflash-$BUNDLE_NAME"
 
 # The licence files are asserted against the TARBALL rather than the stage
 # directory, because the tarball is what ships and a `tar` that quietly leaves
@@ -306,17 +355,17 @@ tar -czf "$TARBALL" -C "$OUT_DIR" "lnflash-$STAMP"
 # lawful (Codeberg #288).
 listing="$(tar -tzf "$TARBALL")"
 wanted=(
-    "lnflash-$STAMP/LICENSE"
-    "lnflash-$STAMP/THIRD-PARTY-NOTICES"
+    "lnflash-$BUNDLE_NAME/LICENSE"
+    "lnflash-$BUNDLE_NAME/THIRD-PARTY-NOTICES"
 )
 # Every board's image, and every vendored blob's licence beside it. Derived
 # from the board list rather than written out, so a board added above cannot
 # ship with its image silently missing from the archive.
 for record in "${BOARDS[@]}"; do
     IFS='|' read -r name _bin _features stem <<<"$record"
-    wanted+=("lnflash-$STAMP/firmware/$name/leviculum-$name-$STAMP.uf2")
+    wanted+=("lnflash-$BUNDLE_NAME/firmware/$name/leviculum-$name-$BUNDLE_NAME.uf2")
     [ -n "$stem" ] || continue
-    wanted+=("lnflash-$STAMP/firmware/$name/${stem}_license-agreement.txt")
+    wanted+=("lnflash-$BUNDLE_NAME/firmware/$name/${stem}_license-agreement.txt")
 done
 for want in "${wanted[@]}"; do
     printf '%s\n' "$listing" | grep -qxF "$want" \

@@ -57,7 +57,7 @@ every one of them pure and host-testable: `screen`, `sd-policy`,
 `qspi-boot`, `usb-policy`, `time-floor` (`members`, `leviculum-nrf/Cargo.toml:14`). Before
 `heap-budget` and `node-name` joined them they carried **806 host assertions across 61 test targets** —
 measured 2026-09-25 by the host-triple lines of `lint-nrf`
-(`Justfile:75`). `mute-lease` is the
+(`Justfile:80`). `mute-lease` is the
 newest and the rule's own case twice over: the deadline on a host's
 transmit mute (Codeberg #410) is a decision that would have been
 unassertable inside `src/lora.rs`, and the `LORA_MUTE_EXPIRED` line that

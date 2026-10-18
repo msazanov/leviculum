@@ -16,6 +16,12 @@
 # names a compiler and writes a copying bin2uf2, llvm-objcopy copies, and the
 # lnflash it "builds" accepts --check-bundle. ~1 s, no network, no build.
 #
+# #438 added the NRF_FEATURES knob (`just lnflash-bundle nrf_features=...`) for
+# a rig A/B arm. Without it a bundle must stay what it was, so every default
+# case also asserts the manifest carries no `features` key and every firmware
+# build got its board's bsp-* set and nothing more; the features case asserts
+# the `+<feature>` suffix, the manifest list and the extra build features.
+#
 # LNFLASH_BUNDLE_SH overrides the script under test, which is how the
 # pre-fix version is checked to be red:
 #   LNFLASH_BUNDLE_SH=<old copy> bash scripts/test-lnflash-bundle.sh
@@ -32,6 +38,7 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
 failures=0
+badn=0
 fail() { echo "  FAIL: $*"; failures=$((failures + 1)); }
 
 # The board records of the script under test, so a board added there is a
@@ -49,6 +56,7 @@ cat >"$STUBS/cargo" <<'EOF'
 case "$1" in
 metadata) printf '{"target_directory":"%s"}\n' "$FIXTURE_TARGET" ;;
 build)
+    echo "$*" >>"$FIXTURE_TARGET/cargo-builds.log"
     if [ "${3:-}" = lnflash ]; then
         out="$FIXTURE_TARGET/x86_64-unknown-linux-musl/release/lnflash"
         mkdir -p "$(dirname "$out")"
@@ -113,39 +121,46 @@ setup() { # <case>
     SHA7="$(git -C "$TREE" rev-parse HEAD | cut -c1-7)"
 }
 
-run_bundle() {
+# The firmware builds run, against a cargo stub that only logs them, so the
+# features each board is built with are observable.
+run_bundle() { # [NRF_FEATURES]
     (cd "$TREE" && env -u CI_COMMIT_SHA -u CARGO_TARGET_DIR \
-        PATH="$STUBS:$PATH" FIXTURE_TARGET="$FIXTURE_TARGET" SKIP_FIRMWARE=1 \
+        PATH="$STUBS:$PATH" FIXTURE_TARGET="$FIXTURE_TARGET" \
+        NRF_FEATURES="${1:-}" \
         bash scripts/lnflash-bundle.sh) >"$TREE/../out" 2>&1
     echo $? >"$TREE/../rc"
 }
 rc() { cat "$TREE/../rc"; }
 dumpout() { echo "  --- script output ---"; sed 's/^/    /' "$TREE/../out"; }
 
-# The three places, for a bundle that must be called <stamp>.
-assert_stamped() { # <stamp>
-    local stamp="$1" tarball listing unpack name image
-    tarball="$TREE/target/lnflash/lnflash-$stamp.tar.gz"
+# The three places, for a bundle that must be called <stamp>[<suffix>]: the
+# suffix names the tarball, its directory and the UF2s, the manifest version
+# and the README keep the bare stamp.
+assert_stamped() { # <stamp> [<suffix>]
+    local stamp="$1" suffix="${2:-}" tarball listing unpack name image
+    local bundle="$stamp$suffix"
+    tarball="$TREE/target/lnflash/lnflash-$bundle.tar.gz"
     [ "$(rc)" = 0 ] || { fail "the bundle script exited $(rc)"; return; }
     # 1. The tarball, and the one directory inside it that `cd lnflash-*`
     #    (publish-nightly.sh, README, flashing.md) enters.
     [ -f "$tarball" ] || {
-        fail "no tarball named lnflash-$stamp.tar.gz; target/lnflash holds: $(find "$TREE/target/lnflash" -mindepth 1 -maxdepth 1 -printf '%f ')"
+        fail "no tarball named lnflash-$bundle.tar.gz; target/lnflash holds: $(find "$TREE/target/lnflash" -mindepth 1 -maxdepth 1 -printf '%f ')"
         return
     }
     listing="$(tar -tzf "$tarball")"
-    [ "$(printf '%s\n' "$listing" | cut -d/ -f1 | sort -u)" = "lnflash-$stamp" ] ||
-        fail "the tarball's top directory is not lnflash-$stamp: $(printf '%s\n' "$listing" | cut -d/ -f1 | sort -u | tr '\n' ' ')"
+    [ "$(printf '%s\n' "$listing" | cut -d/ -f1 | sort -u)" = "lnflash-$bundle" ] ||
+        fail "the tarball's top directory is not lnflash-$bundle: $(printf '%s\n' "$listing" | cut -d/ -f1 | sort -u | tr '\n' ' ')"
     unpack="$TREE/../unpack"
     rm -rf "$unpack" && mkdir -p "$unpack" && tar -xzf "$tarball" -C "$unpack"
-    local dir="$unpack/lnflash-$stamp"
+    local dir="$unpack/lnflash-$bundle"
+    MANIFEST="$dir/firmware/manifest.toml"
     # 2. Every UF2 is named after the stamp, the manifest's version is the
     #    stamp, and every image the manifest names is in the archive.
     grep -qxF "version = \"$stamp\"" "$dir/firmware/manifest.toml" 2>/dev/null ||
         fail "manifest [bundle] version is not \"$stamp\": $(grep '^version' "$dir/firmware/manifest.toml" 2>/dev/null)"
     for record in "${RECORDS[@]}"; do
         IFS='|' read -r name _ <<<"$record"
-        image="$name/leviculum-$name-$stamp.uf2"
+        image="$name/leviculum-$name-$bundle.uf2"
         [ -f "$dir/firmware/$image" ] || fail "no image firmware/$image"
         grep -qF "file    = \"$image\"" "$dir/firmware/manifest.toml" 2>/dev/null ||
             fail "the manifest does not point at $image"
@@ -153,6 +168,24 @@ assert_stamped() { # <stamp>
     # 3. The README a person opens names the build.
     grep -qxF "    $stamp" "$dir/README.md" 2>/dev/null ||
         fail "README.md does not state the stamp $stamp"
+}
+
+# A default bundle: no `features` key, and each board built with exactly its
+# own feature set.
+assert_default_features() {
+    ! grep -q '^features' "$MANIFEST" 2>/dev/null ||
+        fail "a default manifest carries a features key: $(grep '^features' "$MANIFEST")"
+    assert_build_features ""
+}
+
+assert_build_features() { # <extra, comma-prefixed or empty>
+    local record name bin features
+    for record in "${RECORDS[@]}"; do
+        IFS='|' read -r name bin features _ <<<"$record"
+        grep -qxF -- "build --release --bin $bin --features $features$1" \
+            "$FIXTURE_TARGET/cargo-builds.log" 2>/dev/null ||
+            fail "the $name firmware was not built with --features $features$1: $(cat "$FIXTURE_TARGET/cargo-builds.log" 2>/dev/null)"
+    done
 }
 
 # --- Case: the stamp deb-stamp.sh wrote for this commit is used verbatim ----
@@ -166,6 +199,7 @@ STAMP="0.10.0~dev~nightly.19991231.$SHA7"
 echo "$STAMP" >"$TREE/.deb-version-leviculum-cli"
 run_bundle
 assert_stamped "$STAMP"
+assert_default_features
 [ "$failures" -eq "$before" ] || dumpout
 
 # --- Case: no stamp file (a developer's `just lnflash-bundle`) --------------
@@ -179,6 +213,7 @@ stamp="0.10.0~dev~nightly.$day_before.$SHA7"
 [ -f "$TREE/target/lnflash/lnflash-$stamp.tar.gz" ] ||
     stamp="0.10.0~dev~nightly.$day_after.$SHA7"
 assert_stamped "$stamp"
+assert_default_features
 [ "$failures" -eq "$before" ] || dumpout
 
 # --- Case: a stamp file left by another commit is not believed -------------
@@ -193,9 +228,37 @@ stamp="0.10.0~dev~nightly.$day_before.$SHA7"
 [ -f "$TREE/target/lnflash/lnflash-$stamp.tar.gz" ] ||
     stamp="0.10.0~dev~nightly.$day_after.$SHA7"
 assert_stamped "$stamp"
+assert_default_features
 grep -q "ignoring .deb-version-leviculum-cli" "$TREE/../out" ||
     fail "a stale stamp file was dropped without saying so"
 [ "$failures" -eq "$before" ] || dumpout
+
+# --- Case: an A/B arm's bundle names its features (#438) -------------------
+echo "[case] nrf-features"
+before=$failures
+setup nrf-features
+STAMP="0.10.0~dev~nightly.19991231.$SHA7"
+echo "$STAMP" >"$TREE/.deb-version-leviculum-cli"
+run_bundle subslot-offset
+assert_stamped "$STAMP" "+subslot-offset"
+grep -qxF 'features = ["subslot-offset"]' "$MANIFEST" 2>/dev/null ||
+    fail "the manifest does not list the features: $(grep '^features' "$MANIFEST" 2>/dev/null)"
+assert_build_features ",subslot-offset"
+grep -qF 'subslot-offset' "$(dirname "$MANIFEST")/../README.md" ||
+    fail "README.md does not name the extra features"
+[ "$failures" -eq "$before" ] || dumpout
+
+# --- Case: a feature list that is not one is refused ------------------------
+for bad in "bsp-t114" "a,,b" "x;rm" ",subslot-offset"; do
+    echo "[case] refuses NRF_FEATURES='$bad'"
+    before=$failures
+    setup "bad-$((++badn))"
+    run_bundle "$bad"
+    [ "$(rc)" != 0 ] || fail "NRF_FEATURES='$bad' was accepted"
+    [ -z "$(find "$TREE/target/lnflash" -name '*.tar.gz' 2>/dev/null)" ] ||
+        fail "NRF_FEATURES='$bad' still wrote a tarball"
+    [ "$failures" -eq "$before" ] || dumpout
+done
 
 echo
 if [ "$failures" -eq 0 ]; then
