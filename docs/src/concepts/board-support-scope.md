@@ -194,9 +194,13 @@ the two bounds computed from them are forwarded to
 three the same way slots in behind the existing traits. A part that does
 not forces the traits themselves open, and choosing between widening them
 and carrying a second implementation is a design decision, not a port.
-**That decision is not taken here, and nothing in this tree has measured
-an LR11xx part against these traits.** Until one has, the honest estimate
-is the driver in full and the two crates untouched.
+**For the LR11xx that decision did not arise: `leviculum-lr11xx` is the
+measurement.** It implements `RxPort` and `RxWindowProbe` unchanged
+(`leviculum-lr11xx/README.md:43-45`), and on a ThinkNode M9 its receive
+interrupt word read back `0x38`, preamble, header and `RxDone` latched
+and readable without a clear (`leviculum-lr11xx/README.md:259-265`,
+section 10, "Verification status"). The port was the driver in full and
+the two crates untouched.
 
 ## The limit that bites
 
