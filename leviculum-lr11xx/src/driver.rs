@@ -76,12 +76,15 @@ pub struct Version {
 }
 
 /// What `configure_lora` programmed for the transmit power, in the shape
-/// the firmware's `[SX_TX_POWER]` fact carries.
+/// the firmware's `[SX_TX_POWER]` fact carries. The field names are
+/// `leviculum_core::sx126x::TxPowerProgram`'s, minus `ocp`: the LR11xx
+/// has no over-current register to read a byte back from, and a zero
+/// there would be an invented fact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TxPowerProgram {
     pub requested_dbm: i8,
     pub programmed_dbm: i8,
-    pub pa_cfg: [u8; 4],
+    pub pa_config: [u8; 4],
     pub ramp: u8,
     pub clamped: bool,
 }
@@ -531,8 +534,8 @@ where
         // bytes for the requested output (Codeberg #349's contract: the
         // request reaches the chip, clamped to what the part can do).
         let choice = self.board.pa_for_dbm(power_dbm);
-        let pa_cfg = choice.row.pa_cfg();
-        self.write_command(op::SET_PA_CFG, &pa_cfg).await?;
+        let pa_config = choice.row.pa_cfg();
+        self.write_command(op::SET_PA_CFG, &pa_config).await?;
         self.write_command(
             op::SET_TX_PARAMS,
             &cmd::set_tx_params(choice.row.power, cmd::RAMP_48_US),
@@ -556,7 +559,7 @@ where
         Ok(TxPowerProgram {
             requested_dbm: power_dbm,
             programmed_dbm: choice.row.power,
-            pa_cfg,
+            pa_config,
             ramp: cmd::RAMP_48_US,
             clamped: choice.clamped,
         })

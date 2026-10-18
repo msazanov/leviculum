@@ -478,7 +478,7 @@ fn configure_programs_frequency_pa_modulation_and_packet_params() {
     assert_eq!(w[7][2..], [0x01]);
     assert_eq!(p.programmed_dbm, 22);
     assert!(!p.clamped);
-    assert_eq!(p.pa_cfg, [0x01, 0x01, 0x04, 0x07]);
+    assert_eq!(p.pa_config, [0x01, 0x01, 0x04, 0x07]);
 }
 
 #[test]
