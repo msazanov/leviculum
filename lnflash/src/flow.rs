@@ -522,6 +522,10 @@ pub struct Options {
     pub boards: Vec<String>,
     /// Inspect and report; change nothing, and do not even reboot a board
     /// into its bootloader, which is itself a change to somebody's device.
+    /// A dry run writes nothing, so it refuses nothing: an identity a real
+    /// run would refuse, or a question it would ask, is said as such and the
+    /// board is a skip, so a dry run that completes exits
+    /// [`EXIT_CONFIRMED`] (838).
     pub dry_run: bool,
     /// How long to wait for a bootloader or an application to appear.
     pub appear_within: Duration,
@@ -708,6 +712,19 @@ pub fn run(
     ui: &mut dyn Ui,
     opts: &Options,
 ) -> Result<Bus, Error> {
+    run_with(catalogue, manifest, sysfs, ui, opts, &Mounted)
+}
+
+/// [`run`] with the dry run's drive reads handed in, so a test reaches both
+/// sides of the root line whatever uid runs it (838).
+fn run_with(
+    catalogue: &Catalogue,
+    manifest: &Manifest,
+    sysfs: &Sysfs,
+    ui: &mut dyn Ui,
+    opts: &Options,
+    drives: &dyn BootDrives,
+) -> Result<Bus, Error> {
     // `--board` is the only handle a user has for saying which board a run is
     // for, so a name this tool does not flash is answered before the bus is
     // read at all — and the boards offered instead are the flashable ones.
@@ -762,7 +779,7 @@ pub fn run(
     ui.say("");
 
     Ok(each_candidate(&candidates, ui, |ui, candidate| {
-        resolve(catalogue, manifest, sysfs, ui, opts, candidate)
+        resolve(catalogue, manifest, sysfs, ui, opts, drives, candidate)
     }))
 }
 
@@ -2416,64 +2433,20 @@ fn report_telemetry(
     }
 }
 
-fn resolve(
-    catalogue: &Catalogue,
-    manifest: &Manifest,
-    sysfs: &Sysfs,
+/// What the bootloader says the board is and what a write would do to it,
+/// said to the user. The real run and the dry run both come through here, so
+/// the plan a dry run shows is the plan a real run follows. `Ok(None)` is a
+/// board skipped because `--board` does not name it.
+fn inspect<'m>(
+    catalogue: &'m Catalogue,
+    manifest: &'m Manifest,
     ui: &mut dyn Ui,
-    opts: &Options,
-    candidate: &Candidate,
-) -> Result<Option<Outcome>, Error> {
-    let port = candidate.device.name.clone();
-
-    // Before anything is touched, dry run or not: a board this tool does not
-    // flash by manifest is left alone, and the reason is said out loud. It is
-    // on the bus because its catalogue entry makes the control commands work
-    // (Codeberg #233), and a flashing session that quietly skipped it would
-    // look exactly like one that failed to see it — which is the bug that
-    // entry was added to fix.
-    if let Err(err) = catalogue
-        .board(&candidate.hint)
-        .and_then(|board| board.require_flashing(&candidate.hint))
-    {
-        ui.say(&format!("{port}: {err}"));
-        ui.say(&format!(
-            "{port}: its control commands are unaffected — --announce, --set-time, --radio-* \
-             and --watch all reach it.\n"
-        ));
-        return Ok(None);
-    }
-
-    if opts.dry_run && !candidate.in_bootloader {
-        ui.say(&format!(
-            "{port}: would enter the bootloader and confirm what it is there. \
-             --dry-run stops here, because rebooting a board is already a change to it."
-        ));
-        return Ok(None);
-    }
-    if opts.dry_run && !crate::sys::is_root() {
-        // Reading INFO_UF2.TXT means mounting, and mounting means root. Say
-        // what is missing rather than reporting the board as a problem.
-        ui.say(&format!(
-            "{port}: already in its bootloader. Reading INFO_UF2.TXT off it needs root, so \
-             run --dry-run under sudo to see the identity and SoftDevice check too."
-        ));
-        return Ok(None);
-    }
-
-    let bootloader = if candidate.in_bootloader {
-        candidate.device.clone()
-    } else {
-        enter_bootloader(catalogue, sysfs, ui, opts, candidate)?
-    };
-    let Some(block) = bootloader.block_device() else {
-        return Err(transport::Error::NoDrive { port }.into());
-    };
-
-    let drive = Drive::open(&block)?;
-    let info = drive.info()?;
-    let Some(confirmed) = confirm_named(catalogue, manifest, &info, &port, &opts.boards, ui)?
-    else {
+    boards: &[String],
+    port: &str,
+    info: &InfoUf2,
+    installed: impl FnOnce(&InfoUf2) -> Installed,
+) -> Result<Option<(Confirmed<'m>, Plan)>, Error> {
+    let Some(confirmed) = confirm_named(catalogue, manifest, info, port, boards, ui)? else {
         return Ok(None);
     };
     ui.say(&format!(
@@ -2483,7 +2456,7 @@ fn resolve(
         info.banner.as_deref().unwrap_or("unreported")
     ));
 
-    let installed = read_installed(&drive, &info);
+    let installed = installed(info);
     ui.say(&format!("{port}: SoftDevice {}", installed.describe()));
     if installed.disagree() {
         ui.say(&format!(
@@ -2560,10 +2533,204 @@ fn resolve(
         ui.say(line);
     }
 
-    if opts.dry_run {
-        ui.say(&format!("{port}: --dry-run, so nothing was written.\n"));
+    Ok(Some((
+        confirmed,
+        Plan {
+            req,
+            remedy_image,
+            app_image,
+        },
+    )))
+}
+
+/// What a write would do once the identity is settled: the SoftDevice the
+/// board needs, and the images that get it there.
+struct Plan {
+    req: Option<VersionReq>,
+    remedy_image: Option<Image>,
+    app_image: Image,
+}
+
+/// The one privileged thing a dry run does: mount the bootloader drive and
+/// read `INFO_UF2.TXT` and `CURRENT.UF2` off it. A seam, because whether the
+/// dry run goes on depends on the uid, and a test has to walk both sides of
+/// that line whatever uid runs it: the forge gate runs as root (838).
+trait BootDrives {
+    /// Whether a mount can be attempted at all.
+    fn can_mount(&self) -> bool;
+    /// What the bootloader on `block` publishes, and the SoftDevice it holds.
+    fn read(&self, block: &Path) -> Result<(InfoUf2, Installed), Error>;
+}
+
+/// The drives as they are: mounted, which needs root.
+struct Mounted;
+
+impl BootDrives for Mounted {
+    fn can_mount(&self) -> bool {
+        crate::sys::is_root()
+    }
+
+    fn read(&self, block: &Path) -> Result<(InfoUf2, Installed), Error> {
+        let drive = Drive::open(block)?;
+        let info = drive.info()?;
+        let installed = read_installed(&drive, &info);
+        Ok((info, installed))
+    }
+}
+
+/// `--dry-run` for one board: say what a real run would do, and do none of
+/// it. A dry run writes nothing, so it refuses nothing (838): a question the
+/// identity step would put is said as "would ask", an identity the real run
+/// would refuse as "would be refused", and the board is a skip either way.
+/// The real run keeps 832's rule, where a refusal fails the run.
+fn dry_walk(
+    catalogue: &Catalogue,
+    manifest: &Manifest,
+    ui: &mut dyn Ui,
+    opts: &Options,
+    drives: &dyn BootDrives,
+    candidate: &Candidate,
+) {
+    let port = &candidate.device.name;
+    if !candidate.in_bootloader {
+        ui.say(&format!(
+            "{port}: would enter the bootloader and confirm what it is there. \
+             --dry-run stops here, because rebooting a board is already a change to it."
+        ));
+        return;
+    }
+    if !drives.can_mount() {
+        // Reading INFO_UF2.TXT means mounting, and mounting means root. Say
+        // what is missing rather than reporting the board as a problem.
+        ui.say(&format!(
+            "{port}: already in its bootloader. Reading INFO_UF2.TXT off it needs root, so \
+             run --dry-run under sudo to see the identity and SoftDevice check too."
+        ));
+        return;
+    }
+
+    let mut dry = DryUi {
+        inner: &mut *ui,
+        asked: Vec::new(),
+    };
+    let walked = candidate
+        .device
+        .block_device()
+        .ok_or_else(|| Error::from(transport::Error::NoDrive { port: port.clone() }))
+        .and_then(|block| drives.read(&block))
+        .and_then(|(info, installed)| {
+            inspect(
+                catalogue,
+                manifest,
+                &mut dry,
+                &opts.boards,
+                port,
+                &info,
+                |_| installed,
+            )
+        });
+    let asked = dry.asked;
+    for question in &asked {
+        ui.say(&format!("{port}: would ask: {question}"));
+    }
+    match walked {
+        Ok(Some(_)) => ui.say(&format!("{port}: --dry-run, so nothing was written.\n")),
+        Ok(None) => {}
+        Err(err) => ui.say(&format!("{port}: would be refused: {err}\n")),
+    }
+}
+
+/// The ui a dry run's identity step talks to. Nothing is asked of the person:
+/// every question is kept so the dry run can say it would be asked, and is
+/// left unanswered, which is the answer an unattended real run gets.
+struct DryUi<'a> {
+    inner: &'a mut dyn Ui,
+    asked: Vec<String>,
+}
+
+impl Ui for DryUi<'_> {
+    fn say(&mut self, line: &str) {
+        self.inner.say(line);
+    }
+
+    fn confirm(&mut self, question: &str) -> io::Result<bool> {
+        self.asked.push(question.trim().to_string());
+        Ok(false)
+    }
+
+    fn ask(&mut self, prompt: &str) -> io::Result<Option<String>> {
+        self.asked.push(prompt.trim().to_string());
+        Ok(None)
+    }
+
+    fn wait_for_human(&mut self, instruction: &str) -> io::Result<()> {
+        self.asked.push(instruction.trim().to_string());
+        Err(io::Error::other("--dry-run waits for nobody"))
+    }
+}
+
+fn resolve(
+    catalogue: &Catalogue,
+    manifest: &Manifest,
+    sysfs: &Sysfs,
+    ui: &mut dyn Ui,
+    opts: &Options,
+    drives: &dyn BootDrives,
+    candidate: &Candidate,
+) -> Result<Option<Outcome>, Error> {
+    let port = candidate.device.name.clone();
+
+    // Before anything is touched, dry run or not: a board this tool does not
+    // flash by manifest is left alone, and the reason is said out loud. It is
+    // on the bus because its catalogue entry makes the control commands work
+    // (Codeberg #233), and a flashing session that quietly skipped it would
+    // look exactly like one that failed to see it — which is the bug that
+    // entry was added to fix.
+    if let Err(err) = catalogue
+        .board(&candidate.hint)
+        .and_then(|board| board.require_flashing(&candidate.hint))
+    {
+        ui.say(&format!("{port}: {err}"));
+        ui.say(&format!(
+            "{port}: its control commands are unaffected — --announce, --set-time, --radio-* \
+             and --watch all reach it.\n"
+        ));
         return Ok(None);
     }
+
+    if opts.dry_run {
+        dry_walk(catalogue, manifest, ui, opts, drives, candidate);
+        return Ok(None);
+    }
+
+    let bootloader = if candidate.in_bootloader {
+        candidate.device.clone()
+    } else {
+        enter_bootloader(catalogue, sysfs, ui, opts, candidate)?
+    };
+    let Some(block) = bootloader.block_device() else {
+        return Err(transport::Error::NoDrive { port }.into());
+    };
+
+    let drive = Drive::open(&block)?;
+    let info = drive.info()?;
+    let Some((confirmed, plan)) = inspect(
+        catalogue,
+        manifest,
+        ui,
+        &opts.boards,
+        &port,
+        &info,
+        |info| read_installed(&drive, info),
+    )?
+    else {
+        return Ok(None);
+    };
+    let Plan {
+        req,
+        remedy_image,
+        app_image,
+    } = plan;
     if !ui.confirm(&format!(
         "\n{port}: overwrite the firmware on this {}?",
         confirmed.name()
@@ -4881,24 +5048,107 @@ convert = "hex-to-uf2"
         assert_eq!(telemetry::resolve(&mut ui, &opts.telemetry).unwrap(), None);
     }
 
-    #[test]
-    fn a_dry_run_will_not_even_reboot_a_board_into_its_bootloader() {
+    /// The dry run's drive reads with the uid decided by the test, not by
+    /// whoever runs it: the forge gate runs as root, the coder and the land
+    /// gate do not, and a verdict that depends on that is no verdict (838).
+    /// Mounting is never attempted, so a root run does not go near the
+    /// host's own `/dev/sdb`, which is the block device the fixture names.
+    struct FakeDrives {
+        root: bool,
+    }
+
+    impl BootDrives for FakeDrives {
+        fn can_mount(&self) -> bool {
+            self.root
+        }
+
+        fn read(&self, _block: &Path) -> Result<(InfoUf2, Installed), Error> {
+            Ok((
+                infouf2::parse(T114_INFO),
+                Installed {
+                    from_info: None,
+                    from_flash: None,
+                },
+            ))
+        }
+    }
+
+    /// A dry run over the fixture bus as `root` or not, with no `--board`.
+    fn dry_run_as(root: bool) -> (Bus, Fake) {
         let (_dir, catalogue, manifest) = bundle();
         let mut ui = crate::ui::testing::Fake::agreeing();
         let opts = Options {
             dry_run: true,
             ..Options::default()
         };
-        // Both candidates are reported; the application-mode one stops
-        // before the touch, and the bootloader one stops at Drive::open,
-        // which needs root. Neither writes.
-        let bus = run(&catalogue, &manifest, &sysfs(), &mut ui, &opts).unwrap();
+        let drives = FakeDrives { root };
+        let bus = run_with(&catalogue, &manifest, &sysfs(), &mut ui, &opts, &drives).unwrap();
+        (bus, ui)
+    }
+
+    #[test]
+    fn a_dry_run_will_not_even_reboot_a_board_into_its_bootloader() {
+        // Unprivileged: the application-mode boards stop before the touch,
+        // and the bootloader one (the T114 on 3-2.4) before the mount.
+        let (bus, ui) = dry_run_as(false);
         // A dry run's stop is a skip, never a refusal: it must not fail.
         assert!(bus.outcomes.is_empty() && bus.refused.is_empty(), "{bus:?}");
+        assert!(bus.skipped.contains(&"3-2.4".to_string()), "{bus:?}");
         assert_eq!(bus.exit_code(), EXIT_CONFIRMED);
         let said = ui.transcript();
         assert!(said.contains("would enter the bootloader"));
         assert!(said.contains("rebooting a board is already a change"));
+        assert!(said.contains("3-2.4: already in its bootloader"), "{said}");
+        assert!(ui.answers.len() == 8, "nothing should have been confirmed");
+    }
+
+    #[test]
+    fn a_privileged_dry_run_says_what_it_would_refuse_and_refuses_nothing() {
+        // As root the dry run reads the T114's INFO_UF2.TXT and reaches the
+        // identity step. HT-n5262 is shared and no --board names it, so a
+        // real run would ask, go unanswered under --yes, and refuse: 832's
+        // rule, which fails a real run. The dry run says so and skips (838).
+        let (bus, ui) = dry_run_as(true);
+        assert!(bus.outcomes.is_empty() && bus.refused.is_empty(), "{bus:?}");
+        assert!(bus.skipped.contains(&"3-2.4".to_string()), "{bus:?}");
+        assert_eq!(bus.exit_code(), EXIT_CONFIRMED);
+        let said = ui.transcript();
+        assert!(
+            said.contains("3-2.4: would ask: 3-2.4: Board-ID \"HT-n5262\""),
+            "{said}"
+        );
+        assert!(
+            said.contains("3-2.4: would be refused: the board on 3-2.4 says it is \"HT-n5262\""),
+            "{said}"
+        );
+        assert!(said.contains("pass --board t114"), "{said}");
+        assert!(!said.contains("already in its bootloader"), "{said}");
+        // Nothing was put to the person: the question was kept, not asked.
+        assert!(ui.answers.len() == 8, "nothing should have been confirmed");
+        assert!(ui.typed.is_empty());
+    }
+
+    #[test]
+    fn a_privileged_dry_run_naming_the_board_shows_the_plan_and_writes_nothing() {
+        let (_dir, catalogue, manifest) = bundle();
+        let mut ui = crate::ui::testing::Fake::agreeing();
+        let opts = Options {
+            dry_run: true,
+            boards: vec!["t114".into()],
+            ..Options::default()
+        };
+        let drives = FakeDrives { root: true };
+        let bus = run_with(&catalogue, &manifest, &sysfs(), &mut ui, &opts, &drives).unwrap();
+        assert!(bus.outcomes.is_empty() && bus.refused.is_empty(), "{bus:?}");
+        assert_eq!(bus.exit_code(), EXIT_CONFIRMED);
+        let said = ui.transcript();
+        assert!(said.contains("3-2.4: confirmed t114"), "{said}");
+        assert!(said.contains("3-2.4: this will"), "{said}");
+        assert!(
+            said.contains("3-2.4: --dry-run, so nothing was written."),
+            "{said}"
+        );
+        assert!(!said.contains("would ask"), "{said}");
         assert!(ui.answers.len() == 8, "nothing should have been confirmed");
     }
 

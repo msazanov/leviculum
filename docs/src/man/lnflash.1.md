@@ -28,7 +28,7 @@ The configure sessions (**--set-** *something*) talk to boards that are already 
 :   A board model that is present; repeatable. A board whose model is not named is skipped and nothing is written to it. A Board-ID several models share is written without a question only when its model is named, which is how an unattended run under **--yes** flashes boards one owns: **--board t114 --board rak4631 --yes**.
 
 **--dry-run**
-:   Report what is attached and what would happen; change nothing.
+:   Report what is attached and what would happen; change nothing. A board in application mode is not rebooted into its bootloader. A board already in its bootloader is identified only under root, because reading `INFO_UF2.TXT` means mounting it; a question the identity step would ask is reported as "would ask", and an identity a real run would refuse as "would be refused". A dry run refuses nothing itself.
 
 **--yes**
 :   Answer yes to every confirmation. Fails rather than waits when a board needs a physical double-tap.
@@ -90,6 +90,8 @@ On a flash run the three outcomes are kept apart, because they need different th
 
 2
 :   Every board took the write and none contradicted it, and at least one could not be read back. The firmware is on the board as far as anything here knows; which build it is running is unknown. Read it back again (**--watch**, or re-run the flash) rather than assuming the write failed.
+
+A **--dry-run** exits 0 once it has walked the bus: it writes nothing, so it refuses nothing, and a board a real run would refuse is a skip with that reason said.
 
 Every other session exits 0 when every addressed board did what was asked and 1 otherwise.
 

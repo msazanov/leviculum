@@ -54,6 +54,8 @@ struct Cli {
 
     /// Report what is attached and what would happen. Changes nothing — not
     /// even rebooting a board into its bootloader, which is already a change.
+    /// Refuses nothing either: a board a real run would refuse is reported
+    /// as such and skipped, so a dry run exits 0.
     #[arg(long)]
     dry_run: bool,
 
