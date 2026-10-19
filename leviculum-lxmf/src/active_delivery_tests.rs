@@ -114,3 +114,74 @@ fn the_too_large_list_holds_an_id_once_and_drops_the_oldest_past_its_cap() {
     assert_eq!(list[0], [2; 32], "the oldest id dropped out");
     assert_eq!(list[TOO_LARGE_CAP - 1], [0xFF; 32]);
 }
+
+fn solicited(entries: &[StoredMessage], excluded: &[TransientId]) -> Vec<[u8; 16]> {
+    let mut pick = PeerUpSolicit::new(excluded);
+    for meta in entries {
+        pick.consider(meta);
+    }
+    pick.destinations()
+}
+
+/// Every destination with pushable mail is asked about once, the one whose
+/// mail has waited longest first.
+#[test]
+fn a_peer_up_asks_each_stored_destination_once_oldest_first() {
+    let entries = [
+        stored(OTHER, 4, 4),
+        stored(RECIPIENT, 7, 7),
+        stored(OTHER, 9, 9),
+        stored(RECIPIENT, 2, 2),
+    ];
+    assert_eq!(solicited(&entries, &[]), alloc::vec![RECIPIENT, OTHER]);
+}
+
+/// A destination whose only mail is too large for a push has nothing a
+/// path would trigger, so the peer is not asked about it.
+#[test]
+fn a_destination_with_only_too_large_mail_is_not_asked_about() {
+    let entries = [stored(RECIPIENT, 1, 1), stored(OTHER, 2, 2)];
+    assert_eq!(solicited(&entries, &[[1; 32]]), alloc::vec![OTHER]);
+}
+
+/// A full store asks about at most the cap, and the destinations whose mail
+/// has waited longest are the ones kept, whatever the scan order.
+#[test]
+fn a_full_store_asks_about_the_longest_waiting_destinations_up_to_the_cap() {
+    let entries: Vec<StoredMessage> = (0..(SOLICIT_DESTINATIONS_CAP as u8 + 4))
+        .rev()
+        .map(|n| stored([n; 16], u64::from(n), n))
+        .collect();
+    let asked = solicited(&entries, &[]);
+    let expected: Vec<[u8; 16]> = (0..SOLICIT_DESTINATIONS_CAP as u8)
+        .map(|n| [n; 16])
+        .collect();
+    assert_eq!(asked, expected);
+}
+
+/// One pair is asked once per interval; another peer or another
+/// destination is its own pair.
+#[test]
+fn the_pacer_asks_each_peer_and_destination_pair_once_per_interval() {
+    let phone = [0xC4; 16];
+    let other_phone = [0x5A; 16];
+    let mut pacer = SolicitPacer::new();
+    assert!(pacer.due(0, phone, RECIPIENT));
+    assert!(!pacer.due(SOLICIT_INTERVAL_MS - 1, phone, RECIPIENT));
+    assert!(pacer.due(1, other_phone, RECIPIENT));
+    assert!(pacer.due(1, phone, OTHER));
+    assert!(pacer.due(SOLICIT_INTERVAL_MS, phone, RECIPIENT));
+}
+
+/// The marks stay bounded: expired ones go on every call, and a burst of
+/// distinct peers inside one interval evicts the oldest at the cap.
+#[test]
+fn the_pacer_holds_at_most_its_cap() {
+    let mut pacer = SolicitPacer::new();
+    for n in 0..(SOLICIT_PACER_CAP as u8 + 5) {
+        assert!(pacer.due(u64::from(n), [n; 16], RECIPIENT));
+    }
+    assert_eq!(pacer.marks().len(), SOLICIT_PACER_CAP);
+    assert!(pacer.due(SOLICIT_INTERVAL_MS + 100, [0xEE; 16], RECIPIENT));
+    assert_eq!(pacer.marks().len(), 1);
+}

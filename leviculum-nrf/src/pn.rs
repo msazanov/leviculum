@@ -231,8 +231,8 @@ use leviculum_core::{
     Destination, DestinationHash, DestinationType, Direction, LinkId, ProofStrategy, RequestError,
 };
 use leviculum_lxmf::active_delivery::{
-    after_failed_push, after_refused_push, remember_too_large, ActiveCandidate, AfterFailedPush,
-    AfterRefusedPush,
+    after_failed_push, after_refused_push, remember_too_large, solicit_on_peer_up, ActiveCandidate,
+    AfterFailedPush, AfterRefusedPush, PeerUpSolicit, SolicitPacer,
 };
 use leviculum_lxmf::constants::{
     STAMP_SIZE, WORKBLOCK_EXPAND_ROUNDS_PEERING, WORKBLOCK_EXPAND_ROUNDS_PN,
@@ -790,6 +790,10 @@ pub struct Engine {
     /// Records active delivery skipped as too large for one packet —
     /// left for `/get`, never retried actively.
     too_large: Vec<TransientId>,
+    /// Which returning peers were asked about which stored destinations,
+    /// so a flapping link does not repeat the requests (leviculum#849,
+    /// [`Engine::on_ble_peer_up`]).
+    solicit_pacer: SolicitPacer,
     /// The own-traffic share (leviculum#494): one tracker for every site
     /// where the engine originates traffic, so a yield is stated once per
     /// edge however many sites meet it ([`Engine::own_traffic_go`]).
@@ -978,6 +982,7 @@ impl Engine {
             active: None,
             next_active_at_ms: 0,
             too_large: Vec::with_capacity(TOO_LARGE_SLOTS),
+            solicit_pacer: SolicitPacer::new(),
             own_share: OwnShare::new(),
             grind: None,
             reprice,
@@ -1028,7 +1033,8 @@ impl Engine {
                 .sum::<usize>()
             + hc::btree_map_bytes(&self.validated_links)
             + hc::vec_bytes(&self.inbound_transfers)
-            + hc::vec_bytes(&self.too_large);
+            + hc::vec_bytes(&self.too_large)
+            + hc::vec_bytes(self.solicit_pacer.marks());
         EngineHeapCensus {
             peer_count: self.peers.len(),
             // The operator lists the engine holds ride with the table they
@@ -2597,6 +2603,16 @@ impl Engine {
     /// A BLE peer finished its identity handshake: announce the role to
     /// it, on its link alone, so a phone that just connected learns this
     /// board is a propagation node without waiting out the cadence.
+    ///
+    /// Then ask it, on the same link, for every destination the store holds
+    /// pushable mail for (leviculum#849). The handshake names the peer's
+    /// transport identity and the store is keyed by delivery destinations,
+    /// so the board cannot tell which mail is the peer's; the peer answers
+    /// a path request for its own destinations with an announce, and that
+    /// announce triggers the push (`trigger_active`) the way an
+    /// unsolicited one does. Paced per peer and destination
+    /// ([`SolicitPacer`]); not under the own-traffic share, which budgets
+    /// LoRa airtime, and these requests never leave the BLE link.
     pub fn on_ble_peer_up<R, C, S>(
         &mut self,
         node: &mut NodeCore<R, C, S>,
@@ -2617,6 +2633,22 @@ impl Engine {
             node.announce_destination_to_peer(&self.dest_hash, Some(&app_data), iface, peer)
         {
             out.merge(send);
+        }
+        let mut pick = PeerUpSolicit::new(&self.too_large);
+        let _ = self.role.store().for_each(&mut |meta| pick.consider(meta));
+        let (solicit, asked) = solicit_on_peer_up(
+            node,
+            &mut self.solicit_pacer,
+            iface,
+            peer,
+            &pick.destinations(),
+        );
+        out.merge(solicit);
+        for destination in &asked {
+            crate::log::log_fmt(
+                "PN_SOLICIT ",
+                format_args!("dst={} peer={}", Hex(destination), Hex(&peer[..4])),
+            );
         }
         out
     }

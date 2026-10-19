@@ -15,10 +15,17 @@
 //! The third decision, what a push the core refuses outright leaves
 //! ([`after_refused_push`], [`remember_too_large`]), followed in the third
 //! wave of leviculum#413: no cell makes the core refuse a push.
+//!
+//! The fourth is what a peer that just linked is asked
+//! ([`PeerUpSolicit`], [`SolicitPacer`], [`solicit_on_peer_up`],
+//! leviculum#849): the push needs a trigger, and a phone that returns to
+//! the room gives none of its own.
 
 use alloc::vec::Vec;
 
-use leviculum_core::SendError;
+use leviculum_core::constants::PATH_REQUEST_MIN_INTERVAL_MS;
+use leviculum_core::{Clock, DestinationHash, NodeCore, SendError, Storage, TickOutput};
+use rand_core::CryptoRngCore;
 
 use crate::propagation::TransientId;
 use crate::propagation_store::StoredMessage;
@@ -129,6 +136,168 @@ pub fn remember_too_large(list: &mut Vec<TransientId>, transient_id: TransientId
     if list.len() > TOO_LARGE_CAP {
         list.remove(0);
     }
+}
+
+/// How many stored destinations one peer-up asks about at most.
+///
+/// The board's store holds mail for a handful of recipients; the bound
+/// keeps a full store from turning one link-up into a burst. Past it the
+/// destinations whose oldest pushable message is oldest win, so mail that
+/// has waited longest is asked about first.
+pub const SOLICIT_DESTINATIONS_CAP: usize = 8;
+
+/// How long a (peer, destination) pair stays asked before the same peer is
+/// asked again: the core's own pacing for the requests it raises
+/// ([`PATH_REQUEST_MIN_INTERVAL_MS`], 20 s).
+pub const SOLICIT_INTERVAL_MS: u64 = PATH_REQUEST_MIN_INTERVAL_MS;
+
+/// How many (peer, destination) marks [`SolicitPacer`] holds. Marks past
+/// [`SOLICIT_INTERVAL_MS`] are dropped on every call, so only a burst of
+/// distinct peers inside one interval can reach the cap; the oldest mark
+/// then goes first, and that peer may be asked once more than the interval
+/// allows.
+pub const SOLICIT_PACER_CAP: usize = 32;
+
+/// The stored destinations a newly linked peer is asked about: every
+/// destination with a message an active push could send (the pick
+/// [`ActiveCandidate`] would make), at most [`SOLICIT_DESTINATIONS_CAP`].
+///
+/// A fold over the store's own scan, like [`ActiveCandidate`].
+#[derive(Debug, Clone)]
+pub struct PeerUpSolicit<'a> {
+    excluded: &'a [TransientId],
+    /// (destination, sequence of its oldest pushable message).
+    picks: Vec<([u8; 16], u64)>,
+}
+
+impl<'a> PeerUpSolicit<'a> {
+    /// A pick that skips ids in `excluded` (the too-large list: a
+    /// destination whose only mail is too large for a push has nothing a
+    /// path would trigger).
+    pub fn new(excluded: &'a [TransientId]) -> Self {
+        Self {
+            excluded,
+            picks: Vec::new(),
+        }
+    }
+
+    /// Offer one directory entry.
+    pub fn consider(&mut self, meta: &StoredMessage) {
+        if self.excluded.contains(&meta.transient_id) {
+            return;
+        }
+        if let Some(pick) = self
+            .picks
+            .iter_mut()
+            .find(|(destination, _)| *destination == meta.destination_hash)
+        {
+            pick.1 = pick.1.min(meta.sequence);
+            return;
+        }
+        if self.picks.len() < SOLICIT_DESTINATIONS_CAP {
+            self.picks.push((meta.destination_hash, meta.sequence));
+            return;
+        }
+        // Full: the newest-waiting destination makes room for an older one.
+        if let Some(youngest) = self
+            .picks
+            .iter_mut()
+            .max_by_key(|(_, sequence)| *sequence)
+            .filter(|(_, sequence)| meta.sequence < *sequence)
+        {
+            *youngest = (meta.destination_hash, meta.sequence);
+        }
+    }
+
+    /// The destinations to ask about, longest-waiting first.
+    pub fn destinations(mut self) -> Vec<[u8; 16]> {
+        self.picks.sort_by_key(|(_, sequence)| *sequence);
+        self.picks
+            .into_iter()
+            .map(|(destination, _)| destination)
+            .collect()
+    }
+}
+
+/// Which (peer, destination) pairs were asked recently, so a link that
+/// flaps does not repeat its requests: each pair is asked at most once per
+/// [`SOLICIT_INTERVAL_MS`]. Keyed by the peer as well as the destination,
+/// because a second phone linking inside the interval has to be asked too;
+/// it may be the one that owns the destination.
+#[derive(Debug, Clone, Default)]
+pub struct SolicitPacer {
+    /// (peer, destination, asked at ms).
+    marks: Vec<([u8; 16], [u8; 16], u64)>,
+}
+
+impl SolicitPacer {
+    /// An empty pacer.
+    pub const fn new() -> Self {
+        Self { marks: Vec::new() }
+    }
+
+    /// Whether `peer` may be asked about `destination` at `now_ms`; a yes
+    /// is recorded as asked.
+    pub fn due(&mut self, now_ms: u64, peer: [u8; 16], destination: [u8; 16]) -> bool {
+        self.marks
+            .retain(|(_, _, at_ms)| now_ms.saturating_sub(*at_ms) < SOLICIT_INTERVAL_MS);
+        if self
+            .marks
+            .iter()
+            .any(|(p, d, _)| *p == peer && *d == destination)
+        {
+            return false;
+        }
+        if self.marks.len() >= SOLICIT_PACER_CAP {
+            self.marks.remove(0);
+        }
+        self.marks.push((peer, destination, now_ms));
+        true
+    }
+
+    /// The marks held, for the heap census.
+    pub fn marks(&self) -> &Vec<([u8; 16], [u8; 16], u64)> {
+        &self.marks
+    }
+}
+
+/// A peer finished its handshake on `iface`: ask it, on its link alone,
+/// for every destination in `destinations` the pacer lets through
+/// (leviculum#849). Returns what to send and the destinations asked.
+///
+/// The handshake names the peer's transport identity, and the store is
+/// keyed by LXMF delivery destinations, which belong to a different
+/// identity on a two-identity client such as Columba, so the node cannot
+/// tell which stored destinations the peer owns. A path request is the
+/// question every RNS node answers for its own destinations
+/// (`reference/Reticulum/RNS/Transport.py:2938-2940`, the local
+/// destination arm of `path_request`, which announces as a path response,
+/// on the interface the request came in on); the answer is an
+/// announce, which triggers the push the same way an unsolicited one
+/// does. A peer that owns none of them stays silent.
+pub fn solicit_on_peer_up<R, C, S>(
+    node: &mut NodeCore<R, C, S>,
+    pacer: &mut SolicitPacer,
+    iface: usize,
+    peer: [u8; 16],
+    destinations: &[[u8; 16]],
+) -> (TickOutput, Vec<[u8; 16]>)
+where
+    R: CryptoRngCore,
+    C: Clock,
+    S: Storage,
+{
+    let mut out = TickOutput::default();
+    let mut asked = Vec::new();
+    let now_ms = node.now_ms();
+    for destination in destinations {
+        if !pacer.due(now_ms, peer, *destination) {
+            continue;
+        }
+        out.merge(node.request_path_to_peer(&DestinationHash::new(*destination), iface, peer));
+        asked.push(*destination);
+    }
+    (out, asked)
 }
 
 #[cfg(test)]
