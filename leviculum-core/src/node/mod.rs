@@ -234,7 +234,7 @@ mod send;
 
 pub use builder::NodeCoreBuilder;
 pub use event::{DeliveryError, EventClass, FrameDropReason, NodeEvent};
-pub use request::{RequestError, RequestPolicy};
+pub use request::{request_timeout_ms, RequestError, RequestPolicy};
 pub use send::SendError;
 
 use alloc::boxed::Box;
@@ -1547,13 +1547,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let request_id = crate::packet::truncated_packet_hash(&raw_packet);
 
         // Compute timeout
-        let rtt_ms = link.rtt_ms();
-        let timeout = timeout_ms.unwrap_or_else(|| {
-            rtt_ms
-                .saturating_mul(crate::constants::TRAFFIC_TIMEOUT_FACTOR)
-                .saturating_add(crate::constants::RESPONSE_MAX_GRACE_TIME_MS)
-                .saturating_add(1250) // Python adds 1250ms extra grace
-        });
+        let timeout = timeout_ms.unwrap_or_else(|| request::request_timeout_ms(link.rtt_ms()));
 
         // Insert pending request
         self.pending_requests.insert(
@@ -1635,13 +1629,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         }
 
         let request_id = crate::crypto::truncated_hash(&packed);
-        let rtt_ms = link.rtt_ms();
-        let timeout = timeout_ms.unwrap_or_else(|| {
-            rtt_ms
-                .saturating_mul(crate::constants::TRAFFIC_TIMEOUT_FACTOR)
-                .saturating_add(crate::constants::RESPONSE_MAX_GRACE_TIME_MS)
-                .saturating_add(1250)
-        });
+        let timeout = timeout_ms.unwrap_or_else(|| request::request_timeout_ms(link.rtt_ms()));
 
         // A request past one segment travels as a split request resource,
         // every segment flagged and carrying the request id, the way the

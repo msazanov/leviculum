@@ -7,8 +7,21 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::constants::TRUNCATED_HASHBYTES;
+use crate::constants::{RESPONSE_MAX_GRACE_TIME_MS, TRAFFIC_TIMEOUT_FACTOR, TRUNCATED_HASHBYTES};
 use crate::link::LinkId;
+
+/// The timeout of a request sent on a link whose RTT is `rtt_ms`, when the
+/// caller names none: `rtt * TRAFFIC_TIMEOUT_FACTOR +
+/// RESPONSE_MAX_GRACE_TIME * 1.125`
+/// (`reference/Reticulum/RNS/Link.py:493-494`, the factor at `Link.py:82`,
+/// the grace at `reference/Reticulum/RNS/Resource.py:117`). The 1.125 is
+/// written as the grace plus an eighth of it, so the sum stays integral.
+pub const fn request_timeout_ms(rtt_ms: u64) -> u64 {
+    rtt_ms
+        .saturating_mul(TRAFFIC_TIMEOUT_FACTOR)
+        .saturating_add(RESPONSE_MAX_GRACE_TIME_MS)
+        .saturating_add(RESPONSE_MAX_GRACE_TIME_MS / 8)
+}
 
 /// Policy controlling which identities may send requests to a handler.
 #[derive(Debug, Clone, PartialEq, Eq)]
