@@ -9374,7 +9374,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 return Ok(());
             }
         }
-        self.send_path_request(dest_hash, on_interface, tag)
+        self.send_path_request(dest_hash, on_interface, None, tag)
     }
 
     /// [`request_path`](Self::request_path) without the per-destination
@@ -9395,7 +9395,29 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         tag: &[u8; TRUNCATED_HASHBYTES],
     ) -> Result<(), TransportError> {
         self.distrust_offline_path(dest_hash);
-        self.send_path_request(dest_hash, on_interface, tag)
+        self.send_path_request(dest_hash, on_interface, None, tag)
+    }
+
+    /// [`request_path_unthrottled`](Self::request_path_unthrottled) on one
+    /// interface, addressed to one peer link behind it: a multi-peer
+    /// interface puts the request on that link alone, a single-peer one
+    /// ignores the hint (the #376 delivery hint of
+    /// [`Action::SendPacket::peer`](Action::SendPacket)).
+    ///
+    /// Unthrottled because the per-destination interval is the wrong key
+    /// for its caller: a propagation node asks each newly linked peer for
+    /// the destinations it holds mail for (leviculum#849), and a second
+    /// phone linking inside the interval has to be asked as well. The
+    /// caller paces per destination and per peer.
+    pub fn request_path_to_peer(
+        &mut self,
+        dest_hash: &[u8; TRUNCATED_HASHBYTES],
+        interface_index: usize,
+        peer: [u8; TRUNCATED_HASHBYTES],
+        tag: &[u8; TRUNCATED_HASHBYTES],
+    ) -> Result<(), TransportError> {
+        self.distrust_offline_path(dest_hash);
+        self.send_path_request(dest_hash, Some(interface_index), Some(peer), tag)
     }
 
     /// A caller asking for a path while the table holds an entry over
@@ -9419,6 +9441,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         &mut self,
         dest_hash: &[u8; TRUNCATED_HASHBYTES],
         on_interface: Option<usize>,
+        peer: Option<[u8; TRUNCATED_HASHBYTES]>,
         tag: &[u8; TRUNCATED_HASHBYTES],
     ) -> Result<(), TransportError> {
         let now = self.clock.now_ms();
@@ -9467,7 +9490,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         match on_interface {
             Some(idx) => {
                 self.record_outgoing_path_request(idx);
-                self.send_on_interface(idx, &buf[..len])
+                self.send_on_interface_to_peer(idx, &buf[..len], peer)
             }
             None => {
                 // No egress limit here: the reference applies it only to
