@@ -438,8 +438,9 @@ pub fn airtime_limits<S: LineSink>(sink: &mut S, l: &AirtimeLimits) {
 
 /// Everything the transmit-power line states, as it was written to the chip.
 ///
-/// Built from `sx126x::TxPowerProgram`, which the driver gets back from the
-/// call that did the writing — so every field here is a byte that went out on
+/// Built from `sx126x::TxPowerProgram` (or the LR11xx driver's own
+/// `TxPowerProgram`), which the driver gets back from the call that did the
+/// writing — so every field here is a byte that went out on
 /// the SPI bus, not one the caller intended to send.
 pub struct TxPowerProgrammed {
     /// The configured request, before any clamp.
@@ -450,10 +451,25 @@ pub struct TxPowerProgrammed {
     pub pa_config: [u8; 4],
     /// The `SetTxParams` ramp byte.
     pub ramp: u8,
-    /// The `REG_OCP` byte.
-    pub ocp: u8,
+    /// The `REG_OCP` byte, or `None` on a part that has no over-current
+    /// register to read one back from (the LR11xx). The line then leaves the
+    /// key out: a `0x00` there would read as a programmed limit of nothing,
+    /// which is a fact no chip stated.
+    pub ocp: Option<u8>,
     /// Whether the request had to be brought into the part's range.
     pub clamped: bool,
+}
+
+/// ` ocp=0x..` when the part has the register, nothing when it does not.
+struct OcpField(Option<u8>);
+
+impl core::fmt::Display for OcpField {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self.0 {
+            Some(ocp) => write!(f, " ocp=0x{:02X}", ocp),
+            None => Ok(()),
+        }
+    }
 }
 
 /// `[SX_TX_POWER] requested_dbm=… tx_params_dbm=… pa=… ocp=… clamped=…` — the
@@ -481,7 +497,7 @@ pub struct TxPowerProgrammed {
 /// `ramp` and `ocp` ride along because they are the other two bytes of the
 /// same three-op sequence and cost nothing to state; `ocp` in particular is
 /// the one value that could make a board deliver less than `tx_params_dbm`
-/// says.
+/// says. A part without the register (the LR11xx) prints no `ocp=` at all.
 ///
 /// Critical, for the same reason as the two facts above: a board that boots
 /// before a reader attaches drops everything gated, and this is the fact a
@@ -492,7 +508,7 @@ pub fn tx_power_programmed<S: LineSink>(sink: &mut S, p: &TxPowerProgrammed) {
         "[SX_TX_POWER] ",
         format_args!(
             "requested_dbm={} tx_params_dbm={} pa=0x{:02X},0x{:02X},0x{:02X},0x{:02X} \
-             ramp=0x{:02X} ocp=0x{:02X} clamped={}",
+             ramp=0x{:02X}{} clamped={}",
             p.requested_dbm,
             p.programmed_dbm,
             p.pa_config[0],
@@ -500,7 +516,7 @@ pub fn tx_power_programmed<S: LineSink>(sink: &mut S, p: &TxPowerProgrammed) {
             p.pa_config[2],
             p.pa_config[3],
             p.ramp,
-            p.ocp,
+            OcpField(p.ocp),
             if p.clamped { "yes" } else { "no" },
         ),
     );
@@ -774,9 +790,31 @@ mod tests {
             programmed_dbm,
             pa_config: [0x04, 0x07, 0x00, 0x01],
             ramp: 0x04,
-            ocp: 0x38,
+            ocp: Some(0x38),
             clamped,
         }
+    }
+
+    /// A part with no over-current register states none. The key is absent
+    /// rather than `ocp=0x00`, which would claim a limit the chip never had;
+    /// the rest of the line is the SX1262's, byte for byte, so every reader
+    /// of the other keys keeps working.
+    #[test]
+    fn a_part_without_an_ocp_register_leaves_the_key_out() {
+        let mut sink = Recorder::default();
+        let mut p = programmed(2, 2, false);
+        p.ocp = None;
+        tx_power_programmed(&mut sink, &p);
+        assert_eq!(
+            sink.lines,
+            [(
+                Route::Critical,
+                String::from(
+                    "[SX_TX_POWER] requested_dbm=2 tx_params_dbm=2 pa=0x04,0x07,0x00,0x01 \
+                     ramp=0x04 clamped=no t=191\r\n"
+                )
+            )]
+        );
     }
 
     /// The case the line exists for: 23 hardware scenarios configure 2 dBm,

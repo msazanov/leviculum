@@ -703,7 +703,7 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
                 programmed_dbm: programmed.programmed_dbm,
                 pa_config: programmed.pa_config,
                 ramp: programmed.ramp,
-                ocp: programmed.ocp,
+                ocp: Some(programmed.ocp),
                 clamped: programmed.clamped,
             },
         );
