@@ -386,11 +386,13 @@ async fn main(spawner: Spawner) {
         p.P1_06.into(), // RESET
         p.P1_14.into(), // BUSY
         p.P1_15.into(), // DIO1
-        // No host-driven RX enable: DIO2 owns the whole antenna switch, and
-        // the module's P1.07 pad must not be driven (`boards/rak4631.rs`).
-        None,
         spim::Frequency::M4,
-        rak4631::CONFIG.lora_tcxo_voltage_reg,
+        leviculum_nrf::radio::FrontEnd {
+            tcxo_voltage_reg: rak4631::CONFIG.lora_tcxo_voltage_reg,
+            // No host-driven RX enable: DIO2 owns the whole antenna switch, and
+            // the module's P1.07 pad must not be driven (`boards/rak4631.rs`).
+            rx_enable: None,
+        },
     )
     .await;
     info!("SX1262 ready");

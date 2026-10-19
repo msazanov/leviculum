@@ -104,7 +104,7 @@ listening and, when a reception cuts the window short, keeps the
 remainder owed and serves it on the next turn
 (`acquisition_jitter_ms` / `jitter_spent`,
 `leviculum-nrf/channel-access/src/lib.rs:624-700`;
-`leviculum-nrf/src/lora.rs:2137-2168`) — same shape, same reason. Our
+`leviculum-nrf/src/lora.rs:2122-2153`) — same shape, same reason. Our
 *host* serves its drawn wait as an uninterruptible sleep
 (`leviculum-std/src/interfaces/rnode.rs:3012-3027`): it cannot sense
 the medium, the modem under it can and does. On the air: equivalent
@@ -135,7 +135,7 @@ avoidance, current RSSI above its sampled noise floor plus 11 dB
 `reference/RNode_Firmware/RNode_Firmware.ino:1394-1431`,
 `CSMA_INFR_THRESHOLD_DB`, `reference/RNode_Firmware/Config.h:113`).
 Our board probes with the SX1262's CAD per attempt
-(`leviculum-nrf/src/lora.rs:2244`) and keeps **no noise floor, no
+(`leviculum-nrf/src/lora.rs:2229`) and keeps **no noise floor, no
 interference detection, and no DCD sampling at all**. Three on-air
 consequences: (a) a reference node defers to non-LoRa interference, we
 do not; (b) the reference's latched preamble holds "busy" for up to a
@@ -253,7 +253,7 @@ it aged under the lock goes out, oldest first, deaf. Ours: the host
 never lets the modem hold more than one frame (D1), sweeps frames the
 hold aged past 18 s (`pop_live_frame`,
 `leviculum-std/src/interfaces/rnode.rs:301`), and the board drops stale
-frames at dequeue (`leviculum-nrf/src/lora.rs:2003-2047`). On the air: a
+frames at dequeue (`leviculum-nrf/src/lora.rs:1988-2032`). On the air: a
 reference relay exiting a duty hold emits a burst of minutes-old
 traffic; ours emits one current frame. Class: deviation ours
 (deliberate; #433). Test: exists (the stale-drop mvr and the field
@@ -350,8 +350,8 @@ claim below. Our board runs windowed RX with an explicit post-TX
 listening window of one reply airtime plus the peer's whole key-up wait
 (`post_tx_rx_window_ms`, `leviculum-nrf/channel-access/src/lib.rs:311`,
 the #423 fix), burst bounds of 16 frames / 8 s
-(`leviculum-nrf/src/lora.rs:855-860`), and a peer-turn yield after two
-empty ack windows (`leviculum-nrf/src/lora.rs:2389`). The window
+(`leviculum-nrf/src/lora.rs:854-859`), and a peer-turn yield after two
+empty ack windows (`leviculum-nrf/src/lora.rs:2374`). The window
 teardown/adoption/harvest discipline (`leviculum-nrf/rx-arming`) exists
 only because our RX is windowed; the reference has no teardown to get
 wrong. On the air: ours trades continuous listening for bounded turns;
@@ -467,7 +467,7 @@ Two asymmetries, neither a defect of ours:
    but the two rationales are the kind that get copied.
 2. **"It even reserves a fixed post-TX yield (CSMA_POST_TX_YIELD_SLOTS)"
    — wrong, the reference never uses it.**
-   `leviculum-nrf/src/lora.rs:876-877` (corrected in 35034019) claimed the reference firmware
+   `leviculum-nrf/src/lora.rs:875-876` (corrected in 35034019) claimed the reference firmware
    reserves a post-TX yield. `CSMA_POST_TX_YIELD_SLOTS` is defined at
    `reference/RNode_Firmware/Config.h:103` and referenced nowhere else
    in the firmware (checked by exhaustive grep over the mirror). The
@@ -529,7 +529,7 @@ Two asymmetries, neither a defect of ours:
    Mechanism: comment-only edits — "~2 s" → "~1 s
    (`UTIL_UPDATE_INTERVAL_MS`)" at
    `leviculum-std/src/interfaces/rnode.rs:1027` and `:873` (done in 35034019), and the
-   post-TX-yield sentence at `leviculum-nrf/src/lora.rs:876-877` (likewise)
+   post-TX-yield sentence at `leviculum-nrf/src/lora.rs:875-876` (likewise)
    rewritten to what the reference does (returns to continuous RX;
    the yield constant is unused). Test: the citation guard anchors the
    corrected lines; no behaviour moves. Cheap, and it is exactly the
@@ -546,7 +546,7 @@ split framing, `AirtimeTracker`, announce-cap bitrate); the policy
 crates `leviculum-channel-access`, `leviculum-queue-budget`,
 `leviculum-tx-spacing`, `leviculum-mute-lease` and the module contract
 of `leviculum-rx-arming`; the LNode transmit loop
-(`leviculum-nrf/src/lora.rs:1753-2423`); the core announce cap
+(`leviculum-nrf/src/lora.rs:1741-2408`); the core announce cap
 (`leviculum-core/src/transport.rs`, the cap/drain/hold paths); the CAD
 and window arithmetic in `leviculum-core/src/sx126x.rs`. Reference
 side: `RNodeInterface.py` (serial fully, Android spot-checked for the

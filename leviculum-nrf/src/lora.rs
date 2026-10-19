@@ -1,6 +1,8 @@
-//! SX1262 LoRa radio initialization, configuration, and async task for T114.
+//! LoRa radio initialization, configuration, and async task.
 //!
-//! Uses the custom sx1262 driver on SPIM2 (SPIM3 has a MISO read bug on T114).
+//! Drives the board's transceiver on SPIM2 (SPIM3 has a MISO read bug on
+//! T114) through [`crate::radio`], which is where the build picks the part:
+//! the SX1262 driver on every board but the T1000-E, the LR11xx driver there.
 //! Provides an `Interface` impl for NodeCore dispatch and an async task that
 //! handles half-duplex TX/RX on the radio.
 
@@ -22,7 +24,7 @@ use leviculum_queue_budget::{
 };
 use static_cell::StaticCell;
 
-use crate::sx1262::Sx1262;
+use crate::radio::Radio;
 
 /// Cumulative count of LoRa frames successfully transmitted at the radio
 /// boundary (one increment per `[LORA] TX done`). Read by the status
@@ -45,7 +47,7 @@ pub static LORA_RX_COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::At
 /// format a log line anyway.
 ///
 /// **Successful receptions only.** A frame that failed its payload CRC is
-/// also a measurement, and `sx1262::CrcErrFrame` keeps it for exactly that
+/// also a measurement, and the driver's `CrcErrFrame` keeps it for exactly that
 /// reason — but it is a measurement of the population that did *not* get
 /// through, and reporting it as the link's rssi would mean a board whose
 /// link had just collapsed would report the signal of the frames that
@@ -66,7 +68,7 @@ static LAST_RECEPTION: embassy_sync::blocking_mutex::Mutex<
 /// chip has not been configured yet — not reachable on this path, since a
 /// frame cannot arrive before the receiver was armed, and it yields no
 /// `q` rather than a wrong one if it ever is.
-fn note_reception(status: &crate::sx1262::RxStatus, at_ms: u64) {
+fn note_reception(status: &crate::radio::RxStatus, at_ms: u64) {
     let spreading_factor = running_config().map_or(0, |config| config.sf);
     LAST_RECEPTION.lock(|slot| {
         slot.set(Some(leviculum_telemetry_policy::link::Reception {
@@ -91,10 +93,6 @@ bind_interrupts!(pub struct SpiIrqs {
 });
 
 type SpiBus = Mutex<NoopRawMutex, Spim<'static>>;
-type Spi = SpiDevice<'static, NoopRawMutex, Spim<'static>, Output<'static>>;
-
-/// LoRa radio instance type
-pub type Radio = Sx1262<Spi>;
 
 // Channels between LoRa task and main loop
 //
@@ -301,7 +299,7 @@ pub fn config_applied() -> &'static embassy_sync::signal::Signal<CriticalSection
 }
 
 /// Index of the LoRa carrier in the node's interface table — the one the
-/// binaries name `lora_sx1262`, and the one [`LoRaInterface::id`] answers
+/// binaries name [`crate::radio::IFACE_NAME`], and the one [`LoRaInterface::id`] answers
 /// with. Spelled once so a caller that has to address this interface without
 /// holding it (the announce cap, #402) cannot address a different one.
 pub const IFACE_INDEX: usize = 1;
@@ -778,7 +776,8 @@ impl AnnounceCap {
         crate::log::log_fmt_critical(
             "[ANNOUNCE_CAP] ",
             format_args!(
-                "iface=lora_sx1262 bitrate_bps={} cap_pct={} holdoff_ms={} ref_bytes={} sf={} bw={} cr={} preamble={}",
+                "iface={} bitrate_bps={} cap_pct={} holdoff_ms={} ref_bytes={} sf={} bw={} cr={} preamble={}",
+                crate::radio::IFACE_NAME,
                 bitrate_bps,
                 cap_pct,
                 holdoff_ms,
@@ -946,7 +945,7 @@ impl leviculum_log_line::facts::LineSink for FirmwareLog {
 /// mistake this line used to make.
 fn active_facts(
     config: &RadioConfig,
-    programmed: &leviculum_core::sx126x::TxPowerProgram,
+    programmed: &crate::radio::TxPowerProgram,
     lease: &leviculum_mute_lease::MuteLease,
     now_ms: u64,
 ) -> leviculum_log_line::facts::ActiveRadioConfig {
@@ -1209,7 +1208,7 @@ struct CoreHandoff<'a> {
 }
 
 impl leviculum_rx_arming::FrameSink for CoreHandoff<'_> {
-    type Meta = crate::sx1262::RxStatus;
+    type Meta = crate::radio::RxStatus;
 
     async fn deliver(&mut self, frame: &[u8], status: &Self::Meta) {
         // Before anything else, and for every frame rather than only the
@@ -1496,7 +1495,7 @@ async fn rx_window(
                 frame_len: Some(reception.len),
             }
         }
-        Err(crate::sx1262::Error::Timeout) => {
+        Err(crate::radio::Error::Timeout) => {
             *rx_timeout_count = rx_timeout_count.wrapping_add(1);
             crate::log::log_fmt("[T114_SX_TIMEOUT] ", format_args!(""));
             crate::log::log_fmt(
@@ -1521,12 +1520,13 @@ async fn rx_window(
             // (Codeberg #258). `len` comes out of the explicit header, which
             // passed its own CRC, so it is the length the transmitter meant.
             //
-            // There is no frequency-error field: the SX1262 exposes no FEI
-            // readout (see `sx1262::CrcErrFrame`), unlike the SX127x, so this
+            // There is no frequency-error field: neither the SX1262 nor the
+            // LR11xx exposes an FEI readout (see `sx1262::CrcErrFrame`), unlike
+            // the SX127x, so this
             // line carries what the chip actually reports and nothing shaped
             // to look like more.
             match &e {
-                crate::sx1262::Error::Crc(frame) => {
+                crate::radio::Error::Crc(frame) => {
                     crate::log::log_fmt(
                         "[LORA] ",
                         format_args!(
@@ -1554,12 +1554,14 @@ async fn rx_window(
 
 // Init
 //
-// Board-agnostic: GPIO pins arrive as AnyPin (degraded in the bin file)
-// and the SX1262-specific knobs (SPI clock, TCXO voltage) come from
-// `BoardConfig`. SPI peripheral is still typed because embassy-nrf does
-// not expose an erased-instance Spim. SPI2 is used on both T114 (SPI3
-// has a MISO read bug there) and RAK4631 — same instance keeps the
-// shared Spim<'static> type stable.
+// Board-agnostic: GPIO pins arrive as AnyPin (degraded in the bin file),
+// the SPI clock comes from `BoardConfig`, and what the transceiver needs
+// beyond its bus and its three lines is the part's own `FrontEnd`
+// (`crate::radio`): a TCXO byte and an optional RX-enable line on the
+// SX1262, the whole board description on the LR11xx. SPI peripheral is
+// still typed because embassy-nrf does not expose an erased-instance
+// Spim. SPI2 is used on every board (SPI3 has a MISO read bug on the
+// T114) — same instance keeps the shared Spim<'static> type stable.
 //
 // 10 parameters: the radio's full pin/bus/board wiring arrives here once
 // at boot. A grouping struct would only move the same ten names one file
@@ -1573,15 +1575,11 @@ pub async fn init(
     cs: Peri<'static, AnyPin>,
     reset: Peri<'static, AnyPin>,
     busy: Peri<'static, AnyPin>,
-    dio1: Peri<'static, AnyPin>,
-    // The board's external RX-enable line, or `None` where DIO2 owns the
-    // whole antenna switch (T114, RAK4631). Passed through to the driver,
-    // which is where the switching happens — see `crate::boards` for why
-    // the front end is not one boolean, and `boards/solarnode.rs` for the
-    // board that needs it.
-    rx_enable: Option<Peri<'static, AnyPin>>,
+    // DIO1 on the SX1262, DIO9 on the LR11xx: the line the chip raises
+    // for an interrupt.
+    irq: Peri<'static, AnyPin>,
     spi_freq: spim::Frequency,
-    tcxo_voltage_reg: u8,
+    front_end: crate::radio::FrontEnd,
 ) -> Radio {
     let mut spi_config = spim::Config::default();
     spi_config.frequency = spi_freq;
@@ -1596,19 +1594,9 @@ pub async fn init(
 
     let reset_pin = Output::new(reset, Level::High, OutputDrive::Standard);
     let busy_pin = Input::new(busy, Pull::None);
-    let dio1_pin = Input::new(dio1, Pull::Down);
-    // Released at construction: the chip is not listening yet, and the very
-    // first thing the LoRa task does to it is a reset.
-    let rx_enable_pin = rx_enable.map(|pin| Output::new(pin, Level::Low, OutputDrive::Standard));
+    let irq_pin = Input::new(irq, Pull::Down);
 
-    Sx1262::new(
-        spi_device,
-        reset_pin,
-        busy_pin,
-        dio1_pin,
-        tcxo_voltage_reg,
-        rx_enable_pin,
-    )
+    crate::radio::new(spi_device, reset_pin, busy_pin, irq_pin, front_end)
 }
 
 /// One word of per-board, per-boot entropy for [`lora_task`]'s
@@ -1653,16 +1641,16 @@ async fn apply_runtime_config(
     access: &mut leviculum_channel_access::ChannelAccess,
     lease: &mut leviculum_mute_lease::MuteLease,
 ) {
-    match radio
-        .configure_lora(
-            new_cfg.frequency_hz,
-            new_cfg.sf,
-            new_cfg.bw,
-            new_cfg.cr,
-            new_cfg.tx_power_dbm,
-            new_cfg.preamble_len,
-        )
-        .await
+    match crate::radio::configure_lora(
+        radio,
+        new_cfg.frequency_hz,
+        new_cfg.sf,
+        new_cfg.bw,
+        new_cfg.cr,
+        new_cfg.tx_power_dbm,
+        new_cfg.preamble_len,
+    )
+    .await
     {
         Ok(programmed) => {
             // The mute first, so the line below states the lease this config
@@ -1756,11 +1744,8 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
     let config_rx = LORA_CONFIG.receiver();
 
     // Init radio
-    radio.reset().await;
-    let _ = radio.wait_busy().await;
-
-    match radio.init_radio(config.frequency_hz).await {
-        Ok(s) => crate::log::log_fmt("[LORA] ", format_args!("init ok, status=0x{:02X}", s.raw)),
+    match crate::radio::bring_up(&mut radio, config.frequency_hz).await {
+        Ok(ready) => crate::log::log_fmt("[LORA] ", format_args!("init ok, {}", ready)),
         Err(e) => {
             crate::log::log_fmt("[LORA] ", format_args!("init FAILED: {:?}", e));
             return; // Can't continue without radio
@@ -1776,16 +1761,16 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
     // runtime path cannot come to disagree about what a config means.
     let mut mute_lease = leviculum_mute_lease::MuteLease::new();
 
-    match radio
-        .configure_lora(
-            config.frequency_hz,
-            config.sf,
-            config.bw,
-            config.cr,
-            config.tx_power_dbm,
-            config.preamble_len,
-        )
-        .await
+    match crate::radio::configure_lora(
+        &mut radio,
+        config.frequency_hz,
+        config.sf,
+        config.bw,
+        config.cr,
+        config.tx_power_dbm,
+        config.preamble_len,
+    )
+    .await
     {
         Ok(programmed) => {
             let now_ms = embassy_time::Instant::now().as_millis();

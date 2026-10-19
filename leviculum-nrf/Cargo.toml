@@ -178,6 +178,11 @@ leviculum-persist-ack = { path = "persist-ack" }
 # status-register protection rule and the verdict, host-tested. Optional,
 # and only the `qspi-selftest` feature below pulls it; see there for why.
 leviculum-qspi-selftest = { path = "qspi-selftest", optional = true }
+# The LR11xx transceiver driver (PR #451), for the one board that carries an
+# LR1110 instead of an SX1262. Its own workspace beside this one
+# (`leviculum-lr11xx/Cargo.toml`), pulled by path; optional, and only
+# `radio-lr11xx` below pulls it, so no SX1262 image links a byte of it.
+leviculum-lr11xx = { path = "../leviculum-lr11xx", optional = true }
 
 # Embassy async runtime
 embassy-executor = { version = "0.9", features = ["arch-cortex-m", "executor-thread"] }
@@ -346,7 +351,7 @@ softdevice = [
 
 # Per-board BSPs: same SoftDevice stack, board-specific peripherals
 # layered on top. Mutex enforced via compile_error! in lib.rs.
-bsp-rak4631 = ["softdevice"]
+bsp-rak4631 = ["softdevice", "radio-sx1262"]
 # bsp-t114 pulls the ST7789 status display unconditionally: the panel is
 # write-only (MISO not connected), presence detection is physically
 # impossible, and both references (Meshtastic, RNode firmware) drive it
@@ -362,7 +367,7 @@ bsp-rak4631 = ["softdevice"]
 # panel and the L76K: the 100/490 divider and its enable pin are on every
 # T114, not on an optional baseboard, so one UF2 serves every board and a
 # board whose reading is implausible says so at runtime (#380).
-bsp-t114 = ["softdevice", "dep:leviculum-screen", "gnss", "battery"]
+bsp-t114 = ["softdevice", "radio-sx1262", "dep:leviculum-screen", "gnss", "battery"]
 # SenseCAP Solar Node P1-Pro (#233): XIAO nRF52840 Plus + Wio-SX1262 +
 # XIAO L76K on a carrier board. No display, so no `leviculum-screen`.
 #
@@ -383,7 +388,18 @@ bsp-t114 = ["softdevice", "dep:leviculum-screen", "gnss", "battery"]
 # probe, so `leviculum-gnss-init` needs no board-specific branch — the two
 # differences are pins and the absent PPS line, and both live in the
 # `GnssWiring` value in `bin/solarnode.rs`.
-bsp-solarnode = ["softdevice", "battery", "gnss"]
+bsp-solarnode = ["softdevice", "radio-sx1262", "battery", "gnss"]
+
+# Which LoRa transceiver driver `src/radio.rs` links: exactly one, pulled by
+# the BSP and never named on a command line. Every board but one carries an
+# SX1262 (`src/sx1262.rs`); `radio-lr11xx` is the LR11xx driver. They are
+# features rather than a `cfg` on the BSP names so the binaries can be bound
+# to their part with `required-features`: a binary is compiled under every
+# BSP whose radio it links (the cross-lint the clippy lines in `lint-nrf`
+# rely on) and under no other, because its `lora::init` call hands over the
+# part's own `radio::FrontEnd`.
+radio-sx1262 = []
+radio-lr11xx = ["dep:leviculum-lr11xx"]
 
 display = ["dep:ssd1306", "dep:embedded-graphics", "dep:leviculum-screen"]
 gnss = [
@@ -426,14 +442,17 @@ debug = true         # emit DWARF in the first place; required even
 [[bin]]
 name = "t114"
 path = "src/bin/t114.rs"
+required-features = ["radio-sx1262"]
 
 [[bin]]
 name = "rak4631"
 path = "src/bin/rak4631.rs"
+required-features = ["radio-sx1262"]
 
 [[bin]]
 name = "solarnode"
 path = "src/bin/solarnode.rs"
+required-features = ["radio-sx1262"]
 
 # Measurement instrument, not firmware: prints the S140's required app
 # RAM base for a series of BLE configs (#255 T2 central-role design).

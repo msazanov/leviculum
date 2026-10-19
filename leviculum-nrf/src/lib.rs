@@ -42,6 +42,11 @@ compile_error!(
 )))]
 compile_error!("must enable exactly one of `bsp-rak4631`, `bsp-t114` or `bsp-solarnode`");
 
+// The radio driver follows from the BSP; a build that names both, or a
+// BSP that names neither, is a Cargo.toml mistake.
+#[cfg(all(feature = "radio-sx1262", feature = "radio-lr11xx"))]
+compile_error!("`radio-sx1262` and `radio-lr11xx` are mutually exclusive — the BSP picks one");
+
 pub mod announce;
 pub mod ble;
 pub mod boards;
@@ -73,6 +78,9 @@ pub mod name;
 #[cfg(feature = "softdevice")]
 pub mod pn;
 pub mod qspi;
+// The LoRa transceiver driver this build links, behind one set of names
+// for `lora`. Documented inside, where its links resolve.
+pub mod radio;
 pub mod radio_store;
 /// The board's message store (#384): the record log mounted on the flash
 /// region `memory.x` reserves behind the image. Nothing is stored in it yet —

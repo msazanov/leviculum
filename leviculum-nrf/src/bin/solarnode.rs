@@ -424,14 +424,16 @@ async fn main(spawner: Spawner) {
         p.P0_28.into(), // RESET
         p.P0_29.into(), // BUSY
         p.P0_03.into(), // DIO1
-        // The line the other two boards do not have: DIO2 steers the
-        // transmit side of the Wio-SX1262's switch, the host steers the
-        // receive side. The driver asserts it for a listening window and
-        // releases it before every key-up (`sx1262.rs`); nothing above the
-        // interface knows it exists.
-        Some(p.P0_05.into()), // RXEN
         spim::Frequency::M4,
-        solarnode::CONFIG.lora_tcxo_voltage_reg,
+        leviculum_nrf::radio::FrontEnd {
+            tcxo_voltage_reg: solarnode::CONFIG.lora_tcxo_voltage_reg,
+            // The line the other two boards do not have: DIO2 steers the
+            // transmit side of the Wio-SX1262's switch, the host steers the
+            // receive side. The driver asserts it for a listening window and
+            // releases it before every key-up (`sx1262.rs`); nothing above the
+            // interface knows it exists.
+            rx_enable: Some(p.P0_05.into()),
+        },
     )
     .await;
     info!("SX1262 ready");

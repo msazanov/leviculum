@@ -357,11 +357,13 @@ async fn main(spawner: Spawner) {
         p.P0_25.into(),
         p.P0_17.into(),
         p.P0_20.into(),
-        // No host-driven RX enable: DIO2 owns the whole antenna switch on
-        // this board (`boards/t114.rs`).
-        None,
         spim::Frequency::M4,
-        t114::CONFIG.lora_tcxo_voltage_reg,
+        leviculum_nrf::radio::FrontEnd {
+            tcxo_voltage_reg: t114::CONFIG.lora_tcxo_voltage_reg,
+            // No host-driven RX enable: DIO2 owns the whole antenna switch on
+            // this board (`boards/t114.rs`).
+            rx_enable: None,
+        },
     )
     .await;
     info!("SX1262 ready");
