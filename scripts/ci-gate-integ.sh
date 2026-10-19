@@ -80,6 +80,15 @@ EXCLUDED_TESTS="$(printf '%s\n' "$UNMET" | awk -F'\t' '$2 != "-" { print $1 " " 
 
 say() { echo "[ci-gate-integ] $*" >&2; }
 
+# Is the line $1 in the text $2? A here-string and never `printf | grep -q`:
+# under `pipefail` that pipeline is RED whenever grep matches and exits before
+# printf has finished writing, because printf then dies of SIGPIPE (141) and
+# pipefail reports it. On a loaded runner that happens: forge pipeline 536 went
+# red on f78ce9a6 claiming target mvr "no longer has" a test that 537 found in
+# the same listing an hour later (#843). Measured on the coder host under
+# twenty busy loops: the pipe form 3 red of 10500 checks, this form 0.
+has_line() { grep -qxF -- "$1" <<<"$2"; }
+
 die() {
     echo "" >&2
     echo "ci-gate-integ: FAILED — $*" >&2
@@ -104,7 +113,7 @@ EXCLUDED_LIST="$(printf '%s\n' "$EXCLUDED" | sed '/^[[:space:]]*$/d')"
 # a target that no longer exists means the reason is describing nothing.
 while read -r entry; do
     [ -n "$entry" ] || continue
-    printf '%s\n' "$ALL" | grep -qxF "$entry" ||
+    has_line "$entry" "$ALL" ||
         die "scripts/integ-prerequisites.txt names '$entry', which is not a test target in this tree.
 Either the target was renamed or removed — drop the line — or the path is
 wrong, in which case a suite everyone believes is excluded is being run."
@@ -155,25 +164,115 @@ fi
 # exact name in that target's own listing. Same two directions as EXCLUDED: a
 # line naming nothing is a reason describing nothing, and a skip that silently
 # stopped matching puts the test back on a gate that cannot run it.
+#
+# A missing name is a red gate, so the listing that made it red is evidence
+# and is kept: the failure names its line count, first and last lines and
+# cargo's stderr, and writes the whole capture under the manifest directory
+# (#195). Before calling a name gone, the target is listed ONCE more: a binary
+# that lists itself twice with different results is its own finding, and the
+# gate stops on it rather than trusting either listing.
+LISTING_DIR="$(mktemp -d)"
+trap 'rm -rf "$LISTING_DIR"' EXIT
+
+# list_target NAME N: listing N of target NAME into $LISTING_DIR/NAME.N.{out,err}.
+# Same `--workspace` as the run below, so the listing compiles what the run
+# reuses rather than a second feature resolution.
+list_target() {
+    cargo test --workspace --test "$1" -- --list \
+        >"$LISTING_DIR/$1.$2.out" 2>"$LISTING_DIR/$1.$2.err"
+}
+
+# The number of tests a listing names (libtest's `<name>: test` lines).
+listed_tests() { grep -c ': test$' "$1"; }
+
+# A floor under which a listing is called truncated rather than believed: the
+# test attributes in the target's sources, less a tenth for the cfg-gated and
+# the macro-generated ones the grep cannot see either way.
+test_floor() {
+    local pkg="${1%/*}" name="${1##*/}" attrs
+    attrs="$(grep -rhcE '^[[:space:]]*#\[(tokio::)?test\b' \
+        "$pkg/tests/$name" "$pkg/tests/$name.rs" 2>/dev/null | awk '{ n += $1 } END { print n + 0 }')"
+    echo $(( ${attrs:-0} * 9 / 10 ))
+}
+
+# Copy every capture of NAME to a directory the run leaves behind, and say it.
+keep_listings() {
+    local name="$1" dest
+    dest="$(python3 - <<'PY' 2>/dev/null
+import importlib.util
+spec = importlib.util.spec_from_file_location("rwm", "scripts/run-with-manifest.py")
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+print(mod.manifest_dir())
+PY
+)"
+    dest="${dest:-${XDG_STATE_HOME:-$HOME/.local/state}/leviculum-ci}/ci-gate-integ-listing-$name-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+    if mkdir -p "$dest" && cp "$LISTING_DIR/$name".* "$dest"/; then
+        echo "$dest"
+    else
+        echo "(could not write $dest)"
+    fi
+}
+
+# describe_listing NAME N TARGET: the facts of one capture, for a die message.
+describe_listing() {
+    local out="$LISTING_DIR/$1.$2.out" err="$LISTING_DIR/$1.$2.err"
+    echo "listing $2: $(wc -l <"$out") lines, $(listed_tests "$out") tests, floor $(test_floor "$3")"
+    echo "  first line: $(head -n 1 "$out")"
+    echo "  last line:  $(tail -n 1 "$out")"
+    if [ -s "$err" ]; then
+        echo "  cargo stderr:"
+        sed 's/^/    /' "$err"
+    fi
+}
+
 SKIP_ARGS=()
 declare -A LISTING=()
 while read -r target test; do
     [ -n "$target" ] || continue
-    printf '%s\n' "$SELECTED" | grep -qxF "$target" ||
+    has_line "$target" "$SELECTED" ||
         die "scripts/integ-prerequisites.txt names '$test' in '$target', which is not a selected
 test target in this tree. Fix the target path, or drop the line if the
 target itself went onto EXCLUDED."
     name="${target##*/}"
     if [ -z "${LISTING[$name]+set}" ]; then
         say "listing target $name to check its excluded tests"
-        # Same `--workspace` as the run below, so the listing compiles what
-        # the run reuses rather than a second feature resolution.
-        LISTING[$name]="$(cargo test --workspace --test "$name" -- --list)" ||
-            die "could not list the tests of target '$name'."
+        list_target "$name" 1 ||
+            die "could not list the tests of target '$name' (cargo exited $?).
+$(describe_listing "$name" 1 "$target")
+Kept: $(keep_listings "$name")"
+        LISTING[$name]="$(cat "$LISTING_DIR/$name.1.out")"
     fi
-    printf '%s\n' "${LISTING[$name]}" | grep -qxF "$test: test" ||
-        die "scripts/integ-prerequisites.txt names '$test', which target '$name' no longer has.
+    # Every branch of a miss ends in die, so a target is relisted at most once.
+    if ! has_line "$test: test" "${LISTING[$name]}"; then
+        say "target $name does not list '$test'; listing it once more before believing that"
+        list_target "$name" 2
+        relist_rc=$?
+        if [ "$relist_rc" -eq 0 ] && has_line "$test: test" "$(cat "$LISTING_DIR/$name.2.out")"; then
+            die "the test binary of target '$name' listed itself twice with different results:
+the first listing lacks '$test', the second has it.
+$(describe_listing "$name" 1 "$target")
+$(describe_listing "$name" 2 "$target")
+diff of listing 1 against listing 2:
+$(diff "$LISTING_DIR/$name.1.out" "$LISTING_DIR/$name.2.out" | sed 's/^/  /')
+Kept: $(keep_listings "$name")"
+        fi
+        floor="$(test_floor "$target")"
+        count="$(listed_tests "$LISTING_DIR/$name.1.out")"
+        if [ "$count" -lt "$floor" ]; then
+            verdict="the listing of target '$name' is truncated: it names $count tests where the
+tree's test attributes put the floor at $floor, so its lack of '$test'
+says nothing about the test. The second listing (exit $relist_rc) lacks it too."
+        else
+            verdict="scripts/integ-prerequisites.txt names '$test', which target '$name' no longer has
+(two listings agree; the second exited $relist_rc).
 It was renamed or removed: follow the rename, or drop the line."
+        fi
+        die "$verdict
+$(describe_listing "$name" 1 "$target")
+$(describe_listing "$name" 2 "$target")
+Kept: $(keep_listings "$name")"
+    fi
     say "excluded test: $target $test (a prerequisite is absent, scripts/integ-prerequisites.txt)"
     SKIP_ARGS+=(--skip "$test")
 done <<EOF

@@ -104,11 +104,15 @@ $(printf '%s\n' "$SELECTED" | sed 's|.*/||' | sort -u)
 EOF
 
 # Single tests whose prerequisite is absent, inside a target this run selects.
-# `--exact` below makes each `--skip` a whole test name.
+# `--exact` below makes each `--skip` a whole test name. The membership test
+# reads a here-string, not `printf | grep -q`: under `pipefail` that pipeline
+# goes red when grep exits on its match before printf is done writing (SIGPIPE,
+# #843), and here the `|| continue` would then drop the skip in silence and
+# run a test whose prerequisite is absent.
 SKIP_ARGS=()
 while IFS=$'\t' read -r target test path; do
     { [ -n "$target" ] && [ "$test" != "-" ]; } || continue
-    printf '%s\n' "$SELECTED" | grep -qxF "$target" || continue
+    grep -qxF -- "$target" <<<"$SELECTED" || continue
     say "skipped test: $target $test ($path absent, $INTEG_PREREQUISITES)"
     SKIP_ARGS+=(--skip "$test")
 done <<EOF
