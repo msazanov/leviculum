@@ -176,9 +176,9 @@ drive them, and being liftable is the same property as being portable:
   family writes a third implementation; it does not fork the crate.
 - `channel-access` touches no radio at all. The caller reports what its
   own channel-activity detection said — `cad_clear`
-  (`leviculum-nrf/channel-access/src/lib.rs:566`), `cad_busy`
-  (`leviculum-nrf/channel-access/src/lib.rs:576`), `cad_error`
-  (`leviculum-nrf/channel-access/src/lib.rs:612`) — and the jitter slot is
+  (`leviculum-nrf/channel-access/src/lib.rs:716`), `cad_busy`
+  (`leviculum-nrf/channel-access/src/lib.rs:726`), `cad_error`
+  (`leviculum-nrf/channel-access/src/lib.rs:764`) — and the jitter slot is
   derived from bandwidth, spreading factor and coding rate
   (`jitter_slot_ms`, `leviculum-nrf/channel-access/src/lib.rs:228`), which
   are properties of the modulation rather than of the part. Only the

@@ -239,6 +239,11 @@ pub fn jitter_slot_ms(bw_hz: u32, sf: u8, cr_denom: u8) -> u64 {
 /// latest it can finish a frame. The draw is uniform over the window, so
 /// this is a ceiling reached once per `JITTER_CW_SLOTS` acquisitions and
 /// not a typical wait; the mean is DIFS plus half the window.
+///
+/// It is a wait over QUIET medium: a frame the node receives during it
+/// pauses it rather than serving it ([`Listened`], #438), so in wall-clock
+/// the key-up comes this long after the release plus the airtime of every
+/// frame heard in between.
 pub fn widest_acquisition_wait_ms(bw_hz: u32, sf: u8, cr_denom: u8) -> u64 {
     (JITTER_DIFS_SLOTS + JITTER_CW_SLOTS as u64 - 1) * jitter_slot_ms(bw_hz, sf, cr_denom)
 }
@@ -290,6 +295,19 @@ pub const POST_TX_WINDOW_MAX_MS: u64 = 10_000;
 /// coverage is now structural — the term the window must cover is a
 /// summand of the window — instead of an accident of how much airtime the
 /// modulation happens to charge.
+///
+/// **A reception pauses the peer's wait (#438)**, so the peer keys up later
+/// in wall-clock than the turnaround by the airtime of every frame it hears
+/// in between. Not widened for it, because a frame this node hears as well
+/// ends this window first (the window returns on a reception), and so cannot
+/// carry the peer past it. What can is a frame only the peer hears, a hidden
+/// third sender, by that frame's airtime; before #438 the same frame released
+/// the peer at its end, which lay just as far past. One more reply airtime
+/// would cover one such frame and not two, and would be paid on every yield
+/// into a silent channel (at SF8/125 kHz 728 ms on top of the 1188 ms window). A
+/// peer that keys after the window is not talked over either: what follows
+/// the window is the idle receive or the next acquisition's own
+/// listened-through wait, and both hear it.
 pub fn post_tx_rx_window_ms(
     reply_airtime_ms: u64,
     host_margin_ms: u64,
@@ -316,6 +334,83 @@ pub const LISTEN_WINDOW_MAX_MS: u64 = 10_000;
 /// and to at most [`LISTEN_WINDOW_MAX_MS`].
 pub fn listen_window_ms(wait_ms: u64) -> u32 {
     wait_ms.clamp(1, LISTEN_WINDOW_MAX_MS) as u32
+}
+
+/// How a listening wait inside the channel access ended, as far as the
+/// booking of it cares: whether the radio decoded a frame header in it, and
+/// if so how long that frame was on the air.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowEnd {
+    /// No header decoded: the window ran out, the software wait expired on a
+    /// preamble that never became a frame, the radio errored, or the window
+    /// was stood down for a radio config. Whatever of it was spent on a
+    /// carrier is the overrun past the budget.
+    NoFrame,
+    /// A frame whose header decoded, delivered or failed on its payload CRC,
+    /// and its on-air time at the live modulation.
+    Frame { airtime_ms: u64 },
+}
+
+/// One listening wait as the transmit path lived it: the wall-clock it
+/// took, the window it was armed with, and how it ended.
+///
+/// The reference counts its contention wait only over a free medium: a busy
+/// channel restarts DIFS and pauses the contention window
+/// (`reference/RNode_Firmware/RNode_Firmware.ino:1631-1646`). A wait here is
+/// spent in a receive window that returns when a frame completes, so the
+/// wall-clock of a window a reception ended is quiet time plus that
+/// reception, and only the quiet part has de-tiled anything (#438). Two
+/// measures of the reception, one per outcome:
+///
+/// * **A decoded frame** ([`WindowEnd::Frame`], `rx_success` and a payload
+///   CRC failure): its airtime. The timer stops on preamble detect
+///   (`SET_STOP_RX_TIMER_ON_PREAMBLE`) and the window then runs to the frame
+///   end, so the frame's whole airtime sits inside the wall-clock whether it
+///   ended inside the budget or past it; the overrun alone would book a frame
+///   that ended inside the budget as quiet. Capped at the elapsed, for a
+///   frame that was already on the air when the window opened. The CRC
+///   failure counts here too, because its length came out of a header that
+///   passed its own CRC.
+/// * **No decoded frame** ([`WindowEnd::NoFrame`], `rx_timeout`, a carrier
+///   held past the budget by the preamble stop, an error): the overrun past
+///   the budget. There is no length to price, and a window that ran its
+///   course in quiet overruns by the arming turnaround only, which the debt
+///   it was armed against cannot go below anyway.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Listened {
+    /// Wall-clock from arming the window to its return.
+    pub elapsed_ms: u64,
+    /// The window it was armed with.
+    pub budget_ms: u64,
+    pub end: WindowEnd,
+}
+
+impl Listened {
+    /// A wait served in full on a quiet medium: a sleep nothing cuts short.
+    pub const fn quiet(ms: u64) -> Self {
+        Self {
+            elapsed_ms: ms,
+            budget_ms: ms,
+            end: WindowEnd::NoFrame,
+        }
+    }
+
+    /// The part of the wait a reception took ([`Listened`] says which
+    /// measure per outcome).
+    pub fn rx_ms(&self) -> u64 {
+        match self.end {
+            WindowEnd::NoFrame => self.elapsed_ms.saturating_sub(self.budget_ms),
+            WindowEnd::Frame { airtime_ms } => airtime_ms.min(self.elapsed_ms),
+        }
+    }
+
+    /// The part of the wait the medium was free, which is what a contention
+    /// wait is counted in. At least 1 ms, so a radio that returns at once,
+    /// or a channel that is never quiet, still drains the debt and the
+    /// transmit path cannot spin on a wait forever.
+    pub fn quiet_ms(&self) -> u64 {
+        self.elapsed_ms.saturating_sub(self.rx_ms()).max(1)
+    }
 }
 
 /// What the SX1262's channel-activity detection reported for one probe.
@@ -392,8 +487,12 @@ pub struct ChannelAccess {
     subslot: bool,
     drawn_slots: u64,
     drawn_offset_ms: u64,
+    last_quiet_ms: u64,
+    last_rx_ms: u64,
     attempt: u8,
     cw: u8,
+    backoff_remaining_ms: u64,
+    backoff_cut: bool,
 }
 
 /// xorshift32 step. The all-zero state is a fixed point, which is why the
@@ -427,8 +526,12 @@ impl ChannelAccess {
             subslot: false,
             drawn_slots: 0,
             drawn_offset_ms: 0,
+            last_quiet_ms: 0,
+            last_rx_ms: 0,
             attempt: 0,
             cw: CAD_CW_INITIAL,
+            backoff_remaining_ms: 0,
+            backoff_cut: false,
         }
     }
 
@@ -490,14 +593,17 @@ impl ChannelAccess {
     pub fn channel_released(&mut self) {
         self.jitter_owed = true;
         self.jitter_remaining_ms = 0;
+        self.backoff_remaining_ms = 0;
     }
 
     /// A new packet starts contending: reset the retry gate. Does not
     /// touch the owed jitter — a burst continuation is a new packet but
-    /// not a new acquisition.
+    /// not a new acquisition. A backoff the previous packet left unserved
+    /// is that packet's, and goes with it.
     pub fn begin_packet(&mut self) {
         self.attempt = 0;
         self.cw = CAD_CW_INITIAL;
+        self.backoff_remaining_ms = 0;
     }
 
     /// The randomised pre-TX wait this acquisition still owes, in ms: on
@@ -541,12 +647,56 @@ impl ChannelAccess {
         self.jitter_remaining_ms
     }
 
-    /// Report how long the caller actually listened through the wait
-    /// [`Self::acquisition_jitter_ms`] last handed it. Wall-clock elapsed
-    /// is the right figure and may overshoot the window; the debt
-    /// saturates at zero.
-    pub fn jitter_spent(&mut self, ms: u64) {
-        self.jitter_remaining_ms = self.jitter_remaining_ms.saturating_sub(ms);
+    /// Report the window the caller listened through for the wait
+    /// [`Self::acquisition_jitter_ms`] last handed it. Only its quiet part
+    /// is booked ([`Listened::quiet_ms`]): a reception that ended the window
+    /// pauses the wait, it does not serve it, so two draws cut by the same
+    /// frame keep the stagger they drew. The debt saturates at zero.
+    pub fn jitter_spent(&mut self, window: Listened) {
+        let quiet = self.book(window);
+        self.jitter_remaining_ms = self.jitter_remaining_ms.saturating_sub(quiet);
+    }
+
+    /// Record a window for the log line that resumes it, and return its
+    /// quiet part.
+    fn book(&mut self, window: Listened) -> u64 {
+        self.last_quiet_ms = window.quiet_ms();
+        self.last_rx_ms = window.rx_ms();
+        self.last_quiet_ms
+    }
+
+    /// The quiet part of the last window booked, for the resume lines.
+    pub const fn last_quiet_ms(&self) -> u64 {
+        self.last_quiet_ms
+    }
+
+    /// The reception part of the last window booked, for the resume lines.
+    pub const fn last_rx_ms(&self) -> u64 {
+        self.last_rx_ms
+    }
+
+    /// The CAD backoff this packet still owes before it probes again, in
+    /// ms: the slots of the last [`Verdict::Backoff`] in the CSMA slot, less
+    /// what [`Self::backoff_spent`] booked of it. A backoff is a wait like
+    /// the acquisition's and is counted the same way, over quiet medium
+    /// only, so a backed-off node does not re-probe at the end of the frame
+    /// that cut its window, alongside everyone else that frame released.
+    pub const fn backoff_owed_ms(&self) -> u64 {
+        self.backoff_remaining_ms
+    }
+
+    /// Report the window the caller listened through for the backoff
+    /// [`Self::backoff_owed_ms`] handed it; as [`Self::jitter_spent`].
+    pub fn backoff_spent(&mut self, window: Listened) {
+        let quiet = self.book(window);
+        self.backoff_remaining_ms = self.backoff_remaining_ms.saturating_sub(quiet);
+        self.backoff_cut = true;
+    }
+
+    /// Whether the backoff [`Self::backoff_owed_ms`] hands out is what a
+    /// window left of it rather than a fresh one, for the resume line.
+    pub const fn backoff_was_cut(&self) -> bool {
+        self.backoff_cut
     }
 
     /// Whether the last [`Self::acquisition_jitter_ms`] was a fresh draw
@@ -583,6 +733,8 @@ impl ChannelAccess {
         }
         let slots = (xorshift32(&mut self.rng) as u64) % (self.cw as u64);
         self.cw = core::cmp::min(self.cw.saturating_mul(2), CAD_CW_MAX);
+        self.backoff_remaining_ms = slots.saturating_mul(self.jitter_slot_ms);
+        self.backoff_cut = false;
         Verdict::Backoff { slots }
     }
 
@@ -875,7 +1027,7 @@ mod tests {
         assert!(drawn > 0);
         // The transmit path listens the wait through; only then does it
         // probe the channel and key up.
-        access.jitter_spent(drawn);
+        access.jitter_spent(Listened::quiet(drawn));
         assert_eq!(access.acquisition_jitter_ms(), 0);
         // Burst continuation: more packets, same acquisition, no new wait.
         access.begin_packet();
@@ -913,13 +1065,159 @@ mod tests {
         // Part-served: the remainder is what is still owed, and it is a
         // resume, not a second draw.
         let served = drawn / 3;
-        access.jitter_spent(served);
+        access.jitter_spent(Listened::quiet(served));
         assert_eq!(access.acquisition_jitter_ms(), drawn - served);
         assert!(!access.jitter_was_drawn(), "the resume redrew the window");
 
         // Listened through: only now may the acquisition probe the channel.
-        access.jitter_spent(drawn - served);
+        access.jitter_spent(Listened::quiet(drawn - served));
         assert_eq!(access.acquisition_jitter_ms(), 0);
+    }
+
+    /// A seed whose first draw on the bench PHY of #438's kills (SF7, 250
+    /// kHz, 24 ms slot) takes `slots` contention slots in band 1.
+    fn seed_drawing(slots: u64) -> u32 {
+        (1..10_000u32)
+            .find(|&seed| {
+                let mut access = ChannelAccess::new(seed);
+                access.set_phy(250_000, 7, 5);
+                access.acquisition_jitter_ms();
+                access.drawn_slots() == slots
+            })
+            .unwrap_or_else(|| panic!("no seed below 10000 draws {slots} slots"))
+    }
+
+    #[test]
+    fn a_reception_that_ends_the_wait_pays_none_of_it() {
+        // 844's mechanism (#438): the wait is one receive window, the window
+        // returns when a foreign frame completes, and the whole elapsed was
+        // booked as served. A draw cut after `quiet` ms by a frame of
+        // `airtime` ms has listened `quiet` ms through and owes the rest.
+        let mut access = ChannelAccess::new(seed_drawing(4));
+        access.set_phy(250_000, 7, 5);
+        let drawn = access.acquisition_jitter_ms();
+        assert_eq!(drawn, (JITTER_DIFS_SLOTS + 4) * 24);
+        let (quiet, airtime) = (30, 400);
+        access.jitter_spent(Listened {
+            elapsed_ms: quiet + airtime,
+            budget_ms: drawn,
+            end: WindowEnd::Frame {
+                airtime_ms: airtime,
+            },
+        });
+        assert_eq!(
+            access.acquisition_jitter_ms(),
+            drawn - quiet,
+            "the reception was booked as listened through"
+        );
+        assert!(!access.jitter_was_drawn(), "the cut redrew the window");
+        assert_eq!((access.last_quiet_ms(), access.last_rx_ms()), (30, 400));
+    }
+
+    #[test]
+    fn two_draws_cut_by_one_frame_keep_their_stagger() {
+        // The kill shape itself: draws of 4 and 13 slots both saturated
+        // during the same foreign frame, both boards left the wait at that
+        // frame end and keyed within a millisecond. Counted over quiet medium
+        // only, the frame pauses both waits and the 9 slots between them
+        // survive it.
+        let mut short = ChannelAccess::new(seed_drawing(4));
+        let mut long = ChannelAccess::new(seed_drawing(13));
+        let mut owed = [0u64; 2];
+        for (access, owed) in [&mut short, &mut long].into_iter().zip(owed.iter_mut()) {
+            access.set_phy(250_000, 7, 5);
+            let drawn = access.acquisition_jitter_ms();
+            // The frame begins 20 ms into both windows and lasts 400 ms,
+            // longer than either draw.
+            access.jitter_spent(Listened {
+                elapsed_ms: 20 + 400,
+                budget_ms: drawn,
+                end: WindowEnd::Frame { airtime_ms: 400 },
+            });
+            *owed = access.acquisition_jitter_ms();
+        }
+        assert_eq!(
+            owed[1] - owed[0],
+            9 * 24,
+            "one frame collapsed the stagger: owed {owed:?}"
+        );
+    }
+
+    #[test]
+    fn a_window_that_ran_out_books_its_budget_whatever_the_overrun() {
+        // A timed-out window overruns its budget by the arming turnaround,
+        // and a preamble that never became a frame by the stop-on-preamble
+        // hold: neither may leave a few-ms resume behind, and neither may
+        // be booked as quiet past the budget.
+        let mut access = ChannelAccess::new(seed_drawing(4));
+        access.set_phy(250_000, 7, 5);
+        let drawn = access.acquisition_jitter_ms();
+        access.jitter_spent(Listened {
+            elapsed_ms: drawn + 3,
+            budget_ms: drawn,
+            end: WindowEnd::NoFrame,
+        });
+        assert_eq!(access.acquisition_jitter_ms(), 0);
+
+        let carrier = Listened {
+            elapsed_ms: 100 + 500,
+            budget_ms: 100,
+            end: WindowEnd::NoFrame,
+        };
+        assert_eq!((carrier.quiet_ms(), carrier.rx_ms()), (100, 500));
+    }
+
+    #[test]
+    fn a_window_that_heard_nothing_but_a_frame_still_drains_a_millisecond() {
+        // A frame already on the air when the window opened leaves no quiet
+        // at all; the floor keeps the transmit path from spinning on a
+        // channel that never falls silent.
+        let window = Listened {
+            elapsed_ms: 150,
+            budget_ms: 300,
+            end: WindowEnd::Frame { airtime_ms: 400 },
+        };
+        assert_eq!((window.quiet_ms(), window.rx_ms()), (1, 150));
+    }
+
+    #[test]
+    fn a_backoff_cut_by_a_reception_is_still_owed() {
+        // `Verdict::Backoff` used to listen its window and go straight back
+        // to CAD whatever ended it, so a backed-off node re-probed at the end
+        // of the frame that cut it short, with everyone else that frame
+        // released.
+        let mut access = bench_access(0x5EED_0845);
+        let slots = loop {
+            match access.cad(CadOutcome::Busy) {
+                Verdict::Backoff { slots } if slots >= 2 => break slots,
+                Verdict::Backoff { .. } => {}
+                other => panic!("expected a backoff, got {other:?}"),
+            }
+        };
+        let window = slots * 24;
+        assert_eq!(access.backoff_owed_ms(), window);
+        assert!(
+            !access.backoff_was_cut(),
+            "a fresh backoff reads as a resume"
+        );
+        access.backoff_spent(Listened {
+            elapsed_ms: 10 + 200,
+            budget_ms: window,
+            end: WindowEnd::Frame { airtime_ms: 200 },
+        });
+        assert_eq!(
+            access.backoff_owed_ms(),
+            window - 10,
+            "the reception was booked as backoff served"
+        );
+        assert!(access.backoff_was_cut());
+        access.backoff_spent(Listened::quiet(window - 10));
+        assert_eq!(access.backoff_owed_ms(), 0);
+
+        // A remainder belongs to its packet: the next one starts owing none.
+        access.cad(CadOutcome::Busy);
+        access.begin_packet();
+        assert_eq!(access.backoff_owed_ms(), 0);
     }
 
     #[test]
@@ -930,7 +1228,7 @@ mod tests {
         let mut access = ChannelAccess::new(0x5EED_0002);
         access.set_phy(250_000, 7, 5);
         let drawn = access.acquisition_jitter_ms();
-        access.jitter_spent(drawn + 10_000);
+        access.jitter_spent(Listened::quiet(drawn + 10_000));
         assert_eq!(access.acquisition_jitter_ms(), 0);
     }
 
@@ -941,7 +1239,7 @@ mod tests {
         let mut access = ChannelAccess::new(0x5EED_0003);
         access.set_phy(250_000, 7, 5);
         let drawn = access.acquisition_jitter_ms();
-        access.jitter_spent(drawn / 2);
+        access.jitter_spent(Listened::quiet(drawn / 2));
         access.channel_released();
         let redrawn = access.acquisition_jitter_ms();
         assert!(access.jitter_was_drawn(), "a release did not redraw");
@@ -1398,7 +1696,7 @@ mod tests {
         access.set_airtime_short(9_000);
         let drawn = access.acquisition_jitter_ms();
         access.set_airtime_short(0);
-        access.jitter_spent(1);
+        access.jitter_spent(Listened::quiet(1));
         assert_eq!(access.acquisition_jitter_ms(), drawn - 1);
         assert!(!access.jitter_was_drawn());
         assert_eq!(access.drawn_band(), 4);

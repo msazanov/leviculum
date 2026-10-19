@@ -906,7 +906,7 @@ fn arm_owed_jitter_ms(
             // Report the draw as served at once: the debt has to be
             // discharged by somebody, or the next acquisition inherits a
             // wait this arm decided not to serve.
-            access.jitter_spent(drawn);
+            access.jitter_spent(leviculum_channel_access::Listened::quiet(drawn));
             0
         }
         JitterArm::FrameSlot | JitterArm::FrameSlotShort => {
@@ -3021,7 +3021,7 @@ where
                 // was served, so the debt is discharged and the rest of this
                 // acquisition's burst is not asked to wait a second time.
                 if jitter_armed_ms > 0 {
-                    access.jitter_spent(jitter_armed_ms);
+                    access.jitter_spent(leviculum_channel_access::Listened::quiet(jitter_armed_ms));
                     jitter_armed_ms = 0;
                 }
                 timer_ready = true;
@@ -6494,7 +6494,7 @@ mod tests {
         // nothing to send and hands the channel back. What comes after is a
         // new acquisition, and the policy draws for it again — the oracle
         // walks the same three calls the io task made.
-        oracle.jitter_spent(first_wait);
+        oracle.jitter_spent(leviculum_channel_access::Listened::quiet(first_wait));
         oracle.channel_released();
         let second_wait = oracle.acquisition_jitter_ms();
 

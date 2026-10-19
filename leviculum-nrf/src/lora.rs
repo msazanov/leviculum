@@ -1317,6 +1317,55 @@ impl leviculum_rx_arming::FrameSink for CoreHandoff<'_> {
     }
 }
 
+/// What one [`rx_window`] caught.
+#[derive(Clone, Copy)]
+struct WindowExit {
+    /// A reception was handed up: what the empty-ack counter and the peer
+    /// yield count.
+    received: bool,
+    /// The bytes of a frame whose header decoded in the window, delivered or
+    /// failed on its payload CRC, for pricing its airtime
+    /// ([`leviculum_channel_access::Listened`]).
+    frame_len: Option<u8>,
+}
+
+impl WindowExit {
+    /// No frame: a timeout, an error, a config, or a window not armed.
+    const NOTHING: Self = Self {
+        received: false,
+        frame_len: None,
+    };
+}
+
+/// A listening wait of the channel access as the board lived it: armed with
+/// `budget_ms` at `start`, ended as `exit` says. The frame's airtime is the
+/// one the transmit path charges its own frames with, at the live modulation;
+/// `frame_len` is the raw LoRa payload, split header included, so it is
+/// priced as it stands.
+fn listened(
+    cfg: &RadioConfig,
+    start: embassy_time::Instant,
+    budget_ms: u32,
+    exit: WindowExit,
+) -> leviculum_channel_access::Listened {
+    leviculum_channel_access::Listened {
+        elapsed_ms: start.elapsed().as_millis(),
+        budget_ms: budget_ms as u64,
+        end: match exit.frame_len {
+            Some(len) => leviculum_channel_access::WindowEnd::Frame {
+                airtime_ms: leviculum_core::rnode::airtime_ms_with_preamble(
+                    len as u32,
+                    cfg.bw_hz,
+                    cfg.sf,
+                    cfg.cr_denom,
+                    cfg.preamble_len,
+                ),
+            },
+            None => leviculum_channel_access::WindowEnd::NoFrame,
+        },
+    }
+}
+
 /// Run one RX window — the given timeout at the given site — with the host's
 /// runtime radio config as its second exit. Feeds receptions through the
 /// split reassembler and pushes reassembled payloads to `incoming_tx`.
@@ -1359,6 +1408,10 @@ impl leviculum_rx_arming::FrameSink for CoreHandoff<'_> {
 /// see the config stands down through `disarm_rx_for_tx`, which may wait out
 /// a frame that is measurably mid-air, and every later window of the same
 /// turn returns here without touching the radio.
+///
+/// Returns what the window caught ([`WindowExit`]): the callers count
+/// receptions, and the channel access books the part of a wait a frame
+/// took.
 async fn rx_window(
     radio: &mut Radio,
     rx_buf: &mut [u8; 255],
@@ -1367,7 +1420,7 @@ async fn rx_window(
     incoming_tx: &Sender<'static, CriticalSectionRawMutex, Vec<u8>, 4>,
     rx_timeout_count: &mut u32,
     config_rx: &Receiver<'static, CriticalSectionRawMutex, RadioConfig, 1>,
-) -> bool {
+) -> WindowExit {
     let (timeout_ms, site) = window;
     if leviculum_rx_arming::window_entry(!config_rx.is_empty())
         == leviculum_rx_arming::WindowEntry::StandAside
@@ -1379,7 +1432,7 @@ async fn rx_window(
             "[T114_LORA_LOOP] ",
             format_args!("op=rx_config_pending site={}", site.tag()),
         );
-        return false;
+        return WindowExit::NOTHING;
     }
     let rx_start = embassy_time::Instant::now();
     let mut sink = CoreHandoff {
@@ -1423,7 +1476,7 @@ async fn rx_window(
             // Not a reception: a frame the teardown caught went up through
             // the sink on its own, and what the callers count here is windows
             // that ran their course.
-            return false;
+            return WindowExit::NOTHING;
         }
     };
     match rx_result {
@@ -1438,7 +1491,10 @@ async fn rx_window(
             // A packet was received this window (full delivery, split part, or
             // runt). The caller uses this to reset its consecutive-empty-ack
             // counter: any reception means the peer is being heard.
-            true
+            WindowExit {
+                received: true,
+                frame_len: Some(reception.len),
+            }
         }
         Err(crate::sx1262::Error::Timeout) => {
             *rx_timeout_count = rx_timeout_count.wrapping_add(1);
@@ -1451,7 +1507,7 @@ async fn rx_window(
                 crate::log::log_fmt("[LORA] ", format_args!("RX idle ({})", *rx_timeout_count));
             }
             // Window expired with no reception.
-            false
+            WindowExit::NOTHING
         }
         Err(e) => {
             crate::log::log_fmt("[T114_SX_ERR] ", format_args!("error={:?}", e));
@@ -1470,17 +1526,28 @@ async fn rx_window(
             // line carries what the chip actually reports and nothing shaped
             // to look like more.
             match &e {
-                crate::sx1262::Error::Crc(frame) => crate::log::log_fmt(
-                    "[LORA] ",
-                    format_args!(
-                        "RX err: Crc len={} rssi={} snr={}",
-                        frame.len, frame.rssi, frame.snr
-                    ),
-                ),
-                _ => crate::log::log_fmt("[LORA] ", format_args!("RX err: {:?}", e)),
+                crate::sx1262::Error::Crc(frame) => {
+                    crate::log::log_fmt(
+                        "[LORA] ",
+                        format_args!(
+                            "RX err: Crc len={} rssi={} snr={}",
+                            frame.len, frame.rssi, frame.snr
+                        ),
+                    );
+                    // Not a reception to the callers, but a frame on the air
+                    // all the same: its header passed its own CRC, so the
+                    // length is the one the sender keyed.
+                    WindowExit {
+                        received: false,
+                        frame_len: Some(frame.len),
+                    }
+                }
+                _ => {
+                    crate::log::log_fmt("[LORA] ", format_args!("RX err: {:?}", e));
+                    // Radio error, treat as no reception.
+                    WindowExit::NOTHING
+                }
             }
-            // Radio error, treat as no reception.
-            false
         }
     }
 }
@@ -2001,6 +2068,7 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
                         &config_rx,
                     )
                     .await
+                    .received
                     {
                         consecutive_empty_acks = 0;
                     }
@@ -2042,11 +2110,25 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
             // get listened through is still owed: the frame that cut the
             // window short released every other waiting node at the same
             // instant, so keying up on its heels is precisely the phase
-            // lock the draw exists to break. Hence the elapsed report and
-            // the `continue` back into the remainder, rather than falling
-            // through to CAD. Wall-clock elapsed (floor 1 ms so a radio
-            // erroring out instantly still drains the debt) bounds the
-            // resumes at the drawn window.
+            // lock the draw exists to break. Hence the booking and the
+            // `continue` back into the remainder, rather than falling
+            // through to CAD.
+            //
+            // What is booked is the QUIET part of the window, never its
+            // wall-clock (#438): a window a frame ended is quiet time plus
+            // that frame, and booking both let draws of 4 and 13 slots
+            // saturate on the same foreign frame and key within a
+            // millisecond of each other at its end (844). The reference
+            // counts its wait over free medium only, a busy channel pausing
+            // it (RNode_Firmware.ino:1631-1646). The frame's part is its
+            // airtime when a header decoded (`rx_success`, a payload CRC
+            // failure: the window ran from preamble detect to the frame end
+            // whether or not that end lay past the budget), and the overrun
+            // past the budget when none did (`rx_timeout`, a preamble the
+            // stop-on-preamble held past the budget that never became a
+            // frame, an error); `Listened` is where that is decided and
+            // host-tested. At least 1 ms is booked per window, so the
+            // resumes are bounded even on a channel that never goes quiet.
             //
             // The draw's window widens with our own short-term airtime, the
             // reference's CSMA band (leviculum#637): the duty ledger was
@@ -2054,25 +2136,40 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
             access.set_airtime_short(crate::chtm::with(|l| l.airtime_short_bp()));
             let jitter_ms = access.acquisition_jitter_ms();
             if jitter_ms > 0 {
-                crate::log::log_fmt(
-                    if access.jitter_was_drawn() {
-                        "[LORA_JITTER] "
-                    } else {
-                        "[LORA_JITTER_RESUME] "
-                    },
-                    format_args!(
-                        "wait_ms={} slot_ms={} band={} slot={} offset_ms={}",
-                        jitter_ms,
-                        access.jitter_slot(),
-                        access.drawn_band(),
-                        access.drawn_slots(),
-                        access.drawn_offset_ms()
-                    ),
-                );
+                if access.jitter_was_drawn() {
+                    crate::log::log_fmt(
+                        "[LORA_JITTER] ",
+                        format_args!(
+                            "wait_ms={} slot_ms={} band={} slot={} offset_ms={}",
+                            jitter_ms,
+                            access.jitter_slot(),
+                            access.drawn_band(),
+                            access.drawn_slots(),
+                            access.drawn_offset_ms()
+                        ),
+                    );
+                } else {
+                    // A resume follows the window that cut the wait, so it
+                    // says what that window discharged: its quiet part, and
+                    // the reception it did not count.
+                    crate::log::log_fmt(
+                        "[LORA_JITTER_RESUME] ",
+                        format_args!(
+                            "wait_ms={} slot_ms={} band={} slot={} offset_ms={} quiet_ms={} rx_ms={}",
+                            jitter_ms,
+                            access.jitter_slot(),
+                            access.drawn_band(),
+                            access.drawn_slots(),
+                            access.drawn_offset_ms(),
+                            access.last_quiet_ms(),
+                            access.last_rx_ms()
+                        ),
+                    );
+                }
                 let rx_ms = leviculum_channel_access::listen_window_ms(jitter_ms);
                 reassembler.check_timeout(rx_timeout_count, 10);
                 let jitter_start = embassy_time::Instant::now();
-                if rx_window(
+                let exit = rx_window(
                     &mut radio,
                     &mut rx_buf,
                     (rx_ms, leviculum_core::sx126x::RxSite::Jitter),
@@ -2081,11 +2178,55 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
                     &mut rx_timeout_count,
                     &config_rx,
                 )
-                .await
-                {
+                .await;
+                if exit.received {
                     consecutive_empty_acks = 0;
                 }
-                access.jitter_spent(jitter_start.elapsed().as_millis().max(1));
+                access.jitter_spent(listened(&config, jitter_start, rx_ms, exit));
+                continue;
+            }
+
+            // The CAD backoff a busy probe owes, listened through so incoming
+            // packets are not lost, and counted the same way as the jitter:
+            // over quiet medium, a window a reception ended leaving the rest
+            // owed. So a backed-off board does not re-probe at the end of the
+            // frame that cut its window short, alongside every other node
+            // that frame released (#438). Until then the backoff was one
+            // window in the verdict arm, and whatever ended it went straight
+            // back to CAD.
+            let backoff_ms = access.backoff_owed_ms();
+            if backoff_ms > 0 {
+                // The first window is the `[LORA_CAD] busy=true` line's; a
+                // resume says what the window that cut it discharged.
+                if access.backoff_was_cut() {
+                    crate::log::log_fmt(
+                        "[LORA_BACKOFF_RESUME] ",
+                        format_args!(
+                            "wait_ms={} attempt={} quiet_ms={} rx_ms={}",
+                            backoff_ms,
+                            access.retries(),
+                            access.last_quiet_ms(),
+                            access.last_rx_ms()
+                        ),
+                    );
+                }
+                let rx_ms = leviculum_channel_access::listen_window_ms(backoff_ms);
+                reassembler.check_timeout(rx_timeout_count, 10);
+                let backoff_start = embassy_time::Instant::now();
+                let exit = rx_window(
+                    &mut radio,
+                    &mut rx_buf,
+                    (rx_ms, leviculum_core::sx126x::RxSite::Csma),
+                    &mut reassembler,
+                    &incoming_tx,
+                    &mut rx_timeout_count,
+                    &config_rx,
+                )
+                .await;
+                if exit.received {
+                    consecutive_empty_acks = 0;
+                }
+                access.backoff_spent(listened(&config, backoff_start, rx_ms, exit));
                 continue;
             }
 
@@ -2157,25 +2298,10 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
                         continue;
                     }
                 }
-                leviculum_channel_access::Verdict::Backoff { slots } => {
-                    // RX during the backoff so incoming packets aren't lost.
-                    let rx_ms = access.backoff_window_ms(slots);
-                    reassembler.check_timeout(rx_timeout_count, 10);
-                    if rx_window(
-                        &mut radio,
-                        &mut rx_buf,
-                        (rx_ms, leviculum_core::sx126x::RxSite::Csma),
-                        &mut reassembler,
-                        &incoming_tx,
-                        &mut rx_timeout_count,
-                        &config_rx,
-                    )
-                    .await
-                    {
-                        consecutive_empty_acks = 0;
-                    }
-                    continue;
-                }
+                // The verdict booked the backoff as owed; the wait above
+                // serves it, the first window and whatever a reception leaves
+                // of it alike, before the next CAD.
+                leviculum_channel_access::Verdict::Backoff { .. } => continue,
                 leviculum_channel_access::Verdict::Retry => continue,
             }
             // TX just completed. Before draining the next outgoing item, give
@@ -2243,7 +2369,8 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
                 &mut rx_timeout_count,
                 &config_rx,
             )
-            .await;
+            .await
+            .received;
             if ack_received {
                 consecutive_empty_acks = 0;
             } else {
@@ -2326,8 +2453,8 @@ pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: 
             // immediately; the only gap is this brief re-arm, taken right
             // after a reception. A reception here also means the peer is
             // being heard, so clear the empty-ack counter.
-            Either::First(received) => {
-                if received {
+            Either::First(exit) => {
+                if exit.received {
                     consecutive_empty_acks = 0;
                 }
             }

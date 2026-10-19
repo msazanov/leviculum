@@ -4540,7 +4540,7 @@ mod tests {
 
         for &(at_ms, len) in POCKET_MINUTE_FRAMES.iter() {
             // `lora_task` calls `update` once per turn while a frame is
-            // pending, before it decides to key or hold (lora.rs:1922), and
+            // pending, before it decides to key or hold (lora.rs:1989), and
             // charges the frame only after `radio.transmit` returned Ok
             // (lora.rs:1156) — i.e. at TX-done, one frame's airtime later.
             t.update(at_ms);

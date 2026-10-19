@@ -103,8 +103,8 @@ busy medium restarts only DIFS, `:1635`). Our board spends the draw
 listening and, when a reception cuts the window short, keeps the
 remainder owed and serves it on the next turn
 (`acquisition_jitter_ms` / `jitter_spent`,
-`leviculum-nrf/channel-access/src/lib.rs:518-550`;
-`leviculum-nrf/src/lora.rs:2055-2090`) — same shape, same reason. Our
+`leviculum-nrf/channel-access/src/lib.rs:624-700`;
+`leviculum-nrf/src/lora.rs:2137-2168`) — same shape, same reason. Our
 *host* serves its drawn wait as an uninterruptible sleep
 (`leviculum-std/src/interfaces/rnode.rs:3012-3027`): it cannot sense
 the medium, the modem under it can and does. On the air: equivalent
@@ -135,7 +135,7 @@ avoidance, current RSSI above its sampled noise floor plus 11 dB
 `reference/RNode_Firmware/RNode_Firmware.ino:1394-1431`,
 `CSMA_INFR_THRESHOLD_DB`, `reference/RNode_Firmware/Config.h:113`).
 Our board probes with the SX1262's CAD per attempt
-(`leviculum-nrf/src/lora.rs:2103`) and keeps **no noise floor, no
+(`leviculum-nrf/src/lora.rs:2244`) and keeps **no noise floor, no
 interference detection, and no DCD sampling at all**. Three on-air
 consequences: (a) a reference node defers to non-LoRa interference, we
 do not; (b) the reference's latched preamble holds "busy" for up to a
@@ -253,7 +253,7 @@ it aged under the lock goes out, oldest first, deaf. Ours: the host
 never lets the modem hold more than one frame (D1), sweeps frames the
 hold aged past 18 s (`pop_live_frame`,
 `leviculum-std/src/interfaces/rnode.rs:301`), and the board drops stale
-frames at dequeue (`leviculum-nrf/src/lora.rs:1936-1980`). On the air: a
+frames at dequeue (`leviculum-nrf/src/lora.rs:2003-2047`). On the air: a
 reference relay exiting a duty hold emits a burst of minutes-old
 traffic; ours emits one current frame. Class: deviation ours
 (deliberate; #433). Test: exists (the stale-drop mvr and the field
@@ -348,10 +348,10 @@ burst bound, no peer yield.
 defined and **used nowhere** in the pinned firmware — see the wrong
 claim below. Our board runs windowed RX with an explicit post-TX
 listening window of one reply airtime plus the peer's whole key-up wait
-(`post_tx_rx_window_ms`, `leviculum-nrf/channel-access/src/lib.rs:293`,
+(`post_tx_rx_window_ms`, `leviculum-nrf/channel-access/src/lib.rs:311`,
 the #423 fix), burst bounds of 16 frames / 8 s
 (`leviculum-nrf/src/lora.rs:855-860`), and a peer-turn yield after two
-empty ack windows (`leviculum-nrf/src/lora.rs:2262`). The window
+empty ack windows (`leviculum-nrf/src/lora.rs:2389`). The window
 teardown/adoption/harvest discipline (`leviculum-nrf/rx-arming`) exists
 only because our RX is windowed; the reference has no teardown to get
 wrong. On the air: ours trades continuous listening for bounded turns;
@@ -546,7 +546,7 @@ split framing, `AirtimeTracker`, announce-cap bitrate); the policy
 crates `leviculum-channel-access`, `leviculum-queue-budget`,
 `leviculum-tx-spacing`, `leviculum-mute-lease` and the module contract
 of `leviculum-rx-arming`; the LNode transmit loop
-(`leviculum-nrf/src/lora.rs:1686-2296`); the core announce cap
+(`leviculum-nrf/src/lora.rs:1753-2423`); the core announce cap
 (`leviculum-core/src/transport.rs`, the cap/drain/hold paths); the CAD
 and window arithmetic in `leviculum-core/src/sx126x.rs`. Reference
 side: `RNodeInterface.py` (serial fully, Android spot-checked for the
