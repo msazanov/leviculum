@@ -47,12 +47,12 @@
 //! request reaches N, and N's real answer reaches X. Then the Pixel's
 //! packet for D arrives at X on A. The Pixel is a packet source only.
 //!
-//! The first test pins the damping the order asked about and holds
-//! today: a relayed copy that comes back from the next hop is not
-//! relayed again. The second is the loop itself, red today and
-//! `#[ignore]`d until a fix is chosen; it asserts the outcome (no copy
-//! toward N), so a receive-side refusal and a responder-side split
-//! horizon would both turn it green.
+//! The first test pins the damping: a relayed copy that comes back from
+//! the next hop is not relayed again. The second is the loop itself,
+//! closed by #852: the returning copy proves N routes D through X, so X
+//! drops the entry and refuses N's replay of the same emission. The
+//! last is the valid route a tombstone would have killed (X, N, Y,
+//! phone), which must survive because no packet comes back.
 
 extern crate std;
 
@@ -340,17 +340,63 @@ fn a_relayed_packet_that_comes_back_is_not_relayed_again() {
     assert_eq!(x.transport().stats().drops_duplicate(), 1);
 }
 
-/// THE #848 loop, red today: after the cull X admits N's answer, a route
-/// through itself, and hands the Pixel's packet to N, which returns it.
-/// Green means no copy of the packet goes toward N.
+/// THE #848 loop, closed by #852. After the cull X admits N's answer, a
+/// route through itself, and hands the Pixel's first packet to N, which
+/// returns it addressed to X. That return is the proof: X drops the
+/// circular entry, refuses N's next answer carrying the same emission, and
+/// the Pixel's second packet no longer goes round N. The first packet is
+/// the price of the proof; X cannot tell the route from a valid one before
+/// (the counterexample test below is the valid one).
 #[test]
-#[ignore = "#848: red until a fix is chosen; the report names the candidates"]
 fn a_culled_relay_does_not_send_the_phones_packets_round_its_neighbour() {
-    let (mut x, a, _b, _n, _nb, phone) = field_state();
+    let (mut x, a, b, mut n, nb, phone) = field_state();
     let dest = *phone.dest_hash.as_bytes();
     let x_id = *x.identity().hash();
 
+    // The first packet goes round once, as in the field.
     let x_out = x.handle_packet(InterfaceId(a), &packet_via(x_id, &dest, 0x52));
+    let to_n = of_kind(&[x_out], PacketType::Data, &dest);
+    assert_eq!(to_n.len(), 1, "X relays the first packet toward N");
+    let back = of_kind(&feed(&mut n, nb, &to_n), PacketType::Data, &dest);
+    assert_eq!(back.len(), 1, "N relays it straight back to X");
+    let again = of_kind(&feed(&mut x, b, &back), PacketType::Data, &dest);
+    assert!(again.is_empty(), "the returning copy is not relayed again");
+    assert!(
+        !x.has_path(&phone.dest_hash),
+        "the return proves N routes D through X; X must drop the entry (now {:?})",
+        x.get_path_clone(phone.dest_hash.as_bytes()).map(|e| (
+            e.hops,
+            e.interface_index,
+            e.next_hop
+        ))
+    );
+
+    // The Pixel asks again and N answers again from the same emission:
+    // X must not take it back.
+    let mut pixel = make_node();
+    let _ = add_iface(&mut pixel, "ble_boards", 1);
+    let pr_hash = *pixel.transport().path_request_hash();
+    let request: Vec<Vec<u8>> = wire_out(&pixel.request_path(&phone.dest_hash))
+        .into_iter()
+        .map(|(_, data)| data)
+        .filter(|data| {
+            Packet::unpack(data)
+                .map(|p| p.destination_hash == pr_hash)
+                .unwrap_or(false)
+        })
+        .collect();
+    let mut n_outs = feed(&mut n, nb, &request);
+    n_outs.extend(run_scheduler(&mut n, PATH_REQUEST_GRACE_MS + 1_000, 3));
+    let answer = of_kind(&n_outs, PacketType::Announce, &dest);
+    assert!(!answer.is_empty(), "N answers the Pixel again");
+    let _ = feed(&mut x, b, &answer);
+    assert!(
+        !x.has_path(&phone.dest_hash),
+        "N's repeated answer replays the proven loop and must be refused"
+    );
+
+    // So the Pixel's next packet does not go round N.
+    let x_out = x.handle_packet(InterfaceId(a), &packet_via(x_id, &dest, 0x53));
     let relayed = of_kind(&[x_out], PacketType::Data, &dest);
     assert!(
         relayed.is_empty(),
@@ -362,23 +408,216 @@ fn a_culled_relay_does_not_send_the_phones_packets_round_its_neighbour() {
             e.next_hop
         ))
     );
+
+    // The refusal is for that emission only: the phone's next announce,
+    // here back on A, installs as usual.
+    let mut phone = phone;
+    let later = TEST_TIME_MS + 600_000;
+    x.transport().clock().set(later);
+    let _ = x.handle_packet(InterfaceId(a), &phone.direct_announce(later));
+    let entry = x.get_path_clone(phone.dest_hash.as_bytes());
+    assert_eq!(
+        entry.map(|e| (e.hops, e.interface_index, e.next_hop)),
+        Some((1, a, None)),
+        "a new emission ends the refusal"
+    );
 }
 
-/// The red test's setup is the field's: pinned green so the ignored test
-/// cannot go green by losing its own preconditions. X re-learns D at
-/// three hops via N on B.
+/// The field's own shape: the phone, the Pixel and N all sit on X's ONE
+/// BLE interface, as on the boards (iface 2), so the interfaces cannot
+/// tell the return from the Pixel retrying the same bytes. The peer links
+/// can: a retry comes from the peer the original came from, the return
+/// from the peer the route runs to. Without peer links on one interface
+/// (a shared LoRa channel) nothing is concluded, and the route stays.
+#[test]
+fn on_one_multi_peer_interface_the_peer_links_tell_a_return_from_a_retry() {
+    let mut phone = make_phone();
+    let dest = *phone.dest_hash.as_bytes();
+    let pixel_peer = *Identity::generate(&mut OsRng).hash();
+
+    let mut x = make_node();
+    let ble = add_iface(&mut x, "ble", 2);
+    let x_id = *x.identity().hash();
+    let mut n = make_node();
+    let nb = add_iface(&mut n, "ble", 2);
+    let n_id = *n.identity().hash();
+
+    // The loop state, with X's entry learned through N's peer link.
+    let raw = phone.direct_announce(TEST_TIME_MS);
+    let relayed = |via: [u8; TRUNCATED_HASHBYTES], hops: u8| {
+        let mut p = Packet::unpack(&raw).unwrap();
+        p.flags.header_type = HeaderType::Type2;
+        p.flags.transport_type = TransportType::Transport;
+        p.hops = hops;
+        p.transport_id = Some(via);
+        pack(&p)
+    };
+    let _ = x.handle_packet_from_peer(InterfaceId(ble), n_id, &relayed(n_id, 2));
+    let _ = n.handle_packet(InterfaceId(nb), &relayed(x_id, 1));
+    let route = |x: &EmbeddedNode| {
+        x.get_path_clone(phone.dest_hash.as_bytes())
+            .map(|e| (e.interface_index, e.next_hop, e.via_peer))
+    };
+    assert_eq!(route(&x), Some((ble, Some(n_id), Some(n_id))));
+
+    // The Pixel sends, X relays toward N on the same interface, and the
+    // Pixel retries the same bytes: a duplicate addressed to X on the
+    // relay's outbound interface, but from the original's peer.
+    let packet = packet_via(x_id, &dest, 0x56);
+    let to_n = of_kind(
+        &[x.handle_packet_from_peer(InterfaceId(ble), pixel_peer, &packet)],
+        PacketType::Data,
+        &dest,
+    );
+    assert_eq!(to_n.len(), 1, "X relays the packet toward N");
+    let _ = x.handle_packet_from_peer(InterfaceId(ble), pixel_peer, &packet);
+    assert_eq!(x.transport().stats().drops_duplicate(), 1);
+    assert_eq!(
+        route(&x),
+        Some((ble, Some(n_id), Some(n_id))),
+        "a retry from the original's peer proves nothing"
+    );
+
+    // Without peer links the same retry is indistinguishable from a
+    // return, so it proves nothing either.
+    let _ = x.handle_packet(InterfaceId(ble), &packet);
+    assert_eq!(x.transport().stats().drops_duplicate(), 2);
+    assert_eq!(
+        route(&x),
+        Some((ble, Some(n_id), Some(n_id))),
+        "on one interface without peer links nothing is concluded"
+    );
+
+    // N sends it back through its own link: that is the proof.
+    let back = of_kind(&feed(&mut n, nb, &to_n), PacketType::Data, &dest);
+    assert_eq!(back.len(), 1, "N relays it straight back to X");
+    let _ = x.handle_packet_from_peer(InterfaceId(ble), n_id, &back[0]);
+    assert_eq!(x.transport().stats().drops_duplicate(), 3);
+    assert_eq!(
+        route(&x),
+        None,
+        "the copy N returned proves the loop; X must drop the entry"
+    );
+}
+
+/// The counterexample 848 named against a tombstone: the phone is linked
+/// to X and Y, N learned D from Y, and the phone leaves X only. X culls and
+/// takes N's answer, X, N, Y, phone, which is a valid route: N hands the
+/// packet on to Y, not back to X. On the shared medium X overhears that
+/// copy, but it names Y as its next hop, not X, so it proves nothing and
+/// the route must survive.
+#[test]
+fn a_route_through_a_neighbour_that_does_not_return_the_packet_survives() {
+    let mut phone = make_phone();
+    let dest = *phone.dest_hash.as_bytes();
+
+    let mut x = make_node();
+    let a = add_iface(&mut x, "ble_phone", 0);
+    let b = add_iface(&mut x, "ble_boards", 1);
+    let x_id = *x.identity().hash();
+    let mut n = make_node();
+    let nb = add_iface(&mut n, "ble_boards", 1);
+    let n_id = *n.identity().hash();
+    let y_id = *Identity::generate(&mut OsRng).hash();
+
+    // One emission, heard by X direct and by N through Y.
+    let raw = phone.direct_announce(TEST_TIME_MS);
+    let mut via_y = Packet::unpack(&raw).unwrap();
+    via_y.flags.header_type = HeaderType::Type2;
+    via_y.flags.transport_type = TransportType::Transport;
+    via_y.hops = 1;
+    via_y.transport_id = Some(y_id);
+    let _ = n.handle_packet(InterfaceId(nb), &pack(&via_y));
+    let _ = x.handle_packet(InterfaceId(a), &raw);
+    let rebroadcast = of_kind(
+        &run_scheduler(&mut x, 1_000, 10),
+        PacketType::Announce,
+        &dest,
+    );
+    let _ = feed(&mut n, nb, &rebroadcast);
+    let _ = run_scheduler(&mut n, 1_000, 10);
+    assert_eq!(
+        n.get_path_clone(phone.dest_hash.as_bytes())
+            .map(|e| (e.hops, e.next_hop)),
+        Some((2, Some(y_id))),
+        "N holds D via Y"
+    );
+
+    // The phone leaves X only; X takes N's answer to the Pixel.
+    let _ = x.handle_interface_peer_lost(InterfaceId(a), phone.identity_hash);
+    assert!(!x.has_path(&phone.dest_hash), "the cull fires on X");
+    let mut pixel = make_node();
+    let _ = add_iface(&mut pixel, "ble_boards", 1);
+    let pr_hash = *pixel.transport().path_request_hash();
+    let request: Vec<Vec<u8>> = wire_out(&pixel.request_path(&phone.dest_hash))
+        .into_iter()
+        .map(|(_, data)| data)
+        .filter(|data| {
+            Packet::unpack(data)
+                .map(|p| p.destination_hash == pr_hash)
+                .unwrap_or(false)
+        })
+        .collect();
+    let mut n_outs = feed(&mut n, nb, &request);
+    n_outs.extend(run_scheduler(&mut n, PATH_REQUEST_GRACE_MS + 1_000, 3));
+    let answer = of_kind(&n_outs, PacketType::Announce, &dest);
+    assert!(
+        !answer.is_empty(),
+        "N answers the Pixel from its entry via Y"
+    );
+    let _ = feed(&mut x, b, &answer);
+    let route = Some((3, b, Some(n_id)));
+    let state = |x: &EmbeddedNode| {
+        x.get_path_clone(phone.dest_hash.as_bytes())
+            .map(|e| (e.hops, e.interface_index, e.next_hop))
+    };
+    assert_eq!(state(&x), route, "X takes D at three hops via N");
+
+    // The Pixel's packet: X to N, N on to Y, and X overhears N's copy.
+    let x_out = x.handle_packet(InterfaceId(a), &packet_via(x_id, &dest, 0x54));
+    let to_n = of_kind(&[x_out], PacketType::Data, &dest);
+    assert_eq!(to_n.len(), 1, "X relays the packet toward N");
+    let on_to_y = of_kind(&feed(&mut n, nb, &to_n), PacketType::Data, &dest);
+    assert_eq!(on_to_y.len(), 1, "N relays it on");
+    assert_eq!(
+        Packet::unpack(&on_to_y[0]).unwrap().transport_id,
+        Some(y_id),
+        "N hands it to Y, not back to X"
+    );
+    let _ = feed(&mut x, b, &on_to_y);
+    assert_eq!(
+        x.transport().stats().drops_overheard_transport_id(),
+        1,
+        "X drops the overheard copy, it names Y as its next hop"
+    );
+    assert_eq!(
+        state(&x),
+        route,
+        "the overheard copy proves no loop; the route must survive"
+    );
+
+    // And the next packet still takes it.
+    let x_out = x.handle_packet(InterfaceId(a), &packet_via(x_id, &dest, 0x55));
+    assert_eq!(
+        of_kind(&[x_out], PacketType::Data, &dest).len(),
+        1,
+        "X keeps relaying toward N"
+    );
+}
+
+/// The loop test's setup is the field's: pinned so that test cannot go
+/// green by losing its own preconditions. X re-learns D at three hops via
+/// N on B; nothing on X can tell that route from a valid one until a
+/// packet comes back (#852 acts there, not at admission).
 #[test]
 fn the_field_chain_puts_x_back_on_a_route_through_n() {
     let (x, _a, b, n, _nb, phone) = field_state();
     let n_id = *n.identity().hash();
     let entry = x.get_path_clone(phone.dest_hash.as_bytes());
     let state = entry.map(|e| (e.hops, e.interface_index, e.next_hop));
-    // Today: admitted. A receive-side fix leaves X without the entry; a
-    // responder-side fix never lets N's answer reach X. Both are the fix,
-    // so this pin accepts either and refuses only a different route.
-    assert!(
-        state.is_none() || state == Some((3, b, Some(n_id))),
-        "unexpected route for D on X: {:?}",
-        state
+    assert_eq!(
+        state,
+        Some((3, b, Some(n_id))),
+        "unexpected route for D on X"
     );
 }

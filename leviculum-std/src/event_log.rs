@@ -888,6 +888,14 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "LR_LOCAL_REDIRECT",
         required_keys: &["dst", "iface_in", "client"],
     },
+    // leviculum#852: a packet we relayed came back from its next hop
+    // addressed to us, so that hop routes `dst` through us; the entry is
+    // dropped. `next_hop` is the hop's transport id, `iface` an interface
+    // name, `path_hops` the dropped entry's hops, `pkt_hops` the copy's.
+    EventSchema {
+        name: "PATH_LOOP_DROP",
+        required_keys: &["dst", "next_hop", "iface", "path_hops", "pkt_hops"],
+    },
     // Remaining `leviculum-core` transport events.
     EventSchema {
         name: "ANN_SLOW",

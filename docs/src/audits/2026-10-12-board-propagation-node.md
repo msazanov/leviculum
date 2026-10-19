@@ -27,7 +27,8 @@ The budget frame every price below moves in, from the boot plan
 (`budget_total`, `leviculum-nrf/heap-budget/src/lib.rs:408`): heap
 96 KiB (`HEAP_SIZE`, `leviculum-nrf/heap-budget/src/lib.rs:49`), node
 box 31 704 B (`NODE_BOX_BYTES`,
-`leviculum-nrf/heap-budget/src/lib.rs:829`), role budget 21 120 B
+`leviculum-nrf/heap-budget/src/lib.rs:830`; 31 712 B and slack 48 B
+since #852), role budget 21 120 B
 (`ROLE_BUDGET_BYTES`, `leviculum-nrf/heap-budget/src/lib.rs:298` =
 sync slice 8 000 + two queued uploads 8 000 + structural 5 120 + serve
 reserve 0), four endpoint links with four BLE sessions, reserve

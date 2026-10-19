@@ -155,6 +155,31 @@ const IC_DEQUE_MIN_SAMPLE: usize = 2;
 /// ic_max_held_announces = 256, Interface.py:70, hold_announce Interface.py:228-232).
 const MAX_HELD_ANNOUNCES: usize = 256;
 
+/// Cap on remembered loop refusals ([`LoopRefusal`]). One entry exists per
+/// destination whose route a returning relay proved circular, until the
+/// destination emits a new announce; the oldest goes first when full.
+const MAX_LOOP_REFUSALS: usize = 8;
+
+/// A route a returning relay proved circular (leviculum#852): we handed a
+/// packet for `dest_hash` to `next_hop`, and it came back to us addressed
+/// to us, so `next_hop` routes `dest_hash` through this node. The entry was
+/// dropped; this keeps `next_hop`'s answers carrying the same emission
+/// (`random_blob`) from reinstalling it.
+#[derive(Debug, Clone, Copy)]
+struct LoopRefusal {
+    dest_hash: [u8; TRUNCATED_HASHBYTES],
+    next_hop: [u8; TRUNCATED_HASHBYTES],
+    random_blob: [u8; crate::constants::RANDOM_HASHBYTES],
+    /// Our clock past which the refusal no longer holds: the dropped
+    /// entry's own expiry, so the refusal never outlives the route it
+    /// refused.
+    expires_ms: u64,
+}
+
+/// The heap side of [`Transport`]'s loop refusals; see its field.
+#[derive(Debug, Default)]
+struct LoopRefusals(Vec<LoopRefusal>);
+
 /// Size of one held-announce entry (the map value, without its raw announce),
 /// evaluated on the target the crate is built for. The boards' heap budget
 /// pins this number for `thumbv7em` and the firmware asserts it at compile
@@ -3053,6 +3078,13 @@ pub struct Transport<C: Clock, S: Storage> {
     /// identities at the two layers).
     ingress_peer: Option<[u8; TRUNCATED_HASHBYTES]>,
 
+    /// Routes a returning relay proved circular, refused until their
+    /// destination emits anew (leviculum#852, [`LoopRefusal`]). At most
+    /// [`MAX_LOOP_REFUSALS`] entries. Boxed and allocated with the first
+    /// proven loop: a `Vec` inline would cost every board 12 B of the node
+    /// box (`NODE_BOX_BYTES`) for a table that is empty almost always.
+    loop_refusals: Option<Box<LoopRefusals>>,
+
     /// Per-interface Reticulum propagation mode (Python `Interface.mode`).
     /// Keyed by interface index. Only non-`Full` interfaces are stored; a
     /// missing entry means `InterfaceMode::Full` (the default). Set from config
@@ -3336,6 +3368,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             discovery_request_peers: BTreeMap::new(),
             discovery_extra_requesters: BTreeSet::new(),
             ingress_peer: None,
+            loop_refusals: None,
             interface_modes: BTreeMap::new(),
             interface_kinds: BTreeMap::new(),
             interface_ingress_control: BTreeMap::new(),
@@ -4203,6 +4236,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 && packet.transport_id == Some(*self.identity.hash())
             {
                 self.push_relay_decision(&packet, &full_packet_hash, RelayOutcome::Duplicate, None);
+                self.drop_route_proven_circular(&packet, &truncated_hash, interface_index);
             }
             self.stats.record_drop(DropReason::Duplicate);
             return Ok(());
@@ -5152,6 +5186,9 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             + hc::btree_set_bytes(&self.peer_link_reoriginations)
             + hc::btree_map_bytes(&self.discovery_request_peers)
             + hc::btree_set_bytes(&self.discovery_extra_requesters)
+            + self.loop_refusals.as_ref().map_or(0, |r| {
+                core::mem::size_of::<LoopRefusals>() + hc::vec_bytes(&r.0)
+            })
             + hc::btree_map_bytes(&self.interface_modes)
             + hc::btree_map_bytes(&self.interface_kinds)
             + hc::btree_map_bytes(&self.interface_ingress_control)
@@ -5739,6 +5776,129 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         to_remove
     }
 
+    /// A duplicate addressed to us for relay arrived: if it is a packet we
+    /// relayed, coming back from the next hop we handed it to, that next
+    /// hop routes its destination through us. Drop our entry, which is
+    /// circular, and refuse the next hop's answers carrying the same
+    /// emission until the destination announces anew (leviculum#852).
+    ///
+    /// The proof needs three things, all local:
+    /// - the reverse table holds this packet with the arrival interface as
+    ///   its outbound one: we relayed it there;
+    /// - our path for the destination runs over that interface to a next
+    ///   hop, and the copy names us as its next hop: whoever sent it back
+    ///   routes the destination through us;
+    /// - the copy is not the original sender's retry of the same bytes. On
+    ///   a different interface than the original's arrival it cannot be;
+    ///   on the same multi-peer interface the peer links tell the two
+    ///   apart. On a shared medium without peer links (one LoRa channel,
+    ///   A-B-C relayed back out) a retry and a return look the same, so
+    ///   nothing is concluded there.
+    ///
+    /// A route that only passes a neighbour on the same medium is not hit:
+    /// the neighbour hands the packet on with ITS next hop's id, never
+    /// ours, so the copy we overhear never reaches this function.
+    ///
+    /// Python takes the loop and only drops the copy (Transport.py:1376-1386
+    /// after admitting the answer at :1828-1831). Dropping the entry is a
+    /// local table change, nothing on the wire moves, and it saves every
+    /// further packet the loop would carry (deviation rule, P1).
+    fn drop_route_proven_circular(
+        &mut self,
+        packet: &Packet,
+        truncated_hash: &[u8; TRUNCATED_HASHBYTES],
+        interface_index: usize,
+    ) {
+        if !matches!(
+            packet.flags.packet_type,
+            PacketType::Data | PacketType::LinkRequest
+        ) {
+            return;
+        }
+        let Some(reverse) = self.storage.get_reverse(truncated_hash) else {
+            return;
+        };
+        if reverse.outbound_interface_index != interface_index {
+            return;
+        }
+        let dest_hash = packet.destination_hash;
+        let Some(path) = self.storage.get_path(&dest_hash) else {
+            return;
+        };
+        let Some(next_hop) = path.next_hop else {
+            return;
+        };
+        if path.interface_index != interface_index {
+            return;
+        }
+        let returned_by_next_hop = match (self.ingress_peer, path.via_peer) {
+            (Some(ingress), Some(via)) => ingress == via && reverse.peer() != Some(&ingress),
+            _ => reverse.receiving_interface_index != reverse.outbound_interface_index,
+        };
+        if !returned_by_next_hop {
+            return;
+        }
+        let path_hops = path.hops;
+        let expires_ms = path.expires_ms;
+        let newest_blob = path
+            .random_blobs
+            .iter()
+            .max_by_key(|blob| emission_from_random_hash(blob))
+            .copied();
+
+        self.storage.remove_path(&dest_hash);
+        if let Some(random_blob) = newest_blob {
+            let now = self.clock.now_ms();
+            let refusals = &mut self.loop_refusals.get_or_insert_with(Box::default).0;
+            refusals.retain(|r| r.dest_hash != dest_hash && r.expires_ms > now);
+            if refusals.len() >= MAX_LOOP_REFUSALS {
+                refusals.remove(0);
+            }
+            refusals.push(LoopRefusal {
+                dest_hash,
+                next_hop,
+                random_blob,
+                expires_ms,
+            });
+        }
+        crate::tracing::debug!(
+            event = "PATH_LOOP_DROP",
+            dst = %HexShort(&dest_hash),
+            next_hop = %HexShort(&next_hop),
+            iface = %self.iface_name(interface_index),
+            path_hops = path_hops,
+            pkt_hops = packet.hops,
+        );
+    }
+
+    /// Whether an announce for `dest_hash` relayed by `transport_id` and
+    /// carrying `random_blob` replays a route a returning relay proved
+    /// circular (leviculum#852). A different emission of the destination
+    /// ends the refusal: the loop was proven for the old one only.
+    fn refuses_proven_loop(
+        &mut self,
+        dest_hash: &[u8; TRUNCATED_HASHBYTES],
+        transport_id: Option<&[u8; TRUNCATED_HASHBYTES]>,
+        random_blob: &[u8; crate::constants::RANDOM_HASHBYTES],
+    ) -> bool {
+        let Some(refusals) = self.loop_refusals.as_mut() else {
+            return false;
+        };
+        let now = self.clock.now_ms();
+        refusals.0.retain(|r| {
+            r.expires_ms > now && (&r.dest_hash != dest_hash || &r.random_blob == random_blob)
+        });
+        let refused = refusals.0.iter().any(|r| {
+            &r.dest_hash == dest_hash
+                && &r.random_blob == random_blob
+                && transport_id == Some(&r.next_hop)
+        });
+        if refusals.0.is_empty() {
+            self.loop_refusals = None;
+        }
+        refused
+    }
+
     // Blackholed identities (Codeberg #67)
     //
     // Mirrors the Python `RNS.Transport` blackhole API. The set is authoritative
@@ -5784,7 +5944,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// recall source is the cached announce for the destination
     /// (`get_announce_cache`, keyed by destination hash, holding the raw announce
     /// whose payload starts with the 64-byte public key), the same source the
-    /// link-request path uses at transport.rs:4143. A destination with no cached
+    /// link-request path uses at transport.rs:4176. A destination with no cached
     /// announce cannot be associated with an identity, so it is left untouched,
     /// exactly as Python keeps a path whose `Identity.recall` returns `None`.
     ///
@@ -6585,7 +6745,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             path_response = is_path_response,
         );
 
-        // Gate on the already-incremented hops (transport.rs:1692 ran in the
+        // Gate on the already-incremented hops (transport.rs:1717 ran in the
         // inbound path before handle_announce, and local-client/shared-instance
         // accounting has already been applied there). Announces whose hop count
         // exceeds max_hops are neither stored in the path table nor scheduled
@@ -6659,6 +6819,20 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 self.stats.record_drop(DropReason::AnnounceReplay);
                 return Ok(());
             }
+        }
+
+        // leviculum#852: a neighbour a returning relay showed to route this
+        // destination through us offers the same emission again. Taking it
+        // would rebuild the loop the dedup gate just broke, so it counts as
+        // a replay; a new emission, from anyone, passes.
+        if self.refuses_proven_loop(&dest_hash, packet.transport_id.as_ref(), &random_hash) {
+            crate::tracing::debug!(
+                dest = %HexShort(&dest_hash),
+                iface = %self.iface_name(interface_index),
+                "Dropped announce, its relay routes this destination through us (proven loop)"
+            );
+            self.stats.record_drop(DropReason::AnnounceReplay);
+            return Ok(());
         }
 
         // Direct-link evidence (Codeberg #230; no-op under the default
@@ -11689,7 +11863,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // Emit the STORED path-table count, matching Python
                 // Transport.py:2956 (`packet.hops = path_table[dst][IDX_PT_HOPS]`).
                 // The cached raw's hop byte is the PRE-increment wire value
-                // (`stored - 1`): the receipt increment (`transport.rs:2648`) only
+                // (`stored - 1`): the receipt increment (`transport.rs:2673`) only
                 // touches the in-memory packet, never the raw buffer stashed by
                 // `set_announce_cache`. Using it here would put `stored - 1` on the
                 // wire and every peer that learns via this response would be one hop
@@ -17914,7 +18088,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // `random_blobs` (transport.rs:7331), a deliberate anti-replay
+            // `random_blobs` (transport.rs:7505), a deliberate anti-replay
             // extension — so the blob count is not a rejection indicator.)
             transport
                 .clock
@@ -24208,7 +24382,7 @@ mod tests {
         // (PATHFINDER_MAX_HOPS=128) must NOT be stored in the path table nor
         // scheduled for rebroadcast, mirroring Python RNS Transport.py:1750
         // (`local_and_hops_condition = packet.hops < PATHFINDER_M+1`, M=128).
-        // The inbound path increments hops once (transport.rs:1692) before
+        // The inbound path increments hops once (transport.rs:1717) before
         // handle_announce, so `packet.hops` inside the handler is already the
         // post-increment value — same accounting as the RNS gate.
         #[test]
