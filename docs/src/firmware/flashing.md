@@ -123,8 +123,11 @@ clone-and-deploy policy forbids. (`Justfile:55-57`)
 
 ### Which boards the bundle carries
 
-**Today: the T114 and the RAK4631** (WisMesh Pocket V2 and every other
-carrier built around the RAK4630 module). Boards are data rather than
+**Today: the T114, the RAK4631** (WisMesh Pocket V2 and every other
+carrier built around the RAK4630 module) **and the SenseCAP T1000-E**, the
+last at level *Expected*: its wiring is read from the vendor firmware and
+we have not run it yet, so `lnflash` writes it only after a person says
+yes to exactly that. Boards are data rather than
 code, so a new board is a catalogue entry plus a firmware build, not a
 new binary — and an entry without a firmware build is an empty promise,
 so the shipped bundle carries what we actually build.
@@ -159,6 +162,13 @@ elsewhere reports the same string. So the bundle carries no image for it,
 bus names it, says why, and leaves it alone. It is flashed from this
 checkout with `just flash-solarnode`, by a person who can see which board
 is on the bench.
+
+**The T1000-E's first image goes on by serial DFU.** Its catalogue entry
+names the bootloader's `Board-ID`, `nRF52840-T1000-E-v1`, its USB ID
+`2886:0057` and the drive label `T1000-E`, but the unit on our rig mounts
+no drive at all: its bootloader takes serial DFU only, which `lnflash`
+does not speak. Until it does, a board like that one is flashed from this
+checkout, below under "SenseCAP T1000-E: serial DFU".
 
 **The SoftDevice carve-out.** The T114 entry ships Nordic's S140 7.3.0
 beside its licence, so a factory board carrying 6.1.1 is repaired and
@@ -233,7 +243,7 @@ debug info does not bloat what lands on the device.
 
 The firmware crate `leviculum-nrf` is its own Cargo workspace, separate
 from the repo-root workspace, and is cross-compiled. The flash recipes
-therefore `cd leviculum-nrf` before invoking cargo. (`Justfile:1995-1996`)
+therefore `cd leviculum-nrf` before invoking cargo. (`Justfile:1996-1997`)
 
 A plain build (no flash) is:
 
@@ -273,7 +283,7 @@ The **WisMesh Pocket V2 (RAK4631)** running stock Meshtastic has no
 *first* flash needs either `just dfu-rak4631` (a Meshtastic admin
 command, below) or the manual needle double-tap in the hidden pinhole.
 Once our firmware is on the board, subsequent flashes use the touch path
-automatically. (`Justfile:2022-2024`, `Justfile:2074-2083`. See
+automatically. (`Justfile:2023-2025`, `Justfile:2087-2096`. See
 [Recovery](recovery.md) for the pinhole detail.)
 
 ## The flash recipes
@@ -293,7 +303,7 @@ against mixed firmware versions. Use this as your default for T114s.
 cd leviculum-nrf && cargo run --release --bin t114 --features bsp-t114
 ```
 
-(`Justfile:1997-1999`; rationale `leviculum-nrf/README.md:25`)
+(`Justfile:1998-2000`; rationale `leviculum-nrf/README.md:25`)
 
 ### `just flash-one PORT` — a single T114
 
@@ -311,7 +321,7 @@ Expands to:
 cd leviculum-nrf && LEVICULUM_FLASH_ONLY=<PORT> cargo run --release --bin t114 --features bsp-t114
 ```
 
-(`Justfile:2006-2011`; usage forms `leviculum-nrf/README.md:31-36`)
+(`Justfile:2007-2012`; usage forms `leviculum-nrf/README.md:31-36`)
 
 ### `just flash-rak4631` — every RAK4631 (bare module)
 
@@ -324,7 +334,7 @@ cd leviculum-nrf && LEVICULUM_USB_PID=0002 LEVICULUM_BOARD_NAME=RAK4631 \
   cargo run --release --bin rak4631 --features bsp-rak4631
 ```
 
-(`Justfile:2025-2027`)
+(`Justfile:2026-2028`)
 
 ### `just flash-rak4631-one PORT` — a single RAK4631
 
@@ -343,7 +353,7 @@ cd leviculum-nrf && LEVICULUM_FLASH_ONLY=<PORT> LEVICULUM_USB_PID=0002 \
   cargo run --release --bin rak4631 --features bsp-rak4631
 ```
 
-(`Justfile:2029-2033`)
+(`Justfile:2030-2034`)
 
 ### `just flash-rak4631-pocket` — WisMesh Pocket V2, full baseboard
 
@@ -357,7 +367,7 @@ cd leviculum-nrf && LEVICULUM_USB_PID=0002 LEVICULUM_BOARD_NAME=RAK4631 \
   cargo run --release --bin rak4631 --features bsp-rak4631,rak-baseboard
 ```
 
-(`Justfile:2035-2041`; `rak-baseboard` aggregate
+(`Justfile:2036-2042`; `rak-baseboard` aggregate
 `leviculum-nrf/Cargo.toml:419`)
 
 ### `just dfu-rak4631 PORT` — DFU entry for stock Meshtastic
@@ -380,7 +390,53 @@ Runs:
 meshtastic --port /dev/ttyACM0 --enter-dfu
 ```
 
-(`Justfile:2074-2083`)
+(`Justfile:2087-2096`)
+
+### SenseCAP T1000-E: serial DFU
+
+The T1000-E's bootloader (Adafruit nRF52, USB `2886:0057`, `Board-ID`
+`nRF52840-T1000-E-v1`, S140 7.3.0) answers the 1200-baud touch with serial
+DFU and, on the rig unit, with nothing else: no UF2 drive appears. The
+UF2 runner the other recipes use has nothing to copy onto, so this board is
+written with `adafruit-nrfutil` (`pip install --user adafruit-nrfutil`):
+
+```sh
+just t1000e-dfu-package
+```
+
+builds the release image and wraps it as a DFU package, which runs
+
+```sh
+adafruit-nrfutil dfu genpkg --dev-type 0x0052 --sd-req 0x0123 \
+    --application t1000e.hex t1000e-dfu.zip
+```
+
+(`scripts/t1000e-dfu-package.sh`), and prints the line that writes it:
+
+```sh
+adafruit-nrfutil --verbose dfu serial --package t1000e-dfu.zip \
+    -p /dev/ttyACM0 -b 115200 --singlebank --touch 1200
+```
+
+`--touch 1200` opens the port at 1200 baud and closes it, which is what
+drops both stock Meshtastic and our firmware into the bootloader, so the
+same line serves the first flash and every one after it. The two numbers
+in the package are checked by the bootloader before it writes a byte:
+
+- `--dev-type 0x0052` is `ADAFRUIT_DEVICE_TYPE`; an init packet with any
+  other device type is refused (Adafruit_nRF52_Bootloader, `dfu_init.c`
+  in its `src/`, lines 84 and 158).
+- `--sd-req 0x0123` is the firmware id of S140 7.3.0, the SoftDevice the
+  unit reports; the bootloader compares the list in the packet with the
+  SoftDevice it runs (the same file, line 178). The value is Meshtastic's,
+  from its board definition for this product
+  (`boards/tracker-t1000-e.json`, `"sd_fwid": "0x0123"`), the file its
+  own `nrfutil` upload of this board reads.
+
+`--singlebank` is the Adafruit bootloader's single-bank mode, the one every
+Adafruit nRF52840 board is written with. Our image is linked at `0x27000`
+(`leviculum-nrf/memory.x`), above the S140 7.x SoftDevice, so it boots on
+this unit without a SoftDevice step.
 
 ## A note on disconnecting consumers
 

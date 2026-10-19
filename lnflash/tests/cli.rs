@@ -513,7 +513,7 @@ fn asking_for_a_board_nobody_knows_names_the_ones_that_can_be_flashed() {
     assert!(!out.status.success(), "{}", stdout(&out));
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("knows no board"), "{err}");
-    assert!(err.contains("rak4631, t114"), "{err}");
+    assert!(err.contains("rak4631, t1000e, t114"), "{err}");
     // The control-only board is not offered as an alternative here: no bundle
     // may carry an image for it, so naming it would send the user hunting.
     assert!(!err.contains("solarnode"), "{err}");

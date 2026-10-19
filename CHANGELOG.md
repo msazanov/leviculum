@@ -20,6 +20,16 @@ Toolchain: Rust 1.97.1
 
 ### Added
 
+- A firmware image for the SenseCAP T1000-E (#406), the first board on
+  the LR11xx driver: `leviculum-nrf/src/radio.rs` links that driver for
+  the `bsp-t1000e` build in place of the SX1262's, and nothing above the
+  LoRa interface changes. Radio, USB and BLE only for now (no GNSS,
+  accelerometer or battery yet); wiring from Meshtastic's variant, since
+  Seeed publishes no schematic, so `lnflash` carries it at level
+  `expected`. The rig unit takes serial DFU only:
+  `just t1000e-dfu-package` builds the package and prints the line that
+  writes it.
+
 - A clockless LNode keeps the time it learned from traffic across a power
   cycle (#166 item 4). The calendar is appended at most hourly to a
   two-page ring at `0xD7000` (the image window shrinks by 8 KiB) and

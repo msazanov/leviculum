@@ -68,12 +68,18 @@ OUT_DIR="${OUT_DIR:-$ROOT/target/lnflash}"
 # SenseCAP Solar Node is the first (Codeberg #233); it is flashed by
 # `just flash-solarnode`, by a person who can see which board is on the bench.
 #
+# The SenseCAP T1000-E carries no SoftDevice remedy: its factory bootloader
+# already runs S140 7.3.0, and its catalogue level is `expected` until the rig
+# has run it. Its first image goes on by serial DFU (`just
+# t1000e-dfu-package`), because the unit we have publishes no UF2 volume.
+#
 # Which image a board gets is settled in docs/src/concepts/board-support-scope.md:
 # one build serves a pinout family, so the RAK4631 ships the baseboard build
 # that also runs on a bare module rather than a second, stripped one.
 BOARDS=(
     "t114|t114|bsp-t114|s140_nrf52_7.3.0"
     "rak4631|rak4631|bsp-rak4631,rak-baseboard|"
+    "t1000e|t1000e|bsp-t1000e|"
 )
 
 # Fixed properties of the Adafruit nRF52 UF2 family, the same two constants

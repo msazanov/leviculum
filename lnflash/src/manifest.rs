@@ -970,7 +970,36 @@ convert = "hex-to-uf2"
             flashing.softdevice_req("t114").unwrap().unwrap().as_str(),
             ">=7.0.1, <8.0.0"
         );
-        assert_eq!(catalogue.names(), vec!["rak4631", "solarnode", "t114"]);
+        assert_eq!(
+            catalogue.names(),
+            vec!["rak4631", "solarnode", "t1000e", "t114"]
+        );
+    }
+
+    #[test]
+    fn the_t1000e_is_known_at_level_expected_and_keyed_on_its_own_board_id() {
+        // Codeberg #406. The SenseCAP T1000-E is one product on one PCB, so
+        // the Board-ID its bootloader publishes is bound to the radio wiring
+        // (unlike the Solar Node's module ID). Its level is `expected` until
+        // the rig has run it: the wiring is the vendor firmware's word.
+        let catalogue = catalogue();
+        let board = catalogue.board("t1000e").unwrap();
+        let flashing = board.require_flashing("t1000e").unwrap();
+        assert_eq!(flashing.level, Level::Expected);
+        assert_eq!(flashing.transport, Transport::Uf2Msc);
+        assert_eq!(flashing.identify.info_uf2_board_id, "nRF52840-T1000-E-v1");
+        assert_eq!(flashing.identify.msc_label.as_deref(), Some("T1000-E"));
+        assert!(!flashing.identify.board_id_shared);
+        assert_eq!(flashing.flash.family_id, crate::uf2::FAMILY_NRF52840_APP);
+        assert_eq!(flashing.flash.app_base, 0x2_7000);
+        assert_eq!(flashing.flash.writable_end, 0xEA000);
+        assert_eq!(
+            flashing.softdevice_req("t1000e").unwrap().unwrap().as_str(),
+            ">=7.0.1, <8.0.0"
+        );
+        let (name, _, _) = catalogue.board_for_id("nRF52840-T1000-E-v1").unwrap();
+        assert_eq!(name, "t1000e");
+        assert!(catalogue.board_for_id("T1000-E").is_none());
     }
 
     #[test]
@@ -1060,6 +1089,7 @@ convert = "hex-to-uf2"
                     vec![
                         "rak4631".to_string(),
                         "solarnode".to_string(),
+                        "t1000e".to_string(),
                         "t114".to_string()
                     ]
                 );
@@ -1068,7 +1098,10 @@ convert = "hex-to-uf2"
         }
         // And the flashing path names only the boards a bundle may carry an
         // image for, which is not the same list.
-        assert_eq!(catalogue().flashable_names(), vec!["rak4631", "t114"]);
+        assert_eq!(
+            catalogue().flashable_names(),
+            vec!["rak4631", "t1000e", "t114"]
+        );
     }
 
     #[test]
@@ -1215,11 +1248,17 @@ convert = "hex-to-uf2"
         )
         .unwrap_err();
         assert!(matches!(err, Error::Toml { .. }), "{err}");
-        // Both current entries are boards we own and run.
+        // The two boards we own and have run are `verified`; the T1000-E,
+        // whose wiring is the vendor firmware's word, is `expected` (#406).
         let catalogue = catalogue();
         for name in catalogue.flashable_names() {
             let level = catalogue.board(name).unwrap().flashing().unwrap().level;
-            assert_eq!(level, Level::Verified, "{name}");
+            let want = if name == "t1000e" {
+                Level::Expected
+            } else {
+                Level::Verified
+            };
+            assert_eq!(level, want, "{name}");
         }
     }
 

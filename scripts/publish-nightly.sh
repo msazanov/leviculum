@@ -161,6 +161,7 @@ This is the prebuilt embedded firmware — no checkout, no Rust toolchain, no bu
 | --- | --- |
 | \`t114\` | Heltec Mesh Node T114 |
 | \`rak4631\` | RAK4631 — the WisMesh Pocket V2 and the other carriers built around that module |
+| \`t1000e\` | SenseCAP T1000-E (level \`expected\`: not yet run on our rig) |
 
 \`tar xzf lnflash-nightly-amd64.tar.gz && cd lnflash-* && sudo ./lnflash\` — nothing is downloaded and nothing is installed; everything it writes to the board is in the directory. \`--dry-run\` says what is attached and changes nothing. The flasher binary is amd64; the firmware images and the SoftDevice inside are not architecture-specific.
 

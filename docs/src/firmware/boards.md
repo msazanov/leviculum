@@ -301,6 +301,43 @@ told the `Board-ID` explicitly by a person who can see which board is on
 the bench, and for the first flash the image goes onto the mass-storage
 volume by hand.
 
+### Family D: SenseCAP T1000-E (LR1110)
+
+`t1000e` binary, the first board whose radio is not an SX1262: an LR1110,
+driven through the `leviculum-lr11xx` driver, which `leviculum-nrf/src/radio.rs`
+links for the `bsp-t1000e` build in place of `sx1262.rs`. Nothing above the
+LoRa interface knows the difference. NSS `P0.12`, SCK `P0.11`, MOSI `P1.09`,
+MISO `P1.08`, BUSY `P0.07`, IRQ (the LR1110's DIO9) `P1.01`, NRESET `P1.10`;
+TCXO at 1.6 V; the RF switch on DIO5..DIO8, set by `SetDioAsRfSwitch` from
+the board's description rather than by a host pin.
+
+| Product | Level | Note |
+|---|---|---|
+| Seeed SenseCAP T1000-E | **Bring-up** | On the rig since 2026-10-18, first image built, not yet run; every wiring fact is from Meshtastic's variant, as Seeed publishes no schematic. `lnflash` carries it at *Expected* |
+
+Every fact in `leviculum-nrf/src/boards/t1000e.rs` is marked as a hint from
+the vendor's firmware, and the two that can be wrong are refuted at first
+boot rather than by a symptom: the LR1110 reads back its error word after
+calibration, and a wrong TCXO voltage or start-up time answers
+`Calibration(errors=0x0020)`, a 32.768 kHz crystal that is not there
+`Calibration(errors=0x0040)`, both on the `[LORA] init FAILED` line. The
+PA table is the Semtech LR1110MB1DXS shield's, so the radiated power for a
+configured number is unverified until it is measured on the rig; the
+`[SX_TX_POWER]` line names the row that went out.
+
+The first image drives the radio, USB and BLE, holds the sensor rail on
+(`P1.06`, as the vendor firmware does) and the AG3335 GNSS off (`P1.11`).
+Not in it: the GNSS receiver, the QMA6100P accelerometer, the battery
+divider, the buzzer and the button. The product has no display.
+
+The bootloader's `Board-ID` is `nRF52840-T1000-E-v1`, bound to this one
+product, so `lnflash` has a flashing entry for it at level *Expected*:
+USB `1209:0004` for our firmware and `239a:8029` for stock Meshtastic, the
+bootloader on `2886:0057`, drive label `T1000-E`. The rig unit's bootloader
+offers serial DFU only and mounts no drive, so its first image goes on with
+`adafruit-nrfutil` ([Building and flashing](flashing.md), "SenseCAP
+T1000-E: serial DFU").
+
 ### ESP32 class: Heltec WiFi LoRa 32 V4
 
 **A different crate and a different stage.** Everything above is
@@ -402,7 +439,7 @@ be settled before the family is presented as broadly supported.
 
 ## Cargo features and binaries
 
-Three firmware binaries are defined, one per board family:
+Four firmware binaries are defined, one per board family:
 
 ```text
 [[bin]]
@@ -416,7 +453,15 @@ path = "src/bin/rak4631.rs"
 [[bin]]
 name = "solarnode"
 path = "src/bin/solarnode.rs"
+
+[[bin]]
+name = "t1000e"
+path = "src/bin/t1000e.rs"
 ```
+
+Each binary names the radio driver it links in `required-features`
+(`radio-sx1262` for the first three, `bsp-t1000e` for the last), so a
+feature set compiles the binaries on its own radio and no others.
 
 (`leviculum-nrf/Cargo.toml:449-461`)
 
@@ -430,6 +475,7 @@ board. Exactly one BSP feature must be enabled per build; a
 | `bsp-t114` | T114 BSP (+ SoftDevice BLE + status display + GNSS + battery) | `leviculum-nrf/Cargo.toml:370` |
 | `bsp-rak4631` | RAK4631 BSP (+ SoftDevice BLE) | `leviculum-nrf/Cargo.toml:354` |
 | `bsp-solarnode` | SenseCAP Solar Node P1-Pro BSP (+ SoftDevice BLE + battery + GNSS). No display | `leviculum-nrf/Cargo.toml:391` |
+| `bsp-t1000e` | SenseCAP T1000-E BSP (+ SoftDevice BLE), on the LR11xx driver. No GNSS, battery or display yet | `leviculum-nrf/Cargo.toml:398` |
 | `display` | SSD1306 OLED, probed at run time | `leviculum-nrf/Cargo.toml:411` |
 | `gnss` | NMEA0183 GNSS (ZOE-M8Q on the V2 baseboard, L76K on the T114 and the Solar Node) | `leviculum-nrf/Cargo.toml:412` |
 | `battery` | pack-voltage monitor: the `BATTERY` log line, the panel's voltage and, on the V2, the telemetry field. Unconditional under `bsp-t114` (the divider is on every T114) and under `bsp-solarnode` (it is on the XIAO module), opt-in on the V2 via `rak-baseboard` | `leviculum-nrf/Cargo.toml:418` |
@@ -457,10 +503,11 @@ The mapping from board to binary and features used by the flash recipes:
 | Heltec Mesh Node T114 | `t114` | `bsp-t114` |
 | RAK4631 (bare module) | `rak4631` | `bsp-rak4631` |
 | WisMesh Pocket V2 (full baseboard) | `rak4631` | `bsp-rak4631,rak-baseboard` |
+| SenseCAP T1000-E | `t1000e` | `bsp-t1000e` |
 
 (Feature sets as invoked in the `just flash`, `just flash-rak4631`, and
-`just flash-rak4631-pocket` recipes: `Justfile:1998`, `Justfile:2026`,
-`Justfile:2040`.)
+`just flash-rak4631-pocket` recipes: `Justfile:1999`, `Justfile:2027`,
+`Justfile:2041`.)
 
 ### What the `lnflash` bundle carries
 

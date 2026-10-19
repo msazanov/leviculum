@@ -1,7 +1,9 @@
 # lnflash
 
 Puts Leviculum firmware on a Heltec Mesh Node T114 or a RAK4631 (the
-WisMesh Pocket V2 and the other carriers built around that module).
+WisMesh Pocket V2 and the other carriers built around that module), and,
+once you confirm it, on a SenseCAP T1000-E: we have not run that one
+yet, and `lnflash` says so before it writes.
 
     sudo ./lnflash
 
@@ -89,12 +91,16 @@ reappear as a drive.
     firmware/t114/s140_nrf52_7.3.0_license-agreement.txt
                                              its licence, Nordic's own
     firmware/rak4631/leviculum-rak4631-*.uf2 our firmware, RAK4631
+    firmware/t1000e/leviculum-t1000e-*.uf2   our firmware, SenseCAP T1000-E
 
 One image per board, and `lnflash` picks by asking your board's
 bootloader what it is. There is no RAK4631 SoftDevice in here: every RAK
 we have seen already runs a version our firmware can use, and rather than
 ship a repair we have never had to perform, `lnflash` refuses — telling
-you what it found — if it meets one that does not.
+you what it found — if it meets one that does not. The same holds for the
+T1000-E. A T1000-E whose bootloader shows no drive at all takes serial
+DFU only, which `lnflash` does not speak; the Leviculum source tree has
+the commands for that (`docs/src/firmware/flashing.md`).
 
 The SoftDevice is Nordic Semiconductor's, not ours, and is redistributed
 under the terms in `s140_nrf52_7.3.0_license-agreement.txt`, the file

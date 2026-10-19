@@ -75,6 +75,13 @@ T114=$'UF2 Bootloader 0.9.0-2-g836c8dc-dirty lib/nrfx (v2.0.0) lib/tinyusb (0.12
 # The RAK4631's file: same shape plus a `Ver:` key.
 RAK=$'UF2 Bootloader 0.4.3\r\nModel: WisBlock RAK4631 Board\r\nBoard-ID: WisBlock-RAK4631-Board\r\nDate: May 20 2023\r\nVer: 0.4.3\r\nSoftDevice: S140 7.3.0\r\n'
 
+# The SenseCAP T1000-E's file, CONSTRUCTED rather than read off a unit: the
+# rig unit's bootloader mounts no volume. Model, Board-ID and SoftDevice are
+# the Adafruit_nRF52_Bootloader board definition's (boards/t1000_e) and what
+# the unit reports over USB; the banner and date are placeholders. Replace it
+# with the real text the first time a T1000-E publishes one.
+T1000E=$'UF2 Bootloader 0.9.2\r\nModel: Seeed T1000-E for Meshtastic\r\nBoard-ID: nRF52840-T1000-E-v1\r\nDate: (constructed)\r\nSoftDevice: S140 7.3.0\r\n'
+
 # The factory board that was written off as bricked for weeks, serial
 # 183004F712B4A7FE (docs/src/concepts/lnode-flashing.md).
 FACTORY="${T114//S140 7.3.0/S140 6.1.1}"
@@ -84,6 +91,7 @@ NO_LINE="${T114//$'SoftDevice: S140 7.3.0\r\n'/}"
 
 D_OK="$(fixture ok "$T114")"
 D_RAK="$(fixture rak "$RAK")"
+D_T1000E="$(fixture t1000e "$T1000E")"
 D_FACTORY="$(fixture factory "$FACTORY")"
 D_NOLINE="$(fixture noline "$NO_LINE")"
 D_LF="$(fixture lf "${T114//$'\r\n'/$'\n'}")"
@@ -126,6 +134,7 @@ check_verdict "a bootloader with no line is unknown"    2 "$D_NOLINE"
 # --- Everything around them -------------------------------------------------
 
 check_verdict "the RAK file, extra key and all"         0 "$D_RAK"
+check_verdict "the T1000-E file (constructed)"          0 "$D_T1000E"
 check_verdict "LF-only line endings read the same"      0 "$D_LF"
 check_verdict "the key is matched case-insensitively"   0 "$D_LOWER"
 check_verdict "7.0.1, the floor lnflash accepts"        0 "$D_FLOOR"

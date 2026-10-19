@@ -59,6 +59,12 @@ check_contains() {
 # tools/test-softdevice-guard.sh uses).
 T114_INFO=$'UF2 Bootloader 0.9.0-2-g836c8dc-dirty\r\nModel: HT-n5262\r\nBoard-ID: HT-n5262\r\nDate: Jul  9 2024\r\nSoftDevice: S140 7.3.0\r\n'
 RAK_INFO=$'UF2 Bootloader 0.4.3\r\nModel: WisBlock RAK4631 Board\r\nBoard-ID: WisBlock-RAK4631-Board\r\nDate: May 20 2023\r\nVer: 0.4.3\r\nSoftDevice: S140 7.3.0\r\n'
+# The SenseCAP T1000-E's file, CONSTRUCTED rather than read off a unit: the
+# rig unit's bootloader mounts no volume. Model, Board-ID and SoftDevice are
+# the Adafruit_nRF52_Bootloader board definition's (boards/t1000_e) and what
+# the unit reports over USB; the banner and date are placeholders. Replace it
+# with the real text the first time a T1000-E publishes one.
+T1000E_INFO=$'UF2 Bootloader 0.9.2\r\nModel: Seeed T1000-E for Meshtastic\r\nBoard-ID: nRF52840-T1000-E-v1\r\nDate: (constructed)\r\nSoftDevice: S140 7.3.0\r\n'
 
 # A directory that stands in for one mounted bootloader volume.
 # Args: $1 = name, $2 = INFO_UF2.TXT text
@@ -257,6 +263,20 @@ S8_T114="$(volume s8-t114 "$T114_INFO")"
 SEARCH_DIRS="$S8_T114"$'\n'
 S8_WARNINGS="$(poll_matching_drive "(test)" 2 2>&1 >/dev/null | grep -c 'ignoring UF2 drive')"
 check_eq "a foreign volume is warned about once across three ticks" "1" "$S8_WARNINGS"
+
+# --- 9. A T1000-E is told from a T114 by its Board-ID alone ----------------
+# The board added in Codeberg #406: its volume, should it publish one, is
+# chosen by `nRF52840-T1000-E-v1` and a T114 volume beside it is not taken.
+
+reset_scenario
+BOOTLOADER_BOARD_ID="nRF52840-T1000-E-v1"
+S9_T114="$(volume s9-t114 "$T114_INFO")"
+S9_T1000E="$(volume s9-t1000e "$T1000E_INFO")"
+SEARCH_DIRS="$S9_T114"$'\n'"$S9_T1000E"$'\n'
+S9_RC=0
+S9_GOT="$(poll_matching_drive "(test)" 0 2>/dev/null)" || S9_RC=$?
+check_eq "the T1000-E volume is the one selected" "$S9_T1000E" "$S9_GOT"
+check_eq "...with success" "0" "$S9_RC"
 
 # --- Summary ----------------------------------------------------------------
 

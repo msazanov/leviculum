@@ -353,6 +353,7 @@ nrf-shellcheck:
         packaging/site/lev-receive-nightly packaging/site/lev-unpack-docs scripts/test-site-unpack-docs.sh scripts/build-docs-tarball.sh \
         scripts/collect-nightly-debs.sh scripts/test-collect-nightly-debs.sh \
         scripts/deb-stamp.sh scripts/test-deb-stamp.sh scripts/build-deb.sh scripts/lnflash-bundle.sh \
+        scripts/t1000e-dfu-package.sh \
         scripts/test-lnflash-bundle.sh \
         scripts/rnode-flash.sh scripts/check-rnode-chip-offsets.sh \
         scripts/install-ci.sh \
@@ -2059,6 +2060,18 @@ flash-solarnode:
 [doc('Flash a single SenseCAP Solar Node by port path or udev symlink')]
 flash-solarnode-one PORT:
     cd leviculum-nrf && LEVICULUM_FLASH_ONLY={{PORT}} {{solarnode_env}} cargo run --release --bin solarnode --features bsp-solarnode
+
+# The SenseCAP T1000-E's bootloader (2886:0057, Board-ID nRF52840-T1000-E-v1)
+# answers serial DFU only on the rig unit, with no UF2 volume, so the UF2
+# runner the other boards use has nothing to copy onto. This builds the image
+# and wraps it as the DFU package that bootloader takes; the `dfu serial` line
+# that writes it, and where the two constants come from, are in
+# docs/src/firmware/flashing.md ("SenseCAP T1000-E: serial DFU").
+# adafruit-nrfutil comes from `pip install --user adafruit-nrfutil`.
+[doc('Build the SenseCAP T1000-E image as a serial-DFU package')]
+t1000e-dfu-package:
+    cd leviculum-nrf && cargo build --release --bin t1000e --features bsp-t1000e
+    bash scripts/t1000e-dfu-package.sh
 
 # A measurement instrument for OTA stage 2, not firmware. It ERASES the whole
 # 2 MiB external flash, programs two patterns over it, reads them back, and

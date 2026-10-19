@@ -187,3 +187,49 @@ docs/src/concepts/lnode-flashing.md, "Decoupled by construction"). Flash it \
 with `just flash-solarnode`, which is told the Board-ID explicitly by a person \
 who can see which board is on the bench.\
 """
+
+# The SenseCAP T1000-E (Codeberg #406): an nRF52840 with an LR1110 radio, the
+# first board on the LR11xx driver. One product, one PCB, no carrier variants,
+# so the Board-ID its bootloader publishes and the radio wiring belong to the
+# same unit (docs/src/concepts/board-support-scope.md, "The limit that bites").
+[board.t1000e]
+family    = "nrf52840"
+# 1209:0004 is ours (leviculum-nrf/src/boards/t1000e.rs, CONFIG). 239a:8029 is
+# stock Meshtastic's, measured on the rig unit 2026-10-18; unlike stock
+# firmware on the T114 it answers the 1200-baud touch.
+candidate_usb = ["1209:0004", "239a:8029"]
+
+[board.t1000e.flashing]
+# `expected`: the wiring is read from Meshtastic's variant (Seeed publishes no
+# schematic), and we have not run the board yet. A write needs a person to say
+# yes to exactly that.
+level     = "expected"
+transport = "uf2-msc"
+entry     = ["touch-1200", "double-tap"]
+
+[board.t1000e.flashing.identify]
+# From the Adafruit_nRF52_Bootloader board definition for this product
+# (boards/t1000_e) and the rig unit: Board-ID nRF52840-T1000-E-v1, volume
+# label T1000-E, bootloader USB 2886:0057 ("T1000-E-BOOT"). The rig unit's
+# bootloader publishes no UF2 volume and takes serial DFU only, which this
+# transport cannot drive; its first flash is `just t1000e-dfu-package` and the
+# `dfu serial` line in docs/src/firmware/flashing.md. A unit whose bootloader
+# does mount the volume is flashed here like the others.
+info_uf2_board_id = "nRF52840-T1000-E-v1"
+bootloader_usb    = ["2886:0057"]
+msc_label         = "T1000-E"
+
+[board.t1000e.flashing.flash]
+# The Adafruit nRF52840 layout every other board here has: the same
+# bootloader family, S140 7.3.0, and the image linked at 0x27000
+# (leviculum-nrf/memory.x). Not measured off this unit's CURRENT.UF2, which
+# it does not publish.
+family_id      = 0xADA52840
+writable_start = 0x1000
+writable_end   = 0xEA000
+app_base       = 0x27000
+
+[board.t1000e.flashing.requires]
+# The rig unit reports S140 7.3.0; the constraint is the one every board on
+# this image base has. No remedy is carried.
+softdevice = ">=7.0.1, <8.0.0"

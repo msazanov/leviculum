@@ -119,6 +119,29 @@ mod tests {
         "SoftDevice: S140 7.3.0\r\n",
     );
 
+    /// The SenseCAP T1000-E's file, CONSTRUCTED rather than read off a unit:
+    /// the rig unit's bootloader mounts no volume (Codeberg #406). Model,
+    /// Board-ID and SoftDevice are the Adafruit bootloader's board
+    /// definition (`boards/t1000_e`) and what the unit reports; the banner
+    /// and date are placeholders, to be replaced by the real text.
+    const T1000E: &str = concat!(
+        "UF2 Bootloader 0.9.2\r\n",
+        "Model: Seeed T1000-E for Meshtastic\r\n",
+        "Board-ID: nRF52840-T1000-E-v1\r\n",
+        "Date: (constructed)\r\n",
+        "SoftDevice: S140 7.3.0\r\n",
+    );
+
+    #[test]
+    fn the_t1000e_file_parses_to_the_board_id_the_catalogue_keys_on() {
+        let info = parse(T1000E);
+        assert_eq!(info.board_id(), Some("nRF52840-T1000-E-v1"));
+        assert_eq!(info.model(), Some("Seeed T1000-E for Meshtastic"));
+        assert_eq!(info.softdevice().unwrap().version, Version::new(7, 3, 0));
+        assert_ne!(info.board_id(), parse(T114).board_id());
+        assert_ne!(info.board_id(), parse(RAK).board_id());
+    }
+
     #[test]
     fn the_t114_file_parses_to_its_measured_values() {
         let info = parse(T114);
