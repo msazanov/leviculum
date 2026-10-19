@@ -68,43 +68,7 @@
 //! state by whatever firmware ran before ours), and the driver holds
 //! that pin high for its whole life.
 
-use crate::{AckOutcome, ModuleInit, Output};
-
-/// Build an NMEA sentence at compile time: `$`, body, `*`, the two
-/// uppercase hex digits of the XOR checksum over the body, CRLF.
-///
-/// `N` must be `body.len() + 6`; the assert makes a mismatch a compile
-/// error because the function is only evaluated in const context (the
-/// `FRAME` consts below).
-const fn nmea_frame<const N: usize>(body: &[u8]) -> [u8; N] {
-    assert!(N == body.len() + 6, "N must be body length + 6");
-    let mut f = [0u8; N];
-    f[0] = b'$';
-    let mut ck: u8 = 0;
-    let mut i = 0;
-    while i < body.len() {
-        f[1 + i] = body[i];
-        ck ^= body[i];
-        i += 1;
-    }
-    let end = 1 + body.len();
-    f[end] = b'*';
-    f[end + 1] = hex_upper(ck >> 4);
-    f[end + 2] = hex_upper(ck & 0x0F);
-    f[end + 3] = b'\r';
-    f[end + 4] = b'\n';
-    f
-}
-
-/// One nibble as an uppercase ASCII hex digit (NMEA checksums are
-/// uppercase; the reference's literals are).
-const fn hex_upper(nibble: u8) -> u8 {
-    if nibble < 10 {
-        b'0' + nibble
-    } else {
-        b'A' + (nibble - 10)
-    }
-}
+use crate::{nmea_frame, AckOutcome, LiteralScanner, ModuleInit, Output};
 
 /// `$PCAS06,0` — version query. The answer identifies the module and,
 /// more usefully here, proves it reads our TX line.
@@ -187,36 +151,6 @@ impl Step {
     }
 }
 
-/// Rolling literal matcher for [`PROBE_ANSWER`] in the RX byte stream.
-///
-/// The answer arrives inside a normal NMEA burst, so it has to be found
-/// between other sentences and possibly split across read chunks. A
-/// byte that breaks the match may itself be the start of a new one
-/// (`$` is the only such byte here, since the pattern contains no other
-/// `$`), so the reset is to "matched one byte" in that case.
-#[derive(Default)]
-struct AnswerScanner {
-    matched: usize,
-}
-
-impl AnswerScanner {
-    /// Feed one byte; `true` on the byte that completes the pattern.
-    fn push(&mut self, byte: u8) -> bool {
-        if byte == PROBE_ANSWER[self.matched] {
-            self.matched += 1;
-            if self.matched == PROBE_ANSWER.len() {
-                self.matched = 0;
-                return true;
-            }
-            return false;
-        }
-        // Mismatch: restart, but do not swallow a byte that begins the
-        // pattern itself.
-        self.matched = usize::from(byte == PROBE_ANSWER[0]);
-        false
-    }
-}
-
 /// Sequencer state. `Gate` holds the send of `step` until the settle
 /// deadline has passed AND a clean sentence has arrived after it
 /// (`snap` is the sentence count taken at the first poll past
@@ -241,7 +175,7 @@ enum State {
 /// it stays silent forever.
 pub struct L76kInit {
     state: State,
-    scanner: AnswerScanner,
+    scanner: LiteralScanner,
 }
 
 impl Default for L76kInit {
@@ -254,7 +188,7 @@ impl L76kInit {
     pub fn new() -> Self {
         Self {
             state: State::AwaitLock,
-            scanner: AnswerScanner::default(),
+            scanner: LiteralScanner::new(PROBE_ANSWER),
         }
     }
 

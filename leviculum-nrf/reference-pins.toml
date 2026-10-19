@@ -17,6 +17,12 @@
 # have no upstream define at all, and the RAK's display/I2C pins depend on
 # the baseboard rather than the module. Those would need a per-pin rule,
 # and a table of exceptions does not gate anything.
+#
+# One GNSS set is recorded, the T1000-E's (#456), because its variant is the
+# exception to the first of those reasons: it names the UART from the MCU's
+# side (`PIN_SERIAL1_RX` is our RX, and `GPS_RX_PIN` is defined as it), and
+# every control line under a define of its own. Its call site is the
+# `gnss::GnssWiring` literal, compared field by field.
 
 # `qspi_part` per board is the part the board file must declare, and it is
 # what decides whether a `[boards.<b>.qspi]` table may exist at all:
@@ -139,3 +145,17 @@ cs = { pin = 12, alias = "LoRaCs", define = "PIN_SPI_NSS" }
 reset = { pin = 42, alias = "LoRaReset", define = "LORA_RESET" }
 busy = { pin = 7, alias = "LoRaBusy", define = "LORA_DIO2" }
 dio1 = { pin = 33, alias = "LoRaIrq", define = "LORA_DIO1" }
+
+# The AG3335 (#456). rx/tx/power_enable/standby are `GnssWiring` fields; the
+# other four are held by `t1000e::gnss_control`, whose parameters are typed by
+# these aliases, so the compiler already binds the bin's pins to them and the
+# literal check has nothing to add (`call_site = false`).
+[boards.t1000e.gnss]
+rx = { pin = 14, alias = "GnssRx", define = "PIN_SERIAL1_RX" }
+tx = { pin = 13, alias = "GnssTx", define = "PIN_SERIAL1_TX" }
+power_enable = { pin = 43, alias = "GnssEnable", define = "PIN_GPS_EN" }
+standby = { pin = 44, alias = "GnssSleepInt", define = "GPS_SLEEP_INT" }
+vrtc = { pin = 8, alias = "GnssVrtc", define = "GPS_VRTC_EN", call_site = false }
+reset = { pin = 47, alias = "GnssReset", define = "PIN_GPS_RESET", call_site = false }
+rtc_int = { pin = 15, alias = "GnssRtcInt", define = "GPS_RTC_INT", call_site = false }
+resetb_out = { pin = 46, alias = "GnssResetbOut", define = "GPS_RESETB_OUT", call_site = false }

@@ -25,7 +25,9 @@
 #      same pins as those aliases. This is not redundant: the call sites pass
 #      `p.P0_07` peripherals directly, not the aliases, so the alias can be
 #      right while the hardware sees something else. Fixing only `boards/`
-#      would have left the T114 exactly as red as it was.
+#      would have left the T114 exactly as red as it was. The T1000-E's
+#      GNSS set is the one group whose call site is a struct literal
+#      (`gnss::GnssWiring`), compared by field name instead of position.
 #   3. The recorded numbers still match the upstream variant header, when a
 #      Meshtastic tree is at hand. Without one, 1 and 2 still run and this
 #      one says so rather than passing quietly.
@@ -59,7 +61,7 @@
 # that is the shape a board takes when everything is removed from under
 # it, and the T114 passed through it when its QSPI rows went.
 #
-# The reference numbers and the scope — QSPI and LoRa, and why not the rest —
+# The reference numbers and the scope — QSPI, LoRa, one GNSS set, and why not the rest —
 # live in `leviculum-nrf/reference-pins.toml`.
 #
 # Usage:
@@ -89,8 +91,17 @@ TAG = "[board-pins]"
 CALL_ORDER = {
     "qspi": ["sck", "cs", "io0", "io1", "io2", "io3"],  # qspi::identify_and_mount_bounded
     "lora": ["sck", "mosi", "miso", "cs", "reset", "busy", "dio1"],  # lora::init
+    # The `gnss::GnssWiring` literal: fields, not arguments, so the order is
+    # only the set the table must carry and the comparison goes by name.
+    "gnss": ["rx", "tx", "power_enable", "standby"],
 }
-CALLEE = {"qspi": "qspi::identify_and_mount_bounded", "lora": "lora::init"}
+CALLEE = {
+    "qspi": "qspi::identify_and_mount_bounded",
+    "lora": "lora::init",
+    "gnss": "gnss::GnssWiring",
+}
+# Groups whose call site is a struct literal rather than a call.
+STRUCT_SITE = {"gnss"}
 
 ALIAS_RE = re.compile(r"pub type (\w+)\s*=\s*peripherals::(P[01]_\d\d)\s*;")
 PIN_ARG_RE = re.compile(r"\bp\.(P[01]_\d\d)\b")
@@ -191,7 +202,50 @@ def check_aliases(board, group, entries, text, where):
     return out
 
 
+def struct_fields(text, name):
+    """`field: p.Pn_mm` pairs of the first `name {` literal, or None."""
+    m = re.search(re.escape(name) + r"\s*\{", text)
+    if not m:
+        return None
+    depth, i = 1, m.end()
+    while i < len(text) and depth:
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+        i += 1
+    body = text[m.end() : i - 1]
+    return dict(re.findall(r"\b(\w+)\s*:\s*(?:Some\()?\s*p\.(P[01]_\d\d)\b", body))
+
+
+def check_struct_site(board, group, entries, text, where):
+    """The literal's fields, by name, against the table's pins."""
+    fields = struct_fields(text, CALLEE[group])
+    if fields is None:
+        return [
+            f"{where}: {board}: no `{CALLEE[group]} {{` literal found — the "
+            f"gate is checking nothing. If it moved, point this script at it."
+        ]
+    out = []
+    for key, e in entries.items():
+        want = pin_name(e["pin"])
+        got = fields.get(key)
+        if got is None:
+            out.append(
+                f"{where}: {board}: `{CALLEE[group]}` sets no `{key}: p.…` — "
+                f"expected {want} from {e['define']}"
+            )
+        elif got != want:
+            out.append(
+                f"{where}: {board}: `{CALLEE[group]}` field {key} is p.{got}, "
+                f"reference {e['define']} says {want}"
+            )
+    return out
+
+
 def check_call_site(board, group, entries, text, where):
+    if group in STRUCT_SITE:
+        return check_struct_site(board, group, entries, text, where)
     args = call_args(text, CALLEE[group])
     order = CALL_ORDER[group]
     if args is None:
@@ -448,6 +502,28 @@ FIX_PINMAP = {
 }
 
 
+GOOD_GNSS_BIN = """
+        leviculum_nrf::gnss::GnssWiring {
+            uarte: p.UARTE0,
+            rx: p.P0_14.into(),
+            tx: p.P0_13.into(),
+            pps: None,
+            standby: Some(p.P1_12.into()),
+            power_enable: Some(p.P1_11.into()),
+        },
+"""
+# The swap the T114's header comments invite: RX and TX exchanged.
+BAD_GNSS_BIN = GOOD_GNSS_BIN.replace("rx: p.P0_14", "rx: p.P0_13").replace(
+    "tx: p.P0_13", "tx: p.P0_14"
+)
+FIX_GNSS = {
+    "rx": {"pin": 14, "alias": "GnssRx", "define": "PIN_SERIAL1_RX"},
+    "tx": {"pin": 13, "alias": "GnssTx", "define": "PIN_SERIAL1_TX"},
+    "power_enable": {"pin": 43, "alias": "GnssEnable", "define": "PIN_GPS_EN"},
+    "standby": {"pin": 44, "alias": "GnssSleepInt", "define": "GPS_SLEEP_INT"},
+}
+
+
 def self_test():
     rc = 0
     # Each case: a label, a one-argument probe, and the pair of fixtures it
@@ -472,6 +548,13 @@ def self_test():
     cases = (
         ("alias", "P1_01-for-P0_05", pins(check_aliases, FIX_IO3), GOOD_BOARD, BAD_BOARD),
         ("call site", "P1_01-for-P0_05", pins(check_call_site, FIX_QSPI), GOOD_BIN, BAD_BIN),
+        (
+            "struct site",
+            "a GnssWiring with RX and TX swapped",
+            lambda text: check_call_site("t1000e", "gnss", FIX_GNSS, text, "<fixture>"),
+            GOOD_GNSS_BIN,
+            BAD_GNSS_BIN,
+        ),
         ("variant", "P1_01-for-P0_05", pins(check_variant, FIX_SCK_IO3), GOOD_VARIANT, BAD_VARIANT),
         (
             "no-part",
@@ -640,7 +723,7 @@ for board, spec in table.items():
         rc = 1
 
     board_checked = 0
-    for group in ("qspi", "lora"):
+    for group in ("qspi", "lora", "gnss"):
         entries = spec.get(group)
         if entries is None:
             continue

@@ -15,9 +15,10 @@
 //! of its guesses first boot can refute, are in `boards/t1000e.rs`.
 //!
 //! The first image's milestone: boot, dual CDC, identity, announce, and a
-//! LoRa link with a T114 at the default PHY. Not in it: the Airoha AG3335
-//! GNSS (held powered down; a second pass adds its `ModuleKind`), the
-//! QMA6100P accelerometer, the battery divider, the buzzer and the button.
+//! LoRa link with a T114 at the default PHY. Since #456 it also drives the
+//! Airoha AG3335 GNSS, which seeds the calendar and puts a position into
+//! telemetry as the T114's L76K does. Not in it: the QMA6100P
+//! accelerometer, the battery divider, the buzzer and the button.
 //! There is no display on this product.
 
 #![no_std]
@@ -93,11 +94,10 @@ async fn main(spawner: Spawner) {
     leviculum_nrf::telemetry::declare_reporter();
     // Which position sources this board boots with — the second clause of
     // the telemetry send condition, and a question a host may put before
-    // the reporter exists, so it is answered before USB comes up. No GNSS
-    // in this image (the AG3335 is held off), so reports carry a position
-    // only when a host pins a fixed one.
+    // the reporter exists, so it is answered before USB comes up. The
+    // AG3335 is driven (#456), unconditionally: `bsp-t1000e` carries `gnss`.
     leviculum_nrf::telemetry::declare_position_sources(
-        /* gnss_available */ false,
+        /* gnss_available */ true,
         t1000e::CONFIG.telemetry_flash_page,
     );
     // The media profile decides which carriers come up at all, so it is
@@ -145,13 +145,14 @@ async fn main(spawner: Spawner) {
         persistent_log,
     );
 
-    // The sensor rail up and the GNSS receiver down, in the order
-    // Meshtastic's `initVariant` sets them, before anything touches the
-    // radio: which parts hang on the sensor rail is what the unpublished
+    // The sensor rail up and the AG3335's static control lines set, in the
+    // order Meshtastic's `initVariant` sets them, before anything touches
+    // the radio: which parts hang on the sensor rail is what the unpublished
     // schematic would say, and the vendor's order is the one known to run
-    // (`boards/t1000e.rs`). Both held for the life of the board.
+    // (`boards/t1000e.rs`). Both held for the life of the board. The
+    // receiver's enable and sleep lines belong to the GNSS task below.
     let _power_sensors = t1000e::power_sensors(p.P1_06);
-    let _gnss_off = t1000e::gnss_off(p.P1_11);
+    let _gnss_control = t1000e::gnss_control(p.P0_08, p.P1_15, p.P0_15, p.P1_14);
     let mut led = t1000e::led(p.P0_24);
 
     let rng = leviculum_nrf::rng::RawHwRng::new();
@@ -513,6 +514,27 @@ async fn main(spawner: Spawner) {
     leviculum_nrf::log::log_fmt_critical("[DISP] ", format_args!("none"));
     leviculum_nrf::log::log_fmt_critical("[BTN] ", format_args!("none"));
 
+    // Airoha AG3335 on UARTE0 (#456), the pins named from the MCU's side as
+    // the variant names them: the MCU receives on P0.14 and transmits on
+    // P0.13. P1.11 is the receiver's own power enable and P1.12 its sleep
+    // line, both held high by the task; the variant names no pulse line.
+    leviculum_nrf::gnss::init(
+        &spawner,
+        leviculum_nrf::gnss::GnssWiring {
+            uarte: p.UARTE0,
+            timer: p.TIMER1,
+            ppi_a: p.PPI_CH0,
+            ppi_b: p.PPI_CH1,
+            rx: p.P0_14.into(),
+            tx: p.P0_13.into(),
+            pps: None,
+            standby: Some(p.P1_12.into()),
+            power_enable: Some(p.P1_11.into()),
+            module: leviculum_nrf::gnss::ModuleKind::AirohaAg3335,
+        },
+    );
+    info!("gnss task spawned (AG3335)");
+
     let (hu, hf) = leviculum_nrf::heap_stats();
     info!("heap u={} f={}", hu, hf);
     leviculum_nrf::log_stack("post-init");
@@ -593,6 +615,18 @@ async fn main(spawner: Spawner) {
     }
     let telemetry_target_rx = leviculum_nrf::telemetry::inbound_target_receiver();
     let fixed_position_rx = leviculum_nrf::telemetry::inbound_fixed_position_receiver();
+
+    // Calendar seeding from GNSS (Codeberg #166 item 1, #456 on this
+    // board), as on the T114: one accepted fix seeds, the monotonic clock
+    // carries the calendar from there.
+    let mut gnss_rx = {
+        let rx = leviculum_nrf::baseboard::GNSS_FIX.receiver();
+        if rx.is_none() {
+            log_critical!("[TIME_SEED_REFUSED] source=gnss reason=watch_capacity");
+        }
+        rx
+    };
+    let mut time_seed_gate = leviculum_gnss_time::SeedGate::new();
 
     // Periodic `[TRANSPORT]` counters (#344). Rides the main loop rather than
     // a spawned task: the counters live in the node this loop owns.
@@ -686,10 +720,22 @@ async fn main(spawner: Spawner) {
             None => deadline,
         };
 
-        // No GNSS in this image, so no fix ever offers a calendar seed. The
-        // arm stays in the select so the loop keeps the solar node's shape
-        // and the AG3335 pass only has to fill it in.
-        let gnss_time_candidate = core::future::pending::<u64>();
+        let gnss_time_candidate = async {
+            if time_seed_gate.is_seeded() {
+                // Seeded for this boot: nothing left to wait for.
+                core::future::pending::<u64>().await
+            } else {
+                match gnss_rx.as_mut() {
+                    Some(rx) => loop {
+                        let fix = rx.changed().await;
+                        if let Some(unix) = time_seed_gate.offer(fix.unix_secs) {
+                            break unix;
+                        }
+                    },
+                    None => core::future::pending::<u64>().await,
+                }
+            }
+        };
 
         // The tick rate is also the retry rate for a report the radio
         // could not take: the policy re-arms until a send is confirmed.
@@ -768,8 +814,19 @@ async fn main(spawner: Spawner) {
         time_checkpoint.poll(node.anchor_rank(), node.emission_secs(), node.now_ms());
         match wake {
             Either4::Second(unix) => {
-                // Unreachable: the GNSS arm above never resolves.
-                let _ = unix;
+                // A GNSS fix carrying UTC. The seam applies the same
+                // sanity window as every other time source; a refusal is
+                // surfaced as a structured event, never swallowed.
+                use leviculum_core::transport::TimeSource;
+                // A refusal leaves the gate open for the next fix:
+                // `leviculum_gnss_time::SeedGate::settle`.
+                if time_seed_gate.settle(node.set_wall_time_unix_secs(unix, TimeSource::Gnss)) {
+                    leviculum_nrf::set_time_source(TimeSource::Gnss);
+                    log_critical!("[TIME_SEED] source=gnss unix={}", unix);
+                    log_critical!("[TIME_SOURCE] source={}", leviculum_nrf::time_source_str());
+                } else {
+                    log_critical!("[TIME_SEED_REFUSED] source=gnss unix={}", unix);
+                }
             }
             Either4::Third(Either4::First(unix_secs)) => {
                 // A host that knows wall time (#238 TYPE_WALL_TIME). The
@@ -1135,11 +1192,12 @@ const TELEMETRY_TICK_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Read this board's sensors for one telemetry evaluation.
 ///
-/// Returns the readings and whether GNSS presence is `Fix`, which is never
-/// in this image: no GNSS receiver is driven, and no battery divider is
-/// sampled yet. What every board has is read: the die temperature, through
-/// the SoftDevice ([`leviculum_nrf::telemetry::die_temperature_quarter_c`]),
-/// and the last reception's link figures.
+/// Returns the readings and whether GNSS presence is `Fix`. The AG3335's
+/// latest fix supplies the position fields (#456); no battery divider is
+/// sampled yet. What every board has is read too: the die temperature,
+/// through the SoftDevice
+/// ([`leviculum_nrf::telemetry::die_temperature_quarter_c`]), and the last
+/// reception's link figures.
 fn collect_readings<R, C, S>(
     node: &leviculum_core::node::NodeCore<R, C, S>,
     sd: &nrf_softdevice::Softdevice,
@@ -1149,7 +1207,7 @@ where
     C: leviculum_core::traits::Clock,
     S: leviculum_core::traits::Storage,
 {
-    let readings = leviculum_nrf::telemetry::Readings {
+    let mut readings = leviculum_nrf::telemetry::Readings {
         // A timebase below the plausibility floor is uptime seconds, not a
         // calendar estimate — the anchor model's "never ahead" rule has
         // nothing to work with there. Which arm anchored it is reported
@@ -1164,7 +1222,19 @@ where
         link: leviculum_nrf::telemetry::link_reading(),
         ..Default::default()
     };
-    let has_fix = false;
+    use leviculum_nrf::baseboard::{GnssPresence, GNSS_FIX, GNSS_PRESENCE};
+    if let Some(fix) = GNSS_FIX.try_get() {
+        readings.latitude = fix.latitude;
+        readings.longitude = fix.longitude;
+        readings.altitude_m = fix.altitude_m;
+        readings.speed_mps = fix.speed_mps;
+        readings.bearing_deg = fix.bearing_deg;
+        readings.hdop = fix.hdop;
+    }
+    let has_fix = matches!(
+        GNSS_PRESENCE.try_get().map(|p| p.state),
+        Some(GnssPresence::Fix)
+    );
     (readings, has_fix)
 }
 

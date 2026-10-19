@@ -1080,13 +1080,13 @@ own issue, not a finding of this page.
 
 | # | Where | What it decides | State it reads | Cheapest rig cell | s | radios/boards | Host test |
 |---|---|---|---|---|---|---|---|
-| 339 | `leviculum-nrf/src/gnss.rs:155` | which init sequencer runs: UBX on ZOE-M8Q, `$PCAS` on L76K | wiring.module | `boot_smoke_t114` | 300 | 1/1 |  |
-| 340 | `leviculum-nrf/src/gnss.rs:256` | RMC fold: valid sets lat/lon/time/speed/bearing, invalid clears only unix_secs | rmc, latest | none | - | - || `leviculum_gnss_time::fix::tests::a_valid_rmc_sets_position_time_and_movement`<br>`leviculum_gnss_time::fix::tests::an_invalid_rmc_clears_the_time_and_keeps_the_position`<br>`leviculum_gnss_time::fix::tests::an_invalid_rmc_on_an_unseeded_board_offers_the_gate_nothing` |
+| 339 | `leviculum-nrf/src/gnss.rs:161` | which init sequencer runs: UBX on ZOE-M8Q, `$PCAS` on L76K, `$PAIR` on AG3335 | wiring.module | `boot_smoke_t114` | 300 | 1/1 |  |
+| 340 | `leviculum-nrf/src/gnss.rs:264` | RMC fold: valid sets lat/lon/time/speed/bearing, invalid clears only unix_secs | rmc, latest | none | - | - || `leviculum_gnss_time::fix::tests::a_valid_rmc_sets_position_time_and_movement`<br>`leviculum_gnss_time::fix::tests::an_invalid_rmc_clears_the_time_and_keeps_the_position`<br>`leviculum_gnss_time::fix::tests::an_invalid_rmc_on_an_unseeded_board_offers_the_gate_nothing` |
 | 341 | `leviculum-nrf/src/gnss.rs:277` | GGA fold: valid is quality != NoFix; position, altitude, HDOP only on a fix | gga, latest | none | - | - || `leviculum_gnss_time::fix::tests::a_gga_with_a_fix_sets_position_altitude_and_hdop`<br>`leviculum_gnss_time::fix::tests::a_gga_without_a_fix_counts_satellites_and_keeps_the_rest`<br>`leviculum_gnss_time::fix::tests::a_gga_searching_for_a_fix_publishes_its_satellite_count` |
-| 342 | `leviculum-nrf/src/gnss.rs:274` | hold the receiver power enable high, where the board has one | wiring.power_enable | `boot_smoke_t114` | 300 | 1/1 |  |
-| 343 | `leviculum-nrf/src/gnss.rs:285` | hold the standby pin high | wiring.standby | `boot_smoke_t114` | 300 | 1/1 |  |
-| 344 | `leviculum-nrf/src/gnss.rs:397` | rebuild the UART only for a different baud | pending_baud, configured_baud | `boot_smoke_t114` | 300 | 1/1 |  |
-| 345 | `leviculum-nrf/src/gnss.rs:409` | init frames after the baud decision, at most 4 staged per loop, extras dropped | locked, sentences_seen | `boot_smoke_t114` | 300 | 1/1 |  |
+| 342 | `leviculum-nrf/src/gnss.rs:282` | hold the receiver power enable high, where the board has one | wiring.power_enable | `boot_smoke_t114` | 300 | 1/1 |  |
+| 343 | `leviculum-nrf/src/gnss.rs:293` | hold the standby pin high | wiring.standby | `boot_smoke_t114` | 300 | 1/1 |  |
+| 344 | `leviculum-nrf/src/gnss.rs:405` | rebuild the UART only for a different baud | pending_baud, configured_baud | `boot_smoke_t114` | 300 | 1/1 |  |
+| 345 | `leviculum-nrf/src/gnss.rs:417` | init frames after the baud decision, at most 4 staged per loop, extras dropped | locked, sentences_seen | `boot_smoke_t114` | 300 | 1/1 |  |
 | 346 | `leviculum-nrf/src/battery.rs:234` | power the divider only while sampling, 10 ms settle | divider_enable | `boot_smoke_t114` | 300 | 1/1 |  |
 | 347 | `leviculum-nrf/src/battery.rs:393` | publish BATTERY_STATE every 5th sample | samples | `boot_smoke_t114` | 300 | 1/1 |  |
 | 348 | `leviculum-nrf/src/battery.rs:396` | 30 s report, then reseed the window with the closing sample | samples | `boot_smoke_t114` | 300 | 1/1 |  |

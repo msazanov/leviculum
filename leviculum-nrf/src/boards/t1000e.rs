@@ -2,7 +2,7 @@
 //!
 //! A card-sized tracker: an nRF52840 and a Semtech LR1110 (LoRa plus GNSS
 //! and WiFi scanning, of which this firmware uses the LoRa modem only),
-//! an Airoha AG3335 GNSS receiver, a QMA6100P accelerometer, a buzzer, one
+//! an Airoha AG3335 GNSS receiver (driven since #456), a QMA6100P accelerometer, a buzzer, one
 //! LED and one button. No display. It is the first board on this firmware
 //! whose radio is not an SX1262, so it is also the first one driven
 //! through `leviculum_lr11xx` (`crate::radio` picks the driver for the
@@ -67,7 +67,7 @@
 //! four `SetPaCfg` bytes of the row that went out, so a capture says which
 //! row of which table a number came from.
 
-use embassy_nrf::gpio::{Level, Output, OutputDrive};
+use embassy_nrf::gpio::{Input, Level, Output, OutputDrive, Pull};
 use embassy_nrf::peripherals;
 use embassy_nrf::Peri;
 use leviculum_lr11xx::board::{
@@ -154,13 +154,71 @@ pub const LR1110: Board = Board {
 /// and the one configuration known to run the radio is the vendor's.
 pub type PowerSensors = peripherals::P1_06;
 
-// GNSS (Airoha AG3335), held off in this image
+// GNSS (Airoha AG3335, Codeberg #456). Every line is the variant's
+// (`variant.h:107-124`), the levels those of its `initVariant`
+// (`variant.cpp`): the hint standing of the rest of this file.
+/// UART, MCU receive: the AG3335's TX (`PIN_SERIAL1_RX (0 + 14)`,
+/// `GPS_RX_PIN`). Unlike the T114's header, this variant names the GPS
+/// lines from the MCU's side, which `gnss::GnssWiring` uses too.
+pub type GnssRx = peripherals::P0_14;
+/// UART, MCU transmit: the AG3335's RX (`PIN_SERIAL1_TX (0 + 13)`,
+/// `GPS_TX_PIN`). 115200 baud (`GPS_BAUDRATE`), one of the presence
+/// machine's sweep rates.
+pub type GnssTx = peripherals::P0_13;
 /// GNSS power enable, **active HIGH** (`PIN_GPS_EN (32 + 11)`,
-/// `GPS_EN_ACTIVE HIGH`). Driven low at boot, as Meshtastic's `initVariant`
-/// does before its GPS code decides: the first image has no AG3335 driver,
-/// and a receiver nobody reads should not draw current on a battery
-/// tracker.
+/// `GPS_EN_ACTIVE HIGH`). The driver's `power_enable`: nothing else on
+/// the board hangs on it.
 pub type GnssEnable = peripherals::P1_11;
+/// The AG3335's sleep request, **held HIGH** = awake (`GPS_SLEEP_INT
+/// (32 + 12)`, "always high"). The driver's `standby` line, which it
+/// holds high for its whole life, exactly the level this one wants.
+pub type GnssSleepInt = peripherals::P1_12;
+/// Supply of the AG3335's RTC domain, **held HIGH** (`GPS_VRTC_EN (0 +
+/// 8)`, "always high"). Low only in Meshtastic's deep sleep
+/// (`src/sleep.cpp:257`), which this firmware has none of.
+pub type GnssVrtc = peripherals::P0_08;
+/// AG3335 reset, **active HIGH** (`PIN_GPS_RESET (32 + 15)`,
+/// `GPS_RESET_MODE HIGH`), held LOW = released. Never pulsed: a reset
+/// would throw away the receiver's assistance data on every boot, and the
+/// power enable above already gives it a clean start.
+pub type GnssReset = peripherals::P1_15;
+/// AG3335 RTC wake, **held LOW** (`GPS_RTC_INT (0 + 15)`, "normal is LOW,
+/// wake by HIGH"). Nothing here asks it to wake from an RTC sleep it is
+/// never put into.
+pub type GnssRtcInt = peripherals::P0_15;
+/// The AG3335's own reset output, an input with pull-up here
+/// (`GPS_RESETB_OUT (32 + 14)`, "always input pull_up"; `initVariant`
+/// makes it an input). Read by nothing; configured so the pad is not left
+/// floating against a driving output.
+pub type GnssResetbOut = peripherals::P1_14;
+
+/// The AG3335 control lines the GNSS driver does not own, at the levels
+/// [`gnss_control`] sets. Kept alive by the caller: dropping an embassy
+/// pin returns it to its reset state, which would release VRTC.
+pub struct GnssControl {
+    _vrtc: Output<'static>,
+    _reset: Output<'static>,
+    _rtc_int: Output<'static>,
+    _resetb_out: Input<'static>,
+}
+
+/// Set the AG3335's static control lines for the life of the board, in
+/// the order of Meshtastic's `initVariant`: VRTC up, reset released, RTC
+/// wake low, reset output as an input. The enable and the sleep line go
+/// to the GNSS driver as `power_enable` and `standby`.
+pub fn gnss_control(
+    vrtc: Peri<'static, GnssVrtc>,
+    reset: Peri<'static, GnssReset>,
+    rtc_int: Peri<'static, GnssRtcInt>,
+    resetb_out: Peri<'static, GnssResetbOut>,
+) -> GnssControl {
+    GnssControl {
+        _vrtc: Output::new(vrtc, Level::High, OutputDrive::Standard),
+        _reset: Output::new(reset, Level::Low, OutputDrive::Standard),
+        _rtc_int: Output::new(rtc_int, Level::Low, OutputDrive::Standard),
+        _resetb_out: Input::new(resetb_out, Pull::Up),
+    }
+}
 
 // LED and button
 /// The one LED, **active HIGH** (`PIN_LED1 (0 + 24)`, `LED_STATE_ON 1`).
@@ -180,12 +238,6 @@ pub fn led(pin: Peri<'static, LedPin>) -> Output<'static> {
 /// `Output` disconnects it.
 pub fn power_sensors(pin: Peri<'static, PowerSensors>) -> Output<'static> {
     Output::new(pin, Level::High, OutputDrive::Standard)
-}
-
-/// Hold the GNSS receiver off ([`GnssEnable`]). Kept alive by the caller
-/// for the same reason as [`power_sensors`].
-pub fn gnss_off(pin: Peri<'static, GnssEnable>) -> Output<'static> {
-    Output::new(pin, Level::Low, OutputDrive::Standard)
 }
 
 /// Runtime board metadata for shared init code (USB / flash / LoRa).

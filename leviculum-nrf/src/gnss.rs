@@ -1,12 +1,13 @@
 //! GNSS driver task: baud sweep, presence tri-state, NMEA fold.
 //!
-//! One task, three boards, two receivers. UARTE0 on P0.15/P0.16 carries
+//! One task, four boards, three receivers. UARTE0 on P0.15/P0.16 carries
 //! the WisMesh Pocket V2's u-blox ZOE-M8Q (RAK19026 VC baseboard); on
 //! P1.07/P1.05 it carries the Heltec Mesh Node T114's Quectel L76K
 //! (Codeberg #69); on P1.11/P1.12 it carries the SenseCAP Solar Node's
 //! XIAO L76K, which is the same receiver on a different carrier and
-//! therefore the same [`ModuleKind`] (#233). Everything below the
-//! module-init step is identical for all three, because nothing in it is
+//! therefore the same [`ModuleKind`] (#233); on P0.13/P0.14 it carries
+//! the SenseCAP T1000-E's Airoha AG3335 (#456). Everything below the
+//! module-init step is identical for all of them, because nothing in it is
 //! module-specific: a baud sweep, a presence tri-state and an NMEA fold
 //! work on sentences, and sentences are sentences. The differences are
 //! all named in [`GnssWiring`] — which pins, which control lines exist,
@@ -46,13 +47,14 @@
 //! first baud lock the task walks the sequence its board's
 //! [`leviculum_gnss_init::ModuleInit`] hands out — UBX factory clear /
 //! full power / antenna supply on the ZOE-M8Q, the `$PCAS` probe /
-//! constellations / sentence selection / navigation mode on the L76K —
+//! constellations / sentence selection / navigation mode on the L76K,
+//! the `$PAIR` probe / constellations / sentence selection on the AG3335 —
 //! so a persisted Meshtastic-era module configuration cannot survive
 //! into our runtime, and acquisition never depends on a field module's
-//! factory defaults. Both sequences are derived from the Meshtastic
+//! factory defaults. All sequences are derived from the Meshtastic
 //! reference (`meshtastic/src/gps/ubx.h`, `GPS.cpp`) and live
 //! host-tested in the pure crate with the citations; this task only
-//! writes the frames and logs `[GNSS_INIT]` lines. Neither sequence
+//! writes the frames and logs `[GNSS_INIT]` lines. No sequence
 //! contains a reset or a baud command: a forced cold start would wipe
 //! the module's assistance data on every boot, and a baud command would
 //! desynchronise the line the driver is talking on. The UBX clear does
@@ -70,8 +72,9 @@
 //!
 //! The PPS pin (P1.04 on the T114) is configured as a pull-down input
 //! but not used — reserved for a future timestamp-capture iteration.
-//! Two of the three boards pass `pps: None`, for two different reasons,
-//! and neither is "there is a pulse here we are ignoring". The Solar
+//! Three of the four boards pass `pps: None`, and none of them means
+//! "there is a pulse here we are ignoring". The T1000-E's variant names
+//! no pulse line for the AG3335. The Solar
 //! Node breaks no pulse line out at all: an absent output is not a quiet
 //! one, and the pad that would carry it on a XIAO is that board's
 //! battery ADC. The WisMesh Pocket V2 has the output but no wire — the
@@ -87,7 +90,7 @@ use embassy_nrf::uarte::{self, Uarte};
 use embassy_nrf::{bind_interrupts, Peri};
 use embassy_time::{with_timeout, Duration, Instant, Timer};
 
-use leviculum_gnss_init::{L76kInit, ModuleInit, UbxInit};
+use leviculum_gnss_init::{AirohaInit, L76kInit, ModuleInit, UbxInit};
 use leviculum_gnss_presence::{Output, PresenceMachine};
 
 use crate::baseboard::{GnssFix, GnssPresenceState, GNSS_FIX, GNSS_PRESENCE};
@@ -104,6 +107,8 @@ pub enum ModuleKind {
     /// XIAO L76K carrier — the same part, the same command language,
     /// the same probe answer, so one variant serves both.
     QuectelL76k,
+    /// Airoha AG3335 (SenseCAP T1000-E), `$PAIR` sentences (#456).
+    AirohaAg3335,
 }
 
 /// The board-specific half of the driver: which peripherals and pins
@@ -148,6 +153,7 @@ pub struct GnssWiring {
 enum Init {
     Ubx(UbxInit),
     L76k(L76kInit),
+    Airoha(AirohaInit),
 }
 
 impl Init {
@@ -155,6 +161,7 @@ impl Init {
         match module {
             ModuleKind::UbloxM8 => Init::Ubx(UbxInit::new()),
             ModuleKind::QuectelL76k => Init::L76k(L76kInit::new()),
+            ModuleKind::AirohaAg3335 => Init::Airoha(AirohaInit::new()),
         }
     }
 
@@ -162,6 +169,7 @@ impl Init {
         match self {
             Init::Ubx(i) => i,
             Init::L76k(i) => i,
+            Init::Airoha(i) => i,
         }
     }
 }

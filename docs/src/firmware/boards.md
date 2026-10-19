@@ -325,10 +325,16 @@ PA table is the Semtech LR1110MB1DXS shield's, so the radiated power for a
 configured number is unverified until it is measured on the rig; the
 `[SX_TX_POWER]` line names the row that went out.
 
-The first image drives the radio, USB and BLE, holds the sensor rail on
-(`P1.06`, as the vendor firmware does) and the AG3335 GNSS off (`P1.11`).
-Not in it: the GNSS receiver, the QMA6100P accelerometer, the battery
-divider, the buzzer and the button. The product has no display.
+The image drives the radio, USB and BLE, holds the sensor rail on
+(`P1.06`, as the vendor firmware does), and since #456 drives the Airoha
+AG3335 GNSS on UARTE0 (MCU RX `P0.14`, TX `P0.13`, 115200): enable `P1.11`
+and sleep line `P1.12` held high by the GNSS task, VRTC `P0.08` high,
+reset `P1.15` released low, RTC wake `P0.15` low, all at the levels of
+Meshtastic's `initVariant`. Its one-shot init speaks Airoha's `$PAIR`
+sentences (`leviculum-nrf/gnss-init/src/airoha.rs`), and a fix seeds the
+calendar and fills the telemetry position as on the T114. Not in it yet:
+the QMA6100P accelerometer, the battery divider, the buzzer and the
+button. The product has no display.
 
 The bootloader's `Board-ID` is `nRF52840-T1000-E-v1`, bound to this one
 product, so `lnflash` has a flashing entry for it at level *Expected*:
@@ -475,9 +481,9 @@ board. Exactly one BSP feature must be enabled per build; a
 | `bsp-t114` | T114 BSP (+ SoftDevice BLE + status display + GNSS + battery) | `leviculum-nrf/Cargo.toml:372` |
 | `bsp-rak4631` | RAK4631 BSP (+ SoftDevice BLE) | `leviculum-nrf/Cargo.toml:356` |
 | `bsp-solarnode` | SenseCAP Solar Node P1-Pro BSP (+ SoftDevice BLE + battery + GNSS). No display | `leviculum-nrf/Cargo.toml:393` |
-| `bsp-t1000e` | SenseCAP T1000-E BSP (+ SoftDevice BLE), on the LR11xx driver. No GNSS, battery or display yet | `leviculum-nrf/Cargo.toml:400` |
+| `bsp-t1000e` | SenseCAP T1000-E BSP (+ SoftDevice BLE, GNSS), on the LR11xx driver. No battery or display yet | `leviculum-nrf/Cargo.toml:400` |
 | `display` | SSD1306 OLED, probed at run time | `leviculum-nrf/Cargo.toml:413` |
-| `gnss` | NMEA0183 GNSS (ZOE-M8Q on the V2 baseboard, L76K on the T114 and the Solar Node) | `leviculum-nrf/Cargo.toml:414` |
+| `gnss` | NMEA0183 GNSS (ZOE-M8Q on the V2 baseboard, L76K on the T114 and the Solar Node, AG3335 on the T1000-E) | `leviculum-nrf/Cargo.toml:414` |
 | `battery` | pack-voltage monitor: the `BATTERY` log line, the panel's voltage and, on the V2, the telemetry field. Unconditional under `bsp-t114` (the divider is on every T114) and under `bsp-solarnode` (it is on the XIAO module), opt-in on the V2 via `rak-baseboard` | `leviculum-nrf/Cargo.toml:420` |
 | `rak-baseboard` | aggregate of `display` + `gnss` + `battery` | `leviculum-nrf/Cargo.toml:421` |
 
