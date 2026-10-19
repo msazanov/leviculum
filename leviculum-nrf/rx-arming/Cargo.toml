@@ -7,3 +7,9 @@ license = "AGPL-3.0-or-later"
 description = "Order of operations around arming the LoRa receiver, host-testable"
 
 [dependencies]
+
+[dev-dependencies]
+# Only the placement tests need it, for one function: the preamble a frame
+# sent back to back carries is DERIVED from the same rule the firmware
+# programs it with, never a number copied into this crate.
+leviculum-core = { path = "../../leviculum-core", default-features = false }

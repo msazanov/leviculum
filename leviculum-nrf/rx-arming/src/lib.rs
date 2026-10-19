@@ -146,6 +146,7 @@
 //! denominator, and the question is a rate.
 
 pub mod front_end;
+pub mod placement;
 pub use front_end::{FrontEnd, FrontEndFault, Lines, Position, RxEnableLine, Wiring};
 
 /// The receiver operations the arming order is defined over.

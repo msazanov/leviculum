@@ -429,11 +429,7 @@ async fn main(spawner: Spawner) {
         // seed here would make co-booted boards draw identical pre-TX
         // jitter and collide anyway (see `lora_task`).
         let channel_seed = leviculum_nrf::lora::channel_seed();
-        spawner.must_spawn(leviculum_nrf::lora::lora_task(
-            lora,
-            radio_cfg,
-            channel_seed,
-        ));
+        leviculum_nrf::lora::spawn(&spawner, lora, radio_cfg, channel_seed);
         leviculum_nrf::boot_trace::phase(leviculum_nrf::boot_trace::Phase::LoraTask);
     } else {
         leviculum_nrf::media::log_carrier_held_down("lora");

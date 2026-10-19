@@ -14,7 +14,7 @@ use embassy_futures::select::{select, Either};
 use embassy_nrf::gpio::{AnyPin, Input, Level, Output, OutputDrive, Pull};
 use embassy_nrf::spim::{self, Spim};
 use embassy_nrf::{bind_interrupts, peripherals, Peri};
-use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex};
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::{Channel, Receiver, Sender};
 use embassy_sync::mutex::Mutex;
 use leviculum_core::traits::{Interface, InterfaceError};
@@ -92,7 +92,7 @@ bind_interrupts!(pub struct SpiIrqs {
     SPI2 => spim::InterruptHandler<peripherals::SPI2>;
 });
 
-type SpiBus = Mutex<NoopRawMutex, Spim<'static>>;
+type SpiBus = Mutex<CriticalSectionRawMutex, Spim<'static>>;
 
 // Channels between LoRa task and main loop
 //
@@ -1599,7 +1599,7 @@ pub async fn init(
     crate::radio::new(spi_device, reset_pin, busy_pin, irq_pin, front_end)
 }
 
-/// One word of per-board, per-boot entropy for [`lora_task`]'s
+/// One word of per-board, per-boot entropy for the LoRa task's ([`spawn`])
 /// `channel_seed`.
 ///
 /// Every board binary draws its seed through this one function instead of
@@ -1730,6 +1730,74 @@ fn admit_for_transmit(
     true
 }
 
+// Where the LoRa task runs (leviculum#850)
+
+/// The interrupt executor the LoRa task is polled from under
+/// [`Placement::Preemptive`](leviculum_rx_arming::placement::Placement).
+///
+/// Every chip transaction the driver issues is an `await` on a DMA transfer.
+/// On the thread-mode executor each one that returns `Pending` waited for the
+/// poll that was running to end, and while the propagation role validates a
+/// stamp that poll is a 77 ms workblock slice: 21 transactions from `RxDone`
+/// to the re-arming `SetRx`, `SX_RX_ARM site=ack dark_ms=1674` in the field
+/// capture of 2026-10-19. Here a completed transfer preempts thread mode
+/// instead, so the receiver is listening again a bus time after the frame,
+/// whatever the main loop is doing. The arithmetic and the bound are
+/// `leviculum_rx_arming::placement`'s tests.
+static LORA_EXECUTOR: embassy_executor::InterruptExecutor =
+    embassy_executor::InterruptExecutor::new();
+
+/// The software interrupt that executor runs on. SWI0/EGU0 is free: the
+/// SoftDevice takes SWI2 for its events and reserves SWI5
+/// (nrf-softdevice `events.rs`, `critical_section_impl.rs` `RESERVED_IRQS`),
+/// and a second handler of this name anywhere in the image fails the link.
+const LORA_IRQ: embassy_nrf::interrupt::Interrupt = embassy_nrf::interrupt::Interrupt::EGU0_SWI0;
+
+/// The executor's priority: above thread mode, which is all the fix needs,
+/// and below the P5 peripheral handlers of [`crate::set_irq_priorities`], so
+/// the SPIM2 and GPIOTE completions it waits on are never held back by it.
+/// Outside the SoftDevice's reserved levels (0, 1, 4), and on the side of
+/// the SVC priority from which a SoftDevice call is still allowed.
+const LORA_PRIORITY: embassy_nrf::interrupt::Priority = embassy_nrf::interrupt::Priority::P6;
+
+#[export_name = "EGU0_SWI0"]
+unsafe extern "C" fn lora_executor_irq() {
+    // SAFETY: the vector table calls this only for `LORA_IRQ`, which is
+    // unmasked by `InterruptExecutor::start` and by nothing else, so the
+    // executor has been started whenever this runs.
+    unsafe { LORA_EXECUTOR.on_interrupt() }
+}
+
+/// Spawn the LoRa task where [`leviculum_rx_arming::placement::LORA_TASK`]
+/// says it runs. The only way a board binary starts it: the task itself is
+/// private, so no binary can put it on the thread executor by hand.
+///
+/// `thread` is the binary's own spawner, used only by the cooperative
+/// placement, which stays buildable so a rig A/B is one constant away.
+pub fn spawn(
+    thread: &embassy_executor::Spawner,
+    radio: Radio,
+    config: RadioConfig,
+    channel_seed: u32,
+) {
+    use embassy_nrf::interrupt::InterruptExt as _;
+    use leviculum_rx_arming::placement::{Placement, LORA_TASK};
+
+    let task = lora_task(radio, config, channel_seed);
+    let placement = match LORA_TASK {
+        Placement::Cooperative => {
+            thread.must_spawn(task);
+            "cooperative"
+        }
+        Placement::Preemptive => {
+            LORA_IRQ.set_priority(LORA_PRIORITY);
+            LORA_EXECUTOR.start(LORA_IRQ).must_spawn(task);
+            "preemptive"
+        }
+    };
+    crate::log::log_fmt("[LORA] ", format_args!("task placement={placement}"));
+}
+
 // LoRa async task
 //
 // `channel_seed` feeds the channel-access randomness (acquisition jitter,
@@ -1738,7 +1806,7 @@ fn admit_for_transmit(
 // draw counts, which re-creates exactly the phase lock the jitter exists to
 // break. The previous fixed `0xDEAD_BEEF` seed did precisely that.
 #[embassy_executor::task]
-pub async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: u32) {
+async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: u32) {
     let outgoing_rx = LORA_OUTGOING.receiver();
     let incoming_tx = LORA_INCOMING.sender();
     let config_rx = LORA_CONFIG.receiver();

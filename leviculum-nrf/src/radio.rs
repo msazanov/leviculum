@@ -40,11 +40,17 @@
 use embassy_embedded_hal::shared_bus::asynch::spi::SpiDevice;
 use embassy_nrf::gpio::Output;
 use embassy_nrf::spim::Spim;
-use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 
 /// The SPI device the radio sits on: SPIM2 behind a shared-bus mutex, with
 /// the chip select it owns.
-pub type Spi = SpiDevice<'static, NoopRawMutex, Spim<'static>, Output<'static>>;
+///
+/// A critical-section mutex rather than a no-op one because the LoRa task is
+/// polled from an interrupt executor (`lora::spawn`, leviculum#850), and a
+/// task spawned there must be `Send`: the bus reference it holds is only
+/// that if the mutex is `Sync`. Only the LoRa task ever locks it, so the
+/// critical section is never contended and costs a few instructions.
+pub type Spi = SpiDevice<'static, CriticalSectionRawMutex, Spim<'static>, Output<'static>>;
 
 pub use part::{
     bring_up, configure_lora, new, Error, FrontEnd, Radio, Ready, RxStatus, TxPowerProgram,

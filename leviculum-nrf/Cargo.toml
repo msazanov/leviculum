@@ -185,7 +185,9 @@ leviculum-qspi-selftest = { path = "qspi-selftest", optional = true }
 leviculum-lr11xx = { path = "../leviculum-lr11xx", optional = true }
 
 # Embassy async runtime
-embassy-executor = { version = "0.9", features = ["arch-cortex-m", "executor-thread"] }
+# `executor-interrupt` for the LoRa task (leviculum#850): it runs on an
+# interrupt executor above thread mode, `lora::spawn`.
+embassy-executor = { version = "0.9", features = ["arch-cortex-m", "executor-thread", "executor-interrupt"] }
 embassy-nrf = { version = "0.9", features = ["nrf52840", "time-driver-rtc1", "nfc-pins-as-gpio", "gpiote"] }
 embassy-time = "0.5"
 embassy-sync = "0.7"

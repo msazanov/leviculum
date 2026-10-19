@@ -88,6 +88,17 @@
 //! unaffected: their workblock is 25 rounds, forty times cheaper, which
 //! is why board-to-board sync completes where a client upload does not.
 //!
+//! The slice bounds the hand-off and nothing else. Until 2026-10-19 the
+//! LoRa task shared this loop's executor, so each of the 21 bus transactions
+//! between a frame's `RxDone` and the re-arming `SetRx` waited for one whole
+//! slice: `SX_RX_ARM site=ack dark_ms=1674` inside a `PN_STAMP ms=3854
+//! slices=50` grind, and a split `/offer` that lost its second half
+//! (leviculum#850). The task now runs on an interrupt executor
+//! (`crate::lora::spawn`) and preempts the slice, so its bus transactions no
+//! longer wait for this loop; only the hand-off still does, and that is what
+//! the slice is sized for. `leviculum_rx_arming::placement` holds the
+//! arithmetic.
+//!
 //! ## What those seconds cost on a fast carrier (leviculum#397)
 //!
 //! A client upload arrives as a plain link packet, and the uploader

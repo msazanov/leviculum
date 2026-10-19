@@ -1139,6 +1139,9 @@ dependencies = [
 [[package]]
 name = "leviculum-rx-arming"
 version = "0.1.0"
+dependencies = [
+ "leviculum-core",
+]
 
 [[package]]
 name = "leviculum-screen"
