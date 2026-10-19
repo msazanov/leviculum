@@ -53,12 +53,25 @@
 //! drops the entry and refuses N's replay of the same emission. The
 //! last is the valid route a tombstone would have killed (X, N, Y,
 //! phone), which must survive because no packet comes back.
+//!
+//! The last three tests are #854, which keeps the loop from being offered
+//! at all on per-peer links. N answers the Pixel on every BLE link but
+//! X's, because its own route to D runs over X's link, and N's transit
+//! rebroadcast is withheld from X's link the same way. On LoRa, one shared
+//! medium, X hears the answer as before, and #852 is what closes the loop
+//! there. An interface that cannot address a subset of its links (lnsd's
+//! BLE) also answers as before, because withholding there would withhold
+//! from everyone.
 
 extern crate std;
 
 use std::boxed::Box;
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::string::String;
 use std::vec::Vec;
+
+use alloc::collections::BTreeMap;
 
 use rand_core::OsRng;
 
@@ -71,8 +84,8 @@ use crate::packet::{
     HeaderType, Packet, PacketContext, PacketData, PacketFlags, PacketType, TransportType,
 };
 use crate::test_utils::{MockClock, MockInterface, TEST_TIME_MS};
-use crate::traits::Clock;
-use crate::transport::{Action, InterfaceId, TickOutput};
+use crate::traits::{Clock, Interface, InterfaceError};
+use crate::transport::{dispatch_actions, Action, InterfaceId, TickOutput};
 
 /// The boards' exact shape: `EmbeddedStorage`, transport enabled.
 type EmbeddedNode = NodeCore<OsRng, MockClock, EmbeddedStorage>;
@@ -619,5 +632,292 @@ fn the_field_chain_puts_x_back_on_a_route_through_n() {
         state,
         Some((3, b, Some(n_id))),
         "unexpected route for D on X"
+    );
+}
+
+/// What every link of a per-peer interface was handed, by peer.
+type LinkLog = Rc<RefCell<Vec<([u8; TRUNCATED_HASHBYTES], Vec<u8>)>>>;
+
+/// The BLE shape: several point-to-point links in ONE interface id, each
+/// addressed by the identity its peer reported on peer-up. Only the sends
+/// the core's actions reach are modelled (`mvr_ingress_link_exclusion`
+/// carries the same fake).
+struct PeerLinks {
+    id: InterfaceId,
+    links: Vec<[u8; TRUNCATED_HASHBYTES]>,
+    log: LinkLog,
+}
+
+impl Interface for PeerLinks {
+    fn id(&self) -> InterfaceId {
+        self.id
+    }
+    fn name(&self) -> &str {
+        "ble"
+    }
+    fn mtu(&self) -> usize {
+        500
+    }
+    fn is_online(&self) -> bool {
+        true
+    }
+    /// An announce with no addressee reaches every live link.
+    fn try_send(&mut self, data: &[u8]) -> Result<(), InterfaceError> {
+        for link in &self.links {
+            self.log.borrow_mut().push((*link, data.to_vec()));
+        }
+        Ok(())
+    }
+    /// Every live link but the one named.
+    fn try_send_excluding_peer(
+        &mut self,
+        data: &[u8],
+        peer: &[u8; TRUNCATED_HASHBYTES],
+        _high_priority: bool,
+    ) -> Result<(), InterfaceError> {
+        for link in self.links.iter().filter(|link| *link != peer) {
+            self.log.borrow_mut().push((*link, data.to_vec()));
+        }
+        Ok(())
+    }
+}
+
+/// The Pixel's path request for `dest`, as it leaves the Pixel.
+fn path_request(dest: &crate::DestinationHash) -> Vec<u8> {
+    let mut pixel = make_node();
+    let _ = add_iface(&mut pixel, "ble", 0);
+    let pr_hash = *pixel.transport().path_request_hash();
+    let mut request: Vec<Vec<u8>> = wire_out(&pixel.request_path(dest))
+        .into_iter()
+        .map(|(_, data)| data)
+        .filter(|data| {
+            Packet::unpack(data)
+                .map(|p| p.destination_hash == pr_hash)
+                .unwrap_or(false)
+        })
+        .collect();
+    assert_eq!(request.len(), 1, "the Pixel emits one path request");
+    request.remove(0)
+}
+
+/// The phone's announce as X rebroadcasts it to N: one hop, X's transport id.
+fn relayed_by(phone: &mut Phone, x_id: [u8; TRUNCATED_HASHBYTES]) -> Vec<u8> {
+    let mut p = Packet::unpack(&phone.direct_announce(TEST_TIME_MS)).unwrap();
+    p.flags.header_type = HeaderType::Type2;
+    p.flags.transport_type = TransportType::Transport;
+    p.hops = 1;
+    p.transport_id = Some(x_id);
+    pack(&p)
+}
+
+/// The announces for `dest` in this log, by the link they reached.
+fn announces_by_link(log: &LinkLog, dest: &[u8; 16]) -> Vec<([u8; TRUNCATED_HASHBYTES], Vec<u8>)> {
+    log.borrow()
+        .iter()
+        .filter(|(_, data)| {
+            Packet::unpack(data)
+                .map(|p| p.flags.packet_type == PacketType::Announce && &p.destination_hash == dest)
+                .unwrap_or(false)
+        })
+        .cloned()
+        .collect()
+}
+
+/// #854, split horizon, at step 3 of the 848 chain. N holds D via X on its
+/// BLE interface, which carries three links: X, the Pixel and a third
+/// peer Q, plus a LoRa interface beside it. The Pixel asks for D. N's
+/// answer goes to the Pixel and to Q, and not to X, the one neighbour that
+/// could only learn from it a route through itself. It does not reach LoRa
+/// either, because a path response goes to the requesting interface only.
+/// N's transit rebroadcast of D, before that, kept off X's link the same
+/// way. X, fed everything its link got, holds no entry for D, so the loop
+/// is never offered.
+#[test]
+fn a_responder_keeps_the_answer_off_the_link_its_route_runs_through() {
+    const LORA: usize = 0;
+    const BLE: usize = 1;
+    let mut phone = make_phone();
+    let dest = *phone.dest_hash.as_bytes();
+
+    let mut x = make_node();
+    let xb = add_iface(&mut x, "ble", 0);
+    let x_id = *x.identity().hash();
+    let pixel_id = *Identity::generate(&mut OsRng).hash();
+    let q_id = *Identity::generate(&mut OsRng).hash();
+
+    let mut n = make_node();
+    n.set_interface_name(LORA, String::from("lora"));
+    n.set_interface_name(BLE, String::from("ble"));
+    n.set_interface_peer_count(BLE, 3);
+    n.set_interface_link_sparing(BLE, true);
+    let mut lora = MockInterface::new("lora", LORA as u8);
+    let log: LinkLog = Rc::new(RefCell::new(Vec::new()));
+    let mut ble = PeerLinks {
+        id: InterfaceId(BLE),
+        links: std::vec![x_id, pixel_id, q_id],
+        log: Rc::clone(&log),
+    };
+    let dispatch = |outs: Vec<TickOutput>, lora: &mut MockInterface, ble: &mut PeerLinks| {
+        let mut ifaces: [&mut dyn Interface; 2] = [lora, ble];
+        for out in outs {
+            let _ = dispatch_actions(&mut ifaces, out.actions, &BTreeMap::new());
+        }
+    };
+
+    // N learns D from X's rebroadcast, on X's link.
+    let first = n.handle_packet_from_peer(InterfaceId(BLE), x_id, &relayed_by(&mut phone, x_id));
+    let route = n
+        .get_path_clone(phone.dest_hash.as_bytes())
+        .map(|e| (e.hops, e.interface_index, e.next_hop, e.via_peer));
+    assert_eq!(
+        route,
+        Some((2, BLE, Some(x_id), Some(x_id))),
+        "N holds D via X"
+    );
+
+    // N's own transit rebroadcast: every link but X's, and LoRa.
+    let mut outs = std::vec![first];
+    outs.extend(run_scheduler(&mut n, 1_000, 10));
+    dispatch(outs, &mut lora, &mut ble);
+    let links: Vec<_> = announces_by_link(&log, &dest)
+        .into_iter()
+        .map(|(l, _)| l)
+        .collect();
+    assert!(!links.is_empty(), "N rebroadcasts D");
+    assert!(
+        links.iter().all(|l| *l != x_id) && links.contains(&pixel_id) && links.contains(&q_id),
+        "the transit rebroadcast reaches the Pixel and Q, never X"
+    );
+    assert!(
+        lora.sent.iter().any(|data| Packet::unpack(data)
+            .map(|p| p.flags.packet_type == PacketType::Announce && p.destination_hash == dest)
+            .unwrap_or(false)),
+        "LoRa is a shared medium and keeps the rebroadcast"
+    );
+    log.borrow_mut().clear();
+    lora.sent.clear();
+
+    // The Pixel asks, on its own link.
+    let mut outs = std::vec![n.handle_packet_from_peer(
+        InterfaceId(BLE),
+        pixel_id,
+        &path_request(&phone.dest_hash)
+    )];
+    outs.extend(run_scheduler(&mut n, PATH_REQUEST_GRACE_MS + 1_000, 3));
+    dispatch(outs, &mut lora, &mut ble);
+    let answered = announces_by_link(&log, &dest);
+    let mut links: Vec<_> = answered.iter().map(|(l, _)| *l).collect();
+    links.sort();
+    links.dedup();
+    let mut want = std::vec![pixel_id, q_id];
+    want.sort();
+    assert_eq!(links, want, "N answers the Pixel and Q, and not X");
+    assert!(
+        answered
+            .iter()
+            .all(|(_, data)| Packet::unpack(data).unwrap().context == PacketContext::PathResponse),
+        "what N sent is its path response"
+    );
+    assert!(
+        lora.sent.is_empty(),
+        "a path response stays on the requesting interface"
+    );
+
+    // X, fed what its link got, learns no route through N.
+    let to_x: Vec<Vec<u8>> = log
+        .borrow()
+        .iter()
+        .filter(|(l, _)| *l == x_id)
+        .map(|(_, d)| d.clone())
+        .collect();
+    let _ = feed(&mut x, xb, &to_x);
+    assert!(!x.has_path(&phone.dest_hash), "X gains no entry for D");
+}
+
+/// The contrast: the same N on one shared interface, LoRa, with no peer
+/// links. Everyone on the air hears what the requester hears, so there is
+/// no link to spare. The rule does not apply, the answer floods as before,
+/// and X takes D at three hops via N (#852 is what closes that loop on a
+/// shared medium).
+#[test]
+fn on_a_shared_medium_the_answer_still_reaches_the_next_hop() {
+    let mut phone = make_phone();
+    let dest = *phone.dest_hash.as_bytes();
+
+    let mut x = make_node();
+    let xl = add_iface(&mut x, "lora", 0);
+    let x_id = *x.identity().hash();
+
+    let mut n = make_node();
+    let nl = add_iface(&mut n, "lora", 0);
+    let n_id = *n.identity().hash();
+
+    let _ = n.handle_packet(InterfaceId(nl), &relayed_by(&mut phone, x_id));
+    assert_eq!(
+        n.get_path_clone(phone.dest_hash.as_bytes())
+            .map(|e| (e.hops, e.next_hop, e.via_peer)),
+        Some((2, Some(x_id), None)),
+        "N holds D via X, with no peer link to name"
+    );
+    let _ = run_scheduler(&mut n, 1_000, 10);
+
+    let mut outs = feed(&mut n, nl, &[path_request(&phone.dest_hash)]);
+    outs.extend(run_scheduler(&mut n, PATH_REQUEST_GRACE_MS + 1_000, 3));
+    let answer = of_kind(&outs, PacketType::Announce, &dest);
+    assert!(!answer.is_empty(), "N answers on the shared medium");
+    assert!(
+        outs.iter()
+            .flat_map(|o| o.actions.iter())
+            .all(|a| matches!(a, Action::SendPacket { peer: None, .. })),
+        "nothing is spared on a shared medium"
+    );
+
+    let _ = feed(&mut x, xl, &answer);
+    assert_eq!(
+        x.get_path_clone(phone.dest_hash.as_bytes())
+            .map(|e| (e.hops, e.next_hop)),
+        Some((3, Some(n_id))),
+        "X hears the answer and takes D via N"
+    );
+}
+
+/// lnsd's shape: per-peer links that the interface cannot address as a
+/// subset (its BLE peripheral notifies every subscribed central at once).
+/// An excluding send would reach nobody there, the requester included, so
+/// without the driver's declaration the answer floods the interface as
+/// before.
+#[test]
+fn an_interface_that_cannot_spare_a_link_still_answers_on_all_of_them() {
+    let mut phone = make_phone();
+    let dest = *phone.dest_hash.as_bytes();
+    let x_id = *Identity::generate(&mut OsRng).hash();
+    let pixel_id = *Identity::generate(&mut OsRng).hash();
+
+    let mut n = make_node();
+    let nb = add_iface(&mut n, "ble", 0);
+    n.set_interface_peer_count(nb, 2);
+    let _ = n.handle_packet_from_peer(InterfaceId(nb), x_id, &relayed_by(&mut phone, x_id));
+    let _ = run_scheduler(&mut n, 1_000, 10);
+
+    let mut outs = std::vec![n.handle_packet_from_peer(
+        InterfaceId(nb),
+        pixel_id,
+        &path_request(&phone.dest_hash)
+    )];
+    outs.extend(run_scheduler(&mut n, PATH_REQUEST_GRACE_MS + 1_000, 3));
+    assert!(
+        !of_kind(&outs, PacketType::Announce, &dest).is_empty(),
+        "N answers"
+    );
+    assert!(
+        outs.iter().flat_map(|o| o.actions.iter()).all(|a| matches!(
+            a,
+            Action::SendPacket {
+                iface,
+                peer: None,
+                ..
+            } if iface.0 == nb
+        )),
+        "the answer goes to the whole interface, X's link included"
     );
 }

@@ -930,6 +930,44 @@ pub(crate) struct InterfaceAnnounceCap {
     pub queue: VecDeque<QueuedAnnounce>,
 }
 
+/// The one peer link an announce for a destination is kept off, and
+/// where (leviculum#854, [`Transport::split_horizon`]).
+struct SplitHorizon {
+    /// The interface our own route to the destination lies on.
+    iface: usize,
+    /// The peer behind it that the route runs through.
+    peer: [u8; TRUNCATED_HASHBYTES],
+    /// Every other interface, which a sparing send must not reach.
+    others: Vec<InterfaceId>,
+}
+
+/// The action that puts an announce on `iface`, sparing the link `horizon`
+/// names when the route runs over this interface.
+///
+/// The sparing send is a `Broadcast` whose excluded interface is `iface`
+/// narrowed to the one peer (the #422 shape), and which excludes every
+/// other interface outright, so it reaches exactly what the plain
+/// `SendPacket` would have reached except that one link. The interface
+/// set is `interface_names`, the same set `broadcast_announce_with_caps`
+/// sends announces to.
+fn announce_send(horizon: Option<&SplitHorizon>, iface: usize, data: Vec<u8>) -> Action {
+    match horizon {
+        Some(h) if h.iface == iface => Action::Broadcast {
+            data,
+            exclude_iface: Some(InterfaceId(iface)),
+            exclude_peer: Some(h.peer),
+            exclude_ifaces: h.others.clone(),
+        },
+        // An announce is a broadcast: no #376 hint, every live link on a
+        // multi-peer interface gets it.
+        _ => Action::SendPacket {
+            iface: InterfaceId(iface),
+            data,
+            peer: None,
+        },
+    }
+}
+
 /// A queued announce waiting for bandwidth on a specific interface
 #[derive(Debug, Clone)]
 pub(crate) struct QueuedAnnounce {
@@ -3021,6 +3059,13 @@ pub struct Transport<C: Clock, S: Storage> {
     /// answer.
     interface_peer_counts: BTreeMap<usize, usize>,
 
+    /// Interfaces whose driver declared they can serve every link but one
+    /// ([`Self::set_interface_link_sparing`], leviculum#854), one bit per
+    /// interface index. Empty by default; only the boards' BLE interface
+    /// is in it. A bit mask, not a set: a `BTreeSet` inline would cost
+    /// every board 12 B of the node box (`NODE_BOX_BYTES`).
+    link_sparing_ifaces: u32,
+
     /// Destinations whose pending discovery entry was registered by the
     /// peer-link re-origination (Codeberg #365). These entries answer
     /// the requester through the ordinary discovery path response, but
@@ -3364,6 +3409,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             offline_interfaces: BTreeSet::new(),
             duty_hold_ifaces: BTreeSet::new(),
             interface_peer_counts: BTreeMap::new(),
+            link_sparing_ifaces: 0,
             peer_link_reoriginations: BTreeSet::new(),
             discovery_request_peers: BTreeMap::new(),
             discovery_extra_requesters: BTreeSet::new(),
@@ -4430,22 +4476,85 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         ph: Option<[u8; PKT_PH_BYTES]>,
         peer: Option<[u8; TRUNCATED_HASHBYTES]>,
     ) {
-        if self.pkt_journey_enabled() {
-            let ph = ph.unwrap_or_else(|| ph8(&packet_hash(&data)));
-            crate::tracing::debug!(
-                target: PKT_EVENT_TARGET,
-                event = "PKT_TX",
-                ph = %HexShort(&ph),
-                iface = %self.iface_name(interface_index),
-                hops = wire_hops(&data),
-                len = data.len(),
-            );
-        }
+        self.trace_pkt_tx(interface_index, &data, ph);
         self.pending_actions.push(Action::SendPacket {
             iface: InterfaceId(interface_index),
             data,
             peer,
         });
+    }
+
+    /// The PKT_TX journey event for bytes leaving on one interface.
+    fn trace_pkt_tx(&self, interface_index: usize, data: &[u8], ph: Option<[u8; PKT_PH_BYTES]>) {
+        if self.pkt_journey_enabled() {
+            let ph = ph.unwrap_or_else(|| ph8(&packet_hash(data)));
+            crate::tracing::debug!(
+                target: PKT_EVENT_TARGET,
+                event = "PKT_TX",
+                ph = %HexShort(&ph),
+                iface = %self.iface_name(interface_index),
+                hops = wire_hops(data),
+                len = data.len(),
+            );
+        }
+    }
+
+    /// The peer link an announce for `dest` is kept off: the one our own
+    /// route to `dest` runs through, when that route lies on an interface
+    /// with per-peer links (leviculum#854).
+    ///
+    /// Split horizon. A neighbour that is our next hop for `dest` can only
+    /// learn from our announce a route through itself. After it loses its
+    /// own route it takes ours, and both relays then hand the
+    /// destination's packets to each other (#848, the field chain:
+    /// t114-boot answered a path request on BLE, the answer reached
+    /// feld-t114, its own next hop, and the loop began). Python sends the
+    /// same answer (848 §3), so this is a deviation. The wire is unchanged,
+    /// because a copy is withheld on one link and nothing is added. A
+    /// Python neighbour never needs a route through itself, and Python's
+    /// requestor guard (Transport.py:2958-2966) already refuses it when
+    /// the neighbour asks for it.
+    ///
+    /// Only interfaces with per-peer links that can serve all of them but
+    /// one are affected, which the driver declares
+    /// ([`Self::set_interface_link_sparing`]; the boards' BLE). There, a
+    /// copy can be withheld from one link while every other link still
+    /// gets it. LoRa is one shared medium: the next hop hears whatever the
+    /// requester hears, so it has no link to spare and stays as it is. A
+    /// direct entry is never spared either, because its next hop is the
+    /// destination itself and cannot route back through us.
+    fn split_horizon(&self, dest: &[u8; TRUNCATED_HASHBYTES]) -> Option<SplitHorizon> {
+        let entry = self.storage.get_path(dest)?;
+        let next_hop = entry.next_hop?;
+        if !self.interface_link_sparing(entry.interface_index) {
+            return None;
+        }
+        Some(SplitHorizon {
+            iface: entry.interface_index,
+            peer: entry.via_peer.unwrap_or(next_hop),
+            others: self
+                .interface_names
+                .keys()
+                .copied()
+                .filter(|&id| id != entry.interface_index)
+                .map(InterfaceId)
+                .collect(),
+        })
+    }
+
+    /// Push an announce (a path response, a transit rebroadcast) onto one
+    /// interface, kept off the link of our own next hop for `dest`
+    /// ([`Self::split_horizon`]).
+    fn push_announce(
+        &mut self,
+        interface_index: usize,
+        dest: &[u8; TRUNCATED_HASHBYTES],
+        data: Vec<u8>,
+    ) {
+        self.trace_pkt_tx(interface_index, &data, None);
+        let horizon = self.split_horizon(dest);
+        self.pending_actions
+            .push(announce_send(horizon.as_ref(), interface_index, data));
     }
 
     /// Push a Broadcast action and emit the PKT_TX journey event for it.
@@ -5944,7 +6053,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// recall source is the cached announce for the destination
     /// (`get_announce_cache`, keyed by destination hash, holding the raw announce
     /// whose payload starts with the 64-byte public key), the same source the
-    /// link-request path uses at transport.rs:4176. A destination with no cached
+    /// link-request path uses at transport.rs:4222. A destination with no cached
     /// announce cannot be associated with an identity, so it is left untouched,
     /// exactly as Python keeps a path whose `Identity.recall` returns `None`.
     ///
@@ -6745,7 +6854,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             path_response = is_path_response,
         );
 
-        // Gate on the already-incremented hops (transport.rs:1717 ran in the
+        // Gate on the already-incremented hops (transport.rs:1755 ran in the
         // inbound path before handle_announce, and local-client/shared-instance
         // accounting has already been applied there). Announces whose hop count
         // exceeds max_hops are neither stored in the path table nor scheduled
@@ -9320,9 +9429,26 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 Vec::new()
             };
 
+            // The link of our own next hop for this destination gets no
+            // copy (leviculum#854): its interface is named as the excluded
+            // one, narrowed to that peer, which every other link still
+            // hears. A shared medium has no horizon and is reached whole.
+            let (spare_iface, spare_peer) = match packet.flags.packet_type {
+                PacketType::Announce => self
+                    .split_horizon(&packet.destination_hash)
+                    .map_or((None, None), |h| (Some(InterfaceId(h.iface)), Some(h.peer))),
+                _ => (None, None),
+            };
+
             // The packed buffer is the frame; no second copy of it.
             buf.truncate(len);
-            self.push_broadcast(buf, None, None, exclude_ifaces, Some(ph8(&seed_hash)));
+            self.push_broadcast(
+                buf,
+                spare_iface,
+                spare_peer,
+                exclude_ifaces,
+                Some(ph8(&seed_hash)),
+            );
             self.stats.packets_forwarded += 1;
             return true;
         }
@@ -9705,6 +9831,42 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// not holding.
     pub fn interface_duty_hold(&self, id: usize) -> bool {
         self.duty_hold_ifaces.contains(&id)
+    }
+
+    // Public: per-link sparing (leviculum#854)
+    /// Declare whether an interface can serve every one of its links but
+    /// one: whether its [`Interface::try_send_excluding_peer`](crate::traits::Interface::try_send_excluding_peer)
+    /// really sends to the others. The driver states it once at startup,
+    /// because it is a property of the interface's implementation.
+    ///
+    /// Only on such an interface does the split horizon withhold an
+    /// announce from the link of our own next hop (`split_horizon`).
+    /// Everywhere else the announce goes to the whole interface, as before:
+    /// a shared medium (LoRa) has no link to spare, and on an interface
+    /// that cannot address a subset of its links (lnsd's BLE peripheral
+    /// notifies its subscribed centrals as one group) an excluding send
+    /// would reach nobody, including the requester.
+    ///
+    /// Only the first 32 interface indices can be declared; a later one
+    /// stays undeclared, which is the behaviour from before #854.
+    pub fn set_interface_link_sparing(&mut self, id: usize, spares: bool) {
+        let Some(bit) = u32::try_from(id).ok().and_then(|id| 1u32.checked_shl(id)) else {
+            return;
+        };
+        if spares {
+            self.link_sparing_ifaces |= bit;
+        } else {
+            self.link_sparing_ifaces &= !bit;
+        }
+    }
+
+    /// Whether the driver declared this interface able to spare one link.
+    /// See [`Self::set_interface_link_sparing`].
+    pub fn interface_link_sparing(&self, id: usize) -> bool {
+        u32::try_from(id)
+            .ok()
+            .and_then(|id| 1u32.checked_shl(id))
+            .is_some_and(|bit| self.link_sparing_ifaces & bit != 0)
     }
 
     /// Mirror an interface's live direct-peer count into the transport
@@ -11886,7 +12048,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // Emit the STORED path-table count, matching Python
                 // Transport.py:2956 (`packet.hops = path_table[dst][IDX_PT_HOPS]`).
                 // The cached raw's hop byte is the PRE-increment wire value
-                // (`stored - 1`): the receipt increment (`transport.rs:2673`) only
+                // (`stored - 1`): the receipt increment (`transport.rs:2711`) only
                 // touches the in-memory packet, never the raw buffer stashed by
                 // `set_announce_cache`. Using it here would put `stored - 1` on the
                 // wire and every peer that learns via this response would be one hop
@@ -12718,8 +12880,10 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                             // the announce entry, but addressing the response at
                             // it would WITHHOLD a path from the other peers on
                             // the same carrier, which is a delivery regression,
-                            // not a duplicate saved.
-                            self.push_packet(target_iface, buf[..len].to_vec(), None, None);
+                            // not a duplicate saved. The one link it does
+                            // skip is our own next hop's for this destination
+                            // (leviculum#854, split horizon).
+                            self.push_announce(target_iface, &dest_hash, buf[..len].to_vec());
                             // Python records sent_announce() at transmit time for
                             // every announce, including targeted path responses
                             // (Transport.py:1323), so they count toward
@@ -12878,6 +13042,9 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         // the all-`Full`, no-hold case.
         let is_local = self.local_destinations.contains(&packet.destination_hash);
         let blocked = self.announce_blocked_ifaces(&packet.destination_hash, is_local);
+        // The link of our own next hop for this destination gets no copy
+        // (leviculum#854); taken once, the cap map is borrowed below.
+        let horizon = self.split_horizon(&packet.destination_hash);
 
         // Handle capped interfaces individually.
         //
@@ -12929,13 +13096,8 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             // decides; testing the holdoff alone let a fresh announce of any
             // hop count overtake every queued one once per holdoff (631).
             if now >= cap.allowed_at_ms && cap.queue.is_empty() {
-                self.pending_actions.push(Action::SendPacket {
-                    iface: InterfaceId(*iface_idx),
-                    data: raw.clone(),
-                    // An announce is a broadcast: no #376 hint, every live
-                    // link on a multi-peer interface gets it.
-                    peer: None,
-                });
+                self.pending_actions
+                    .push(announce_send(horizon.as_ref(), *iface_idx, raw.clone()));
                 // Compute holdoff: wait_ms = (bytes * 8 * 1000) / (bitrate * cap% / 100)
                 let tx_bits = raw.len() as u64 * 8;
                 let cap_bps = cap.bitrate_bps as u64 * cap.announce_cap_percent as u64 / 100;
@@ -12992,11 +13154,8 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 ));
                 continue;
             }
-            self.pending_actions.push(Action::SendPacket {
-                iface: InterfaceId(iface_idx),
-                data: raw.clone(),
-                peer: None,
-            });
+            self.pending_actions
+                .push(announce_send(horizon.as_ref(), iface_idx, raw.clone()));
             ann_tx_ifaces.push((iface_idx, announce_tx_occasion(packet.hops, false)));
         }
         self.stats.packets_forwarded += 1;
@@ -13151,7 +13310,10 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             if let Some(cap) = self.interface_announce_caps.get_mut(&iface_idx) {
                 cap.allowed_at_ms += release_draw;
             }
-            self.push_packet(iface_idx, raw, None, peer);
+            match peer {
+                Some(_) => self.push_packet(iface_idx, raw, None, peer),
+                None => self.push_announce(iface_idx, &dst, raw),
+            }
             self.record_outgoing_announce(iface_idx);
             // OBS-1: a previously cap-suppressed announce is now actually sent.
             // It is `transit` like one the cap passed immediately — the cap
@@ -13765,7 +13927,8 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                         HexShort(dest_hash),
                         self.iface_name(iface)
                     );
-                    let _ = self.send_on_interface(iface, &buf[..len]);
+                    self.push_announce(iface, dest_hash, buf[..len].to_vec());
+                    self.stats.packets_sent += 1;
                 }
             }
         }
@@ -18111,7 +18274,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // `random_blobs` (transport.rs:7505), a deliberate anti-replay
+            // `random_blobs` (transport.rs:7614), a deliberate anti-replay
             // extension — so the blob count is not a rejection indicator.)
             transport
                 .clock
@@ -24405,7 +24568,7 @@ mod tests {
         // (PATHFINDER_MAX_HOPS=128) must NOT be stored in the path table nor
         // scheduled for rebroadcast, mirroring Python RNS Transport.py:1750
         // (`local_and_hops_condition = packet.hops < PATHFINDER_M+1`, M=128).
-        // The inbound path increments hops once (transport.rs:1717) before
+        // The inbound path increments hops once (transport.rs:1755) before
         // handle_announce, so `packet.hops` inside the handler is already the
         // post-increment value — same accounting as the RNS gate.
         #[test]

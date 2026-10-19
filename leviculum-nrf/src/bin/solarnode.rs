@@ -335,6 +335,10 @@ async fn main(spawner: Spawner) {
     node.set_interface_name(2, alloc::string::String::from("ble"));
     node.set_interface_hw_mtu(2, 564);
     node.set_interface_mode(2, leviculum_core::InterfaceMode::Gateway);
+    // #854: the BLE interface serves every link but one
+    // (`try_send_excluding_peer`), so an announce can be kept off the link
+    // of the neighbour our own route runs through.
+    node.set_interface_link_sparing(2, true);
     // #606: the USB serial interface runs no ingress burst limiter, LoRa
     // and BLE do. The table and its reasons are the heap budget's, which
     // sizes the held-announce cap for exactly the interfaces left on.

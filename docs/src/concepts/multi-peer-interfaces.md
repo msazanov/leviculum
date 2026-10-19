@@ -97,6 +97,18 @@ from the phone died at the board: one `InterfaceId` covered both links,
 so excluding the arrival interface silenced the neighbour board that
 was the only node able to answer.
 
+Since leviculum#854 the same exclusion carries a split horizon. An
+announce that the board sends for a destination (a path response or a
+transit rebroadcast) skips the link of the peer its own route to that
+destination runs through (`split_horizon`,
+`leviculum-core/src/transport.rs:4526`). That neighbour could only learn a
+route through itself from it, and after a phone left, one did, and two
+boards handed the phone's packets to each other (#848). The driver
+states which interfaces can serve all of their links but one
+(`set_interface_link_sparing`), and only the boards' BLE interface does. LoRa is
+one shared medium and lnsd's BLE cannot address a subset of its links,
+so both still send the announce to the whole interface.
+
 The firmware runs the same shape with fixed ids: serial 0, LoRa 1, BLE
 2, set once at startup (`set_interface_name`,
 `leviculum-nrf/src/bin/t114.rs:271`) and hardcoded in the interface
@@ -110,14 +122,14 @@ the hint onto a per-link queue (`tx_fanout_task`,
 **The receive side is already peer-aware on both stacks.** The board
 reports which peer a packet came from and when a peer appears or
 disappears (`handle_packet_from_peer`,
-`leviculum-nrf/src/bin/t114.rs:1142`;
-`handle_interface_peer_lost`, `leviculum-nrf/src/bin/t114.rs:1170`;
-`handle_interface_peer_up`, `leviculum-nrf/src/bin/t114.rs:1182`; the
+`leviculum-nrf/src/bin/t114.rs:1146`;
+`handle_interface_peer_lost`, `leviculum-nrf/src/bin/t114.rs:1174`;
+`handle_interface_peer_up`, `leviculum-nrf/src/bin/t114.rs:1186`; the
 same three in `handle_packet_from_peer`,
-`leviculum-nrf/src/bin/rak4631.rs:1132`), the core stamps the peer onto
+`leviculum-nrf/src/bin/rak4631.rs:1136`), the core stamps the peer onto
 the path entry it installs, and a peer loss culls exactly the paths
 through it (`drop_paths_via_peer`,
-`leviculum-core/src/transport.rs:5745`). So the identity-shaped
+`leviculum-core/src/transport.rs:5854`). So the identity-shaped
 addressing already exists end to end; the only open question is whether
 the *send* side spends an interface object on it.
 
@@ -216,9 +228,9 @@ address one peripheral-role link. lnsd, on BlueZ, cannot.
 
 `NodeCore` holds no interface-keyed collection of its own; every
 per-interface field lives in `Transport`, and there are 24 of them
-(`interface_announce_caps`, `leviculum-core/src/transport.rs:2974`
+(`interface_announce_caps`, `leviculum-core/src/transport.rs:3012`
 through `own_tunnel_ids`,
-`leviculum-core/src/transport.rs:3319` — the `BTreeMap<usize, _>` and
+`leviculum-core/src/transport.rs:3364` — the `BTreeMap<usize, _>` and
 `BTreeSet<usize>` fields in that block).
 
 **Method, and why not `size_of`.** Summing `size_of` over those 24
@@ -226,7 +238,7 @@ value types would be the wrong number by a wide margin in both
 directions: a `BTreeMap` allocates in nodes of up to 11 entries, so the
 first interface pays for a whole node in every map and the next ten pay
 nothing, and several of the values are themselves growable
-(`interface_held_announces`, `leviculum-core/src/transport.rs:3202`, is
+(`interface_held_announces`, `leviculum-core/src/transport.rs:3247`, is
 a map of maps). What the 96 KiB firmware pool actually sees is
 allocator traffic, so that is what was measured: a counting
 `GlobalAlloc` around `System` — the harness already in the tree as
@@ -307,7 +319,7 @@ either way.
 Stack is likewise not per-interface: the send loop iterates, it does not
 recurse. What does scale with the interface count is the broadcast
 fan-out — an announce emits one action per entry in the routing map
-(`interface_names`, `leviculum-core/src/transport.rs:12976`), each
+(`interface_names`, `leviculum-core/src/transport.rs:13138`), each
 carrying a cloned packet. With three BLE children an announce would
 allocate three ~500 B action buffers where today it allocates one that
 `tx_fanout_task` clones per link (`leviculum-nrf/src/ble/mod.rs:523`).
@@ -322,8 +334,8 @@ parent to lean on. Measured against the tree, not assumed:
 |---|---|---|
 | Airtime credit bucket (`AirtimeCredit`, `leviculum-std/src/interfaces/airtime.rs:23`) | **medium** — one radio, one duty cycle | parent |
 | Pre-TX jitter / CSMA deference (`compute_jitter_max_ms`, `leviculum-std/src/interfaces/rnode.rs:361`) | **medium** — contention is on the air | parent |
-| Announce cap and egress slot (`interface_announce_caps`, `leviculum-core/src/transport.rs:2974`; `interface_next_slot_ms`, `leviculum-core/src/transport.rs:3239`) | **medium** — it rations a shared resource | parent (splitting it per link multiplies the budget by the link count) |
-| Max-airtime backchannel (`interface_max_airtime_ms`, `leviculum-core/src/transport.rs:3265`) | **medium** | parent |
+| Announce cap and egress slot (`interface_announce_caps`, `leviculum-core/src/transport.rs:3012`; `interface_next_slot_ms`, `leviculum-core/src/transport.rs:3284`) | **medium** — it rations a shared resource | parent (splitting it per link multiplies the budget by the link count) |
+| Max-airtime backchannel (`interface_max_airtime_ms`, `leviculum-core/src/transport.rs:3310`) | **medium** | parent |
 | Advertising and scanning (`reconcile_advertising`, `leviculum-std/src/interfaces/ble/mod.rs:1504`; `ScanScheduler`, `leviculum-std/src/interfaces/ble/links.rs:1743`) | **medium** — one adapter | parent |
 | IFAC | **medium** — it is a property of the configured section | parent |
 | BLE inter-packet gap (`LinkPacer`, `leviculum-std/src/interfaces/ble/links.rs:1966`) | **link**, except on the shared notify pipe where one pacer serves every subscriber (`leviculum-std/src/interfaces/ble/mod.rs:553`) | child, mostly |

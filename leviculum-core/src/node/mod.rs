@@ -3031,6 +3031,13 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.transport.set_interface_peer_count(iface, count);
     }
 
+    /// Declare that an interface can serve every one of its links but one
+    /// (leviculum#854). See
+    /// [`Transport::set_interface_link_sparing`](crate::transport::Transport::set_interface_link_sparing).
+    pub fn set_interface_link_sparing(&mut self, iface: usize, spares: bool) {
+        self.transport.set_interface_link_sparing(iface, spares);
+    }
+
     /// The driver-mirrored live direct-peer count (see
     /// [`set_interface_peer_count`](Self::set_interface_peer_count)).
     pub fn interface_peer_count(&self, iface: usize) -> usize {

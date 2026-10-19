@@ -989,35 +989,35 @@ own issue, not a finding of this page.
 | 252 | `leviculum-nrf/src/bin/t114.rs:254` | mgmt RUNNING flag means the destination was derived (all three bins) | remote_mgmt_dest_hash | `lnode_remote_status` | 900 | 2/1 |  |
 | 253 | `leviculum-nrf/src/bin/t114.rs:264` | persist a generated identity, save result ignored (all three bins) | identity_loaded | `reset_loop_quiet` | 300 | 1/1 |  |
 | 254 | `leviculum-nrf/src/bin/t114.rs:271` | interface config: MTU 564/508/564, Gateway mode on all three | constants | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 255 | `leviculum-nrf/src/bin/solarnode.rs:390` | probe and mount QSPI only where the board declares a part | CONFIG.qspi_part | `boot_smoke_t114` | 300 | 1/1 |  |
-| 256 | `leviculum-nrf/src/bin/t114.rs:373` | radio profile: persisted config, else eu_medium (all three bins) | flash page | `reset_loop_quiet` | 300 | 1/1 |  |
-| 257 | `leviculum-nrf/src/bin/t114.rs:398` | spawn the LoRa task or hold the radio down (all three bins) | media.lora_enabled | `boot_smoke_t114` | 300 | 1/1 |  |
-| 258 | `leviculum-nrf/src/bin/t114.rs:422` | BLE on or off at init (all three bins) | media.ble_enabled | `boot_smoke_t114` | 300 | 1/1 |  |
-| 259 | `leviculum-nrf/src/bin/t114.rs:583` | no IFAC on any interface (all three bins) | - | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 260 | `leviculum-nrf/src/bin/t114.rs:614` | PN role on or off, spawn the miner (all three bins) | pn::Engine::new | `ble_pn_board_upload` | 1800 | 3/2 (>2) |  |
-| 261 | `leviculum-nrf/src/bin/t114.rs:626` | a telemetry reporter exists only if the delivery destination registered (all three bins) | delivery_hash | `board_delivery_promise` | 1800 | 3/1 (>2) |  |
-| 262 | `leviculum-nrf/src/bin/t114.rs:637` | restore the persisted telemetry target at boot (all three bins) | flash | `board_delivery_promise` | 1800 | 3/1 (>2) |  |
-| 263 | `leviculum-nrf/src/bin/t114.rs:660` | restore the persisted fixed position at boot (all three bins) | flash | none | - | - || no decision: glue, a stored record handed to the reporter; its decode is `leviculum_core::fixed_position_store::decode_fixed_position` and what the pin does is `location_source`, both host-tested |
-| 264 | `leviculum-nrf/src/bin/t114.rs:661` | GNSS time seeding off when the watch receiver is unavailable (all three bins) | GNSS_FIX.receiver() | `boot_smoke_t114` | 300 | 1/1 |  |
-| 265 | `leviculum-nrf/src/bin/t114.rs:748` | main-loop wake: earliest of node, stats, census, PN deadlines (all three bins) | deadlines | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 266 | `leviculum-nrf/src/bin/t114.rs:790` | arm the 5 s telemetry tick only while a target is set (all three bins) | reporter | `board_delivery_promise` | 1800 | 3/1 (>2) |  |
-| 267 | `leviculum-nrf/src/bin/t114.rs:833` | mirror interface online state into routing (all three bins) | is_online() | `ble_mesh_formation` | 600 | 3/2 (>2) |  |
-| 268 | `leviculum-nrf/src/bin/t114.rs:840` | mirror the BLE peer count into routing (all three bins) | peer_count | `ble_mesh_formation` | 600 | 3/2 (>2) |  |
-| 269 | `leviculum-nrf/src/bin/t114.rs:885` | GNSS seed accepted marks seeded and sets the time source, else refuses (all three bins) | node | none | - | - || `leviculum_gnss_time::tests::a_refused_seed_leaves_the_gate_open_and_an_accepted_one_closes_it`<br>`leviculum_gnss_time::fix::tests::an_invalid_rmc_on_an_unseeded_board_offers_the_gate_nothing` |
-| 270 | `leviculum-nrf/src/bin/t114.rs:881` | host wall time: ack or REFUSE_VALUE, answer dropped when the channel is full (all three bins) | node, serial_ctl_tx | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
-| 271 | `leviculum-nrf/src/bin/t114.rs:910` | host telemetry target applied, dropped silently without a reporter (all three bins) | reporter | `board_delivery_promise` | 1800 | 3/1 (>2) |  |
-| 272 | `leviculum-nrf/src/bin/t114.rs:939` | host fixed position applied, dropped silently without a reporter (all three bins) | reporter | none | - | - || no decision: early return, a board without a reporter has no telemetry role this boot (row 261); the host was answered by the serial task with `fixed_position_answer` |
-| 273 | `leviculum-nrf/src/bin/t114.rs:966` | host announce: run the PN announce if the role exists and produced actions (all three bins) | pn_engine | `ble_pn_board_upload` | 1800 | 3/2 (>2) |  |
-| 274 | `leviculum-nrf/src/bin/t114.rs:986` | host announce answer: UNSUPPORTED without delivery, NO_CLOCK, ack, or BUSY (all three bins) | delivery_hash, wall clock | `lora_path_discovery_fast_mixed` | 90 | 2/1 |  |
-| 275 | `leviculum-nrf/src/bin/t114.rs:1038` | an ack overrides the refusal when the PN announce went out (all three bins) | pn_announced | `ble_pn_board_upload` | 1800 | 3/2 (>2) |  |
+| 255 | `leviculum-nrf/src/bin/solarnode.rs:394` | probe and mount QSPI only where the board declares a part | CONFIG.qspi_part | `boot_smoke_t114` | 300 | 1/1 |  |
+| 256 | `leviculum-nrf/src/bin/t114.rs:377` | radio profile: persisted config, else eu_medium (all three bins) | flash page | `reset_loop_quiet` | 300 | 1/1 |  |
+| 257 | `leviculum-nrf/src/bin/t114.rs:402` | spawn the LoRa task or hold the radio down (all three bins) | media.lora_enabled | `boot_smoke_t114` | 300 | 1/1 |  |
+| 258 | `leviculum-nrf/src/bin/t114.rs:426` | BLE on or off at init (all three bins) | media.ble_enabled | `boot_smoke_t114` | 300 | 1/1 |  |
+| 259 | `leviculum-nrf/src/bin/t114.rs:587` | no IFAC on any interface (all three bins) | - | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
+| 260 | `leviculum-nrf/src/bin/t114.rs:618` | PN role on or off, spawn the miner (all three bins) | pn::Engine::new | `ble_pn_board_upload` | 1800 | 3/2 (>2) |  |
+| 261 | `leviculum-nrf/src/bin/t114.rs:630` | a telemetry reporter exists only if the delivery destination registered (all three bins) | delivery_hash | `board_delivery_promise` | 1800 | 3/1 (>2) |  |
+| 262 | `leviculum-nrf/src/bin/t114.rs:641` | restore the persisted telemetry target at boot (all three bins) | flash | `board_delivery_promise` | 1800 | 3/1 (>2) |  |
+| 263 | `leviculum-nrf/src/bin/t114.rs:664` | restore the persisted fixed position at boot (all three bins) | flash | none | - | - || no decision: glue, a stored record handed to the reporter; its decode is `leviculum_core::fixed_position_store::decode_fixed_position` and what the pin does is `location_source`, both host-tested |
+| 264 | `leviculum-nrf/src/bin/t114.rs:665` | GNSS time seeding off when the watch receiver is unavailable (all three bins) | GNSS_FIX.receiver() | `boot_smoke_t114` | 300 | 1/1 |  |
+| 265 | `leviculum-nrf/src/bin/t114.rs:752` | main-loop wake: earliest of node, stats, census, PN deadlines (all three bins) | deadlines | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
+| 266 | `leviculum-nrf/src/bin/t114.rs:794` | arm the 5 s telemetry tick only while a target is set (all three bins) | reporter | `board_delivery_promise` | 1800 | 3/1 (>2) |  |
+| 267 | `leviculum-nrf/src/bin/t114.rs:837` | mirror interface online state into routing (all three bins) | is_online() | `ble_mesh_formation` | 600 | 3/2 (>2) |  |
+| 268 | `leviculum-nrf/src/bin/t114.rs:844` | mirror the BLE peer count into routing (all three bins) | peer_count | `ble_mesh_formation` | 600 | 3/2 (>2) |  |
+| 269 | `leviculum-nrf/src/bin/t114.rs:889` | GNSS seed accepted marks seeded and sets the time source, else refuses (all three bins) | node | none | - | - || `leviculum_gnss_time::tests::a_refused_seed_leaves_the_gate_open_and_an_accepted_one_closes_it`<br>`leviculum_gnss_time::fix::tests::an_invalid_rmc_on_an_unseeded_board_offers_the_gate_nothing` |
+| 270 | `leviculum-nrf/src/bin/t114.rs:885` | host wall time: ack or REFUSE_VALUE, answer dropped when the channel is full (all three bins) | node, serial_ctl_tx | `lora_pn_board_sync` | 1800 | 4/2 (>2) |  |
+| 271 | `leviculum-nrf/src/bin/t114.rs:914` | host telemetry target applied, dropped silently without a reporter (all three bins) | reporter | `board_delivery_promise` | 1800 | 3/1 (>2) |  |
+| 272 | `leviculum-nrf/src/bin/t114.rs:943` | host fixed position applied, dropped silently without a reporter (all three bins) | reporter | none | - | - || no decision: early return, a board without a reporter has no telemetry role this boot (row 261); the host was answered by the serial task with `fixed_position_answer` |
+| 273 | `leviculum-nrf/src/bin/t114.rs:970` | host announce: run the PN announce if the role exists and produced actions (all three bins) | pn_engine | `ble_pn_board_upload` | 1800 | 3/2 (>2) |  |
+| 274 | `leviculum-nrf/src/bin/t114.rs:990` | host announce answer: UNSUPPORTED without delivery, NO_CLOCK, ack, or BUSY (all three bins) | delivery_hash, wall clock | `lora_path_discovery_fast_mixed` | 90 | 2/1 |  |
+| 275 | `leviculum-nrf/src/bin/t114.rs:1042` | an ack overrides the refusal when the PN announce went out (all three bins) | pn_announced | `ble_pn_board_upload` | 1800 | 3/2 (>2) |  |
 | 276 | `leviculum-nrf/src/bin/t114.rs:1128` | LoRa RX dropped while LoRa is off at runtime, PN step skipped too (all three bins) | media STATE | none | - | - || no decision: glue, a `continue` on `MediaState::lora_active`, host-tested in `leviculum-media-state` |
-| 277 | `leviculum-nrf/src/bin/t114.rs:1141` | attribute BLE RX to the peer the handshake named (all three bins) | peer | `ble_mesh_formation` | 600 | 3/2 (>2) |  |
-| 278 | `leviculum-nrf/src/bin/t114.rs:1200` | BLE peer up: PN announce to the phone if the role exists (all three bins) | pn_engine | `ble_pn_board_upload` | 1800 | 3/2 (>2) |  |
-| 279 | `leviculum-nrf/src/bin/t114.rs:708` | answer `/status` from the PN step on any carrier (all three bins) | events | `lnode_remote_status` | 900 | 2/1 |  |
-| 280 | `leviculum-nrf/src/bin/t114.rs:1282` | readings: unix time only with a plausible wall clock (all three bins) | node | `board_delivery_promise` | 1800 | 3/1 (>2) |  |
-| 281 | `leviculum-nrf/src/bin/t114.rs:1313` | readings: GNSS fields copied whenever a fix value exists (all three bins) | GNSS_FIX | none | - | - || no decision: glue, a copy of the snapshot whose fields `GnssFix::fold_rmc` and `fold_gga` decide (rows 340, 341) |
+| 277 | `leviculum-nrf/src/bin/t114.rs:1145` | attribute BLE RX to the peer the handshake named (all three bins) | peer | `ble_mesh_formation` | 600 | 3/2 (>2) |  |
+| 278 | `leviculum-nrf/src/bin/t114.rs:1204` | BLE peer up: PN announce to the phone if the role exists (all three bins) | pn_engine | `ble_pn_board_upload` | 1800 | 3/2 (>2) |  |
+| 279 | `leviculum-nrf/src/bin/t114.rs:712` | answer `/status` from the PN step on any carrier (all three bins) | events | `lnode_remote_status` | 900 | 2/1 |  |
+| 280 | `leviculum-nrf/src/bin/t114.rs:1286` | readings: unix time only with a plausible wall clock (all three bins) | node | `board_delivery_promise` | 1800 | 3/1 (>2) |  |
+| 281 | `leviculum-nrf/src/bin/t114.rs:1317` | readings: GNSS fields copied whenever a fix value exists (all three bins) | GNSS_FIX | none | - | - || no decision: glue, a copy of the snapshot whose fields `GnssFix::fold_rmc` and `fold_gga` decide (rows 340, 341) |
 | 282 | `leviculum-nrf/src/bin/t114.rs:1325` | readings: has_fix iff presence is Fix (all three bins) | GNSS_PRESENCE | none | - | - || no decision: glue, the presence state is `leviculum_gnss_presence::PresenceMachine`'s, host-tested |
-| 283 | `leviculum-nrf/src/bin/t114.rs:1316` | readings: battery percent only once classified (all three bins) | BATTERY_STATE | `board_delivery_promise` | 1800 | 3/1 (>2) |  |
+| 283 | `leviculum-nrf/src/bin/t114.rs:1320` | readings: battery percent only once classified (all three bins) | BATTERY_STATE | `board_delivery_promise` | 1800 | 3/1 (>2) |  |
 | 284 | `leviculum-nrf/src/interface.rs:46` | the serial interface is always online | - | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
 | 285 | `leviculum-nrf/src/interface.rs:45` | a full outgoing channel drops the frame with BufferFull; TX bytes counted by the writer once the frame reached the host (`tx_counted`, `usb.rs`) | channel | none | - | - | `leviculum_usb_policy` `tests/seam.rs`: `a_written_packet_counts_its_unframed_bytes`<br>`the_packet_past_a_full_queue_is_dropped_uncounted`<br>`a_packet_the_writer_drops_unread_is_not_counted` |
 | 286 | `leviculum-nrf/src/remote_status.rs:61` | only RequestReceived events are considered | events | `lnode_remote_status` | 900 | 2/1 |  |
