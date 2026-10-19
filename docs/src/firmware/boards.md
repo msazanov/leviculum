@@ -334,9 +334,9 @@ The bootloader's `Board-ID` is `nRF52840-T1000-E-v1`, bound to this one
 product, so `lnflash` has a flashing entry for it at level *Expected*:
 USB `1209:0004` for our firmware and `239a:8029` for stock Meshtastic, the
 bootloader on `2886:0057`, drive label `T1000-E`. The rig unit's bootloader
-offers serial DFU only and mounts no drive, so its first image goes on with
-`adafruit-nrfutil` ([Building and flashing](flashing.md), "SenseCAP
-T1000-E: serial DFU").
+offers serial DFU only and mounts no drive, so `lnflash` writes this board
+over its `dfu-serial` transport, identified by that bootloader USB ID
+([Building and flashing](flashing.md), "SenseCAP T1000-E: serial DFU").
 
 ### ESP32 class: Heltec WiFi LoRa 32 V4
 

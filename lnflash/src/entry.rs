@@ -24,7 +24,7 @@ use std::io;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use crate::manifest::DoubleTap;
+use crate::manifest::{DoubleTap, Transport};
 use crate::sys::Fd;
 use crate::usb::{Device, Sysfs, UsbId};
 
@@ -56,11 +56,16 @@ pub fn touch_1200(port: &Path) -> io::Result<()> {
 /// Correlation matters when more than one board is attached: "a UF2 drive
 /// appeared" is not the same claim as "the board I touched came back", and
 /// only the second one licenses a write.
+///
+/// A bootloader counts as there once it offers what `transport` writes
+/// through: its drive for `uf2-msc`, its serial port for `dfu-serial`. The
+/// device directory appears before the kernel has bound either.
 pub fn wait_for_bootloader(
     sysfs: &Sysfs,
     ids: &[UsbId],
     was: Option<&Device>,
     within: Duration,
+    transport: Transport,
 ) -> io::Result<Option<Device>> {
     let deadline = Instant::now() + within;
     loop {
@@ -68,7 +73,10 @@ pub fn wait_for_bootloader(
             was.is_none_or(|before| candidate.is_same_board(before))
                 // A board with no serial in either mode can only be tracked
                 // by its port, which `is_same_board` already falls back to.
-                && candidate.block_device().is_some()
+                && match transport {
+                    Transport::Uf2Msc => candidate.block_device().is_some(),
+                    Transport::DfuSerial => candidate.first_tty().is_some(),
+                }
         });
         if found.is_some() {
             return Ok(found);
@@ -181,10 +189,14 @@ const PRESS_RESET: &str =
 /// press one sends them looking for a button that is not there (Codeberg
 /// #261). The wording therefore comes from the board's catalogue entry, and
 /// only the shape is fixed here.
-pub fn double_tap_instruction(what: &str, board: &DoubleTap) -> String {
+pub fn double_tap_instruction(what: &str, board: &DoubleTap, transport: Transport) -> String {
+    let appears = match transport {
+        Transport::Uf2Msc => "A drive appears",
+        Transport::DfuSerial => "Its bootloader's serial port appears",
+    };
     let mut text = format!(
         "{what} has to be put into its bootloader by hand:\n  {}\n  \
-         A drive appears when it worked.",
+         {appears} when it worked.",
         board.press.as_deref().unwrap_or(PRESS_RESET)
     );
     if let Some(docs) = &board.docs {
@@ -211,7 +223,8 @@ mod tests {
 
     #[test]
     fn the_double_tap_instruction_says_what_to_press_and_what_success_looks_like() {
-        let text = double_tap_instruction("the board on 3-2.4", &wording("t114"));
+        let text =
+            double_tap_instruction("the board on 3-2.4", &wording("t114"), Transport::Uf2Msc);
         assert!(text.contains("3-2.4"));
         assert!(text.contains("RESET twice"));
         assert!(text.contains("drive appears"));
@@ -220,12 +233,30 @@ mod tests {
     }
 
     #[test]
+    fn a_serial_dfu_board_is_not_told_to_watch_for_a_drive() {
+        // The T1000-E's bootloader publishes no drive (Codeberg #452); a
+        // person told to wait for one would wait forever on a board that
+        // is ready.
+        let text = double_tap_instruction(
+            "the board on 3-2.3.4.3",
+            &wording("t1000e"),
+            Transport::DfuSerial,
+        );
+        assert!(text.contains("serial port appears"), "{text}");
+        assert!(!text.contains("drive"), "{text}");
+    }
+
+    #[test]
     fn a_board_with_no_reset_button_is_not_told_to_press_one() {
         // Codeberg #261: the Pocket V2 has no externally accessible RESET, so
         // the T114 wording sends its owner hunting for a button that is not
         // there. The instruction names the pinhole and the needle, and points
         // at the page that explains the rest.
-        let text = double_tap_instruction("The board on 3-2.3.4.4", &wording("rak4631"));
+        let text = double_tap_instruction(
+            "The board on 3-2.3.4.4",
+            &wording("rak4631"),
+            Transport::Uf2Msc,
+        );
         assert!(text.contains("3-2.3.4.4"), "{text}");
         assert!(text.contains("pinhole"), "{text}");
         assert!(text.contains("needle"), "{text}");
@@ -244,6 +275,7 @@ mod tests {
             &[UsbId::new(0x239a, 0x0071)],
             None,
             Duration::from_secs(30),
+            Transport::Uf2Msc,
         )
         .unwrap()
         .unwrap();
@@ -268,7 +300,8 @@ mod tests {
             &sysfs,
             &[UsbId::new(0x239a, 0x0071)],
             Some(&t114),
-            Duration::from_millis(1)
+            Duration::from_millis(1),
+            Transport::Uf2Msc,
         )
         .unwrap()
         .is_some());
@@ -279,7 +312,8 @@ mod tests {
             &sysfs,
             &[UsbId::new(0x239a, 0x0071)],
             Some(&rak),
-            Duration::from_millis(1)
+            Duration::from_millis(1),
+            Transport::Uf2Msc,
         )
         .unwrap()
         .is_none());
@@ -320,6 +354,7 @@ mod tests {
             &[UsbId::new(0x239a, 0x0029)], // the RAK bootloader, not present
             None,
             Duration::from_millis(300),
+            Transport::Uf2Msc,
         )
         .unwrap();
         assert!(found.is_none());

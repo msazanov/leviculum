@@ -5,7 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 homepage.workspace = true
-description = "Self-contained flasher for LNode boards — identifies a board from its bootloader, checks preconditions, and writes our firmware over UF2 mass storage"
+description = "Self-contained flasher for LNode boards — identifies a board from its bootloader, checks preconditions, and writes our firmware over UF2 mass storage or serial DFU"
 
 [dependencies]
 # The radio-configuration frame and its HDLC framing. There is one wire

@@ -17,7 +17,13 @@
 //! here by construction rather than by ordering: [`Confirmed`] can only be
 //! produced by [`confirm_identity`] from an `INFO_UF2.TXT` read off a
 //! mounted bootloader drive, and the write functions take one. There is no
-//! way to call them with a board guessed from a USB ID.
+//! way to call them with a board guessed from an application's USB ID.
+//!
+//! A serial-DFU bootloader publishes no drive and so no `INFO_UF2.TXT`
+//! (Codeberg #452). For a `dfu-serial` board the identity is the
+//! bootloader's own USB ID, matched by `identify_dfu` against a
+//! catalogue that will not load unless that ID belongs to the one board.
+//! That is the bootloader speaking, not the firmware that happened to run.
 //!
 //! With several devices attached, each is resolved individually. "The one
 //! UF2 drive" is an assumption, and it is the assumption that went wrong.
@@ -26,10 +32,13 @@ use std::io;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use crate::dfu;
 use crate::entry;
 use crate::envelope::SessionReply;
 use crate::infouf2::InfoUf2;
-use crate::manifest::{self, Board, Catalogue, Flashing, Level, Manifest, Payload, Payloads};
+use crate::manifest::{
+    self, Board, Catalogue, Flashing, Level, Manifest, Payload, Payloads, Transport,
+};
 use crate::radio::{self, RadioChoice, RadioPlan, RadioSettings};
 use crate::softdevice::{self, Version, VersionReq};
 use crate::telemetry::{self, TelemetryPlan};
@@ -142,15 +151,78 @@ pub enum Error {
         req: String,
         found: String,
     },
+    #[error("{0}")]
+    Dfu(#[from] dfu::Error),
+    #[error(
+        "the bootloader on {port} answers on {id}, which no dfu-serial board in the catalogue \
+         claims. Nothing was written."
+    )]
+    UnknownBootloader { port: String, id: UsbId },
+    #[error("the bootloader on {port} offers no serial port to send the image over")]
+    NoDfuPort { port: String },
+    #[error("{board}: its catalogue entry states no serial-DFU parameters. Nothing was written.")]
+    NoDfuParams { board: String },
+    #[error("serial DFU did not finish: {source}.{}", dfu_consequence(.source, .params))]
+    DfuFailed {
+        port: String,
+        source: dfu::Error,
+        params: dfu::Params,
+    },
     #[error("cancelled")]
     Cancelled,
 }
 
+/// What a failed transfer leaves behind, said after the failure itself.
+///
+/// The bootloader erases the application area on the start packet and only
+/// then reads the init packet (`dfu_single_bank.c`, `dfu_start_pkt_handle`),
+/// so every failure after an acknowledged start leaves a board with no
+/// application — in its bootloader, and flashable again. A bootloader that
+/// refuses the init packet resets the moment it has read it, which from the
+/// host is a port that goes away; so does a pulled cable, and nothing on the
+/// wire tells the two apart, which is why both are named.
+fn dfu_consequence(source: &dfu::Error, params: &dfu::Params) -> String {
+    let Some(stage) = source.stage() else {
+        return String::new();
+    };
+    let mut text = String::new();
+    if matches!(source, dfu::Error::Gone { .. }) {
+        let sd: Vec<String> = params
+            .sd_req
+            .iter()
+            .map(|fwid| format!("{fwid:#06x}"))
+            .collect();
+        text.push_str(&format!(
+            " A bootloader that refuses the init packet resets right after acknowledging it, \
+             and that looks exactly like this from here: it takes device type {:#06x} and a \
+             SoftDevice among {} only. So does a cable pulled mid-image.",
+            params.device_type,
+            sd.join(",")
+        ));
+    }
+    if stage.erased_before() {
+        text.push_str(
+            " The start packet had already erased the application area, so the board stays in \
+             its bootloader with no application until a flash goes through; the bootloader and \
+             the SoftDevice beneath it are untouched. Run lnflash again; if it stops at \
+             the same place twice, the bootloader is refusing the package rather than losing it.",
+        );
+    } else {
+        text.push_str(
+            " The start packet was not acknowledged, so the application area may or may not \
+             have been erased. Run lnflash again.",
+        );
+    }
+    text
+}
+
 /// A board identity read off a mounted bootloader drive.
 ///
-/// The private field is the whole point: this cannot be constructed from a
-/// USB ID, a command-line flag, or a guess. Only [`confirm_identity`] makes
-/// one, and it only does so from an `INFO_UF2.TXT`.
+/// The private field is the whole point: this cannot be constructed from an
+/// application's USB ID, a command-line flag, or a guess. Only
+/// [`confirm_identity`] makes one, from an `INFO_UF2.TXT`, and
+/// `identify_dfu` for a bootloader that publishes none, from the
+/// bootloader USB ID the catalogue holds exclusive to one `dfu-serial` board.
 #[derive(Debug, Clone, Copy)]
 pub struct Confirmed<'m> {
     name: &'m str,
@@ -234,6 +306,14 @@ pub fn confirm_identity<'m>(
             });
         }
     }
+    ask_about_level(&confirmed, port, ui)?;
+    Ok(confirmed)
+}
+
+/// The question a board at level `expected` puts to the person, whichever
+/// way its identity was established.
+fn ask_about_level(confirmed: &Confirmed, port: &str, ui: &mut dyn Ui) -> Result<(), Error> {
+    let name = confirmed.name();
     let level = confirmed.flashing().level;
     if level == Level::Expected {
         let answer = ui.ask(&format!(
@@ -249,7 +329,48 @@ pub fn confirm_identity<'m>(
             });
         }
     }
-    Ok(confirmed)
+    Ok(())
+}
+
+/// Identify for a bootloader that publishes no `INFO_UF2.TXT`: the
+/// `dfu-serial` board whose bootloader answers on `id` (Codeberg #452).
+///
+/// A board `--board` does not name is skipped with `Ok(None)` and a line
+/// saying so, as [`confirm_named`] skips one. The level question is not put
+/// here but by [`inspect_dfu`], the only caller, after it has shown the
+/// plan: a dry run then shows the port and the package even for a board
+/// whose question would go unanswered (838), and a person answers it with
+/// the plan in front of them.
+fn identify_dfu<'m>(
+    catalogue: &'m Catalogue,
+    manifest: &'m Manifest,
+    id: UsbId,
+    port: &str,
+    named: &[String],
+    ui: &mut dyn Ui,
+) -> Result<Option<Confirmed<'m>>, Error> {
+    let Some((name, board, flashing)) = catalogue.board_for_bootloader_usb(id) else {
+        return Err(Error::UnknownBootloader {
+            port: port.to_string(),
+            id,
+        });
+    };
+    if !named.is_empty() && !named.iter().any(|n| n == name) {
+        ui.say(&format!(
+            "{port}: bootloader {id} is {name}, which is not among the boards named with --board \
+             ({}). Skipped: nothing was written, and it is still in its bootloader.\n",
+            named.join(", ")
+        ));
+        return Ok(None);
+    }
+    let confirmed = Confirmed {
+        name,
+        board,
+        flashing,
+        payloads: manifest.payloads(name)?,
+        _private: (),
+    };
+    Ok(Some(confirmed))
 }
 
 /// [`confirm_identity`] against the boards a run named with `--board`
@@ -455,9 +576,19 @@ pub fn read_installed(drive: &Drive, info: &InfoUf2) -> Installed {
 /// Every refusal here happens before anything is mounted for writing, so
 /// "nothing was written" in the error text is true.
 pub fn prepare(payload: &Payload, root: &Path, confirmed: &Confirmed) -> Result<Image, Error> {
+    prepare_for(payload, root, confirmed.name(), confirmed.flashing())
+}
+
+/// [`prepare`] against a catalogue entry rather than a confirmed board: what
+/// a dry run that has not entered the bootloader can still check.
+fn prepare_for(
+    payload: &Payload,
+    root: &Path,
+    name: &str,
+    flashing: &Flashing,
+) -> Result<Image, Error> {
     // The only way to get the bytes, and it verifies the checksum.
     let bytes = payload.read(root)?;
-    let flashing = confirmed.flashing();
     let image = match payload.convert.unwrap_or(manifest::Convert::None) {
         manifest::Convert::None => Image::parse(&bytes)?,
         manifest::Convert::HexToUf2 => {
@@ -471,7 +602,7 @@ pub fn prepare(payload: &Payload, root: &Path, confirmed: &Confirmed) -> Result<
         if actual != flashing.flash.family_id {
             return Err(Error::WrongFamily {
                 file,
-                board: confirmed.name().to_string(),
+                board: name.to_string(),
                 actual,
                 expected: flashing.flash.family_id,
             });
@@ -485,7 +616,7 @@ pub fn prepare(payload: &Payload, root: &Path, confirmed: &Confirmed) -> Result<
     if high > flashing.flash.writable_end {
         return Err(Error::OutsideWindow {
             file,
-            board: confirmed.name().to_string(),
+            board: name.to_string(),
             low,
             high,
             start: flashing.flash.writable_start,
@@ -493,6 +624,74 @@ pub fn prepare(payload: &Payload, root: &Path, confirmed: &Confirmed) -> Result<
         });
     }
     Ok(image)
+}
+
+/// The serial-DFU package for a board's application payload: the image
+/// checked as [`prepare`] checks it, made into the bytes `adafruit-nrfutil
+/// dfu genpkg` would make of it, with the init packet the catalogue's
+/// parameters give (Codeberg #452).
+///
+/// A hex payload is converted straight from its records, which is the
+/// reference's own conversion byte for byte; a UF2 payload from its blocks,
+/// which differs from that only in the zero padding a UF2 block carries.
+fn dfu_package(
+    payload: &Payload,
+    root: &Path,
+    name: &str,
+    flashing: &Flashing,
+) -> Result<dfu::Package, Error> {
+    let params = flashing.dfu_params().ok_or_else(|| Error::NoDfuParams {
+        board: name.to_string(),
+    })?;
+    let image = prepare_for(payload, root, name, flashing)?;
+    let spans = match payload.convert.unwrap_or(manifest::Convert::None) {
+        manifest::Convert::None => dfu::image_spans(&image),
+        manifest::Convert::HexToUf2 => {
+            crate::ihex::parse(&String::from_utf8_lossy(&payload.read(root)?))?
+        }
+    };
+    let firmware = dfu::firmware(&spans, flashing.flash.app_base)?;
+    Ok(dfu::Package::new(&params, firmware))
+}
+
+/// The plan a serial-DFU write shows before it asks, dry run or not.
+fn dfu_plan(confirmed: &Confirmed, package: &dfu::Package, tty: &str) -> Vec<String> {
+    let flashing = confirmed.flashing();
+    let app = &confirmed.payloads().app;
+    let sd: Vec<String> = package
+        .init
+        .sd_req
+        .iter()
+        .map(|fwid| format!("{fwid:#06x}"))
+        .collect();
+    vec![
+        format!(
+            "  send {} ({}) over serial DFU on {tty} at {} baud",
+            app.file.display(),
+            app.git_sha
+                .as_deref()
+                .map(|sha| format!("git_sha={sha}"))
+                .unwrap_or_else(|| "no build recorded".into()),
+            dfu::BAUD
+        ),
+        format!("  package: {}", package.describe()),
+        format!(
+            "  which writes {:#x}-{:#x}; the start packet erases that area before anything \
+             else is checked",
+            flashing.flash.app_base,
+            flashing.flash.app_base as usize + package.firmware.len()
+        ),
+        format!(
+            "  the SoftDevice cannot be read over serial DFU: the bootloader refuses the image \
+             unless it runs one of {} ({} by the catalogue)",
+            sd.join(","),
+            flashing
+                .requires
+                .softdevice
+                .as_deref()
+                .unwrap_or("no constraint")
+        ),
+    ]
 }
 
 /// One line describing what a prepared image will do to the board.
@@ -2698,9 +2897,24 @@ fn resolve(
         return Ok(None);
     }
 
+    // The hint chooses how to reach the board, as it chooses how to knock;
+    // what may be written is still decided on the bootloader's identity.
+    let serial_dfu = catalogue
+        .board(&candidate.hint)?
+        .require_flashing(&candidate.hint)?
+        .transport
+        == Transport::DfuSerial;
+
     if opts.dry_run {
-        dry_walk(catalogue, manifest, ui, opts, drives, candidate);
+        if serial_dfu {
+            dry_walk_dfu(catalogue, manifest, sysfs, ui, opts, candidate);
+        } else {
+            dry_walk(catalogue, manifest, ui, opts, drives, candidate);
+        }
         return Ok(None);
+    }
+    if serial_dfu {
+        return resolve_dfu(catalogue, manifest, sysfs, ui, opts, candidate);
     }
 
     let bootloader = if candidate.in_bootloader {
@@ -2784,7 +2998,22 @@ fn resolve(
     drive.close()?;
     outcome.application_written = Some(written);
 
-    let booted = verify_boot(sysfs, ui, opts, &bootloader, &confirmed, &port)?;
+    after_write(sysfs, ui, opts, &bootloader, &confirmed, outcome)
+}
+
+/// Everything after the application went on, whichever transport took it
+/// there: wait for the board to come back, read which build it runs, and
+/// set what the person asked for on the port it came back with.
+fn after_write(
+    sysfs: &Sysfs,
+    ui: &mut dyn Ui,
+    opts: &Options,
+    bootloader: &Device,
+    confirmed: &Confirmed,
+    mut outcome: Outcome,
+) -> Result<Option<Outcome>, Error> {
+    let port = outcome.port.clone();
+    let booted = verify_boot(sysfs, ui, opts, bootloader, confirmed, &port)?;
     // The radio step needs a port to talk to, so it runs whenever the
     // application came back — including on an unconfirmed banner, where the
     // board is up and the only thing missing is the proof of which build.
@@ -2795,6 +3024,261 @@ fn resolve(
     }
     outcome.verdict = Some(booted.verdict);
     Ok(Some(outcome))
+}
+
+/// The bootloader of a `dfu-serial` board, once its CDC port is bound, and
+/// the stable path to that port.
+fn dfu_bootloader(
+    sysfs: &Sysfs,
+    opts: &Options,
+    port: &str,
+    device: &Device,
+) -> Result<(Device, u8, std::path::PathBuf), Error> {
+    // The device directory is on the bus a moment before the kernel binds
+    // the serial driver, so a bootloader found at the start of a run may
+    // have no port yet.
+    let ready = entry::wait_for_bootloader(
+        sysfs,
+        &[device.id],
+        Some(device),
+        opts.appear_within,
+        Transport::DfuSerial,
+    )?;
+    let no_port = || Error::NoDfuPort {
+        port: port.to_string(),
+    };
+    let ready = ready.ok_or_else(no_port)?;
+    let (interface, tty) = ready.first_tty().ok_or_else(no_port)?;
+    let tty = sysfs.stable_tty_path(tty);
+    Ok((ready.clone(), interface, tty))
+}
+
+/// What the bootloader of a `dfu-serial` board is and what the transfer
+/// would send, said to the user. The real run and the dry run both come
+/// through here, as they do through [`inspect`] on the UF2 path.
+fn inspect_dfu<'m>(
+    catalogue: &'m Catalogue,
+    manifest: &'m Manifest,
+    ui: &mut dyn Ui,
+    boards: &[String],
+    port: &str,
+    bootloader: &Device,
+    tty: &Path,
+) -> Result<Option<(Confirmed<'m>, dfu::Package)>, Error> {
+    let Some(confirmed) = identify_dfu(catalogue, manifest, bootloader.id, port, boards, ui)?
+    else {
+        return Ok(None);
+    };
+    ui.say(&format!(
+        "{port}: confirmed {} — bootloader {} [{}], an ID the catalogue gives this board alone; \
+         a serial-DFU bootloader publishes no Board-ID",
+        confirmed.name(),
+        bootloader.product.as_deref().unwrap_or("unnamed"),
+        bootloader.id
+    ));
+    let package = dfu_package(
+        &confirmed.payloads().app,
+        &manifest.root,
+        confirmed.name(),
+        confirmed.flashing(),
+    )?;
+    ui.say(&format!("\n{port}: this will"));
+    for line in dfu_plan(&confirmed, &package, &tty.display().to_string()) {
+        ui.say(&line);
+    }
+    ask_about_level(&confirmed, port, ui)?;
+    Ok(Some((confirmed, package)))
+}
+
+/// One `dfu-serial` board: into its bootloader, identity from the
+/// bootloader's USB ID, the image over its CDC port (Codeberg #452).
+fn resolve_dfu(
+    catalogue: &Catalogue,
+    manifest: &Manifest,
+    sysfs: &Sysfs,
+    ui: &mut dyn Ui,
+    opts: &Options,
+    candidate: &Candidate,
+) -> Result<Option<Outcome>, Error> {
+    let port = candidate.device.name.clone();
+    let entered = if candidate.in_bootloader {
+        candidate.device.clone()
+    } else {
+        enter_bootloader(catalogue, sysfs, ui, opts, candidate)?
+    };
+    let (bootloader, interface, tty) = dfu_bootloader(sysfs, opts, &port, &entered)?;
+    let Some((confirmed, package)) = inspect_dfu(
+        catalogue,
+        manifest,
+        ui,
+        &opts.boards,
+        &port,
+        &bootloader,
+        &tty,
+    )?
+    else {
+        return Ok(None);
+    };
+    if !ui.confirm(&format!(
+        "\n{port}: overwrite the firmware on this {}?",
+        confirmed.name()
+    ))? {
+        return Err(Error::Cancelled);
+    }
+
+    let (mut fd, _) = open_interface(
+        sysfs,
+        &bootloader,
+        &tty,
+        interface,
+        "serial-DFU port",
+        "nothing was sent",
+    )?;
+    ui.say(&format!(
+        "{port}: sending {} bytes over serial DFU on {}",
+        package.firmware.len(),
+        tty.display()
+    ));
+    let params = confirmed
+        .flashing()
+        .dfu_params()
+        .ok_or_else(|| Error::NoDfuParams {
+            board: confirmed.name().to_string(),
+        })?;
+    let sent = dfu::send(
+        &mut fd,
+        &package,
+        &mut |pause| std::thread::sleep(pause),
+        &mut |_, _| {},
+    )
+    .map_err(|source| Error::DfuFailed {
+        port: port.clone(),
+        source,
+        params,
+    })?;
+    drop(fd);
+    let mut line = format!(
+        "{port}: sent the application ({} bytes in {} data frames",
+        sent.bytes, sent.data_frames
+    );
+    if sent.resent > 0 {
+        line.push_str(&format!(
+            ", {} of them sent again after a NACK or silence",
+            sent.resent
+        ));
+    }
+    line.push(')');
+    ui.say(&line);
+    if sent.stop_unacknowledged {
+        ui.say(&format!(
+            "{port}: the port went away before the stop packet was acknowledged. The bootloader \
+             resets when it activates an image, so this can be success or not: the boot check \
+             below decides."
+        ));
+    }
+
+    let outcome = Outcome {
+        port: port.clone(),
+        board: confirmed.name().to_string(),
+        softdevice_installed: None,
+        application_written: Some(Written {
+            path: tty,
+            bytes: sent.bytes,
+            blocks: sent.data_frames,
+            declined: 0,
+            reboot_error: None,
+        }),
+        verdict: None,
+        radio: None,
+        telemetry: None,
+    };
+    after_write(sysfs, ui, opts, &bootloader, &confirmed, outcome)
+}
+
+/// `--dry-run` for a `dfu-serial` board: the port and the package a real run
+/// would use, and nothing sent (838's rule: a dry run refuses nothing).
+///
+/// No mount is involved, so unlike [`dry_walk`] this needs no root to reach
+/// the identity step of a board already in its bootloader.
+fn dry_walk_dfu(
+    catalogue: &Catalogue,
+    manifest: &Manifest,
+    sysfs: &Sysfs,
+    ui: &mut dyn Ui,
+    opts: &Options,
+    candidate: &Candidate,
+) {
+    let port = &candidate.device.name;
+    if !candidate.in_bootloader {
+        let knock = candidate
+            .device
+            .first_tty()
+            .map(|(_, tty)| sysfs.stable_tty_path(tty).display().to_string())
+            .unwrap_or_else(|| "its port".into());
+        let bootloader_ids = catalogue
+            .board(&candidate.hint)
+            .and_then(|board| board.bootloader_ids(&candidate.hint))
+            .map(|ids| {
+                ids.iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default();
+        ui.say(&format!(
+            "{port}: would touch {knock} at 1200 baud, wait for its bootloader on \
+             {bootloader_ids} and send the application over its serial port at {} baud. \
+             --dry-run stops here, because rebooting a board is already a change to it.",
+            dfu::BAUD
+        ));
+        let package = catalogue
+            .board(&candidate.hint)
+            .map_err(Error::from)
+            .and_then(|board| Ok(board.require_flashing(&candidate.hint)?))
+            .and_then(|flashing| {
+                let payloads = manifest.payloads(&candidate.hint)?;
+                dfu_package(&payloads.app, &manifest.root, &candidate.hint, flashing)
+            });
+        match package {
+            Ok(package) => ui.say(&format!(
+                "{port}: if its bootloader is a {}, the package would be: {}\n",
+                candidate.hint,
+                package.describe()
+            )),
+            Err(err) => ui.say(&format!("{port}: would be refused: {err}\n")),
+        }
+        return;
+    }
+
+    let mut dry = DryUi {
+        inner: &mut *ui,
+        asked: Vec::new(),
+    };
+    let walked =
+        dfu_bootloader(sysfs, opts, port, &candidate.device).and_then(|(bootloader, _, tty)| {
+            inspect_dfu(
+                catalogue,
+                manifest,
+                &mut dry,
+                &opts.boards,
+                port,
+                &bootloader,
+                &tty,
+            )
+            .map(|found| found.map(|_| tty))
+        });
+    let asked = dry.asked;
+    for question in &asked {
+        ui.say(&format!("{port}: would ask: {question}"));
+    }
+    match walked {
+        Ok(Some(tty)) => ui.say(&format!(
+            "{port}: --dry-run, so nothing was sent to {}.\n",
+            tty.display()
+        )),
+        Ok(None) => {}
+        Err(err) => ui.say(&format!("{port}: would be refused: {err}\n")),
+    }
 }
 
 /// Ask whether this board should send telemetry, and if so to where (#236).
@@ -3132,13 +3616,18 @@ fn enter_bootloader(
                 ui.wait_for_human(&entry::double_tap_instruction(
                     &format!("The board on {port}"),
                     &flashing.double_tap,
+                    flashing.transport,
                 ))?;
             }
         }
         let ids = flashing.bootloader_ids(&candidate.hint)?;
-        if let Some(found) =
-            entry::wait_for_bootloader(sysfs, &ids, Some(&candidate.device), opts.appear_within)?
-        {
+        if let Some(found) = entry::wait_for_bootloader(
+            sysfs,
+            &ids,
+            Some(&candidate.device),
+            opts.appear_within,
+            flashing.transport,
+        )? {
             return Ok(found);
         }
         ui.say(&format!("{port}: nothing appeared."));
@@ -3162,7 +3651,14 @@ fn back_to_bootloader(
     // answers instantly with the pre-reboot sysfs entry and the next mount
     // lands on a device in the middle of detaching.
     entry::wait_until_gone(sysfs, was, opts.appear_within)?;
-    if let Some(found) = entry::wait_for_bootloader(sysfs, &ids, Some(was), opts.appear_within)? {
+    // Only the UF2 path installs a SoftDevice, so only it comes back here.
+    if let Some(found) = entry::wait_for_bootloader(
+        sysfs,
+        &ids,
+        Some(was),
+        opts.appear_within,
+        Transport::Uf2Msc,
+    )? {
         return Ok(found);
     }
     let candidate = Candidate {
@@ -5296,5 +5792,342 @@ convert = "hex-to-uf2"
         )
         .unwrap_err();
         assert!(matches!(err, Error::NeedsConfirmation { .. }), "{err:?}");
+    }
+
+    // -----------------------------------------------------------------
+    // dfu-serial: the T1000-E's bootloader, faked behind a pty (#452)
+    // -----------------------------------------------------------------
+
+    use crate::dfu::fake::{Bootloader, Ended, S140_7_3_0};
+    use crate::dfu::Link as _;
+    use std::sync::{Arc, Mutex};
+
+    /// The application a t1000e bundle carries, as the bundle script makes
+    /// it: a UF2 based at the application start. Not a multiple of 512
+    /// bytes, so the last data frame is a short one.
+    fn t1000e_bundle() -> (TempDir, Catalogue, Manifest) {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir_all(dir.path().join("t1000e")).unwrap();
+        let app = Image::from_spans(
+            &[crate::ihex::Span {
+                start: 0x2_7000,
+                data: (0..0x1300u32).map(|i| (i * 7) as u8).collect(),
+            }],
+            crate::uf2::FAMILY_NRF52840_APP,
+        )
+        .encode()
+        .unwrap();
+        fs::write(dir.path().join("t1000e/app.uf2"), &app).unwrap();
+        let text = format!(
+            "[bundle]\nversion = \"0.8.0\"\n\n[board.t1000e.app]\nfile    = \
+             \"t1000e/app.uf2\"\nsha256  = \"{}\"\ngit_sha = \"bb7c4f64\"\n",
+            manifest::hex_digest(&app)
+        );
+        fs::write(dir.path().join("manifest.toml"), text).unwrap();
+        let manifest = load(dir.path(), &catalogue()).unwrap();
+        (dir, catalogue(), manifest)
+    }
+
+    fn sysfs_file(dir: &Path, name: &str, value: &str) {
+        fs::create_dir_all(dir).unwrap();
+        fs::write(dir.join(name), format!("{value}\n")).unwrap();
+    }
+
+    /// A bus with one T1000-E on it: in its bootloader (`2886:0057`, one CDC
+    /// function, if00 bound to ttyACM9), or running our application with
+    /// the four interfaces every leviculum board has.
+    fn t1000e_bus(root: &Path, in_bootloader: bool) {
+        let dev = root.join("1-1");
+        sysfs_file(&dev, "serial", "DD6AB3FCACCE95DA");
+        if in_bootloader {
+            sysfs_file(&dev, "idVendor", "2886");
+            sysfs_file(&dev, "idProduct", "0057");
+            sysfs_file(&dev, "product", "T1000-E-BOOT");
+            sysfs_file(&root.join("1-1:1.0"), "bInterfaceNumber", "00");
+            sysfs_file(&root.join("1-1:1.0"), "bInterfaceClass", "02");
+            fs::create_dir_all(root.join("1-1:1.0/tty/ttyACM9")).unwrap();
+            sysfs_file(&root.join("1-1:1.1"), "bInterfaceNumber", "01");
+            sysfs_file(&root.join("1-1:1.1"), "bInterfaceClass", "0a");
+        } else {
+            sysfs_file(&dev, "idVendor", "1209");
+            sysfs_file(&dev, "idProduct", "0004");
+            sysfs_file(&dev, "product", "leviculum T1000-E");
+            for (n, class, tty) in [("0", "02", Some("ttyACM7")), ("2", "02", Some("ttyACM8"))] {
+                let iface = root.join(format!("1-1:1.{n}"));
+                sysfs_file(&iface, "bInterfaceNumber", &format!("0{n}"));
+                sysfs_file(&iface, "bInterfaceClass", class);
+                if let Some(tty) = tty {
+                    fs::create_dir_all(iface.join("tty").join(tty)).unwrap();
+                }
+            }
+        }
+    }
+
+    /// The board leaving its bootloader for the application it was given:
+    /// the bootloader's device goes, the application's arrives on the same
+    /// port with the same serial, and it has not bound a debug port yet.
+    fn t1000e_reboots_into_the_application(root: &Path) {
+        for iface in ["1-1:1.0", "1-1:1.1"] {
+            let _ = fs::remove_dir_all(root.join(iface));
+        }
+        sysfs_file(&root.join("1-1"), "product", "leviculum T1000-E");
+        sysfs_file(&root.join("1-1"), "idVendor", "1209");
+        sysfs_file(&root.join("1-1"), "idProduct", "0004");
+    }
+
+    struct DfuBench {
+        sys: TempDir,
+        dev: TempDir,
+        board: Arc<Mutex<Bootloader>>,
+        heard: Arc<Mutex<usize>>,
+    }
+
+    impl DfuBench {
+        fn sysfs(&self) -> Sysfs {
+            Sysfs::with_dev(self.sys.path(), self.dev.path())
+        }
+    }
+
+    /// The T1000-E in its bootloader, with `board` answering on its CDC
+    /// port. The fake hangs up when the bootloader would reset, and on a
+    /// good image the bus then shows the application, as the rig would.
+    fn t1000e_in_bootloader(board: Bootloader) -> DfuBench {
+        let sys = TempDir::new().unwrap();
+        t1000e_bus(sys.path(), true);
+        let pty = crate::sys::testpty::Pty::open();
+        let dev = dev_tree(&[("ttyACM9", &pty.slave_path)]);
+        let board = Arc::new(Mutex::new(board));
+        let heard = Arc::new(Mutex::new(0usize));
+        let (inside, count, root) = (board.clone(), heard.clone(), sys.path().to_path_buf());
+        crate::sys::testpty::spawn_raw(pty, move |bytes| {
+            *count.lock().unwrap() += bytes.len();
+            let mut board = inside.lock().unwrap();
+            board.write(bytes).unwrap();
+            let answer = board.read(Duration::ZERO).unwrap().unwrap_or_default();
+            let gone = board.is_gone();
+            if board.ended == Some(Ended::Activated) {
+                t1000e_reboots_into_the_application(&root);
+            }
+            (answer, gone)
+        });
+        DfuBench {
+            sys,
+            dev,
+            board,
+            heard,
+        }
+    }
+
+    fn dfu_opts() -> Options {
+        Options {
+            appear_within: Duration::from_secs(2),
+            banner_budget: Duration::from_millis(300),
+            radio: RadioPlan::Skip,
+            management: crate::mgmt::MgmtPlan::Skip,
+            ..Options::default()
+        }
+    }
+
+    #[test]
+    fn a_t1000e_in_its_bootloader_is_flashed_over_serial_dfu() {
+        let (_dir, catalogue, manifest) = t1000e_bundle();
+        let bench = t1000e_in_bootloader(Bootloader::new(S140_7_3_0));
+        // Yes to the overwrite, and yes to hardware at level expected.
+        let mut ui = Fake::typing(&["yes"]);
+        let bus = run_with(
+            &catalogue,
+            &manifest,
+            &bench.sysfs(),
+            &mut ui,
+            &dfu_opts(),
+            &FakeDrives { root: false },
+        )
+        .unwrap();
+        let said = ui.transcript();
+        assert!(bus.refused.is_empty(), "{said}");
+        let outcome = &bus.outcomes[0];
+        assert_eq!(outcome.board, "t1000e");
+        let written = outcome.application_written.as_ref().unwrap();
+        assert_eq!(written.path, bench.dev.path().join("ttyACM9"));
+
+        let board = bench.board.lock().unwrap();
+        assert_eq!(board.ended, Some(Ended::Activated), "{said}");
+        // The image is the payload from 0x27000 on, to the end of its last
+        // UF2 block, and the bootloader checked it against the init packet.
+        assert_eq!(board.image.len(), 0x1300);
+        assert_eq!(board.image[..4], [0, 7, 14, 21]);
+        assert_eq!(written.bytes, 0x1300);
+        assert_eq!(written.blocks, 10);
+
+        for needle in [
+            "1-1: confirmed t1000e — bootloader T1000-E-BOOT [2886:0057]",
+            "level expected",
+            "package: device type 0x0052, device revision 0xffff, application version \
+             0xffffffff, SoftDevice requirement 0x0123, 4864 bytes in 10 data frames",
+            "the start packet erases that area",
+            "1-1: sent the application (4864 bytes in 10 data frames)\n",
+            "1-1: back as leviculum T1000-E [1209:0004]",
+        ] {
+            assert!(said.contains(needle), "{needle:?} missing from:\n{said}");
+        }
+        // Back, and nobody could read which build: the fake has no debug
+        // port. Written and not contradicted is exit 2, not a failure.
+        assert_eq!(bus.exit_code(), EXIT_UNCONFIRMED, "{said}");
+    }
+
+    #[test]
+    fn a_board_on_a_softdevice_the_package_does_not_name_fails_and_says_what_is_left() {
+        // S140 6.1.1 (0x00B6): the bootloader acknowledges the init packet,
+        // reads it, and resets. The application area is already erased.
+        let (_dir, catalogue, manifest) = t1000e_bundle();
+        let bench = t1000e_in_bootloader(Bootloader::new(0x00B6));
+        let mut ui = Fake::typing(&["yes"]);
+        let bus = run_with(
+            &catalogue,
+            &manifest,
+            &bench.sysfs(),
+            &mut ui,
+            &dfu_opts(),
+            &FakeDrives { root: false },
+        )
+        .unwrap();
+        let said = ui.transcript();
+        assert_eq!(bus.refused, vec!["1-1".to_string()], "{said}");
+        assert_eq!(bus.exit_code(), EXIT_FLASH_FAILED);
+        assert_eq!(
+            bench.board.lock().unwrap().ended,
+            Some(Ended::Refused("SoftDevice requirement"))
+        );
+        for needle in [
+            "1-1: serial DFU did not finish: data frame 1 of 10: the port went away",
+            "device type 0x0052 and a SoftDevice among 0x0123 only",
+            "already erased the application area",
+            "Run lnflash again; if it stops at the same place twice, the bootloader is refusing \
+             the package",
+        ] {
+            assert!(said.contains(needle), "{needle:?} missing from:\n{said}");
+        }
+    }
+
+    #[test]
+    fn a_frame_the_bootloader_keeps_refusing_fails_the_flash_at_that_frame() {
+        let (_dir, catalogue, manifest) = t1000e_bundle();
+        let mut board = Bootloader::new(S140_7_3_0);
+        board.nack_data = Some((4, usize::MAX));
+        let bench = t1000e_in_bootloader(board);
+        let mut ui = Fake::typing(&["yes"]);
+        let bus = run_with(
+            &catalogue,
+            &manifest,
+            &bench.sysfs(),
+            &mut ui,
+            &dfu_opts(),
+            &FakeDrives { root: false },
+        )
+        .unwrap();
+        let said = ui.transcript();
+        assert_eq!(bus.exit_code(), EXIT_FLASH_FAILED, "{said}");
+        assert!(
+            said.contains("serial DFU did not finish: data frame 4 of 10"),
+            "{said}"
+        );
+        assert!(said.contains("3 times in a row"), "{said}");
+        assert!(
+            said.contains("already erased the application area"),
+            "{said}"
+        );
+        assert_eq!(bench.board.lock().unwrap().ended, None);
+    }
+
+    #[test]
+    fn a_t1000e_is_not_written_without_a_yes_to_its_level() {
+        let (_dir, catalogue, manifest) = t1000e_bundle();
+        let bench = t1000e_in_bootloader(Bootloader::new(S140_7_3_0));
+        let mut ui = Fake::agreeing();
+        let bus = run_with(
+            &catalogue,
+            &manifest,
+            &bench.sysfs(),
+            &mut ui,
+            &dfu_opts(),
+            &FakeDrives { root: false },
+        )
+        .unwrap();
+        assert_eq!(bus.exit_code(), EXIT_FLASH_FAILED);
+        assert!(ui.transcript().contains("Nothing was written."));
+        assert_eq!(*bench.heard.lock().unwrap(), 0, "not a byte was sent");
+    }
+
+    #[test]
+    fn a_dry_run_names_the_port_and_the_package_and_sends_nothing() {
+        // No root needed: nothing is mounted on this transport. The level
+        // question is said as one a real run would ask (838).
+        let (_dir, catalogue, manifest) = t1000e_bundle();
+        let bench = t1000e_in_bootloader(Bootloader::new(S140_7_3_0));
+        let mut ui = Fake::agreeing();
+        let opts = Options {
+            dry_run: true,
+            ..dfu_opts()
+        };
+        let bus = run_with(
+            &catalogue,
+            &manifest,
+            &bench.sysfs(),
+            &mut ui,
+            &opts,
+            &FakeDrives { root: false },
+        )
+        .unwrap();
+        let said = ui.transcript();
+        assert!(bus.refused.is_empty() && bus.outcomes.is_empty(), "{said}");
+        assert_eq!(bus.skipped, vec!["1-1".to_string()]);
+        assert_eq!(bus.exit_code(), EXIT_CONFIRMED);
+        let tty = bench.dev.path().join("ttyACM9");
+        for needle in [
+            format!("over serial DFU on {} at 115200 baud", tty.display()),
+            "package: device type 0x0052, device revision 0xffff, application version \
+             0xffffffff, SoftDevice requirement 0x0123, 4864 bytes in 10 data frames, image \
+             CRC16 0x"
+                .to_string(),
+            "1-1: would be refused: the board on 1-1 is t1000e, which lnflash knows at level \
+             expected"
+                .to_string(),
+            "1-1: would ask: 1-1: t1000e is at level expected".to_string(),
+        ] {
+            assert!(said.contains(&needle), "{needle:?} missing from:\n{said}");
+        }
+        assert_eq!(*bench.heard.lock().unwrap(), 0, "not a byte was sent");
+        assert!(ui.answers.len() == 8, "nothing should have been confirmed");
+    }
+
+    #[test]
+    fn a_dry_run_on_a_running_t1000e_names_the_touch_and_the_package() {
+        let (_dir, catalogue, manifest) = t1000e_bundle();
+        let sys = TempDir::new().unwrap();
+        t1000e_bus(sys.path(), false);
+        let sysfs = Sysfs::with_dev(sys.path(), "/nonexistent-dev");
+        let mut ui = Fake::agreeing();
+        let opts = Options {
+            dry_run: true,
+            ..dfu_opts()
+        };
+        let bus = run_with(
+            &catalogue,
+            &manifest,
+            &sysfs,
+            &mut ui,
+            &opts,
+            &FakeDrives { root: false },
+        )
+        .unwrap();
+        let said = ui.transcript();
+        assert_eq!(bus.exit_code(), EXIT_CONFIRMED, "{said}");
+        for needle in [
+            "1-1: would touch /nonexistent-dev/ttyACM7 at 1200 baud, wait for its bootloader on \
+             2886:0057 and send the application over its serial port at 115200 baud",
+            "1-1: if its bootloader is a t1000e, the package would be: device type 0x0052",
+        ] {
+            assert!(said.contains(needle), "{needle:?} missing from:\n{said}");
+        }
     }
 }

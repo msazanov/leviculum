@@ -9,7 +9,7 @@ different people.
 | needs | the bundle, and root | this checkout and the embedded toolchain |
 | builds firmware | no, it carries it | yes, from the working tree |
 | identifies the board | from its bootloader | from the USB id you configure |
-| boards today | T114, RAK4631 | T114, RAK4631 |
+| boards today | T114, RAK4631, T1000-E | T114, RAK4631 |
 
 If you just want our firmware on a board, use `lnflash`. If you are
 changing the firmware and want your build on a board, use `just flash`.
@@ -54,7 +54,10 @@ hardware is. `lnflash` therefore finds candidates on the USB bus, brings
 each into its bootloader, and only there asks what the board actually
 is, from the bootloader's own `INFO_UF2.TXT`. The identity that a write
 rests on can only come from that reading, which is enforced in the type
-system rather than by convention (`lnflash/src/lib.rs:15-21`). Then it
+system rather than by convention (`lnflash/src/lib.rs:15-21`). A
+bootloader that publishes no drive, and so no `INFO_UF2.TXT`, is
+identified by its own USB ID instead, and only where the catalogue gives
+that ID to one board alone (the T1000-E, below). Then it
 checks the SoftDevice precondition, installs a matching SoftDevice first
 if needed, writes the firmware, and reads the board's debug port back to
 confirm what is now running.
@@ -163,12 +166,21 @@ bus names it, says why, and leaves it alone. It is flashed from this
 checkout with `just flash-solarnode`, by a person who can see which board
 is on the bench.
 
-**The T1000-E's first image goes on by serial DFU.** Its catalogue entry
-names the bootloader's `Board-ID`, `nRF52840-T1000-E-v1`, its USB ID
-`2886:0057` and the drive label `T1000-E`, but the unit on our rig mounts
-no drive at all: its bootloader takes serial DFU only, which `lnflash`
-does not speak. Until it does, a board like that one is flashed from this
-checkout, below under "SenseCAP T1000-E: serial DFU".
+**The T1000-E goes on over serial DFU.** Its bootloader, USB `2886:0057`,
+mounts no drive on the unit on our rig; it takes serial DFU only. Its
+catalogue entry therefore names `lnflash`'s second transport, `dfu-serial`
+(Codeberg #452): the image goes over the bootloader's serial port the way
+`adafruit-nrfutil dfu serial` sends it, and the board is identified by
+that bootloader USB ID, which the catalogue gives this board alone, since
+there is no `INFO_UF2.TXT` to read its `Board-ID` (`nRF52840-T1000-E-v1`,
+drive label `T1000-E` on a unit that has one) from. For the person at the
+keyboard it is the same command as for every other board:
+
+```sh
+sudo ./lnflash --board t1000e
+```
+
+What it sends and why is below under "SenseCAP T1000-E: serial DFU".
 
 **The SoftDevice carve-out.** The T114 entry ships Nordic's S140 7.3.0
 beside its licence, so a factory board carrying 6.1.1 is repaired and
@@ -397,46 +409,61 @@ meshtastic --port /dev/ttyACM0 --enter-dfu
 The T1000-E's bootloader (Adafruit nRF52, USB `2886:0057`, `Board-ID`
 `nRF52840-T1000-E-v1`, S140 7.3.0) answers the 1200-baud touch with serial
 DFU and, on the rig unit, with nothing else: no UF2 drive appears. The
-UF2 runner the other recipes use has nothing to copy onto, so this board is
-written with `adafruit-nrfutil` (`pip install --user adafruit-nrfutil`):
+UF2 runner the other recipes use has nothing to copy onto, so a build from
+this checkout goes on through `lnflash`, from a bundle built here:
 
 ```sh
-just t1000e-dfu-package
+just lnflash-bundle
+sudo target/lnflash/lnflash-<stamp>/lnflash --board t1000e
 ```
 
-builds the release image and wraps it as a DFU package, which runs
+`lnflash` touches the board's port at 1200 baud, which drops both stock
+Meshtastic and our firmware into the bootloader, waits for `2886:0057`
+and its serial port, shows the package it is about to send, and asks.
+The board is at level *Expected*, so it also asks for a typed yes to
+hardware we have not run, and `--yes` does not give one. The transfer is
+the legacy Nordic serial DFU of `adafruit-nrfutil dfu serial
+--singlebank` at 115200 baud, frame for frame: `lnflash/src/dfu.rs`
+cites the reference's lines for every part of it, and its tests compare
+the init packet and the whole session on the wire with bytes the
+installed tool produced (`lnflash/tests/fixtures/dfu/`). Where it does
+more than the reference, it is on the side of stopping: a frame the
+bootloader acknowledges with the wrong number is sent again and then
+fails the flash, and an image that does not start at `0x27000` is
+refused before anything is sent, because the protocol carries no address
+and the bootloader writes the first byte there whatever the image was
+linked for.
 
-```sh
-adafruit-nrfutil dfu genpkg --dev-type 0x0052 --sd-req 0x0123 \
-    --application t1000e.hex t1000e-dfu.zip
-```
+The two numbers in the package are checked by the bootloader before it
+writes a byte, and come from the catalogue (`[board.t1000e.flashing.dfu]`
+in `lnflash/catalogue.toml`):
 
-(`scripts/t1000e-dfu-package.sh`), and prints the line that writes it:
-
-```sh
-adafruit-nrfutil --verbose dfu serial --package t1000e-dfu.zip \
-    -p /dev/ttyACM0 -b 115200 --singlebank --touch 1200
-```
-
-`--touch 1200` opens the port at 1200 baud and closes it, which is what
-drops both stock Meshtastic and our firmware into the bootloader, so the
-same line serves the first flash and every one after it. The two numbers
-in the package are checked by the bootloader before it writes a byte:
-
-- `--dev-type 0x0052` is `ADAFRUIT_DEVICE_TYPE`; an init packet with any
-  other device type is refused (Adafruit_nRF52_Bootloader, `dfu_init.c`
+- device type `0x0052` is `ADAFRUIT_DEVICE_TYPE`; an init packet with
+  any other device type is refused (Adafruit_nRF52_Bootloader, `dfu_init.c`
   in its `src/`, lines 84 and 158).
-- `--sd-req 0x0123` is the firmware id of S140 7.3.0, the SoftDevice the
-  unit reports; the bootloader compares the list in the packet with the
-  SoftDevice it runs (the same file, line 178). The value is Meshtastic's,
-  from its board definition for this product
+- SoftDevice requirement `0x0123` is the firmware id of S140 7.3.0, the
+  SoftDevice the unit reports; the bootloader compares the list in the
+  packet with the SoftDevice it runs (the same file, line 178). The value
+  is Meshtastic's, from its board definition for this product
   (`boards/tracker-t1000-e.json`, `"sd_fwid": "0x0123"`), the file its
   own `nrfutil` upload of this board reads.
 
-`--singlebank` is the Adafruit bootloader's single-bank mode, the one every
-Adafruit nRF52840 board is written with. Our image is linked at `0x27000`
-(`leviculum-nrf/memory.x`), above the S140 7.x SoftDevice, so it boots on
-this unit without a SoftDevice step.
+Serial DFU cannot read the SoftDevice first, so this is the only check
+of it on this board. A refusal does not leave the board untouched: the
+start packet erases the application area before the init packet is
+looked at, and a bootloader that refuses the init packet resets. `lnflash`
+then reports where the transfer stopped and that the board is in its
+bootloader with no application. A cable pulled mid-image looks the same
+from the host and is reported the same way, so the advice is to run it
+again: a transfer that stops at the same place twice is a bootloader
+refusing the package, not a line losing it.
+
+`lnflash --dry-run` prints the port and the package (device type,
+revision, application version, SoftDevice list, size and CRC16) without
+sending anything. On this board it needs no root, because nothing is
+mounted. Our image is linked at `0x27000` (`leviculum-nrf/memory.x`),
+above the S140 7.x SoftDevice, so it boots on this unit without a
+SoftDevice step.
 
 ## A note on disconnecting consumers
 

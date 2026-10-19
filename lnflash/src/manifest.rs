@@ -121,13 +121,29 @@ pub enum Error {
     },
 }
 
-/// How the bytes get in. One variant today; a new chip family adds one here
-/// and one module, and touches nothing else.
+/// How the bytes get in. A new bootloader protocol adds one here and one
+/// module, and touches nothing else.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Transport {
     /// Copy a UF2 onto the bootloader's mass-storage drive.
     Uf2Msc,
+    /// Nordic's legacy serial DFU over the bootloader's CDC port, the way
+    /// `adafruit-nrfutil dfu serial` sends it ([`crate::dfu`]). For a
+    /// bootloader that publishes no drive, which also means no
+    /// `INFO_UF2.TXT`: identity rests on the bootloader's USB ID instead,
+    /// which the catalogue then has to hold exclusive to this one board
+    /// (Codeberg #452).
+    DfuSerial,
+}
+
+impl Transport {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Transport::Uf2Msc => "uf2-msc",
+            Transport::DfuSerial => "dfu-serial",
+        }
+    }
 }
 
 /// How a board reaches a programmable state, in the order they are tried.
@@ -264,6 +280,22 @@ pub struct Flashing {
     /// button on the outside of the case.
     #[serde(default)]
     pub double_tap: DoubleTap,
+    /// The init-packet fields a serial-DFU bootloader checks. Stated exactly
+    /// when the transport is `dfu-serial`.
+    #[serde(default)]
+    pub dfu: Option<DfuInit>,
+}
+
+/// What `[board.<name>.flashing.dfu]` states: the two init-packet fields the
+/// bootloader refuses an image on, in `dfu genpkg`'s terms. The other two,
+/// device revision and application version, are the tool's defaults and the
+/// bootloader does not check them for an application ([`crate::dfu`]).
+#[derive(Debug, Clone, Deserialize)]
+pub struct DfuInit {
+    /// `--dev-type`.
+    pub device_type: u16,
+    /// `--sd-req`: firmware IDs of the SoftDevices the image may land on.
+    pub sd_req: Vec<u16>,
 }
 
 /// How well we know a board we write to, in the terms
@@ -481,6 +513,14 @@ impl Flashing {
             "flashing.identify.bootloader_usb",
         )
     }
+
+    /// The serial-DFU package parameters, for a `dfu-serial` board.
+    pub fn dfu_params(&self) -> Option<crate::dfu::Params> {
+        self.dfu.as_ref().map(|dfu| crate::dfu::Params {
+            device_type: dfu.device_type,
+            sd_req: dfu.sd_req.clone(),
+        })
+    }
 }
 
 fn parse_ids(values: &[String], board: &str, field: &str) -> Result<Vec<UsbId>, Error> {
@@ -564,6 +604,21 @@ impl Catalogue {
                 board,
                 flashing,
             ))
+        })
+    }
+
+    /// The `dfu-serial` board whose bootloader answers on `id`. Stage two of
+    /// identify for a bootloader that publishes no `INFO_UF2.TXT`: the
+    /// catalogue will not load unless such an ID belongs to this board alone,
+    /// so the match is a statement about the hardware rather than a hint.
+    pub fn board_for_bootloader_usb(&self, id: UsbId) -> Option<(&str, &Board, &Flashing)> {
+        self.board.iter().find_map(|(name, board)| {
+            let flashing = board.flashing()?;
+            (flashing.transport == Transport::DfuSerial
+                && flashing
+                    .bootloader_ids(name)
+                    .is_ok_and(|ids| ids.contains(&id)))
+            .then_some((name.as_str(), board, flashing))
         })
     }
 
@@ -730,6 +785,49 @@ fn validate_catalogue(catalogue: &Catalogue, path: &Path) -> Result<(), Error> {
                 flash.app_base, flash.writable_start, flash.writable_end
             )));
         }
+
+        match (flashing.transport, &flashing.dfu) {
+            (Transport::DfuSerial, None) => {
+                return Err(bad(format!(
+                    "board {name}: transport dfu-serial and no flashing.dfu, so there is no \
+                     device type or SoftDevice requirement to put in the init packet"
+                )))
+            }
+            (Transport::DfuSerial, Some(dfu)) if dfu.sd_req.is_empty() => {
+                return Err(bad(format!(
+                    "board {name}: flashing.dfu.sd_req is empty, and the bootloader refuses an \
+                     init packet that names no SoftDevice"
+                )))
+            }
+            (Transport::Uf2Msc, Some(_)) => {
+                return Err(bad(format!(
+                    "board {name}: flashing.dfu on a uf2-msc board is a package nothing sends"
+                )))
+            }
+            _ => {}
+        }
+        // A serial-DFU bootloader publishes no Board-ID, so its USB ID is the
+        // identity a write rests on, and an identity two entries share is a
+        // guess (Codeberg #452).
+        if flashing.transport == Transport::DfuSerial {
+            let ids = flashing.bootloader_ids(name)?;
+            for (other, other_board) in &catalogue.board {
+                if other == name {
+                    continue;
+                }
+                let shared = other_board
+                    .bootloader_ids(other)?
+                    .into_iter()
+                    .chain(other_board.candidate_ids(other)?)
+                    .find(|id| ids.contains(id));
+                if let Some(id) = shared {
+                    return Err(bad(format!(
+                        "board {name}: its bootloader USB ID {id} is also listed for {other}, \
+                         and on dfu-serial that ID is the board's identity"
+                    )));
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -780,6 +878,15 @@ fn validate(manifest: &Manifest, catalogue: &Catalogue, path: &Path) -> Result<(
                 return Err(bad(format!(
                     "board {name}: a softdevice remedy with no flashing.requires.softdevice to \
                      trigger it"
+                )));
+            }
+            // dfu-serial cannot read the installed SoftDevice, so nothing
+            // could ever decide the remedy is needed; the bootloader's own
+            // check against flashing.dfu.sd_req is the precondition there.
+            if flashing.transport == Transport::DfuSerial {
+                return Err(bad(format!(
+                    "board {name}: a softdevice remedy on a dfu-serial board, which cannot read \
+                     the SoftDevice it would be repairing"
                 )));
             }
         }
@@ -986,7 +1093,7 @@ convert = "hex-to-uf2"
         let board = catalogue.board("t1000e").unwrap();
         let flashing = board.require_flashing("t1000e").unwrap();
         assert_eq!(flashing.level, Level::Expected);
-        assert_eq!(flashing.transport, Transport::Uf2Msc);
+        assert_eq!(flashing.transport, Transport::DfuSerial);
         assert_eq!(flashing.identify.info_uf2_board_id, "nRF52840-T1000-E-v1");
         assert_eq!(flashing.identify.msc_label.as_deref(), Some("T1000-E"));
         assert!(!flashing.identify.board_id_shared);
@@ -1000,6 +1107,99 @@ convert = "hex-to-uf2"
         let (name, _, _) = catalogue.board_for_id("nRF52840-T1000-E-v1").unwrap();
         assert_eq!(name, "t1000e");
         assert!(catalogue.board_for_id("T1000-E").is_none());
+    }
+
+    #[test]
+    fn the_t1000e_is_written_over_serial_dfu_with_the_package_the_hand_path_built() {
+        // Codeberg #452: the rig unit's bootloader publishes no drive. The
+        // init-packet fields are the two `just t1000e-dfu-package` passes to
+        // `adafruit-nrfutil dfu genpkg`, and its bootloader USB ID is what
+        // identifies it, so that ID resolves to this board and no other.
+        let catalogue = catalogue();
+        let flashing = catalogue
+            .board("t1000e")
+            .unwrap()
+            .require_flashing("t1000e")
+            .unwrap();
+        assert_eq!(flashing.transport, Transport::DfuSerial);
+        assert_eq!(flashing.transport.as_str(), "dfu-serial");
+        assert_eq!(flashing.entry, vec![Entry::Touch1200, Entry::DoubleTap]);
+        assert_eq!(
+            flashing.dfu_params(),
+            Some(crate::dfu::Params {
+                device_type: 0x0052,
+                sd_req: vec![0x0123],
+            })
+        );
+        let id: UsbId = "2886:0057".parse().unwrap();
+        let (name, _, _) = catalogue.board_for_bootloader_usb(id).unwrap();
+        assert_eq!(name, "t1000e");
+        // A UF2 board's bootloader ID identifies nothing on this path: its
+        // identity is the Board-ID in INFO_UF2.TXT.
+        assert!(catalogue
+            .board_for_bootloader_usb("239a:0071".parse().unwrap())
+            .is_none());
+        // And the other boards still copy UF2s.
+        for name in ["t114", "rak4631"] {
+            let flashing = catalogue.board(name).unwrap().flashing().unwrap();
+            assert_eq!(flashing.transport, Transport::Uf2Msc, "{name}");
+            assert!(flashing.dfu_params().is_none(), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_dfu_serial_board_without_its_package_parameters_will_not_load() {
+        let err = mutated_catalogue(
+            "[board.t1000e.flashing.dfu]",
+            "[board.t1000e.flashing.unused]",
+        )
+        .unwrap_err();
+        assert!(format!("{err}").contains("no flashing.dfu"), "{err}");
+        let err = mutated_catalogue("sd_req      = [0x0123]", "sd_req      = []").unwrap_err();
+        assert!(format!("{err}").contains("sd_req is empty"), "{err}");
+    }
+
+    #[test]
+    fn a_uf2_board_with_dfu_parameters_will_not_load() {
+        let err =
+            mutated_catalogue("transport = \"dfu-serial\"", "transport = \"uf2-msc\"").unwrap_err();
+        assert!(
+            format!("{err}").contains("a package nothing sends"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_dfu_serial_bootloader_id_another_board_lists_will_not_load() {
+        // On dfu-serial the bootloader's USB ID is the identity, so a second
+        // entry listing it would make the write rest on a guess.
+        let err = mutated_catalogue(
+            "bootloader_usb    = [\"2886:0057\"]",
+            "bootloader_usb    = [\"239a:0071\"]",
+        )
+        .unwrap_err();
+        assert!(format!("{err}").contains("also listed for t114"), "{err}");
+    }
+
+    #[test]
+    fn a_softdevice_remedy_for_a_dfu_serial_board_will_not_load() {
+        // Nothing on serial DFU can read the SoftDevice a remedy would repair.
+        let f = Fixture::new();
+        fs::create_dir_all(f.dir.path().join("t1000e")).unwrap();
+        f.write("t1000e/app.uf2", b"t1000e image");
+        f.write("t1000e/sd.hex", b":00000001FF\n");
+        f.write("t1000e/licence.txt", b"Nordic");
+        let text = format!(
+            "{}\n[board.t1000e.app]\nfile = \"t1000e/app.uf2\"\nsha256 = \"{}\"\n\
+             [board.t1000e.remedy.softdevice]\nfile = \"t1000e/sd.hex\"\nsha256 = \"{}\"\n\
+             license = \"t1000e/licence.txt\"\nconvert = \"hex-to-uf2\"\n",
+            f.manifest_text(),
+            f.sha("t1000e/app.uf2"),
+            f.sha("t1000e/sd.hex"),
+        );
+        f.write_manifest(&text);
+        let err = f.load().unwrap_err();
+        assert!(format!("{err}").contains("dfu-serial board"), "{err}");
     }
 
     #[test]

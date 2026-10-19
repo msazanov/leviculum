@@ -520,6 +520,47 @@ pub(crate) mod testpty {
         }
     }
 
+    /// Run `device` on the far end of the pty with no framing at all: it
+    /// is handed every chunk the host writes and returns the bytes to
+    /// answer with, and `true` beside them to hang up once they are
+    /// written. Hanging up drops the pty — master and holder — so the
+    /// host's next read or write on its own fd fails the way a port does
+    /// when the device behind it resets.
+    pub fn spawn_raw(
+        pty: Pty,
+        mut device: impl FnMut(&[u8]) -> (Vec<u8>, bool) + Send + 'static,
+    ) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            let mut master = pty.master.try_clone().expect("cloning the pty master");
+            let mut buf = [0u8; 1024];
+            loop {
+                let n = match master.read(&mut buf) {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => n,
+                };
+                let (answer, hang_up) = device(&buf[..n]);
+                if !answer.is_empty() && master.write_all(&answer).is_err() {
+                    return;
+                }
+                if hang_up {
+                    // Let the host read the last answer before the port
+                    // goes: the pty discards what is queued at close, and
+                    // a write to the master reaches the slave's queue
+                    // asynchronously, so an empty queue right after the
+                    // write does not yet mean it was read.
+                    std::thread::sleep(Duration::from_millis(100));
+                    let deadline = Instant::now() + Duration::from_secs(2);
+                    while pty.queued_for_host() > 0 && Instant::now() < deadline {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    drop(master);
+                    drop(pty);
+                    return;
+                }
+            }
+        })
+    }
+
     /// Run `script` as the device: for every deframed HDLC frame the host
     /// writes, `Some(answer)` is HDLC-framed back, `None` is scripted
     /// silence. The thread ends when the pty goes away with the test.

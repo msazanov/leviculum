@@ -161,7 +161,7 @@ are not architecture-specific. The boards it carries an image for:
 | --- | --- | --- |
 | `t114` | Heltec Mesh Node T114 | `just flash` |
 | `rak4631` | RAK4631 — the WisMesh Pocket V2 and the other carriers built around that module | `just flash-rak4631` |
-| `t1000e` | SenseCAP T1000-E, at level `expected`: wiring from the vendor firmware, not yet run on our rig; its bootloader may offer serial DFU only (`docs/src/firmware/flashing.md`) | `just t1000e-dfu-package` |
+| `t1000e` | SenseCAP T1000-E, at level `expected`: wiring from the vendor firmware, not yet run on our rig; its bootloader may offer serial DFU only, which `lnflash` speaks (`docs/src/firmware/flashing.md`) | `just t1000e-dfu-package` |
 
 `lnflash` and not a bare UF2 you drag onto the bootloader drive, because the
 images have a precondition that cannot be checked by dragging: our firmware

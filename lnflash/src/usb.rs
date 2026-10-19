@@ -103,6 +103,16 @@ impl Device {
         Some(Path::new("/dev").join(tty))
     }
 
+    /// The lowest-numbered interface the kernel bound a serial driver to,
+    /// and its tty name: the CDC port of a bootloader that offers one. A
+    /// serial-DFU bootloader has a single CDC function, so the lowest is
+    /// the only one.
+    pub fn first_tty(&self) -> Option<(u8, &str)> {
+        self.interfaces
+            .iter()
+            .find_map(|i| Some((i.number, i.tty.as_deref()?)))
+    }
+
     /// The mass-storage block device, if this is a bootloader.
     pub fn block_device(&self) -> Option<PathBuf> {
         let block = self

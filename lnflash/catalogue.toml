@@ -204,20 +204,45 @@ candidate_usb = ["1209:0004", "239a:8029"]
 # schematic), and we have not run the board yet. A write needs a person to say
 # yes to exactly that.
 level     = "expected"
-transport = "uf2-msc"
+# The rig unit's bootloader publishes no UF2 volume and takes serial DFU only
+# (Codeberg #452), so this board is written the way `adafruit-nrfutil dfu
+# serial --singlebank` writes it (lnflash/src/dfu.rs). A unit whose bootloader
+# does mount the volume still has the CDC port, so one transport serves both.
+transport = "dfu-serial"
+# Our firmware answers the touch (leviculum-nrf/src/usb.rs), and so does stock
+# Meshtastic on this board, measured on the rig unit 2026-10-18.
 entry     = ["touch-1200", "double-tap"]
 
 [board.t1000e.flashing.identify]
 # From the Adafruit_nRF52_Bootloader board definition for this product
 # (boards/t1000_e) and the rig unit: Board-ID nRF52840-T1000-E-v1, volume
-# label T1000-E, bootloader USB 2886:0057 ("T1000-E-BOOT"). The rig unit's
-# bootloader publishes no UF2 volume and takes serial DFU only, which this
-# transport cannot drive; its first flash is `just t1000e-dfu-package` and the
-# `dfu serial` line in docs/src/firmware/flashing.md. A unit whose bootloader
-# does mount the volume is flashed here like the others.
+# label T1000-E, bootloader USB 2886:0057 ("T1000-E-BOOT").
+#
+# On dfu-serial the Board-ID is never read: there is no INFO_UF2.TXT to read
+# it from. Identity rests on the bootloader's USB ID instead, which the
+# catalogue refuses to load unless no other entry lists it (Seeed's VID, and a
+# PID its bootloader uses for this product), and the `expected` level puts a
+# person in front of every write on top of that.
 info_uf2_board_id = "nRF52840-T1000-E-v1"
 bootloader_usb    = ["2886:0057"]
 msc_label         = "T1000-E"
+
+[board.t1000e.flashing.dfu]
+# The two init-packet fields the bootloader refuses an image on, the same two
+# `just t1000e-dfu-package` passes to `adafruit-nrfutil dfu genpkg`
+# (scripts/t1000e-dfu-package.sh):
+#   device_type 0x0052  ADAFRUIT_DEVICE_TYPE; anything else is refused
+#                       (Adafruit_nRF52_Bootloader, src/dfu_init.c,
+#                       dfu_init_prevalidate)
+#   sd_req 0x0123       the firmware ID of S140 7.3.0, the SoftDevice the unit
+#                       reports; the bootloader refuses a list without the one
+#                       it runs (the same function). Value from Meshtastic's
+#                       boards/tracker-t1000-e.json, "sd_fwid": "0x0123".
+# The bootloader checks the SoftDevice itself because this transport cannot
+# read it first. `requires` below says the same thing as a version range; on
+# this transport it is shown in the plan, and the bootloader's check decides.
+device_type = 0x0052
+sd_req      = [0x0123]
 
 [board.t1000e.flashing.flash]
 # The Adafruit nRF52840 layout every other board here has: the same
