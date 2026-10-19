@@ -25,11 +25,58 @@
 //! leaves the peer deferred by its whole accumulator, and one that ends
 //! after leaves it due on the next sync pass.
 
+use leviculum_core::constants::CHANNEL_DEFAULT_RTT_MS;
 use leviculum_core::link::LinkId;
+use leviculum_core::node::request_timeout_ms;
 
 /// How long an outbound round may run, dial to conclusion, before it is
 /// ended as [`RoundEnd::Timeout`].
 pub const OUTBOUND_ROUND_DEADLINE_MS: u64 = 180_000;
+
+/// The longest the `/offer` request waits for its answer: the fixed
+/// timeout both callers used before leviculum#851, kept as the ceiling so
+/// a slow link never waits longer than it did.
+pub const OFFER_TIMEOUT_CEILING_MS: u64 = 60_000;
+
+/// The shortest the `/offer` request waits for its answer: the reference
+/// formula at the core's default RTT ([`CHANNEL_DEFAULT_RTT_MS`]), 14.25 s.
+///
+/// The formula prices the offer by the RTT the handshake measured, which
+/// is small packets on a quiet channel. The offer is up to one full MDU
+/// and its answer up to as much again, each split into two LoRa frames.
+/// On the field preset (SF10/BW125) those four frames are about 9.2 s of
+/// airtime. A handshake that read near zero leaves the formula at its
+/// 11.25 s grace, 2 s over them; the floor clears them by 5 s. Slower
+/// presets measure what they cost: an SF12 handshake is about 7.4 s, which
+/// the formula turns into about 56 s against 36 s of airtime for the four
+/// frames, so the floor never binds there.
+pub const OFFER_TIMEOUT_FLOOR_MS: u64 = request_timeout_ms(CHANNEL_DEFAULT_RTT_MS);
+
+/// How long the `/offer` request on a link of `rtt_ms` waits for its
+/// answer. The reference passes no timeout (`reference/LXMF/LXMF/LXMPeer.py:389`),
+/// so RNS derives it from the link ([`request_timeout_ms`]); this is that
+/// value held between [`OFFER_TIMEOUT_FLOOR_MS`] and
+/// [`OFFER_TIMEOUT_CEILING_MS`].
+pub const fn offer_timeout_ms(rtt_ms: u64) -> u64 {
+    let derived = request_timeout_ms(rtt_ms);
+    if derived < OFFER_TIMEOUT_FLOOR_MS {
+        OFFER_TIMEOUT_FLOOR_MS
+    } else if derived > OFFER_TIMEOUT_CEILING_MS {
+        OFFER_TIMEOUT_CEILING_MS
+    } else {
+        derived
+    }
+}
+
+/// The round's link as the step needs to see it at link-up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LinkView {
+    /// The link's MDU, which sizes the offer.
+    pub mdu: usize,
+    /// The link's RTT in milliseconds, which times the offer
+    /// ([`offer_timeout_ms`]).
+    pub rtt_ms: u64,
+}
 
 /// The round in flight, as the step needs to see it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,8 +104,8 @@ pub enum RoundEvent {
         identified: bool,
         /// The peer's mined peering key, if it holds one.
         peering_key: Option<[u8; 32]>,
-        /// The link's MDU, `None` when the core no longer holds the link.
-        link_mdu: Option<usize>,
+        /// The link, `None` when the core no longer holds it.
+        link: Option<LinkView>,
     },
     /// The core gave up on a request.
     RequestTimedOut {
@@ -110,10 +157,12 @@ impl RoundEnd {
 pub enum RoundStep {
     /// Nothing changes: no round, or the event is not this round's.
     Unchanged,
-    /// Plan and send the `/offer` against this link.
+    /// Plan the `/offer` against this link's MDU and send it with this
+    /// timeout.
     Offer {
         peering_key: [u8; 32],
         link_mdu: usize,
+        timeout_ms: u64,
     },
     /// End the round: log the result, peer Idle, close the link.
     End(RoundEnd),
@@ -150,7 +199,7 @@ pub fn round_step(round: Option<&RoundView>, event: RoundEvent) -> RoundStep {
         RoundEvent::LinkUp {
             identified,
             peering_key,
-            link_mdu,
+            link,
         } => {
             if round.is_none() {
                 return RoundStep::Unchanged;
@@ -161,12 +210,13 @@ pub fn round_step(round: Option<&RoundView>, event: RoundEvent) -> RoundStep {
             let Some(peering_key) = peering_key else {
                 return RoundStep::End(RoundEnd::NoKey);
             };
-            let Some(link_mdu) = link_mdu else {
+            let Some(link) = link else {
                 return RoundStep::End(RoundEnd::LinkGone);
             };
             RoundStep::Offer {
                 peering_key,
-                link_mdu,
+                link_mdu: link.mdu,
+                timeout_ms: offer_timeout_ms(link.rtt_ms),
             }
         }
         RoundEvent::RequestTimedOut {

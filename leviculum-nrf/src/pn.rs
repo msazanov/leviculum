@@ -250,7 +250,9 @@ use leviculum_lxmf::propagation::{
 use leviculum_lxmf::propagation_client::PROPAGATION_ASPECT;
 use leviculum_lxmf::propagation_node::{link_idle_past_bound, offer_remote, propagation_hash_of};
 use leviculum_lxmf::propagation_store::StoredMessage;
-use leviculum_lxmf::sync_round::{round_deadline_ms, round_step, RoundEvent, RoundStep, RoundView};
+use leviculum_lxmf::sync_round::{
+    round_deadline_ms, round_step, LinkView, RoundEvent, RoundStep, RoundView,
+};
 use leviculum_lxmf::{
     CooperativeStamper, Eviction, EvictionReason, GetOutcome, PropagationNode, PropagationStore,
     StampCancel, UploadOutcome, WorkblockStream, MESSAGE_GET_PATH,
@@ -392,9 +394,6 @@ const STATS_SECS: u64 = 300;
 /// the loop makes for other reasons; this only bounds a quiet board, where
 /// a link idle past the 180 s bound goes at most this much later.
 const IDLE_SWEEP_MS: u64 = 15_000;
-
-/// `/offer` request timeout, as on the host.
-const OFFER_REQUEST_TIMEOUT_MS: u64 = 60_000;
 
 // The board peer-table cap is `leviculum_heap_budget::BOARD_MAX_PEERS`,
 // derived by a const assertion in the heap budget crate beside the census
@@ -1641,17 +1640,21 @@ impl Engine {
         // `link.mdu()`, which on LoRa is 431 B and admits ten ids. The
         // plan the round was scheduled with only established that
         // something above the cursor is offerable at all.
-        let link_mdu = node.link(link_id).map(|link| link.mdu());
+        let link = node.link(link_id).map(|link| LinkView {
+            mdu: link.mdu(),
+            rtt_ms: link.rtt_ms(),
+        });
         let event = RoundEvent::LinkUp {
             identified,
             peering_key,
-            link_mdu,
+            link,
         };
-        let (key, mdu) = match round_step(self.round_view().as_ref(), event) {
+        let (key, mdu, timeout_ms) = match round_step(self.round_view().as_ref(), event) {
             RoundStep::Offer {
                 peering_key,
                 link_mdu,
-            } => (peering_key, link_mdu),
+                timeout_ms,
+            } => (peering_key, link_mdu, timeout_ms),
             RoundStep::End(end) => {
                 self.finish_round(end.as_str(), 0, 0);
                 out.merge(node.close_link(link_id));
@@ -1711,7 +1714,7 @@ impl Engine {
             link_id,
             OFFER_REQUEST_PATH,
             Some(&offer.encode()),
-            Some(OFFER_REQUEST_TIMEOUT_MS),
+            Some(timeout_ms),
         ) {
             Ok((request_id, send)) => {
                 sync.request_id = Some(request_id);

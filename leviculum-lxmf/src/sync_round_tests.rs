@@ -22,11 +22,24 @@ fn round(request_id: Option<[u8; 16]>) -> RoundView {
     }
 }
 
+/// A RTT the field LoRa link measures at its handshake (the 847 captures
+/// read 1 to 2 s).
+const LORA_RTT_MS: u64 = 1_000;
+
 fn link_up(identified: bool, peering_key: Option<[u8; 32]>, link_mdu: Option<usize>) -> RoundEvent {
+    link_up_at(identified, peering_key, link_mdu, LORA_RTT_MS)
+}
+
+fn link_up_at(
+    identified: bool,
+    peering_key: Option<[u8; 32]>,
+    link_mdu: Option<usize>,
+    rtt_ms: u64,
+) -> RoundEvent {
     RoundEvent::LinkUp {
         identified,
         peering_key,
-        link_mdu,
+        link: link_mdu.map(|mdu| LinkView { mdu, rtt_ms }),
     }
 }
 
@@ -77,6 +90,59 @@ fn an_identified_link_with_a_key_offers_against_its_own_mdu() {
         RoundStep::Offer {
             peering_key: KEY,
             link_mdu: LORA_MDU,
+            timeout_ms: 17_250,
+        }
+    );
+}
+
+/// The offer waits as long as the reference would on the same link,
+/// `rtt * 6 + 10 s * 1.125` (`reference/Reticulum/RNS/Link.py:493-494`),
+/// not a fixed minute. A 1 s RTT gives 17.25 s, a 2 s RTT 23.25 s: the
+/// span the 847 captures put the field LoRa link in, where the fixed
+/// timeout cost a lost `/offer` 60 s.
+#[test]
+fn the_offer_times_out_on_the_reference_formula_over_the_links_rtt() {
+    for (rtt_ms, timeout_ms) in [(1_000, 17_250), (2_000, 23_250)] {
+        assert_eq!(
+            round_step(
+                Some(&round(None)),
+                link_up_at(true, Some(KEY), Some(LORA_MDU), rtt_ms)
+            ),
+            RoundStep::Offer {
+                peering_key: KEY,
+                link_mdu: LORA_MDU,
+                timeout_ms,
+            },
+            "rtt {rtt_ms} ms"
+        );
+    }
+}
+
+/// The derived timeout is held between a floor and the old fixed minute.
+/// A link quicker than the core's default RTT still waits 14.25 s, enough
+/// for a split offer and a split answer on the field preset; a link slow
+/// enough that the formula passes 60 s (an RTT past 8.125 s) waits the
+/// 60 s it always did, never longer.
+#[test]
+fn the_offer_timeout_is_held_between_its_floor_and_the_old_fixed_minute() {
+    assert_eq!(OFFER_TIMEOUT_FLOOR_MS, 14_250);
+    assert_eq!(OFFER_TIMEOUT_CEILING_MS, 60_000);
+    assert_eq!(offer_timeout_ms(0), OFFER_TIMEOUT_FLOOR_MS);
+    assert_eq!(offer_timeout_ms(50), OFFER_TIMEOUT_FLOOR_MS);
+    assert_eq!(offer_timeout_ms(500), OFFER_TIMEOUT_FLOOR_MS);
+    assert_eq!(offer_timeout_ms(501), 14_256);
+    assert_eq!(offer_timeout_ms(8_125), OFFER_TIMEOUT_CEILING_MS);
+    assert_eq!(offer_timeout_ms(8_126), OFFER_TIMEOUT_CEILING_MS);
+    assert_eq!(offer_timeout_ms(u64::MAX), OFFER_TIMEOUT_CEILING_MS);
+    assert_eq!(
+        round_step(
+            Some(&round(None)),
+            link_up_at(true, Some(KEY), Some(LORA_MDU), 30_000)
+        ),
+        RoundStep::Offer {
+            peering_key: KEY,
+            link_mdu: LORA_MDU,
+            timeout_ms: OFFER_TIMEOUT_CEILING_MS,
         }
     );
 }

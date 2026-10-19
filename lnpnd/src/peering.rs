@@ -33,16 +33,15 @@ use leviculum_lxmf::peering::{
 use leviculum_lxmf::propagation::PeerError;
 use leviculum_lxmf::propagation_client::PROPAGATION_ASPECT;
 use leviculum_lxmf::propagation_store::StoredMessage;
-use leviculum_lxmf::sync_round::{round_deadline_ms, round_step, RoundEvent, RoundStep, RoundView};
+use leviculum_lxmf::sync_round::{
+    round_deadline_ms, round_step, LinkView, RoundEvent, RoundStep, RoundView,
+};
 use leviculum_lxmf::{
     CooperativeStamper, PropagationNode, PropagationNodeAnnounce, PropagationStore, StampCancel,
     TransientId, UploadOutcome,
 };
 
 use crate::engine::EngineEvent;
-
-/// `/offer` request timeout handed to the core's request tracker.
-const OFFER_REQUEST_TIMEOUT_MS: u64 = 60_000;
 
 fn short_hex(bytes: &[u8]) -> String {
     bytes.iter().take(8).map(|b| format!("{b:02x}")).collect()
@@ -1517,17 +1516,21 @@ impl PeeringRuntime {
         // `link.mdu()` — 431 B over LoRa, ten ids. The plan the round was
         // scheduled with only established that something above the cursor
         // is offerable at all.
-        let link_mdu = core.link(link_id).map(|link| link.mdu());
+        let link = core.link(link_id).map(|link| LinkView {
+            mdu: link.mdu(),
+            rtt_ms: link.rtt_ms(),
+        });
         let event = RoundEvent::LinkUp {
             identified,
             peering_key,
-            link_mdu,
+            link,
         };
-        let (key, mdu) = match round_step(self.round_view().as_ref(), event) {
+        let (key, mdu, timeout_ms) = match round_step(self.round_view().as_ref(), event) {
             RoundStep::Offer {
                 peering_key,
                 link_mdu,
-            } => (peering_key, link_mdu),
+                timeout_ms,
+            } => (peering_key, link_mdu, timeout_ms),
             RoundStep::End(end) => {
                 self.finish_round(&peer_hash, end.as_str(), 0, 0);
                 out.merge(core.close_link(link_id));
@@ -1583,7 +1586,7 @@ impl PeeringRuntime {
             link_id,
             OFFER_REQUEST_PATH,
             Some(&offer.encode()),
-            Some(OFFER_REQUEST_TIMEOUT_MS),
+            Some(timeout_ms),
         ) {
             Ok((request_id, send)) => {
                 sync.request_id = Some(request_id);
