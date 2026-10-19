@@ -682,6 +682,22 @@ It moves three axes, and the design held:
   packet is checked, so a refused package leaves the board in its
   bootloader with no application. It is a retry, not a repair.
 
+There is also no way back out. Activating without an image changes
+nothing (`dfu_image_activate` answers `NRF_ERROR_INVALID_STATE` outside
+`DFU_STATE_WAIT_4_ACTIVATE`, and the serial transport ignores that and
+waits on), the bootloader's CDC port takes no 1200-baud touch, and its
+startup timeout is cancelled once USB enumerates (Adafruit bootloader
+0.4.2, `dfu_single_bank.c`, `dfu_transport_serial.c`, `bootloader.c`
+`dfu_startup_timer_handler`). A board touched in error sits in its
+bootloader until somebody presses RESET or power-cycles it. So `--board`
+is decided before the touch, on the running board's USB ID against
+every catalogue entry that lists it: one the run does not name is left
+running, untouched, and one whose ID two entries share with only one of
+them named is refused untouched, because only the bootloader could tell
+them apart. Measured on the rig on 2026-10-19, when a bank flash naming
+the T114 and the RAK touched the T1000-E and left it in its bootloader
+for 34 minutes (861).
+
 Not every Adafruit-family bootloader takes it: the Heltec T114's did not
 in the 2026-05 spike ("Installing the SoftDevice" above), which is one
 more reason the transport is a per-board fact in the catalogue and not a

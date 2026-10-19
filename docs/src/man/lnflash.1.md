@@ -25,7 +25,7 @@ The configure sessions (**--set-** *something*) talk to boards that are already 
 :   Where the bundle is. Otherwise $LNFLASH_BUNDLE, then next to the binary, then /usr/share/lnflash.
 
 **--board** *name*
-:   A board model that is present; repeatable. A board whose model is not named is skipped and nothing is written to it. A Board-ID several models share is written without a question only when its model is named, which is how an unattended run under **--yes** flashes boards one owns: **--board t114 --board rak4631 --yes**.
+:   A board model that is present; repeatable. A board whose model is not named is skipped and nothing is written to it; one found running is decided on its USB ID before the 1200-baud touch, and is not touched ("not named, not touched"). A Board-ID several models share is written without a question only when its model is named, which is how an unattended run under **--yes** flashes boards one owns: **--board t114 --board rak4631 --yes**.
 
 **--dry-run**
 :   Report what is attached and what would happen; change nothing. A board in application mode is not rebooted into its bootloader. A board already in its bootloader is identified only under root, because reading `INFO_UF2.TXT` means mounting it; a question the identity step would ask is reported as "would ask", and an identity a real run would refuse as "would be refused". A dry run refuses nothing itself.

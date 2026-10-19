@@ -111,6 +111,29 @@ pub enum Error {
     #[error("the board on {port} never appeared in its bootloader")]
     NoBootloader { port: String },
     #[error(
+        "the board on {port} is running on {id}, which the catalogue gives to {}, and of those \
+         only {} is named with --board. Only its bootloader could say which it is, and no \
+         bootloader lnflash knows can be sent back to its application from here, so it was not \
+         touched. Nothing was written. Double-tap RESET to put it in its bootloader yourself \
+         and run this again.",
+        claimants.join(", "),
+        named.join(", ")
+    )]
+    SharedRunningId {
+        port: String,
+        id: UsbId,
+        claimants: Vec<String>,
+        named: Vec<String>,
+    },
+    #[error(
+        "this run touched the board on {port} into its bootloader, on a running ID the \
+         catalogue gives to {hint}, and the bootloader says it is a board not named with \
+         --board. Nothing was written, and no bootloader lnflash knows can be sent back to its \
+         application from here: press RESET once, or power-cycle it, and it starts what it ran \
+         before."
+    )]
+    TouchedNotNamed { port: String, hint: String },
+    #[error(
         "{file}: this image is family {actual:#010x}, and {board} takes {expected:#010x}. \
          Nothing was written."
     )]
@@ -2868,6 +2891,86 @@ impl Ui for DryUi<'_> {
     }
 }
 
+/// The `--board` decision for one candidate, taken before anything is sent
+/// to it (861): `Ok(Some(line))` is a board to leave alone with that line
+/// said, `Ok(None)` one to go on with.
+///
+/// A board found running is judged by its USB ID, against every catalogue
+/// entry whose `candidate_usb` lists it. The bootloader's identity is still
+/// what licenses a write; this only decides whether to knock. When none of
+/// the entries is named the board is not touched at all, and when some are
+/// and some are not, only its bootloader could tell, so it is refused
+/// without a touch: no bootloader lnflash knows can be sent back to its
+/// application from the host (the Adafruit bootloader's serial DFU activates
+/// nothing without an image, `dfu_image_activate` in `dfu_single_bank.c`,
+/// and its CDC port takes no 1200-baud touch). The product string the board
+/// reports is said in the line but decides nothing: the catalogue holds none
+/// to compare it with.
+///
+/// A board already in its bootloader goes on: nothing is sent to knock it
+/// there, and its own `Board-ID` or bootloader ID decides
+/// ([`confirm_named`], `identify_dfu`).
+fn named_before_touch(
+    catalogue: &Catalogue,
+    candidate: &Candidate,
+    named: &[String],
+) -> Result<Option<String>, Error> {
+    if named.is_empty() || candidate.in_bootloader {
+        return Ok(None);
+    }
+    let id = candidate.device.id;
+    let mut claimants: Vec<String> = Vec::new();
+    for (name, board) in &catalogue.board {
+        if board.candidate_ids(name)?.contains(&id) {
+            claimants.push(name.clone());
+        }
+    }
+    let ours: Vec<String> = claimants
+        .iter()
+        .filter(|c| named.contains(c))
+        .cloned()
+        .collect();
+    let port = &candidate.device.name;
+    if ours.is_empty() {
+        return Ok(Some(format!(
+            "{port}: running {} [{id}], an ID the catalogue gives to {}, which is not among the \
+             boards named with --board ({}). Not named, not touched: nothing was sent to it, and \
+             it is still running.\n",
+            candidate
+                .device
+                .product
+                .as_deref()
+                .unwrap_or("unnamed firmware"),
+            claimants.join(", "),
+            named.join(", ")
+        )));
+    }
+    if ours.len() < claimants.len() {
+        return Err(Error::SharedRunningId {
+            port: port.clone(),
+            id,
+            claimants,
+            named: ours,
+        });
+    }
+    Ok(None)
+}
+
+/// What a board the bootloader says `--board` does not name comes to: the
+/// skip it always was for one found in its bootloader, and a refusal for one
+/// this run touched there, since it now sits in a bootloader it was not in.
+/// [`named_before_touch`] keeps that second case to a running ID that lied
+/// about the board, which is why it is said rather than prevented.
+fn left_in_bootloader(candidate: &Candidate) -> Result<Option<Outcome>, Error> {
+    if candidate.in_bootloader {
+        return Ok(None);
+    }
+    Err(Error::TouchedNotNamed {
+        port: candidate.device.name.clone(),
+        hint: candidate.hint.clone(),
+    })
+}
+
 fn resolve(
     catalogue: &Catalogue,
     manifest: &Manifest,
@@ -2895,6 +2998,23 @@ fn resolve(
              and --watch all reach it.\n"
         ));
         return Ok(None);
+    }
+
+    // Then `--board`, still before anything is sent (861): a board this run
+    // is not for must be left as it was found, and one found running would
+    // otherwise be touched into a bootloader nothing here can send it back
+    // out of. A dry run says the same and refuses nothing (838).
+    match named_before_touch(catalogue, candidate, &opts.boards) {
+        Ok(None) => {}
+        Ok(Some(line)) => {
+            ui.say(&line);
+            return Ok(None);
+        }
+        Err(err) if opts.dry_run => {
+            ui.say(&format!("{port}: would be refused: {err}\n"));
+            return Ok(None);
+        }
+        Err(err) => return Err(err),
     }
 
     // The hint chooses how to reach the board, as it chooses how to knock;
@@ -2938,7 +3058,7 @@ fn resolve(
         |info| read_installed(&drive, info),
     )?
     else {
-        return Ok(None);
+        return left_in_bootloader(candidate);
     };
     let Plan {
         req,
@@ -3117,7 +3237,7 @@ fn resolve_dfu(
         &tty,
     )?
     else {
-        return Ok(None);
+        return left_in_bootloader(candidate);
     };
     if !ui.confirm(&format!(
         "\n{port}: overwrite the firmware on this {}?",
@@ -3597,7 +3717,15 @@ fn enter_bootloader(
     for mechanism in &flashing.entry {
         match mechanism {
             manifest::Entry::Touch1200 => {
-                let Some(tty) = candidate.device.tty(0) else {
+                // Through the sysfs view's device root and by-id, like every
+                // other open here: a bare `/dev/ttyACMn` is a slot number, and
+                // a test bus must never reach a real port on the host.
+                let Some(tty) = candidate
+                    .device
+                    .interface(0)
+                    .and_then(|i| i.tty.as_deref())
+                    .map(|name| sysfs.stable_tty_path(name))
+                else {
                     continue;
                 };
                 ui.say(&format!(
@@ -5896,9 +6024,26 @@ convert = "hex-to-uf2"
         t1000e_bus(sys.path(), true);
         let pty = crate::sys::testpty::Pty::open();
         let dev = dev_tree(&[("ttyACM9", &pty.slave_path)]);
+        let (board, heard) = serve_bootloader(pty, board, sys.path());
+        DfuBench {
+            sys,
+            dev,
+            board,
+            heard,
+        }
+    }
+
+    /// `board` answering on `pty`, the bootloader's CDC port, with the bus
+    /// under `root` showing the application once it activates an image.
+    #[allow(clippy::type_complexity)]
+    fn serve_bootloader(
+        pty: crate::sys::testpty::Pty,
+        board: Bootloader,
+        root: &Path,
+    ) -> (Arc<Mutex<Bootloader>>, Arc<Mutex<usize>>) {
         let board = Arc::new(Mutex::new(board));
         let heard = Arc::new(Mutex::new(0usize));
-        let (inside, count, root) = (board.clone(), heard.clone(), sys.path().to_path_buf());
+        let (inside, count, root) = (board.clone(), heard.clone(), root.to_path_buf());
         crate::sys::testpty::spawn_raw(pty, move |bytes| {
             *count.lock().unwrap() += bytes.len();
             let mut board = inside.lock().unwrap();
@@ -5910,12 +6055,7 @@ convert = "hex-to-uf2"
             }
             (answer, gone)
         });
-        DfuBench {
-            sys,
-            dev,
-            board,
-            heard,
-        }
+        (board, heard)
     }
 
     fn dfu_opts() -> Options {
@@ -6129,5 +6269,232 @@ convert = "hex-to-uf2"
         ] {
             assert!(said.contains(needle), "{needle:?} missing from:\n{said}");
         }
+    }
+
+    // -----------------------------------------------------------------
+    // --board before the touch (861)
+    // -----------------------------------------------------------------
+
+    /// A T1000-E running our application, its transport port 0 a pty that
+    /// shows a 1200-baud touch, and behind a second pty the bootloader it
+    /// would come up in. A watcher plays the reboot: when the port is set to
+    /// 1200 baud, the application's interfaces go and the bootloader's
+    /// arrive on the same USB port, as the rig unit does.
+    struct TouchBench {
+        sys: TempDir,
+        dev: TempDir,
+        touched: Arc<std::sync::atomic::AtomicBool>,
+        stop: Arc<std::sync::atomic::AtomicBool>,
+        board: Arc<Mutex<Bootloader>>,
+        heard: Arc<Mutex<usize>>,
+    }
+
+    impl TouchBench {
+        fn sysfs(&self) -> Sysfs {
+            Sysfs::with_dev(self.sys.path(), self.dev.path())
+        }
+
+        fn touched(&self) -> bool {
+            self.touched.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl Drop for TouchBench {
+        fn drop(&mut self) {
+            self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    fn running_t1000e() -> TouchBench {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let sys = TempDir::new().unwrap();
+        t1000e_bus(sys.path(), false);
+        let app = crate::sys::testpty::Pty::open();
+        let boot = crate::sys::testpty::Pty::open();
+        let dev = dev_tree(&[("ttyACM7", &app.slave_path), ("ttyACM9", &boot.slave_path)]);
+        assert_ne!(app.speed(), libc::B1200, "the port starts at another speed");
+        let (board, heard) = serve_bootloader(boot, Bootloader::new(S140_7_3_0), sys.path());
+        let touched = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (flag, halt, root) = (touched.clone(), stop.clone(), sys.path().to_path_buf());
+        std::thread::spawn(move || {
+            while !halt.load(Ordering::SeqCst) {
+                if app.speed() == libc::B1200 {
+                    flag.store(true, Ordering::SeqCst);
+                    for iface in ["1-1:1.0", "1-1:1.2"] {
+                        let _ = fs::remove_dir_all(root.join(iface));
+                    }
+                    t1000e_bus(&root, true);
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        });
+        TouchBench {
+            sys,
+            dev,
+            touched,
+            stop,
+            board,
+            heard,
+        }
+    }
+
+    fn run_on(bench: &TouchBench, ui: &mut Fake, opts: &Options) -> Bus {
+        let (_dir, catalogue, manifest) = t1000e_bundle();
+        run_with(
+            &catalogue,
+            &manifest,
+            &bench.sysfs(),
+            ui,
+            opts,
+            &FakeDrives { root: false },
+        )
+        .unwrap()
+    }
+
+    const NOT_NAMED: &str = "1-1: running leviculum T1000-E [1209:0004], an ID the catalogue \
+                             gives to t1000e, which is not among the boards named with --board \
+                             (t114, rak4631). Not named, not touched: nothing was sent to it, \
+                             and it is still running.";
+
+    #[test]
+    fn a_running_t1000e_not_named_is_left_running_and_never_touched() {
+        // The rig's bank flash on 2026-10-19: --board t114 --board rak4631,
+        // and a T1000-E on the hub. It was touched into a bootloader with no
+        // volume and sat there 34 minutes. Now nothing is sent to it.
+        let bench = running_t1000e();
+        let mut ui = Fake::agreeing();
+        let opts = Options {
+            boards: vec!["t114".into(), "rak4631".into()],
+            ..dfu_opts()
+        };
+        let bus = run_on(&bench, &mut ui, &opts);
+        let said = ui.transcript();
+        assert_eq!(bus.skipped, ["1-1"], "{said}");
+        assert!(bus.refused.is_empty() && bus.outcomes.is_empty(), "{said}");
+        assert_eq!(bus.exit_code(), EXIT_CONFIRMED);
+        assert!(said.contains(NOT_NAMED), "{said}");
+        assert!(!said.contains("1200-baud touch"), "{said}");
+        assert!(!bench.touched(), "the port was set to 1200 baud: {said}");
+        assert_eq!(*bench.heard.lock().unwrap(), 0, "not a byte was sent");
+    }
+
+    #[test]
+    fn a_dry_run_says_the_same_not_named_not_touched() {
+        let bench = running_t1000e();
+        let mut ui = Fake::agreeing();
+        let opts = Options {
+            dry_run: true,
+            boards: vec!["t114".into(), "rak4631".into()],
+            ..dfu_opts()
+        };
+        let bus = run_on(&bench, &mut ui, &opts);
+        let said = ui.transcript();
+        assert_eq!(bus.skipped, ["1-1"], "{said}");
+        assert!(said.contains(NOT_NAMED), "{said}");
+        assert!(!said.contains("would touch"), "{said}");
+        assert!(!bench.touched());
+    }
+
+    #[test]
+    fn a_running_t1000e_named_is_touched_and_flashed_over_serial_dfu() {
+        let bench = running_t1000e();
+        // The answer to the level question; the overwrite is a confirm.
+        let mut ui = Fake::typing(&["yes"]);
+        let opts = Options {
+            boards: vec!["t1000e".into()],
+            ..dfu_opts()
+        };
+        let bus = run_on(&bench, &mut ui, &opts);
+        let said = ui.transcript();
+        assert!(bench.touched(), "{said}");
+        assert!(bus.refused.is_empty() && bus.skipped.is_empty(), "{said}");
+        assert_eq!(bus.outcomes[0].board, "t1000e");
+        assert_eq!(
+            bench.board.lock().unwrap().ended,
+            Some(Ended::Activated),
+            "{said}"
+        );
+        for needle in [
+            format!(
+                "1-1: 1200-baud touch on {}",
+                bench.dev.path().join("ttyACM7").display()
+            ),
+            "1-1: confirmed t1000e — bootloader T1000-E-BOOT [2886:0057]".to_string(),
+            "1-1: sent the application (4864 bytes in 10 data frames)".to_string(),
+        ] {
+            assert!(said.contains(&needle), "{needle:?} missing from:\n{said}");
+        }
+        assert!(!said.contains("Not named"), "{said}");
+        assert_eq!(bus.exit_code(), EXIT_UNCONFIRMED, "{said}");
+    }
+
+    #[test]
+    fn a_dry_run_naming_the_t1000e_would_touch_it_and_does_not() {
+        let bench = running_t1000e();
+        let mut ui = Fake::agreeing();
+        let opts = Options {
+            dry_run: true,
+            boards: vec!["t1000e".into()],
+            ..dfu_opts()
+        };
+        let bus = run_on(&bench, &mut ui, &opts);
+        let said = ui.transcript();
+        assert_eq!(bus.skipped, ["1-1"], "{said}");
+        assert!(said.contains("1-1: would touch"), "{said}");
+        assert!(!said.contains("Not named"), "{said}");
+        assert!(!bench.touched());
+    }
+
+    #[test]
+    fn a_running_id_two_entries_share_is_refused_untouched_when_only_one_is_named() {
+        // No entry shares a running ID today. If one ever does, only the
+        // bootloader could tell the boards apart, and a wrong guess there
+        // has no way back, so it is not touched to find out.
+        let catalogue = Catalogue::builtin_with(
+            "candidate_usb = [\"1209:0002\"]",
+            "candidate_usb = [\"1209:0002\", \"1209:0004\"]",
+        )
+        .unwrap();
+        let sys = TempDir::new().unwrap();
+        t1000e_bus(sys.path(), false);
+        let candidate = find_candidates(&catalogue, &Sysfs::new(sys.path()))
+            .unwrap()
+            .remove(0);
+        let err = named_before_touch(&catalogue, &candidate, &["t1000e".to_string()]).unwrap_err();
+        assert!(matches!(err, Error::SharedRunningId { .. }), "{err:?}");
+        let text = err.to_string();
+        assert!(text.contains("gives to rak4631, t1000e"), "{text}");
+        assert!(text.contains("only t1000e is named"), "{text}");
+        assert!(text.contains("it was not touched"), "{text}");
+        // Both named: no question about which, so it goes on to the touch.
+        let both = ["t1000e".to_string(), "rak4631".to_string()];
+        assert!(named_before_touch(&catalogue, &candidate, &both)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn a_board_touched_and_then_not_named_is_refused_with_the_way_back() {
+        let candidate = Candidate {
+            device: crate::usb::Device {
+                name: "1-1".into(),
+                id: crate::usb::UsbId::new(0x1209, 0x0004),
+                serial: None,
+                manufacturer: None,
+                product: None,
+                interfaces: Vec::new(),
+            },
+            in_bootloader: false,
+            hint: "t1000e".into(),
+        };
+        let err = left_in_bootloader(&candidate).unwrap_err();
+        assert!(err.to_string().contains("press RESET once"), "{err}");
+        let found_there = Candidate {
+            in_bootloader: true,
+            ..candidate
+        };
+        assert!(left_in_bootloader(&found_there).unwrap().is_none());
     }
 }

@@ -468,6 +468,19 @@ pub(crate) mod testpty {
             queued.max(0) as usize
         }
 
+        /// The output speed the port is set to. The termios belong to the
+        /// port, not to a descriptor, so a 1200-baud touch through any open
+        /// of the slave shows here: the event a touch test waits for.
+        pub fn speed(&self) -> libc::speed_t {
+            // SAFETY: tcgetattr writes one termios through the pointer,
+            // which is a live zeroed local.
+            unsafe {
+                let mut tio: libc::termios = std::mem::zeroed();
+                assert_eq!(libc::tcgetattr(self.holder.as_raw_fd(), &mut tio), 0);
+                libc::cfgetospeed(&tio)
+            }
+        }
+
         /// Block until the port's input queue satisfies `settled`, and say
         /// whether it did before `within` ran out.
         ///

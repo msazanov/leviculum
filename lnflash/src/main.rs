@@ -46,7 +46,8 @@ struct Cli {
 
     /// The board models present, repeatable (--board t114 --board rak4631).
     /// A board whose model is not named is skipped and nothing is written to
-    /// it. A Board-ID that several models share is written without a
+    /// it; one found running is decided on its USB ID and not even touched
+    /// into its bootloader. A Board-ID that several models share is written without a
     /// question only when its model is named, so this is the way to flash
     /// boards one owns unattended under --yes.
     #[arg(long, value_name = "NAME")]
