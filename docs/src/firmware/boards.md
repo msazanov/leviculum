@@ -418,22 +418,22 @@ name = "solarnode"
 path = "src/bin/solarnode.rs"
 ```
 
-(`leviculum-nrf/Cargo.toml:442-454`)
+(`leviculum-nrf/Cargo.toml:449-461`)
 
 The board-support-package (BSP) features select the runtime for a given
 board. Exactly one BSP feature must be enabled per build; a
 `compile_error!` in `lib.rs` enforces the mutual exclusion.
-(`leviculum-nrf/src/lib.rs:34-43`)
+(`leviculum-nrf/src/lib.rs:29-54`)
 
 | Feature | Effect | Cite |
 |---------|--------|------|
 | `bsp-t114` | T114 BSP (+ SoftDevice BLE + status display + GNSS + battery) | `leviculum-nrf/Cargo.toml:370` |
 | `bsp-rak4631` | RAK4631 BSP (+ SoftDevice BLE) | `leviculum-nrf/Cargo.toml:354` |
 | `bsp-solarnode` | SenseCAP Solar Node P1-Pro BSP (+ SoftDevice BLE + battery + GNSS). No display | `leviculum-nrf/Cargo.toml:391` |
-| `display` | SSD1306 OLED, probed at run time | `leviculum-nrf/Cargo.toml:404` |
-| `gnss` | NMEA0183 GNSS (ZOE-M8Q on the V2 baseboard, L76K on the T114 and the Solar Node) | `leviculum-nrf/Cargo.toml:405` |
-| `battery` | pack-voltage monitor: the `BATTERY` log line, the panel's voltage and, on the V2, the telemetry field. Unconditional under `bsp-t114` (the divider is on every T114) and under `bsp-solarnode` (it is on the XIAO module), opt-in on the V2 via `rak-baseboard` | `leviculum-nrf/Cargo.toml:411` |
-| `rak-baseboard` | aggregate of `display` + `gnss` + `battery` | `leviculum-nrf/Cargo.toml:412` |
+| `display` | SSD1306 OLED, probed at run time | `leviculum-nrf/Cargo.toml:411` |
+| `gnss` | NMEA0183 GNSS (ZOE-M8Q on the V2 baseboard, L76K on the T114 and the Solar Node) | `leviculum-nrf/Cargo.toml:412` |
+| `battery` | pack-voltage monitor: the `BATTERY` log line, the panel's voltage and, on the V2, the telemetry field. Unconditional under `bsp-t114` (the divider is on every T114) and under `bsp-solarnode` (it is on the XIAO module), opt-in on the V2 via `rak-baseboard` | `leviculum-nrf/Cargo.toml:418` |
+| `rak-baseboard` | aggregate of `display` + `gnss` + `battery` | `leviculum-nrf/Cargo.toml:419` |
 
 > **Note on BLE:** Both firmware entry points register a BLE interface
 > and call `leviculum_nrf::ble::init`
@@ -444,7 +444,7 @@ board. Exactly one BSP feature must be enabled per build; a
 > `leviculum-nrf/Cargo.toml:199`).
 
 The baseboard peripherals are each gated behind their own Cargo feature
-(`leviculum-nrf/Cargo.toml:404-412`) and spawned only when that feature
+(`leviculum-nrf/Cargo.toml:411-419`) and spawned only when that feature
 is on (`leviculum-nrf/src/bin/rak4631.rs:339-370`). Because each of them
 either probes for its hardware or degrades to nothing when it is absent,
 the aggregate build is what we ship for the whole family rather than a
@@ -459,8 +459,8 @@ The mapping from board to binary and features used by the flash recipes:
 | WisMesh Pocket V2 (full baseboard) | `rak4631` | `bsp-rak4631,rak-baseboard` |
 
 (Feature sets as invoked in the `just flash`, `just flash-rak4631`, and
-`just flash-rak4631-pocket` recipes: `Justfile:1993`, `Justfile:2021`,
-`Justfile:2035`.)
+`just flash-rak4631-pocket` recipes: `Justfile:1998`, `Justfile:2026`,
+`Justfile:2040`.)
 
 ### What the `lnflash` bundle carries
 

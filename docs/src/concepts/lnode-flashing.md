@@ -546,7 +546,7 @@ Start with how wide the field actually is. The Meshtastic tree carries
 
 **Two transports cover 155 of the 160 flashable variants**, and we
 already own both: the UF2 path in `leviculum-nrf/tools/uf2-runner.sh`
-and the ESP path behind `Justfile:813`, which drives `esptool`. The
+and the ESP path behind `Justfile:818`, which drives `esptool`. The
 work is not building 162 things. It is separating two mechanisms
 cleanly and turning everything else into data.
 
@@ -748,7 +748,7 @@ data entry, in the catalogue plus one image. The `license` field is not
 bureaucracy: it makes shipping a third-party blob without its licence
 impossible by construction, which is exactly the mistake described
 above. Board names stay identical to the firmware-side ones in
-`leviculum-nrf/src/boards/mod.rs:39`, so that two namespaces never
+`leviculum-nrf/src/boards/mod.rs:43`, so that two namespaces never
 diverge.
 
 ### Identify in two stages, write only after

@@ -29,18 +29,24 @@ extern crate alloc;
 #[cfg(any(
     all(feature = "bsp-rak4631", feature = "bsp-t114"),
     all(feature = "bsp-rak4631", feature = "bsp-solarnode"),
+    all(feature = "bsp-rak4631", feature = "bsp-t1000e"),
     all(feature = "bsp-t114", feature = "bsp-solarnode"),
+    all(feature = "bsp-t114", feature = "bsp-t1000e"),
+    all(feature = "bsp-solarnode", feature = "bsp-t1000e"),
 ))]
 compile_error!(
-    "`bsp-rak4631`, `bsp-t114` and `bsp-solarnode` are mutually exclusive — pick exactly one"
+    "`bsp-rak4631`, `bsp-t114`, `bsp-solarnode` and `bsp-t1000e` are mutually exclusive — pick exactly one"
 );
 
 #[cfg(not(any(
     feature = "bsp-rak4631",
     feature = "bsp-t114",
-    feature = "bsp-solarnode"
+    feature = "bsp-solarnode",
+    feature = "bsp-t1000e"
 )))]
-compile_error!("must enable exactly one of `bsp-rak4631`, `bsp-t114` or `bsp-solarnode`");
+compile_error!(
+    "must enable exactly one of `bsp-rak4631`, `bsp-t114`, `bsp-solarnode` or `bsp-t1000e`"
+);
 
 // The radio driver follows from the BSP; a build that names both, or a
 // BSP that names neither, is a Cargo.toml mistake.

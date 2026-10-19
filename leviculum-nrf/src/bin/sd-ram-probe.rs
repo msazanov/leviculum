@@ -34,6 +34,8 @@ use nrf_softdevice::raw;
 use leviculum_nrf::boards::rak4631 as board;
 #[cfg(feature = "bsp-solarnode")]
 use leviculum_nrf::boards::solarnode as board;
+#[cfg(feature = "bsp-t1000e")]
+use leviculum_nrf::boards::t1000e as board;
 #[cfg(feature = "bsp-t114")]
 use leviculum_nrf::boards::t114 as board;
 

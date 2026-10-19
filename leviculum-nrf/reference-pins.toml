@@ -117,3 +117,25 @@ io0 = { pin = 20, alias = "QspiIo0", define = "PIN_QSPI_IO0" }
 io1 = { pin = 24, alias = "QspiIo1", define = "PIN_QSPI_IO1" }
 io2 = { pin = 22, alias = "QspiIo2", define = "PIN_QSPI_IO2" }
 io3 = { pin = 23, alias = "QspiIo3", define = "PIN_QSPI_IO3" }
+
+# SenseCAP T1000-E (Codeberg #406): an LR1110, not an SX1262, so the LoRa set
+# is that part's. Seeed publishes no schematic, so this variant header is the
+# only reference there is, and the board file marks every pin as its hint.
+# The defines are Meshtastic's RadioLib-idiom names: `LORA_DIO2` is the
+# LR1110's BUSY line and `LORA_DIO1` its IRQ (DIO9); the `dio1` key below is
+# the argument slot of `lora::init`, which takes the interrupt line whatever
+# the part calls it. The variant names no external flash.
+[boards.t1000e]
+board = "leviculum-nrf/src/boards/t1000e.rs"
+bin = "leviculum-nrf/src/bin/t1000e.rs"
+variant = "variants/nrf52840/tracker-t1000-e/variant.h"
+qspi_part = "none"
+
+[boards.t1000e.lora]
+sck = { pin = 11, alias = "LoRaSck", define = "PIN_SPI_SCK" }
+mosi = { pin = 41, alias = "LoRaMosi", define = "PIN_SPI_MOSI" }
+miso = { pin = 40, alias = "LoRaMiso", define = "PIN_SPI_MISO" }
+cs = { pin = 12, alias = "LoRaCs", define = "PIN_SPI_NSS" }
+reset = { pin = 42, alias = "LoRaReset", define = "LORA_RESET" }
+busy = { pin = 7, alias = "LoRaBusy", define = "LORA_DIO2" }
+dio1 = { pin = 33, alias = "LoRaIrq", define = "LORA_DIO1" }

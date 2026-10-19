@@ -389,6 +389,13 @@ bsp-t114 = ["softdevice", "radio-sx1262", "dep:leviculum-screen", "gnss", "batte
 # differences are pins and the absent PPS line, and both live in the
 # `GnssWiring` value in `bin/solarnode.rs`.
 bsp-solarnode = ["softdevice", "radio-sx1262", "battery", "gnss"]
+# SenseCAP T1000-E (Codeberg #406): an nRF52840 with an LR1110 radio, the
+# first board on the LR11xx driver (`radio-lr11xx`). The first image runs
+# the radio, USB and BLE only: no `gnss` (an Airoha AG3335, which needs its
+# own `ModuleKind` and is held powered down meanwhile), no `battery` (the
+# divider is stated only as a multiplier, and the sampling window needs its
+# resistors), no display (the product has none).
+bsp-t1000e = ["softdevice", "radio-lr11xx"]
 
 # Which LoRa transceiver driver `src/radio.rs` links: exactly one, pulled by
 # the BSP and never named on a command line. Every board but one carries an
@@ -453,6 +460,13 @@ required-features = ["radio-sx1262"]
 name = "solarnode"
 path = "src/bin/solarnode.rs"
 required-features = ["radio-sx1262"]
+
+# The one binary on the LR11xx driver, and therefore the one the SX1262
+# feature sets do not compile (see `radio-sx1262` above).
+[[bin]]
+name = "t1000e"
+path = "src/bin/t1000e.rs"
+required-features = ["bsp-t1000e"]
 
 # Measurement instrument, not firmware: prints the S140's required app
 # RAM base for a series of BLE configs (#255 T2 central-role design).

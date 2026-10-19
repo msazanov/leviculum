@@ -29,6 +29,10 @@
 
 pub mod rak4631;
 pub mod solarnode;
+// Only where the LR11xx driver is linked: the board's transceiver facts
+// are a `leviculum_lr11xx::Board`.
+#[cfg(feature = "radio-lr11xx")]
+pub mod t1000e;
 pub mod t114;
 
 /// Runtime board metadata consumed by shared init code (USB, flash, LoRa).

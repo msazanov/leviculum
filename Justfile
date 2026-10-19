@@ -81,6 +81,9 @@ lint-nrf:
     cd leviculum-nrf && cargo clippy --features bsp-rak4631,rak-baseboard -- -D warnings
     cd leviculum-nrf && cargo clippy --features bsp-t114 -- -D warnings
     cd leviculum-nrf && cargo clippy --features bsp-solarnode -- -D warnings
+    # The T1000-E is the one board on the LR11xx driver, so its feature set
+    # compiles its own binary and no other (`radio-sx1262` in Cargo.toml).
+    cd leviculum-nrf && cargo clippy --features bsp-t1000e -- -D warnings
     # The QSPI self-test instrument sits behind its own feature (Cargo.toml,
     # `qspi-selftest`, for why), so the line above no longer builds it.
     cd leviculum-nrf && cargo clippy --features bsp-solarnode,qspi-selftest --bin qspi-selftest -- -D warnings
@@ -90,6 +93,7 @@ lint-nrf:
     cd leviculum-nrf && cargo clippy --features bsp-rak4631,rak-baseboard,subslot-offset -- -D warnings
     cd leviculum-nrf && cargo clippy --features bsp-t114,subslot-offset -- -D warnings
     cd leviculum-nrf && cargo clippy --features bsp-solarnode,subslot-offset -- -D warnings
+    cd leviculum-nrf && cargo clippy --features bsp-t1000e,subslot-offset -- -D warnings
     # Every other member of the leviculum-nrf workspace is a pure,
     # host-testable crate: clippy + tests run on the host triple, because the
     # workspace's own `.cargo/config.toml` defaults `build.target` to
@@ -135,6 +139,7 @@ lint-nrf:
     cd leviculum-nrf && RUSTDOCFLAGS="-D warnings" cargo doc -p leviculum-nrf --no-deps --features bsp-rak4631,rak-baseboard
     cd leviculum-nrf && RUSTDOCFLAGS="-D warnings" cargo doc -p leviculum-nrf --no-deps --features bsp-t114
     cd leviculum-nrf && RUSTDOCFLAGS="-D warnings" cargo doc -p leviculum-nrf --no-deps --features bsp-solarnode
+    cd leviculum-nrf && RUSTDOCFLAGS="-D warnings" cargo doc -p leviculum-nrf --no-deps --features bsp-t1000e
 
 [doc('Lint, test and document the LR11xx driver')]
 lint-lr11xx:

@@ -42,7 +42,7 @@
 #      table (`TREE_PARTS`), so that walking a board file and the table
 #      back together cannot quietly change the answer — neither of them
 #      would contradict the other. Today: t114 none, rak4631 none,
-#      solarnode P25Q16H. The solar node is the one positive, and its
+#      solarnode P25Q16H, t1000e none (its variant names no flash part). The solar node is the one positive, and its
 #      evidence is a schematic rather than a variant header; the part
 #      NUMBER is still only a header's word, which is why the firmware
 #      asks the part its name at boot instead of asserting it
@@ -104,7 +104,7 @@ PINMAP_RE = re.compile(r"g_ADigitalPinMap\s*\[\s*\]\s*=\s*\{(.*?)\}\s*;", re.S)
 
 # What each board is allowed to declare, stated here as well as in
 # reference-pins.toml. Editing one alone is the failure this catches.
-TREE_PARTS = {"t114": "none", "rak4631": "none", "solarnode": "P25Q16H"}
+TREE_PARTS = {"t114": "none", "rak4631": "none", "solarnode": "P25Q16H", "t1000e": "none"}
 
 
 def pin_name(n):

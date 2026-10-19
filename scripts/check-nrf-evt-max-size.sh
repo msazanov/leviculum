@@ -33,6 +33,7 @@ BUILDS=(
     "bsp-rak4631"
     "bsp-rak4631,rak-baseboard"
     "bsp-solarnode"
+    "bsp-t1000e"
 )
 
 rc=0

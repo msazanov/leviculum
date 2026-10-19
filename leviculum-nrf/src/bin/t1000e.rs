@@ -1,0 +1,1199 @@
+//! Firmware entry point for the SenseCAP T1000-E (Codeberg #406)
+//!
+//! Runs a Reticulum transport node with three interfaces:
+//! - Interface 0: USB CDC-ACM serial (HDLC framing) to host
+//! - Interface 1: LR1110 LoRa radio, through the LR11xx driver
+//! - Interface 2: BLE peripheral (Columba v2.2 protocol)
+//!
+//! The transport engine routes packets between all interfaces.
+//!
+//! This file is the solar node's binary with the T1000-E's pin map and
+//! without the peripherals the first image does not drive. What is new is
+//! not here: the radio is an LR1110, and `leviculum_nrf::radio` links the
+//! LR11xx driver for the `bsp-t1000e` build, so `lora.rs` and everything
+//! above it run unchanged. The board's transceiver description, and which
+//! of its guesses first boot can refute, are in `boards/t1000e.rs`.
+//!
+//! The first image's milestone: boot, dual CDC, identity, announce, and a
+//! LoRa link with a T114 at the default PHY. Not in it: the Airoha AG3335
+//! GNSS (held powered down; a second pass adds its `ModuleKind`), the
+//! QMA6100P accelerometer, the battery divider, the buzzer and the button.
+//! There is no display on this product.
+
+#![no_std]
+#![no_main]
+
+extern crate alloc;
+
+use alloc::collections::BTreeMap;
+use embassy_executor::Spawner;
+use embassy_futures::select::{select, select4, Either, Either4};
+use embassy_nrf::gpio::Level;
+use embassy_nrf::spim;
+use embassy_time::{Duration, Instant, Timer};
+
+use leviculum_core::embedded_storage::EmbeddedStorage;
+use leviculum_core::ifac::IfacConfig;
+use leviculum_core::node::{NodeCoreBuilder, NodeEvent};
+use leviculum_core::traits::Interface;
+use leviculum_core::transport::dispatch_actions;
+use leviculum_core::InterfaceId;
+
+use leviculum_nrf::ble::{BleInterface, PeerEvent as BlePeerEvent};
+use leviculum_nrf::boards::t1000e;
+use leviculum_nrf::clock::EmbassyClock;
+use leviculum_nrf::interface::EmbeddedInterface;
+use leviculum_nrf::lora::LoRaInterface;
+use leviculum_nrf::{info, init_heap, log_critical};
+
+#[embassy_executor::main]
+async fn main(spawner: Spawner) {
+    // First statement on purpose: reads the PREVIOUS boot's breadcrumbs
+    // and RESETREAS (and clears it), then arms this boot's record at
+    // enter-main — so even a hang inside `embassy_nrf::init`'s HFXO wait
+    // is attributable on the next boot's BOOT_TRACE line.
+    let boot = leviculum_nrf::boot_trace::capture();
+
+    let mut config = embassy_nrf::config::Config::default();
+    config.hfclk_source = embassy_nrf::config::HfclkSource::ExternalXtal;
+    config.gpiote_interrupt_priority = embassy_nrf::interrupt::Priority::P2;
+    config.time_interrupt_priority = embassy_nrf::interrupt::Priority::P2;
+    // `mut`: the boot record reborrows the NVMC below and the identity
+    // store takes it for good later on.
+    let mut p = embassy_nrf::init(config);
+
+    init_heap();
+
+    // Boot diagnostics from the previous run. Read before the first log
+    // call of this boot: `take_persistent_log` must snapshot the PREVIOUS
+    // boot's tail before we start writing this boot's into the same ring.
+    let hardfault_pm = leviculum_nrf::take_hardfault_postmortem();
+    let panic_pm = leviculum_nrf::take_panic_postmortem();
+    let persistent_log = leviculum_nrf::log::take_persistent_log();
+
+    // SAFETY: called once before any complex work or concurrent tasks.
+    // Under flip-link the painted region is `[_stack_end, SP-1KiB)` at
+    // the BOTTOM of RAM — disjoint from `.uninit`, so the post-mortem
+    // reads above are no longer order-critical against it.
+    unsafe {
+        leviculum_nrf::paint_stack();
+    }
+
+    leviculum_nrf::set_panic_led(
+        t1000e::PANIC_LED_PORT,
+        t1000e::PANIC_LED_PIN,
+        t1000e::PANIC_LED_ACTIVE_LOW,
+    );
+    // No HardFault LED: this board has one LED and the panic path owns it,
+    // as on the T114.
+    leviculum_nrf::set_irq_priorities();
+    // This binary wires a telemetry Reporter into its main loop; declared
+    // before USB comes up so the serial task can never answer a telemetry
+    // target ahead of the declaration (ack honesty, #236).
+    leviculum_nrf::telemetry::declare_reporter();
+    // Which position sources this board boots with — the second clause of
+    // the telemetry send condition, and a question a host may put before
+    // the reporter exists, so it is answered before USB comes up. No GNSS
+    // in this image (the AG3335 is held off), so reports carry a position
+    // only when a host pins a fixed one.
+    leviculum_nrf::telemetry::declare_position_sources(
+        /* gnss_available */ false,
+        t1000e::CONFIG.telemetry_flash_page,
+    );
+    // The media profile decides which carriers come up at all, so it is
+    // read before USB and before either carrier: before USB so a host
+    // frame can never be answered against the default while the flash
+    // record is still unread, and before the carriers because the answer
+    // is their spawn decision. A memory-mapped flash read, legal this
+    // early and before `Softdevice::enable`.
+    let (media, media_src) =
+        leviculum_nrf::media::load_at_boot(t1000e::CONFIG.telemetry_flash_page);
+    // The node's name, read on the same page and for the same reason the
+    // profile is: before USB, so a host frame is never answered against
+    // the derived default while the record is still unread, and before
+    // the first announce and `ble::init`, which both display it.
+    leviculum_nrf::name::load_at_boot(t1000e::CONFIG.telemetry_flash_page);
+    // Remote management (#235): the identity allow-list this board serves
+    // `rnstransport.remote.management` `/status` to, read on the same page
+    // and this early because the answer decides how the NODE IS BUILT —
+    // the destination is created by the builder below and cannot be added
+    // or withdrawn while the node runs. Also before USB, so a host frame
+    // is never answered against an unread record.
+    let mgmt_allow = leviculum_nrf::mgmt::load_at_boot(t1000e::CONFIG.telemetry_flash_page);
+    // How many times this board has restarted, appended to its own flash
+    // page. Here because it must be before `Softdevice::enable` — after
+    // it, writing internal flash means going through the SD, and a board
+    // that boot-loops on a sagging pack rarely gets that far (the whole
+    // reasoning is in `boot_count`). The line it produces waits for USB.
+    let boot_count = leviculum_nrf::boot_count::record_at_boot(
+        embassy_nrf::nvmc::Nvmc::new(p.NVMC.reborrow()),
+        &boot,
+    );
+    leviculum_nrf::boot_trace::phase(leviculum_nrf::boot_trace::Phase::PersistRead);
+    let vbus = leviculum_nrf::init_vbus();
+    let serial = leviculum_nrf::usb::init(&spawner, p.USBD, vbus, &t1000e::CONFIG);
+    leviculum_nrf::boot_trace::phase(leviculum_nrf::boot_trace::Phase::UsbUp);
+
+    log_critical!("leviculum T1000-E booting");
+    log_critical!("[FW_BUILD] {}", leviculum_nrf::FW_BUILD_STAMP);
+    log_critical!("[TIME_SOURCE] source={}", leviculum_nrf::time_source_str());
+    leviculum_nrf::log_boot_diagnostics(
+        &boot,
+        &boot_count,
+        hardfault_pm.as_ref(),
+        panic_pm.as_ref(),
+        persistent_log,
+    );
+
+    // The sensor rail up and the GNSS receiver down, in the order
+    // Meshtastic's `initVariant` sets them, before anything touches the
+    // radio: which parts hang on the sensor rail is what the unpublished
+    // schematic would say, and the vendor's order is the one known to run
+    // (`boards/t1000e.rs`). Both held for the life of the board.
+    let _power_sensors = t1000e::power_sensors(p.P1_06);
+    let _gnss_off = t1000e::gnss_off(p.P1_11);
+    let mut led = t1000e::led(p.P0_24);
+
+    let rng = leviculum_nrf::rng::RawHwRng::new();
+
+    // Load or generate persistent identity from internal flash
+    let mut id_store = leviculum_nrf::flash::NvmcIdentityStore::new(
+        embassy_nrf::nvmc::Nvmc::new(p.NVMC),
+        t1000e::CONFIG.identity_flash_page,
+    );
+
+    // #388 pass 3: the heap budget's `links=` term, derived from the
+    // arithmetic in `heap_census::max_endpoint_links` and ENFORCED as the
+    // core's link cap — the budget and the cap are the same constant.
+    const MAX_ENDPOINT_LINKS: usize =
+        leviculum_nrf::heap_census::max_endpoint_links(core::mem::size_of::<
+            leviculum_core::node::NodeCore<
+                leviculum_nrf::rng::RawHwRng,
+                EmbassyClock,
+                EmbeddedStorage,
+            >,
+        >());
+    const _: () = assert!(
+        MAX_ENDPOINT_LINKS >= leviculum_nrf::ble::MAX_LINKS,
+        "HEAP_BUDGET affords fewer endpoint links than claimable BLE sessions (#388)"
+    );
+
+    let mut builder = NodeCoreBuilder::new()
+        .enable_transport(true)
+        .max_links(Some(MAX_ENDPOINT_LINKS))
+        .max_incoming_resource_size(leviculum_nrf::MAX_INCOMING_RESOURCE_BYTES)
+        .max_incoming_resources_per_link(leviculum_nrf::BOARD_INCOMING_RESOURCES_PER_LINK)
+        // #402: announces held back by the LoRa announce cap wait here, and
+        // on a board the queue is a heap term, not a formality. One entry is
+        // its raw announce (~183 B) plus its Vec header, destination, hops
+        // and timestamp, about 220 B, so eight entries are ~1.8 KiB of the
+        // 45-50 KiB idle heap — against 16384 entries (the host default, and
+        // Python's `MAX_QUEUED_ANNOUNCES`), which is no bound at all here.
+        // Eight is also a time bound: at SF10 the 2 % share holds an announce
+        // ~92 s, so a full queue is ~12 minutes deep, and past that an
+        // announce is better re-learned from its source's next one than
+        // replayed stale. A full queue drops the ARRIVING announce, the
+        // newest one; the queue keeps what it has and drains fewest-hops-
+        // first (`Transport::drain_announce_queues`).
+        .max_queued_announces(8)
+        // #598: announces the ingress burst limiter holds are the same kind
+        // of heap term, and the core's 256 per interface would be more than
+        // the heap. The cap and its arithmetic are the heap budget's
+        // (`leviculum_heap_budget::HELD_ANNOUNCE_SLICE_BYTES`), pinned there.
+        .max_held_announces(leviculum_nrf::heap_census::BOARD_MAX_HELD_ANNOUNCES)
+        .max_random_blobs(8)
+        .respond_to_probes(true);
+
+    // Only a stored, NON-EMPTY list registers anything. That rule is
+    // `leviculum_core::mgmt_allow_store::remote_mgmt_decision`, and it is
+    // deliberately not the daemon's: `lnsd` and Python's `rnsd` register
+    // the handler with an empty list and consult it per request
+    // (`leviculum-std/src/config.rs:88-96`), which is safe on a machine
+    // with an operator and a login, and is not safe on a board left on a
+    // mast — an unattended node announcing a management destination with
+    // nobody on the list is advertising a door (#235).
+    if let leviculum_nrf::mgmt::RemoteMgmtDecision::Enabled(allowed) = &mgmt_allow {
+        builder = builder.remote_management(true, allowed.clone());
+    }
+
+    let identity_loaded = {
+        use leviculum_core::identity_store::IdentityStore;
+        // Critical for the same reason as the `[IDENTITY]` banner below
+        // (#234): this says whether the hash that banner prints was the
+        // board's own or made up this boot, and the recovery doc sends an
+        // operator to the debug port to read exactly that after a flash.
+        if let Ok(Some(identity)) = id_store.load() {
+            log_critical!("Identity loaded from flash");
+            builder = builder.identity(identity);
+            true
+        } else {
+            log_critical!("No identity in flash, generating new");
+            false
+        }
+    };
+
+    let mut node = builder.build_boxed(rng, EmbassyClock, EmbeddedStorage::new());
+    // #388: state the heap budget and refuse a configuration that
+    // cannot fit — at boot, where the panic names the arithmetic. The
+    // compile-time twin below fails the build before it can fail a
+    // board.
+    leviculum_nrf::heap_census::log_budget_and_assert(core::mem::size_of_val(&*node));
+    // Codeberg #166 item 4: the calendar this board learned before it lost
+    // power comes back as a floor at the birth rank, here, before any
+    // interface exists to deliver an announce, so the first one is judged
+    // against it. Printed beside `[TIME_SOURCE]`, which says
+    // `restored-floor` when the seam took it.
+    let mut time_checkpoint =
+        leviculum_nrf::time_floor::Checkpoint::restore_at_boot(|v| node.restore_emission_floor(v));
+    if leviculum_nrf::set_time_source(node.time_source()) {
+        log_critical!("[TIME_SOURCE] source={}", leviculum_nrf::time_source_str());
+    }
+    const _: () = assert!(
+        leviculum_nrf::heap_census::budget_total(core::mem::size_of::<
+            leviculum_core::node::NodeCore<
+                leviculum_nrf::rng::RawHwRng,
+                EmbassyClock,
+                EmbeddedStorage,
+            >,
+        >()) <= leviculum_nrf::HEAP_SIZE,
+        "HEAP_BUDGET total exceeds the heap (#388): shrink a term"
+    );
+
+    // What the builder actually did with the allow-list, on the critical
+    // log path: `[MGMT] enabled allowed=N`, or `disabled (no allow-list)`
+    // for the state a board ships in. Read `remote_mgmt_dest_hash` rather
+    // than assuming, so a boot that could not derive the destination says
+    // so instead of promising a service nothing serves.
+    let mgmt_registered = node.remote_mgmt_dest_hash().is_some();
+    leviculum_nrf::mgmt::note_registered(mgmt_registered);
+    leviculum_nrf::mgmt::log_banner(&mgmt_allow, mgmt_registered);
+
+    let initial_path_len = node.path_count();
+    info!("[BOOT] path_table_initial_len={}", initial_path_len);
+    spawner.must_spawn(boot_log_repeater(initial_path_len));
+    spawner.must_spawn(fw_build_banner(media_src));
+    leviculum_nrf::spawn_diagnostics_tasks(&spawner);
+
+    if !identity_loaded {
+        use leviculum_core::identity_store::IdentityStore;
+        let _ = id_store.save(node.identity());
+        info!("Identity saved to flash");
+    }
+
+    // Register all three interfaces
+    node.set_interface_name(0, alloc::string::String::from("serial_usb"));
+    node.set_interface_hw_mtu(0, 564);
+    // Codeberg #117: the client-facing serial interface must be Gateway so the
+    // node discovers unknown paths on behalf of the host.
+    node.set_interface_mode(0, leviculum_core::InterfaceMode::Gateway);
+    node.set_interface_name(
+        1,
+        alloc::string::String::from(leviculum_nrf::radio::IFACE_NAME),
+    );
+    // Codeberg #390: 508, not 255. Three places already agree on 508 for a
+    // LoRa carrier -- the reference (`RNS/Interfaces/RNodeInterface.py`,
+    // `HW_MTU = 508`), our own RNode constant (`leviculum-core/src/rnode.rs`,
+    // `HW_MTU: usize = 508`), and the splitter that actually puts the bytes on
+    // the air (`build_lora_frames`, two frames of at most
+    // `MAX_SINGLE_PAYLOAD = 254`). The radio was never the limit; 255 was.
+    //
+    // What the old 255 cost: an incoming link over this interface clamped to
+    // 255 on the responder (`Link::new_incoming`, `path_mtu.min(hw_mtu)`)
+    // while the initiator floored the confirmed value back at 500
+    // (`Link::process_proof`). The two ends then derived different resource
+    // SDUs (464 vs 219), the receiver computed more parts than the
+    // advertisement had hashmap entries, and every request it built came back
+    // flagged exhausted -- an unbounded 115-byte REQ/HMU loop that burned a PN
+    // sync round for 177 s until the outbound watchdog reaped it
+    // (`lora_pn_board_sync`, hardware, 2026-09-14). Pinned in
+    // `leviculum-core/src/node/mvr_link_mtu_asymmetry.rs`. Read that price
+    // before tidying this number back down.
+    node.set_interface_hw_mtu(1, 508);
+    // The board is the mesh's relay on this link, so it must answer "where
+    // is X" for the nodes behind it, not only for the daemon on its serial
+    // line (#117 set that one alone). A `Full` interface returns from
+    // `handle_path_request` case 3 without re-originating discovery
+    // (`Full.discovers_paths() == false`), which left the LoRa and BLE sides
+    // of a board deaf to path requests and the announce-capped queue -- 2 %
+    // of link capacity, ~13.4 s per relayed announce at SF7 -- as the only
+    // way anything could be resolved across the carrier seam. That cost
+    // `ble_lora_transport` its `file_transfer` step: the host's path request
+    // reached the pocket board over BLE and produced no action, and the
+    // listener's announce arrived 91 s later, 1.2 s after the step's 60 s
+    // budget. Re-origination excludes the receiving interface, so this adds
+    // no airtime to the band the question came in on. Pinned in
+    // `leviculum-core/src/node/mvr_board_radio_pathresolve.rs`.
+    node.set_interface_mode(1, leviculum_core::InterfaceMode::Gateway);
+    node.set_interface_name(2, alloc::string::String::from("ble"));
+    node.set_interface_hw_mtu(2, 564);
+    node.set_interface_mode(2, leviculum_core::InterfaceMode::Gateway);
+    // #606: the USB serial interface runs no ingress burst limiter, LoRa
+    // and BLE do. The table and its reasons are the heap budget's, which
+    // sizes the held-announce cap for exactly the interfaces left on.
+    leviculum_nrf::iface_bytes::apply_board_ingress_control(&mut *node);
+
+    // #234: boot-critical, because `log_fmt` DROPS a line while the
+    // runtime-drain gate is shut — it returns before the ring buffer and
+    // before the reset-surviving tail — and the gate opens on the first
+    // DTR-assert or after 30 s, both long after this point. A one-shot
+    // line written there is not late, it is gone, and nothing re-emits it.
+    // The full hashes are no longer spelled out here at all: the
+    // `[IDENTITY]` banner below carries every one of them, on the critical
+    // path and repeated every 5 s, so a reader attached at any moment gets
+    // them instead of only one attached across the boot.
+    let hash = node.identity().hash();
+    log_critical!(
+        "LNode started -- identity: {:02X}{:02X}{:02X}{:02X}{:02X}",
+        hash[0],
+        hash[1],
+        hash[2],
+        hash[3],
+        hash[4]
+    );
+
+    // No QSPI on this board: `CONFIG.qspi_part` is `None` and no pin is
+    // configured for one. Said out loud for the T114's reason: a capture
+    // with no store line would not say whether a part failed to answer or
+    // the board has none.
+    leviculum_nrf::log::log_fmt_critical(
+        "[QSPI] ",
+        format_args!("NONE board=t1000e reason=not-fitted-see-boards-t1000e-rs"),
+    );
+
+    // LoRa on SPIM2, the instance the shared `lora::init` signature
+    // dictates. Pin map from `boards/t1000e.rs`, every pin a hint from
+    // Meshtastic's variant; the front end is the board's whole LR1110
+    // description, RF switch on DIO5..DIO8 included, so there is no host
+    // RX-enable line to pass.
+    log_critical!("[STG] lora-init");
+    let lora = leviculum_nrf::lora::init(
+        p.SPI2,
+        p.P0_11.into(), // SCK
+        p.P1_09.into(), // MOSI
+        p.P1_08.into(), // MISO
+        p.P0_12.into(), // NSS / CS
+        p.P1_10.into(), // NRESET
+        p.P0_07.into(), // BUSY
+        p.P1_01.into(), // IRQ (DIO9)
+        spim::Frequency::M4,
+        &t1000e::LR1110,
+    )
+    .await;
+    info!("LR1110 ready");
+
+    // Radio profile: whatever a host last set and we persisted, else the
+    // compiled default. A blank or corrupt page decodes to None.
+    let radio_cfg = match leviculum_nrf::radio_store::load(t1000e::CONFIG.radio_config_flash_page)
+        .and_then(leviculum_nrf::lora::RadioConfig::from_wire_config)
+    {
+        Some(cfg) => {
+            leviculum_nrf::log::log_fmt(
+                "[RADIO] ",
+                format_args!(
+                    "persisted freq={} bw={} sf={} cr={} pwr={}",
+                    cfg.frequency_hz, cfg.bw_hz, cfg.sf, cfg.cr_denom, cfg.tx_power_dbm
+                ),
+            );
+            cfg
+        }
+        None => {
+            leviculum_nrf::log::log_fmt("[RADIO] ", format_args!("default eu_medium"));
+            leviculum_nrf::lora::RadioConfig::eu_medium()
+        }
+    };
+    let lora_channels = leviculum_nrf::lora::channels();
+    // `lora=off` means the radio stays down: the task that resets,
+    // configures and keys the LR1110 is never spawned, so the chip is
+    // never brought out of the state `lora::init` left it in. Nothing
+    // transmits and nothing is received — which is the point, since a
+    // reception over the medium under test's neighbour is exactly what
+    // makes a single-medium measurement falsifiable.
+    if media.lora_enabled {
+        // Per-board entropy for the TX channel-access randomness: a fixed
+        // seed here would make co-booted boards draw identical pre-TX
+        // jitter and collide anyway (see `lora_task`).
+        let channel_seed = leviculum_nrf::lora::channel_seed();
+        spawner.must_spawn(leviculum_nrf::lora::lora_task(
+            lora,
+            radio_cfg,
+            channel_seed,
+        ));
+        leviculum_nrf::boot_trace::phase(leviculum_nrf::boot_trace::Phase::LoraTask);
+    } else {
+        leviculum_nrf::media::log_carrier_held_down("lora");
+        leviculum_nrf::boot_trace::phase(leviculum_nrf::boot_trace::Phase::LoraSkipped);
+    }
+
+    // BLE — full init restored. RAM ORIGIN bumped to 40K (memory.x) to give
+    // Softdevice::enable headroom for our config (att_mtu=256, …).
+    let identity_hash = *node.identity().hash();
+    // Freeze the BLE name for this boot, before the SoftDevice is
+    // enabled and before the advertisement is built: both read it, and a
+    // name that changed between them would put two different strings on
+    // the two BLE surfaces. This also publishes the identity hash the
+    // control-envelope report derives its defaults from.
+    leviculum_nrf::name::note_boot_name(&identity_hash);
+    log_critical!("[STG] ble-init");
+    let sd = leviculum_nrf::ble::init(
+        &spawner,
+        media.ble_enabled,
+        identity_hash,
+        vbus,
+        p.RTC0,
+        p.TIMER0,
+        p.TEMP,
+        p.PPI_CH19,
+        p.PPI_CH30,
+        p.PPI_CH31,
+        p.PPI_CH17,
+        p.PPI_CH18,
+        p.PPI_CH20,
+        p.PPI_CH21,
+        p.PPI_CH22,
+        p.PPI_CH23,
+        p.PPI_CH24,
+        p.PPI_CH25,
+        p.PPI_CH26,
+        p.PPI_CH27,
+        p.PPI_CH28,
+        p.PPI_CH29,
+        p.RNG,
+    );
+    let ble_channels = leviculum_nrf::ble::channels();
+    info!("BLE ready");
+
+    // Both spawn decisions are made: say what actually came up, then
+    // prove it on the debug port. `note_boot_state` is passed what was
+    // really spawned, which is what makes "switching a medium on takes
+    // effect at reboot" a fact the board can state rather than a hope.
+    leviculum_nrf::media::note_boot_state(media.lora_enabled, media.ble_enabled);
+    leviculum_nrf::media::log_banner(media_src);
+    leviculum_nrf::name::log_banner();
+
+    // Radio-config persistence. Must come after `ble::init`: writing internal
+    // flash with the SoftDevice enabled is only legal through its own
+    // `sd_flash_*` syscalls, which need the enabled SoftDevice.
+    let shared_flash = leviculum_nrf::flash::shared_flash(sd);
+    leviculum_nrf::radio_store::spawn_store_task(
+        &spawner,
+        shared_flash,
+        t1000e::CONFIG.radio_config_flash_page,
+    );
+    // The calendar checkpoint ring (#166 item 4), on the same handle.
+    leviculum_nrf::time_floor::spawn_store_task(&spawner, shared_flash);
+    // Telemetry-target persistence (#236): its own page (0xEA000, reserved
+    // in memory.x beside identity and radio config, above the linker's
+    // FLASH region and at the bootloader's USER_FLASH_END so it survives a
+    // UF2 update), borrowing the same one-and-only SoftDevice flash handle.
+    leviculum_nrf::telemetry::spawn_store_task(
+        &spawner,
+        shared_flash,
+        t1000e::CONFIG.telemetry_flash_page,
+    );
+
+    // The message store (#384): mounts the record log on the region
+    // `memory.x` reserves behind the image, formats it once if it is not ours,
+    // and then does nothing until something asks it to append — nothing does
+    // yet except the `--store-storm` bench instrument. Borrows the same
+    // one-and-only SoftDevice flash handle as the two stores above, per
+    // operation rather than per append (see `record_store` module docs).
+    leviculum_nrf::record_store::spawn_store_task(&spawner, shared_flash);
+
+    // Codeberg #384 size harness, behind a throwaway non-default feature:
+    // appends, iterates and removes once so the linker keeps the candidate
+    // store's code and `arm-none-eabi-size` can weigh it. No shipped build
+    // enables this.
+    #[cfg(any(feature = "store-spike-record-log", feature = "store-spike-sequential"))]
+    leviculum_nrf::store_spike::exercise(shared_flash).await;
+
+    // No display on this product, and no button task in this image (the
+    // button on P0.06 is wired, nothing reads it yet). Both absences are
+    // declared once, gate-free, so a boot smoke cell can tell them from a
+    // line dropped before the host attached (Codeberg #296).
+    leviculum_nrf::log::log_fmt_critical("[DISP] ", format_args!("none"));
+    leviculum_nrf::log::log_fmt_critical("[BTN] ", format_args!("none"));
+
+    let (hu, hf) = leviculum_nrf::heap_stats();
+    info!("heap u={} f={}", hu, hf);
+    leviculum_nrf::log_stack("post-init");
+
+    // Interface adapters
+    let serial_ctl_tx = serial.outgoing_tx;
+    let mut serial_iface = EmbeddedInterface::new(serial.outgoing_tx);
+    let mut lora_iface = LoRaInterface::new(lora_channels.outgoing_tx);
+    let mut ble_iface = BleInterface::new(ble_channels.outgoing_tx);
+    let ifac_configs: BTreeMap<usize, IfacConfig> = BTreeMap::new();
+
+    // Boot blink. Inverted against the T114's: this board's green LED is
+    // **active high** (`boards/t1000e.rs`), so High is the lit level
+    // and the pin ends where `t1000e::led` left it, dark.
+    led.set_level(Level::High);
+    for _ in 0..12_000_000u32 {
+        cortex_m::asm::nop();
+    }
+    led.set_level(Level::Low);
+
+    // Telemetry (Codeberg #236). The delivery destination is registered
+    // unconditionally, target or not: it is what a receiver verifies our
+    // LXMF signature against, and it is useful on its own — a node that
+    // announces it can be addressed by name instead of by hex string.
+    let delivery_hash = leviculum_nrf::telemetry::register_delivery_destination(&mut node);
+    // Every hash a prober needs, on one boot-critical line (and from
+    // here on in the periodic banner and the identity query). This is
+    // the only place they are written: a per-BSP copy on the gated path
+    // was a line a late reader never saw (#234).
+    leviculum_nrf::identity::note_boot_identity(
+        *node.identity().hash(),
+        node.probe_dest_hash().map(|h| *h.as_bytes()),
+        delivery_hash.as_ref().map(|h| *h.as_bytes()),
+    );
+    // The propagation-node role (#384 part 3): register the
+    // `lxmf.propagation` destination and its two request handlers, over
+    // the record-log store the store task mounts. Costs from the config
+    // page (PN_CONFIG line above states which source answered). The
+    // miner task is the peering-key grinder — cooperative, off the main
+    // loop, results harvested by the engine.
+    let pn_config = leviculum_nrf::pn::load_config_at_boot(t1000e::CONFIG.telemetry_flash_page);
+    let mut pn_engine = leviculum_nrf::pn::Engine::new(&mut node, pn_config);
+    if let Some(pn) = pn_engine.as_ref() {
+        leviculum_nrf::identity::note_propagation(*pn.destination_hash().as_bytes());
+        spawner.must_spawn(leviculum_nrf::pn::miner_task());
+    } else {
+        log_critical!("PN role=off reason=identity-underivable");
+    }
+
+    // The announce occasions telemetry does not cover (#376): a new BLE
+    // peer, and the plain timer. Armed from the node's clock so the first
+    // periodic announce is a fixed delay after boot, not after whatever
+    // the loop happened to do first.
+    let mut announce_gate = leviculum_nrf::announce::AnnounceGate::new(node.now_ms());
+    let mut reporter = delivery_hash.map(leviculum_nrf::telemetry::Reporter::new);
+    if reporter.is_none() {
+        log_critical!("[TELEMETRY] target=00000000 state=off reason=no-delivery-destination");
+    }
+    if let Some(reporter) = reporter.as_mut() {
+        // A persisted target comes back as awaiting-key unless its key
+        // was persisted with it; the node then resolves it over the air
+        // exactly as it would after a fresh set. The reporter rewrites a
+        // hash-only record with the key once it is resolved (#370), so
+        // after one successful resolution a reboot restores ready and
+        // owes the immediate report.
+        if let Some(stored) = leviculum_nrf::telemetry::load(t1000e::CONFIG.telemetry_flash_page) {
+            reporter.apply_target(&mut node, stored);
+        }
+        // A persisted fixed position replaces the sensor from the first
+        // report of this boot on — the pin must not depend on which
+        // record the host set last.
+        if let Some(stored) =
+            leviculum_nrf::telemetry::load_fixed_position(t1000e::CONFIG.telemetry_flash_page)
+        {
+            reporter.apply_fixed_position(Some(stored));
+        }
+        reporter.log_banner();
+    }
+    let telemetry_target_rx = leviculum_nrf::telemetry::inbound_target_receiver();
+    let fixed_position_rx = leviculum_nrf::telemetry::inbound_fixed_position_receiver();
+
+    // Periodic `[TRANSPORT]` counters (#344). Rides the main loop rather than
+    // a spawned task: the counters live in the node this loop owns.
+    let mut transport_stats = leviculum_nrf::transport_stats::Ticker::new();
+
+    // The `[HEAP_CENSUS]` line (#388): who holds the heap. Rides the
+    // main loop like the `[TRANSPORT]` ticker — the node and the engine
+    // it walks are this loop's own state.
+    let mut heap_census = leviculum_nrf::heap_census::Ticker::new();
+
+    // The announce bandwidth cap's price list (#402). The core has always had
+    // the cap — queue, fewest-hops-first drain, 2 % share — but it only binds
+    // an interface somebody registered a bitrate for, and the firmware
+    // registered none, so the medium where an announce is DEAREST was the one
+    // medium that never held one back. Synced after every wake because the
+    // PHY changes under it (the test cells reconfigure the radio per profile);
+    // the tracker registers only on a real change.
+    let mut announce_cap = leviculum_nrf::lora::AnnounceCap::new();
+
+    log_critical!("[STG] main-loop");
+    leviculum_nrf::boot_trace::phase(leviculum_nrf::boot_trace::Phase::MainLoop);
+
+    // One engine pass: digest a dispatch's events, run the async half
+    // (validation, flash flushes, periodic jobs), and put whatever the
+    // role wants on the wire. A macro because the borrows are the loop's
+    // own locals; expanded only after a dispatch, never inside the
+    // select, so the engine's awaits cannot be cancelled (the DropBomb
+    // rule, `leviculum_nrf::record_store` module docs).
+    macro_rules! pn_step {
+        ($events:expr) => {
+            // Board-visible core-event lines (LINK_REFUSED, #388) render
+            // regardless of whether a propagation role runs.
+            leviculum_nrf::events::log_events($events, node.now_ms());
+            // #235: answer a `/status` request from an allow-listed identity.
+            // In this macro because every arm that produces core events runs
+            // it, and a remote query may arrive over any of the three
+            // carriers — a responder wired into one arm would answer only the
+            // carrier its author had in mind.
+            {
+                let mut status_out = leviculum_core::transport::TickOutput::empty();
+                leviculum_nrf::remote_status::handle_events(&mut node, $events, &mut status_out);
+                if !status_out.actions.is_empty() {
+                    let mut ifaces: [&mut dyn Interface; 3] =
+                        [&mut serial_iface, &mut lora_iface, &mut ble_iface];
+                    let dispatched =
+                        dispatch_actions(&mut ifaces, status_out.actions, &ifac_configs);
+                    leviculum_nrf::dispatch::settle("remote-status", &mut node, &dispatched);
+                }
+            }
+            if let Some(pn) = pn_engine.as_mut() {
+                let mut pn_out = pn.on_events(&mut node, $events);
+                pn_out.merge(pn.settle(&mut node).await);
+                if !pn_out.actions.is_empty() {
+                    let mut ifaces: [&mut dyn Interface; 3] =
+                        [&mut serial_iface, &mut lora_iface, &mut ble_iface];
+                    let dispatched = dispatch_actions(&mut ifaces, pn_out.actions, &ifac_configs);
+                    leviculum_nrf::dispatch::settle("pn", &mut node, &dispatched);
+                }
+            }
+        };
+    }
+    // Event-driven main loop, nine event sources:
+    // 1. Serial incoming (USB)
+    // 2. LoRa incoming (radio)
+    // 3. BLE incoming (defragmented Reticulum packets from phone)
+    // 4. Timer deadline (protocol maintenance, announces)
+    // 5. GNSS time candidate (until the calendar is seeded once)
+    // 6. Host wall-time injection (#238 control envelope)
+    // 7. Host telemetry target (#238 control envelope, #236)
+    // 8. Host fixed position (#238 control envelope)
+    // 9. Telemetry evaluation tick (only while a target is configured)
+    loop {
+        transport_stats.poll(&node);
+        // Close a `[DROP]` rate-limit window that expired without a further
+        // drop to carry its summary (#346): the silence after a storm is the
+        // reading that summary is for, and no event arrives to trigger it.
+        leviculum_nrf::events::flush_drop_summary(node.now_ms());
+        heap_census.poll(&node, pn_engine.as_ref());
+        // Clamped by the stats deadline so the line is still emitted on a
+        // channel quiet enough that the node itself has nothing scheduled.
+        let deadline = node
+            .next_deadline()
+            .map(Instant::from_millis)
+            .unwrap_or(Instant::MAX)
+            .min(transport_stats.deadline())
+            .min(heap_census.deadline());
+        // The propagation engine's own schedule (queued work, announce,
+        // sync scheduler) rides the same timer arm.
+        let deadline = match pn_engine.as_ref() {
+            Some(pn) => deadline.min(Instant::from_millis(pn.next_deadline_ms(node.now_ms()))),
+            None => deadline,
+        };
+
+        // No GNSS in this image, so no fix ever offers a calendar seed. The
+        // arm stays in the select so the loop keeps the solar node's shape
+        // and the AG3335 pass only has to fill it in.
+        let gnss_time_candidate = core::future::pending::<u64>();
+
+        // The tick rate is also the retry rate for a report the radio
+        // could not take: the policy re-arms until a send is confirmed.
+        // With no target configured there is nothing to wake up for.
+        let telemetry_tick = async {
+            match reporter.as_ref() {
+                Some(reporter) if !reporter.is_off() => Timer::after(TELEMETRY_TICK_INTERVAL).await,
+                _ => core::future::pending::<()>().await,
+            }
+        };
+
+        // The periodic announce (#376 item 2). Sleeps exactly to its own
+        // deadline rather than polling: an idle board with telemetry off
+        // wakes twice an hour for this, and a clockless one once a
+        // minute until its clock arrives.
+        let announce_tick = async {
+            Timer::after(Duration::from_millis(
+                announce_gate.periodic_wait_ms(node.now_ms()).max(1),
+            ))
+            .await
+        };
+
+        let wake = select4(
+            select4(
+                serial.incoming_rx.receive(),
+                lora_channels.incoming_rx.receive(),
+                select(
+                    ble_channels.incoming_rx.receive(),
+                    ble_channels.peer_event_rx.receive(),
+                ),
+                Timer::at(deadline),
+            ),
+            gnss_time_candidate,
+            select4(
+                serial.wall_time_rx.receive(),
+                telemetry_target_rx.receive(),
+                fixed_position_rx.receive(),
+                serial.announce_rx.receive(),
+            ),
+            select(telemetry_tick, announce_tick),
+        )
+        .await;
+        // Mirror each interface's is_online() into the core (#365): a
+        // path over an offline interface is no path, so a report due
+        // while a carrier is off (or peerless, for BLE) falls through
+        // to a path request instead of a silent carrier-off drop. After
+        // the await, not at the loop top: a `--set-media ble=off` lands
+        // in another task while this one sleeps, and the arm below must
+        // route with the state as it is NOW.
+        node.set_interface_online(0, serial_iface.is_online());
+        node.set_interface_online(1, lora_iface.is_online());
+        node.set_interface_online(2, ble_iface.is_online());
+        // The peer-count sibling of the online mirror (Codeberg #365):
+        // marks BLE as a peer-link carrier the transport may
+        // re-originate an unanswerable path request on. Serial and LoRa
+        // mirror nothing — no "peers" at this layer — and stay at zero.
+        node.set_interface_peer_count(2, ble_iface.peer_count());
+        // The LoRa PHY's price, mirrored into the announce cap in the same
+        // place and for the same reason as the online mirror above: a
+        // reconfigure lands in another task while this one sleeps, and the
+        // arms below must throttle against the PHY as it is NOW.
+        announce_cap.sync(&mut node);
+        // The calendar's own healing, mirrored here for the same reason as
+        // the state above: it happens in code this task does not run. The
+        // seeding arms below record the source they inject, but
+        // `learn_emission_timebase` seats an anchor from an overheard
+        // announce with nothing at this layer called, so a board healed
+        // from traffic kept saying the birth state forever (Codeberg #398).
+        // Reading the node is what keeps the banner honest without a
+        // notification path per source.
+        if leviculum_nrf::set_time_source(node.time_source()) {
+            log_critical!("[TIME_SOURCE] source={}", leviculum_nrf::time_source_str());
+        }
+        // Write the calendar back at most hourly once a live source vouched
+        // for it (#166 item 4); the store task does the flash work.
+        time_checkpoint.poll(node.anchor_rank(), node.emission_secs(), node.now_ms());
+        match wake {
+            Either4::Second(unix) => {
+                // Unreachable: the GNSS arm above never resolves.
+                let _ = unix;
+            }
+            Either4::Third(Either4::First(unix_secs)) => {
+                // A host that knows wall time (#238 TYPE_WALL_TIME). The
+                // seam applies the same sanity window as every other time
+                // source; the bool picks the enveloped ack or the named
+                // refusal — mirror of the GNSS path.
+                use leviculum_core::envelope;
+                use leviculum_core::transport::TimeSource;
+                let answer = if node.set_wall_time_unix_secs(unix_secs, TimeSource::Host) {
+                    leviculum_nrf::set_time_source(TimeSource::Host);
+                    log_critical!("[TIME_SEED] source=host unix={}", unix_secs);
+                    log_critical!("[TIME_SOURCE] source={}", leviculum_nrf::time_source_str());
+                    envelope::encode_ack(envelope::TYPE_WALL_TIME)
+                } else {
+                    log_critical!("[TIME_SEED_REFUSED] source=host unix={}", unix_secs);
+                    envelope::encode_refusal(envelope::TYPE_WALL_TIME, envelope::REFUSE_VALUE)
+                };
+                // Best effort: a full outgoing channel means a busy link;
+                // the host's retry covers it.
+                let _ = serial_ctl_tx.try_send(answer);
+            }
+            Either4::Third(Either4::Second(wire)) => {
+                // A host set or cleared the telemetry target (#236). What
+                // happens here is the part that needs the node — the
+                // identity lookup that decides ready vs awaiting-key. The
+                // persist and the answer both belong to the serial task
+                // now: the answer may not go out before the record is on
+                // the page (#358), and only the task that requested the
+                // save can wait for it.
+                use leviculum_nrf::telemetry::TargetOutcome;
+                if let Some(reporter) = reporter.as_mut() {
+                    match reporter.apply_target(&mut node, wire) {
+                        TargetOutcome::Set(_) | TargetOutcome::Cleared => {
+                            reporter.log_banner();
+                        }
+                    }
+                }
+            }
+            Either4::Third(Either4::Third(position)) => {
+                // A host set or cleared the fixed position. This is the
+                // part that needs the reporter — the source switch and the
+                // confirmation re-arm; the persist is the serial task's,
+                // for the reason above.
+                if let Some(reporter) = reporter.as_mut() {
+                    reporter.apply_fixed_position(position);
+                    match position {
+                        Some(p) => log_critical!(
+                            "[TELEMETRY] fixed-position set lat_e6={} lon_e6={} alt_e2={} alt_present={}",
+                            p.latitude_e6,
+                            p.longitude_e6,
+                            p.altitude_e2.unwrap_or(0),
+                            p.altitude_e2.is_some() as u8
+                        ),
+                        None => log_critical!("[TELEMETRY] fixed-position cleared"),
+                    }
+                }
+            }
+            Either4::Third(Either4::Fourth(())) => {
+                // A host asked for an announce now (#376 `TYPE_ANNOUNCE`,
+                // `lnflash --announce`, periculum's `announce_board`):
+                // every announce this board makes on its own cadence,
+                // made now.
+                //
+                // TWO announces, not one, because a board running the
+                // propagation role has two destinations a peer can look
+                // up: the `lxmf.delivery` one the telemetry path
+                // announces, and the `lxmf.propagation` one the role
+                // announces (`leviculum_nrf::pn::Engine::announce_now`).
+                // A client that wants to upload needs the SECOND —
+                // `Identity.recall` is keyed by destination hash, so
+                // knowing the delivery destination tells it nothing
+                // about the mailbox — and until this arm sent it, the
+                // only way to learn it was to wait out the role's own
+                // 300 s interval.
+                //
+                // Each half keeps its own rule: the delivery announce
+                // stays clock-gated (an uptime-stamped announce poisons
+                // the path ranking a desk measures), the role's is not
+                // (#384 item 6 — a clockless board still announces, and
+                // the contact it invites is what delivers the seed). So
+                // the answer grades the COMMAND and not either half:
+                // ack when at least one announce left the board, the
+                // named refusal only when none did. Which one went out
+                // is on the board's own `[ANNOUNCE] sent ... reason=`
+                // lines — `pn-host` for the role, `host` for delivery.
+                use leviculum_core::envelope;
+                let pn_announced = match pn_engine.as_mut() {
+                    Some(pn) => {
+                        let out = pn.announce_now(&mut node);
+                        if out.actions.is_empty() {
+                            false
+                        } else {
+                            let mut ifaces: [&mut dyn Interface; 3] =
+                                [&mut serial_iface, &mut lora_iface, &mut ble_iface];
+                            let dispatched =
+                                dispatch_actions(&mut ifaces, out.actions, &ifac_configs);
+                            leviculum_nrf::dispatch::settle(
+                                "pn-announce-host",
+                                &mut node,
+                                &dispatched,
+                            );
+                            true
+                        }
+                    }
+                    None => false,
+                };
+                let answer = match delivery_hash.as_ref() {
+                    None => {
+                        // No delivery destination was registered this
+                        // boot: nothing exists to announce, and neither a
+                        // retry nor the clock can change that.
+                        envelope::encode_refusal(
+                            envelope::TYPE_ANNOUNCE,
+                            envelope::REFUSE_UNSUPPORTED,
+                        )
+                    }
+                    Some(_) if !node.has_plausible_wall_clock() => {
+                        // The telemetry path's clock gate: the emission
+                        // timestamp inside the announce is what peers
+                        // rank paths by, and an uptime-stamped announce
+                        // would poison the very path under measurement.
+                        log_critical!("[ANNOUNCE] withheld reason=no-clock");
+                        envelope::encode_refusal(envelope::TYPE_ANNOUNCE, envelope::REFUSE_NO_CLOCK)
+                    }
+                    Some(hash) => {
+                        let app_data = leviculum_nrf::telemetry::announce_app_data(node.identity());
+                        match node.announce_destination(hash, Some(&app_data)) {
+                            Ok(out) => {
+                                let mut ifaces: [&mut dyn Interface; 3] =
+                                    [&mut serial_iface, &mut lora_iface, &mut ble_iface];
+                                let dispatched =
+                                    dispatch_actions(&mut ifaces, out.actions, &ifac_configs);
+                                leviculum_nrf::dispatch::settle(
+                                    "announce-host",
+                                    &mut node,
+                                    &dispatched,
+                                );
+                                let dh = hash.as_bytes();
+                                log_critical!(
+                                    "[ANNOUNCE] sent dst={:02x}{:02x}{:02x}{:02x} reason=host",
+                                    dh[0],
+                                    dh[1],
+                                    dh[2],
+                                    dh[3]
+                                );
+                                envelope::encode_ack(envelope::TYPE_ANNOUNCE)
+                            }
+                            Err(_) => envelope::encode_refusal(
+                                envelope::TYPE_ANNOUNCE,
+                                envelope::REFUSE_BUSY,
+                            ),
+                        }
+                    }
+                };
+                // The role's announce is on the air even where the
+                // delivery half was withheld or does not exist, and a
+                // refusal would report the command as having done
+                // nothing.
+                let answer = if pn_announced {
+                    envelope::encode_ack(envelope::TYPE_ANNOUNCE)
+                } else {
+                    answer
+                };
+                // Best effort, like the wall-time answer: a full outgoing
+                // channel means a busy link; the host's retry covers it.
+                let _ = serial_ctl_tx.try_send(answer);
+            }
+            Either4::Fourth(Either::First(())) => {
+                // Telemetry evaluation (#236). Everything decided here is
+                // decided in the policy crate; this arm reads the board's
+                // sensors, hands them over, and dispatches whatever came
+                // back.
+                if let Some(reporter) = reporter.as_mut() {
+                    let now_ms = node.now_ms();
+                    let (readings, has_fix) = collect_readings(&node, sd);
+                    let actions = reporter.tick(&mut node, now_ms, has_fix, &readings);
+                    if !actions.is_empty() {
+                        let mut ifaces: [&mut dyn Interface; 3] =
+                            [&mut serial_iface, &mut lora_iface, &mut ble_iface];
+                        let dispatched = dispatch_actions(&mut ifaces, actions, &ifac_configs);
+                        // The reporter settles first: it is the only caller
+                        // that owns a cadence the dispatch's verdict decides
+                        // (#344). `settle` counts and logs afterwards, as at
+                        // every other site.
+                        reporter.note_dispatch(&dispatched);
+                        leviculum_nrf::dispatch::settle("telemetry", &mut node, &dispatched);
+                    }
+                }
+            }
+            Either4::Fourth(Either::Second(())) => {
+                // The periodic announce (#376 item 2). Independent of
+                // telemetry: a node that reports rarely, or has no target
+                // at all, still has to be findable, and a phone that
+                // missed the peer-up announce gets one from here. The gate
+                // owns the deadline and the clock rule; this arm dispatches
+                // whatever it hands back, which is nothing before the
+                // deadline and nothing without a plausible clock.
+                let actions = announce_gate.periodic(&mut node, delivery_hash.as_ref());
+                if !actions.is_empty() {
+                    let mut ifaces: [&mut dyn Interface; 3] =
+                        [&mut serial_iface, &mut lora_iface, &mut ble_iface];
+                    let dispatched = dispatch_actions(&mut ifaces, actions, &ifac_configs);
+                    leviculum_nrf::dispatch::settle("announce-periodic", &mut node, &dispatched);
+                }
+            }
+            Either4::First(Either4::First(data)) => {
+                info!("SER RX {} bytes", data.len());
+                let output = node.handle_packet(InterfaceId(0), &data);
+                info!("SER RX -> {} actions", output.actions.len());
+                // An inbound TELEMETRY_REQUEST may ride any carrier (#371).
+                if let Some(reporter) = reporter.as_mut() {
+                    let now_ms = node.now_ms();
+                    reporter.handle_inbound_events(&node, &output.events, now_ms);
+                }
+                let mut ifaces: [&mut dyn Interface; 3] =
+                    [&mut serial_iface, &mut lora_iface, &mut ble_iface];
+                let dispatched = dispatch_actions(&mut ifaces, output.actions, &ifac_configs);
+                leviculum_nrf::dispatch::settle("ser-rx", &mut node, &dispatched);
+                pn_step!(&output.events);
+            }
+            Either4::First(Either4::Second(data)) => {
+                // A medium switched off at runtime stops carrying traffic
+                // in BOTH directions from the moment the frame was
+                // answered: the interface drops what the core hands it,
+                // this drops what the medium hands up. Without the second
+                // half a "LoRa off" node would still deliver over LoRa,
+                // which is precisely the masking the profile exists to
+                // remove.
+                if !leviculum_nrf::media::lora_active() {
+                    continue;
+                }
+                let output = node.handle_packet(InterfaceId(1), &data);
+                if !output.actions.is_empty() {
+                    info!("LORA RX -> {} actions", output.actions.len());
+                }
+                if let Some(reporter) = reporter.as_mut() {
+                    let now_ms = node.now_ms();
+                    reporter.handle_inbound_events(&node, &output.events, now_ms);
+                }
+                let mut ifaces: [&mut dyn Interface; 3] =
+                    [&mut serial_iface, &mut lora_iface, &mut ble_iface];
+                let dispatched = dispatch_actions(&mut ifaces, output.actions, &ifac_configs);
+                leviculum_nrf::dispatch::settle("lora-rx", &mut node, &dispatched);
+                pn_step!(&output.events);
+            }
+            Either4::First(Either4::Third(Either::First((peer, data)))) => {
+                // #388 census: this packet just left BLE_INCOMING
+                // custody (counted by the session that queued it).
+                leviculum_nrf::ble::incoming_held_sub(data.capacity());
+                // The reception itself is already on the log: columba's
+                // `BLE: RX <n>B conn=<h> frags=<k>` line names the link
+                // and the peer's fragmentation (#376), so a second
+                // per-packet line here said less and doubled the noise.
+                // See the LoRa arm: a medium switched off at runtime
+                // delivers nothing upward either.
+                if !leviculum_nrf::media::ble_active() {
+                    continue;
+                }
+                // Name the ingress link when the handshake did (#365):
+                // paths learned through it become attributable to the
+                // peer when the link dies.
+                let output = match peer {
+                    Some(peer) => node.handle_packet_from_peer(InterfaceId(2), peer, &data),
+                    None => node.handle_packet(InterfaceId(2), &data),
+                };
+                if !output.actions.is_empty() {
+                    info!("BLE RX -> {} actions", output.actions.len());
+                }
+                if let Some(reporter) = reporter.as_mut() {
+                    let now_ms = node.now_ms();
+                    reporter.handle_inbound_events(&node, &output.events, now_ms);
+                }
+                let mut ifaces: [&mut dyn Interface; 3] =
+                    [&mut serial_iface, &mut lora_iface, &mut ble_iface];
+                let dispatched = dispatch_actions(&mut ifaces, output.actions, &ifac_configs);
+                leviculum_nrf::dispatch::settle("ble-rx", &mut node, &dispatched);
+                pn_step!(&output.events);
+            }
+            Either4::First(Either4::Third(Either::Second(event))) => {
+                // A BLE peer transition (Codeberg #365). Lost: cull the
+                // paths whose next hop is that peer so the next report
+                // re-resolves over a carrier that can still deliver.
+                // Up: pull the peer's delivery path over the fresh link
+                // (Columba answers a path request but announces on
+                // neither connect nor reconnect). Not gated on
+                // media::ble_active — the cull is state cleanup, and a
+                // pull for a medium switched off mid-run dies in the
+                // interface's carrier-off drop like any other packet.
+                let (label, output) = match event {
+                    BlePeerEvent::Lost(peer) => {
+                        let output = node.handle_interface_peer_lost(InterfaceId(2), peer);
+                        info!(
+                            "BLE peer lost, {} paths culled",
+                            output
+                                .events
+                                .iter()
+                                .filter(|e| matches!(e, NodeEvent::PathLost { .. }))
+                                .count()
+                        );
+                        ("ble-peer-lost", output)
+                    }
+                    BlePeerEvent::Up(peer) => {
+                        let mut output = node.handle_interface_peer_up(InterfaceId(2), peer);
+                        info!("BLE peer up, {} pull actions", output.actions.len());
+                        // #376: and announce OURSELVES to that peer, on
+                        // its link alone. The peer just finished its
+                        // identity handshake, so it can receive and it is
+                        // exactly the node that does not know us; the pull
+                        // above only asks what IT is. A broadcast here
+                        // would reach the neighbour board, which forwards
+                        // it, and the relayed copy racing the direct one
+                        // is the two-hop reading this issue opened with.
+                        output.actions.extend(announce_gate.peer_up(
+                            &mut node,
+                            delivery_hash.as_ref(),
+                            peer,
+                        ));
+                        // And the propagation role (#384): the phone
+                        // that just linked is exactly the client that
+                        // should learn its board is a mailbox.
+                        if let Some(pn) = pn_engine.as_mut() {
+                            output
+                                .actions
+                                .extend(pn.on_ble_peer_up(&mut node, 2, peer).actions);
+                        }
+                        ("ble-peer-up", output)
+                    }
+                };
+                let mut ifaces: [&mut dyn Interface; 3] =
+                    [&mut serial_iface, &mut lora_iface, &mut ble_iface];
+                let dispatched = dispatch_actions(&mut ifaces, output.actions, &ifac_configs);
+                leviculum_nrf::dispatch::settle(label, &mut node, &dispatched);
+                pn_step!(&output.events);
+            }
+            Either4::First(Either4::Fourth(())) => {
+                let output = node.handle_timeout();
+                if !output.actions.is_empty() {
+                    info!("timeout: {} actions", output.actions.len());
+                }
+                // A receipt timeout surfaces here, not on a reception —
+                // the proof wait (#373) needs this arm's events too.
+                if let Some(reporter) = reporter.as_mut() {
+                    let now_ms = node.now_ms();
+                    reporter.handle_inbound_events(&node, &output.events, now_ms);
+                }
+                let mut ifaces: [&mut dyn Interface; 3] =
+                    [&mut serial_iface, &mut lora_iface, &mut ble_iface];
+                let dispatched = dispatch_actions(&mut ifaces, output.actions, &ifac_configs);
+                leviculum_nrf::dispatch::settle("timeout", &mut node, &dispatched);
+                pn_step!(&output.events);
+            }
+        }
+    }
+}
+
+/// How often the telemetry policy is asked whether a report is due.
+///
+/// This is a *poll* rate, not a cadence: the cadence lives in the profile
+/// and is minutes to hours. Five seconds is fine enough that "report now"
+/// means now to an operator watching a serial log, and coarse enough that
+/// it is invisible next to the tasks already waking on the same period.
+const TELEMETRY_TICK_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Read this board's sensors for one telemetry evaluation.
+///
+/// Returns the readings and whether GNSS presence is `Fix`, which is never
+/// in this image: no GNSS receiver is driven, and no battery divider is
+/// sampled yet. What every board has is read: the die temperature, through
+/// the SoftDevice ([`leviculum_nrf::telemetry::die_temperature_quarter_c`]),
+/// and the last reception's link figures.
+fn collect_readings<R, C, S>(
+    node: &leviculum_core::node::NodeCore<R, C, S>,
+    sd: &nrf_softdevice::Softdevice,
+) -> (leviculum_nrf::telemetry::Readings, bool)
+where
+    R: rand_core::CryptoRngCore,
+    C: leviculum_core::traits::Clock,
+    S: leviculum_core::traits::Storage,
+{
+    let readings = leviculum_nrf::telemetry::Readings {
+        // A timebase below the plausibility floor is uptime seconds, not a
+        // calendar estimate — the anchor model's "never ahead" rule has
+        // nothing to work with there. Which arm anchored it is reported
+        // alongside every reading as `[TIME_SOURCE]`.
+        unix_secs: node
+            .has_plausible_wall_clock()
+            .then(|| node.emission_secs()),
+        die_temperature_quarter_c: leviculum_nrf::telemetry::die_temperature_quarter_c(sd),
+        // Not board-specific: every board we build has a LoRa radio, and
+        // what it last heard is the one sensor that describes the mesh
+        // rather than the box.
+        link: leviculum_nrf::telemetry::link_reading(),
+        ..Default::default()
+    };
+    let has_fix = false;
+    (readings, has_fix)
+}
+
+#[embassy_executor::task]
+async fn boot_log_repeater(initial_len: usize) {
+    for _ in 0..6 {
+        Timer::after(Duration::from_secs(10)).await;
+        info!("[BOOT] path_table_initial_len={}", initial_len);
+    }
+}
+
+/// Re-emit the firmware build banner periodically so a debug-serial
+/// reader can verify the running git_sha at any time, not only inside the
+/// short boot window. The CI auto-flash verify reads this back. Uses the
+/// embassy time driver (same timing infra the other periodic tasks use);
+/// no SD-reserved peripheral is touched directly.
+///
+/// The `[MEDIA]` and `[NAME ]` lines ride along for the same reason and
+/// read their state live, so a runtime change shows up here within five
+/// seconds and a capture attached after the boot window still learns
+/// which carriers this board is on and what it is called.
+#[embassy_executor::task]
+async fn fw_build_banner(media_src: leviculum_nrf::media::Source) {
+    loop {
+        Timer::after(Duration::from_secs(5)).await;
+        log_critical!("[FW_BUILD] {}", leviculum_nrf::FW_BUILD_STAMP);
+        log_critical!("[TIME_SOURCE] source={}", leviculum_nrf::time_source_str());
+        leviculum_nrf::media::log_banner(media_src);
+        leviculum_nrf::name::log_banner();
+        leviculum_nrf::identity::log_banner();
+    }
+}
