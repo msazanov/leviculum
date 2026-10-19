@@ -267,3 +267,151 @@ fn resource_part_and_proof_on_another_interface_are_refused() {
 fn mismatch_reason_is_named() {
     assert_eq!(DropReason::LinkIfaceMismatch.kebab(), "link-iface-mismatch");
 }
+
+/// The drop events one responder call raised plus the next pass of its
+/// event loop, which is where a node-layer drop surfaces (see
+/// `mvr_link_silent_exits::Pair::deliver`).
+fn responder_rx(pair: &mut Pair, iface: usize, pkt: &[u8]) -> TickOutput {
+    let mut out = pair.responder.handle_packet(InterfaceId(iface), pkt);
+    let next = pair.responder.process_events_and_actions();
+    out.actions.extend(next.actions);
+    out.events.extend(next.events);
+    out
+}
+
+/// 858 §Q8: the link request came in on one interface, the first data
+/// packet comes in on the other. The refusal is the reference's, and it is
+/// on the capture: one `PacketDropped` with `reason=link-iface-mismatch`
+/// naming the packet, HEADER_1, no transport id. The same packet on the
+/// link's own interface is then delivered.
+#[test]
+fn first_data_on_another_interface_is_a_named_drop() {
+    let mut pair = establish();
+    let (_, out) = pair
+        .initiator
+        .send_packet_on_link(&pair.link, b"first data")
+        .expect("send");
+    let data = only_context(&action_data(&out), PacketContext::None);
+
+    let r_other = pair.r_other;
+    let out = responder_rx(&mut pair, r_other, &data);
+    assert!(!out
+        .events
+        .iter()
+        .any(|e| matches!(e, NodeEvent::LinkDataReceived { .. })));
+    let dropped: Vec<_> = out
+        .events
+        .iter()
+        .filter_map(|e| match e {
+            NodeEvent::PacketDropped {
+                reason,
+                interface_in,
+                packet_hash_prefix,
+                header_type,
+                transport_id,
+                ..
+            } => Some((
+                *reason,
+                *interface_in,
+                packet_hash_prefix.is_some(),
+                *header_type,
+                *transport_id,
+            )),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        dropped,
+        [(
+            DropReason::LinkIfaceMismatch,
+            r_other,
+            true,
+            crate::packet::HeaderType::Type1,
+            None
+        )],
+        "events: {:?}",
+        out.events
+    );
+    assert_eq!(Pair::mismatch_drops(&pair.responder), 1);
+
+    let r_mesh = pair.r_mesh;
+    let out = responder_rx(&mut pair, r_mesh, &data);
+    assert!(out
+        .events
+        .iter()
+        .any(|e| matches!(e, NodeEvent::LinkDataReceived { .. })));
+    assert_eq!(Pair::mismatch_drops(&pair.responder), 1);
+}
+
+/// 858 §Q6, the measured 15:28 success pinned: on a multi-peer interface
+/// (a board's BLE, where every conn enters the core as one interface) the
+/// link request arrives through one peer, a relay, and the RTT and the
+/// data through another, the phone's direct conn. The interface is the
+/// same, so the link is established and the data delivered, and nothing is
+/// dropped. A future conn-keyed gate would turn this red.
+#[test]
+fn request_and_data_through_two_peers_of_one_interface_are_taken() {
+    const RELAY_CONN: [u8; 16] = [0x11; 16];
+    const DIRECT_CONN: [u8; 16] = [0x22; 16];
+
+    let identity = Identity::generate(&mut OsRng);
+    let signing_key = identity.ed25519_verifying().to_bytes();
+    let mut responder =
+        NodeCoreBuilder::new().build(OsRng, MockClock::new(TEST_TIME_MS), NoStorage);
+    let mut dest = Destination::new(
+        Some(identity),
+        Direction::In,
+        DestinationType::Single,
+        "mvrpin",
+        &["peers"],
+    )
+    .unwrap();
+    dest.set_accepts_links(true);
+    let dest_hash = *dest.hash();
+    responder.register_destination(dest);
+    let r_ble = add_iface(&mut responder, "R_ble");
+
+    let mut initiator =
+        NodeCoreBuilder::new().build(OsRng, MockClock::new(TEST_TIME_MS), NoStorage);
+    let i_ble = add_iface(&mut initiator, "I_ble");
+    let advance = |i: &mut EndpointNode, r: &mut EndpointNode| {
+        i.transport.clock().advance(LEG_MS);
+        r.transport.clock().advance(LEG_MS);
+    };
+
+    let (link, _routed, out) = initiator.connect(dest_hash, &signing_key).expect("connect");
+    let request = only_context(&action_data(&out), PacketContext::None);
+    advance(&mut initiator, &mut responder);
+    let out = responder.handle_packet_from_peer(InterfaceId(r_ble), RELAY_CONN, &request);
+    let proof = only_context(&action_data(&out), PacketContext::Lrproof);
+    advance(&mut initiator, &mut responder);
+    let out = initiator.handle_packet(InterfaceId(i_ble), &proof);
+    let rtt = only_context(&action_data(&out), PacketContext::Lrrtt);
+    advance(&mut initiator, &mut responder);
+
+    let mut events = Vec::new();
+    let out = responder.handle_packet_from_peer(InterfaceId(r_ble), DIRECT_CONN, &rtt);
+    events.extend(out.events);
+    let (_, out) = initiator
+        .send_packet_on_link(&link, b"through the direct conn")
+        .expect("send");
+    let data = only_context(&action_data(&out), PacketContext::None);
+    let out = responder.handle_packet_from_peer(InterfaceId(r_ble), DIRECT_CONN, &data);
+    events.extend(out.events);
+    events.extend(responder.process_events_and_actions().events);
+
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, NodeEvent::LinkEstablished { .. })));
+    assert!(events.iter().any(|e| matches!(
+        e,
+        NodeEvent::LinkDataReceived { data, .. } if data.as_slice() == b"through the direct conn"
+    )));
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, NodeEvent::PacketDropped { .. })),
+        "nothing dropped; events: {events:?}"
+    );
+    assert_eq!(responder.transport().stats().packets_dropped(), 0);
+}

@@ -511,6 +511,11 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
             "no_such_interface",
             "next_hop_is_requestor",
             "link_iface_mismatch",
+            "link_not_active",
+            "link_decrypt_fail",
+            "rtt_invalid",
+            "request_no_handler",
+            "channel_decrypt_fail",
             "total",
             // Not a drop reason and outside `total` (#374): link requests
             // for a local client's destination redirected to the clients.

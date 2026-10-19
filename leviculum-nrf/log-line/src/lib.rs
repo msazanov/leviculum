@@ -340,7 +340,7 @@ impl core::fmt::Display for AnnounceTransmittedBody {
 /// `NodeEvent::PacketDropped` (Codeberg #346, #421).
 ///
 /// ```text
-/// [DROP] reason=<kebab> ph=<16 hex|none> dst=<8 hex> iface=<n>
+/// [DROP] reason=<kebab> ph=<16 hex|none> dst=<8 hex> iface=<n> ht=<1|2>[ transport_id=<8 hex>]
 /// ```
 ///
 /// One line per packet the receive path threw away, naming the taxonomy's own
@@ -366,6 +366,16 @@ impl core::fmt::Display for AnnounceTransmittedBody {
 /// decisions — including the ones that are drops — stay on `PKT_RELAY`
 /// ([`RelayDecidedBody`]); the two event sites are disjoint in the core, so
 /// one dropped packet produces exactly one line, on one of the two.
+///
+/// `ht=` and `transport_id=` (860, from 858 §Q5) name WHAT was dropped:
+/// `reason=overheard-transport-id` is recorded from three sites, a HEADER_2
+/// packet addressed to another transport node and two HEADER_1 shapes, and
+/// the field capture of 2026-10-19 had to tell them apart by byte
+/// arithmetic. `ht=` is the header type as the wire numbers it (1 or 2);
+/// `transport_id=` is the first 4 bytes of the transport id a HEADER_2
+/// packet carries, the neighbour it was addressed to, and is absent on a
+/// HEADER_1 line. Both are appended after `iface=`, so a reader that takes
+/// the earlier fields by key reads every line it read before.
 pub struct PacketDroppedBody {
     /// The reason scalar, the core's own (`DropReason::kebab`), passed
     /// through as `&'static str` so this crate keeps no dependencies.
@@ -377,6 +387,10 @@ pub struct PacketDroppedBody {
     pub dest: [u8; 16],
     /// The interface it arrived on.
     pub iface_in: usize,
+    /// The header type, 1 or 2, as the wire numbers it.
+    pub header_type: u8,
+    /// The transport id a HEADER_2 packet carried.
+    pub transport_id: Option<[u8; 16]>,
 }
 
 /// The widest `reason=` scalar [`PacketDroppedBody`] can carry, in bytes.
@@ -404,7 +418,14 @@ impl core::fmt::Display for PacketDroppedBody {
         for byte in &self.dest[..4] {
             write!(f, "{byte:02x}")?;
         }
-        write!(f, " iface={}", self.iface_in)
+        write!(f, " iface={} ht={}", self.iface_in, self.header_type)?;
+        if let Some(id) = &self.transport_id {
+            f.write_str(" transport_id=")?;
+            for byte in &id[..4] {
+                write!(f, "{byte:02x}")?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -420,7 +441,7 @@ impl core::fmt::Display for PacketDroppedBody {
 /// a reader greps one tag to get both the drops and the proof that more of
 /// them happened than are printed. Without it a storm and a trickle read the
 /// same on a capture, since both show [`leviculum_drop_budget::LINES_PER_WINDOW`]
-/// lines per second.
+/// lines per window.
 ///
 /// [`leviculum_drop_budget::LINES_PER_WINDOW`]: https://codeberg.org/Lew_Palm/leviculum
 pub struct DropSuppressedBody {
@@ -608,15 +629,20 @@ iface_out=none t=7\r\n"
     fn a_dropped_packet_names_its_reason_the_destination_and_the_ingress() {
         let mut dest = [0u8; 16];
         dest[..4].copy_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+        let mut transport_id = [0u8; 16];
+        transport_id[..4].copy_from_slice(&[0xb2, 0xa8, 0xbe, 0xa1]);
         let body = PacketDroppedBody {
             reason: "overheard-transport-id",
             ph: None,
             dest,
             iface_in: 1,
+            header_type: 2,
+            transport_id: Some(transport_id),
         };
         assert_eq!(
             line("[DROP] ", format_args!("{body}"), 1234),
-            "[DROP] reason=overheard-transport-id ph=none dst=deadbeef iface=1 t=1234\r\n"
+            "[DROP] reason=overheard-transport-id ph=none dst=deadbeef iface=1 ht=2 \
+transport_id=b2a8bea1 t=1234\r\n"
         );
     }
 
@@ -630,11 +656,40 @@ iface_out=none t=7\r\n"
             ph: Some([0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef]),
             dest: [0x11; 16],
             iface_in: 0,
+            header_type: 1,
+            transport_id: None,
         };
         assert_eq!(
             line("[DROP] ", format_args!("{body}"), 99),
             "[DROP] reason=single-decrypt-fail ph=0123456789abcdef dst=11111111 \
-iface=0 t=99\r\n"
+iface=0 ht=1 t=99\r\n"
+        );
+    }
+
+    /// The 860 lines, the 15:48 shape: a responder link whose RTT did not
+    /// validate, and the link data after it. HEADER_1, so no transport id.
+    #[test]
+    fn the_link_layer_refusals_render_as_drop_lines() {
+        let rtt = PacketDroppedBody {
+            reason: "rtt-invalid",
+            ph: Some([0xfd, 0x2c, 0x6b, 0x74, 0, 1, 2, 3]),
+            dest: [0xb6; 16],
+            iface_in: 2,
+            header_type: 1,
+            transport_id: None,
+        };
+        assert_eq!(
+            line("[DROP] ", format_args!("{rtt}"), 15),
+            "[DROP] reason=rtt-invalid ph=fd2c6b7400010203 dst=b6b6b6b6 iface=2 ht=1 t=15\r\n"
+        );
+        let data = PacketDroppedBody {
+            reason: "link-not-active",
+            ..rtt
+        };
+        assert_eq!(
+            line("[DROP] ", format_args!("{data}"), 16),
+            "[DROP] reason=link-not-active ph=fd2c6b7400010203 dst=b6b6b6b6 iface=2 ht=1 \
+t=16\r\n"
         );
     }
 
@@ -653,7 +708,14 @@ iface=0 t=99\r\n"
     }
 
     /// The widest drop line has to leave room for the stamp inside one
-    /// 256-byte log buffer, the same bound the relay line is held to.
+    /// 256-byte log buffer.
+    ///
+    /// Held to that bound itself since 860, not to the 128 B the relay line
+    /// keeps: `ht=` and the HEADER_2 `transport_id=` took the synthetic
+    /// worst case (a 20-digit interface index and a 20-digit stamp) to
+    /// 148 B. A real line, one-digit interface and a ten-digit stamp, is
+    /// 118 B; what that width costs the debug ring is priced in
+    /// `leviculum-drop-budget`'s `the_ring_derivation_still_holds`.
     #[test]
     fn the_widest_drop_line_fits_the_firmware_log_buffer() {
         // The longest kebab in the taxonomy (`DropReason::kebab`), at the
@@ -665,10 +727,12 @@ iface=0 t=99\r\n"
             ph: Some([0xff; 8]),
             dest: [0xff; 16],
             iface_in: usize::MAX,
+            header_type: 2,
+            transport_id: Some([0xff; 16]),
         };
         let rendered = line("[DROP] ", format_args!("{body}"), u64::MAX);
         assert!(
-            rendered.len() < 128,
+            rendered.len() < 256,
             "{} bytes: {rendered:?}",
             rendered.len()
         );

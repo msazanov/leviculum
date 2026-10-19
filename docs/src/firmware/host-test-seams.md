@@ -1117,7 +1117,7 @@ own issue, not a finding of this page.
 | 373 | `leviculum-nrf/src/display.rs:201` | seed display power on | - | `boot_smoke_t114` | 300 | 1/1 |  |
 | 374 | `leviculum-nrf/src/display.rs:220` | apply only a changed power request; an error keeps the old state | request, display_on | none | - | - || `leviculum_screen::power::tests::an_unchanged_request_does_not_command_the_panel`<br>`leviculum_screen::power::tests::a_changed_request_follows_the_panel_write`<br>`leviculum_screen::power::tests::a_failed_panel_write_keeps_the_old_state` |
 | 375 | `leviculum-nrf/src/display.rs:241` | no frame work while the display is off | display_on | none | - | - || no decision: early return while the display is off |
-| 376 | `leviculum-nrf/src/events.rs:76` | the first announce from a new neighbour is forwarded to the immediate-announce trigger | NodeEvent | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
+| 376 | `leviculum-nrf/src/events.rs:77` | the first announce from a new neighbour is forwarded to the immediate-announce trigger | NodeEvent | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
 | 377 | `leviculum-nrf/src/media.rs:144` | no flash profile means both carriers on | page | `boot_smoke_t114` | 300 | 1/1 |  |
 | 378 | `leviculum-nrf/src/media.rs:222` | runtime apply: store state, wake BLE, then queue the save | profile | `lora_path_discovery_fast_mixed` | 90 | 2/1 |  |
 | 379 | `leviculum-nrf/src/name.rs:170` | an undecodable boot name is empty | BOOT_GAP | none | - | - || no decision: glue, `NodeName::decode` falling back to the empty name, which `boot_gap_name` documents as "no BLE name on the air" |

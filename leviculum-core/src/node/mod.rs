@@ -134,6 +134,8 @@ mod mvr_link_rekey_alias;
 #[cfg(test)]
 mod mvr_link_retry_held_route;
 #[cfg(test)]
+mod mvr_link_silent_exits;
+#[cfg(test)]
 mod mvr_link_timing_reference;
 #[cfg(test)]
 mod mvr_link_up_reoffer;
@@ -4251,6 +4253,8 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 interface_in,
                 hops,
                 packet_hash_prefix,
+                header_type,
+                transport_id,
             } => {
                 self.events.push(NodeEvent::PacketDropped {
                     destination_hash: DestinationHash::new(destination_hash),
@@ -4258,6 +4262,8 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                     interface_in,
                     hops,
                     packet_hash_prefix,
+                    header_type,
+                    transport_id,
                 });
             }
 

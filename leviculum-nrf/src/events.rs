@@ -17,6 +17,7 @@
 //! [`leviculum_log_line`].
 
 use leviculum_core::node::NodeEvent;
+use leviculum_core::packet::HeaderType;
 use leviculum_drop_budget::DropBudget;
 
 /// The board's one budget for `[DROP]` lines.
@@ -171,6 +172,8 @@ pub fn log_events(events: &[NodeEvent], now_ms: u64) {
             reason,
             interface_in,
             packet_hash_prefix,
+            header_type,
+            transport_id,
             ..
         } = event
         {
@@ -190,6 +193,12 @@ pub fn log_events(events: &[NodeEvent], now_ms: u64) {
                             ph: *packet_hash_prefix,
                             dest: *destination_hash.as_bytes(),
                             iface_in: *interface_in,
+                            // The wire's own numbering, 1 or 2 (860).
+                            header_type: match header_type {
+                                HeaderType::Type1 => 1,
+                                HeaderType::Type2 => 2,
+                            },
+                            transport_id: *transport_id,
                         }
                     ),
                 );

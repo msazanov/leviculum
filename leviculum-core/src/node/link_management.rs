@@ -20,6 +20,7 @@ use crate::link::channel::{ChannelAction, ChannelError, Message, ReceiveOutcome}
 use crate::link::{Link, LinkCloseReason, LinkError, LinkId, LinkPhase, LinkState};
 use crate::packet::{packet_hash, Packet, PacketContext, PacketType};
 use crate::traits::{Clock, Storage};
+use crate::transport::DropReason;
 use rand_core::CryptoRngCore;
 
 use super::event::NodeEvent;
@@ -1511,6 +1512,17 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         true
     }
 
+    /// Record a link packet one of the per-context handlers refused, through
+    /// the same node-layer drop path as the interface check above: one
+    /// counter, one `PKT_DROP` journey line off-board, one `[DROP]` line on
+    /// a board (860). Until then these exits logged at trace or debug level
+    /// only, which a board compiles out, so a phone's packets on a link the
+    /// board terminated could vanish with no line at all (858 §Q6).
+    fn drop_link_packet(&mut self, packet: &Packet, rx: LinkRx<'_>, reason: DropReason) {
+        self.transport
+            .record_node_layer_drop(rx.raw_hash, packet, rx.interface_index, reason);
+    }
+
     /// Handle an incoming DATA packet on a link.
     ///
     /// Dispatches to per-context handlers after the interface check and
@@ -1545,11 +1557,16 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             self.try_recover_stale(&link_id, now_ms);
         }
 
+        let rx = LinkRx {
+            raw_hash,
+            interface_index,
+        };
         if !self.links.contains_key(&link_id) {
             crate::tracing::trace!(
                 link = %HexShort(link_id.as_bytes()),
                 "Link data packet for unknown link, ignoring"
             );
+            self.drop_link_packet(packet, rx, DropReason::LinkDataNoLink);
             return;
         }
 
@@ -1571,11 +1588,11 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         }
 
         match packet.context {
-            PacketContext::Lrrtt => self.handle_rtt_packet(link_id, packet, now_ms),
+            PacketContext::Lrrtt => self.handle_rtt_packet(link_id, packet, rx, now_ms),
             PacketContext::Keepalive => self.handle_keepalive_packet(link_id, packet, now_ms),
             PacketContext::LinkClose => self.handle_close_packet(link_id, packet),
             PacketContext::Channel => {
-                self.handle_channel_packet(link_id, packet, raw_packet, now_ms)
+                self.handle_channel_packet(link_id, packet, raw_packet, rx, now_ms)
             }
             PacketContext::ResourceAdv => {
                 self.handle_resource_adv(link_id, packet, raw_packet, now_ms);
@@ -1599,7 +1616,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 self.handle_link_identify(link_id, packet, now_ms);
             }
             PacketContext::Request => {
-                self.handle_request_packet(link_id, packet, raw_packet, now_ms);
+                self.handle_request_packet(link_id, packet, raw_packet, rx, now_ms);
             }
             PacketContext::Response => {
                 self.handle_response_packet(link_id, packet, raw_packet, now_ms);
@@ -1629,45 +1646,62 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             | PacketContext::CommandStatus
             | PacketContext::LinkProof
             | PacketContext::Lrproof => {
-                self.handle_plain_data_packet(link_id, packet, raw_packet, now_ms)
+                self.handle_plain_data_packet(link_id, packet, raw_packet, rx, now_ms)
             }
         }
     }
 
     /// RTT packet (context = Lrrtt), responder side
-    fn handle_rtt_packet(&mut self, link_id: LinkId, packet: &Packet, now_ms: u64) {
+    fn handle_rtt_packet(&mut self, link_id: LinkId, packet: &Packet, rx: LinkRx<'_>, now_ms: u64) {
         let Some(link) = self.links.get_mut(&link_id) else {
+            self.drop_link_packet(packet, rx, DropReason::LinkDataNoLink);
             return;
         };
         if link.state() != LinkState::Handshake || link.is_initiator() {
+            crate::tracing::debug!(
+                link = %HexShort(link_id.as_bytes()),
+                state = ?link.state(),
+                initiator = link.is_initiator(),
+                "RTT packet for a link not awaiting one, ignoring"
+            );
+            self.drop_link_packet(packet, rx, DropReason::RttInvalid);
             return;
         }
         let encrypted_data = packet.data.as_slice();
-        if let Ok(rtt_secs) = link.process_rtt(encrypted_data, now_ms) {
-            link.update_keepalive_from_rtt(rtt_secs);
-            link.mark_established(now_ms);
-            link.set_phase(LinkPhase::Established);
+        let Ok(rtt_secs) = link.process_rtt(encrypted_data, now_ms) else {
+            // The responder link stays in its handshake, and every packet
+            // after this one on it is a `link-not-active` drop: this line
+            // names where that chain starts (858 §Q6).
             crate::tracing::debug!(
-                "Link <{}> established (responder), RTT {:.3}s",
-                HexShort(link_id.as_bytes()),
-                rtt_secs
+                link = %HexShort(link_id.as_bytes()),
+                "RTT packet did not decrypt or parse, ignoring"
             );
-            crate::tracing::debug!(
-                target: "leviculum_core::link",
-                "LINK_ESTAB link={} rtt_ms={} keepalive_ms={} stale_ms={} inactivity_timeout_ms={} hops={} initiator=false",
-                HexShort(link_id.as_bytes()),
-                link.rtt_ms(),
-                link.keepalive_ms(),
-                link.stale_time_ms(),
-                link.stale_close_timeout_ms(),
-                link.hops(),
-            );
-            self.events.push(NodeEvent::LinkEstablished {
-                link_id,
-                is_initiator: false,
-                destination_hash: *link.destination_hash(),
-            });
-        }
+            self.drop_link_packet(packet, rx, DropReason::RttInvalid);
+            return;
+        };
+        link.update_keepalive_from_rtt(rtt_secs);
+        link.mark_established(now_ms);
+        link.set_phase(LinkPhase::Established);
+        crate::tracing::debug!(
+            "Link <{}> established (responder), RTT {:.3}s",
+            HexShort(link_id.as_bytes()),
+            rtt_secs
+        );
+        crate::tracing::debug!(
+            target: "leviculum_core::link",
+            "LINK_ESTAB link={} rtt_ms={} keepalive_ms={} stale_ms={} inactivity_timeout_ms={} hops={} initiator=false",
+            HexShort(link_id.as_bytes()),
+            link.rtt_ms(),
+            link.keepalive_ms(),
+            link.stale_time_ms(),
+            link.stale_close_timeout_ms(),
+            link.hops(),
+        );
+        self.events.push(NodeEvent::LinkEstablished {
+            link_id,
+            is_initiator: false,
+            destination_hash: *link.destination_hash(),
+        });
     }
 
     /// Keepalive packet, record activity and echo if requested
@@ -1731,6 +1765,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         link_id: LinkId,
         packet: &Packet,
         raw_packet: &[u8],
+        rx: LinkRx<'_>,
         now_ms: u64,
     ) {
         let Some(link) = self.links.get_mut(&link_id) else {
@@ -1738,6 +1773,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 link = %HexShort(link_id.as_bytes()),
                 "Channel packet for unknown link, ignoring"
             );
+            self.drop_link_packet(packet, rx, DropReason::LinkDataNoLink);
             return;
         };
         if link.state() != LinkState::Active {
@@ -1745,6 +1781,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 link = %HexShort(link_id.as_bytes()),
                 "Channel packet for non-active link, ignoring"
             );
+            self.drop_link_packet(packet, rx, DropReason::LinkNotActive);
             return;
         }
 
@@ -1773,6 +1810,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                     link = %HexShort(link_id.as_bytes()),
                     "Channel packet decryption failed"
                 );
+                self.drop_link_packet(packet, rx, DropReason::ChannelDecryptFail);
                 return;
             }
         };
@@ -2007,6 +2045,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         link_id: LinkId,
         packet: &Packet,
         raw_packet: &[u8],
+        rx: LinkRx<'_>,
         now_ms: u64,
     ) {
         let Some(link) = self.links.get_mut(&link_id) else {
@@ -2014,6 +2053,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 link = %HexShort(link_id.as_bytes()),
                 "Data packet for unknown link, ignoring"
             );
+            self.drop_link_packet(packet, rx, DropReason::LinkDataNoLink);
             return;
         };
         if link.state() != LinkState::Active {
@@ -2021,6 +2061,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 link = %HexShort(link_id.as_bytes()),
                 "Data packet for non-active link, ignoring"
             );
+            self.drop_link_packet(packet, rx, DropReason::LinkNotActive);
             return;
         }
 
@@ -2066,6 +2107,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                     link = %HexShort(link_id.as_bytes()),
                     "Plain data packet decryption failed"
                 );
+                self.drop_link_packet(packet, rx, DropReason::LinkDecryptFail);
             }
         }
     }
@@ -2223,13 +2265,20 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         link_id: LinkId,
         packet: &Packet,
         raw_packet: &[u8],
+        rx: LinkRx<'_>,
         now_ms: u64,
     ) {
         let Some(link) = self.links.get_mut(&link_id) else {
+            self.drop_link_packet(packet, rx, DropReason::LinkDataNoLink);
             return;
         };
 
         if link.state() != LinkState::Active {
+            crate::tracing::trace!(
+                link = %HexShort(link_id.as_bytes()),
+                "Request packet for non-active link, ignoring"
+            );
+            self.drop_link_packet(packet, rx, DropReason::LinkNotActive);
             return;
         }
         link.record_inbound(now_ms);
@@ -2245,6 +2294,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                     link = %HexShort(link_id.as_bytes()),
                     "Request packet decryption failed"
                 );
+                self.drop_link_packet(packet, rx, DropReason::LinkDecryptFail);
                 return;
             }
         };
@@ -2253,7 +2303,10 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // Compute request_id = truncated_packet_hash(raw_packet)
         let request_id = crate::packet::truncated_packet_hash(raw_packet);
 
-        self.handle_request_payload(link_id, request_id, plaintext);
+        if self.handle_request_payload(link_id, request_id, plaintext) == RequestDispatch::NoHandler
+        {
+            self.drop_link_packet(packet, rx, DropReason::RequestNoHandler);
+        }
     }
 
     /// Parse, authorize, and dispatch a decrypted request payload.
@@ -2267,7 +2320,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         link_id: LinkId,
         request_id: [u8; crate::constants::TRUNCATED_HASHBYTES],
         plaintext: &[u8],
-    ) {
+    ) -> RequestDispatch {
         use crate::msgpack::{
             read_fixarray_len, read_float64, read_msgpack_bin, read_msgpack_raw_value,
         };
@@ -2279,21 +2332,21 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 link = %HexShort(link_id.as_bytes()),
                 "Request: invalid array header"
             );
-            return;
+            return RequestDispatch::Ignored;
         };
         let Some(requested_at) = read_float64(plaintext, &mut pos) else {
             crate::tracing::debug!(
                 link = %HexShort(link_id.as_bytes()),
                 "Request: invalid timestamp"
             );
-            return;
+            return RequestDispatch::Ignored;
         };
         let Some(path_hash_bytes) = read_msgpack_bin(plaintext, &mut pos) else {
             crate::tracing::debug!(
                 link = %HexShort(link_id.as_bytes()),
                 "Request: invalid path_hash"
             );
-            return;
+            return RequestDispatch::Ignored;
         };
         if path_hash_bytes.len() != crate::constants::TRUNCATED_HASHBYTES {
             crate::tracing::debug!(
@@ -2301,7 +2354,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 len = path_hash_bytes.len(),
                 "Request: path_hash wrong length"
             );
-            return;
+            return RequestDispatch::Ignored;
         }
         let mut path_hash = [0u8; crate::constants::TRUNCATED_HASHBYTES];
         path_hash.copy_from_slice(path_hash_bytes);
@@ -2311,7 +2364,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 link = %HexShort(link_id.as_bytes()),
                 "Request: invalid data value"
             );
-            return;
+            return RequestDispatch::Ignored;
         };
 
         // Convert nil to empty, otherwise preserve raw bytes
@@ -2330,7 +2383,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 path_hash = %HexShort(&path_hash),
                 "Request: no handler for (destination, path_hash), dropping"
             );
-            return;
+            return RequestDispatch::NoHandler;
         };
 
         // Authorization check
@@ -2341,7 +2394,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                     link = %HexShort(link_id.as_bytes()),
                     "Request: AllowNone policy, dropping"
                 );
-                return;
+                return RequestDispatch::Ignored;
             }
             super::request::RequestPolicy::AllowAll => {
                 // Allowed
@@ -2356,7 +2409,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                         link = %HexShort(link_id.as_bytes()),
                         "Request: identity not in allow list, dropping"
                     );
-                    return;
+                    return RequestDispatch::Ignored;
                 }
             }
         }
@@ -2382,6 +2435,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             data,
             requested_at,
         });
+        RequestDispatch::Dispatched
     }
 
     /// Handle an incoming response packet (initiator side).
@@ -4764,4 +4818,26 @@ mod receipt_tracker_tests {
         trunc2.copy_from_slice(&hash2[..TRUNCATED_HASHBYTES]);
         assert!(tracker.contains_truncated(&trunc2));
     }
+}
+
+/// Where a link packet came in, for the drop line a refusing handler records
+/// (860): the wire hash the delivering path held, which names the packet as
+/// `ph=`, and the interface it arrived on.
+#[derive(Clone, Copy)]
+struct LinkRx<'a> {
+    raw_hash: Option<&'a [u8; 32]>,
+    interface_index: usize,
+}
+
+/// What [`NodeCore::handle_request_payload`] did with a decrypted request,
+/// so the packet path can name the one outcome that is a drop of the packet
+/// (860). A request Resource has no packet to name and ignores it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequestDispatch {
+    /// Handed to the application as [`NodeEvent::RequestReceived`].
+    Dispatched,
+    /// No handler is registered for the path on the link's destination.
+    NoHandler,
+    /// Malformed, or refused by the handler's policy.
+    Ignored,
 }

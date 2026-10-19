@@ -23,25 +23,32 @@
 //! 2 s, `[FW_BUILD]` every 5 s, `[TRANSPORT]` every 30 s — is about 2.3 KiB
 //! per 30 s window.
 //!
-//! [`LINES_PER_WINDOW`] = 2 per second keeps a full storm's worth of drop
-//! lines (60 × ~90 B ≈ 5.4 KiB per 30 s) plus that context inside the 8 KiB
-//! ring, so a full half-minute of context survives beside the storm. At
-//! ~180 B/s it is also well below the 8 KiB the ring would need refilled per
-//! second to lap itself. (Until #421 the line had no `ph=` and the budget
-//! was 3; the wider line is the better trade — the whole point of the line
-//! is naming the packet, and the summary still recovers the rate.)
+//! [`LINES_PER_WINDOW`] = 2 per 2 s [`WINDOW_MS`] window keeps a full
+//! storm's worth of drop lines (30 × ~118 B ≈ 3.5 KiB per 30 s) plus that
+//! context inside the 8 KiB ring, so a full half-minute of context survives
+//! beside the storm. At ~118 B/s it is also well below the 8 KiB the ring
+//! would need refilled per second to lap itself. (Until #421 the line had no
+//! `ph=` and the budget was 3 a second; until 860 it had no `ht=` and
+//! `transport_id=` and the budget was 2 a second, which at the 118 B line
+//! would have been 7.1 KiB of drops per 30 s, past the ring with the context
+//! beside it. 860 halved the sustained rate by doubling the window rather
+//! than halving the lines in it: a burst of two drops inside a second, an
+//! RTT that did not validate and the link data refused after it, still
+//! prints both lines, where one line a second would have printed only the
+//! first. Each widening of the line was the better trade — the line exists
+//! to name the packet, and the summary still recovers the rate.)
 //!
 //! The LoRa side bounds the storm from the other direction: at the
 //! project's default PHY (SF8, BW 125 kHz) a 100-byte frame is ~164 ms of
-//! airtime, so one carrier delivers at most ~6 packets per second. Two
-//! lines per second names a third of the worst a single radio can produce
+//! airtime, so one carrier delivers at most ~6 packets per second. One
+//! line per second names a sixth of the worst a single radio can produce
 //! and summarises the rest — while a BLE peer, which has no such ceiling,
 //! is exactly the case the limiter earns its keep on.
 //!
 //! # Why a summary and not silence
 //!
 //! A suppressed line that leaves no trace turns a storm into a lull: the
-//! capture shows three drops per second whatever the load, and the shape of
+//! capture shows the same few drops per window whatever the load, and the shape of
 //! the event — which is the whole diagnostic — is gone. The window therefore
 //! closes with one `[DROP] suppressed=<n> window_ms=<w>` line naming what it
 //! held back, so the reader can always recover the rate.
@@ -58,11 +65,12 @@
 
 /// The accounting window, in milliseconds.
 ///
-/// One second: short enough that the summary names a rate a reader can use
-/// directly, long enough that a two- or three-packet burst — a path response
-/// plus an announce plus a link proof, which the stack produces together —
-/// passes through whole instead of being clipped by a window boundary.
-pub const WINDOW_MS: u32 = 1_000;
+/// Two seconds since 860 (one before): short enough that the summary still
+/// names a rate a reader can use directly, and the window in which
+/// [`LINES_PER_WINDOW`] lines fit the ring at the 118 B line `ht=` and
+/// `transport_id=` made (module docs). A burst of two drops passes whole;
+/// a third inside the window is in the summary.
+pub const WINDOW_MS: u32 = 2_000;
 
 /// How many `[DROP]` lines may be printed per [`WINDOW_MS`] window.
 ///
@@ -336,7 +344,8 @@ mod tests {
     // LOG_RING over one 30 s capture window. Render the real worst-case line
     // through the crate that owns its shape rather than estimating bytes —
     // this is the test that forced LINES_PER_WINDOW from 3 to 2 when the
-    // 16-hex `ph=` correlator joined the line.
+    // 16-hex `ph=` correlator joined the line, and WINDOW_MS from 1 s to 2 s
+    // when `ht=` and `transport_id=` did (860).
     #[test]
     fn the_ring_derivation_still_holds() {
         // The debug CDC ring the derivation is sized against
@@ -360,6 +369,10 @@ mod tests {
             ph: Some([0xff; 8]),
             dest: [0xff; 16],
             iface_in: 9,
+            // A HEADER_2 overheard drop carries both 860 fields, the
+            // widest shape the line has.
+            header_type: 2,
+            transport_id: Some([0xff; 16]),
         };
         let mut buf = [0u8; 1024];
         // Eleven days of uptime; a longer soak buys one more digit per order

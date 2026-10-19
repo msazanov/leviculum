@@ -1914,6 +1914,20 @@ pub struct TransportStats {
     pub(crate) drops_no_such_interface: u64,
     pub(crate) drops_next_hop_is_requestor: u64,
     pub(crate) drops_link_iface_mismatch: u64,
+    // The link layer's own refusals (860). u32, saturating, for the reason
+    // `lr_local_client_redirect` below is: the node box had 48 B of slack
+    // when these joined, five u64 would have spent 40 of them, and five u32
+    // packed beside the two already there cost 24. Each counts a packet a
+    // live peer sent us on one of our links, so the rate is bounded by
+    // link traffic; at the 2 packets a second a busy BLE link carries, a
+    // u32 saturates after about 68 years. Past saturation `packets_dropped`
+    // would run ahead of `drops_reason_sum()`, which `record_drop`'s debug
+    // assertion would name; no build lives that long.
+    pub(crate) drops_link_not_active: u32,
+    pub(crate) drops_link_decrypt_fail: u32,
+    pub(crate) drops_rtt_invalid: u32,
+    pub(crate) drops_request_no_handler: u32,
+    pub(crate) drops_channel_decrypt_fail: u32,
     // NOT a drop counter and deliberately outside `packets_dropped`: link
     // requests for a local client's destination that arrived while the path
     // table held nothing for it, and were handed to the connected clients
@@ -2109,6 +2123,51 @@ pub enum DropReason {
     /// another interface while it lived: the link goes stale here as it
     /// does on a Python node.
     LinkIfaceMismatch,
+    /// A packet for one of our own links that is not Active yet (or any
+    /// more): link DATA, a request or a channel packet on a link still in
+    /// its handshake. Until 860 the link layer dropped it at trace level and
+    /// a board printed nothing (858 §Q6: a phone's 483 B transfer packet and
+    /// a 99 B packet on 2026-10-19, 17:48 CEST, left no line on the board
+    /// that terminated the link).
+    ///
+    /// The reference does NOT refuse all of these, which is what makes the
+    /// line worth having: a responder registers its link as active before
+    /// the RTT arrives (`reference/Reticulum/RNS/Link.py:216`,
+    /// `reference/Reticulum/RNS/Transport.py:2447-2452`), and `Link.receive`
+    /// decrypts and delivers plain link data and channel data with no status
+    /// check (`reference/Reticulum/RNS/Link.py:988-1000`, `:1168-1176`). Only
+    /// a request waits for ACTIVE (`reference/Reticulum/RNS/Link.py:853-854`).
+    /// So a rising count of this reason on a link a Python peer opened names
+    /// packets a Python terminus would have taken; 860 only names them, and
+    /// whether to take them is a decision of its own.
+    LinkNotActive,
+    /// Link DATA (a plain packet or a request) for an Active link of ours
+    /// that did not decrypt under the link key: corruption, or a peer that
+    /// derived another key. Python drops this too, logging it at ERROR
+    /// (`reference/Reticulum/RNS/Link.py:1205-1212`, `decrypt` returns
+    /// None).
+    LinkDecryptFail,
+    /// An RTT packet a responder link could not take: the link is not in
+    /// its handshake (already established, a retry or duplicate), we are
+    /// the link's initiator, or it did not decrypt or parse. The responder
+    /// link stays in its handshake if the RTT never validates, and every
+    /// later packet on it is a [`DropReason::LinkNotActive`]; this is the
+    /// line that names the start of that chain (858 §Q6). The reference
+    /// runs an RTT on an already active responder link through again
+    /// (`reference/Reticulum/RNS/Link.py:1059-1061`, no state check), where
+    /// we refuse it; the link is up either way, so that refusal loses
+    /// nothing but is counted here too.
+    RttInvalid,
+    /// A request on an Active link of ours whose path names no handler
+    /// registered on the link's destination. The reference ignores it too:
+    /// `Link.handle_request` looks the path up and does nothing when it is
+    /// absent (`reference/Reticulum/RNS/Link.py:859`).
+    RequestNoHandler,
+    /// A CHANNEL packet on an Active link of ours that did not decrypt.
+    /// Kept apart from [`DropReason::LinkDecryptFail`] because a channel
+    /// packet is the reliable path: its sender retransmits, so a rising
+    /// count names a retry storm the plain-data counter would hide.
+    ChannelDecryptFail,
 }
 
 /// Dedicated tracing target for the per-packet journey contract
@@ -2176,11 +2235,16 @@ impl DropReason {
             DropReason::NoSuchInterface => "no-such-interface",
             DropReason::NextHopIsRequestor => "next-hop-is-requestor",
             DropReason::LinkIfaceMismatch => "link-iface-mismatch",
+            DropReason::LinkNotActive => "link-not-active",
+            DropReason::LinkDecryptFail => "link-decrypt-fail",
+            DropReason::RttInvalid => "rtt-invalid",
+            DropReason::RequestNoHandler => "request-no-handler",
+            DropReason::ChannelDecryptFail => "channel-decrypt-fail",
         }
     }
 
     /// All variants, for taxonomy completeness checks and summary emission.
-    pub const ALL: [DropReason; 22] = [
+    pub const ALL: [DropReason; 27] = [
         DropReason::OverheardTransportId,
         DropReason::InvalidAnnounce,
         DropReason::PlainGroupMultihop,
@@ -2203,6 +2267,11 @@ impl DropReason {
         DropReason::NoSuchInterface,
         DropReason::NextHopIsRequestor,
         DropReason::LinkIfaceMismatch,
+        DropReason::LinkNotActive,
+        DropReason::LinkDecryptFail,
+        DropReason::RttInvalid,
+        DropReason::RequestNoHandler,
+        DropReason::ChannelDecryptFail,
     ];
 }
 
@@ -2375,6 +2444,33 @@ impl TransportStats {
         self.drops_link_iface_mismatch
     }
 
+    /// Packets for one of our links refused because the link was not Active
+    /// (860).
+    pub fn drops_link_not_active(&self) -> u64 {
+        u64::from(self.drops_link_not_active)
+    }
+
+    /// Link DATA or requests on an Active link of ours that did not decrypt
+    /// (860).
+    pub fn drops_link_decrypt_fail(&self) -> u64 {
+        u64::from(self.drops_link_decrypt_fail)
+    }
+
+    /// RTT packets a responder link could not take (860).
+    pub fn drops_rtt_invalid(&self) -> u64 {
+        u64::from(self.drops_rtt_invalid)
+    }
+
+    /// Requests on one of our links naming no registered handler (860).
+    pub fn drops_request_no_handler(&self) -> u64 {
+        u64::from(self.drops_request_no_handler)
+    }
+
+    /// CHANNEL packets on one of our links that did not decrypt (860).
+    pub fn drops_channel_decrypt_fail(&self) -> u64 {
+        u64::from(self.drops_channel_decrypt_fail)
+    }
+
     /// Link requests for a local client's destination that arrived with an
     /// empty path table and were handed to the connected clients instead of
     /// dying as overheard/no-path (#374). Not a drop; not part of
@@ -2427,6 +2523,11 @@ impl TransportStats {
             + self.drops_no_such_interface
             + self.drops_next_hop_is_requestor
             + self.drops_link_iface_mismatch
+            + self.drops_link_not_active()
+            + self.drops_link_decrypt_fail()
+            + self.drops_rtt_invalid()
+            + self.drops_request_no_handler()
+            + self.drops_channel_decrypt_fail()
     }
 
     /// Single choke point for every packet drop (OBS-2b).
@@ -2460,6 +2561,21 @@ impl TransportStats {
             DropReason::NoSuchInterface => self.drops_no_such_interface += 1,
             DropReason::NextHopIsRequestor => self.drops_next_hop_is_requestor += 1,
             DropReason::LinkIfaceMismatch => self.drops_link_iface_mismatch += 1,
+            DropReason::LinkNotActive => {
+                self.drops_link_not_active = self.drops_link_not_active.saturating_add(1)
+            }
+            DropReason::LinkDecryptFail => {
+                self.drops_link_decrypt_fail = self.drops_link_decrypt_fail.saturating_add(1)
+            }
+            DropReason::RttInvalid => {
+                self.drops_rtt_invalid = self.drops_rtt_invalid.saturating_add(1)
+            }
+            DropReason::RequestNoHandler => {
+                self.drops_request_no_handler = self.drops_request_no_handler.saturating_add(1)
+            }
+            DropReason::ChannelDecryptFail => {
+                self.drops_channel_decrypt_fail = self.drops_channel_decrypt_fail.saturating_add(1)
+            }
         }
         debug_assert_eq!(
             self.packets_dropped,
@@ -2870,6 +2986,25 @@ pub enum TransportEvent {
         /// requested destination. For those, `destination_hash` plus the
         /// line's own timestamp remain the correlator.
         packet_hash_prefix: Option<[u8; PKT_PH_BYTES]>,
+        /// The packet's header type, read off its flags.
+        ///
+        /// `reason=overheard-transport-id` alone is recorded from three
+        /// sites (the HEADER_2 foreign-id gate, the HEADER_1 undesignated
+        /// link request, the HEADER_1 undesignated data packet), and a
+        /// reader of the 2026-10-19 field capture had to tell them apart by
+        /// byte arithmetic (858 §Q5). The header type names the site.
+        header_type: HeaderType,
+        /// The transport id a HEADER_2 packet carried, `None` on HEADER_1:
+        /// which neighbour the packet was addressed to, the other half of
+        /// "whose drop is it" (858 §Q5).
+        ///
+        /// Cost: this field and `header_type` add 18 bytes to this variant, and none to the event: on
+        /// `thumbv7em-none-eabihf` `TransportEvent` and `NodeEvent` stay 216
+        /// bytes each (232 on x86_64), set by larger variants, measured
+        /// before and after with a `size_of` probe. The queue entry, which
+        /// on a shared medium carries more of these than of anything else,
+        /// did not grow.
+        transport_id: Option<[u8; TRUNCATED_HASHBYTES]>,
     },
 
     /// One announce transmission, and which of the occasions in
@@ -4403,6 +4538,8 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             interface_in: iface_in,
             hops: packet.hops,
             packet_hash_prefix,
+            header_type: packet.flags.header_type,
+            transport_id: packet.transport_id,
         });
     }
 
@@ -5002,6 +5139,11 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 no_such_interface = self.stats.drops_no_such_interface,
                 next_hop_is_requestor = self.stats.drops_next_hop_is_requestor,
                 link_iface_mismatch = self.stats.drops_link_iface_mismatch,
+                link_not_active = self.stats.drops_link_not_active,
+                link_decrypt_fail = self.stats.drops_link_decrypt_fail,
+                rtt_invalid = self.stats.drops_rtt_invalid,
+                request_no_handler = self.stats.drops_request_no_handler,
+                channel_decrypt_fail = self.stats.drops_channel_decrypt_fail,
                 total = self.stats.packets_dropped,
                 // Outside `total` on purpose: a redirect is a delivery, not
                 // a drop (#374); it rides this line because the operators
@@ -6053,7 +6195,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// recall source is the cached announce for the destination
     /// (`get_announce_cache`, keyed by destination hash, holding the raw announce
     /// whose payload starts with the 64-byte public key), the same source the
-    /// link-request path uses at transport.rs:4222. A destination with no cached
+    /// link-request path uses at transport.rs:4357. A destination with no cached
     /// announce cannot be associated with an identity, so it is left untouched,
     /// exactly as Python keeps a path whose `Identity.recall` returns `None`.
     ///
@@ -12048,7 +12190,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // Emit the STORED path-table count, matching Python
                 // Transport.py:2956 (`packet.hops = path_table[dst][IDX_PT_HOPS]`).
                 // The cached raw's hop byte is the PRE-increment wire value
-                // (`stored - 1`): the receipt increment (`transport.rs:2711`) only
+                // (`stored - 1`): the receipt increment (`transport.rs:2827`) only
                 // touches the in-memory packet, never the raw buffer stashed by
                 // `set_announce_cache`. Using it here would put `stored - 1` on the
                 // wire and every peer that learns via this response would be one hop
@@ -16046,12 +16188,16 @@ mod tests {
                             interface_in,
                             hops,
                             packet_hash_prefix,
+                            header_type,
+                            transport_id,
                         } => Some((
                             *destination_hash,
                             *reason,
                             *interface_in,
                             *hops,
                             *packet_hash_prefix,
+                            *header_type,
+                            *transport_id,
                         )),
                         _ => None,
                     })
@@ -16063,7 +16209,7 @@ mod tests {
                      once; events: {:?}",
                     transport.events
                 );
-                let (dst, reason, iface_in, hops, ph) = dropped[0];
+                let (dst, reason, iface_in, hops, ph, ht, transport_id) = dropped[0];
                 assert_eq!(reason, DropReason::OverheardTransportId);
                 assert_eq!(
                     dst, [0x11; TRUNCATED_HASHBYTES],
@@ -16082,6 +16228,15 @@ mod tests {
                     "the HEADER_2 overheard gate decides on the header alone \
                      and must not start hashing its 99 %-volume path for a \
                      correlator (#421)"
+                );
+                // 858 §Q5: three sites share this reason; the header type and
+                // the foreign transport id say which one fired and whose
+                // packet it was.
+                assert_eq!(ht, HeaderType::Type2);
+                assert_eq!(
+                    transport_id,
+                    Some([0xAB; TRUNCATED_HASHBYTES]),
+                    "the neighbour the packet was addressed to"
                 );
             }
 
@@ -18274,7 +18429,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // `random_blobs` (transport.rs:7614), a deliberate anti-replay
+            // `random_blobs` (transport.rs:7756), a deliberate anti-replay
             // extension — so the blob count is not a rejection indicator.)
             transport
                 .clock

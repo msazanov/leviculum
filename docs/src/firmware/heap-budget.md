@@ -17,7 +17,7 @@ says otherwise.
 The node box is the one `Box<NodeCore<RawHwRng, EmbassyClock,
 EmbeddedStorage>>` the firmware allocates at boot. It is the same type
 on the T114, the RAK4631 and the solar node, and it measures the same
-on all three: **31 712 B** since #852 (31 704 B since #666, 31 696 B at 68429da6), read as `size_of` of that type
+on all three: **31 736 B** since 860 (31 712 B since #852, 31 704 B since #666, 31 696 B at 68429da6), read as `size_of` of that type
 in the release build of each binary (`cargo build --release --features
 bsp-t114 --bin t114`, and the `bsp-rak4631,rak-baseboard` and
 `bsp-solarnode` equivalents) off a compile error that prints it. At
@@ -40,7 +40,7 @@ The field T114 on ed0754e4 (2026-10-07) printed `node_box=31152` and
 
 | Term | Per entry | Cap | Total | Source |
 |---|---:|---:|---:|---|
-| Node box, `NodeCore` | | 1 | **31 712** | `NODE_BOX_BYTES`, measured |
+| Node box, `NodeCore` | | 1 | **31 736** | `NODE_BOX_BYTES`, measured |
 | of which `EmbeddedStorage` | | 1 | 29 968 | measured |
 | `packet_cache` + `packet_cache_prev` | 16 B key | 2 × 256 | 11 272 | measured, 5 636 each |
 | `known_identities` | `Identity` 504 B, 533 B a slot | 8 | 4 264 | measured |
@@ -69,20 +69,21 @@ The field T114 on ed0754e4 (2026-10-07) printed `node_box=31152` and
 | of which fragmentation | | | 6 144 | `FRAG_RESERVE_BYTES` |
 | of which the shared BLE channels | 2 × 4 × 564 | | 4 512 | `CHANNEL_BUDGET_BYTES` |
 | of which one incoming resource | 8 192 | 1 | 8 192 | `MAX_INCOMING_RESOURCE_BYTES` |
-| **Total** | | | **98 248** | `budget_total` |
+| **Total** | | | **98 280** | `budget_total` |
 | **Heap** | | | **98 304** | `HEAP_SIZE` |
-| **Slack** | | | **48** | `budget_slack` |
+| **Slack** | | | **24** | `budget_slack` |
 | **Boot serve cap** | | | **0** | `budget_serve_cap` |
 
-The heap is full but for 48 B: 31 696 B was exactly the node box at
+The heap is full but for 24 B: 31 696 B was exactly the node box at
 which four links fit with nothing left, #662 took 16 B a link out
 of `Link` (the RTT retry state), so the boundary now sits at 31 760 B
 (`max_endpoint_links_at_its_boundaries`), and #666 spent 8 B of the
 gain on the boxed split request/response state in `NodeCore`, #852 8 B
-more on the boxed loop refusals in `Transport`. 49 more
-bytes in `NodeCore`, or 15 in `Link`, cost an endpoint link and fail the
-binaries' `MAX_ENDPOINT_LINKS >= ble::MAX_LINKS` assert at compile time.
-48 B funds no serve, so the boot serve cap is still 0 B and the propagation
+more on the boxed loop refusals in `Transport`, 860 24 B more on five
+link-layer drop counters in `TransportStats`. 25 more bytes in
+`NodeCore`, or more than 6 B a link in `per_link`, cost an endpoint link
+and fail the binaries' `MAX_ENDPOINT_LINKS >= ble::MAX_LINKS` assert at
+compile time. 24 B funds no serve, so the boot serve cap is still 0 B and the propagation
 role serves only what the live heap funds at each `/get`
 (`live_serve_cap`).
 

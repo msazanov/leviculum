@@ -324,7 +324,7 @@ pub fn lora_queue_drop_stale<S: LineSink>(sink: &mut S, drop: &StaleDrop) {
 ///
 /// Emitted only for a window that refused something. Without it a purge and a
 /// trickle read identically on a capture, since both show
-/// `leviculum_drop_budget::LINES_PER_WINDOW` lines per second.
+/// `leviculum_drop_budget::LINES_PER_WINDOW` lines per window.
 pub fn lora_queue_drop_suppressed<S: LineSink>(sink: &mut S, suppressed: u32, window_ms: u32) {
     sink.line(
         Route::Gated,

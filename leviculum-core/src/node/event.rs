@@ -11,6 +11,7 @@ use crate::announce::ReceivedAnnounce;
 use crate::constants::TRUNCATED_HASHBYTES;
 use crate::destination::DestinationHash;
 use crate::link::{LinkCloseReason, LinkId};
+use crate::packet::HeaderType;
 use crate::transport::{
     AnnounceTableClosed, AnnounceTxOccasion, DiscoveryWindow, DropReason, RelayOutcome,
     PKT_PH_BYTES,
@@ -298,6 +299,14 @@ pub enum NodeEvent {
         /// [`TransportEvent::PacketDropped`](crate::transport::TransportEvent::PacketDropped)
         /// for which sites carry `None` and why.
         packet_hash_prefix: Option<[u8; PKT_PH_BYTES]>,
+        /// The packet's header type, so a `[DROP]` line says which of the
+        /// sites sharing a reason fired (858 §Q5).
+        header_type: HeaderType,
+        /// The transport id a HEADER_2 packet carried, `None` on HEADER_1.
+        /// See
+        /// [`TransportEvent::PacketDropped`](crate::transport::TransportEvent::PacketDropped)
+        /// for what the two fields cost the event.
+        transport_id: Option<[u8; TRUNCATED_HASHBYTES]>,
     },
 
     /// One announce this node transmitted, and which occasion put it on the
