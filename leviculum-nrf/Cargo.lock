@@ -977,6 +977,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "leviculum-feedback"
+version = "0.1.0"
+
+[[package]]
 name = "leviculum-gnss-init"
 version = "0.1.0"
 
@@ -1074,6 +1078,7 @@ dependencies = [
  "leviculum-channel-access",
  "leviculum-core",
  "leviculum-drop-budget",
+ "leviculum-feedback",
  "leviculum-gnss-init",
  "leviculum-gnss-presence",
  "leviculum-gnss-time",

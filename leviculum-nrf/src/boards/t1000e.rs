@@ -286,20 +286,37 @@ pub type LedPin = peripherals::P0_24;
 pub type UserButton = peripherals::P0_06;
 
 // Buzzer
-/// The buzzer's PWM line (`PIN_BUZZER (0 + 25)`, "pwm output"). Declared and
-/// left alone.
+/// The buzzer's PWM line (`PIN_BUZZER (0 + 25)`, "pwm output"). The
+/// feedback grammar's buzzer player drives it ([`buzzer_pwm`], order 892).
 pub type BuzzerPin = peripherals::P0_25;
 /// The buzzer's enable (`BUZZER_EN_PIN (32 + 5)`). Meshtastic keeps it
 /// "always high" and drives the tone on [`BuzzerPin`].
 pub type BuzzerEnable = peripherals::P1_05;
+/// The PWM instance the buzzer takes. No other part of this firmware uses
+/// a PWM peripheral.
+pub type BuzzerPwm = peripherals::PWM0;
 
-/// Hold the buzzer's enable **low**, so the buzzer is unpowered whatever its
-/// PWM line does. Nothing drives the buzzer on this firmware: no event has
-/// been chosen that it should sound for, and that choice is a product
-/// decision, not part of porting the board. The returned pin must be kept
+/// Create the buzzer's enable, **low**: the buzzer is unpowered whatever
+/// its PWM line does. Unlike Meshtastic, which holds it high for the life
+/// of the board, the feedback player (`crate::feedback::buzzer_task`)
+/// raises it only while a pattern plays. The returned pin must be kept
 /// alive: dropping an embassy `Output` disconnects it.
-pub fn buzzer_off(pin: Peri<'static, BuzzerEnable>) -> Output<'static> {
+pub fn buzzer_enable(pin: Peri<'static, BuzzerEnable>) -> Output<'static> {
     Output::new(pin, Level::Low, OutputDrive::Standard)
+}
+
+/// Create the buzzer's PWM on [`BuzzerPin`]: 1 MHz counter clock (16 MHz
+/// / 16), so the tone's period fits the 15-bit counter from 31 Hz up, and
+/// the line idles low while the generator is off. The player sets the
+/// tone.
+pub fn buzzer_pwm(
+    pwm: Peri<'static, BuzzerPwm>,
+    pin: Peri<'static, BuzzerPin>,
+) -> embassy_nrf::pwm::SimplePwm<'static> {
+    let mut config = embassy_nrf::pwm::SimpleConfig::default();
+    config.prescaler = embassy_nrf::pwm::Prescaler::Div16;
+    config.ch0_idle_level = Level::Low;
+    embassy_nrf::pwm::SimplePwm::new_1ch(pwm, pin, &config)
 }
 
 /// Create the LED output. **Active HIGH**; off at boot.

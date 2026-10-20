@@ -65,6 +65,9 @@ pub mod chtm;
 pub mod clock;
 pub mod dispatch;
 pub mod events;
+/// The feedback grammar's players (#459, order 892): the LED, the
+/// notification LED and the T1000-E's buzzer answer the button.
+pub mod feedback;
 pub mod flash;
 /// The `[HEAP_CENSUS]` line (Codeberg #388): who holds the heap the
 /// `[HEAP]` line watches. Gated like [`pn`] — the engine is one of the

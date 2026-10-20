@@ -1,0 +1,9 @@
+[package]
+name = "leviculum-feedback"
+version = "0.1.0"
+edition = "2021"
+authors = ["Lew Palm"]
+license = "AGPL-3.0-or-later"
+description = "The one-button feedback grammar as on/off patterns: mode, battery in quarters, error, notify, release now. The timings, their reasons and a playback stepper, host-tested"
+
+[dependencies]

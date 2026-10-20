@@ -164,6 +164,7 @@ async fn main(spawner: Spawner) {
     // (P1.05), and that one belongs to the receiver, so it is raised in
     // the GNSS block below rather than at board level.
     let mut led = solarnode::led(p.P0_19);
+    let led_notification = solarnode::led_notification(p.P0_15);
 
     let rng = leviculum_nrf::rng::RawHwRng::new();
 
@@ -678,6 +679,24 @@ async fn main(spawner: Spawner) {
         cortex_m::asm::nop();
     }
     led.set_level(Level::Low);
+    // From here the two LEDs are the feedback grammar's (order 892): the
+    // green one answers the button (battery on a short press, a blip at
+    // 2 s), the blue one blinks once for a message for this board. Both
+    // active high (`boards/solarnode.rs`).
+    leviculum_nrf::feedback::spawn_led(
+        &spawner,
+        led,
+        true,
+        leviculum_nrf::feedback::Sink::Led,
+        None,
+    );
+    leviculum_nrf::feedback::spawn_led(
+        &spawner,
+        led_notification,
+        true,
+        leviculum_nrf::feedback::Sink::Notify,
+        None,
+    );
 
     // Telemetry (Codeberg #236). The delivery destination is registered
     // unconditionally, target or not: it is what a receiver verifies our

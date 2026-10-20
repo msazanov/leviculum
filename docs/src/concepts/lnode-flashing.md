@@ -273,7 +273,7 @@ with what each board's `INFO_UF2.TXT` claims. A tool that cross-checks
 the two is immune to a bootloader too old to report the line at all.
 
 **The image is not part of this repo's source.** The crate dependency
-(`leviculum-nrf/Cargo.toml:269`) supplies Rust bindings, not the blob.
+(`leviculum-nrf/Cargo.toml:273`) supplies Rust bindings, not the blob.
 The authoritative copy is Nordic's own distribution, downloaded
 2026-08-10 to `~/coding/s140_nrf52_730/`, containing
 `s140_nrf52_7.3.0_softdevice.hex` (md5
@@ -609,7 +609,7 @@ module and the Pocket V2 share a `Board-ID` and have separate builds,
 but the baseboard build degrades cleanly on a bare module: the display
 is found by an I2C probe and its task exits when nothing answers
 (`leviculum-nrf/src/display.rs:162-168`), the button pin is pulled to its
-released level so it never reads as pressed (`leviculum-nrf/src/button.rs:69`), the GNSS
+released level so it never reads as pressed (`leviculum-nrf/src/button.rs:72`), the GNSS
 task waits on a UART that stays silent, and the battery task publishes
 into a watch channel whose only subscriber is the display that is not
 running. One image therefore covers both, at 47.6 KiB of flash and

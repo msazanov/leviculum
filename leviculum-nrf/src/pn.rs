@@ -3297,6 +3297,7 @@ impl Engine {
                                 durable as u8
                             ),
                         );
+                        notify_if_for_us(&destination_hash, duplicate);
                     }
                     UploadOutcome::InvalidStamp { reject } => {
                         // The verdict is late by construction now — the
@@ -3576,6 +3577,7 @@ impl Engine {
                         durable as u8
                     ),
                 );
+                notify_if_for_us(&destination_hash, duplicate);
                 if !duplicate && durable {
                     if let Some(batch) = self.sync_batch.as_mut() {
                         batch.drain.accept(size as u64);
@@ -3725,4 +3727,17 @@ async fn execute(op: &FlushOp) -> Option<u32> {
         },
     };
     pn_execute(op).await.ok().map(|done| done.free_bytes)
+}
+
+/// A message the role just stored is for this board's own `lxmf.delivery`
+/// destination: the feedback grammar's "a message for the user arrived"
+/// (order 892, `crate::feedback::notify`). The board has no inbox, so the
+/// propagation store is the one place a message for its user is kept
+/// (`crate::telemetry::register_delivery_destination`); a copy already
+/// held (`dup=1`) is not news.
+fn notify_if_for_us(destination_hash: &[u8; 16], duplicate: bool) {
+    let own = crate::identity::report().and_then(|report| report.lxmf);
+    if !duplicate && own.as_ref() == Some(destination_hash) {
+        crate::feedback::notify();
+    }
 }

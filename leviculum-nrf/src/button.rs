@@ -5,15 +5,16 @@
 //! announce is decided in [`leviculum_announce_policy::ButtonGate`]; this
 //! task only times the edges, writes the `BTN_PRESS` and `BTN_HOLD` lines,
 //! raises [`ANNOUNCE_PRESS`](crate::button::ANNOUNCE_PRESS) for a double
-//! press and wakes the display where there is one. The announces
+//! press, wakes the display where there is one and asks
+//! [`crate::feedback`] for the status and "release now" patterns. The announces
 //! themselves go out from the node loop, which owns the node
 //! ([`crate::announce::on_button_press`]).
 //!
 //! | Gesture | `action=` | Does |
 //! |---|---|---|
-//! | short | `status` | wakes the display (Pocket V2); the LED and buzzer status is the feedback grammar's pass |
+//! | short | `status` | wakes the display (Pocket V2), then the battery in quarters on the LED and the buzzer (`crate::feedback`) |
 //! | double | `announce` / `rate-limited` | both announces, at most one set per 30 s |
-//! | long, 2 s | `long` | nothing yet: the mode switch, once Tracker mode exists |
+//! | long, 2 s | `long` | nothing yet: the mode switch, once Tracker mode exists; the 2 s mark blips "release now" |
 //! | very long, 8 s | `hold8` | nothing yet: the power off, once the board can sleep |
 //!
 //! | Board | Pin | Wiring |
@@ -39,7 +40,9 @@ use embassy_nrf::Peri;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
 use embassy_time::{Instant, Timer};
-use leviculum_announce_policy::{ButtonEvent, ButtonGate, PressAction, BUTTON_DEBOUNCE_MS};
+use leviculum_announce_policy::{
+    ButtonEvent, ButtonGate, PressAction, BUTTON_DEBOUNCE_MS, LONG_PRESS_MIN_MS,
+};
 
 /// Raised once per double press that announces; the node loop waits on it beside
 /// its other inputs. A `Signal` rather than a channel because the rate
@@ -114,14 +117,18 @@ pub async fn button_task(wiring: ButtonWiring) {
         let press = match event {
             Some(ButtonEvent::Press(press)) => press,
             // The moment a held button reaches 2 s and 8 s, so the rig can
-            // see it; the "release now" signal to the user is the feedback
-            // grammar's pass. The gesture itself is the `BTN_PRESS` line at
-            // the release. The formatter appends the line's `t=`.
+            // see it. At 2 s the board blips "release now" (order 892); the
+            // 8 s mark has no signal until it powers the board off. The
+            // gesture itself is the `BTN_PRESS` line at the release. The
+            // formatter appends the line's `t=`.
             Some(ButtonEvent::Held { ms }) => {
                 crate::log::log_fmt_critical(
                     "",
                     format_args!("BTN_HOLD board={} ms={}", board, ms),
                 );
+                if ms == LONG_PRESS_MIN_MS {
+                    crate::feedback::release_now();
+                }
                 continue;
             }
             None => continue,
@@ -135,25 +142,25 @@ pub async fn button_task(wiring: ButtonWiring) {
                 press.held_ms
             ),
         );
-        match press.action {
-            // A double press outside the 30 s window: both announces.
-            PressAction::Announce => ANNOUNCE_PRESS.signal(()),
-            // A short press is status. The display wake below is its
-            // whole effect in this pass; the LED and buzzer answer is the
-            // feedback grammar's pass.
-            PressAction::Status => {}
-            // Recognised and reported, nothing else: the long press becomes
-            // the mode switch in the pass that builds Tracker mode, the very
-            // long one the power off in the pass that builds the sleep.
-            PressAction::Long | PressAction::Hold8 => {}
-            PressAction::RateLimited | PressAction::Debounced => {}
-        }
-
         // Any press lights a dark display and restarts its minute; a
         // debounced glitch was never a press.
         #[cfg(feature = "display")]
         if press.action != PressAction::Debounced {
             crate::baseboard::DISPLAY_WAKE.signal(());
+        }
+
+        match press.action {
+            // A double press outside the 30 s window: both announces.
+            PressAction::Announce => ANNOUNCE_PRESS.signal(()),
+            // A short press is status: after the display wake above, the
+            // battery in quarters on the LED and the buzzer (order 892).
+            // The mode blink joins it once there is a mode.
+            PressAction::Status => crate::feedback::status(),
+            // Recognised and reported, nothing else: the long press becomes
+            // the mode switch in the pass that builds Tracker mode, the very
+            // long one the power off in the pass that builds the sleep.
+            PressAction::Long | PressAction::Hold8 => {}
+            PressAction::RateLimited | PressAction::Debounced => {}
         }
     }
 }

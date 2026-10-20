@@ -158,9 +158,10 @@ async fn main(spawner: Spawner) {
     let _power_sensors = t1000e::power_sensors(p.P1_06);
     let gnss_control = t1000e::gnss_control(p.P0_08, p.P1_15, p.P0_15, p.P1_14);
     let mut led = t1000e::led(p.P0_24);
-    // The buzzer's enable held low for the life of the board: nothing drives
-    // the buzzer (`boards/t1000e.rs` says why).
-    let _buzzer_off = t1000e::buzzer_off(p.P1_05);
+    // The buzzer's enable starts low; the feedback grammar's buzzer player
+    // raises it for the length of a pattern (order 892, `crate::feedback`).
+    let buzzer_enable = t1000e::buzzer_enable(p.P1_05);
+    let buzzer_pwm = t1000e::buzzer_pwm(p.PWM0, p.P0_25);
 
     let rng = leviculum_nrf::rng::RawHwRng::new();
 
@@ -605,6 +606,18 @@ async fn main(spawner: Spawner) {
         cortex_m::asm::nop();
     }
     led.set_level(Level::Low);
+    // From here the LED and the buzzer are the feedback grammar's (order
+    // 892): a short press plays the battery, a held button blips at 2 s, a
+    // message for this board blinks and buzzes once. No notification LED,
+    // so `notify` plays on the LED.
+    leviculum_nrf::feedback::spawn_led(
+        &spawner,
+        led,
+        true,
+        leviculum_nrf::feedback::Sink::Led,
+        None,
+    );
+    leviculum_nrf::feedback::spawn_buzzer(&spawner, buzzer_pwm, buzzer_enable);
 
     // Telemetry (Codeberg #236). The delivery destination is registered
     // unconditionally, target or not: it is what a receiver verifies our

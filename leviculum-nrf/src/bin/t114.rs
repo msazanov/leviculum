@@ -600,6 +600,17 @@ async fn main(spawner: Spawner) {
         cortex_m::asm::nop();
     }
     led.set_level(Level::High);
+    // From here the LED is the feedback grammar's (order 892): a short
+    // press blinks the battery, a held button blips at 2 s, a message for
+    // this board blinks once. Active low (`boards/t114.rs`). The board has
+    // no notification LED, so `notify` plays here too.
+    leviculum_nrf::feedback::spawn_led(
+        &spawner,
+        led,
+        false,
+        leviculum_nrf::feedback::Sink::Led,
+        None,
+    );
 
     // Telemetry (Codeberg #236). The delivery destination is registered
     // unconditionally, target or not: it is what a receiver verifies our

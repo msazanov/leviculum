@@ -118,8 +118,9 @@ pub static DISPLAY_WAKE: embassy_sync::signal::Signal<CriticalSectionRawMutex, (
     embassy_sync::signal::Signal::new();
 
 /// One-shot signals raised by `lora.rs` whenever a packet boundary
-/// completes. The LED pulse tasks in `led.rs` block on these and emit a
-/// short flash each time. Coalescing is intentional — a Signal stores at
+/// completes. The Pocket V2's LED players (`led.rs`, `feedback.rs`)
+/// wait on these and emit a short flash each time no feedback pattern
+/// is playing. Coalescing is intentional — a Signal stores at
 /// most one pending event, so a burst of TX-completes inside an 80 ms
 /// window collapses to a single flash. That matches what the eye can
 /// resolve anyway.

@@ -351,9 +351,10 @@ before its first fix or ten minutes after boot, as a gate in front of the
 wrong bit, so the driver polls. Since #459 a double press of the button
 (`P0.06`, active high) announces, as on every board
 (`leviculum-nrf/src/button.rs`); the long press is also the product's
-power button. The buzzer (`P0.25`, enable `P1.05`) is not driven: its
-enable is held low, because which event it should sound for is a product
-decision nobody has made. The product has no display.
+power button. The buzzer (`P0.25` on `PWM0`, enable `P1.05`) plays the
+feedback grammar of [One button](../concepts/one-button.md) at 247 Hz
+since 892; its enable is raised only while a pattern plays. The product
+has no display.
 
 The bootloader's `Board-ID` is `nRF52840-T1000-E-v1`, bound to this one
 product, so `lnflash` has a flashing entry for it at level *Verified*:
@@ -489,7 +490,7 @@ Each binary names the radio driver it links in `required-features`
 (`radio-sx1262` for the first three, `bsp-t1000e` for the last), so a
 feature set compiles the binaries on its own radio and no others.
 
-(`leviculum-nrf/Cargo.toml:458-470`)
+(`leviculum-nrf/Cargo.toml:462-474`)
 
 The board-support-package (BSP) features select the runtime for a given
 board. Exactly one BSP feature must be enabled per build; a
@@ -498,26 +499,26 @@ board. Exactly one BSP feature must be enabled per build; a
 
 | Feature | Effect | Cite |
 |---------|--------|------|
-| `bsp-t114` | T114 BSP (+ SoftDevice BLE + status display + GNSS + battery) | `leviculum-nrf/Cargo.toml:375` |
-| `bsp-rak4631` | RAK4631 BSP (+ SoftDevice BLE) | `leviculum-nrf/Cargo.toml:359` |
-| `bsp-solarnode` | SenseCAP Solar Node P1-Pro BSP (+ SoftDevice BLE + battery + GNSS). No display | `leviculum-nrf/Cargo.toml:396` |
-| `bsp-t1000e` | SenseCAP T1000-E BSP (+ SoftDevice BLE, GNSS, battery, motion), on the LR11xx driver. No display | `leviculum-nrf/Cargo.toml:406` |
-| `display` | SSD1306 OLED, probed at run time | `leviculum-nrf/Cargo.toml:419` |
-| `gnss` | NMEA0183 GNSS (ZOE-M8Q on the V2 baseboard, L76K on the T114 and the Solar Node, AG3335 on the T1000-E) | `leviculum-nrf/Cargo.toml:420` |
-| `battery` | pack-voltage monitor: the `BATTERY` log line, the panel's voltage and, on the V2, the T114 and the T1000-E, the telemetry field. Unconditional under `bsp-t114` (the divider is on every T114), under `bsp-solarnode` (it is on the XIAO module) and under `bsp-t1000e` (part of the product), opt-in on the V2 via `rak-baseboard` | `leviculum-nrf/Cargo.toml:426` |
-| `motion` | the QMA6100P accelerometer as a `MOTION` moving or still line (#457); T1000-E only, unconditional under `bsp-t1000e` | `leviculum-nrf/Cargo.toml:427` |
-| `rak-baseboard` | aggregate of `display` + `gnss` + `battery` | `leviculum-nrf/Cargo.toml:428` |
+| `bsp-t114` | T114 BSP (+ SoftDevice BLE + status display + GNSS + battery) | `leviculum-nrf/Cargo.toml:379` |
+| `bsp-rak4631` | RAK4631 BSP (+ SoftDevice BLE) | `leviculum-nrf/Cargo.toml:363` |
+| `bsp-solarnode` | SenseCAP Solar Node P1-Pro BSP (+ SoftDevice BLE + battery + GNSS). No display | `leviculum-nrf/Cargo.toml:400` |
+| `bsp-t1000e` | SenseCAP T1000-E BSP (+ SoftDevice BLE, GNSS, battery, motion), on the LR11xx driver. No display | `leviculum-nrf/Cargo.toml:410` |
+| `display` | SSD1306 OLED, probed at run time | `leviculum-nrf/Cargo.toml:423` |
+| `gnss` | NMEA0183 GNSS (ZOE-M8Q on the V2 baseboard, L76K on the T114 and the Solar Node, AG3335 on the T1000-E) | `leviculum-nrf/Cargo.toml:424` |
+| `battery` | pack-voltage monitor: the `BATTERY` log line, the panel's voltage and, on the V2, the T114 and the T1000-E, the telemetry field. Unconditional under `bsp-t114` (the divider is on every T114), under `bsp-solarnode` (it is on the XIAO module) and under `bsp-t1000e` (part of the product), opt-in on the V2 via `rak-baseboard` | `leviculum-nrf/Cargo.toml:430` |
+| `motion` | the QMA6100P accelerometer as a `MOTION` moving or still line (#457); T1000-E only, unconditional under `bsp-t1000e` | `leviculum-nrf/Cargo.toml:431` |
+| `rak-baseboard` | aggregate of `display` + `gnss` + `battery` | `leviculum-nrf/Cargo.toml:432` |
 
 > **Note on BLE:** Both firmware entry points register a BLE interface
 > and call `leviculum_nrf::ble::init`
 > (`leviculum-nrf/src/bin/t114.rs:361`,
 > `leviculum-nrf/src/bin/rak4631.rs:413`). The Cargo `softdevice`
 > feature, and therefore the BLE stack, is pulled in by *both* BSP
-> features (`leviculum-nrf/Cargo.toml:359`,
-> `leviculum-nrf/Cargo.toml:201`).
+> features (`leviculum-nrf/Cargo.toml:363`,
+> `leviculum-nrf/Cargo.toml:205`).
 
 The baseboard peripherals are each gated behind their own Cargo feature
-(`leviculum-nrf/Cargo.toml:419-428`) and spawned only when that feature
+(`leviculum-nrf/Cargo.toml:423-432`) and spawned only when that feature
 is on (`leviculum-nrf/src/bin/rak4631.rs:339-374`). Because each of them
 either probes for its hardware or degrades to nothing when it is absent,
 the aggregate build is what we ship for the whole family rather than a
