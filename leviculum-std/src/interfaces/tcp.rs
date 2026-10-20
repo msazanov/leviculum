@@ -132,11 +132,48 @@ pub fn disable_fault_injection() {
     CORRUPT_ACTIVE.store(false, Ordering::Relaxed);
 }
 
+/// Where a reconnecting TCP client dials: a host name or IP literal, and a
+/// port. Resolved on every connect attempt, never when the interface is
+/// built, so a name that does not resolve yet is a failed attempt and not a
+/// failed start (Codeberg #461).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TcpTarget {
+    pub host: String,
+    pub port: u16,
+}
+
+impl TcpTarget {
+    pub(crate) fn new(host: impl Into<String>, port: u16) -> Self {
+        Self {
+            host: host.into(),
+            port,
+        }
+    }
+}
+
+impl From<SocketAddr> for TcpTarget {
+    fn from(addr: SocketAddr) -> Self {
+        Self::new(addr.ip().to_string(), addr.port())
+    }
+}
+
+impl std::fmt::Display for TcpTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.host.contains(':') {
+            write!(f, "[{}]:{}", self.host, self.port)
+        } else {
+            write!(f, "{}:{}", self.host, self.port)
+        }
+    }
+}
+
 /// Configuration for a reconnecting TCP client interface.
 pub(crate) struct TcpClientConfig {
     pub id: InterfaceId,
     pub name: String,
-    pub addr: SocketAddr,
+    pub target: TcpTarget,
+    /// Resolves `target` on each attempt; `None` is the system resolver.
+    pub resolver: Option<crate::resolver::HostResolver>,
     pub buffer_size: usize,
     pub corrupt_every: Option<u64>,
     pub reconnect_interval: Duration,
@@ -497,7 +534,8 @@ pub(crate) fn spawn_tcp_client_with_reconnect(config: TcpClientConfig) -> Interf
     tokio::spawn(async move {
         tcp_client_reconnect_task(
             id,
-            config.addr,
+            config.target,
+            config.resolver,
             task_name,
             incoming_tx,
             outgoing_rx,
@@ -661,7 +699,8 @@ fn connect_log_line(
 #[allow(clippy::too_many_arguments)]
 async fn tcp_client_reconnect_task(
     id: InterfaceId,
-    addr: SocketAddr,
+    target: TcpTarget,
+    resolver: Option<crate::resolver::HostResolver>,
     name: String,
     incoming_tx: mpsc::Sender<IncomingPacket>,
     outgoing_rx: mpsc::Receiver<OutgoingPacket>,
@@ -685,7 +724,8 @@ async fn tcp_client_reconnect_task(
     // the loop directly.
     let loop_fut = tcp_client_reconnect_loop(
         id,
-        addr,
+        target,
+        resolver,
         name.clone(),
         incoming_tx,
         outgoing_rx,
@@ -721,10 +761,83 @@ async fn connect_hooked(
     crate::socket_hook::connect_hooked(addr, hook.as_ref()).await
 }
 
+/// Which step of a connect attempt failed, for the `TCP_CONNECT_FAILED` line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DialStage {
+    /// The target name gave no address (or the lookup timed out).
+    Resolve,
+    /// Every address the name gave refused or timed out.
+    Connect,
+    /// The SOCKS5 proxy was reached but its CONNECT failed.
+    Socks,
+}
+
+impl DialStage {
+    fn as_str(self) -> &'static str {
+        match self {
+            DialStage::Resolve => "resolve",
+            DialStage::Connect => "connect",
+            DialStage::Socks => "socks",
+        }
+    }
+}
+
+/// One connect attempt's dial: resolve `target` afresh, then try every
+/// address it gave, in order, each bounded by `connect_timeout`.
+///
+/// The reference dials only the first `getaddrinfo` entry
+/// (`TCPInterface.py`, `connect`); trying the rest is a local choice that
+/// is invisible on the wire and lets a dual-stack name whose first family is
+/// unreachable still connect on this attempt instead of never.
+async fn dial(
+    target: &TcpTarget,
+    resolver: Option<&crate::resolver::HostResolver>,
+    connect_timeout: Duration,
+    hook: &Option<crate::socket_hook::OutboundSocketHook>,
+) -> Result<(tokio::net::TcpStream, SocketAddr), (DialStage, io::Error)> {
+    let addrs = match tokio::time::timeout(
+        connect_timeout,
+        crate::resolver::resolve(resolver, &target.host, target.port),
+    )
+    .await
+    {
+        Ok(Ok(addrs)) => addrs,
+        Ok(Err(e)) => return Err((DialStage::Resolve, e)),
+        Err(_elapsed) => {
+            return Err((
+                DialStage::Resolve,
+                io::Error::new(io::ErrorKind::TimedOut, "lookup timed out"),
+            ))
+        }
+    };
+    let mut last = None;
+    for addr in addrs {
+        // Bound each address: a connect that does not resolve within
+        // `connect_timeout` (Windows SYN-retransmit to a closed loopback port,
+        // a black-holed peer that never sends RST) is abandoned, keeping
+        // give-up deterministic across platforms.
+        match tokio::time::timeout(connect_timeout, connect_hooked(addr, hook)).await {
+            Ok(Ok(stream)) => return Ok((stream, addr)),
+            Ok(Err(e)) => last = Some(e),
+            Err(_elapsed) => {
+                last = Some(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "connect attempt timed out",
+                ))
+            }
+        }
+    }
+    Err((
+        DialStage::Connect,
+        last.unwrap_or_else(|| io::Error::other(format!("no addresses for {target}"))),
+    ))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn tcp_client_reconnect_loop(
     id: InterfaceId,
-    addr: SocketAddr,
+    target: TcpTarget,
+    resolver: Option<crate::resolver::HostResolver>,
     name: String,
     incoming_tx: mpsc::Sender<IncomingPacket>,
     mut outgoing_rx: mpsc::Receiver<OutgoingPacket>,
@@ -762,28 +875,22 @@ async fn tcp_client_reconnect_loop(
         // Between here and a successful connect the carrier is down; say so
         // (L-0020, Python `self.online = False` across teardown/reconnect).
         counters.set_online(false);
-        // Bound each attempt: a connect that does not resolve within
-        // `connect_timeout` (Windows SYN-retransmit to a closed loopback port,
-        // a black-holed peer that never sends RST) is abandoned and counted,
-        // keeping give-up deterministic across platforms.
-        let connect_result = match tokio::time::timeout(
+        // The name is looked up again on every attempt (Codeberg #461), so a
+        // target that did not resolve at start, or whose address moved, is
+        // reached once the resolver answers.
+        let connect_result = dial(
+            &target,
+            resolver.as_ref(),
             connect_timeout,
-            connect_hooked(addr, &outbound_socket_hook),
+            &outbound_socket_hook,
         )
-        .await
-        {
-            Ok(res) => res,
-            Err(_elapsed) => Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "connect attempt timed out",
-            )),
-        };
-        // A SOCKS proxy target folds into the connect result: `addr` reached the
-        // proxy, and the CONNECT handshake must succeed before the stream is
-        // usable. A handshake failure is just a failed attempt, so backoff and
-        // give-up accounting stay identical to a direct dial.
+        .await;
+        // A SOCKS proxy target folds into the connect result: `target` reached
+        // the proxy, and the CONNECT handshake must succeed before the stream
+        // is usable. A handshake failure is just a failed attempt, so backoff
+        // and give-up accounting stay identical to a direct dial.
         let connect_result = match connect_result {
-            Ok(mut stream) => {
+            Ok((mut stream, addr)) => {
                 stream.set_nodelay(true).ok();
                 apply_liveness_options(&stream).ok();
                 match &socks_target {
@@ -793,20 +900,20 @@ async fn tcp_client_reconnect_loop(
                     )
                     .await
                     {
-                        Ok(Ok(())) => Ok(stream),
-                        Ok(Err(e)) => Err(e),
-                        Err(_elapsed) => Err(io::Error::new(
-                            io::ErrorKind::TimedOut,
-                            "SOCKS5 handshake timed out",
+                        Ok(Ok(())) => Ok((stream, addr)),
+                        Ok(Err(e)) => Err((DialStage::Socks, e)),
+                        Err(_elapsed) => Err((
+                            DialStage::Socks,
+                            io::Error::new(io::ErrorKind::TimedOut, "SOCKS5 handshake timed out"),
                         )),
                     },
-                    None => Ok(stream),
+                    None => Ok((stream, addr)),
                 }
             }
             Err(e) => Err(e),
         };
         match connect_result {
-            Ok(stream) => {
+            Ok((stream, addr)) => {
                 let is_reconnect = has_connected_before;
                 let failed_attempts = attempt;
                 let outage = outage_start.take();
@@ -857,7 +964,20 @@ async fn tcp_client_reconnect_loop(
                 .await;
                 tracing::warn!("{}: connection lost, will reconnect", name);
             }
-            Err(e) => {
+            Err((stage, e)) => {
+                // One structured line per failed attempt, unthrottled: the
+                // event log is where an operator counts attempts, and the
+                // backoff already bounds how many there are.
+                let target_str = target.to_string();
+                let error = e.to_string();
+                tracing::debug!(
+                    event = "TCP_CONNECT_FAILED",
+                    iface = %crate::event_log::Scalar(&name),
+                    target = %crate::event_log::Scalar(&target_str),
+                    attempt = attempt + 1,
+                    stage = stage.as_str(),
+                    error = %crate::event_log::Scalar(&error),
+                );
                 // The failure warn! is throttled: attempts 1,2,3 and each
                 // backoff doubling, then at most once per capped interval.
                 // `attempt + 1` is the value the tail below increments to.
@@ -865,7 +985,7 @@ async fn tcp_client_reconnect_loop(
                     tracing::warn!(
                         "{}: connect to {} failed: {} (attempt {})",
                         name,
-                        addr,
+                        target,
                         e,
                         attempt + 1
                     );
@@ -1120,7 +1240,8 @@ mod tests {
         let mut handle = spawn_tcp_client_with_reconnect(TcpClientConfig {
             id: InterfaceId(0),
             name: "test_panic_hook".to_string(),
-            addr,
+            target: addr.into(),
+            resolver: None,
             buffer_size: 16,
             corrupt_every: None,
             reconnect_interval: Duration::from_millis(100),
@@ -1528,7 +1649,8 @@ mod tests {
         let mut handle = spawn_tcp_client_with_reconnect(TcpClientConfig {
             id: InterfaceId(0),
             name: "test_reconnect".to_string(),
-            addr,
+            target: addr.into(),
+            resolver: None,
             buffer_size: 32,
             corrupt_every: None,
             reconnect_interval: Duration::from_millis(200),
@@ -1600,7 +1722,8 @@ mod tests {
         let mut handle = spawn_tcp_client_with_reconnect(TcpClientConfig {
             id: InterfaceId(0),
             name: "test_giveup".to_string(),
-            addr,
+            target: addr.into(),
+            resolver: None,
             buffer_size: 16,
             corrupt_every: None,
             reconnect_interval: Duration::from_millis(100),
@@ -1667,7 +1790,8 @@ mod tests {
         let mut handle = spawn_tcp_client_with_reconnect(TcpClientConfig {
             id: InterfaceId(0),
             name: "test_socks".to_string(),
-            addr: proxy_addr,
+            target: proxy_addr.into(),
+            resolver: None,
             buffer_size: 32,
             corrupt_every: None,
             reconnect_interval: Duration::from_millis(200),
@@ -1699,7 +1823,8 @@ mod tests {
         let mut handle = spawn_tcp_client_with_reconnect(TcpClientConfig {
             id: InterfaceId(0),
             name: "test_detach".to_string(),
-            addr,
+            target: addr.into(),
+            resolver: None,
             buffer_size: 16,
             corrupt_every: None,
             reconnect_interval: Duration::from_millis(100),

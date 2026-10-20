@@ -164,6 +164,13 @@ impl NodeBuilder {
         self
     }
 
+    /// Register a resolver for TCP client target names. See
+    /// [`ReticulumNodeBuilder::host_resolver`](crate::driver::ReticulumNodeBuilder::host_resolver).
+    pub fn host_resolver(mut self, resolver: crate::resolver::HostResolver) -> Self {
+        self.inner = self.inner.host_resolver(resolver);
+        self
+    }
+
     /// Install an in-driver core processor. See [`CoreProcessor`] for what a
     /// hook body may and may not do.
     ///

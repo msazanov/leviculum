@@ -417,6 +417,16 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "DUTY_HOLD",
         required_keys: &["iface", "state", "lt_ms"],
     },
+    // One failed connect attempt of a reconnecting TCP client (Codeberg
+    // #461), every attempt, unthrottled (the human warn! beside it is
+    // throttled). `stage` says which step failed: `resolve` (the target name
+    // gave no address; it is looked up again next attempt), `connect` (every
+    // address refused or timed out) or `socks` (the proxy's CONNECT failed).
+    // `error` is the resolver's or the socket's own message.
+    EventSchema {
+        name: "TCP_CONNECT_FAILED",
+        required_keys: &["iface", "target", "attempt", "stage", "error"],
+    },
     // The ingress burst limiter holding an announce for an unknown
     // destination (Codeberg #87 hold-and-release, emitted by
     // `transport.rs::handle_announce`). Not a drop: the announce is queued
@@ -1548,7 +1558,7 @@ enum SinkMode {
 /// hundred lines apart in `handle_announce`, and nothing between them
 /// can take seconds.  What can is the emission itself: the driver's
 /// event loop calls `tracing::debug!` while it holds the core mutex
-/// (`apply_inbound`, `leviculum-std/src/driver/mod.rs:4744`), the layer
+/// (`apply_inbound`, `leviculum-std/src/driver/mod.rs:4751`), the layer
 /// wrote the line with a blocking `write(2)` on that very thread, and a
 /// `write(2)` to a USB disk under writeback throttling blocks for
 /// seconds.  Every other task then queued behind the core mutex, so the

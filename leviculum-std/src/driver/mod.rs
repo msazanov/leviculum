@@ -98,7 +98,7 @@ use crate::clock::SystemClock;
 use crate::config::InterfaceConfig;
 use crate::error::Error;
 use crate::interfaces::tcp::{
-    spawn_tcp_client_with_reconnect, TcpClientConfig, TcpClientHandle,
+    spawn_tcp_client_with_reconnect, TcpClientConfig, TcpClientHandle, TcpTarget,
     DEFAULT_RECONNECT_MAX_INTERVAL, DEFAULT_TCP_CONNECT_TIMEOUT, TCP_DEFAULT_BUFFER_SIZE,
 };
 use crate::interfaces::{InterfaceHandle, InterfaceRegistry, InterfaceStatsMap};
@@ -1023,6 +1023,7 @@ fn reattach_bootstrap_interfaces(
         storage_path,
         identity_hash,
         auto_peer_count,
+        host_resolver,
     } = bootstrap;
     let ctx = interface_build::InterfaceBuildCtx {
         next_id,
@@ -1033,6 +1034,7 @@ fn reattach_bootstrap_interfaces(
         corrupt_every,
         storage_path: storage_path.clone(),
         outbound_socket_hook,
+        host_resolver: host_resolver.clone(),
         inventory: Arc::clone(inventory),
         transport_enabled,
         default_announce_rate: default_announce_rate.clone(),
@@ -1154,6 +1156,9 @@ struct BootstrapWiring {
     storage_path: Option<PathBuf>,
     identity_hash: [u8; 16],
     auto_peer_count: AutoPeerCount,
+    /// The node's TCP target resolver, so a re-attached client resolves the
+    /// way it did at start.
+    host_resolver: Option<crate::resolver::HostResolver>,
 }
 
 /// One `bootstrap_only` section under management.
@@ -1395,6 +1400,8 @@ pub struct ReticulumNode {
     corrupt_every: Option<u64>,
     /// Outbound-socket hook applied to each TCP client's connect socket.
     outbound_socket_hook: Option<crate::socket_hook::OutboundSocketHook>,
+    /// Resolver for TCP client target names; `None` is the system resolver.
+    host_resolver: Option<crate::resolver::HostResolver>,
     /// Interval between periodic storage flushes (seconds).
     /// Crash protection only, normal shutdown calls flush() via signal handler.
     /// Lost data from a crash is recovered via fresh announces.
@@ -1605,6 +1612,7 @@ impl ReticulumNode {
             action_dispatch_tx,
             corrupt_every,
             outbound_socket_hook: None,
+            host_resolver: None,
             flush_interval_secs,
             auto_peer_count: AutoPeerCount::default(),
             share_instance_name: None,
@@ -2138,6 +2146,7 @@ impl ReticulumNode {
             storage_path: self.storage_path.clone(),
             identity_hash: self.identity_hash(),
             auto_peer_count: self.auto_peer_count.clone(),
+            host_resolver: self.host_resolver.clone(),
         });
 
         // A previous stop() closed the completion registry when its event loop
@@ -2242,6 +2251,7 @@ impl ReticulumNode {
                 corrupt_every: self.corrupt_every,
                 storage_path: self.storage_path.clone(),
                 outbound_socket_hook: self.outbound_socket_hook.clone(),
+                host_resolver: self.host_resolver.clone(),
                 inventory: Arc::clone(&self.inventory),
                 transport_enabled: self.is_transport_enabled(),
                 default_announce_rate: self.default_announce_rate(),
@@ -2640,8 +2650,9 @@ impl ReticulumNode {
     /// routing, cleanly, without rebuilding the node.
     ///
     /// The node assigns the [`InterfaceId`]. Returns [`Error::NotRunning`] if
-    /// called before [`start`](Self::start), or [`Error::Config`] if the dialed
-    /// address (the proxy address when `socks_proxy` is set) does not resolve.
+    /// called before [`start`](Self::start). The dialed name (the proxy's when
+    /// `socks_proxy` is set) is looked up on every connect attempt, so one
+    /// that does not resolve yet leaves the interface down and retrying.
     pub fn spawn_tcp_client(
         &self,
         name: &str,
@@ -2664,16 +2675,10 @@ impl ReticulumNode {
             }
             None => (host.to_string(), port, None),
         };
-        let addr: SocketAddr = match format!("{dial_host}:{dial_port}").parse() {
-            Ok(a) => a,
-            Err(_) => (dial_host.as_str(), dial_port)
-                .to_socket_addrs()
-                .map_err(|e| Error::Config(format!("{dial_host}:{dial_port}: {e}")))?
-                .next()
-                .ok_or_else(|| {
-                    Error::Config(format!("no addresses for {dial_host}:{dial_port}"))
-                })?,
-        };
+        // Resolved by the interface on every attempt, like a config-file
+        // client (Codeberg #461): a name that does not resolve yet is an
+        // interface that is down and retrying, not a refused call.
+        let target = TcpTarget::new(dial_host, dial_port);
 
         let id = InterfaceId(next_id.fetch_add(1, Ordering::Relaxed));
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
@@ -2683,7 +2688,8 @@ impl ReticulumNode {
             spawn_tcp_client_with_reconnect(TcpClientConfig {
                 id,
                 name: name.to_string(),
-                addr,
+                target,
+                resolver: self.host_resolver.clone(),
                 buffer_size: TCP_DEFAULT_BUFFER_SIZE,
                 corrupt_every: self.corrupt_every,
                 reconnect_interval: Duration::from_secs(5),
@@ -2793,6 +2799,7 @@ impl ReticulumNode {
             corrupt_every: self.corrupt_every,
             storage_path: self.storage_path.clone(),
             outbound_socket_hook: self.outbound_socket_hook.clone(),
+            host_resolver: self.host_resolver.clone(),
             inventory: Arc::clone(&self.inventory),
             transport_enabled: self.is_transport_enabled(),
             default_announce_rate: self.default_announce_rate(),
@@ -5566,7 +5573,8 @@ impl crate::autoconnect::AutoConnectSpawner for AutoConnectLiveSpawner<'_> {
         let mut handle = spawn_tcp_client_with_reconnect(TcpClientConfig {
             id,
             name: name.to_string(),
-            addr,
+            target: addr.into(),
+            resolver: None,
             buffer_size: TCP_DEFAULT_BUFFER_SIZE,
             corrupt_every: self.corrupt_every,
             reconnect_interval: Duration::from_secs(5),

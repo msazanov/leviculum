@@ -51,6 +51,9 @@ pub(super) struct InterfaceBuildCtx<'a> {
     pub storage_path: Option<PathBuf>,
     /// Applied to each TCP client's connect socket before it dials.
     pub outbound_socket_hook: Option<crate::socket_hook::OutboundSocketHook>,
+    /// Resolves each TCP client's target name per attempt; `None` is the
+    /// system resolver.
+    pub host_resolver: Option<crate::resolver::HostResolver>,
     /// Reporting-side interface inventory (Codeberg #177): listeners register
     /// themselves here because they never become routable interfaces.
     pub inventory: crate::interfaces::inventory::SharedInventory,
@@ -238,6 +241,7 @@ mod tests {
                 corrupt_every: None,
                 storage_path: None,
                 outbound_socket_hook: None,
+                host_resolver: None,
                 inventory: self.inventory.clone(),
                 transport_enabled: false,
                 default_announce_rate: Default::default(),

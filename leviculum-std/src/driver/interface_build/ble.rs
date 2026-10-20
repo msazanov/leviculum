@@ -180,6 +180,7 @@ mod tests {
                 corrupt_every: None,
                 storage_path: None,
                 outbound_socket_hook: None,
+                host_resolver: None,
                 inventory: self.inventory.clone(),
                 transport_enabled: false,
                 default_announce_rate: Default::default(),

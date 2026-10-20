@@ -54,6 +54,7 @@ pub(crate) mod packet_hashlist;
 pub mod proc_memory;
 pub mod process;
 pub mod remote_status;
+pub mod resolver;
 pub mod resource_policy;
 pub mod reticulum;
 pub(crate) mod rpc;

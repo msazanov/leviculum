@@ -164,7 +164,7 @@ read the answers:
   `shared_instance_name`, `leviculum-std/src/interfaces/inventory.rs:96`;
   against `reference/Reticulum/RNS/Utilities/rnstatus.py:393-401` and
   `:429-438`). The live client count decrements on disconnect
-  (`retire_from_inventory`, `leviculum-std/src/driver/mod.rs:4193`),
+  (`retire_from_inventory`, `leviculum-std/src/driver/mod.rs:4200`),
   so the `Serving : N programs` line (clients − 1,
   `reference/Reticulum/RNS/Utilities/rnstatus.py:432`) reads the same
   against either daemon. Announce-rate defaults follow Python's
@@ -347,7 +347,7 @@ uses.** Python's `path_table` rows carry `str(interface)` —
 `TCPInterface[Client on ...]`, `RNodeInterface[...]`
 (`reference/Reticulum/RNS/Reticulum.py:1534`). Ours carry the driver's
 internal name — `tcp_client_0` for a configured TCP client (the format
-lives at `leviculum-std/src/driver/interface_build/tcp.rs:41`), `udp_5`,
+lives at `leviculum-std/src/driver/interface_build/tcp.rs:40`), `udp_5`,
 `rnode_channel_2` — because the handlers read `core.interface_name`
 (`build_path_table`, `leviculum-std/src/rpc/handlers.rs:1113`;
 same in `build_transport_tables` and `get_next_hop_if_name`), while
@@ -562,7 +562,7 @@ daemon:
 1. **`share_instance`** — Python defaults true
    (`reference/Reticulum/RNS/Reticulum.py:287`); ours defaults false
    (`leviculum-std/src/config.rs:74-79`, resolved unchanged by the
-   builder, `leviculum-std/src/driver/builder.rs:850-852`). A config
+   builder, `leviculum-std/src/driver/builder.rs:860-862`). A config
    that never names the key gives rnsd a shared instance and lnsd
    none: every Python tool answers "No shared RNS instance available"
    against lnsd. This is the central drop-in switch defaulting to the

@@ -49,6 +49,7 @@ pub struct ReticulumNodeBuilder {
     rnode_channels: Vec<RNodeChannelConfig>,
     corrupt_every: Option<u64>,
     outbound_socket_hook: Option<crate::socket_hook::OutboundSocketHook>,
+    host_resolver: Option<crate::resolver::HostResolver>,
     /// Explicit enable_transport override (takes priority over config value)
     enable_transport_explicit: Option<bool>,
     /// Explicit shared_instance override (takes priority over config value)
@@ -108,6 +109,7 @@ impl ReticulumNodeBuilder {
             rnode_channels: Vec::new(),
             corrupt_every: None,
             outbound_socket_hook: None,
+            host_resolver: None,
             enable_transport_explicit: None,
             share_instance_explicit: None,
             instance_name_explicit: None,
@@ -664,6 +666,14 @@ impl ReticulumNodeBuilder {
         self
     }
 
+    /// Register the resolver TCP clients look their target names up with, on
+    /// every connect attempt. Without one the system resolver answers. See
+    /// [`crate::resolver::HostResolver`].
+    pub fn host_resolver(mut self, resolver: crate::resolver::HostResolver) -> Self {
+        self.host_resolver = Some(resolver);
+        self
+    }
+
     /// Enable or disable transport mode
     ///
     /// When enabled, this node will forward packets between interfaces.
@@ -1041,6 +1051,7 @@ impl ReticulumNodeBuilder {
             data_channel_capacity,
         );
         node.outbound_socket_hook = self.outbound_socket_hook.clone();
+        node.host_resolver = self.host_resolver.clone();
         // Where both shared-instance channels live (D2 of the 2026-10-11
         // shared-instance audit; the ports are Codeberg #112): explicit >
         // the config this builder was given > the process default a client

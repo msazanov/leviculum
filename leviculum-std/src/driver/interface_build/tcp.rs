@@ -1,6 +1,6 @@
 //! TCP client and server interface builders.
 
-use std::net::{SocketAddr, ToSocketAddrs};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -8,7 +8,7 @@ use crate::config::InterfaceConfig;
 use crate::error::Error;
 use crate::interfaces::inventory::{self, InterfaceIdentity};
 use crate::interfaces::tcp::{
-    spawn_tcp_client_with_reconnect, spawn_tcp_server, TcpClientConfig, TcpServerConfig,
+    spawn_tcp_client_with_reconnect, spawn_tcp_server, TcpClientConfig, TcpServerConfig, TcpTarget,
     DEFAULT_RECONNECT_MAX_INTERVAL, DEFAULT_TCP_CONNECT_TIMEOUT, TCP_DEFAULT_BUFFER_SIZE,
 };
 use crate::sync_ext::MutexRecover;
@@ -30,13 +30,12 @@ pub(super) fn build_client(
         .target_port
         .ok_or_else(|| Error::Config("TCPClientInterface requires target_port".to_string()))?;
 
-    let addr_str = format!("{}:{}", target_host, target_port);
-    let addr: SocketAddr = addr_str
-        .as_str()
-        .to_socket_addrs()
-        .map_err(|e| Error::Config(format!("cannot resolve {}: {}", addr_str, e)))?
-        .next()
-        .ok_or_else(|| Error::Config(format!("no addresses for {}", addr_str)))?;
+    // Not resolved here: the interface looks the name up on every connect
+    // attempt, so a name that does not resolve yet leaves the interface down
+    // and retrying instead of ending the start (Codeberg #461; the reference
+    // resolves inside `TCPInterface.connect` and keeps going). Only what the
+    // config itself got wrong, above, is an error.
+    let target = TcpTarget::new(target_host.clone(), target_port);
 
     let iface_name = format!("tcp_client_{}", idx);
     let id = InterfaceId(idx);
@@ -49,7 +48,8 @@ pub(super) fn build_client(
     let handle = spawn_tcp_client_with_reconnect(TcpClientConfig {
         id,
         name: iface_name,
-        addr,
+        target: target.clone(),
+        resolver: ctx.host_resolver.clone(),
         buffer_size,
         corrupt_every: ctx.corrupt_every,
         reconnect_interval,
@@ -81,7 +81,7 @@ pub(super) fn build_client(
             },
         );
     }
-    tracing::info!("TCP client interface for {} (reconnect enabled)", addr);
+    tracing::info!("TCP client interface for {} (reconnect enabled)", target);
     Ok(Built::Handles(vec![handle]))
 }
 

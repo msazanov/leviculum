@@ -14,3 +14,4 @@ leviculum-std/tests/rnsd_interop/discovery_interop_tests.rs 45999 a port carried
 leviculum-std/tests/rnsd_interop/discovery_interop_tests.rs 45998 a port carried in a discovery announce; the Python daemon runs --discover-interfaces without autoconnect and only lists it
 leviculum-std/tests/support/port_alloc.rs 61000 the allocator's band floor, not a port
 leviculum-std/tests/support/port_alloc.rs 65000 the allocator's band ceiling (exclusive), not a port
+leviculum-std/tests/mvr/tcp_client_unresolvable_target.rs 4242 the port behind a reserved .invalid name; the name never resolves, so nothing dials it
