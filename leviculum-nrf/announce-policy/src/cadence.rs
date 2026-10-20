@@ -446,6 +446,27 @@ impl PeriodicAnnounce {
         }
     }
 
+    /// Record an announce the caller sent outside the deadline (a button
+    /// press) as this slot's latest, and keep the next scheduled one at
+    /// least `min_spacing_ms` away from it.
+    ///
+    /// Not a re-arm: a deadline already further out stays where it is, so
+    /// a press does not push the cadence back by a whole interval.
+    pub fn book(&mut self, now_ms: u64, min_spacing_ms: u64) {
+        self.last_fired_ms = Some(now_ms);
+        self.defer(now_ms, now_ms.saturating_add(min_spacing_ms));
+    }
+
+    /// The earliest moment an announce `min_spacing_ms` after this slot's
+    /// last may go out: `now_ms` when none has, or the spacing has passed.
+    #[must_use]
+    pub fn earliest_ms(&self, now_ms: u64, min_spacing_ms: u64) -> u64 {
+        match self.last_fired_ms {
+            Some(last) => last.saturating_add(min_spacing_ms).max(now_ms),
+            None => now_ms,
+        }
+    }
+
     /// Hold this slot until `until_ms`, whatever the cadence says. The
     /// caller has a reason of its own (the propagation role refuses to
     /// invite uploads while its store is unmounted).
@@ -495,6 +516,19 @@ pub const PN_ANNOUNCE_INITIAL_DELAY_MS: u64 = 20 * 1_000;
 /// (`reference/LXMF/LXMF/LXMRouter.py:338-341`), so the two leave 10 s
 /// apart. One constant for both stacks: `lnpnd` derives its own from it.
 pub const PN_START_ANNOUNCE_GAP_MS: u64 = 10 * 1_000;
+
+/// What [`AnnounceCadence::manual`] decided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManualAnnounce {
+    /// Send both announces now; the cadence has booked them.
+    Now,
+    /// The budget does not allow the set yet; both slots fire on their own
+    /// in `wait_ms`.
+    Deferred {
+        /// How long until the budget allows it.
+        wait_ms: u64,
+    },
+}
 
 /// The one cadence both halves of the announce obey.
 ///
@@ -652,6 +686,40 @@ impl AnnounceCadence {
         };
         self.own.trigger(now_ms, spacing);
         self.propagation.trigger(now_ms, spacing);
+    }
+
+    /// Somebody asked for both announces now (a button press, Codeberg
+    /// #459): the board's one place a manual announce is booked.
+    ///
+    /// Bounded by rule 5 and by nothing else. When the carrier's budget
+    /// allows the set now, both slots record it as their latest announce,
+    /// so the next trigger and the next tick are spaced from it, and
+    /// [`ManualAnnounce::Now`] tells the caller to send. When the budget's
+    /// spacing since the last announce has not passed, nothing is sent and
+    /// both slots are brought forward to the moment it has, so the press
+    /// is answered by the cadence's own tick as early as the band allows,
+    /// never dropped and never paid for twice.
+    ///
+    /// The spacing is the budget's alone, without the trigger floor
+    /// [`trigger`](Self::trigger) adds: the caller has its own rate limit
+    /// ([`crate::BUTTON_ANNOUNCE_MIN_INTERVAL_MS`]), and the floor exists
+    /// for triggers that arrive in bursts nobody chose.
+    pub fn manual(&mut self, now_ms: u64) -> ManualAnnounce {
+        let spacing = self.budget.min_interval_ms();
+        let earliest = self
+            .own
+            .earliest_ms(now_ms, spacing)
+            .max(self.propagation.earliest_ms(now_ms, spacing));
+        if earliest > now_ms {
+            self.own.trigger(now_ms, spacing);
+            self.propagation.trigger(now_ms, spacing);
+            return ManualAnnounce::Deferred {
+                wait_ms: earliest - now_ms,
+            };
+        }
+        self.own.book(now_ms, spacing);
+        self.propagation.book(now_ms, spacing);
+        ManualAnnounce::Now
     }
 
     /// Poll one slot. `clock_ok` is the caller's plausibility answer; it
@@ -1273,6 +1341,89 @@ mod tests {
             Some(Decision::Announce),
             "and the whole burst collapses into the one announce it owed"
         );
+    }
+
+    // -- The manual announce (#459) --------------------------------------
+
+    fn a_lora_budget() -> DutyBudget {
+        DutyBudget {
+            frame_airtime_ms: 7_054,
+            frames_per_set: 2,
+            lawful_duty_e4: 1_000,
+        }
+    }
+
+    /// A press on an affordable carrier announces now and is booked: the
+    /// next tick and the next trigger are spaced from it, so a press
+    /// right before a scheduled announce does not put two sets on the air
+    /// inside the budget's spacing.
+    #[test]
+    fn a_manual_announce_is_booked_against_the_budget() {
+        let mut cadence = AnnounceCadence::new();
+        cadence.arm(t0());
+        let budget = a_lora_budget();
+        cadence.set_budget(budget);
+        let spacing = budget.min_interval_ms();
+        let press = t0() + 1_000;
+        assert_eq!(cadence.manual(press), ManualAnnounce::Now);
+        for slot in [AnnounceSlot::Own, AnnounceSlot::Propagation] {
+            assert_eq!(
+                cadence.wait_ms(slot, press),
+                spacing,
+                "the boot announce is held one spacing behind the press ({slot:?})"
+            );
+        }
+        cadence.trigger(press + 1);
+        assert_eq!(
+            cadence.wait_ms(AnnounceSlot::Own, press + 1),
+            spacing - 1,
+            "a trigger after the press is spaced from it, not from boot"
+        );
+    }
+
+    /// A press inside the budget's spacing sends nothing itself and brings
+    /// both slots forward to the moment the budget allows: answered once,
+    /// by the tick, never dropped.
+    #[test]
+    fn a_manual_announce_inside_the_spacing_is_deferred_not_dropped() {
+        let mut cadence = AnnounceCadence::new();
+        cadence.arm(t0());
+        let budget = a_lora_budget();
+        cadence.set_budget(budget);
+        let spacing = budget.min_interval_ms();
+        let first = t0() + 1_000;
+        assert_eq!(cadence.manual(first), ManualAnnounce::Now);
+        let second = first + 10_000;
+        assert_eq!(
+            cadence.manual(second),
+            ManualAnnounce::Deferred {
+                wait_ms: spacing - 10_000
+            }
+        );
+        assert_eq!(
+            cadence.poll(AnnounceSlot::Own, first + spacing - 1, true),
+            None
+        );
+        assert_eq!(
+            cadence.poll(AnnounceSlot::Own, first + spacing, true),
+            Some(Decision::Announce)
+        );
+    }
+
+    /// A press is not a re-arm: a deadline already further out than the
+    /// spacing stays where it was.
+    #[test]
+    fn a_manual_announce_does_not_push_the_cadence_back() {
+        let mut cadence = AnnounceCadence::new();
+        cadence.arm(t0());
+        let first = t0() + crate::PERIODIC_ANNOUNCE_INITIAL_DELAY_MS;
+        assert_eq!(
+            cadence.poll(AnnounceSlot::Own, first, true),
+            Some(Decision::Announce)
+        );
+        let due = cadence.wait_ms(AnnounceSlot::Own, first);
+        assert_eq!(cadence.manual(first + 60_000), ManualAnnounce::Now);
+        assert_eq!(cadence.wait_ms(AnnounceSlot::Own, first), due);
     }
 
     // -- The two slots ---------------------------------------------------

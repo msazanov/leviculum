@@ -44,9 +44,11 @@
 
 #![cfg_attr(not(test), no_std)]
 
+mod button;
 mod cadence;
 mod scheduler;
 
+pub use button::*;
 pub use cadence::*;
 pub use scheduler::*;
 
