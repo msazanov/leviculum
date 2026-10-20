@@ -78,6 +78,14 @@ pub struct Storage {
     // next interval (leviculum#44).
     packet_hashes_gen: u64,
     identities_gen: u64,
+    // When each identity was last remembered, in wall-clock seconds, with
+    // the identities generation of that remember. The reference stamps
+    // `time.time()` into an entry's first element in `Identity.remember`
+    // (Identity.py:107, :109), and its cull reads that element as the last
+    // announce (Identity.py:331, :351); a flush folds the stamp into the
+    // table, which carries it from then on, and finish_flush drops it here
+    // (Codeberg #462).
+    remembered_at: BTreeMap<[u8; TRUNCATED_HASHBYTES], (f64, u64)>,
     mono_offset_ms: u64,
     #[cfg(test)]
     flush_io_hook: Option<FlushIoHook>,
@@ -186,6 +194,7 @@ impl Storage {
             identities_dirty: false,
             packet_hashes_gen: 0,
             identities_gen: 0,
+            remembered_at: BTreeMap::new(),
             mono_offset_ms,
             #[cfg(test)]
             flush_io_hook: None,
@@ -474,8 +483,10 @@ pub(crate) struct FlushSnapshot {
 /// The known-destinations half of a flush.
 struct IdentityFlush {
     generation: u64,
-    /// Read once when the flush opens, so every entry it refreshes carries
-    /// the same time, as one in-lock fold gave them.
+    /// Read once when the flush opens. Only an identity that reaches the
+    /// fold with no remember stamp and no entry gets it, which no path
+    /// through this type produces: every identity is either loaded with its
+    /// entry or remembered through `set_identity`.
     timestamp: f64,
     /// The table as the flush found it, shared rather than copied: only a
     /// flush writes it, and flushes do not overlap, so it cannot change
@@ -493,6 +504,9 @@ struct RuntimeIdentity {
     public_key: [u8; IDENTITY_KEY_SIZE],
     /// The cached announce, raw; its `app_data` is parsed off the lock.
     announce: Option<Vec<u8>>,
+    /// When `set_identity` last remembered it, if no flush has folded that
+    /// in yet.
+    remembered_at: Option<f64>,
 }
 
 /// Which stores the write landed, tagged with the snapshot's generations;
@@ -501,8 +515,10 @@ pub(crate) struct FlushOutcome {
     identities_written: Option<u64>,
     packet_hashes_written: Option<u64>,
     /// The table with the runtime identities folded in, for finish_flush to
-    /// install whether or not the file write succeeded.
-    known_dest_entries: Option<KnownDestTable>,
+    /// install whether or not the file write succeeded, tagged with the
+    /// generation the flush opened at: every remember stamp up to it is in
+    /// the table now.
+    known_dest_entries: Option<(u64, KnownDestTable)>,
 }
 
 impl FlushOutcome {
@@ -562,7 +578,7 @@ impl FlushSnapshot {
             for hash in &from_disk {
                 merged.remove(hash);
             }
-            outcome.known_dest_entries = Some(merged);
+            outcome.known_dest_entries = Some((generation, merged));
         }
 
         if let Some((generation, hashes)) = self.packet_hashes {
@@ -584,11 +600,17 @@ impl FlushSnapshot {
 
 /// Merge runtime identities into a copy of the known-destinations table.
 ///
-/// New identities get a minimal entry; existing entries get their timestamp
-/// and public_key refreshed (the runtime version was just validated from a
-/// live announce, so it takes precedence over the disk version). packet_hash
-/// is preserved: it belongs to the announce packet and is not available
-/// here.
+/// New identities get a minimal entry; existing entries get their public_key
+/// refreshed (the runtime version was just validated from a live announce,
+/// so it takes precedence over the disk version). packet_hash is preserved:
+/// it belongs to the announce packet and is not available here.
+///
+/// The timestamp is the time the identity was remembered, which is the
+/// announce time the reference's cull reads (Identity.py:107, :331). An
+/// identity remembered since the last fold carries its stamp; one that was
+/// not keeps the time its entry already holds, so a flush never makes an
+/// old announce look fresh (Codeberg #462). `timestamp` is only the fallback
+/// for an identity that has neither.
 ///
 /// app_data comes from the cached announce, which is what Python hands
 /// `Identity.remember` at validate time
@@ -615,14 +637,16 @@ fn fold_runtime_identities(
         folded
             .entry(identity.hash)
             .and_modify(|e| {
-                e.timestamp = timestamp;
+                if let Some(at) = identity.remembered_at {
+                    e.timestamp = at;
+                }
                 e.public_key = identity.public_key;
                 if announced.is_some() {
                     e.app_data = announced.clone();
                 }
             })
             .or_insert_with(|| KnownDestEntry {
-                timestamp,
+                timestamp: identity.remembered_at.unwrap_or(timestamp),
                 packet_hash: vec![0u8; PACKET_HASH_LEN],
                 public_key: identity.public_key,
                 app_data: announced,
@@ -708,6 +732,7 @@ impl Storage {
                 hash: *hash,
                 public_key: identity.public_key_bytes(),
                 announce: self.inner.get_announce_cache(hash).cloned(),
+                remembered_at: self.remembered_at.get(hash).map(|(at, _)| *at),
             });
         }
         if let Some(last) = flush.runtime.last() {
@@ -719,7 +744,9 @@ impl Storage {
 
     /// Phase 3, under the node lock, map ops only: generation-guarded
     /// dirty-flag clear (an entry dirtied mid-write stays dirty), and the
-    /// folded table swapped in.
+    /// folded table swapped in. The remember stamps the fold took leave
+    /// `remembered_at` with it; one taken after the flush opened has a later
+    /// generation and stays for the next fold.
     ///
     /// Returns the table it replaced, so the caller can free it after letting
     /// go of the lock: dropping 87 000 entries is the same order of work as
@@ -732,9 +759,11 @@ impl Storage {
         if outcome.packet_hashes_written == Some(self.packet_hashes_gen) {
             self.packet_hashes_dirty = false;
         }
-        outcome
-            .known_dest_entries
-            .map(|folded| std::mem::replace(&mut self.known_dest_entries, Arc::new(folded)))
+        outcome.known_dest_entries.map(|(generation, folded)| {
+            self.remembered_at
+                .retain(|_, (_, stamped)| *stamped > generation);
+            std::mem::replace(&mut self.known_dest_entries, Arc::new(folded))
+        })
     }
 
     #[cfg(test)]
@@ -1032,6 +1061,8 @@ impl leviculum_core::traits::Storage for Storage {
         self.inner.set_identity(dest_hash, identity);
         self.identities_dirty = true;
         self.identities_gen = self.identities_gen.wrapping_add(1);
+        self.remembered_at
+            .insert(dest_hash, (unix_timestamp_secs(), self.identities_gen));
     }
 
     // Cleanup
@@ -1142,6 +1173,10 @@ impl leviculum_core::traits::Storage for Storage {
             "known_dest_entries",
             self.known_dest_entries.len(),
         ));
+        counts.push(CollectionCount::unbounded(
+            "remembered_at",
+            self.remembered_at.len(),
+        ));
         counts
     }
 
@@ -1198,6 +1233,18 @@ impl leviculum_core::traits::Storage for Storage {
         let _ = writeln!(
             s,
             "known_dest_entries: {} entries, raw {} bytes, estimated {} bytes (BTreeMap 1.5x)",
+            n, raw, est
+        );
+
+        // remembered_at: BTreeMap<[u8; 16], (f64, u64)>, 1.5x. Only the
+        // identities remembered since the last flush.
+        let n = self.remembered_at.len();
+        let raw = (n * (TRUNCATED_HASHBYTES + std::mem::size_of::<(f64, u64)>())) as u64;
+        let est = raw * 3 / 2;
+        total += est;
+        let _ = writeln!(
+            s,
+            "remembered_at: {} entries, raw {} bytes, estimated {} bytes (BTreeMap 1.5x)",
             n, raw, est
         );
 
@@ -1771,6 +1818,111 @@ mod tests {
         while !storage.collect_flush_slice(snapshot) {}
     }
 
+    /// Codeberg #462: the fold writes the remember time, never the flush
+    /// time. An identity remembered since the last fold takes its stamp, one
+    /// that was not keeps the time its entry holds, and the flush time is
+    /// only the fallback for an identity with neither.
+    #[test]
+    fn the_fold_keeps_the_announce_time_not_the_flush_time() {
+        const ANNOUNCED_LONG_AGO: f64 = 1_700_000_000.0;
+        const REMEMBERED: f64 = 1_790_000_000.0;
+        const FLUSHED: f64 = 1_799_000_000.0;
+        let runtime = |hash: u8, remembered_at: Option<f64>| RuntimeIdentity {
+            hash: [hash; TRUNCATED_HASHBYTES],
+            public_key: Identity::generate(&mut rand_core::OsRng).public_key_bytes(),
+            announce: None,
+            remembered_at,
+        };
+        let entry = || KnownDestEntry {
+            timestamp: ANNOUNCED_LONG_AGO,
+            packet_hash: vec![0x5A; PACKET_HASH_LEN],
+            public_key: [0u8; IDENTITY_KEY_SIZE],
+            app_data: None,
+            use_state: KnownDestUseState::default(),
+        };
+        let mut table = KnownDestTable::new();
+        table.insert([0x01; TRUNCATED_HASHBYTES], entry());
+        table.insert([0x02; TRUNCATED_HASHBYTES], entry());
+
+        let folded = fold_runtime_identities(
+            &table,
+            vec![
+                runtime(0x01, None),
+                runtime(0x02, Some(REMEMBERED)),
+                runtime(0x03, Some(REMEMBERED)),
+                runtime(0x04, None),
+            ],
+            FLUSHED,
+        );
+
+        let at = |hash: u8| folded[&[hash; TRUNCATED_HASHBYTES]].timestamp;
+        assert_eq!(at(0x01), ANNOUNCED_LONG_AGO, "no new announce, no new time");
+        assert_eq!(at(0x02), REMEMBERED, "a new announce moves the time to it");
+        assert_eq!(at(0x03), REMEMBERED, "a new entry starts at its announce");
+        assert_eq!(at(0x04), FLUSHED, "the flush time is the fallback only");
+        assert_eq!(
+            folded[&[0x02; TRUNCATED_HASHBYTES]].packet_hash,
+            vec![0x5A; PACKET_HASH_LEN],
+            "the fold still leaves the packet hash alone"
+        );
+    }
+
+    /// Codeberg #462 through the three phases: a stamp the fold took leaves
+    /// `remembered_at`, the table keeps the time across the next flush, and a
+    /// remember that lands while a flush is writing stays for the next one.
+    #[test]
+    fn a_remember_stamp_outlives_the_flush_that_wrote_it_only_in_the_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut storage = Storage::new(dir.path()).unwrap();
+        let first = [0x01; TRUNCATED_HASHBYTES];
+        CoreStorage::set_identity(
+            &mut storage,
+            first,
+            Identity::generate(&mut rand_core::OsRng),
+        );
+        let stamped = storage.remembered_at[&first].0;
+        CoreStorage::flush(&mut storage);
+        assert!(storage.remembered_at.is_empty(), "the fold took the stamp");
+        assert_eq!(storage.known_dest_entries[&first].timestamp, stamped);
+
+        // A later flush, dirtied by someone else, leaves the first alone.
+        CoreStorage::set_identity(
+            &mut storage,
+            [0x02; TRUNCATED_HASHBYTES],
+            Identity::generate(&mut rand_core::OsRng),
+        );
+        CoreStorage::flush(&mut storage);
+        assert_eq!(
+            storage.known_dest_entries[&first].timestamp, stamped,
+            "a flush is not an announce"
+        );
+
+        // Remembered again while a flush writes: that stamp is newer than
+        // the flush and must survive it.
+        CoreStorage::set_identity(
+            &mut storage,
+            [0x03; TRUNCATED_HASHBYTES],
+            Identity::generate(&mut rand_core::OsRng),
+        );
+        let mut snapshot = storage.take_flush_snapshot().expect("dirty");
+        collect_all(&storage, &mut snapshot);
+        CoreStorage::set_identity(
+            &mut storage,
+            first,
+            Identity::generate(&mut rand_core::OsRng),
+        );
+        let again = storage.remembered_at[&first].0;
+        drop(storage.finish_flush(snapshot.write()));
+        assert_eq!(
+            storage.remembered_at.keys().collect::<Vec<_>>(),
+            vec![&first],
+            "only the remember after the flush opened is still owed"
+        );
+        CoreStorage::flush(&mut storage);
+        assert_eq!(storage.known_dest_entries[&first].timestamp, again);
+        assert!(storage.remembered_at.is_empty());
+    }
+
     #[test]
     fn test_take_flush_snapshot_defers_dirty_clear() {
         let path = tempfile::Builder::new()
@@ -2232,17 +2384,20 @@ mod tests {
                 .get_announce_cache(hash)
                 .and_then(|raw| cached_announce_app_data(raw))
                 .filter(|data| !data.is_empty());
+            let remembered_at = storage.remembered_at.get(hash).map(|(at, _)| *at);
             entries
                 .entry(*hash)
                 .and_modify(|e| {
-                    e.timestamp = timestamp;
+                    if let Some(at) = remembered_at {
+                        e.timestamp = at;
+                    }
                     e.public_key = identity.public_key_bytes();
                     if announced.is_some() {
                         e.app_data = announced.clone();
                     }
                 })
                 .or_insert_with(|| KnownDestEntry {
-                    timestamp,
+                    timestamp: remembered_at.unwrap_or(timestamp),
                     packet_hash: vec![0u8; PACKET_HASH_LEN],
                     public_key: identity.public_key_bytes(),
                     app_data: announced,
