@@ -31,7 +31,7 @@ The configure sessions (**--set-** *something*) talk to boards that are already 
 :   Report what is attached and what would happen; change nothing. A board in application mode is not rebooted into its bootloader. A board already in its bootloader is identified only under root, because reading `INFO_UF2.TXT` means mounting it; a question the identity step would ask is reported as "would ask", and an identity a real run would refuse as "would be refused". A dry run refuses nothing itself.
 
 **--yes**
-:   Answer yes to every confirmation. Fails rather than waits when a board needs a physical double-tap.
+:   Answer yes to every confirmation but one. Writing a board at level *expected* (wiring checked, never run by us) needs the word yes typed at its question, by a person or piped in, and **--yes** deliberately never gives it: that question is asked before the 1200-baud touch, so the board is refused untouched and keeps running. Fails rather than waits when a board needs a physical double-tap.
 
 **--check-bundle**
 :   Verify the bundle's manifest and payload checksums, then exit.
@@ -86,7 +86,7 @@ On a flash run the three outcomes are kept apart, because they need different th
 :   Every board was written and named the build in this bundle on its debug port.
 
 1
-:   The flash failed: a board never came back, or came back naming a different build, or nothing was written to it. A board refused on its identity (a shared Board-ID under **--yes** alone, a board at a level that needs a confirmation nobody gave, a Board-ID the catalogue does not know, the wrong model for **--board**) counts as nothing written, and fails the run even when every other board was confirmed: it was rebooted into its bootloader and stays there. A board skipped because the run was not for it (not among the boards named with **--board**, not flashed by this tool, or stopped by **--dry-run**) does not count. The closing summary names refused and skipped boards on separate lines, each with a count and the ports.
+:   The flash failed: a board never came back, or came back naming a different build, or nothing was written to it. A board refused on its identity (a shared Board-ID under **--yes** alone, a board at a level that needs a confirmation nobody gave, a Board-ID the catalogue does not know, the wrong model for **--board**) counts as nothing written, and fails the run even when every other board was confirmed. A board found in its bootloader, or touched there before it could be identified, stays there; one refused at the level question while still running was never touched and keeps running. A board skipped because the run was not for it (not among the boards named with **--board**, not flashed by this tool, or stopped by **--dry-run**) does not count. The closing summary names refused and skipped boards on separate lines, each with a count and the ports.
 
 2
 :   Every board took the write and none contradicted it, and at least one could not be read back. The firmware is on the board as far as anything here knows; which build it is running is unknown. Read it back again (**--watch**, or re-run the flash) rather than assuming the write failed.

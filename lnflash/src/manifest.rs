@@ -561,11 +561,21 @@ impl Catalogue {
     /// the one reason that proves nothing.
     #[cfg(test)]
     pub(crate) fn builtin_with(from: &str, to: &str) -> Result<Self, Error> {
-        assert!(
-            CATALOGUE_TOML.contains(from),
-            "the catalogue no longer contains {from:?}, so this test mutates nothing"
-        );
-        Self::parse(&CATALOGUE_TOML.replace(from, to), Path::new(CATALOGUE_NAME))
+        Self::builtin_with_all(&[(from, to)])
+    }
+
+    /// [`Catalogue::builtin_with`] for several substrings, each asserted.
+    #[cfg(test)]
+    pub(crate) fn builtin_with_all(edits: &[(&str, &str)]) -> Result<Self, Error> {
+        let mut text = CATALOGUE_TOML.to_string();
+        for (from, to) in edits {
+            assert!(
+                text.contains(from),
+                "the catalogue no longer contains {from:?}, so this test mutates nothing"
+            );
+            text = text.replace(from, to);
+        }
+        Self::parse(&text, Path::new(CATALOGUE_NAME))
     }
 
     fn parse(text: &str, path: &Path) -> Result<Self, Error> {
@@ -1084,15 +1094,16 @@ convert = "hex-to-uf2"
     }
 
     #[test]
-    fn the_t1000e_is_known_at_level_expected_and_keyed_on_its_own_board_id() {
+    fn the_t1000e_is_known_at_level_verified_and_keyed_on_its_own_board_id() {
         // Codeberg #406. The SenseCAP T1000-E is one product on one PCB, so
         // the Board-ID its bootloader publishes is bound to the radio wiring
-        // (unlike the Solar Node's module ID). Its level is `expected` until
-        // the rig has run it: the wiring is the vendor firmware's word.
+        // (unlike the Solar Node's module ID). It was `expected` until the
+        // rig ran it; 864 promoted it after lnflash wrote it over serial DFU
+        // on 2026-10-20 and the LR1110 smoke cell passed 20 of 20 (#453).
         let catalogue = catalogue();
         let board = catalogue.board("t1000e").unwrap();
         let flashing = board.require_flashing("t1000e").unwrap();
-        assert_eq!(flashing.level, Level::Expected);
+        assert_eq!(flashing.level, Level::Verified);
         assert_eq!(flashing.transport, Transport::DfuSerial);
         assert_eq!(flashing.identify.info_uf2_board_id, "nRF52840-T1000-E-v1");
         assert_eq!(flashing.identify.msc_label.as_deref(), Some("T1000-E"));
@@ -1448,17 +1459,14 @@ convert = "hex-to-uf2"
         )
         .unwrap_err();
         assert!(matches!(err, Error::Toml { .. }), "{err}");
-        // The two boards we own and have run are `verified`; the T1000-E,
-        // whose wiring is the vendor firmware's word, is `expected` (#406).
+        // Every board lnflash writes today is one we own and have run: the
+        // T1000-E joined the T114 and the RAK4631 at `verified` in 864.
         let catalogue = catalogue();
-        for name in catalogue.flashable_names() {
+        let names = catalogue.flashable_names();
+        assert!(names.contains(&"t1000e"), "{names:?}");
+        for name in names {
             let level = catalogue.board(name).unwrap().flashing().unwrap().level;
-            let want = if name == "t1000e" {
-                Level::Expected
-            } else {
-                Level::Verified
-            };
-            assert_eq!(level, want, "{name}");
+            assert_eq!(level, Level::Verified, "{name}");
         }
     }
 

@@ -600,7 +600,8 @@ place asks a second question. Every flashable entry states a required
 [Supported Boards](../firmware/boards.md), and an `expected` board is
 written only after an explicit yes to a question saying we have never
 run that hardware. `--yes` answers neither question, so an unattended
-run refuses instead of guessing (Codeberg #262).
+run refuses instead of guessing (Codeberg #262); the refusal names what
+would have been accepted, the word yes typed or piped in.
 
 The cheaper answer, where it is available, is to make the ambiguity stop
 mattering. The RAK4631 looks like the same problem, since the bare
@@ -697,6 +698,25 @@ them named is refused untouched, because only the bootloader could tell
 them apart. Measured on the rig on 2026-10-19, when a bank flash naming
 the T114 and the RAK touched the T1000-E and left it in its bootloader
 for 34 minutes (861).
+
+The level question moved there for the same reason (864). On 2026-10-20
+`lnflash --board t1000e --yes`, with the board still at level
+`expected`, touched it, identified it in its bootloader, and only then
+refused for want of a typed yes, leaving it in a bootloader without a
+volume. A board found running is now judged on the level of every
+catalogue entry that lists its USB ID and that the run may write: all
+`expected`, and the question is put while it still runs, so a no leaves
+it running; all `verified`, and nothing is asked. Where they differ only
+the bootloader can say which board it is, so the question comes after
+the touch, and a no there says the way back (RESET once, or a power
+cycle). No entry shares a running ID today.
+
+`--yes` still gives no yes to that question, and there is deliberately
+no flag that does: a flag in a script is a standing yes nobody reads,
+which is what the question exists to rule out (828), and an `expected`
+board is one a person should watch the first flash of. The word typed
+at the prompt, or piped in, is what the question accepts, and the
+refusal says so.
 
 Not every Adafruit-family bootloader takes it: the Heltec T114's did not
 in the 2026-05 spike ("Installing the SoftDevice" above), which is one

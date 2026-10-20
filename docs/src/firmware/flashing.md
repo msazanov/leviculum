@@ -98,7 +98,7 @@ waits when a board needs the manual double-tap. Radio settings can be
 given at flash time with `--radio-preset` (`eu868`, `us915`, `au915`) or
 the individual `--radio-freq`, `--radio-bw`, `--radio-sf`, `--radio-cr`
 and `--radio-txpower` flags; `--no-radio` leaves the board's stored
-configuration alone. (`lnflash/src/main.rs:42-468`. The board keeps what
+configuration alone. (`lnflash/src/main.rs:42-472`. The board keeps what
 it is given across resets and across the next flash, so this is part of
 the flash rather than a later configuration step.)
 
@@ -130,10 +130,11 @@ clone-and-deploy policy forbids. (`Justfile:55-57`)
 ### Which boards the bundle carries
 
 **Today: the T114, the RAK4631** (WisMesh Pocket V2 and every other
-carrier built around the RAK4630 module) **and the SenseCAP T1000-E**, the
-last at level *Expected*: its wiring is read from the vendor firmware and
-we have not run it yet, so `lnflash` writes it only after a person says
-yes to exactly that. Boards are data rather than
+carrier built around the RAK4630 module) **and the SenseCAP T1000-E**, all
+three at level *Verified*. A board at level *Expected*, wiring checked
+and never run by us, is written only after a person types yes to exactly
+that, and `lnflash` asks it before the 1200-baud touch, so a no leaves
+the board running. Boards are data rather than
 code, so a new board is a catalogue entry plus a firmware build, not a
 new binary — and an entry without a firmware build is an empty promise,
 so the shipped bundle carries what we actually build.
@@ -423,8 +424,7 @@ sudo target/lnflash/lnflash-<stamp>/lnflash --board t1000e
 `lnflash` touches the board's port at 1200 baud, which drops both stock
 Meshtastic and our firmware into the bootloader, waits for `2886:0057`
 and its serial port, shows the package it is about to send, and asks.
-The board is at level *Expected*, so it also asks for a typed yes to
-hardware we have not run, and `--yes` does not give one. The transfer is
+The transfer is
 the legacy Nordic serial DFU of `adafruit-nrfutil dfu serial
 --singlebank` at 115200 baud, frame for frame: `lnflash/src/dfu.rs`
 cites the reference's lines for every part of it, and its tests compare

@@ -101,12 +101,15 @@ pub enum Error {
     #[error(
         "the board on {port} is {board}, which lnflash knows at level {level}: its wiring was \
          checked against the vendor's reference, but we have never run this hardware. Writing \
-         it needs a yes at the prompt, and --yes does not give one. Nothing was written."
+         it needs the word yes typed at that question, by a person at the prompt or piped in; \
+         --yes answers every other confirmation and deliberately not this one. Nothing was \
+         written{left}"
     )]
     NeedsConfirmation {
         port: String,
         board: String,
         level: &'static str,
+        left: Left,
     },
     #[error("the board on {port} never appeared in its bootloader")]
     NoBootloader { port: String },
@@ -193,6 +196,35 @@ pub enum Error {
     },
     #[error("cancelled")]
     Cancelled,
+}
+
+/// Where a board refused at the level question was left, said at the end of
+/// [`Error::NeedsConfirmation`] (864): a person who said no, or a run under
+/// `--yes`, has to know whether the board still runs what it ran before.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Left {
+    /// Asked while it still ran, so nothing was sent to it.
+    Running,
+    /// Found in its bootloader, and still there.
+    InBootloader,
+    /// Touched into its bootloader first, because its running ID is shared
+    /// by entries at different levels and only the bootloader could say
+    /// which board, and so which level, it is.
+    Touched,
+}
+
+impl std::fmt::Display for Left {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Left::Running => ", and it was not touched: it is still running what it ran before.",
+            Left::InBootloader => ", and it is still in its bootloader.",
+            Left::Touched => {
+                ". This run touched it into its bootloader, since its running ID did not say \
+                 which board it is and so not which level: press RESET once, or power-cycle \
+                 it, and it starts what it ran before."
+            }
+        })
+    }
 }
 
 /// What a failed transfer leaves behind, said after the failure itself.
@@ -308,6 +340,22 @@ pub fn confirm_identity<'m>(
     asked_for: Option<&str>,
     ui: &mut dyn Ui,
 ) -> Result<Confirmed<'m>, Error> {
+    confirm_identity_after(catalogue, manifest, info, port, asked_for, &[], ui)
+}
+
+/// [`confirm_identity`] for a board whose level question may already have
+/// been answered before the touch ([`level_before_touch`]): `answered`
+/// names the boards a yes was typed for, and the bootloader naming one of
+/// them is not asked again. One it names otherwise is asked as usual.
+fn confirm_identity_after<'m>(
+    catalogue: &'m Catalogue,
+    manifest: &'m Manifest,
+    info: &InfoUf2,
+    port: &str,
+    asked_for: Option<&str>,
+    answered: &[String],
+    ui: &mut dyn Ui,
+) -> Result<Confirmed<'m>, Error> {
     let confirmed = resolve_identity(catalogue, manifest, info, port, asked_for)?;
     let name = confirmed.name();
     let identify = &confirmed.flashing().identify;
@@ -329,28 +377,56 @@ pub fn confirm_identity<'m>(
             });
         }
     }
-    ask_about_level(&confirmed, port, ui)?;
+    ask_about_level(&confirmed, port, answered, ui)?;
     Ok(confirmed)
 }
 
 /// The question a board at level `expected` puts to the person, whichever
-/// way its identity was established.
-fn ask_about_level(confirmed: &Confirmed, port: &str, ui: &mut dyn Ui) -> Result<(), Error> {
+/// way its identity was established, unless `answered` says it was put to
+/// them before the touch.
+fn ask_about_level(
+    confirmed: &Confirmed,
+    port: &str,
+    answered: &[String],
+    ui: &mut dyn Ui,
+) -> Result<(), Error> {
     let name = confirmed.name();
-    let level = confirmed.flashing().level;
-    if level == Level::Expected {
-        let answer = ui.ask(&format!(
-            "{port}: {name} is at level {}: its wiring matches the vendor's reference, but we \
-             have never run this hardware. Type yes to write it anyway:",
-            level.as_str()
-        ))?;
-        if !answer.is_some_and(|a| a.trim().eq_ignore_ascii_case("yes")) {
-            return Err(Error::NeedsConfirmation {
-                port: port.to_string(),
-                board: name.to_string(),
-                level: level.as_str(),
-            });
-        }
+    if answered.iter().any(|a| a == name) {
+        return Ok(());
+    }
+    put_level_question(
+        port,
+        name,
+        confirmed.flashing().level,
+        Left::InBootloader,
+        ui,
+    )
+}
+
+/// The level question itself, and the refusal a missing yes comes to.
+/// `left` is where a refusal leaves the board.
+fn put_level_question(
+    port: &str,
+    name: &str,
+    level: Level,
+    left: Left,
+    ui: &mut dyn Ui,
+) -> Result<(), Error> {
+    if level != Level::Expected {
+        return Ok(());
+    }
+    let answer = ui.ask(&format!(
+        "{port}: {name} is at level {}: its wiring matches the vendor's reference, but we \
+         have never run this hardware. Type yes to write it anyway:",
+        level.as_str()
+    ))?;
+    if !answer.is_some_and(|a| a.trim().eq_ignore_ascii_case("yes")) {
+        return Err(Error::NeedsConfirmation {
+            port: port.to_string(),
+            board: name.to_string(),
+            level: level.as_str(),
+            left,
+        });
     }
     Ok(())
 }
@@ -415,10 +491,12 @@ pub fn confirm_named<'m>(
     info: &InfoUf2,
     port: &str,
     named: &[String],
+    answered: &[String],
     ui: &mut dyn Ui,
 ) -> Result<Option<Confirmed<'m>>, Error> {
     if named.is_empty() {
-        return confirm_identity(catalogue, manifest, info, port, None, ui).map(Some);
+        return confirm_identity_after(catalogue, manifest, info, port, None, answered, ui)
+            .map(Some);
     }
     // An ID that is missing or unknown falls through to confirm_identity,
     // which names the problem; only a board we can name can be skipped.
@@ -438,7 +516,9 @@ pub fn confirm_named<'m>(
             ));
             Ok(None)
         }
-        found => confirm_identity(catalogue, manifest, info, port, found, ui).map(Some),
+        found => {
+            confirm_identity_after(catalogue, manifest, info, port, found, answered, ui).map(Some)
+        }
     }
 }
 
@@ -2655,6 +2735,26 @@ fn report_telemetry(
     }
 }
 
+/// What a run settled about a board before it was touched, carried to the
+/// identity step in its bootloader: the boards named with `--board`, and
+/// those whose level question was answered yes already
+/// ([`level_before_touch`]).
+#[derive(Clone, Copy)]
+struct BeforeTouch<'a> {
+    boards: &'a [String],
+    answered: &'a [String],
+}
+
+impl<'a> BeforeTouch<'a> {
+    /// A board found in its bootloader, or a dry run: no question was put.
+    fn nothing_asked(boards: &'a [String]) -> Self {
+        Self {
+            boards,
+            answered: &[],
+        }
+    }
+}
+
 /// What the bootloader says the board is and what a write would do to it,
 /// said to the user. The real run and the dry run both come through here, so
 /// the plan a dry run shows is the plan a real run follows. `Ok(None)` is a
@@ -2663,12 +2763,21 @@ fn inspect<'m>(
     catalogue: &'m Catalogue,
     manifest: &'m Manifest,
     ui: &mut dyn Ui,
-    boards: &[String],
+    before: BeforeTouch,
     port: &str,
     info: &InfoUf2,
     installed: impl FnOnce(&InfoUf2) -> Installed,
 ) -> Result<Option<(Confirmed<'m>, Plan)>, Error> {
-    let Some(confirmed) = confirm_named(catalogue, manifest, info, port, boards, ui)? else {
+    let Some(confirmed) = confirm_named(
+        catalogue,
+        manifest,
+        info,
+        port,
+        before.boards,
+        before.answered,
+        ui,
+    )?
+    else {
         return Ok(None);
     };
     ui.say(&format!(
@@ -2845,7 +2954,7 @@ fn dry_walk(
                 catalogue,
                 manifest,
                 &mut dry,
-                &opts.boards,
+                BeforeTouch::nothing_asked(&opts.boards),
                 port,
                 &info,
                 |_| installed,
@@ -2956,6 +3065,74 @@ fn named_before_touch(
     Ok(None)
 }
 
+/// The level question for one candidate, put before anything is sent to it
+/// (864), as [`named_before_touch`] takes the `--board` decision there.
+/// `Ok` carries the boards a yes was typed for, so the bootloader naming one
+/// of them is not asked again ([`confirm_identity_after`]).
+///
+/// A board found running is judged on its USB ID, against the catalogue
+/// entries that list it and that this run may write (the named ones, when
+/// boards are named; [`named_before_touch`] has already refused an ID shared
+/// with one not named). Every one of them at level `expected` is asked about
+/// now, while a no still leaves the board running; every one `verified` asks
+/// nothing. Where they differ, only the bootloader can say which board, and
+/// so which level, it is: that is said, and the question comes after the
+/// touch, where a no names the way back ([`Left::Touched`]). No entry shares
+/// a running ID today, so that branch is for a catalogue that grows one.
+///
+/// A board already in its bootloader is asked after identification, as
+/// before: nothing is sent to knock it there.
+fn level_before_touch(
+    catalogue: &Catalogue,
+    candidate: &Candidate,
+    named: &[String],
+    ui: &mut dyn Ui,
+) -> Result<Vec<String>, Error> {
+    if candidate.in_bootloader {
+        return Ok(Vec::new());
+    }
+    let id = candidate.device.id;
+    let mut claimants: Vec<(&str, Level)> = Vec::new();
+    for (name, board) in &catalogue.board {
+        if !named.is_empty() && !named.contains(name) {
+            continue;
+        }
+        let Some(flashing) = board.flashing() else {
+            continue;
+        };
+        if board.candidate_ids(name)?.contains(&id) {
+            claimants.push((name, flashing.level));
+        }
+    }
+    let port = &candidate.device.name;
+    let expected = claimants
+        .iter()
+        .filter(|(_, level)| *level == Level::Expected)
+        .count();
+    if expected == 0 {
+        return Ok(Vec::new());
+    }
+    if expected < claimants.len() {
+        ui.say(&format!(
+            "{port}: running [{id}], an ID the catalogue gives to {}. Only the bootloader can \
+             say which, and so whether this is hardware we have never run: if it is, the \
+             question comes after the touch.",
+            claimants
+                .iter()
+                .map(|(name, level)| format!("{name} ({})", level.as_str()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+        return Ok(Vec::new());
+    }
+    let mut answered = Vec::new();
+    for (name, level) in claimants {
+        put_level_question(port, name, level, Left::Running, ui)?;
+        answered.push(name.to_string());
+    }
+    Ok(answered)
+}
+
 /// What a board the bootloader says `--board` does not name comes to: the
 /// skip it always was for one found in its bootloader, and a refusal for one
 /// this run touched there, since it now sits in a bootloader it was not in.
@@ -2969,6 +3146,25 @@ fn left_in_bootloader(candidate: &Candidate) -> Result<Option<Outcome>, Error> {
         port: candidate.device.name.clone(),
         hint: candidate.hint.clone(),
     })
+}
+
+/// A level refusal after identification, on a board this run touched into
+/// its bootloader: said with the way back rather than as one found there.
+fn touched_at_level(err: Error, candidate: &Candidate) -> Error {
+    match err {
+        Error::NeedsConfirmation {
+            port,
+            board,
+            level,
+            left: Left::InBootloader,
+        } if !candidate.in_bootloader => Error::NeedsConfirmation {
+            port,
+            board,
+            level,
+            left: Left::Touched,
+        },
+        err => err,
+    }
 }
 
 fn resolve(
@@ -3017,6 +3213,29 @@ fn resolve(
         Err(err) => return Err(err),
     }
 
+    // And the level question, for the same reason (864): a board that
+    // needs a typed yes is asked while it still runs, so a no leaves it
+    // running. A dry run says the question and what no answer comes to,
+    // as it does for one found in its bootloader.
+    let answered = if opts.dry_run {
+        let mut dry = DryUi {
+            inner: &mut *ui,
+            asked: Vec::new(),
+        };
+        let walked = level_before_touch(catalogue, candidate, &opts.boards, &mut dry);
+        let asked = dry.asked;
+        for question in &asked {
+            ui.say(&format!("{port}: would ask: {question}"));
+        }
+        if let Err(err) = walked {
+            ui.say(&format!("{port}: would be refused: {err}\n"));
+            return Ok(None);
+        }
+        Vec::new()
+    } else {
+        level_before_touch(catalogue, candidate, &opts.boards, ui)?
+    };
+
     // The hint chooses how to reach the board, as it chooses how to knock;
     // what may be written is still decided on the bootloader's identity.
     let serial_dfu = catalogue
@@ -3034,7 +3253,8 @@ fn resolve(
         return Ok(None);
     }
     if serial_dfu {
-        return resolve_dfu(catalogue, manifest, sysfs, ui, opts, candidate);
+        return resolve_dfu(catalogue, manifest, sysfs, ui, opts, candidate, &answered)
+            .map_err(|err| touched_at_level(err, candidate));
     }
 
     let bootloader = if candidate.in_bootloader {
@@ -3052,11 +3272,15 @@ fn resolve(
         catalogue,
         manifest,
         ui,
-        &opts.boards,
+        BeforeTouch {
+            boards: &opts.boards,
+            answered: &answered,
+        },
         &port,
         &info,
         |info| read_installed(&drive, info),
-    )?
+    )
+    .map_err(|err| touched_at_level(err, candidate))?
     else {
         return left_in_bootloader(candidate);
     };
@@ -3180,12 +3404,13 @@ fn inspect_dfu<'m>(
     catalogue: &'m Catalogue,
     manifest: &'m Manifest,
     ui: &mut dyn Ui,
-    boards: &[String],
+    before: BeforeTouch,
     port: &str,
     bootloader: &Device,
     tty: &Path,
 ) -> Result<Option<(Confirmed<'m>, dfu::Package)>, Error> {
-    let Some(confirmed) = identify_dfu(catalogue, manifest, bootloader.id, port, boards, ui)?
+    let Some(confirmed) =
+        identify_dfu(catalogue, manifest, bootloader.id, port, before.boards, ui)?
     else {
         return Ok(None);
     };
@@ -3206,7 +3431,7 @@ fn inspect_dfu<'m>(
     for line in dfu_plan(&confirmed, &package, &tty.display().to_string()) {
         ui.say(&line);
     }
-    ask_about_level(&confirmed, port, ui)?;
+    ask_about_level(&confirmed, port, before.answered, ui)?;
     Ok(Some((confirmed, package)))
 }
 
@@ -3219,6 +3444,7 @@ fn resolve_dfu(
     ui: &mut dyn Ui,
     opts: &Options,
     candidate: &Candidate,
+    answered: &[String],
 ) -> Result<Option<Outcome>, Error> {
     let port = candidate.device.name.clone();
     let entered = if candidate.in_bootloader {
@@ -3231,7 +3457,10 @@ fn resolve_dfu(
         catalogue,
         manifest,
         ui,
-        &opts.boards,
+        BeforeTouch {
+            boards: &opts.boards,
+            answered,
+        },
         &port,
         &bootloader,
         &tty,
@@ -3380,7 +3609,7 @@ fn dry_walk_dfu(
                 catalogue,
                 manifest,
                 &mut dry,
-                &opts.boards,
+                BeforeTouch::nothing_asked(&opts.boards),
                 port,
                 &bootloader,
                 &tty,
@@ -5823,8 +6052,8 @@ convert = "hex-to-uf2"
                 .unwrap();
             let port = &candidate.device.name;
             Ok(
-                confirm_named(&catalogue, &manifest, &info, port, &named, ui)?.map(|confirmed| {
-                    Outcome {
+                confirm_named(&catalogue, &manifest, &info, port, &named, &[], ui)?.map(
+                    |confirmed| Outcome {
                         port: port.clone(),
                         board: confirmed.name().to_string(),
                         softdevice_installed: None,
@@ -5846,8 +6075,8 @@ convert = "hex-to-uf2"
                         }),
                         radio: None,
                         telemetry: None,
-                    }
-                }),
+                    },
+                ),
             )
         });
         (result, ui)
@@ -5916,6 +6145,7 @@ convert = "hex-to-uf2"
             &infouf2::parse(RAK_INFO),
             "3-2.3.4.4",
             &["t114".to_string(), "rak4631".to_string()],
+            &[],
             &mut Fake::agreeing(),
         )
         .unwrap_err();
@@ -5954,6 +6184,20 @@ convert = "hex-to-uf2"
         fs::write(dir.path().join("manifest.toml"), text).unwrap();
         let manifest = load(dir.path(), &catalogue()).unwrap();
         (dir, catalogue(), manifest)
+    }
+
+    /// The t1000e bundle with the board back at level `expected`, where it
+    /// stood until 864: the stand-in for the next board flashed over serial
+    /// DFU before we have run it.
+    fn expected_t1000e_bundle() -> (TempDir, Catalogue, Manifest) {
+        let (dir, _, _) = t1000e_bundle();
+        let catalogue = Catalogue::builtin_with(
+            "what that reading gave.\nlevel     = \"verified\"",
+            "what that reading gave.\nlevel     = \"expected\"",
+        )
+        .unwrap();
+        let manifest = load(dir.path(), &catalogue).unwrap();
+        (dir, catalogue, manifest)
     }
 
     fn sysfs_file(dir: &Path, name: &str, value: &str) {
@@ -6070,7 +6314,7 @@ convert = "hex-to-uf2"
 
     #[test]
     fn a_t1000e_in_its_bootloader_is_flashed_over_serial_dfu() {
-        let (_dir, catalogue, manifest) = t1000e_bundle();
+        let (_dir, catalogue, manifest) = expected_t1000e_bundle();
         let bench = t1000e_in_bootloader(Bootloader::new(S140_7_3_0));
         // Yes to the overwrite, and yes to hardware at level expected.
         let mut ui = Fake::typing(&["yes"]);
@@ -6181,7 +6425,7 @@ convert = "hex-to-uf2"
 
     #[test]
     fn a_t1000e_is_not_written_without_a_yes_to_its_level() {
-        let (_dir, catalogue, manifest) = t1000e_bundle();
+        let (_dir, catalogue, manifest) = expected_t1000e_bundle();
         let bench = t1000e_in_bootloader(Bootloader::new(S140_7_3_0));
         let mut ui = Fake::agreeing();
         let bus = run_with(
@@ -6194,7 +6438,12 @@ convert = "hex-to-uf2"
         )
         .unwrap();
         assert_eq!(bus.exit_code(), EXIT_FLASH_FAILED);
-        assert!(ui.transcript().contains("Nothing was written."));
+        let said = ui.transcript();
+        assert!(said.contains("Nothing was written"), "{said}");
+        assert!(
+            said.contains("and it is still in its bootloader."),
+            "{said}"
+        );
         assert_eq!(*bench.heard.lock().unwrap(), 0, "not a byte was sent");
     }
 
@@ -6202,7 +6451,7 @@ convert = "hex-to-uf2"
     fn a_dry_run_names_the_port_and_the_package_and_sends_nothing() {
         // No root needed: nothing is mounted on this transport. The level
         // question is said as one a real run would ask (838).
-        let (_dir, catalogue, manifest) = t1000e_bundle();
+        let (_dir, catalogue, manifest) = expected_t1000e_bundle();
         let bench = t1000e_in_bootloader(Bootloader::new(S140_7_3_0));
         let mut ui = Fake::agreeing();
         let opts = Options {
@@ -6341,7 +6590,15 @@ convert = "hex-to-uf2"
     }
 
     fn run_on(bench: &TouchBench, ui: &mut Fake, opts: &Options) -> Bus {
-        let (_dir, catalogue, manifest) = t1000e_bundle();
+        run_on_bundle(bench, ui, opts, t1000e_bundle())
+    }
+
+    fn run_on_bundle(
+        bench: &TouchBench,
+        ui: &mut Fake,
+        opts: &Options,
+        (_dir, catalogue, manifest): (TempDir, Catalogue, Manifest),
+    ) -> Bus {
         run_with(
             &catalogue,
             &manifest,
@@ -6400,8 +6657,8 @@ convert = "hex-to-uf2"
     #[test]
     fn a_running_t1000e_named_is_touched_and_flashed_over_serial_dfu() {
         let bench = running_t1000e();
-        // The answer to the level question; the overwrite is a confirm.
-        let mut ui = Fake::typing(&["yes"]);
+        // Verified: no question to answer; the overwrite is a confirm.
+        let mut ui = Fake::agreeing();
         let opts = Options {
             boards: vec!["t1000e".into()],
             ..dfu_opts()
@@ -6427,6 +6684,7 @@ convert = "hex-to-uf2"
             assert!(said.contains(&needle), "{needle:?} missing from:\n{said}");
         }
         assert!(!said.contains("Not named"), "{said}");
+        assert!(!said.contains("level expected"), "{said}");
         assert_eq!(bus.exit_code(), EXIT_UNCONFIRMED, "{said}");
     }
 
@@ -6496,5 +6754,167 @@ convert = "hex-to-uf2"
             ..candidate
         };
         assert!(left_in_bootloader(&found_there).unwrap().is_none());
+    }
+
+    // -----------------------------------------------------------------
+    // the level question before the touch (864)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn a_running_expected_board_without_a_yes_is_refused_and_never_touched() {
+        // The rig on 2026-10-20: `lnflash --board t1000e --yes` touched the
+        // board, identified it in its bootloader, and only then refused for
+        // want of a typed yes. Now the question comes while it still runs.
+        let bench = running_t1000e();
+        for ui in [Fake::agreeing(), Fake::typing(&["y"])] {
+            let mut ui = ui;
+            let opts = Options {
+                boards: vec!["t1000e".into()],
+                ..dfu_opts()
+            };
+            let bus = run_on_bundle(&bench, &mut ui, &opts, expected_t1000e_bundle());
+            let said = ui.transcript();
+            assert_eq!(bus.refused, ["1-1"], "{said}");
+            assert_eq!(bus.exit_code(), EXIT_FLASH_FAILED, "{said}");
+            for needle in [
+                "1-1: t1000e is at level expected",
+                "Type yes to write it anyway:",
+                "1-1: the board on 1-1 is t1000e, which lnflash knows at level expected",
+                "the word yes typed at that question, by a person at the prompt or piped in; \
+                 --yes answers every other confirmation and deliberately not this one",
+                "Nothing was written, and it was not touched: it is still running what it ran \
+                 before.",
+            ] {
+                assert!(said.contains(needle), "{needle:?} missing from:\n{said}");
+            }
+            assert!(!said.contains("1200-baud touch"), "{said}");
+            assert!(!bench.touched(), "the port was set to 1200 baud: {said}");
+            assert_eq!(*bench.heard.lock().unwrap(), 0, "not a byte was sent");
+        }
+    }
+
+    #[test]
+    fn a_running_expected_board_with_a_yes_is_asked_once_then_touched_and_flashed() {
+        let bench = running_t1000e();
+        let mut ui = Fake::typing(&["yes"]);
+        let opts = Options {
+            boards: vec!["t1000e".into()],
+            ..dfu_opts()
+        };
+        let bus = run_on_bundle(&bench, &mut ui, &opts, expected_t1000e_bundle());
+        let said = ui.transcript();
+        assert!(bench.touched(), "{said}");
+        assert!(bus.refused.is_empty(), "{said}");
+        assert_eq!(bus.outcomes[0].board, "t1000e");
+        assert_eq!(
+            bench.board.lock().unwrap().ended,
+            Some(Ended::Activated),
+            "{said}"
+        );
+        // Asked once, before the touch, and not again in the bootloader.
+        let question = "1-1: t1000e is at level expected";
+        assert_eq!(said.matches(question).count(), 1, "{said}");
+        let asked = said.find(question).unwrap();
+        let touch = said.find("1-1: 1200-baud touch").unwrap();
+        assert!(asked < touch, "{said}");
+        assert_eq!(bus.exit_code(), EXIT_UNCONFIRMED, "{said}");
+    }
+
+    #[test]
+    fn a_dry_run_on_a_running_expected_board_says_the_question_and_touches_nothing() {
+        let bench = running_t1000e();
+        let mut ui = Fake::agreeing();
+        let opts = Options {
+            dry_run: true,
+            boards: vec!["t1000e".into()],
+            ..dfu_opts()
+        };
+        let bus = run_on_bundle(&bench, &mut ui, &opts, expected_t1000e_bundle());
+        let said = ui.transcript();
+        assert_eq!(bus.skipped, ["1-1"], "{said}");
+        assert_eq!(bus.exit_code(), EXIT_CONFIRMED, "{said}");
+        for needle in [
+            "1-1: would ask: 1-1: t1000e is at level expected",
+            "1-1: would be refused: the board on 1-1 is t1000e",
+            "it was not touched: it is still running",
+        ] {
+            assert!(said.contains(needle), "{needle:?} missing from:\n{said}");
+        }
+        assert!(!said.contains("would touch"), "{said}");
+        assert!(!bench.touched());
+    }
+
+    #[test]
+    fn a_running_id_shared_across_levels_is_asked_after_the_touch_with_the_way_back() {
+        // No entry shares a running ID today. If a verified and an expected
+        // entry ever do, only the bootloader can say which level applies:
+        // nothing is asked before the touch, that is said, and a no after
+        // it names the way back.
+        let catalogue = Catalogue::builtin_with_all(&[
+            (
+                "candidate_usb = [\"1209:0002\"]",
+                "candidate_usb = [\"1209:0002\", \"1209:0004\"]",
+            ),
+            (
+                "what that reading gave.\nlevel     = \"verified\"",
+                "what that reading gave.\nlevel     = \"expected\"",
+            ),
+        ])
+        .unwrap();
+        let sys = TempDir::new().unwrap();
+        t1000e_bus(sys.path(), false);
+        let candidate = find_candidates(&catalogue, &Sysfs::new(sys.path()))
+            .unwrap()
+            .remove(0);
+        let both = ["t1000e".to_string(), "rak4631".to_string()];
+        let mut ui = Fake::default();
+        let answered = level_before_touch(&catalogue, &candidate, &both, &mut ui).unwrap();
+        let said = ui.transcript();
+        assert!(answered.is_empty(), "{said}");
+        assert!(
+            said.contains("gives to rak4631 (verified), t1000e (expected)"),
+            "{said}"
+        );
+        assert!(
+            said.contains("the question comes after the touch"),
+            "{said}"
+        );
+        assert!(!said.contains("Type yes"), "{said}");
+
+        let err = touched_at_level(
+            Error::NeedsConfirmation {
+                port: "1-1".into(),
+                board: "t1000e".into(),
+                level: "expected",
+                left: Left::InBootloader,
+            },
+            &candidate,
+        );
+        let text = err.to_string();
+        assert!(
+            text.contains("This run touched it into its bootloader"),
+            "{text}"
+        );
+        assert!(text.contains("press RESET once"), "{text}");
+        // Only the expected one named: asked before the touch after all.
+        let mut ui = Fake::default();
+        let err = level_before_touch(&catalogue, &candidate, &["t1000e".to_string()], &mut ui)
+            .unwrap_err();
+        assert!(err.to_string().contains("it was not touched"), "{err}");
+    }
+
+    #[test]
+    fn a_verified_running_board_is_asked_nothing_before_the_touch() {
+        let sys = TempDir::new().unwrap();
+        t1000e_bus(sys.path(), false);
+        let catalogue = catalogue();
+        let candidate = find_candidates(&catalogue, &Sysfs::new(sys.path()))
+            .unwrap()
+            .remove(0);
+        let mut ui = Fake::default();
+        assert!(level_before_touch(&catalogue, &candidate, &[], &mut ui)
+            .unwrap()
+            .is_empty());
+        assert!(ui.said.is_empty(), "{}", ui.transcript());
     }
 }

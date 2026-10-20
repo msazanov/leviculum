@@ -313,7 +313,7 @@ the board's description rather than by a host pin.
 
 | Product | Level | Note |
 |---|---|---|
-| Seeed SenseCAP T1000-E | **Bring-up** | On the rig since 2026-10-18, first image built, not yet run; every wiring fact is from Meshtastic's variant, as Seeed publishes no schematic. `lnflash` carries it at *Expected* |
+| Seeed SenseCAP T1000-E | **Verified** | On the rig since 2026-10-18 and running our firmware since 2026-10-19: LoRa traffic overnight without a panic, the LR1110 smoke cell 20 of 20 both ways (#453), and flashed by `lnflash` over serial DFU on 2026-10-20. The wiring is still read from Meshtastic's variant, as Seeed publishes no schematic |
 
 Every fact in `leviculum-nrf/src/boards/t1000e.rs` is marked as a hint from
 the vendor's firmware, and the two that can be wrong are refuted at first
@@ -337,7 +337,7 @@ the QMA6100P accelerometer, the battery divider, the buzzer and the
 button. The product has no display.
 
 The bootloader's `Board-ID` is `nRF52840-T1000-E-v1`, bound to this one
-product, so `lnflash` has a flashing entry for it at level *Expected*:
+product, so `lnflash` has a flashing entry for it at level *Verified*:
 USB `1209:0004` for our firmware and `239a:8029` for stock Meshtastic, the
 bootloader on `2886:0057`, drive label `T1000-E`. The rig unit's bootloader
 offers serial DFU only and mounts no drive, so `lnflash` writes this board

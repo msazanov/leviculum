@@ -9,8 +9,8 @@ What runs the LNode firmware. Every line is a summary of the [board catalogue](h
 - **Heltec Mesh Node T114**: nRF52840, SX1262. Verified: LoRa, BLE, USB, display, GNSS.
 - **RAK WisMesh Pocket V2 (RAK19026 carrier)**: RAK4630 module (nRF52840, SX1262). Verified: LoRa, BLE, USB, display, GNSS, battery.
 - **RAK4631 bare module**: nRF52840, SX1262. Verified: LoRa, BLE, USB.
+- **Seeed SenseCAP T1000-E**: nRF52840, LR1110. Verified: LoRa, USB, flashed by lnflash over serial DFU; BLE and GNSS are in the image but not yet confirmed on the bench.
 - **Seeed SenseCAP Solar Node P1-Pro**: XIAO nRF52840, Wio-SX1262. Bring-up: radio and GNSS not yet confirmed.
-- **Seeed SenseCAP T1000-E**: nRF52840, LR1110. Bring-up: first image built, not yet run; LoRa, BLE, USB only.
 - **Heltec WiFi LoRa 32 V4**: ESP32-S3, SX1262. Skeleton: boots, no radio.
 
 ## Expected to work

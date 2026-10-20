@@ -60,8 +60,12 @@ struct Cli {
     #[arg(long)]
     dry_run: bool,
 
-    /// Answer yes to every confirmation. For automation; fails rather than
-    /// waits if a board needs a physical double-tap.
+    /// Answer yes to every confirmation but one: writing a board at level
+    /// expected (wiring checked, never run by us) needs the word yes typed at
+    /// its question, by a person or piped in, and --yes deliberately never
+    /// gives it. That question comes before the 1200-baud touch, so such a
+    /// board is refused untouched and keeps running. For automation; fails
+    /// rather than waits if a board needs a physical double-tap.
     #[arg(long)]
     yes: bool,
 

@@ -200,10 +200,14 @@ family    = "nrf52840"
 candidate_usb = ["1209:0004", "239a:8029"]
 
 [board.t1000e.flashing]
-# `expected`: the wiring is read from Meshtastic's variant (Seeed publishes no
-# schematic), and we have not run the board yet. A write needs a person to say
-# yes to exactly that.
-level     = "expected"
+# `verified` since 2026-10-20: the rig unit has run our firmware since
+# 2026-10-19 16:18 (LoRa traffic overnight, 404 TX and 508 RX frames, three
+# propagation-node syncs, no panic), passed the LR1110 smoke cell 20 of 20
+# both ways (Codeberg #453), and lnflash itself wrote it over serial DFU on
+# 2026-10-20 (679168 bytes, 1327 data frames, back running 335fc66c, "1 of 1
+# confirmed"). The wiring is still read from Meshtastic's variant, since
+# Seeed publishes no schematic; what we run is what that reading gave.
+level     = "verified"
 # The rig unit's bootloader publishes no UF2 volume and takes serial DFU only
 # (Codeberg #452), so this board is written the way `adafruit-nrfutil dfu
 # serial --singlebank` writes it (lnflash/src/dfu.rs). A unit whose bootloader
@@ -221,8 +225,7 @@ entry     = ["touch-1200", "double-tap"]
 # On dfu-serial the Board-ID is never read: there is no INFO_UF2.TXT to read
 # it from. Identity rests on the bootloader's USB ID instead, which the
 # catalogue refuses to load unless no other entry lists it (Seeed's VID, and a
-# PID its bootloader uses for this product), and the `expected` level puts a
-# person in front of every write on top of that.
+# PID its bootloader uses for this product).
 info_uf2_board_id = "nRF52840-T1000-E-v1"
 bootloader_usb    = ["2886:0057"]
 msc_label         = "T1000-E"
