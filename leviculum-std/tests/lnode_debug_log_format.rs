@@ -1664,10 +1664,7 @@ fn the_firmware_still_emits_the_dial_refused_line() {
 /// Files whose `t=` in a log body is known and owned by another batch. Each
 /// entry carries the reason; an entry outlives its reason by exactly one
 /// review.
-const BODY_STAMP_ALLOWED: &[(&str, &str)] = &[(
-    "button.rs",
-    "BTN_PRESS still appends its own t=; batch 889 owns button.rs and drops it",
-)];
+const BODY_STAMP_ALLOWED: &[(&str, &str)] = &[];
 
 /// `src` with every comment blanked to spaces, string and char literals kept,
 /// so a call named in a doc comment is not mistaken for a call.
