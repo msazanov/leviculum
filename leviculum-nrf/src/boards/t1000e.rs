@@ -2,8 +2,9 @@
 //!
 //! A card-sized tracker: an nRF52840 and a Semtech LR1110 (LoRa plus GNSS
 //! and WiFi scanning, of which this firmware uses the LoRa modem only),
-//! an Airoha AG3335 GNSS receiver (driven since #456), a QMA6100P accelerometer, a buzzer, one
-//! LED and one button. No display. It is the first board on this firmware
+//! an Airoha AG3335 GNSS receiver (driven since #456), a QMA6100P
+//! accelerometer (read as moving/still since #457), a buzzer, one LED and
+//! one button. No display. It is the first board on this firmware
 //! whose radio is not an SX1262, so it is also the first one driven
 //! through `leviculum_lr11xx` (`crate::radio` picks the driver for the
 //! `bsp-t1000e` build). Same Adafruit nRF52 bootloader family as the other
@@ -249,6 +250,26 @@ pub type BatteryAdc = peripherals::P0_02;
 /// other; the USB transition is visible only as the pack voltage the
 /// charger holds.
 pub const ADC_MULTIPLIER: f32 = 2.0;
+
+// Accelerometer (QMA6100P, Codeberg #457). The variant's hint standing again
+// (`variant.h:47,63-67`); the registers are the part's datasheet, in
+// `leviculum_motion`.
+/// I²C SDA (`PIN_WIRE_SDA (0 + 26)`). The variant's only I²C bus, and the
+/// part its only device (`HAS_QMA6100P`, "very rare beast, only on this
+/// board"; at 0x12, Meshtastic `src/configuration.h:253`).
+pub type AccSda = peripherals::P0_26;
+/// I²C SCL (`PIN_WIRE_SCL (0 + 27)`).
+pub type AccScl = peripherals::P0_27;
+/// The accelerometer's rail, **active HIGH** (`PIN_3V3_ACC_EN (32 + 7)`,
+/// "Power to Acc"; `initVariant` raises it). Owned by the motion task, which
+/// drops it again if the part does not answer.
+pub type AccPower = peripherals::P1_07;
+/// The part's INT1 (`QMA_6100P_INT_PIN (32 + 2)`). **Not configured**: the
+/// task polls the data registers instead, for the reasons in
+/// `leviculum_motion`'s module doc (the reference maps the wrong bit of
+/// `INT_MAP1`, so no firmware has shown this line working). Step two may
+/// take it up once the rig has.
+pub type AccInt = peripherals::P1_02;
 
 // LED and button
 /// The one LED, **active HIGH** (`PIN_LED1 (0 + 24)`, `LED_STATE_ON 1`).

@@ -46,7 +46,7 @@ drive (`stand_down_for_rx`, `leviculum-nrf/src/sx1262.rs:961`).
 
 ## Where the seam runs today
 
-The `leviculum-nrf` workspace has 33 members besides the firmware crate,
+The `leviculum-nrf` workspace has 34 members besides the firmware crate,
 every one of them pure and host-testable: `screen`, `sd-policy`,
 `gnss-time`, `gnss-presence`, `gnss-init`, `telemetry-policy`, `ble-tx`,
 `announce-policy`, `queue-budget`, `log-line`, `tx-spacing`, `rx-arming`,
@@ -54,7 +54,7 @@ every one of them pure and host-testable: `screen`, `sd-policy`,
 `media-state`, `record-log`, `pn-store`, `store-spike`, `qspi-bitbang`,
 `battery-scale`, `settle-budget`, `drop-budget`, `heap-budget`,
 `node-name`, `sync-batch`, `upload-proof`, `mute-lease`, `qspi-selftest`,
-`qspi-boot`, `usb-policy`, `time-floor` (`members`, `leviculum-nrf/Cargo.toml:14`). Before
+`qspi-boot`, `usb-policy`, `time-floor`, `motion` (`members`, `leviculum-nrf/Cargo.toml:14`). Before
 `heap-budget` and `node-name` joined them they carried **806 host assertions across 61 test targets** —
 measured 2026-09-25 by the host-triple lines of `lint-nrf`
 (`Justfile:80`). `mute-lease` is the

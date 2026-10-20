@@ -18,8 +18,10 @@
 //! LoRa link with a T114 at the default PHY. Since #456 it also drives the
 //! Airoha AG3335 GNSS, which seeds the calendar and puts a position into
 //! telemetry as the T114's L76K does. Since #458 it samples the battery
-//! divider and puts the charge into telemetry. Not in it: the QMA6100P
-//! accelerometer, the charger status lines, the buzzer and the button.
+//! divider and puts the charge into telemetry. Since #457 it reads the
+//! QMA6100P accelerometer and prints `MOTION state=moving|still`, which
+//! nothing acts on yet. Not in it: the charger status lines, the buzzer and
+//! the button.
 //! There is no display on this product.
 
 #![no_std]
@@ -550,6 +552,22 @@ async fn main(spawner: Spawner) {
         leviculum_nrf::battery::BatteryScale::for_unsized_divider(t1000e::ADC_MULTIPLIER),
     );
     info!("battery task spawned");
+
+    // QMA6100P on TWISPI0 (#457): SDA P0.26, SCL P0.27, its own rail on
+    // P1.07, all from the variant (`boards/t1000e.rs`). The task raises the
+    // rail, prints `MOTION_INIT ok|absent`, and on `ok` polls the axes and
+    // prints a `MOTION` line on each moving/still change. Nothing reads the
+    // state in this step; step two lets it put the GNSS receiver to sleep.
+    leviculum_nrf::motion::init(
+        &spawner,
+        leviculum_nrf::motion::MotionWiring {
+            twim: p.TWISPI0,
+            sda: p.P0_26.into(),
+            scl: p.P0_27.into(),
+            power_enable: p.P1_07.into(),
+        },
+    );
+    info!("motion task spawned");
 
     let (hu, hf) = leviculum_nrf::heap_stats();
     info!("heap u={} f={}", hu, hf);

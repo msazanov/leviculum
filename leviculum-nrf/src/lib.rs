@@ -248,6 +248,14 @@ pub mod display;
 pub mod gnss;
 #[cfg(feature = "display")]
 pub mod led;
+// The T1000-E's accelerometer (#457). Its own feature, not part of the
+// baseboard set above: the only board carrying the part is not a RAK one.
+#[cfg(feature = "motion")]
+pub mod motion;
+#[cfg(all(feature = "motion", feature = "display"))]
+compile_error!(
+    "`motion` and `display` both bind TWISPI0's interrupt; give one of them TWISPI1 first"
+);
 
 use core::mem::MaybeUninit;
 use embedded_alloc::LlffHeap as Heap;

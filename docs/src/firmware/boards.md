@@ -332,9 +332,18 @@ and sleep line `P1.12` held high by the GNSS task, VRTC `P0.08` high,
 reset `P1.15` released low, RTC wake `P0.15` low, all at the levels of
 Meshtastic's `initVariant`. Its one-shot init speaks Airoha's `$PAIR`
 sentences (`leviculum-nrf/gnss-init/src/airoha.rs`), and a fix seeds the
-calendar and fills the telemetry position as on the T114. Not in it yet:
-the QMA6100P accelerometer, the battery divider, the buzzer and the
-button. The product has no display.
+calendar and fills the telemetry position as on the T114. Since #458 it
+samples the battery divider, and since #457 it reads the QMA6100P
+accelerometer over I²C (SDA `P0.26`, SCL `P0.27`, address 0x12, its rail
+on `P1.07`), four samples a second, and prints `MOTION state=moving|still`
+on each change and `MOTION_INIT ok|absent` at boot
+(`leviculum-nrf/motion`). Nothing acts on the state yet; step two lets the
+GNSS receiver sleep while the board is still, as a gate in front of the
+#401 movement proof, not a replacement for it
+([Announce cadence](../concepts/announce-cadence.md)). The part's INT1
+(`P1.02`) is not used: the one reference that configures it maps the
+wrong bit, so the driver polls. Not in it yet: the buzzer and the button.
+The product has no display.
 
 The bootloader's `Board-ID` is `nRF52840-T1000-E-v1`, bound to this one
 product, so `lnflash` has a flashing entry for it at level *Verified*:
@@ -420,11 +429,12 @@ the radio-adjacent crates survive it untouched, is in
 [How far one firmware build reaches](../concepts/board-support-scope.md)
 under "The axis the policy does not have"; Codeberg #406 is the record.
 
-The one thing it has that no board above has is a 3-axis accelerometer,
-which is the movement signal the announce cadence currently has to infer
-from a position delta (`MovementDetector`,
-`leviculum-nrf/announce-policy/src/cadence.rs:226`). If that work ever
-needs a hardware answer instead, this is the device that can give one.
+The one thing it has that no board above has is a 3-axis accelerometer.
+The announce cadence infers movement from a position delta
+(`MovementDetector`, `leviculum-nrf/announce-policy/src/cadence.rs:226`),
+and that stays the proof; since #457 the accelerometer is read and will
+gate when the receiver runs at all
+([Announce cadence](../concepts/announce-cadence.md)).
 
 The XIAO family, now family C above, is the one case where the
 bootloader cannot answer which board it is: the MCU module is a XIAO and
@@ -469,7 +479,7 @@ Each binary names the radio driver it links in `required-features`
 (`radio-sx1262` for the first three, `bsp-t1000e` for the last), so a
 feature set compiles the binaries on its own radio and no others.
 
-(`leviculum-nrf/Cargo.toml:459-471`)
+(`leviculum-nrf/Cargo.toml:466-478`)
 
 The board-support-package (BSP) features select the runtime for a given
 board. Exactly one BSP feature must be enabled per build; a
@@ -478,25 +488,26 @@ board. Exactly one BSP feature must be enabled per build; a
 
 | Feature | Effect | Cite |
 |---------|--------|------|
-| `bsp-t114` | T114 BSP (+ SoftDevice BLE + status display + GNSS + battery) | `leviculum-nrf/Cargo.toml:380` |
-| `bsp-rak4631` | RAK4631 BSP (+ SoftDevice BLE) | `leviculum-nrf/Cargo.toml:364` |
-| `bsp-solarnode` | SenseCAP Solar Node P1-Pro BSP (+ SoftDevice BLE + battery + GNSS). No display | `leviculum-nrf/Cargo.toml:401` |
-| `bsp-t1000e` | SenseCAP T1000-E BSP (+ SoftDevice BLE, GNSS, battery), on the LR11xx driver. No display | `leviculum-nrf/Cargo.toml:408` |
-| `display` | SSD1306 OLED, probed at run time | `leviculum-nrf/Cargo.toml:421` |
-| `gnss` | NMEA0183 GNSS (ZOE-M8Q on the V2 baseboard, L76K on the T114 and the Solar Node, AG3335 on the T1000-E) | `leviculum-nrf/Cargo.toml:422` |
-| `battery` | pack-voltage monitor: the `BATTERY` log line, the panel's voltage and, on the V2, the T114 and the T1000-E, the telemetry field. Unconditional under `bsp-t114` (the divider is on every T114), under `bsp-solarnode` (it is on the XIAO module) and under `bsp-t1000e` (part of the product), opt-in on the V2 via `rak-baseboard` | `leviculum-nrf/Cargo.toml:428` |
-| `rak-baseboard` | aggregate of `display` + `gnss` + `battery` | `leviculum-nrf/Cargo.toml:429` |
+| `bsp-t114` | T114 BSP (+ SoftDevice BLE + status display + GNSS + battery) | `leviculum-nrf/Cargo.toml:383` |
+| `bsp-rak4631` | RAK4631 BSP (+ SoftDevice BLE) | `leviculum-nrf/Cargo.toml:367` |
+| `bsp-solarnode` | SenseCAP Solar Node P1-Pro BSP (+ SoftDevice BLE + battery + GNSS). No display | `leviculum-nrf/Cargo.toml:404` |
+| `bsp-t1000e` | SenseCAP T1000-E BSP (+ SoftDevice BLE, GNSS, battery, motion), on the LR11xx driver. No display | `leviculum-nrf/Cargo.toml:414` |
+| `display` | SSD1306 OLED, probed at run time | `leviculum-nrf/Cargo.toml:427` |
+| `gnss` | NMEA0183 GNSS (ZOE-M8Q on the V2 baseboard, L76K on the T114 and the Solar Node, AG3335 on the T1000-E) | `leviculum-nrf/Cargo.toml:428` |
+| `battery` | pack-voltage monitor: the `BATTERY` log line, the panel's voltage and, on the V2, the T114 and the T1000-E, the telemetry field. Unconditional under `bsp-t114` (the divider is on every T114), under `bsp-solarnode` (it is on the XIAO module) and under `bsp-t1000e` (part of the product), opt-in on the V2 via `rak-baseboard` | `leviculum-nrf/Cargo.toml:434` |
+| `motion` | the QMA6100P accelerometer as a `MOTION` moving or still line (#457); T1000-E only, unconditional under `bsp-t1000e` | `leviculum-nrf/Cargo.toml:435` |
+| `rak-baseboard` | aggregate of `display` + `gnss` + `battery` | `leviculum-nrf/Cargo.toml:436` |
 
 > **Note on BLE:** Both firmware entry points register a BLE interface
 > and call `leviculum_nrf::ble::init`
 > (`leviculum-nrf/src/bin/t114.rs:361`,
 > `leviculum-nrf/src/bin/rak4631.rs:413`). The Cargo `softdevice`
 > feature, and therefore the BLE stack, is pulled in by *both* BSP
-> features (`leviculum-nrf/Cargo.toml:364`,
+> features (`leviculum-nrf/Cargo.toml:367`,
 > `leviculum-nrf/Cargo.toml:201`).
 
 The baseboard peripherals are each gated behind their own Cargo feature
-(`leviculum-nrf/Cargo.toml:421-429`) and spawned only when that feature
+(`leviculum-nrf/Cargo.toml:427-436`) and spawned only when that feature
 is on (`leviculum-nrf/src/bin/rak4631.rs:339-374`). Because each of them
 either probes for its hardware or degrades to nothing when it is absent,
 the aggregate build is what we ship for the whole family rather than a

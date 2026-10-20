@@ -11,7 +11,7 @@ description = "Reticulum firmware for nRF52840-based boards (Heltec Mesh Node T1
 # pure, host-testable crates (screen painter, SoftDevice policy) can
 # live next to the firmware.
 [workspace]
-members = ["screen", "sd-policy", "gnss-time", "gnss-presence", "gnss-init", "telemetry-policy", "ble-tx", "queue-budget", "log-line", "tx-spacing", "rx-arming", "persist-ack", "boot-trace", "channel-access", "media-state", "announce-policy", "record-log", "pn-store", "store-spike", "qspi-bitbang", "battery-scale", "boot-count", "settle-budget", "drop-budget", "heap-budget", "node-name", "sync-batch", "upload-proof", "mute-lease", "qspi-selftest", "qspi-boot", "usb-policy", "time-floor"]
+members = ["screen", "sd-policy", "gnss-time", "gnss-presence", "gnss-init", "telemetry-policy", "ble-tx", "queue-budget", "log-line", "tx-spacing", "rx-arming", "persist-ack", "boot-trace", "channel-access", "media-state", "announce-policy", "record-log", "pn-store", "store-spike", "qspi-bitbang", "battery-scale", "boot-count", "settle-budget", "drop-budget", "heap-budget", "node-name", "sync-batch", "upload-proof", "mute-lease", "qspi-selftest", "qspi-boot", "usb-policy", "time-floor", "motion"]
 
 [dependencies]
 leviculum-core = { path = "../leviculum-core", default-features = false }
@@ -251,6 +251,9 @@ leviculum-gnss-time = { path = "gnss-time", optional = true }
 # host-testable pattern (#240).
 leviculum-gnss-presence = { path = "gnss-presence", optional = true }
 leviculum-gnss-init = { path = "gnss-init", optional = true }
+# The T1000-E's QMA6100P accelerometer (#457): register map, init, the
+# moving/still rule and its lines, host-tested beside the firmware.
+leviculum-motion = { path = "motion", optional = true }
 
 # BLE stack — Nordic S140 SoftDevice via nrf-softdevice (Embassy-async
 # bindings by Dirbaio). Both boards run BLE through the SoftDevice's
@@ -405,7 +408,10 @@ bsp-solarnode = ["softdevice", "radio-sx1262", "battery", "gnss"]
 # universal-build reason, and `battery` since #458 for the same one (the
 # divider is stated only as a ratio, so the sampling window is the longest
 # the part has: `boards/t1000e.rs`). No display (the product has none).
-bsp-t1000e = ["softdevice", "radio-lr11xx", "gnss", "battery"]
+# `motion` since #457: the QMA6100P is part of the product too, and a part
+# that does not answer says `MOTION_INIT absent` at runtime and leaves the
+# board as it was.
+bsp-t1000e = ["softdevice", "radio-lr11xx", "gnss", "battery", "motion"]
 
 # Which LoRa transceiver driver `src/radio.rs` links: exactly one, pulled by
 # the BSP and never named on a command line. Every board but one carries an
@@ -426,6 +432,7 @@ gnss = [
     "dep:leviculum-gnss-init",
 ]
 battery = []
+motion = ["dep:leviculum-motion"]
 rak-baseboard = ["display", "gnss", "battery"]
 # The `qspi-selftest` instrument's crate, and nothing else. Not a plain
 # dependency, because a plain one changes this package's `-C metadata` hash

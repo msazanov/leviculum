@@ -1,0 +1,9 @@
+[package]
+name = "leviculum-motion"
+version = "0.1.0"
+edition = "2021"
+authors = ["Lew Palm"]
+license = "AGPL-3.0-or-later"
+description = "The T1000-E's QMA6100P accelerometer as a moving/still signal: register map, boot init over a small async register-bus trait, sample decoding, the transition rule and its log lines. Host-testable"
+
+[dependencies]
