@@ -408,6 +408,22 @@ impl BatteryScale {
         Self::from_parts(CONFIGURED_GAIN, acq, divider.multiplier_milli())
     }
 
+    /// The scale for a board that states its divider's ratio and whose
+    /// resistors nobody publishes, at the gain the firmware actually
+    /// configures ([`CONFIGURED_GAIN`]).
+    ///
+    /// The ratio decides the conversion, exactly as in
+    /// [`Self::for_board`]. The window is [`AcquisitionTime::FortyUs`]: a
+    /// multiplier cannot say which window the divider needs, and a window
+    /// longer than needed costs no accuracy while a shorter one reads low
+    /// and stays plausible. [`Self::for_board`] keeps 10 µs only because
+    /// the two boards on it predate the question and were measured on it;
+    /// a new board with an unknown divider has no such history to keep.
+    pub const fn for_unsized_divider(divider_multiplier: f32) -> Self {
+        let multiplier_milli = (divider_multiplier * 1000.0 + 0.5) as u32;
+        Self::from_parts(CONFIGURED_GAIN, AcquisitionTime::FortyUs, multiplier_milli)
+    }
+
     const fn from_parts(
         gain: AdcGain,
         acquisition_time: AcquisitionTime,
@@ -1506,6 +1522,43 @@ mod tests {
         assert_eq!(
             BatteryScale::for_divider(huge).acquisition_time(),
             AcquisitionTime::FortyUs
+        );
+    }
+
+    /// The T1000-E states its divider as `ADC_MULTIPLIER 2.0` and nothing
+    /// else, and nobody publishes the schematic that would give the two
+    /// resistors. The ratio is enough for the conversion; for the window
+    /// the only safe answer is the longest one, because sampling longer
+    /// than a divider needs costs nothing in accuracy, and shorter reads
+    /// low and stays plausible.
+    #[test]
+    fn a_divider_of_unknown_size_converts_by_its_ratio_and_takes_the_longest_window() {
+        let t1000e = BatteryScale::for_unsized_divider(2.0);
+        assert_eq!(t1000e.acquisition_time(), AcquisitionTime::FortyUs);
+        assert_eq!(t1000e.multiplier_milli(), 2000);
+        // 3600 mV at the pin, twice that at the terminal: 1.76 mV a count.
+        assert_eq!(t1000e.terminal_full_scale_mv(), 7200);
+        // A full cell and an empty one, where the pin sits at half of
+        // each: 2100 mV is raw 2389, 1500 mV is raw 1706.
+        assert_eq!(t1000e.raw_to_battery_mv(2389), 4200);
+        assert_eq!(t1000e.raw_to_battery_mv(1706), 2999);
+        assert_eq!(classify_cell_count(4200).cells, 1);
+        assert!(classify_cell_count(4200).plausible);
+        assert_eq!(pack_percent(4200, 1), Some(100));
+        // Same conversion as the multiplier-only constructor; only the
+        // window differs.
+        let ratio_only = BatteryScale::for_board(2.0);
+        for raw in 0..=4095i16 {
+            assert_eq!(
+                t1000e.raw_to_battery_mv(raw),
+                ratio_only.raw_to_battery_mv(raw),
+                "raw={raw}"
+            );
+        }
+        assert_eq!(
+            AcquisitionTime::FortyUs.max_source_ohms(),
+            800_000,
+            "the longest window covers a 2:1 divider up to 1.6 MΩ a leg"
         );
     }
 

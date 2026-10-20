@@ -17,8 +17,9 @@
 //! The first image's milestone: boot, dual CDC, identity, announce, and a
 //! LoRa link with a T114 at the default PHY. Since #456 it also drives the
 //! Airoha AG3335 GNSS, which seeds the calendar and puts a position into
-//! telemetry as the T114's L76K does. Not in it: the QMA6100P
-//! accelerometer, the battery divider, the buzzer and the button.
+//! telemetry as the T114's L76K does. Since #458 it samples the battery
+//! divider and puts the charge into telemetry. Not in it: the QMA6100P
+//! accelerometer, the charger status lines, the buzzer and the button.
 //! There is no display on this product.
 
 #![no_std]
@@ -534,6 +535,21 @@ async fn main(spawner: Spawner) {
         },
     );
     info!("gnss task spawned (AG3335)");
+
+    // Battery sense on P0.02 (AIN0) through the 2:1 divider the variant
+    // states as `ADC_MULTIPLIER 2.0`, with no enable line: the variant's
+    // `BATTERY_IMMUTABLE` says the divider is always across the pack.
+    // `for_unsized_divider` rather than `for_board`, because only the
+    // ratio is known and the window has to cover a divider of any size
+    // (`boards/t1000e.rs`).
+    leviculum_nrf::battery::init(
+        &spawner,
+        p.SAADC,
+        p.P0_02,
+        None,
+        leviculum_nrf::battery::BatteryScale::for_unsized_divider(t1000e::ADC_MULTIPLIER),
+    );
+    info!("battery task spawned");
 
     let (hu, hf) = leviculum_nrf::heap_stats();
     info!("heap u={} f={}", hu, hf);
@@ -1193,8 +1209,9 @@ const TELEMETRY_TICK_INTERVAL: Duration = Duration::from_secs(5);
 /// Read this board's sensors for one telemetry evaluation.
 ///
 /// Returns the readings and whether GNSS presence is `Fix`. The AG3335's
-/// latest fix supplies the position fields (#456); no battery divider is
-/// sampled yet. What every board has is read too: the die temperature,
+/// latest fix supplies the position fields (#456), and the battery task
+/// the charge (#458), from the same `BATTERY_STATE` the T114 reads. What
+/// every board has is read too: the die temperature,
 /// through the SoftDevice
 /// ([`leviculum_nrf::telemetry::die_temperature_quarter_c`]), and the last
 /// reception's link figures.
@@ -1235,6 +1252,11 @@ where
         GNSS_PRESENCE.try_get().map(|p| p.state),
         Some(GnssPresence::Fix)
     );
+    // `and_then`, as on the T114: a pack its classification cannot
+    // explain sends no battery sensor rather than an unchecked number.
+    readings.battery_percent = leviculum_nrf::baseboard::BATTERY_STATE
+        .try_get()
+        .and_then(|b| b.percent);
     (readings, has_fix)
 }
 

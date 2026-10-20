@@ -70,7 +70,7 @@
 //! module configures rather than written down beside it, and the
 //! acquisition window, which is derived from the board's divider. The
 //! divider itself and the pins come from the board file
-//! (`boards/t114.rs`, `boards/rak4631.rs`, `boards/solarnode.rs`),
+//! (`boards/t114.rs`, `rak4631.rs`, `solarnode.rs`, `t1000e.rs`),
 //! which stays their single source.
 
 use embassy_executor::Spawner;
@@ -406,8 +406,8 @@ pub async fn battery_task(
 ///
 /// `adc_pin` is the board's `BatteryAdc`, `divider_enable` its
 /// `AdcCtrl` *and the level that asserts it* where it has one (the T114
-/// does, active high; the solar node does, active low; the RAK does
-/// not), and `scale` is built from the board file's own statement of its
+/// does, active high; the solar node does, active low; the RAK and the
+/// T1000-E do not), and `scale` is built from the board file's own statement of its
 /// divider. All of them come from the board file, which stays their
 /// single source — this module holds no copy of any of them.
 ///
@@ -415,7 +415,9 @@ pub async fn battery_task(
 /// its divider is itself board knowledge: the T114 and the RAK state a
 /// ratio and use [`BatteryScale::for_board`]; the solar node states its
 /// two resistors and uses [`BatteryScale::for_divider`], which is what
-/// lets the acquisition window be derived instead of defaulted.
+/// lets the acquisition window be derived instead of defaulted; the
+/// T1000-E states a ratio whose resistors nobody publishes and uses
+/// [`BatteryScale::for_unsized_divider`], the longest window.
 ///
 /// The ADC's gain is not a per-board choice and comes from
 /// [`leviculum_battery_scale::CONFIGURED_GAIN`] either way. A variant

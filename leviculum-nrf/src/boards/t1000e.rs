@@ -220,6 +220,36 @@ pub fn gnss_control(
     }
 }
 
+// Battery (Codeberg #458). The variant's hint standing again: `BATTERY_PIN
+// 2 // P0.02/AIN0, BAT_ADC`, `BATTERY_IMMUTABLE`, `ADC_MULTIPLIER (2.0F)`
+// (`variant.h:126-128`).
+/// Battery voltage sense (`BATTERY_PIN 2`, P0.02 = AIN0, `BAT_ADC`).
+///
+/// No enable pin: the variant says `BATTERY_IMMUTABLE`, i.e. the divider
+/// sits across the pack permanently and Meshtastic switches nothing to
+/// read it. So `battery::init` gets `None` for the enable line.
+pub type BatteryAdc = peripherals::P0_02;
+/// The divider's ratio, terminal volts over pin volts: `ADC_MULTIPLIER
+/// (2.0F)`, two equal resistors.
+///
+/// **Only the ratio**, and it is all there is: without the schematic
+/// nobody can say how large the two resistors are, and their size is what
+/// decides the SAADC acquisition window (`boards/solarnode.rs` has the
+/// argument). So the binary builds the scale with
+/// `BatteryScale::for_unsized_divider`, which takes the longest window the
+/// part has; 40 µs covers a 2:1 divider of up to 1.6 MΩ a leg, and a
+/// smaller one loses nothing by being held longer. The variant's
+/// `AREF_VOLTAGE 3.0` is Meshtastic's ADC configuration and is not folded
+/// in here (`leviculum_battery_scale` module doc). Through this ratio the
+/// measurable range at the terminal is 7200 mV, 1.76 mV a count.
+///
+/// The variant also names a charger: `EXT_CHRG_DETECT` P1.03 (active
+/// low), `EXT_PWR_DETECT` P0.05, `CHARGE_DONE` P1.04. Nothing here reads
+/// them yet, so telemetry's `charging` stays nil on this board as on every
+/// other; the USB transition is visible only as the pack voltage the
+/// charger holds.
+pub const ADC_MULTIPLIER: f32 = 2.0;
+
 // LED and button
 /// The one LED, **active HIGH** (`PIN_LED1 (0 + 24)`, `LED_STATE_ON 1`).
 pub type LedPin = peripherals::P0_24;

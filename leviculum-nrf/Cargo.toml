@@ -394,10 +394,10 @@ bsp-solarnode = ["softdevice", "radio-sx1262", "battery", "gnss"]
 # SenseCAP T1000-E (Codeberg #406): an nRF52840 with an LR1110 radio, the
 # first board on the LR11xx driver (`radio-lr11xx`). `gnss` since #456: the
 # Airoha AG3335 is part of the product, so it is on for the solar node's
-# universal-build reason and the binary drives it unconditionally. Still no
-# `battery` (the divider is stated only as a multiplier, and the sampling
-# window needs its resistors), no display (the product has none).
-bsp-t1000e = ["softdevice", "radio-lr11xx", "gnss"]
+# universal-build reason, and `battery` since #458 for the same one (the
+# divider is stated only as a ratio, so the sampling window is the longest
+# the part has: `boards/t1000e.rs`). No display (the product has none).
+bsp-t1000e = ["softdevice", "radio-lr11xx", "gnss", "battery"]
 
 # Which LoRa transceiver driver `src/radio.rs` links: exactly one, pulled by
 # the BSP and never named on a command line. Every board but one carries an
