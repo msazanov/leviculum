@@ -262,6 +262,25 @@ pub fn try_free_tcp_port() -> Option<u16> {
     None
 }
 
+/// [`try_free_tcp_port`] with the probe listener kept instead of dropped.
+///
+/// For the in-process consumer that needs a number from this band (above the
+/// kernel's ephemeral range) but can take a bound listener rather than a
+/// number: the port is held from the probe on, so there is no handoff window
+/// at all — the number never exists unheld. The land of df09dfec (894) was
+/// refused on exactly that window: a socket that never asked this allocator
+/// bound the drawn number between the probe's release and the consumer's
+/// bind, and the consumer's `start()` died with `EADDRINUSE`.
+pub fn try_free_tcp_listener() -> Option<TcpListener> {
+    for _ in 0..(PORT_RANGE_END - PORT_RANGE_BASE) {
+        let candidate = next_port_candidate();
+        if let Ok(listener) = TcpListener::bind(("127.0.0.1", candidate)) {
+            return Some(listener);
+        }
+    }
+    None
+}
+
 /// UDP counterpart of [`try_free_tcp_port`]. Separate because a free TCP port
 /// says nothing about the same UDP port.
 pub fn try_free_udp_port() -> Option<u16> {
@@ -319,6 +338,11 @@ pub fn try_free_udp_port_pair() -> Option<u16> {
 /// have no error path worth taking.
 pub fn free_tcp_port() -> u16 {
     try_free_tcp_port().expect("exhausted the test port band 61000-65000")
+}
+
+/// [`try_free_tcp_listener`], panicking on an exhausted band.
+pub fn free_tcp_listener() -> TcpListener {
+    try_free_tcp_listener().expect("exhausted the test port band 61000-65000")
 }
 
 /// [`try_free_udp_port`], panicking on an exhausted band.

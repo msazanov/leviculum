@@ -127,8 +127,18 @@ pub(super) fn build_server(
     // identify it in the reporting inventory (Codeberg #177). Ids there and in
     // transport come from the same space, so a listener id can never collide
     // with a spawned child's.
+    // A listener the builder was handed pre-bound (`add_tcp_server_listener`)
+    // is taken out of its slot here, once; `addr` then only names it. The
+    // slot is a Mutex purely so `InterfaceConfig` stays `Clone`.
+    let prebound = config.prebound_tcp_listener.as_ref().and_then(|slot| {
+        slot.lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+    });
+
     spawn_tcp_server(TcpServerConfig {
         bind_addr: addr,
+        prebound,
         section: config.name.clone(),
         next_id: ctx.next_id.clone(),
         new_interface_tx: ctx.new_iface_tx.clone(),

@@ -385,6 +385,7 @@ mod a_dead_sync_link_ends_the_round_beside_a_second_node;
 #[cfg(feature = "serial")]
 mod a_frame_the_modem_consumed_without_transmitting;
 mod a_returning_phone_is_asked_for_its_stored_mail;
+mod a_stranger_inside_the_port_handoff_window;
 mod an_application_path_request_inside_the_interval_leaves;
 mod announce_emission_unix_time;
 mod burst_continuation_contends_inside_its_own_answer;

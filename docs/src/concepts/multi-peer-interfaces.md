@@ -25,10 +25,10 @@ on the interface's side of the boundary.
 
 The listener binds and accepts; every accepted connection becomes its
 own `InterfaceHandle` with its own id, drawn from the shared counter
-(`spawn_tcp_server`, `leviculum-std/src/interfaces/tcp.rs:404`). The
+(`spawn_tcp_server`, `leviculum-std/src/interfaces/tcp.rs:410`). The
 child is built from the already-connected stream
 (`spawn_tcp_interface_from_stream`,
-`leviculum-std/src/interfaces/tcp.rs:471`), inherits IFAC, mode and
+`leviculum-std/src/interfaces/tcp.rs:483`), inherits IFAC, mode and
 ingress control from the listener, and is handed to the event loop,
 which registers it in the routing map like any other interface
 (`registry`, `leviculum-std/src/driver/mod.rs:5130`).
@@ -37,8 +37,8 @@ The listener itself is deliberately **not** in that map. It carries no
 packets, so it would be a send target that cannot send; it is recorded
 in the reporting inventory instead, where the child registers its
 display identity and its parent link (`add_spawned`,
-`leviculum-std/src/interfaces/tcp.rs:458`; `listener_id`,
-`leviculum-std/src/interfaces/tcp.rs:466`). The split between the
+`leviculum-std/src/interfaces/tcp.rs:470`; `listener_id`,
+`leviculum-std/src/interfaces/tcp.rs:478`). The split between the
 routing map and the reporting inventory is the point of that module
 (`interface_names`, `leviculum-std/src/interfaces/inventory.rs:7`).
 

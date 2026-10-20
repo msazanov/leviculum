@@ -349,6 +349,30 @@ impl ReticulumNodeBuilder {
         self
     }
 
+    /// Add a TCP server interface from a listener the caller already bound.
+    ///
+    /// For a caller that must pick the port itself (a test whose client keeps
+    /// dialling the port after this server is gone needs a number above the
+    /// kernel's ephemeral range) and would otherwise hand over a bare number:
+    /// a number picked in advance and bound later is open to anything on the
+    /// host in between (894). The listener is bound from the caller's probe
+    /// until this server's accept loop owns it, so that window does not
+    /// exist. The bound address is reported in `tcp_listen_addrs()` like any
+    /// other TCP server's. A caller with no constraint on the number binds
+    /// port 0 via [`add_tcp_server`](Self::add_tcp_server) instead.
+    pub fn add_tcp_server_listener(mut self, listener: std::net::TcpListener) -> Self {
+        let addr = listener.local_addr().ok();
+        self.interfaces.push(InterfaceConfig {
+            name: "TCP Server".to_string(),
+            interface_type: "TCPServerInterface".to_string(),
+            listen_ip: addr.map(|a| a.ip().to_string()),
+            listen_port: addr.map(|a| a.port()),
+            prebound_tcp_listener: Some(std::sync::Arc::new(std::sync::Mutex::new(Some(listener)))),
+            ..Default::default()
+        });
+        self
+    }
+
     /// Add a discoverable TCP server interface (Codeberg #107).
     ///
     /// Equivalent to a `[[TCPServerInterface]]` block that sets `discoverable =

@@ -34,19 +34,22 @@ async fn wait_until(deadline: Duration, mut cond: impl FnMut() -> bool) -> bool 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn tcp_client_reports_offline_after_peer_is_gone() {
-    // port-handoff: the client keeps dialling this port after the peer is
-    // gone. A kernel-picked port lies in `ip_local_port_range`, where the
-    // client's own next ephemeral port can be that very number and the dial
-    // connects to itself, which reports online: the failure under test.
-    // The allocator's band sits above that range.
-    let port = crate::ports::free_port();
-    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    // The client keeps dialling this port after the peer is gone. A
+    // kernel-picked port lies in `ip_local_port_range`, where the client's
+    // own next ephemeral port can be that very number and the dial connects
+    // to itself, which reports online: the failure under test. The
+    // allocator's band sits above that range — and the listener is handed
+    // over bound, not as a number, so nothing on the host can take the port
+    // between the allocator's probe and `start b` (894: the pre-push mvr
+    // lost exactly that window to a neighbour).
+    let b_listener = crate::ports::held_band_listener();
+    let addr: SocketAddr = b_listener.local_addr().expect("listener addr");
 
     // Peer: a plain TCP server node.
     let b_storage = tempfile::tempdir().expect("tempdir b");
     let mut node_b = ReticulumNodeBuilder::new()
         .enable_transport(false)
-        .add_tcp_server(addr)
+        .add_tcp_server_listener(b_listener)
         .storage_path(b_storage.path().to_path_buf())
         .build()
         .await

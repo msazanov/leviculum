@@ -31,10 +31,17 @@
 //! file before it starts. The race between the pick and the daemon's bind is
 //! accepted there and named at each call site with a `port-handoff:` comment,
 //! which `scripts/check-test-ports.py` (`just check-test-ports`) requires.
-//! So is the one in-process exception, a client that must keep dialling a
-//! port after its server is gone: a kernel-picked port lies in
-//! `ip_local_port_range`, where the client's own next ephemeral port can be
-//! that very number and the dial connects to itself.
+//!
+//! The one consumer that needs a number from the allocator's band but sits in
+//! this process — a node whose client keeps dialling the port after its
+//! server is gone, so the number must stay above `ip_local_port_range`, or
+//! the client's own next ephemeral port can be that very number and the dial
+//! connects to itself — is not a handoff anymore: [`held_band_listener`]
+//! keeps the probe's listener bound and
+//! `ReticulumNodeBuilder::add_tcp_server_listener` takes the listener itself,
+//! so the number never exists unheld. The land of df09dfec (894) was refused
+//! on the window this closes: a socket that never asked the allocator bound
+//! the drawn number between probe and consumer bind.
 
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener};
 
@@ -82,4 +89,16 @@ pub fn bound_tcp_addrs<const N: usize>(listen_addrs: &[SocketAddr]) -> [SocketAd
 /// `port-handoff:` comment.
 pub fn free_port() -> u16 {
     crate::port_alloc::free_tcp_port()
+}
+
+/// A loopback TCP listener on a port from the allocator's band, bound at the
+/// probe and kept bound.
+///
+/// For the in-process consumer that must know its number sits above the
+/// kernel's ephemeral range (see the module doc): hand the listener on —
+/// `ReticulumNodeBuilder::add_tcp_server_listener` — never the number. The
+/// port is held from this call until the node's accept loop owns it, so
+/// nothing on the host can take it in between.
+pub fn held_band_listener() -> TcpListener {
+    crate::port_alloc::free_tcp_listener()
 }

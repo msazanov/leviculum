@@ -524,7 +524,7 @@ comments and quote stripping to ConfigObj's own rules
 (`strip_value`, `leviculum-std/src/ini_config.rs:1129`); the config
 directory lookup order `/etc/reticulum` → `~/.config/reticulum` →
 `~/.reticulum` (`resolve_config_dir`,
-`leviculum-std/src/config.rs:1399`, against
+`leviculum-std/src/config.rs:1411`, against
 `reference/Reticulum/RNS/Reticulum.py:229-236`); `ifac_size` in bits
 with the ≥ 8 floor (`leviculum-std/src/ini_config.rs:928-938`,
 against `reference/Reticulum/RNS/Reticulum.py:747-750`) and the
@@ -562,7 +562,7 @@ daemon:
 1. **`share_instance`** — Python defaults true
    (`reference/Reticulum/RNS/Reticulum.py:287`); ours defaults false
    (`leviculum-std/src/config.rs:74-79`, resolved unchanged by the
-   builder, `leviculum-std/src/driver/builder.rs:869-871`). A config
+   builder, `leviculum-std/src/driver/builder.rs:893-895`). A config
    that never names the key gives rnsd a shared instance and lnsd
    none: every Python tool answers "No shared RNS instance available"
    against lnsd. This is the central drop-in switch defaulting to the
@@ -734,7 +734,7 @@ Deliberate, documented deviations, re-confirmed as stated: our
 being locally observable only (`leviculum-std/src/config.rs:231-246`);
 ingress control defaults off for dial-out point-to-point types where
 Python is flat-true (`ingress_control_default_for_type`,
-`leviculum-std/src/config.rs:1243`); the discoverable-mode promotion
+`leviculum-std/src/config.rs:1255`); the discoverable-mode promotion
 fills only an UNSET mode where Python overrides an explicit one
 (`promote_discoverable_modes`, `leviculum-std/src/ini_config.rs:379`).
 Also ignored without a current consumer: `link_mtu_discovery` (no

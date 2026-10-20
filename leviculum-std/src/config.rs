@@ -1059,6 +1059,17 @@ pub struct InterfaceConfig {
     /// taking the advertisement off the air; absent is off, the boards'
     /// dark-when-full policy. A measurement knob (752). No reference key.
     pub advertise_when_full: Option<bool>,
+    /// A TCP server's listener, bound by the caller and handed over instead
+    /// of an address (`ReticulumNodeBuilder::add_tcp_server_listener`). Never
+    /// a config-file key: a bound socket is not representable there, which is
+    /// why this is skipped by serde — the same reason the builder keeps
+    /// channel-backed RNode factories out of this struct. `Arc<Mutex<..>>`
+    /// only so the struct stays `Clone`; the build takes the listener out
+    /// once (894: a port picked in advance and bound later lost its number
+    /// to a neighbour inside the handoff window).
+    #[serde(skip)]
+    pub prebound_tcp_listener:
+        Option<std::sync::Arc<std::sync::Mutex<Option<std::net::TcpListener>>>>,
 }
 
 /// A single vport subinterface of an `RNodeMultiInterface`, parsed from a
@@ -1213,6 +1224,7 @@ impl Default for InterfaceConfig {
             fragment_mtu: None,
             central_links: None,
             advertise_when_full: None,
+            prebound_tcp_listener: None,
         }
     }
 }

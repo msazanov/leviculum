@@ -381,6 +381,12 @@ pub(crate) fn spawn_tcp_interface<A: ToSocketAddrs>(
 /// (detected via `Sender::closed()`).
 pub(crate) struct TcpServerConfig {
     pub bind_addr: SocketAddr,
+    /// A listener the caller already bound; `bind_addr` is then only the
+    /// fallback name. Carried so a caller that must pick its port number in
+    /// advance can hold the port from its probe to this accept loop instead
+    /// of handing over a bare number (894: the handoff window between a
+    /// number's probe and its bind is open to any socket on the host).
+    pub prebound: Option<std::net::TcpListener>,
     /// Config section name — Python `interface.name`, which appears in both
     /// the listener's and every spawned connection's reported name.
     pub section: String,
@@ -404,6 +410,7 @@ pub(crate) struct TcpServerConfig {
 pub(crate) fn spawn_tcp_server(config: TcpServerConfig) -> Result<(), io::Error> {
     let TcpServerConfig {
         bind_addr,
+        prebound,
         section,
         next_id,
         new_interface_tx,
@@ -417,8 +424,13 @@ pub(crate) fn spawn_tcp_server(config: TcpServerConfig) -> Result<(), io::Error>
         announce_rate,
     } = config;
 
-    // Bind synchronously so errors propagate to the caller immediately
-    let std_listener = std::net::TcpListener::bind(bind_addr)?;
+    // Bind synchronously so errors propagate to the caller immediately. A
+    // prebound listener is taken as it is: its port has been held since the
+    // caller's own bind, which is the point of handing a listener over.
+    let std_listener = match prebound {
+        Some(listener) => listener,
+        None => std::net::TcpListener::bind(bind_addr)?,
+    };
     std_listener.set_nonblocking(true)?;
     let listener = tokio::net::TcpListener::from_std(std_listener)?;
 
@@ -1502,14 +1514,15 @@ mod tests {
         let next_id = Arc::new(AtomicUsize::new(0));
         let (tx, mut rx) = mpsc::channel::<InterfaceHandle>(4);
 
-        // Bind on ephemeral port
+        // Bind on ephemeral port and hand the listener over bound: the port
+        // never exists unheld (and this also exercises the prebound path).
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let std_listener = std::net::TcpListener::bind(addr).unwrap();
         let bound_addr = std_listener.local_addr().unwrap();
-        drop(std_listener); // free the port for spawn_tcp_server
 
         spawn_tcp_server(TcpServerConfig {
             bind_addr: bound_addr,
+            prebound: Some(std_listener),
             section: "Test Server".to_string(),
             next_id: next_id.clone(),
             new_interface_tx: tx,
@@ -1551,10 +1564,10 @@ mod tests {
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let std_listener = std::net::TcpListener::bind(addr).unwrap();
         let bound_addr = std_listener.local_addr().unwrap();
-        drop(std_listener);
 
         spawn_tcp_server(TcpServerConfig {
             bind_addr: bound_addr,
+            prebound: Some(std_listener),
             section: "Test Server".to_string(),
             next_id: next_id.clone(),
             new_interface_tx: tx,
@@ -1603,10 +1616,10 @@ mod tests {
             let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
             let std_listener = std::net::TcpListener::bind(addr).unwrap();
             let bound_addr = std_listener.local_addr().unwrap();
-            drop(std_listener);
 
             spawn_tcp_server(TcpServerConfig {
                 bind_addr: bound_addr,
+                prebound: Some(std_listener),
                 section: "Test Server".to_string(),
                 next_id: next_id.clone(),
                 new_interface_tx: tx,
