@@ -85,6 +85,23 @@ const _: () = assert!(crate::MAX_FRAME >= PROBE_FRAME.len());
 const _: () = assert!(crate::MAX_FRAME >= CONSTELLATIONS_FRAME.len());
 const _: () = assert!(crate::MAX_FRAME >= GGA_FRAME.len());
 
+/// `$PAIR650,0`: enter Backup mode with no wake timer (#457 step two).
+///
+/// Not part of the boot sequence: the GNSS task sends it just before it
+/// cuts the receiver's power enable while the board is still. The Quectel
+/// LC29H hardware design (an AG3335 module; 1.3, §3.3.3 "Backup Mode")
+/// enters Backup mode by sending `$PAIR650` and then cutting VCC while
+/// V_BCKP stays powered, and warns that a VCC cut without it leaves the
+/// part "in an undefined state" drawing more. Its protocol specification
+/// (1.4, §2.4.47) gives `<Second>` 0 as "entering the Backup mode without
+/// any timer" and this frame, `$PAIR650,0*25`, as its example.
+/// Meshtastic's T1000-E sleep cuts the enable without it
+/// (`meshtastic/src/gps/GPS.cpp:862-871`); the datasheet is the stricter
+/// of the two and this firmware follows it.
+pub const BACKUP_FRAME: [u8; 15] = nmea_frame(b"PAIR650,0");
+
+const _: () = assert!(crate::MAX_FRAME >= BACKUP_FRAME.len());
+
 /// The prefix of the `$PAIR021` answer, matched literally in the RX
 /// stream: the reference's own token for this part (`GPS.cpp:1353`).
 /// The firmware build string follows it and is not parsed.

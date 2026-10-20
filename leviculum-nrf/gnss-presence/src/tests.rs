@@ -684,3 +684,74 @@ fn constants_hold_their_justifications() {
     // Fix must demote before the starve re-sweep can fire.
     const { assert!(LOCK_STARVE_RESWEEP_MS > FIX_HOLD_MS) };
 }
+
+// ---- Resume after a sleep (#457 step two) ----
+
+// The receiver was powered down on purpose for longer than both the
+// Fix hold and the starvation threshold. After `resume` the lock and
+// the published Fix stand, and both clocks count from the wake.
+#[test]
+fn resume_keeps_the_lock_and_restarts_both_clocks() {
+    let mut m = PresenceMachine::new(0);
+    feed(&mut m, &valid_rmc(), 1_000);
+    assert_eq!(m.published(), Some(Presence::Fix));
+    let wake = 1_000 + 10 * LOCK_STARVE_RESWEEP_MS;
+    m.resume(wake);
+    let out = poll(&mut m, wake + FIX_HOLD_MS - 1);
+    assert_eq!(
+        out.len(),
+        0,
+        "dark time is neither starvation nor a lost fix"
+    );
+    assert!(m.locked());
+    assert_eq!(m.current_baud(), 9_600);
+    // A warm start that fixes inside the hold never flaps the state.
+    let out = feed(&mut m, &valid_rmc(), wake + 2_000);
+    assert_eq!(transitions(&out), vec![]);
+    assert_eq!(m.published(), Some(Presence::Fix));
+}
+
+// One that does not fix demotes at the hold, counted from the wake,
+// and a line that stays dark re-sweeps at the starvation threshold,
+// counted from the wake: exactly what a fix lost while awake does.
+#[test]
+fn resume_then_silence_demotes_and_resweeps_from_the_wake() {
+    let mut m = PresenceMachine::new(0);
+    feed(&mut m, &valid_rmc(), 1_000);
+    let wake = 500_000;
+    m.resume(wake);
+    let out = poll(&mut m, wake + FIX_HOLD_MS);
+    assert_eq!(transitions(&out), vec![(Presence::NoFix, 9_600)]);
+    let out = poll(&mut m, wake + LOCK_STARVE_RESWEEP_MS - 1);
+    assert_eq!(set_bauds(&out), Vec::<u32>::new());
+    let out = poll(&mut m, wake + LOCK_STARVE_RESWEEP_MS);
+    assert_eq!(set_bauds(&out), vec![9_600]);
+}
+
+// Without a fix before the sleep there is no Fix hold to restart: the
+// state stays NoFix and only the starvation clock moves.
+#[test]
+fn resume_without_a_fix_stays_no_fix() {
+    let mut m = PresenceMachine::new(0);
+    feed(&mut m, &void_rmc(), 1_000);
+    m.resume(400_000);
+    let out = poll(&mut m, 400_000 + FIX_HOLD_MS);
+    assert_eq!(out.len(), 0);
+    assert_eq!(m.published(), Some(Presence::NoFix));
+}
+
+// A half-sentence from before the cut must not join the first one
+// after it into a sentence that never existed.
+#[test]
+fn resume_drops_a_half_sentence() {
+    let mut m = PresenceMachine::new(0);
+    feed(&mut m, &void_rmc(), 1_000);
+    let rmc = valid_rmc();
+    let (head, _) = rmc.split_at(20);
+    feed(&mut m, head, 1_500);
+    m.resume(100_000);
+    let before = m.sentences_seen();
+    let out = feed(&mut m, &valid_rmc(), 100_500);
+    assert_eq!(m.sentences_seen(), before + 1);
+    assert_eq!(rmc_count(&out), 1);
+}

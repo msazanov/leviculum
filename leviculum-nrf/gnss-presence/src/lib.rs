@@ -30,6 +30,9 @@
 
 use nmea0183::{ParseResult, Parser, Source, GGA, GSV, RMC};
 
+mod power;
+pub use power::{Motion, Power, PowerEdge, PowerGate, GNSS_FIRST_FIX_GRACE_S};
+
 /// Baud sweep order. 9600 first — the u-blox ZOE-M8Q factory default on
 /// the WisMesh Pocket V2 and the most common NMEA default overall — then
 /// the two rates preconfigured modules commonly ship with (38400: u-blox
@@ -393,6 +396,38 @@ impl PresenceMachine {
                         activity: false,
                     };
                     emit(Output::SetBaud(BAUD_SWEEP[0]));
+                }
+            }
+            Phase::Silent => {}
+        }
+    }
+
+    /// The receiver is powered again after a sleep (#457 step two): the
+    /// line was dark on purpose, so the dark time must count as neither
+    /// starvation nor a lost fix.
+    ///
+    /// A locked baud stays locked, because the module wakes at the rate it
+    /// slept at, and both its clocks restart here: the starvation
+    /// re-sweep and, if a fix was held, the Fix hold. A warm start that
+    /// fixes inside [`FIX_HOLD_MS`] therefore never flaps the published
+    /// state, and one that does not demotes it exactly as a fix lost
+    /// while awake would. The parser and the GSV view are dropped: a
+    /// half-sentence from before the cut is not the start of one after
+    /// it. A sweep restarts its window; a parked silent line stays parked.
+    pub fn resume(&mut self, now_ms: u64) {
+        self.reset_line_state();
+        match &mut self.phase {
+            Phase::Sweep {
+                window_start_ms, ..
+            } => *window_start_ms = now_ms,
+            Phase::Locked {
+                last_valid_rmc_ms,
+                last_sentence_ms,
+                ..
+            } => {
+                *last_sentence_ms = now_ms;
+                if last_valid_rmc_ms.is_some() {
+                    *last_valid_rmc_ms = Some(now_ms);
                 }
             }
             Phase::Silent => {}

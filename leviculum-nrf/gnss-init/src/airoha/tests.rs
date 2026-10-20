@@ -277,3 +277,20 @@ fn constants_hold_their_justifications() {
     // The reference's probe wait (`GPS.cpp:1356`).
     const { assert!(PROBE_TIMEOUT_MS >= 1_000) };
 }
+
+/// `$PAIR650,0` as the LC29H protocol specification prints it (1.4,
+/// §2.4.47 example), independent of `nmea_frame`.
+#[test]
+fn backup_frame_is_the_specifications_example() {
+    assert_eq!(&BACKUP_FRAME[..], b"$PAIR650,0*25\r\n");
+}
+
+/// The backup command must never leak into the boot sequence: a board
+/// that sent it at boot would put its receiver to sleep before the
+/// first fix.
+#[test]
+fn backup_frame_is_not_a_boot_step() {
+    for (_, frame) in expected_sequence() {
+        assert_ne!(frame, &BACKUP_FRAME[..]);
+    }
+}
