@@ -3,7 +3,9 @@
 //!
 //! One task: raise the part's rail, bring it up over TWIM, then read its
 //! three axes every [`POLL_INTERVAL_MS`] and print
-//! `MOTION state=moving|still hold_ms=<n> src=qma6100p` on each change.
+//! `MOTION state=moving|still hold_ms=<n> src=qma6100p` on each change,
+//! and every [`leviculum_motion::STAT_INTERVAL_MS`] a `MOTION_STAT` line
+//! with the window's sample count, largest delta and over-threshold count.
 //! Nothing reads the state: no coupling to the announce cadence, the GNSS
 //! task or telemetry in this step. The register map, the init order, the
 //! transition rule and why the task polls although INT1 is wired are all
@@ -139,6 +141,11 @@ async fn motion_task(wiring: MotionWiring) {
             if let Some(transition) = detector.on_sample(sample, now_ms()) {
                 crate::log::log_fmt_critical("MOTION ", format_args!("{transition}"));
             }
+        }
+        // Drain-gated, like `[BAT]`: a periodic line whose next instance
+        // says what a dropped one did.
+        if let Some(stat) = detector.stat_due(now_ms()) {
+            crate::log::log_fmt("MOTION_STAT ", format_args!("{stat}"));
         }
     }
 }

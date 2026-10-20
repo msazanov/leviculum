@@ -363,3 +363,114 @@ fn read_health_reports_edges_only() {
     assert_eq!(h.on_read(true), Some("state=ok src=qma6100p"));
     assert_eq!(h.on_read(true), None);
 }
+
+// ---------------------------------------------------------------------------
+// MOTION_STAT
+// ---------------------------------------------------------------------------
+
+#[test]
+fn no_stat_before_the_interval() {
+    let mut det = MotionDetector::new(1_000);
+    det.on_sample(REST, 1_250);
+    assert_eq!(det.stat_due(1_000 + STAT_INTERVAL_MS - 1), None);
+    assert!(det.stat_due(1_000 + STAT_INTERVAL_MS).is_some());
+}
+
+#[test]
+fn a_window_at_rest_reports_its_noise_floor() {
+    let mut det = MotionDetector::new(0);
+    // Noise 0, 7, 0, 7 ... LSB on x: a delta of 7 every sample after the
+    // first, which has nothing to compare with.
+    let mut t = 0;
+    for i in 0..(STAT_INTERVAL_MS / POLL_INTERVAL_MS) {
+        t = (i + 1) * POLL_INTERVAL_MS;
+        det.on_sample(nudged(if i % 2 == 0 { 0 } else { 7 }), t);
+    }
+    let stat = det.stat_due(t).expect("due");
+    assert_eq!(
+        stat,
+        Stat {
+            samples: 120,
+            max_delta: 7,
+            over: 0,
+            state: MotionState::Still,
+            quiet_ms: 30_000,
+        }
+    );
+    assert_eq!(
+        stat.to_string(),
+        "samples=120 max_delta=7 over=0 state=still quiet_ms=30000 src=qma6100p"
+    );
+}
+
+#[test]
+fn max_delta_and_over_count_the_whole_window_then_reset() {
+    let mut det = MotionDetector::new(0);
+    det.on_sample(REST, 250);
+    det.on_sample(nudged(200), 500); // over: 200
+    det.on_sample(nudged(150), 750); // 50, under
+    det.on_sample(nudged(400), 1_000); // over: 250, the largest
+    det.on_sample(nudged(400), 1_250); // 0
+    let stat = det.stat_due(STAT_INTERVAL_MS).expect("due");
+    assert_eq!(stat.samples, 5);
+    assert_eq!(stat.max_delta, 250);
+    assert_eq!(stat.over, 2);
+    assert_eq!(stat.state, MotionState::Moving);
+    assert_eq!(stat.quiet_ms, STAT_INTERVAL_MS - 1_000);
+
+    // The next window starts empty, and its first sample has a delta: the
+    // detector keeps the previous sample across windows.
+    det.on_sample(nudged(410), STAT_INTERVAL_MS + 250);
+    let next = det.stat_due(2 * STAT_INTERVAL_MS).expect("due");
+    assert_eq!(next.samples, 1);
+    assert_eq!(next.max_delta, 10);
+    assert_eq!(next.over, 0);
+    assert_eq!(det.stat_due(2 * STAT_INTERVAL_MS + 250), None);
+}
+
+#[test]
+fn quiet_ms_resets_on_an_over_sample() {
+    let mut det = MotionDetector::new(0);
+    det.on_sample(REST, 250);
+    det.on_sample(nudged(123), 20_000);
+    det.on_sample(nudged(123), 20_250);
+    let stat = det.stat_due(STAT_INTERVAL_MS).expect("due");
+    assert_eq!(stat.quiet_ms, STAT_INTERVAL_MS - 20_000);
+    assert_eq!(stat.over, 1);
+}
+
+#[test]
+fn a_recurring_glitch_keeps_moving_and_the_stat_shows_it() {
+    // Reading (a) of the 881 rig finding: one sample over the threshold in
+    // every window keeps the hold from ever completing. The stat line is
+    // what tells it from a missing still edge.
+    let mut det = MotionDetector::new(0);
+    det.on_sample(REST, 0);
+    let mut lines = Vec::new();
+    let mut stats = Vec::new();
+    let mut t = 0;
+    while t < 4 * STAT_INTERVAL_MS {
+        t += POLL_INTERVAL_MS;
+        let glitch = t % 20_000 == 0;
+        lines.extend(det.on_sample(if glitch { nudged(130) } else { REST }, t));
+        stats.extend(det.stat_due(t));
+    }
+    assert_eq!(lines.len(), 1, "one moving line, never still");
+    assert_eq!(stats.len(), 4);
+    for s in &stats {
+        assert_eq!(s.state, MotionState::Moving);
+        assert!(s.over >= 2, "the glitch and the way back: {s}");
+        assert!(s.quiet_ms < STILL_HOLD_MS, "{s}");
+        assert_eq!(s.max_delta, 130);
+    }
+}
+
+#[test]
+fn an_unknown_state_is_printed_on_the_stat_line() {
+    let mut det = MotionDetector::new(0);
+    let stat = det.stat_due(STAT_INTERVAL_MS).expect("due");
+    assert_eq!(
+        stat.to_string(),
+        "samples=0 max_delta=0 over=0 state=unknown quiet_ms=30000 src=qma6100p"
+    );
+}

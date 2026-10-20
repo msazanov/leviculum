@@ -150,7 +150,7 @@ pub const MOTION_THRESHOLD_MG: u32 = 30;
 /// [`MOTION_THRESHOLD_MG`] in LSB at [`FSR_RANGE_2G`]: 30 000 / 244 = 122.
 pub const MOTION_THRESHOLD_COUNTS: u32 = MOTION_THRESHOLD_MG * 1_000 / LSB_UG_2G;
 
-/// The log token naming the part, the `src=` of both lines.
+/// The log token naming the part, the `src=` of every line.
 pub const SRC: &str = "qma6100p";
 
 // ---------------------------------------------------------------------------
@@ -304,8 +304,8 @@ pub enum MotionState {
 }
 
 impl MotionState {
-    /// The `state=` token. `Unknown` is never printed: no transition leads
-    /// into it.
+    /// The `state=` token. `Unknown` appears only on [`Stat`]: no
+    /// transition leads into it.
     pub fn as_str(self) -> &'static str {
         match self {
             MotionState::Unknown => "unknown",
@@ -354,6 +354,16 @@ pub struct MotionDetector {
     prev: Option<Sample>,
     quiet_since_ms: u64,
     state_since_ms: u64,
+    window: Window,
+}
+
+/// What [`MotionDetector::stat_due`] has seen since its last line.
+#[derive(Clone, Copy, Debug, Default)]
+struct Window {
+    start_ms: u64,
+    samples: u32,
+    max_delta: u32,
+    over: u32,
 }
 
 impl MotionDetector {
@@ -363,6 +373,10 @@ impl MotionDetector {
             prev: None,
             quiet_since_ms: now_ms,
             state_since_ms: now_ms,
+            window: Window {
+                start_ms: now_ms,
+                ..Window::default()
+            },
         }
     }
 
@@ -372,10 +386,12 @@ impl MotionDetector {
 
     /// Feed one sample taken at `now_ms`; `Some` on a change of state.
     pub fn on_sample(&mut self, sample: Sample, now_ms: u64) -> Option<Transition> {
-        let moved = self
-            .prev
-            .is_some_and(|prev| sample.delta(&prev) > MOTION_THRESHOLD_COUNTS);
+        let delta = self.prev.map(|prev| sample.delta(&prev));
+        let moved = delta.is_some_and(|d| d > MOTION_THRESHOLD_COUNTS);
         self.prev = Some(sample);
+        self.window.samples += 1;
+        self.window.max_delta = self.window.max_delta.max(delta.unwrap_or(0));
+        self.window.over += u32::from(moved);
 
         if moved {
             self.quiet_since_ms = now_ms;
@@ -392,6 +408,31 @@ impl MotionDetector {
         None
     }
 
+    /// The window's `MOTION_STAT` line once [`STAT_INTERVAL_MS`] have passed
+    /// since the last one (or since [`MotionDetector::new`]), and a fresh
+    /// window from `now_ms`; `None` before that. The task asks on every
+    /// poll, whether the read succeeded or not, so a `samples=` short of
+    /// [`STAT_INTERVAL_MS`] / [`POLL_INTERVAL_MS`] counts failed reads.
+    pub fn stat_due(&mut self, now_ms: u64) -> Option<Stat> {
+        if now_ms.saturating_sub(self.window.start_ms) < STAT_INTERVAL_MS {
+            return None;
+        }
+        let w = core::mem::replace(
+            &mut self.window,
+            Window {
+                start_ms: now_ms,
+                ..Window::default()
+            },
+        );
+        Some(Stat {
+            samples: w.samples,
+            max_delta: w.max_delta,
+            over: w.over,
+            state: self.state,
+            quiet_ms: now_ms.saturating_sub(self.quiet_since_ms),
+        })
+    }
+
     fn enter(&mut self, state: MotionState, now_ms: u64, since_ms: u64) -> Transition {
         self.state = state;
         self.state_since_ms = now_ms;
@@ -399,6 +440,52 @@ impl MotionDetector {
             state,
             hold_ms: now_ms.saturating_sub(since_ms),
         }
+    }
+}
+
+/// How often the detector task prints `MOTION_STAT`: one [`STILL_HOLD_MS`],
+/// so a board at rest whose state never leaves `moving` shows, window by
+/// window, the sample that keeps restarting the hold, and a board whose
+/// `still` edge was due shows `quiet_ms=` past the hold.
+pub const STAT_INTERVAL_MS: u64 = 30_000;
+
+/// One window of the detector, printed as `MOTION_STAT <this>` every
+/// [`STAT_INTERVAL_MS`] whatever the state, the way `[BAT]` repeats:
+/// `samples=<n> max_delta=<counts> over=<n> state=moving|still|unknown
+/// quiet_ms=<ms> src=qma6100p`.
+///
+/// - `samples`: samples fed in the window;
+/// - `max_delta`: the largest [`Sample::delta`] among them, in LSB, the
+///   noise floor at rest (the threshold is [`MOTION_THRESHOLD_COUNTS`]);
+/// - `over`: how many of them exceeded the threshold;
+/// - `state`: the detector's state at the end of the window;
+/// - `quiet_ms`: time since the last sample over the threshold (since
+///   [`MotionDetector::new`] if none ever was).
+///
+/// It carries `src=` because `MOTION_INIT` is written about 0.1 s after
+/// boot, and the T1000-E's debug CDC is up only about 13 s after boot, so
+/// the rig never sees the init line: the stat line is how a capture
+/// learns the part answered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Stat {
+    pub samples: u32,
+    pub max_delta: u32,
+    pub over: u32,
+    pub state: MotionState,
+    pub quiet_ms: u64,
+}
+
+impl fmt::Display for Stat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "samples={} max_delta={} over={} state={} quiet_ms={} src={SRC}",
+            self.samples,
+            self.max_delta,
+            self.over,
+            self.state.as_str(),
+            self.quiet_ms
+        )
     }
 }
 
