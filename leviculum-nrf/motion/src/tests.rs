@@ -24,8 +24,8 @@ enum Op {
 }
 
 /// A QMA6100P as a register file: writes land, reads return what is there,
-/// and the soft-reset command restores the datasheet defaults of the two
-/// registers this driver touches.
+/// and the soft-reset command restores the datasheet defaults of the three
+/// registers this driver configures.
 struct FakeBus {
     regs: [u8; 0x40],
     ops: Vec<Op>,
@@ -45,6 +45,7 @@ impl FakeBus {
         // Datasheet register table defaults, as a part left by another
         // firmware would NOT have them: start dirty so the reset matters.
         regs[REG_FSR as usize] = 0x0F;
+        regs[REG_BW as usize] = 0x05;
         regs[REG_PM as usize] = 0x00;
         Self {
             regs,
@@ -72,6 +73,7 @@ impl RegisterBus for FakeBus {
         self.check()?;
         if reg == REG_SOFT_RESET && value == SOFT_RESET_CMD {
             self.regs[REG_FSR as usize] = 0x00;
+            self.regs[REG_BW as usize] = 0xE0;
             self.regs[REG_PM as usize] = 0x00;
         }
         if self.sticky != Some(reg) {
@@ -110,12 +112,15 @@ fn init_sequence_is_identify_reset_range_active_readback() {
             Op::Write(0x36, 0x00),
             Op::Delay(20),
             Op::Write(0x0F, 0x01),
+            Op::Write(0x10, 0xE7),
             Op::Write(0x11, 0x80),
             Op::Read(0x0F, 1),
+            Op::Read(0x10, 1),
             Op::Read(0x11, 1),
         ]
     );
     assert_eq!(bus.regs[0x0F], 0x01, "2 g range");
+    assert_eq!(bus.regs[0x10], 0xE7, "BW<2:0> = 111, NLPF = 11");
     assert_eq!(bus.regs[0x11], 0x80, "MODE_BIT set, active");
 }
 
@@ -177,6 +182,26 @@ fn a_register_that_does_not_keep_its_value_is_a_readback_failure() {
         }))
         .to_string(),
         "absent src=qma6100p reason=readback-0x11-0x00"
+    );
+}
+
+#[test]
+fn a_bandwidth_the_part_does_not_keep_is_a_readback_failure() {
+    let mut bus = FakeBus::qma();
+    bus.sticky = Some(REG_BW);
+    let err = InitError::Readback {
+        reg: 0x10,
+        got: 0xE0,
+    };
+    assert_eq!(block_on(init(&mut bus)), Err(err));
+    assert_eq!(
+        bus.ops.last(),
+        Some(&Op::Read(0x10, 1)),
+        "the range read back first, the mode never"
+    );
+    assert_eq!(
+        InitLine(Err(err)).to_string(),
+        "absent src=qma6100p reason=readback-0x10-0xe0"
     );
 }
 

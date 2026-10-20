@@ -41,8 +41,9 @@
 //!   the pin toggling. `INT_ST0` has the same mirror image in the library.
 //! - **The any-motion threshold has no unit we can state.** `ANY_MOT_TH`
 //!   (0x2E) counts in "16 LSB" of a slope scaled by the output data rate,
-//!   and the bandwidth table that gives the rate is a picture in the
-//!   datasheet, not text.
+//!   and the QMA6100P datasheet never gives the rate: its "Register 0x10"
+//!   says "bandwidth setting, as following" and then nothing follows, as
+//!   text or as a picture ([`BW_SLOWEST`] says where the rate comes from).
 //!
 //! Polling the data registers needs neither: [`POLL_INTERVAL_MS`] apart the
 //! task reads the three axes, and [`MotionDetector`] compares successive
@@ -78,6 +79,10 @@ pub const CHIP_ID: u8 = 0x90;
 pub const REG_DATA: u8 = 0x01;
 /// `FSR` (0x0F): `RANGE<3:0>` in bits 3..0.
 pub const REG_FSR: u8 = 0x0F;
+/// `BW` (0x10): `HPF[2]` in bit 7, `NLPF<1:0>` in bits 6..5, `BW<4:0>` in
+/// bits 4..0. Default 0xE0 by "Register 0x10" (§9.1's register table says
+/// 00); see [`BW_SLOWEST`].
+pub const REG_BW: u8 = 0x10;
 /// `PM` (0x11): `MODE_BIT` in bit 7, 1 = active. Standby after power-on and
 /// after a soft reset (datasheet §6.1).
 pub const REG_PM: u8 = 0x11;
@@ -99,6 +104,28 @@ pub const FSR_RANGE_2G: u8 = 0x01;
 /// clock at their reset defaults. The byte Meshtastic's read-modify-write
 /// after a soft reset produces (`enableAccel`, `src/QMA6100P.cpp`).
 pub const PM_ACTIVE: u8 = 0x80;
+/// [`REG_BW`] at its narrowest: `BW<2:0> = 111`, the slowest output data
+/// rate, with the upper three bits at the register's stated default 0xE0
+/// (`NLPF = 11`, the longest of its four averages; [`FSR_RANGE_2G`] leaves
+/// `LPF_HPF` at 0, so bit 7 does not turn it into a high-pass).
+///
+/// Before this the register was never written, so the part ran at its
+/// reset rate, `BW<4:0> = 00000`, and the 4 Hz poll took one sample out of
+/// that wide-band stream every 250 ms (#457, the 881 rig reading: 2 to 8
+/// of 120 rest samples past [`MOTION_THRESHOLD_COUNTS`]).
+///
+/// The rate is not in the QMA6100P datasheet: "Register 0x10" ends at
+/// "bandwidth setting, as following". It is in the datasheet of its
+/// sibling, the QMA6100 (QST document 13-52-21 rev. A, "Register 0x10
+/// (BW)", same field layout), as text: `xx000` MCLK/512 ... `xx111`
+/// MCLK/4096, `xx111` the slowest of the eight, 122 Hz at `MCLK_SEL =
+/// 0000` (500 kHz, "Register 0x11 (PM)"). RIOT's QMA6100P driver states the
+/// same dividers for this part (`drivers/include/qma6100p.h`,
+/// `QMA6100P_ODR_100HZ = 0x00` ... `QMA6100P_ODR_12HZ5 = 0x07` at 51.2 kHz,
+/// a factor of eight between them). [`PM_ACTIVE`] keeps `MCLK_SEL = 0000`,
+/// so the part samples at about 122 Hz, 30 times the poll, and averages
+/// eight of those.
+pub const BW_SLOWEST: u8 = 0xE7;
 /// One LSB at [`FSR_RANGE_2G`], in micro-g.
 pub const LSB_UG_2G: u32 = 244;
 
@@ -204,14 +231,16 @@ impl fmt::Display for InitError {
     }
 }
 
-/// Bring the part from power-on to active at ±2 g.
+/// Bring the part from power-on to active at ±2 g and its narrowest
+/// bandwidth.
 ///
 /// The order is the reference's (`QMA6100PSingleton::init`): identify,
-/// soft reset, range, active. Its offset calibration is left out — this
-/// driver compares samples with each other, so a constant offset cancels —
-/// and so is all of its interrupt set-up (module doc). Then the two
-/// configuration registers are read back, because a write is not
-/// acknowledged with what the part kept.
+/// soft reset, range, active, with the bandwidth between range and active,
+/// which the reference never writes ([`BW_SLOWEST`]). Its offset
+/// calibration is left out — this driver compares samples with each other,
+/// so a constant offset cancels — and so is all of its interrupt set-up
+/// (module doc). Then the three configuration registers are read back,
+/// because a write is not acknowledged with what the part kept.
 ///
 /// The caller raises the rail and waits [`POWER_UP_MS`] first.
 pub async fn init<B: RegisterBus>(bus: &mut B) -> Result<(), InitError> {
@@ -235,11 +264,18 @@ pub async fn init<B: RegisterBus>(bus: &mut B) -> Result<(), InitError> {
     bus.write_reg(REG_FSR, FSR_RANGE_2G)
         .await
         .map_err(|_| InitError::Bus)?;
+    bus.write_reg(REG_BW, BW_SLOWEST)
+        .await
+        .map_err(|_| InitError::Bus)?;
     bus.write_reg(REG_PM, PM_ACTIVE)
         .await
         .map_err(|_| InitError::Bus)?;
 
-    for (reg, want) in [(REG_FSR, FSR_RANGE_2G), (REG_PM, PM_ACTIVE)] {
+    for (reg, want) in [
+        (REG_FSR, FSR_RANGE_2G),
+        (REG_BW, BW_SLOWEST),
+        (REG_PM, PM_ACTIVE),
+    ] {
         let mut got = [0u8; 1];
         bus.read_regs(reg, &mut got)
             .await
