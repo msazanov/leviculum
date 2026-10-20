@@ -56,6 +56,8 @@
 //! `[TAG]`, and a leading stamp would break all of them at once. The parsers
 //! here therefore have to keep working with an unknown-key field appended —
 //! which is exactly what `stamp_does_not_disturb_the_existing_parsers` asserts.
+//! The stamp is the renderer's alone: a body that appends its own prints `t=`
+//! twice, which `no_firmware_log_body_carries_its_own_stamp` refuses (890).
 //!
 //! Two host-side consumers grep them: `scripts/catch-reboot.sh`, which reports
 //! the cause of a reboot caught under sustained LoRa load, and the ad-hoc heap
@@ -1651,4 +1653,226 @@ fn the_firmware_still_emits_the_dial_refused_line() {
         ["addr", "lived_ms", "fallback_in_ms"],
         "lnsd's BLE_DIAL_REFUSED keys, iface aside, are no longer the board's"
     );
+}
+
+/// Files whose `t=` in a log body is known and owned by another batch. Each
+/// entry carries the reason; an entry outlives its reason by exactly one
+/// review.
+const BODY_STAMP_ALLOWED: &[(&str, &str)] = &[(
+    "button.rs",
+    "BTN_PRESS still appends its own t=; batch 889 owns button.rs and drops it",
+)];
+
+/// `src` with every comment blanked to spaces, string and char literals kept,
+/// so a call named in a doc comment is not mistaken for a call.
+fn strip_comments(src: &str) -> String {
+    let b = src.as_bytes();
+    let mut out = b.to_vec();
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'/' if b.get(i + 1) == Some(&b'/') => {
+                while i < b.len() && b[i] != b'\n' {
+                    out[i] = b' ';
+                    i += 1;
+                }
+            }
+            b'/' if b.get(i + 1) == Some(&b'*') => {
+                while i < b.len() && !(b[i] == b'*' && b.get(i + 1) == Some(&b'/')) {
+                    if b[i] != b'\n' {
+                        out[i] = b' ';
+                    }
+                    i += 1;
+                }
+                if i < b.len() {
+                    out[i] = b' ';
+                    out[i + 1] = b' ';
+                    i += 2;
+                }
+            }
+            b'"' => {
+                i += 1;
+                while i < b.len() && b[i] != b'"' {
+                    i += if b[i] == b'\\' { 2 } else { 1 };
+                }
+                i += 1;
+            }
+            b'\'' if b.get(i + 2) == Some(&b'\'') => i += 3,
+            b'\'' if b.get(i + 1) == Some(&b'\\') => {
+                i += 2;
+                while i < b.len() && b[i] != b'\'' {
+                    i += 1;
+                }
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    String::from_utf8(out).expect("blanking ASCII comments keeps UTF-8")
+}
+
+/// The string literals inside the balanced parentheses that open at `open`.
+fn call_literals(src: &str, open: usize) -> Vec<String> {
+    let b = src.as_bytes();
+    let mut depth = 0usize;
+    let mut literals = Vec::new();
+    let mut i = open;
+    while i < b.len() {
+        match b[i] {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            b'"' => {
+                let start = i + 1;
+                i += 1;
+                while i < b.len() && b[i] != b'"' {
+                    i += if b[i] == b'\\' { 2 } else { 1 };
+                }
+                literals.push(src[start..i].to_string());
+            }
+            b'\'' if b.get(i + 2) == Some(&b'\'') => i += 2,
+            b'\'' if b.get(i + 1) == Some(&b'\\') => {
+                while i + 1 < b.len() && b[i + 1] != b'\'' {
+                    i += 1;
+                }
+                i += 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    literals
+}
+
+/// Whether `literal` carries a standalone `t=` key (not `st=`, `sent=`).
+fn has_stamp_key(literal: &str) -> bool {
+    literal.match_indices("t=").any(|(at, _)| {
+        literal[..at]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !(c.is_ascii_alphanumeric() || c == '_' || c == '.'))
+    })
+}
+
+/// The `log_fmt*` lines that put a stamp in a firmware log body, as
+/// `file:line` strings, comments excluded.
+fn body_stamp_sites(rel: &str, src: &str) -> Vec<String> {
+    // Every renderer and every macro that ends in one, plus `format_args!`:
+    // a body built before the call (`retried!` in record_store.rs) reaches
+    // the renderer as a value, so its literal is only visible there.
+    const CALLS: &[&str] = &[
+        "log_fmt(",
+        "log_fmt_critical(",
+        "log_fmt_volatile(",
+        "info!(",
+        "warn!(",
+        "log_critical!(",
+        "format_args!(",
+    ];
+    let code = strip_comments(src);
+    let mut sites = Vec::new();
+    for call in CALLS {
+        for (at, _) in code.match_indices(call) {
+            let preceded_by_ident = code[..at]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
+            if preceded_by_ident {
+                continue;
+            }
+            let open = at + call.len() - 1;
+            if call_literals(&code, open).iter().any(|l| has_stamp_key(l)) {
+                let line = code[..at].matches('\n').count() + 1;
+                sites.push(format!("{rel}:{line}"));
+            }
+        }
+    }
+    sites.sort();
+    sites.dedup();
+    sites
+}
+
+fn nrf_sources(dir: &Path, rel: &str, out: &mut Vec<(String, String)>) {
+    let mut entries: Vec<_> = std::fs::read_dir(dir)
+        .unwrap_or_else(|e| panic!("read_dir {}: {e}", dir.display()))
+        .map(|e| e.expect("dir entry").path())
+        .collect();
+    entries.sort();
+    for path in entries {
+        let name = path.file_name().expect("entry name").to_string_lossy();
+        let child = if rel.is_empty() {
+            name.to_string()
+        } else {
+            format!("{rel}/{name}")
+        };
+        if path.is_dir() {
+            nrf_sources(&path, &child, out);
+        } else if name.ends_with(".rs") {
+            let src = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+            out.push((child, src));
+        }
+    }
+}
+
+#[test]
+fn the_stamp_detector_tells_a_body_stamp_from_its_neighbours() {
+    let src = r#"
+        // log_fmt("x", format_args!("t={}", 1));
+        crate::log::log_fmt_critical("GNSS_POWER ", format_args!("{edge} t={now_ms}"));
+        crate::log::log_fmt("[LORA] ", format_args!("st={} lt={} sent={}", a, b, c));
+        info!("tx.t={} ')' {}", a, ')');
+        warn!(
+            "BTN_PRESS held_ms={} t={}",
+            a, b
+        );
+    "#;
+    let lines: Vec<String> = body_stamp_sites("fixture", src)
+        .iter()
+        .map(|site| site.replace("fixture:", "line "))
+        .collect();
+    assert_eq!(lines, ["line 3", "line 6"]);
+}
+
+/// The renderer stamps every line (`the_firmware_stamps_every_line_with_board_uptime`);
+/// a body that stamps it again prints `t=` twice, and a parser that takes the
+/// first `t=` and one that takes the last disagree the moment the two drift
+/// apart (890: `GNSS_POWER ... t=603034 t=603034`).
+#[test]
+fn no_firmware_log_body_carries_its_own_stamp() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("workspace root")
+        .join("leviculum-nrf/src");
+    let mut files = Vec::new();
+    nrf_sources(&root, "", &mut files);
+    assert!(
+        files.iter().any(|(rel, _)| rel == "log.rs"),
+        "the walk of leviculum-nrf/src found no log.rs; it is reading the wrong tree"
+    );
+    let offending: Vec<String> = files
+        .iter()
+        .filter(|(rel, _)| !BODY_STAMP_ALLOWED.iter().any(|(f, _)| f == rel))
+        .flat_map(|(rel, src)| body_stamp_sites(rel, src))
+        .collect();
+    assert!(
+        offending.is_empty(),
+        "these log bodies append their own t=, which the renderer already \
+         stamps (leviculum-nrf/src/log.rs::fmt_into): {offending:?}"
+    );
+    for (allowed, reason) in BODY_STAMP_ALLOWED {
+        let (_, src) = files
+            .iter()
+            .find(|(rel, _)| rel == allowed)
+            .unwrap_or_else(|| panic!("allow-listed {allowed} no longer exists"));
+        assert!(
+            !body_stamp_sites(allowed, src).is_empty(),
+            "{allowed} no longer stamps its own body; drop its BODY_STAMP_ALLOWED \
+             entry ({reason})"
+        );
+    }
 }

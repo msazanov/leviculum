@@ -200,9 +200,9 @@ impl ModuleKind {
 }
 
 /// Print a power edge: `GNSS_POWER state=sleep|wake reason=still|moving
-/// t=<ms>`. Critical: an edge is rare and nothing repeats it.
-fn log_power(edge: PowerEdge, now_ms: u64) {
-    crate::log::log_fmt_critical("GNSS_POWER ", format_args!("{edge} t={now_ms}"));
+/// t=<ms>`, the renderer's stamp. Critical: an edge is rare, nothing repeats it.
+fn log_power(edge: PowerEdge) {
+    crate::log::log_fmt_critical("GNSS_POWER ", format_args!("{edge}"));
 }
 
 /// The board's boot init sequencer. An enum rather than a `dyn` object
@@ -496,7 +496,7 @@ pub async fn gnss_task(wiring: GnssWiring) {
             edge = edge.or(gate.poll(gate_now));
             if let (Some(asleep), Some(rx)) = (edge, motion_rx.as_mut()) {
                 if asleep.power == Power::Asleep {
-                    log_power(asleep, gate_now);
+                    log_power(asleep);
                     // Park, then cut: the LC29H hardware design's way into
                     // Backup mode, VRTC (the board's) staying up so the
                     // wake is a warm start.
@@ -515,7 +515,7 @@ pub async fn gnss_task(wiring: GnssWiring) {
                         let motion = rx.changed().await;
                         let now = Instant::now().as_millis();
                         if let Some(awake) = gate.on_motion(motion, now) {
-                            log_power(awake, now);
+                            log_power(awake);
                             break;
                         }
                     }
