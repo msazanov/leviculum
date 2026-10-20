@@ -94,17 +94,18 @@ on/off steps built from these constants:
 | `release-now` | 1 blip | 60 ms |
 
 The players are `leviculum-nrf/src/feedback.rs`: one per LED
-(`led_task`, `leviculum-nrf/src/feedback.rs:193`) and the T1000-E's buzzer
-(`buzzer_task`, `leviculum-nrf/src/feedback.rs:257`). The buzzer sounds
-`BUZZER_TONE_HZ` (247 Hz, `leviculum-nrf/src/feedback.rs:249`), the B3 of
+(`led_task`, `leviculum-nrf/src/feedback.rs:202`) and the T1000-E's buzzer
+(`buzzer_task`, `leviculum-nrf/src/feedback.rs:266`). The buzzer sounds
+`BUZZER_TONE_HZ` (247 Hz, `leviculum-nrf/src/feedback.rs:258`), the B3 of
 Meshtastic's own beep on this board, while a step is on. A pattern
 raised while another plays on the same sink replaces it. The Pocket V2's
 LEDs keep their activity pulses between patterns. Three things play:
 
 - **A short press** (`leviculum-nrf/src/button.rs:158`) plays the
   battery in quarters on the LED and the buzzer, after the display wake.
-  A board with no percentage (a pack outside the band its cell count
-  implies) plays `error`: the user asked and the board cannot say.
+  A board with no percentage (on USB without a pack, or a pack outside
+  the band its cell count implies) plays nothing, since nothing is wrong
+  with it, and writes `FEEDBACK pattern=none reason=no-percentage`.
 - **A held button reaching 2 s** (`leviculum-nrf/src/button.rs:130`)
   plays `release-now` on the LED and the buzzer.
 - **A message for this board's own `lxmf.delivery` destination stored by

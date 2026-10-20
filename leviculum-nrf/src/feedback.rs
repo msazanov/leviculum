@@ -23,6 +23,9 @@
 //! FEEDBACK pattern=<name> sink=led|notify|buzzer t=<ms>
 //! ```
 //!
+//! A status press on a board with no battery percentage plays nothing and
+//! writes `FEEDBACK pattern=none reason=no-percentage sink=led` instead.
+//!
 //! A sink a board does not have is never asked, so it writes no line.
 //!
 //! What raises a pattern: [`status`](crate::feedback::status) (a short
@@ -102,8 +105,10 @@ fn raise(sink: Sink, pattern: Pattern) {
 
 /// A short press: the battery in quarters on the LED and the buzzer. A
 /// board without a percentage (no `battery` feature, or a pack outside the
-/// band its cell count implies, `crate::battery`) plays the error flicker
-/// instead: the user asked for the battery and the board cannot say.
+/// band its cell count implies, `crate::battery`) plays nothing: a rig
+/// board on USB without a pack is not in error. It writes one
+/// `FEEDBACK pattern=none reason=no-percentage sink=led` line instead, so
+/// the rig tells "quiet by rule" from "the hook did not fire".
 pub fn status() {
     #[cfg(feature = "battery")]
     let pct = crate::baseboard::BATTERY_STATE
@@ -111,12 +116,16 @@ pub fn status() {
         .and_then(|state| state.percent);
     #[cfg(not(feature = "battery"))]
     let pct: Option<u8> = None;
-    let pattern = match pct {
-        Some(pct) => leviculum_feedback::battery_quarters(pct),
-        None => leviculum_feedback::error(),
-    };
-    raise(Sink::Led, pattern);
-    raise(Sink::Buzzer, pattern);
+    match leviculum_feedback::status(pct) {
+        Some(pattern) => {
+            raise(Sink::Led, pattern);
+            raise(Sink::Buzzer, pattern);
+        }
+        None => crate::log::log_fmt(
+            "",
+            format_args!("FEEDBACK pattern=none reason=no-percentage sink=led"),
+        ),
+    }
 }
 
 /// A held button has reached the long press: one blip on the LED and the

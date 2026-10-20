@@ -144,6 +144,14 @@ pub fn battery_quarters(pct: u8) -> Pattern {
     }
 }
 
+/// What a short press plays: the battery in quarters, or nothing when the
+/// board has no percentage. A board on USB without a pack, or a pack
+/// outside the band its cell count implies, is not in error, so it stays
+/// quiet rather than flicker on every press (order 893).
+pub fn status(pct: Option<u8>) -> Option<Pattern> {
+    pct.map(battery_quarters)
+}
+
 /// The error flicker: [`ERROR_FLASHES`] blinks at 10 Hz, then dark.
 pub fn error() -> Pattern {
     Pattern {
@@ -285,6 +293,13 @@ mod tests {
         assert_eq!(battery_quarters(40).total_ms(), 650);
         assert_eq!(battery_quarters(60).total_ms(), 1_150);
         assert_eq!(battery_quarters(90).total_ms(), 1_650);
+    }
+
+    #[test]
+    fn a_status_press_without_a_percentage_plays_nothing() {
+        assert_eq!(status(None), None);
+        assert_eq!(status(Some(40)), Some(battery_quarters(40)));
+        assert_eq!(status(Some(0)).map(|p| p.name), Some("battery-1"));
     }
 
     #[test]
