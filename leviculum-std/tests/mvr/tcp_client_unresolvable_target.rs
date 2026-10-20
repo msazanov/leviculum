@@ -80,10 +80,19 @@ fn release_bin(name: &str) -> PathBuf {
 }
 
 /// The `TCP_CONNECT_FAILED` lines of an event log, in order.
-fn connect_failures(lines: &[String]) -> Vec<String> {
+/// The `TCP_CONNECT_FAILED` lines whose `target=` names `host`.
+///
+/// Filtered by target because the in-process event-log capture receives every
+/// test's events, not only the caller's (`event_log.rs`, the capture-handle
+/// doc): run beside this file's resolves-on-the-second-attempt test, its
+/// `peer.mvr461.invalid` attempt=1 line lands between this test's own
+/// attempts and breaks the 1, 2, 3 sequence (seen whenever the two share a
+/// small shard under `test-under-quota`).
+fn connect_failures(lines: &[String], host: &str) -> Vec<String> {
     lines
         .iter()
         .filter(|l| l.starts_with("TCP_CONNECT_FAILED "))
+        .filter(|l| field(l, "target").is_some_and(|t| t.contains(host)))
         .cloned()
         .collect()
 }
@@ -160,7 +169,7 @@ fn lnsd_stays_up_when_a_tcp_client_target_does_not_resolve() {
         .lines()
         .map(str::to_string)
         .collect();
-    let failures = connect_failures(&events);
+    let failures = connect_failures(&events, UNRESOLVABLE);
     let first = failures.first().unwrap_or_else(|| {
         panic!("no TCP_CONNECT_FAILED line for the first attempt. Events:\n{events:#?}")
     });
@@ -251,7 +260,7 @@ async fn tcp_client_with_an_unresolvable_target_is_present_and_down() {
         tcp[0]
     );
 
-    let failures = connect_failures(&evlog.dump());
+    let failures = connect_failures(&evlog.dump(), UNRESOLVABLE);
     node.stop().await.expect("stop node");
 
     assert!(
