@@ -305,6 +305,14 @@ ble-churn-penalty-off = []
 # once the series answers must not leave a field in it.
 subslot-offset = []
 
+# The #438 preamble-wide slot (order 870): enabling the feature arms
+# `ChannelAccess::set_slot_preamble_wide`, which counts every CSMA wait in
+# `max(reference slot, preamble airtime)` at the running PHY (37 ms instead
+# of 24 at SF8/BW125), so a one-slot stagger clears the preamble no carrier
+# sense can hear. OFF by default until the rig A/B decides it; a feature and
+# not a knob for the reason `subslot-offset` gives above.
+slot-preamble-wide = []
+
 # BSP selection — exactly one must be enabled. Mutex enforced via
 # `compile_error!` in `lib.rs`. Both go through `softdevice` below and
 # therefore share one critical-section impl, the SoftDevice-aware one

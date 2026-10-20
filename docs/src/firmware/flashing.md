@@ -253,13 +253,13 @@ recipes below keeps you safe. The release profile is size-optimized
 is kept in the `.elf` (`strip = "none"`, `debug = true`) for HardFault
 post-mortem analysis, but the UF2 only carries loadable sections, so the
 debug info does not bloat what lands on the device.
-(`leviculum-nrf/Cargo.toml:438-448`)
+(`leviculum-nrf/Cargo.toml:446-456`)
 
 ### The build/flash workflow
 
 The firmware crate `leviculum-nrf` is its own Cargo workspace, separate
 from the repo-root workspace, and is cross-compiled. The flash recipes
-therefore `cd leviculum-nrf` before invoking cargo. (`Justfile:1996-1997`)
+therefore `cd leviculum-nrf` before invoking cargo. (`Justfile:2002-2003`)
 
 A plain build (no flash) is:
 
@@ -299,7 +299,7 @@ The **WisMesh Pocket V2 (RAK4631)** running stock Meshtastic has no
 *first* flash needs either `just dfu-rak4631` (a Meshtastic admin
 command, below) or the manual needle double-tap in the hidden pinhole.
 Once our firmware is on the board, subsequent flashes use the touch path
-automatically. (`Justfile:2023-2025`, `Justfile:2087-2096`. See
+automatically. (`Justfile:2029-2031`, `Justfile:2093-2102`. See
 [Recovery](recovery.md) for the pinhole detail.)
 
 ## The flash recipes
@@ -319,7 +319,7 @@ against mixed firmware versions. Use this as your default for T114s.
 cd leviculum-nrf && cargo run --release --bin t114 --features bsp-t114
 ```
 
-(`Justfile:1998-2000`; rationale `leviculum-nrf/README.md:25`)
+(`Justfile:2004-2006`; rationale `leviculum-nrf/README.md:25`)
 
 ### `just flash-one PORT` — a single T114
 
@@ -337,7 +337,7 @@ Expands to:
 cd leviculum-nrf && LEVICULUM_FLASH_ONLY=<PORT> cargo run --release --bin t114 --features bsp-t114
 ```
 
-(`Justfile:2007-2012`; usage forms `leviculum-nrf/README.md:31-36`)
+(`Justfile:2013-2018`; usage forms `leviculum-nrf/README.md:31-36`)
 
 ### `just flash-rak4631` — every RAK4631 (bare module)
 
@@ -350,7 +350,7 @@ cd leviculum-nrf && LEVICULUM_USB_PID=0002 LEVICULUM_BOARD_NAME=RAK4631 \
   cargo run --release --bin rak4631 --features bsp-rak4631
 ```
 
-(`Justfile:2026-2028`)
+(`Justfile:2032-2034`)
 
 ### `just flash-rak4631-one PORT` — a single RAK4631
 
@@ -369,7 +369,7 @@ cd leviculum-nrf && LEVICULUM_FLASH_ONLY=<PORT> LEVICULUM_USB_PID=0002 \
   cargo run --release --bin rak4631 --features bsp-rak4631
 ```
 
-(`Justfile:2030-2034`)
+(`Justfile:2036-2040`)
 
 ### `just flash-rak4631-pocket` — WisMesh Pocket V2, full baseboard
 
@@ -383,8 +383,8 @@ cd leviculum-nrf && LEVICULUM_USB_PID=0002 LEVICULUM_BOARD_NAME=RAK4631 \
   cargo run --release --bin rak4631 --features bsp-rak4631,rak-baseboard
 ```
 
-(`Justfile:2036-2042`; `rak-baseboard` aggregate
-`leviculum-nrf/Cargo.toml:421`)
+(`Justfile:2042-2048`; `rak-baseboard` aggregate
+`leviculum-nrf/Cargo.toml:429`)
 
 ### `just dfu-rak4631 PORT` — DFU entry for stock Meshtastic
 
@@ -406,7 +406,7 @@ Runs:
 meshtastic --port /dev/ttyACM0 --enter-dfu
 ```
 
-(`Justfile:2087-2096`)
+(`Justfile:2093-2102`)
 
 ### SenseCAP T1000-E: serial DFU
 

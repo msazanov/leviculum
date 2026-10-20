@@ -469,7 +469,7 @@ Each binary names the radio driver it links in `required-features`
 (`radio-sx1262` for the first three, `bsp-t1000e` for the last), so a
 feature set compiles the binaries on its own radio and no others.
 
-(`leviculum-nrf/Cargo.toml:451-463`)
+(`leviculum-nrf/Cargo.toml:459-471`)
 
 The board-support-package (BSP) features select the runtime for a given
 board. Exactly one BSP feature must be enabled per build; a
@@ -478,25 +478,25 @@ board. Exactly one BSP feature must be enabled per build; a
 
 | Feature | Effect | Cite |
 |---------|--------|------|
-| `bsp-t114` | T114 BSP (+ SoftDevice BLE + status display + GNSS + battery) | `leviculum-nrf/Cargo.toml:372` |
-| `bsp-rak4631` | RAK4631 BSP (+ SoftDevice BLE) | `leviculum-nrf/Cargo.toml:356` |
-| `bsp-solarnode` | SenseCAP Solar Node P1-Pro BSP (+ SoftDevice BLE + battery + GNSS). No display | `leviculum-nrf/Cargo.toml:393` |
-| `bsp-t1000e` | SenseCAP T1000-E BSP (+ SoftDevice BLE, GNSS, battery), on the LR11xx driver. No display | `leviculum-nrf/Cargo.toml:400` |
-| `display` | SSD1306 OLED, probed at run time | `leviculum-nrf/Cargo.toml:413` |
-| `gnss` | NMEA0183 GNSS (ZOE-M8Q on the V2 baseboard, L76K on the T114 and the Solar Node, AG3335 on the T1000-E) | `leviculum-nrf/Cargo.toml:414` |
-| `battery` | pack-voltage monitor: the `BATTERY` log line, the panel's voltage and, on the V2, the T114 and the T1000-E, the telemetry field. Unconditional under `bsp-t114` (the divider is on every T114), under `bsp-solarnode` (it is on the XIAO module) and under `bsp-t1000e` (part of the product), opt-in on the V2 via `rak-baseboard` | `leviculum-nrf/Cargo.toml:420` |
-| `rak-baseboard` | aggregate of `display` + `gnss` + `battery` | `leviculum-nrf/Cargo.toml:421` |
+| `bsp-t114` | T114 BSP (+ SoftDevice BLE + status display + GNSS + battery) | `leviculum-nrf/Cargo.toml:380` |
+| `bsp-rak4631` | RAK4631 BSP (+ SoftDevice BLE) | `leviculum-nrf/Cargo.toml:364` |
+| `bsp-solarnode` | SenseCAP Solar Node P1-Pro BSP (+ SoftDevice BLE + battery + GNSS). No display | `leviculum-nrf/Cargo.toml:401` |
+| `bsp-t1000e` | SenseCAP T1000-E BSP (+ SoftDevice BLE, GNSS, battery), on the LR11xx driver. No display | `leviculum-nrf/Cargo.toml:408` |
+| `display` | SSD1306 OLED, probed at run time | `leviculum-nrf/Cargo.toml:421` |
+| `gnss` | NMEA0183 GNSS (ZOE-M8Q on the V2 baseboard, L76K on the T114 and the Solar Node, AG3335 on the T1000-E) | `leviculum-nrf/Cargo.toml:422` |
+| `battery` | pack-voltage monitor: the `BATTERY` log line, the panel's voltage and, on the V2, the T114 and the T1000-E, the telemetry field. Unconditional under `bsp-t114` (the divider is on every T114), under `bsp-solarnode` (it is on the XIAO module) and under `bsp-t1000e` (part of the product), opt-in on the V2 via `rak-baseboard` | `leviculum-nrf/Cargo.toml:428` |
+| `rak-baseboard` | aggregate of `display` + `gnss` + `battery` | `leviculum-nrf/Cargo.toml:429` |
 
 > **Note on BLE:** Both firmware entry points register a BLE interface
 > and call `leviculum_nrf::ble::init`
 > (`leviculum-nrf/src/bin/t114.rs:361`,
 > `leviculum-nrf/src/bin/rak4631.rs:413`). The Cargo `softdevice`
 > feature, and therefore the BLE stack, is pulled in by *both* BSP
-> features (`leviculum-nrf/Cargo.toml:356`,
+> features (`leviculum-nrf/Cargo.toml:364`,
 > `leviculum-nrf/Cargo.toml:201`).
 
 The baseboard peripherals are each gated behind their own Cargo feature
-(`leviculum-nrf/Cargo.toml:413-421`) and spawned only when that feature
+(`leviculum-nrf/Cargo.toml:421-429`) and spawned only when that feature
 is on (`leviculum-nrf/src/bin/rak4631.rs:339-374`). Because each of them
 either probes for its hardware or degrades to nothing when it is absent,
 the aggregate build is what we ship for the whole family rather than a
@@ -512,8 +512,8 @@ The mapping from board to binary and features used by the flash recipes:
 | SenseCAP T1000-E | `t1000e` | `bsp-t1000e` |
 
 (Feature sets as invoked in the `just flash`, `just flash-rak4631`, and
-`just flash-rak4631-pocket` recipes: `Justfile:1999`, `Justfile:2027`,
-`Justfile:2041`.)
+`just flash-rak4631-pocket` recipes: `Justfile:2005`, `Justfile:2033`,
+`Justfile:2047`.)
 
 ### What the `lnflash` bundle carries
 

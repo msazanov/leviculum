@@ -132,6 +132,23 @@
 //! one slot), Priority 1 improved by the measured kill mode. It ships OFF
 //! until the rig A/B decides it; off, the random stream is the one an
 //! access always drew, bit for bit.
+//!
+//! # The preamble-wide slot (#438, arm off by default)
+//!
+//! Order 857 read the remaining kills of `bench_dual_pair_fast`: they sit
+//! inside the preamble (27 ms there), where no carrier sense on either
+//! firmware hears the other sender, and one contention slot (24 ms on
+//! both firmwares) is narrower than that preamble. A one-slot stagger
+//! therefore still lands both key-ups inside each other's blind window.
+//! The arm ([`ChannelAccess::set_slot_preamble_wide`]) counts every wait
+//! of this access, DIFS, the contention draw and the CAD backoff alike,
+//! in [`preamble_wide_slot_ms`], the reference slot or the preamble's
+//! airtime, whichever is longer, so a one-slot stagger clears the
+//! preamble. Nothing else changes: the draw, the window, the quiet-time
+//! discharge. The reference keeps its 24 ms slot, and so does every
+//! figure here that budgets a PEER's wait ([`widest_acquisition_wait_ms`],
+//! [`post_tx_rx_window_ms`]); whether the deviation is worth its cost in
+//! throughput is the question the rig A/B answers.
 
 pub mod load;
 
@@ -246,6 +263,46 @@ pub fn jitter_slot_ms(bw_hz: u32, sf: u8, cr_denom: u8) -> u64 {
 /// frame heard in between.
 pub fn widest_acquisition_wait_ms(bw_hz: u32, sf: u8, cr_denom: u8) -> u64 {
     (JITTER_DIFS_SLOTS + JITTER_CW_SLOTS as u64 - 1) * jitter_slot_ms(bw_hz, sf, cr_denom)
+}
+
+/// The airtime of the preamble the reference firmware programs at a
+/// modulation, in whole milliseconds rounded up: the symbols
+/// [`leviculum_core::rnode::derive_preamble_symbols`] derives, times the
+/// symbol time `2^sf / bw`, evaluated as one exact rational so the
+/// rounding happens once. `0` for a degenerate modulation (no bandwidth,
+/// a spreading factor no modem has).
+pub fn preamble_airtime_ms(bw_hz: u32, sf: u8, cr_denom: u8) -> u64 {
+    if bw_hz == 0 || sf == 0 || sf > 12 {
+        return 0;
+    }
+    let symbols = u64::from(leviculum_core::rnode::derive_preamble_symbols(
+        sf, cr_denom, bw_hz,
+    ));
+    (symbols * (1u64 << sf) * 1_000).div_ceil(u64::from(bw_hz))
+}
+
+/// The CSMA slot of an access armed with the preamble-wide slot
+/// ([`ChannelAccess::set_slot_preamble_wide`], the crate docs' "The
+/// preamble-wide slot"): the reference slot ([`jitter_slot_ms`]) or the
+/// preamble's airtime ([`preamble_airtime_ms`]), whichever is longer.
+/// 37 ms at the default SF8/BW125 against the reference's 24.
+pub fn preamble_wide_slot_ms(bw_hz: u32, sf: u8, cr_denom: u8) -> u64 {
+    core::cmp::max(
+        jitter_slot_ms(bw_hz, sf, cr_denom),
+        preamble_airtime_ms(bw_hz, sf, cr_denom),
+    )
+}
+
+/// The slot an access counts its own waits in: [`preamble_wide_slot_ms`]
+/// with the arm on, the reference's [`jitter_slot_ms`] with it off. The one
+/// expression [`ChannelAccess::set_phy`] enforces and the `[LORA_CSMA_TX]
+/// slot_ms=` line prints.
+pub fn access_slot_ms(bw_hz: u32, sf: u8, cr_denom: u8, preamble_wide: bool) -> u64 {
+    if preamble_wide {
+        preamble_wide_slot_ms(bw_hz, sf, cr_denom)
+    } else {
+        jitter_slot_ms(bw_hz, sf, cr_denom)
+    }
 }
 
 /// The widest sub-slot offset an armed access adds to a fresh acquisition
@@ -485,6 +542,8 @@ pub struct ChannelAccess {
     band: u8,
     drawn_band: u8,
     subslot: bool,
+    preamble_wide: bool,
+    phy: Option<(u32, u8, u8)>,
     drawn_slots: u64,
     drawn_offset_ms: u64,
     last_quiet_ms: u64,
@@ -524,6 +583,8 @@ impl ChannelAccess {
             band: 1,
             drawn_band: 1,
             subslot: false,
+            preamble_wide: false,
+            phy: None,
             drawn_slots: 0,
             drawn_offset_ms: 0,
             last_quiet_ms: 0,
@@ -538,7 +599,25 @@ impl ChannelAccess {
     /// Adopt a modulation. Called at radio bring-up and on every runtime
     /// reconfiguration, beside the backoff slot recomputation.
     pub fn set_phy(&mut self, bw_hz: u32, sf: u8, cr_denom: u8) {
-        self.jitter_slot_ms = jitter_slot_ms(bw_hz, sf, cr_denom);
+        self.phy = Some((bw_hz, sf, cr_denom));
+        self.jitter_slot_ms = access_slot_ms(bw_hz, sf, cr_denom, self.preamble_wide);
+    }
+
+    /// Arm or disarm the preamble-wide slot ([`preamble_wide_slot_ms`], the
+    /// crate docs' "The preamble-wide slot"). Recomputes the slot at the
+    /// modulation in force, so the order against [`Self::set_phy`] does not
+    /// matter; a wait already drawn keeps the slot it was drawn in. Off is
+    /// the reference slot, as it always was.
+    pub fn set_slot_preamble_wide(&mut self, on: bool) {
+        self.preamble_wide = on;
+        if let Some((bw_hz, sf, cr_denom)) = self.phy {
+            self.jitter_slot_ms = access_slot_ms(bw_hz, sf, cr_denom, on);
+        }
+    }
+
+    /// Whether the preamble-wide slot is armed.
+    pub const fn slot_preamble_wide(&self) -> bool {
+        self.preamble_wide
     }
 
     /// The jitter slot in force, for the `[LORA_JITTER]` line.
@@ -864,6 +943,142 @@ mod tests {
         assert_eq!(jitter_slot_ms(125_000, 0, 5), JITTER_SLOT_MAX_MS);
         assert_eq!(jitter_slot_ms(125_000, 7, 0), JITTER_SLOT_MAX_MS);
         assert_eq!(jitter_slot_ms(125_000, 40, 5), JITTER_SLOT_MAX_MS);
+    }
+
+    // --- The preamble-wide slot (#438 arm) ------------------------------
+
+    #[test]
+    fn the_preamble_wide_slot_at_the_default_phy_is_37_ms_and_24_off() {
+        // SF8/BW125/CR4:5: bitrate 3125 bps (not fast), so the preamble
+        // target is 24 ms, 11.7 symbols, below the 18-symbol floor; 18
+        // symbols of 2.048 ms are 36.864 ms, rounded up to 37.
+        assert_eq!(
+            leviculum_core::rnode::derive_preamble_symbols(8, 5, 125_000),
+            18
+        );
+        assert_eq!(
+            preamble_airtime_ms(125_000, 8, 5),
+            (18 * 256 * 1_000_u64).div_ceil(125_000)
+        );
+        assert_eq!(preamble_airtime_ms(125_000, 8, 5), 37);
+        assert_eq!(access_slot_ms(125_000, 8, 5, true), 37);
+        // Off, the reference slot: 12 symbols are 24.6 ms, truncated to 24.
+        assert_eq!(access_slot_ms(125_000, 8, 5, false), 24);
+        assert_eq!(
+            access_slot_ms(125_000, 8, 5, false),
+            jitter_slot_ms(125_000, 8, 5)
+        );
+    }
+
+    #[test]
+    fn the_preamble_wide_slot_at_sf7_bw250_is_one_preamble() {
+        // SF7/BW250: symbol 0.512 ms, bitrate 10937 bps (not fast), so the
+        // 24 ms target is 46.875 symbols, ceil 47, above the floor; 47
+        // symbols are 24.064 ms, rounded up to 25 against the reference's
+        // 24 ms floor slot.
+        assert_eq!(
+            leviculum_core::rnode::derive_preamble_symbols(7, 5, 250_000),
+            47
+        );
+        assert_eq!(
+            preamble_airtime_ms(250_000, 7, 5),
+            (47 * 128 * 1_000_u64).div_ceil(250_000)
+        );
+        assert_eq!(jitter_slot_ms(250_000, 7, 5), 24);
+        assert_eq!(access_slot_ms(250_000, 7, 5, true), 25);
+    }
+
+    #[test]
+    fn the_preamble_wide_slot_at_sf12_bw125_is_not_clamped_to_the_ceiling() {
+        // SF12/BW125: symbol 32.768 ms, the 18-symbol floor binds, 589.824
+        // ms of preamble, rounded up to 590. The reference slot stops at its
+        // 100 ms ceiling; the arm does not, because the point of the arm is
+        // a stagger that clears the preamble, and the ceiling would undo it.
+        assert_eq!(
+            leviculum_core::rnode::derive_preamble_symbols(12, 5, 125_000),
+            18
+        );
+        assert_eq!(
+            preamble_airtime_ms(125_000, 12, 5),
+            (18 * 4096 * 1_000_u64).div_ceil(125_000)
+        );
+        assert_eq!(jitter_slot_ms(125_000, 12, 5), JITTER_SLOT_MAX_MS);
+        assert_eq!(access_slot_ms(125_000, 12, 5, true), 590);
+    }
+
+    #[test]
+    fn the_preamble_wide_slot_never_shrinks_the_reference_slot() {
+        for &bw in &[7_800u32, 62_500, 125_000, 250_000, 500_000] {
+            for sf in 5..=12u8 {
+                for cr in 5..=8u8 {
+                    let wide = access_slot_ms(bw, sf, cr, true);
+                    assert!(
+                        wide >= jitter_slot_ms(bw, sf, cr),
+                        "bw={bw} sf={sf} cr={cr}"
+                    );
+                    assert!(
+                        wide >= preamble_airtime_ms(bw, sf, cr),
+                        "bw={bw} sf={sf} cr={cr}"
+                    );
+                }
+            }
+        }
+        // A degenerate modulation has no preamble to widen to, so the slot
+        // is the reference's degenerate one.
+        assert_eq!(preamble_airtime_ms(0, 8, 5), 0);
+        assert_eq!(access_slot_ms(0, 8, 5, true), JITTER_SLOT_MAX_MS);
+    }
+
+    #[test]
+    fn an_armed_access_counts_every_wait_in_the_preamble_wide_slot() {
+        // The order against set_phy does not matter: the firmware arms
+        // after bring-up, a reconfiguration re-derives under the arm.
+        let mut before = ChannelAccess::new(0x0438_0870);
+        before.set_slot_preamble_wide(true);
+        before.set_phy(125_000, 8, 5);
+        let mut after = ChannelAccess::new(0x0438_0870);
+        after.set_phy(125_000, 8, 5);
+        after.set_slot_preamble_wide(true);
+        assert_eq!(before.jitter_slot(), 37);
+        assert_eq!(after.jitter_slot(), 37);
+        assert!(after.slot_preamble_wide());
+        // The draw is DIFS plus whole slots of 37 ms, the same slot count an
+        // unarmed access with the same seed draws.
+        let mut plain = ChannelAccess::new(0x0438_0870);
+        plain.set_phy(125_000, 8, 5);
+        let wide = after.acquisition_jitter_ms();
+        let narrow = plain.acquisition_jitter_ms();
+        assert_eq!(after.drawn_slots(), plain.drawn_slots());
+        assert_eq!(wide, (JITTER_DIFS_SLOTS + after.drawn_slots()) * 37);
+        assert_eq!(narrow, (JITTER_DIFS_SLOTS + plain.drawn_slots()) * 24);
+        // The CAD backoff counts in the same slot.
+        after.jitter_spent(Listened::quiet(wide));
+        after.begin_packet();
+        match after.cad(CadOutcome::Busy) {
+            Verdict::Backoff { slots } => {
+                assert_eq!(after.backoff_owed_ms(), slots * 37);
+            }
+            other => panic!("busy must back off, got {other:?}"),
+        }
+        // A reconfiguration re-derives under the arm, and disarming
+        // returns to the reference slot.
+        after.set_phy(250_000, 7, 5);
+        assert_eq!(after.jitter_slot(), 25);
+        after.set_slot_preamble_wide(false);
+        assert_eq!(after.jitter_slot(), 24);
+    }
+
+    #[test]
+    fn an_access_never_told_draws_in_the_reference_slot() {
+        let mut access = ChannelAccess::new(5);
+        assert!(!access.slot_preamble_wide());
+        access.set_phy(125_000, 8, 5);
+        assert_eq!(access.jitter_slot(), jitter_slot_ms(125_000, 8, 5));
+        // Arming before any modulation is known keeps the boot slot until
+        // set_phy brings one.
+        let mut early = ChannelAccess::new(5);
+        early.set_slot_preamble_wide(true);
+        assert_eq!(early.jitter_slot(), JITTER_SLOT_MIN_MS);
     }
 
     // --- The post-TX receive window (Codeberg #423) ---------------------
