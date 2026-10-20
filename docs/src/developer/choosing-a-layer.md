@@ -126,6 +126,46 @@ For embedded work depend on `leviculum-core` instead, with default features off:
 leviculum-core = { path = "../leviculum/leviculum-core", default-features = false }
 ```
 
+## Cargo features
+
+`leviculum-std` builds two interface families behind features, so that a node
+with no Bluetooth and no serial hardware (a router, a TCP-only transit host)
+does not carry them (Codeberg #463). Both are default, so a dependency written
+as above gets everything:
+
+| Feature | Default | What it carries | Without it |
+|---------|---------|-----------------|------------|
+| `compression` | on | the bz2 codec (`leviculum-core/compression`) for compressed resources | a Python peer's compressed resource cannot be read; keep it |
+| `ble` | on | the Columba `BLEInterface`, with `bluer` and `dbus` (Linux only) | a `BLEInterface` section is a configuration error naming the feature |
+| `serial` | on | `SerialInterface` (the LNode), `RNodeInterface`, `RNodeMultiInterface`, `KISSInterface`/`AX25KISSInterface`, `PipeInterface`, with `tokio-serial`; the API for channel-backed RNodes (`ReticulumNodeBuilder::add_rnode_channel_interface`, `ReticulumNode::spawn_rnode_channel_interface`, `interfaces::RNodeChannel*`), `ReticulumNode::spawn_pipe_client` and the LNode radio bring-up (`interfaces::radio_bring_up`) | a section of any of those kinds is a configuration error naming the feature |
+| `heap-accounting` | off | the counting allocator's measured live bytes in the census | the census reports the modelled total |
+
+An interface kind whose feature is off is never skipped in silence: the daemon
+refuses to start and says which feature the section needs. Counters, events
+and the out-of-band firmware requests (`interfaces::request_firmware*`, and
+lnsd's signals 40 to 42 and SIGUSR2) exist in every build; without `serial`
+they reach 0 interfaces and say so.
+
+The daemon's crate, `leviculum-cli`, forwards the same three
+(`compression`, `ble`, `serial`) and adds `alloc-mimalloc`, all on by default.
+The minimal daemon is
+
+```sh
+cargo build --release -p leviculum-cli --bin lnsd --no-default-features --features compression
+```
+
+`just lnsd-minimal` builds and tests that set, and `just fast` runs it so the
+set does not rot. On x86_64 musl, release profile, measured 2026-10-20: the
+default `lnsd` is 15.9 MB (11.6 MB fully stripped), the minimal one 10.1 MB
+(7.5 MB).
+
+To depend on `leviculum-std` without them:
+
+```toml
+[dependencies]
+leviculum-std = { path = "../leviculum/leviculum-std", default-features = false, features = ["compression"] }
+```
+
 The workspace is edition 2021 and licensed AGPL-3.0-or-later. Version numbers
 are the crate manifests' to state, not this page's — read them from
 `Cargo.toml` (`leviculum-nrf` versions independently of the workspace).

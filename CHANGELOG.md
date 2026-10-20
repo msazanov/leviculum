@@ -20,6 +20,16 @@ Toolchain: Rust 1.97.1
 
 ### Added
 
+- `lnsd` builds without BLE and without the serial family (#463):
+  leviculum-std's new `ble` and `serial` features, both default, carry
+  the Columba BLE interface (bluer, dbus) and the Serial, RNode,
+  RNodeMulti, KISS and Pipe interfaces (tokio-serial). Without one, a
+  section of that kind refuses to start the daemon and names the feature.
+  `cargo build -p leviculum-cli --bin lnsd --no-default-features
+  --features compression` is the minimal daemon, 10.1 MB beside the
+  default's 15.9 MB on x86_64 musl, and `just lnsd-minimal`, part of
+  `just fast`, keeps it building and tested. The defaults are unchanged.
+
 - A firmware image for the SenseCAP T1000-E (#406), the first board on
   the LR11xx driver: `leviculum-nrf/src/radio.rs` links that driver for
   the `bsp-t1000e` build in place of the SX1262's, and nothing above the
