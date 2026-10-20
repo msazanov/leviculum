@@ -24,6 +24,8 @@
 - [Wire field semantics](concepts/wire-field-semantics.md)
 - [Regulatory airtime](concepts/regulatory-airtime.md)
 - [Announce cadence](concepts/announce-cadence.md)
+- [Operating modes](concepts/operating-modes.md)
+- [One button](concepts/one-button.md)
 - [lnmsg: a terminal LXMF messenger](concepts/lnmsg.md)
   - [lnmsg: architecture](concepts/lnmsg-architecture.md)
   - [lnmsg: the user interface](concepts/lnmsg-ui.md)

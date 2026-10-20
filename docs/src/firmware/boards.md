@@ -54,6 +54,11 @@ the data (`auto_compress=True`, `reference/Reticulum/RNS/Resource.py:248`);
 to send a resource a board can take, pass `auto_compress=False` to
 `RNS.Resource(...)` for that resource.
 
+Every board runs as a full mesh node; a battery board will also have a
+Tracker mode ([Operating modes](../concepts/operating-modes.md)). The
+button, the LEDs, the buzzer and the display mean the same on every
+board ([One button](../concepts/one-button.md)).
+
 ## Hardware coverage
 
 We build one firmware per **pinout family**, not per product. A family is

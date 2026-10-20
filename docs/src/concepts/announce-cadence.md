@@ -67,3 +67,6 @@ today. The gate only ever removes work; it never adds a way to become
 - [Regulatory airtime](regulatory-airtime.md), for rule 5's duty budget.
 - [Telemetry](telemetry.md), whose tracker policy supplies the distance and
   HDOP thresholds the proof reuses.
+- [Operating modes](operating-modes.md), for Tracker mode, which reports
+  at this cadence and sleeps in between.
+- [One button](one-button.md), for the double press that announces.
