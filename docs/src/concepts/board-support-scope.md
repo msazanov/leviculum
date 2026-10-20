@@ -38,11 +38,11 @@ announces itself or costs nothing when absent. That is a design
 constraint on peripheral handling, not a hope:
 
 - **Probe where the bus allows it.** The RAK baseboard display is found
-  by an I2C address probe (`ack_probe`, `leviculum-nrf/src/display.rs:55`);
+  by an I2C address probe (`ack_probe`, `leviculum-nrf/src/display.rs:56`);
   when nothing answers, the task logs and exits
-  (`DetectedKind::None`, `leviculum-nrf/src/display.rs:161-167`).
+  (`DetectedKind::None`, `leviculum-nrf/src/display.rs:162-168`).
 - **Fail into the harmless state.** The user button is pulled to its
-  released level (`leviculum-nrf/src/button.rs:76`), so an absent button
+  released level (`leviculum-nrf/src/button.rs:69`), so an absent button
   reads as not pressed rather than as noise.
 - **Park rather than spin.** The GNSS task awaits a UART that simply
   stays silent when no receiver is fitted.

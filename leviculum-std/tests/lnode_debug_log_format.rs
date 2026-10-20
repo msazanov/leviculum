@@ -1452,8 +1452,7 @@ fn the_display_and_button_bring_up_is_not_dropped_by_the_runtime_gate() {
     // task, says so once on the gate-free path.
     let none = |tag: &str| format!(r#"log_fmt_critical("{tag} ", format_args!("none"))"#);
     for (bin, tags) in [
-        ("bin/t114.rs", &["[BTN]"][..]),
-        ("bin/solarnode.rs", &["[DISP]", "[BTN]"][..]),
+        ("bin/solarnode.rs", &["[DISP]"][..]),
         ("bin/rak4631.rs", &["[DISP]", "[BTN]"][..]),
         ("bin/t1000e.rs", &["[DISP]"][..]),
     ] {
@@ -1466,19 +1465,26 @@ fn the_display_and_button_bring_up_is_not_dropped_by_the_runtime_gate() {
             );
         }
     }
-    // The two boards with a button bring it up, and the T1000-E no longer
-    // claims it has none (#459). The debounce the init line names is the
-    // shared constant, not a literal of the task's own.
-    for bin in ["bin/t1000e.rs", "bin/rak4631.rs"] {
+    // Every board brings its button up, and no board that spawns the task
+    // claims it has none (#459, 889). The debounce the init line names is
+    // the shared constant, not a literal of the task's own.
+    for bin in [
+        "bin/t1000e.rs",
+        "bin/rak4631.rs",
+        "bin/t114.rs",
+        "bin/solarnode.rs",
+    ] {
         assert!(
             nrf_source(bin).contains("leviculum_nrf::button::init("),
             "leviculum-nrf/src/{bin} no longer spawns the button task (#459)"
         );
     }
-    assert!(
-        !nrf_source("bin/t1000e.rs").contains(&none("[BTN]")),
-        "bin/t1000e.rs declares `[BTN] none` although it spawns the button task"
-    );
+    for bin in ["bin/t1000e.rs", "bin/t114.rs", "bin/solarnode.rs"] {
+        assert!(
+            !nrf_source(bin).contains(&none("[BTN]")),
+            "{bin} declares `[BTN] none` although it spawns the button task"
+        );
+    }
     assert!(
         nrf_source("button.rs").contains("BUTTON_DEBOUNCE_MS"),
         "button.rs no longer names the shared debounce constant in its init line"

@@ -1,36 +1,36 @@
-//! The user button, on every board that has one (Codeberg #459).
+//! The user button, on every board that has one (Codeberg #459, the
+//! gestures of `docs/src/concepts/one-button.md`).
 //!
-//! A short press sends the board's own announces; what counts as a press
-//! and how often one may announce is decided in
-//! [`leviculum_announce_policy::ButtonGate`], and this task only times the
-//! edges, writes the `BTN_PRESS` line and raises
-//! [`ANNOUNCE_PRESS`](crate::button::ANNOUNCE_PRESS). The announces
+//! What counts as a press, which gesture it is and how often one may
+//! announce is decided in [`leviculum_announce_policy::ButtonGate`]; this
+//! task only times the edges, writes the `BTN_PRESS` and `BTN_HOLD` lines,
+//! raises [`ANNOUNCE_PRESS`](crate::button::ANNOUNCE_PRESS) for a double
+//! press and wakes the display where there is one. The announces
 //! themselves go out from the node loop, which owns the node
 //! ([`crate::announce::on_button_press`]).
 //!
-//! | Board | Pin | Wiring | Long press |
-//! |---|---|---|---|
-//! | WisMesh Pocket V2 | P0.09 (NFC1, freed by the RAK bootloader's UICR patch) | active low, internal pull-up | display on |
-//! | T1000-E | P0.06 | active high, internal pull-down (`boards/t1000e.rs`) | unassigned (the power button) |
+//! | Gesture | `action=` | Does |
+//! |---|---|---|
+//! | short | `status` | wakes the display (Pocket V2); the LED and buzzer status is the feedback grammar's pass |
+//! | double | `announce` / `rate-limited` | both announces, at most one set per 30 s |
+//! | long, 2 s | `long` | nothing yet: the mode switch, once Tracker mode exists |
+//! | very long, 8 s | `hold8` | nothing yet: the power off, once the board can sleep |
 //!
-//! The T114 and the Solar Node bring up no button and say `[BTN] none`.
+//! | Board | Pin | Wiring |
+//! |---|---|---|
+//! | WisMesh Pocket V2 | P0.09 (NFC1, freed by the RAK bootloader's UICR patch) | active low, internal pull-up |
+//! | T1000-E | P0.06 | active high, internal pull-down (`boards/t1000e.rs`) |
+//! | Heltec T114 | P1.10 (`boards/t114.rs`) | active low, internal pull-up |
+//! | Solar Node | P1.01, the XIAO's program button (`boards/solarnode.rs`) | active low, internal pull-up |
 //!
 //! # The Pocket V2's display
 //!
-//! The same press also drives the display, through the same debouncer:
-//!
-//! | Display state | Press duration | Display |
-//! |---|---|---|
-//! | on  | any           | off |
-//! | off | < 2 s         | stays off |
-//! | off | ≥ 2 s         | on |
-//!
-//! A short press in the user's pocket can't accidentally wake the screen
-//! and burn battery; turning it off is one quick tap. The short press
-//! announces either way, the long one never does
-//! ([`leviculum_announce_policy::LONG_PRESS_MIN_MS`]), so on this board one
-//! press means one thing. The power-cycling itself happens in
-//! `display::display_task`, which subscribes to `DISPLAY_ON_REQ`.
+//! Any press lights a dark display, and the display goes dark on its own
+//! a minute after the last press; no press turns it off
+//! (`leviculum_screen::power::DisplayWake`). This task raises
+//! `DISPLAY_WAKE` on every press; `display::display_task` owns the state
+//! and the timeout. The T114's ST7789 has no power control yet and stays
+//! lit, as before.
 
 use embassy_executor::Spawner;
 use embassy_futures::select::{select, Either};
@@ -39,29 +39,22 @@ use embassy_nrf::Peri;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
 use embassy_time::{Instant, Timer};
-use leviculum_announce_policy::{ButtonGate, PressAction, BUTTON_DEBOUNCE_MS};
+use leviculum_announce_policy::{ButtonEvent, ButtonGate, PressAction, BUTTON_DEBOUNCE_MS};
 
-/// Raised once per press that announces; the node loop waits on it beside
+/// Raised once per double press that announces; the node loop waits on it beside
 /// its other inputs. A `Signal` rather than a channel because the rate
 /// limit already ran: two raises the loop has not consumed yet would be
 /// two presses inside one window, which the gate never lets through.
 pub static ANNOUNCE_PRESS: Signal<CriticalSectionRawMutex, ()> = Signal::new();
-
-/// One display rule for the Pocket: the display turns on at the length a
-/// press stops announcing at.
-#[cfg(feature = "display")]
-const _: () = assert!(
-    leviculum_screen::power::LONG_PRESS_MIN_MS == leviculum_announce_policy::LONG_PRESS_MIN_MS
-);
 
 /// How a board's button is wired.
 pub struct ButtonWiring {
     /// The pin.
     pub pin: Peri<'static, AnyPin>,
     /// `true` when a press pulls the pin high (the T1000-E), `false` when it
-    /// pulls it low (the Pocket V2). The internal pull goes the other way.
+    /// pulls it low (the others). The internal pull goes the other way.
     pub active_high: bool,
-    /// The `board=` token of the `BTN_PRESS` line.
+    /// The `board=` token of the `BTN_PRESS` and `BTN_HOLD` lines.
     pub board: &'static str,
 }
 
@@ -89,16 +82,6 @@ pub async fn button_task(wiring: ButtonWiring) {
             BUTTON_DEBOUNCE_MS
         ),
     );
-    #[cfg(feature = "display")]
-    let display_tx = crate::baseboard::DISPLAY_ON_REQ.sender();
-    // Receiver here is just for the "what's the current state?" lookup
-    // when classifying a press. We never block on changes from this side.
-    #[cfg(feature = "display")]
-    let Some(mut display_rx) = crate::baseboard::DISPLAY_ON_REQ.receiver() else {
-        crate::log::log_fmt_critical("[BTN] ", format_args!("no DISPLAY_ON_REQ receiver left"));
-        return;
-    };
-
     let mut gate = ButtonGate::new();
     // The level the gate last heard about. The GPIOTE wait senses the
     // opposite of the level at the moment it arms, so a change between the
@@ -121,54 +104,56 @@ pub async fn button_task(wiring: ButtonWiring) {
         let now_ms = Instant::now().as_millis();
         let pressed = button.is_high() == active_high;
         seen = pressed;
-        let press = match woke {
+        let event = match woke {
             Either::First(()) => {
                 gate.edge(now_ms, pressed);
                 continue;
             }
             Either::Second(()) => gate.settle(now_ms, pressed),
         };
-        let Some(press) = press else {
-            continue;
+        let press = match event {
+            Some(ButtonEvent::Press(press)) => press,
+            // The moment a held button reaches 2 s and 8 s, so the rig can
+            // see it; the "release now" signal to the user is the feedback
+            // grammar's pass. The gesture itself is the `BTN_PRESS` line at
+            // the release. The formatter appends the line's `t=`.
+            Some(ButtonEvent::Held { ms }) => {
+                crate::log::log_fmt_critical(
+                    "",
+                    format_args!("BTN_HOLD board={} ms={}", board, ms),
+                );
+                continue;
+            }
+            None => continue,
         };
         crate::log::log_fmt_critical(
             "",
             format_args!(
-                "BTN_PRESS board={} action={} held_ms={} t={}",
+                "BTN_PRESS board={} action={} held_ms={}",
                 board,
                 press.action.as_str(),
-                press.held_ms,
-                now_ms
+                press.held_ms
             ),
         );
-        if press.action == PressAction::Announce {
-            ANNOUNCE_PRESS.signal(());
+        match press.action {
+            // A double press outside the 30 s window: both announces.
+            PressAction::Announce => ANNOUNCE_PRESS.signal(()),
+            // A short press is status. The display wake below is its
+            // whole effect in this pass; the LED and buzzer answer is the
+            // feedback grammar's pass.
+            PressAction::Status => {}
+            // Recognised and reported, nothing else: the long press becomes
+            // the mode switch in the pass that builds Tracker mode, the very
+            // long one the power off in the pass that builds the sleep.
+            PressAction::Long | PressAction::Hold8 => {}
+            PressAction::RateLimited | PressAction::Debounced => {}
         }
 
-        // Which presses switch the display: `leviculum_screen::power::press_target`.
-        // A debounced glitch was never a press.
+        // Any press lights a dark display and restarts its minute; a
+        // debounced glitch was never a press.
         #[cfg(feature = "display")]
         if press.action != PressAction::Debounced {
-            // Treat first-ever press (Watch never sent yet) as if the
-            // display is on — that's the boot state we expect.
-            let currently_on = display_rx.try_get().unwrap_or(true);
-            match leviculum_screen::power::press_target(currently_on, press.held_ms) {
-                Some(target) => {
-                    crate::log::log_fmt(
-                        "[BTN] ",
-                        format_args!(
-                            "press {} ms → display {}",
-                            press.held_ms,
-                            if target { "on" } else { "off" }
-                        ),
-                    );
-                    display_tx.send(target);
-                }
-                None => crate::log::log_fmt(
-                    "[BTN] ",
-                    format_args!("short press leaves the display off ({} ms)", press.held_ms),
-                ),
-            }
+            crate::baseboard::DISPLAY_WAKE.signal(());
         }
     }
 }

@@ -108,14 +108,14 @@ impl BatteryState {
 #[cfg(feature = "battery")]
 pub static BATTERY_STATE: Watch<CriticalSectionRawMutex, BatteryState, 2> = Watch::new();
 
-/// Requested display power state, written by the user-button task and read
-/// by both the display task (to drive `set_display_on`) and the button task
-/// itself (to know what the next press should do).
-///
-/// Capacity-3 watch: button-writer + button-reader (current-state lookup) +
-/// display-reader.
+/// Raised by the user-button task on every press (a debounced glitch is
+/// not one) and taken by the display task, which owns the display's power
+/// state and its one-minute timeout (`leviculum_screen::power::DisplayWake`).
+/// A `Signal` rather than a watch because a press carries no value: two
+/// presses the display task has not seen yet ask for the same thing as one.
 #[cfg(feature = "display")]
-pub static DISPLAY_ON_REQ: Watch<CriticalSectionRawMutex, bool, 3> = Watch::new();
+pub static DISPLAY_WAKE: embassy_sync::signal::Signal<CriticalSectionRawMutex, ()> =
+    embassy_sync::signal::Signal::new();
 
 /// One-shot signals raised by `lora.rs` whenever a packet boundary
 /// completes. The LED pulse tasks in `led.rs` block on these and emit a

@@ -17,10 +17,11 @@ extern crate alloc;
 use core::sync::atomic::Ordering;
 
 use embassy_executor::Spawner;
+use embassy_futures::select::{select, Either};
 use embassy_nrf::peripherals;
 use embassy_nrf::twim::{self, Twim};
 use embassy_nrf::{bind_interrupts, Peri};
-use embassy_time::{Duration, Timer};
+use embassy_time::{Duration, Instant, Timer};
 
 use leviculum_screen::{ident_short, BatteryStatus, FrameKey, GnssStatus, StatusModel};
 use ssd1306::{prelude::*, I2CDisplayInterface, Ssd1306};
@@ -194,15 +195,15 @@ pub async fn display_task(
         .receiver()
         .expect("battery watch capacity");
 
-    // Display power state, controlled by `crate::button` via DISPLAY_ON_REQ.
-    // We seed the watch to `true` so the button task can read the current
-    // state before the user has ever pressed anything.
-    let display_req_sender = crate::baseboard::DISPLAY_ON_REQ.sender();
-    display_req_sender.send(true);
-    let mut display_req_rx = crate::baseboard::DISPLAY_ON_REQ
-        .receiver()
-        .expect("DISPLAY_ON_REQ watch capacity (display reader)");
+    // Display power state. The panel boots lit and goes dark on its own
+    // `DISPLAY_WAKE_MS` after boot or after the last press; any press,
+    // raised by `crate::button` on `DISPLAY_WAKE`, lights it again
+    // (`leviculum_screen::power::DisplayWake`).
+    let mut wake = leviculum_screen::power::DisplayWake::new(Instant::now().as_millis());
     let mut display_on = true;
+    // A press the dark-display wait below took off the signal, handed to
+    // the next iteration.
+    let mut pressed = false;
 
     // Frame key (see `leviculum_screen::FrameKey`) — when nothing
     // relevant has changed since last render, we skip the I²C flush
@@ -214,12 +215,18 @@ pub async fn display_task(
         tick = tick.wrapping_add(1);
         let heartbeat = (tick / 5) & 1 != 0; // toggles every 5 seconds
 
-        // Honour the latest power-state request from the button task. We
-        // only act on actual changes — `try_changed()` returns `Some(_)`
-        // exactly once per new value.
-        // An unchanged request is not sent and a failed one keeps the old
-        // state: `leviculum_screen::power::apply_power`.
-        if let Some(req) = display_req_rx.try_changed() {
+        // A press restarts the minute and lights a dark display; without
+        // one, a lit display goes dark once the minute is up. An unchanged
+        // request is not sent and a failed one keeps the old state:
+        // `leviculum_screen::power::apply_power`.
+        pressed |= crate::baseboard::DISPLAY_WAKE.try_take().is_some();
+        let now_ms = Instant::now().as_millis();
+        let request = if core::mem::take(&mut pressed) {
+            wake.press(now_ms, display_on)
+        } else {
+            wake.timeout(now_ms, display_on)
+        };
+        if let Some(req) = request {
             match leviculum_screen::power::apply_power(req, &mut display_on, |on| {
                 display.set_display_on(on)
             }) {
@@ -236,10 +243,15 @@ pub async fn display_task(
         }
 
         // While the screen is off there is no point computing or flushing
-        // a frame. Tick at the same 1 Hz cadence so the request poll above
-        // still runs.
+        // a frame. Wait for a press, so a dark display lights as soon as
+        // the button task reports one, or a second, whichever is first.
         if !display_on {
-            Timer::after(Duration::from_secs(1)).await;
+            let woke = select(
+                Timer::after(Duration::from_secs(1)),
+                crate::baseboard::DISPLAY_WAKE.wait(),
+            )
+            .await;
+            pressed = matches!(woke, Either::Second(()));
             continue;
         }
 

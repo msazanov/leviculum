@@ -565,12 +565,22 @@ async fn main(spawner: Spawner) {
     leviculum_nrf::store_spike::exercise(shared_flash).await;
 
     // No display on this board: no ST7789, no `leviculum-screen` path,
-    // and P1.08/P1.09 and SPI3 stay unconfigured (Codeberg #233). No
-    // button task either. Both absences are declared once, gate-free, so a
-    // boot smoke cell can tell them from a line dropped before the host
-    // attached (Codeberg #296).
+    // and P1.08/P1.09 and SPI3 stay unconfigured (Codeberg #233). The
+    // absence is declared once, gate-free, so a boot smoke cell can tell
+    // it from a line dropped before the host attached (Codeberg #296).
     leviculum_nrf::log::log_fmt_critical("[DISP] ", format_args!("none"));
-    leviculum_nrf::log::log_fmt_critical("[BTN] ", format_args!("none"));
+    // The user button on P1.01, the XIAO's program button, active low
+    // (`boards/solarnode.rs`, Meshtastic's `BUTTON_PIN D13`): the gestures
+    // of every board (#459). The touch pad on P1.07 stays unused. The task
+    // prints its own `[BTN] init` line.
+    leviculum_nrf::button::init(
+        &spawner,
+        leviculum_nrf::button::ButtonWiring {
+            pin: p.P1_01.into(),
+            active_high: false,
+            board: "solarnode",
+        },
+    );
 
     // XIAO L76K on UARTE0, sweep starting at the module's 9600 default.
     // Pin naming is from the MCU's side, as everywhere else in this tree:
@@ -1169,7 +1179,7 @@ async fn main(spawner: Spawner) {
                 }
             }
             Either4::Fourth(Either3::Third(())) => {
-                // A short press of the user button that got past its
+                // A double press of the user button that got past its
                 // debouncer and its 30 s limit (#459, `leviculum_nrf::button`):
                 // both announces, booked in the cadence's duty budget. A
                 // board without a button never raises this.

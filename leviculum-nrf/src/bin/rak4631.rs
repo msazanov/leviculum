@@ -1091,7 +1091,7 @@ async fn main(spawner: Spawner) {
                 }
             }
             Either4::Fourth(Either3::Third(())) => {
-                // A short press of the user button that got past its
+                // A double press of the user button that got past its
                 // debouncer and its 30 s limit (#459, `leviculum_nrf::button`):
                 // both announces, booked in the cadence's duty budget. A
                 // board without a button never raises this.

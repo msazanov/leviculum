@@ -280,9 +280,9 @@ pub type AccInt = peripherals::P1_02;
 /// The one LED, **active HIGH** (`PIN_LED1 (0 + 24)`, `LED_STATE_ON 1`).
 pub type LedPin = peripherals::P0_24;
 /// User button, **active HIGH** with a pull-down (`BUTTON_PIN (0 + 6)`,
-/// `BUTTON_ACTIVE_LOW false`, `BUTTON_SENSE_TYPE 0x5`). A short press
-/// announces (#459, `crate::button`); the long press is the product's power
-/// button and is left unassigned.
+/// `BUTTON_ACTIVE_LOW false`, `BUTTON_SENSE_TYPE 0x5`). A double press
+/// announces (#459, `crate::button`); the long press is also the product's power
+/// button.
 pub type UserButton = peripherals::P0_06;
 
 // Buzzer

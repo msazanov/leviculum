@@ -21,17 +21,23 @@ and the Solar Node add a `LedNotificationPin`
 (`leviculum-nrf/src/boards/t1000e.rs:291`). The Pocket drives an OLED
 and the T114 an ST7789 (`leviculum-nrf/src/bin/t114.rs:496`).
 
-Today only the Pocket and the T1000-E bring the button up; the T114 and
-the Solar Node say `[BTN] none` (`leviculum-nrf/src/button.rs:16`). On
-the T1000-E the long press is the power button and stays unassigned
-(`leviculum-nrf/src/bin/t1000e.rs:521-522`).
+Since 889 every board brings the button up with the same task
+(`leviculum-nrf/src/bin/t114.rs:524`,
+`leviculum-nrf/src/bin/solarnode.rs:576`,
+`leviculum-nrf/src/bin/rak4631.rs:530`,
+`leviculum-nrf/src/bin/t1000e.rs:525`). The T114 and the Solar Node used
+to say `[BTN] none` only because nobody had wired the task: neither pin
+is shared with anything the firmware drives, and the Solar Node's touch
+pad is a second pin (`TouchButton`, `leviculum-nrf/src/boards/solarnode.rs:100`)
+that stays unused. On the T1000-E the long press is also the product's
+power button (`leviculum-nrf/src/boards/t1000e.rs:282-286`).
 
 ## The gestures
 
 | gesture | does |
 |---|---|
 | short press | Status. The display wakes for one minute and goes dark by itself; there is no display switch. The LED blinks mode and battery, the buzzer joins where present. No announce. |
-| double press | Announce, both identities (what the short press does today, 869), plus one immediate position report when a recipient is configured. Feedback when the proof comes back. |
+| double press | Announce, both identities (what the short press did before 889, 869), plus one immediate position report when a recipient is configured. Feedback when the proof comes back. |
 | long press, 2 s | Mode switch Mesh/Tracker ([Operating modes](operating-modes.md)). The board signals at 2 s, the user releases, the board confirms the new mode. |
 | very long press, 8 s | Power off. A press powers on. |
 | any press in Tracker mode | Also opens the wake window: BLE on, listening. |
@@ -58,23 +64,39 @@ function that sounds the buzzer.
 
 ## What moves compared to today
 
-Two things the button does today change place:
+Two things the button did before 889 changed place, and both moves are
+built:
 
-- **Display wake moves to the short press.** Today a press of at least
-  2 s turns a dark display on and any press turns a lit one off
-  (`press_target`, `leviculum-nrf/screen/src/power.rs:17-25`; the 2 s
-  threshold is `LONG_PRESS_MIN_MS`, `leviculum-nrf/screen/src/power.rs:12`).
-  The 2 s press becomes the mode switch, and the display goes dark on its
-  own after a minute instead of on a press.
-- **Announce moves to the double press.** Today a short press that
-  passes the rate limit announces (`PressAction::Announce`,
-  `leviculum-nrf/announce-policy/src/button.rs:259`; the announce itself
-  is 869, Refs #459). The short press becomes status only.
+- **Display wake moved to any press.** Before, a press of at least 2 s
+  turned a dark display on and any press turned a lit one off. Now any
+  press turns a dark display on and none turns it off
+  (`press_target`, `leviculum-nrf/screen/src/power.rs:21`); the display
+  goes dark by itself `DISPLAY_WAKE_MS` (60 s,
+  `leviculum-nrf/screen/src/power.rs:16`) after boot or after the last
+  press (`DisplayWake`, `leviculum-nrf/screen/src/power.rs:33`). The
+  display task owns the state and the minute
+  (`leviculum-nrf/src/display.rs:202`); the button task only reports the
+  press (`leviculum-nrf/src/button.rs:156`).
+- **Announce moved to the double press.** Before, a short press that
+  passed the rate limit announced. Now the double press does, under the
+  same 30 s limit (`leviculum-nrf/announce-policy/src/button.rs:489`),
+  and the short press is status (`action=status`).
 
-The implementation orders follow this page: the gesture classifier in
-`announce-policy` first (double press, 2 s and 8 s thresholds,
-host-tested), then the display rule in `leviculum-nrf/screen`, then the
-feedback grammar, then the mode switch once Tracker mode exists.
+The classifier lives in `announce-policy`
+(`ButtonGate`, `leviculum-nrf/announce-policy/src/button.rs:334`) and is
+host-tested like the debounce. A short press is reported only once
+`DOUBLE_PRESS_WINDOW_MS` (400 ms,
+`leviculum-nrf/announce-policy/src/button.rs:63`) has passed after its
+release without a second press starting, so the status answer costs that
+much latency and a double is never first reported as a short. The long
+press (2 s) and the very long press (8 s,
+`leviculum-nrf/announce-policy/src/button.rs:74`) fire on release and do
+nothing else yet; the moment a held button reaches each threshold is
+logged as `BTN_HOLD ms=2000` and `BTN_HOLD ms=8000`.
+
+The orders still to come follow this page: the feedback grammar, then
+the mode switch once Tracker mode exists, then the power off once the
+board can sleep.
 
 ## Open
 
@@ -85,11 +107,12 @@ feedback grammar, then the mode switch once Tracker mode exists.
 
 ## Not yet built
 
-Everything except the single press that announces and the long press
-that wakes the Pocket's display: the double press, the 2 s mode switch,
-the 8 s power off, the boot-time factory reset, the feedback grammar,
-the display's one minute timeout, and the button on the T114 and the
-Solar Node.
+The 2 s mode switch and the 8 s power off (both are recognised and
+logged, `action=long` and `action=hold8`, and do nothing), the boot-time
+factory reset, the feedback grammar (so the short press's LED and buzzer
+status, and the "release now" signal at 2 s), the double press's
+position report, and the T114's display wake: its ST7789 has no power
+control yet and stays lit (`leviculum-nrf/src/st7789.rs:33-34`).
 
 ## See also
 

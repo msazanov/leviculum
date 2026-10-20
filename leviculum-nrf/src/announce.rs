@@ -471,7 +471,7 @@ impl AnnounceGate {
     }
 }
 
-/// A short press of the user button got past its debouncer and its rate
+/// A double press of the user button got past its debouncer and its rate
 /// limit (`crate::button`): both announces, booked in the one cadence.
 ///
 /// The cadence decides first ([`AnnounceCadence::manual`]) so that the

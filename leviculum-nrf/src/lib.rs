@@ -58,8 +58,8 @@ pub mod ble;
 pub mod boards;
 pub mod boot_count;
 pub mod boot_trace;
-/// The user button (#459): every board that has one announces on a short
-/// press; the Pocket V2's display toggle rides the same debouncer.
+/// The user button (#459): every board's gestures, a double press
+/// announces; the Pocket V2's display wakes on any press.
 pub mod button;
 pub mod chtm;
 pub mod clock;

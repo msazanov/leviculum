@@ -3,24 +3,62 @@
 //! `docs/src/firmware/host-test-seams.md`).
 //!
 //! `leviculum-nrf/src/button.rs` times the press and `display.rs` drives the
-//! panel; what they decide is here, so the pocket-press rule and the I2C
-//! error rule are host tests instead of a thumb on a board.
+//! panel; what they decide is here, so the press rule, the one-minute
+//! timeout and the I2C error rule are host tests instead of a thumb on a
+//! board.
 
-/// The shortest press that turns a dark display on. Shorter ones are
-/// ignored while it is off, so a press in a pocket cannot wake the screen
-/// and burn the battery; turning it off is one quick tap.
-pub const LONG_PRESS_MIN_MS: u64 = 2_000;
+/// How long a press keeps the display lit (`docs/src/concepts/one-button.md`:
+/// the status press wakes it for one minute). Long enough to read the
+/// status frame, which changes once a second, a few times over; short
+/// enough that a display nobody looks at stops burning the battery within
+/// the minute. There is no press that turns the display off: it goes dark
+/// on its own this long after the last press.
+pub const DISPLAY_WAKE_MS: u64 = 60_000;
 
-/// The display state a press of `press_ms` asks for, or `None` when it is
-/// ignored: any press turns a lit display off, a press of at least
-/// [`LONG_PRESS_MIN_MS`] turns a dark one on.
-pub const fn press_target(currently_on: bool, press_ms: u64) -> Option<bool> {
+/// The display state a press asks for, or `None` when it asks for no
+/// change: any press turns a dark display on, and a lit one stays lit
+/// (its timeout restarts, [`DisplayWake::press`]).
+pub const fn press_target(currently_on: bool) -> Option<bool> {
     if currently_on {
-        Some(false)
-    } else if press_ms >= LONG_PRESS_MIN_MS {
-        Some(true)
-    } else {
         None
+    } else {
+        Some(true)
+    }
+}
+
+/// When the display goes dark on its own: [`DISPLAY_WAKE_MS`] after the
+/// last press, or after boot when nobody has pressed yet (the display
+/// boots lit).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DisplayWake {
+    dark_at_ms: u64,
+}
+
+impl DisplayWake {
+    /// A display lit at `boot_ms`.
+    #[must_use]
+    pub const fn new(boot_ms: u64) -> Self {
+        Self {
+            dark_at_ms: boot_ms.saturating_add(DISPLAY_WAKE_MS),
+        }
+    }
+
+    /// A press at `now_ms` on a display that is `currently_on`: the
+    /// timeout restarts, and the request is [`press_target`]'s.
+    pub fn press(&mut self, now_ms: u64, currently_on: bool) -> Option<bool> {
+        self.dark_at_ms = now_ms.saturating_add(DISPLAY_WAKE_MS);
+        press_target(currently_on)
+    }
+
+    /// `Some(false)` once a lit display has gone [`DISPLAY_WAKE_MS`]
+    /// without a press, `None` otherwise.
+    #[must_use]
+    pub const fn timeout(&self, now_ms: u64, currently_on: bool) -> Option<bool> {
+        if currently_on && now_ms >= self.dark_at_ms {
+            Some(false)
+        } else {
+            None
+        }
     }
 }
 
@@ -49,18 +87,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn any_press_turns_a_lit_display_off() {
-        assert_eq!(press_target(true, 0), Some(false));
-        assert_eq!(press_target(true, 50), Some(false));
-        assert_eq!(press_target(true, 10_000), Some(false));
+    fn any_press_turns_a_dark_display_on_and_none_turns_a_lit_one_off() {
+        assert_eq!(press_target(false), Some(true));
+        assert_eq!(press_target(true), None);
     }
 
     #[test]
-    fn a_dark_display_wakes_only_on_a_long_press() {
-        assert_eq!(press_target(false, 0), None);
-        assert_eq!(press_target(false, LONG_PRESS_MIN_MS - 1), None);
-        assert_eq!(press_target(false, LONG_PRESS_MIN_MS), Some(true));
-        assert_eq!(press_target(false, 60_000), Some(true));
+    fn a_lit_display_goes_dark_a_minute_after_boot_without_a_press() {
+        let wake = DisplayWake::new(500);
+        assert_eq!(wake.timeout(500 + DISPLAY_WAKE_MS - 1, true), None);
+        assert_eq!(wake.timeout(500 + DISPLAY_WAKE_MS, true), Some(false));
+        assert_eq!(
+            wake.timeout(500 + DISPLAY_WAKE_MS, false),
+            None,
+            "a dark display is not asked to go dark again"
+        );
+    }
+
+    #[test]
+    fn a_press_restarts_the_minute() {
+        let mut wake = DisplayWake::new(0);
+        assert_eq!(wake.press(50_000, true), None, "lit stays lit");
+        assert_eq!(wake.timeout(DISPLAY_WAKE_MS, true), None);
+        assert_eq!(wake.timeout(50_000 + DISPLAY_WAKE_MS - 1, true), None);
+        assert_eq!(wake.timeout(50_000 + DISPLAY_WAKE_MS, true), Some(false));
+    }
+
+    #[test]
+    fn a_press_on_a_dark_display_lights_it_for_a_minute() {
+        let mut wake = DisplayWake::new(0);
+        assert_eq!(wake.timeout(DISPLAY_WAKE_MS, true), Some(false));
+        let at = 200_000;
+        assert_eq!(wake.press(at, false), Some(true));
+        assert_eq!(wake.timeout(at + DISPLAY_WAKE_MS - 1, true), None);
+        assert_eq!(wake.timeout(at + DISPLAY_WAKE_MS, true), Some(false));
     }
 
     #[test]

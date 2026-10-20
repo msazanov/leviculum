@@ -518,10 +518,17 @@ async fn main(spawner: Spawner) {
         );
         info!("display task spawned (ST7789 blind-drive)");
     }
-    // The user button (P1.10) has no task on this board yet; say so once,
-    // gate-free, so a boot smoke cell can tell declared absence from a
-    // line dropped before the host attached (Codeberg #296).
-    leviculum_nrf::log::log_fmt_critical("[BTN] ", format_args!("none"));
+    // The user button on P1.10, active low (`boards/t114.rs`, Meshtastic's
+    // `PIN_BUTTON1 (32 + 10)`): the gestures of every board (#459). The
+    // task prints its own `[BTN] init` line.
+    leviculum_nrf::button::init(
+        &spawner,
+        leviculum_nrf::button::ButtonWiring {
+            pin: p.P1_10.into(),
+            active_high: false,
+            board: "t114",
+        },
+    );
 
     // Quectel L76K on UARTE0 (#69). Pin naming is from the MCU's side:
     // the MCU receives on P1.05 and transmits on P1.07. Beware the
@@ -1093,7 +1100,7 @@ async fn main(spawner: Spawner) {
                 }
             }
             Either4::Fourth(Either3::Third(())) => {
-                // A short press of the user button that got past its
+                // A double press of the user button that got past its
                 // debouncer and its 30 s limit (#459, `leviculum_nrf::button`):
                 // both announces, booked in the cadence's duty budget. A
                 // board without a button never raises this.

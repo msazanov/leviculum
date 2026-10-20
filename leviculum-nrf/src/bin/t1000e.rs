@@ -20,7 +20,7 @@
 //! telemetry as the T114's L76K does. Since #458 it samples the battery
 //! divider and puts the charge into telemetry. Since #457 it reads the
 //! QMA6100P accelerometer and prints `MOTION state=moving|still`, which
-//! nothing acts on yet. Since #459 a short press of the button announces.
+//! nothing acts on yet. Since #459 a double press of the button announces.
 //! Not in it: the charger status lines and the buzzer, whose enable is held
 //! low.
 //! There is no display on this product.
@@ -518,9 +518,10 @@ async fn main(spawner: Spawner) {
     // so a boot smoke cell can tell it from a line dropped before the host
     // attached (Codeberg #296).
     leviculum_nrf::log::log_fmt_critical("[DISP] ", format_args!("none"));
-    // The button on P0.06, active high (`boards/t1000e.rs`): a short press
-    // announces (#459). Its long press is the power button and stays
-    // unassigned here. The task prints its own `[BTN] init` line.
+    // The button on P0.06, active high (`boards/t1000e.rs`): the gestures
+    // of every board (#459), a double press announces. Its long press is
+    // also the product's power button. The task prints its own `[BTN] init`
+    // line.
     leviculum_nrf::button::init(
         &spawner,
         leviculum_nrf::button::ButtonWiring {
@@ -1088,7 +1089,7 @@ async fn main(spawner: Spawner) {
                 }
             }
             Either4::Fourth(Either3::Third(())) => {
-                // A short press of the user button that got past its
+                // A double press of the user button that got past its
                 // debouncer and its 30 s limit (#459, `leviculum_nrf::button`):
                 // both announces, booked in the cadence's duty budget. A
                 // board without a button never raises this.
