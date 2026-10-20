@@ -592,8 +592,49 @@ pub fn resource_error_name(error: &leviculum_core::resource::ResourceError) -> &
 /// the one this accept pushed; an earlier transfer on the same link keeps
 /// its own.
 pub fn retire_refused_transfer<L: PartialEq>(inbound: &mut Vec<L>, link: &L) {
-    if let Some(at) = inbound.iter().rposition(|held| held == link) {
-        inbound.remove(at);
+    retire_last(inbound, link);
+}
+
+/// Retire the `inbound_transfers` entry of a transfer on `link` that
+/// FAILED: the sender gave up, the watchdog fired, or the parts did not
+/// assemble, and the link stayed up. Until 879 only completion and close
+/// retired an entry, so a peer whose uploads failed twice was refused for
+/// `max_inbound_syncs` with nothing in flight. The node raises a receiver's
+/// `ResourceFailed` only for a transfer it had accepted, one entry each;
+/// the last entry for `link` goes, an earlier one keeps its own. Returns
+/// whether an entry went, so a link that held none (a client's upload, a
+/// link the engine already forgot) prints nothing.
+pub fn retire_failed_transfer<L: PartialEq>(inbound: &mut Vec<L>, link: &L) -> bool {
+    retire_last(inbound, link)
+}
+
+fn retire_last<L: PartialEq>(inbound: &mut Vec<L>, link: &L) -> bool {
+    match inbound.iter().rposition(|held| held == link) {
+        Some(at) => {
+            inbound.remove(at);
+            true
+        }
+        None => false,
+    }
+}
+
+/// An inbound sync whose transfer failed with the link still up: the body
+/// of `PN_SYNC_FAILED link=<16 hex> reason=<error>`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SyncFailure {
+    /// The link's id, first 8 bytes, as the `PN_LINK` lines print it.
+    pub link: [u8; 8],
+    /// What the transfer failed with.
+    pub error: leviculum_core::resource::ResourceError,
+}
+
+impl core::fmt::Display for SyncFailure {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "link=")?;
+        for byte in &self.link {
+            write!(f, "{byte:02x}")?;
+        }
+        write!(f, " reason={}", resource_error_name(&self.error))
     }
 }
 

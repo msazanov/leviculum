@@ -1623,7 +1623,8 @@ mod oversize_upload {
 
     const IFACE: InterfaceId = InterfaceId(0);
 
-    /// A clock that stands still: the refusal is decided at once.
+    /// A clock that stands still unless a test moves it: the refusal is
+    /// decided at once, and a failed transfer waits for its watchdog.
     #[derive(Clone)]
     pub struct Still(&'static Cell<u64>);
 
@@ -1635,9 +1636,8 @@ mod oversize_upload {
 
     pub type Node = NodeCore<OsRng, Still, MemoryStorage>;
 
-    fn node() -> Node {
-        let clock = Still(Box::leak(Box::new(Cell::new(1_780_000_000_000))));
-        NodeCoreBuilder::new().build(OsRng, clock, MemoryStorage::with_defaults())
+    fn node(now: &'static Cell<u64>) -> Node {
+        NodeCoreBuilder::new().build(OsRng, Still(now), MemoryStorage::with_defaults())
     }
 
     pub fn frames(out: &TickOutput) -> Vec<Vec<u8>> {
@@ -1653,12 +1653,15 @@ mod oversize_upload {
         pub client: Node,
         pub board: Node,
         pub client_link: LinkId,
+        /// The board's clock, for a test that waits out a watchdog.
+        pub board_now: &'static Cell<u64>,
     }
 
     pub fn establish() -> Pair {
         let identity = Identity::generate(&mut OsRng);
         let signing_key = identity.ed25519_verifying().to_bytes();
-        let mut board = node();
+        let board_now: &'static Cell<u64> = Box::leak(Box::new(Cell::new(1_780_000_000_000)));
+        let mut board = node(board_now);
         let mut dest = Destination::new(
             Some(identity),
             Direction::In,
@@ -1672,7 +1675,7 @@ mod oversize_upload {
         dest.set_resource_strategy(ResourceStrategy::AcceptApp);
         let dest_hash = *dest.hash();
         board.register_destination(dest);
-        let mut client = node();
+        let mut client = node(Box::leak(Box::new(Cell::new(1_780_000_000_000))));
         let (client_link, _routed, out) = client.connect(dest_hash, &signing_key).expect("connect");
         let mut to_board = frames(&out);
         let mut up = false;
@@ -1696,6 +1699,7 @@ mod oversize_upload {
             client,
             board,
             client_link,
+            board_now,
         }
     }
 
@@ -1888,5 +1892,97 @@ fn the_retire_takes_only_the_last_entry_for_its_link() {
     retire_refused_transfer(&mut inbound, &1);
     assert_eq!(inbound, vec![1, 2]);
     retire_refused_transfer(&mut inbound, &3);
+    assert_eq!(inbound, vec![1, 2]);
+}
+
+/// 879: a peer's transfer the board accepted and then lost with the link
+/// still up (the sender went silent, the receiver's part watchdog gave up)
+/// retires its `inbound_transfers` entry and says so in one
+/// `PN_SYNC_FAILED` line. An earlier transfer on the same link keeps its
+/// entry. Before 879 only completion and close retired one, so the
+/// `/offer` gate counted a sync that was not running.
+#[test]
+fn a_failed_inbound_transfer_retires_its_entry_and_says_so() {
+    use leviculum_core::resource::ResourceError;
+
+    let mut pair = oversize_upload::establish();
+    let (_hash, out) = pair
+        .client
+        .send_resource(&pair.client_link, &[0x5Au8; 300], None, false)
+        .expect("the client advertises");
+    let adv = oversize_upload::frames(&out);
+    let board_link = pair
+        .board
+        .handle_packet(leviculum_core::InterfaceId(0), &adv[0])
+        .events
+        .iter()
+        .find_map(|e| match e {
+            leviculum_core::NodeEvent::ResourceAdvertised { link_id, .. } => Some(*link_id),
+            _ => None,
+        })
+        .expect("the advertisement is parked for the role");
+
+    // An earlier transfer's entry, then the one this accept pushes, as
+    // `pn.rs` pushes it for a validated peer.
+    let mut inbound = vec![board_link];
+    let earlier = inbound.clone();
+    let part_request = pair
+        .board
+        .accept_resource(&board_link)
+        .expect("the board accepts");
+    inbound.push(board_link);
+
+    // The part request never reaches the client: the receiver's watchdog
+    // is the only thing left to end the transfer.
+    drop(part_request);
+    let mut failed = None;
+    for _ in 0..200 {
+        pair.board_now.set(pair.board_now.get() + 5_000);
+        let out = pair.board.handle_timeout();
+        failed = out.events.iter().find_map(|e| match e {
+            leviculum_core::NodeEvent::ResourceFailed {
+                link_id,
+                error,
+                is_sender: false,
+                ..
+            } => Some((*link_id, *error)),
+            _ => None,
+        });
+        if failed.is_some() {
+            break;
+        }
+    }
+    let (failed_link, error) = failed.expect("the receiver's watchdog fails the transfer");
+    assert_eq!(failed_link, board_link);
+    assert_eq!(error, ResourceError::Timeout);
+    assert!(
+        pair.board.link(&board_link).is_some(),
+        "the link outlives its transfer"
+    );
+
+    // Positive control: without the retire the failed transfer's entry stays.
+    assert_eq!(inbound.len(), earlier.len() + 1);
+    assert!(retire_failed_transfer(&mut inbound, &failed_link));
+    assert_eq!(inbound, earlier, "the earlier transfer keeps its entry");
+
+    let mut link = [0u8; 8];
+    link.copy_from_slice(&failed_link.as_bytes()[..8]);
+    let line = std::format!("PN_SYNC_FAILED {}", SyncFailure { link, error });
+    let hex: std::string::String = link.iter().map(|b| std::format!("{b:02x}")).collect();
+    assert_eq!(
+        line,
+        std::format!("PN_SYNC_FAILED link={hex} reason=timeout")
+    );
+    std::println!("{line}");
+}
+
+/// A link that holds no entry (a client's upload, a link already
+/// forgotten) retires nothing, so the board prints nothing for it.
+#[test]
+fn a_failure_on_a_link_without_an_entry_retires_nothing() {
+    let mut inbound = vec![1u8, 2, 1];
+    assert!(!retire_failed_transfer(&mut inbound, &3));
+    assert_eq!(inbound, vec![1, 2, 1]);
+    assert!(retire_failed_transfer(&mut inbound, &1));
     assert_eq!(inbound, vec![1, 2]);
 }

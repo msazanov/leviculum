@@ -143,7 +143,7 @@ where
 
 /// Send `response`, falling back to a response Resource when it does not fit
 /// one packet. Same shape as the propagation engine's `respond`
-/// (`pn.rs:3175`), which is the board's precedent for answering a request.
+/// (`pn.rs:3195`), which is the board's precedent for answering a request.
 fn respond<R, C, S>(
     node: &mut NodeCore<R, C, S>,
     link_id: &LinkId,

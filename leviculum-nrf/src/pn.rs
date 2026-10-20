@@ -1361,6 +1361,26 @@ impl Engine {
             } => {
                 self.on_resource_sent(node, link_id, false, out);
             }
+            // An inbound transfer that failed while its link stayed up
+            // (879): without this its entry held a `max_inbound_syncs`
+            // slot until the link closed.
+            NodeEvent::ResourceFailed {
+                link_id,
+                error,
+                is_sender: false,
+                ..
+            } => {
+                if leviculum_pn_store::retire_failed_transfer(&mut self.inbound_transfers, link_id)
+                {
+                    let mut link = [0u8; 8];
+                    link.copy_from_slice(&link_id.as_bytes()[..8]);
+                    let failure = leviculum_pn_store::SyncFailure {
+                        link,
+                        error: *error,
+                    };
+                    crate::log::log_fmt("PN_SYNC_FAILED ", format_args!("{failure}"));
+                }
+            }
             NodeEvent::RequestReceived {
                 link_id,
                 destination_hash,
