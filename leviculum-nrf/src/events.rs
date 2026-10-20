@@ -95,6 +95,30 @@ pub fn log_events(events: &[NodeEvent], now_ms: u64) {
                 ),
             );
         }
+        // Every link end, a peer's close above all: a terminus that lost
+        // its link printed nothing, and 858 and 866 had to read the close
+        // out of packet sizes (867). Links end a few times a minute at
+        // most, so the line needs no budget.
+        if let NodeEvent::LinkClosed {
+            link_id,
+            reason,
+            is_initiator,
+            destination_hash,
+        } = event
+        {
+            crate::log::log_fmt(
+                "LINK_CLOSED ",
+                format_args!(
+                    "{}",
+                    leviculum_log_line::LinkClosedBody {
+                        reason: reason.kebab(),
+                        link: *link_id.as_bytes(),
+                        dest: *destination_hash.as_bytes(),
+                        initiator: *is_initiator,
+                    }
+                ),
+            );
+        }
         // The announce a board learned from and had nowhere to send.
         // A board registers no shared-instance local client, so
         // the announce table is its only general route to the serial

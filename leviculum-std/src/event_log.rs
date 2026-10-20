@@ -516,6 +516,8 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
             "rtt_invalid",
             "request_no_handler",
             "channel_decrypt_fail",
+            "resource_full",
+            "resource_compressed",
             "total",
             // Not a drop reason and outside `total` (#374): link requests
             // for a local client's destination redirected to the clients.

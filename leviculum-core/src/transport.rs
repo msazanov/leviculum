@@ -1928,6 +1928,10 @@ pub struct TransportStats {
     pub(crate) drops_rtt_invalid: u32,
     pub(crate) drops_request_no_handler: u32,
     pub(crate) drops_channel_decrypt_fail: u32,
+    // The resource advertisements a link refused (867), u32 for the reason
+    // the five above are; the rate is bounded by advertisements, lower still.
+    pub(crate) drops_resource_full: u32,
+    pub(crate) drops_resource_compressed: u32,
     // NOT a drop counter and deliberately outside `packets_dropped`: link
     // requests for a local client's destination that arrived while the path
     // table held nothing for it, and were handed to the connected clients
@@ -2168,6 +2172,19 @@ pub enum DropReason {
     /// packet is the reliable path: its sender retransmits, so a rising
     /// count names a retry storm the plain-data counter would hide.
     ChannelDecryptFail,
+    /// A resource advertisement on an Active link of ours refused because
+    /// the link already carries `max_incoming_resources_per_link` incoming
+    /// resources. The sender gets the receiver cancel (RCL) the reference's
+    /// `Resource.reject` sends (`reference/Reticulum/RNS/Resource.py:157-161`)
+    /// and fails the transfer at once; until 867 the board refused it with a
+    /// debug line only, which it compiles out.
+    ResourceFull,
+    /// A resource advertisement refused because it is compressed and this
+    /// build cannot decompress it (every board build), with the same RCL.
+    /// A rising count names a Python sender compressing what it sends
+    /// (`reference/Reticulum/RNS/Resource.py:248`), which a board can only
+    /// refuse.
+    ResourceCompressed,
 }
 
 /// Dedicated tracing target for the per-packet journey contract
@@ -2240,11 +2257,13 @@ impl DropReason {
             DropReason::RttInvalid => "rtt-invalid",
             DropReason::RequestNoHandler => "request-no-handler",
             DropReason::ChannelDecryptFail => "channel-decrypt-fail",
+            DropReason::ResourceFull => "resource-full",
+            DropReason::ResourceCompressed => "resource-compressed",
         }
     }
 
     /// All variants, for taxonomy completeness checks and summary emission.
-    pub const ALL: [DropReason; 27] = [
+    pub const ALL: [DropReason; 29] = [
         DropReason::OverheardTransportId,
         DropReason::InvalidAnnounce,
         DropReason::PlainGroupMultihop,
@@ -2272,6 +2291,8 @@ impl DropReason {
         DropReason::RttInvalid,
         DropReason::RequestNoHandler,
         DropReason::ChannelDecryptFail,
+        DropReason::ResourceFull,
+        DropReason::ResourceCompressed,
     ];
 }
 
@@ -2471,6 +2492,18 @@ impl TransportStats {
         u64::from(self.drops_channel_decrypt_fail)
     }
 
+    /// Resource advertisements refused because the link's incoming
+    /// resources were at their cap (867).
+    pub fn drops_resource_full(&self) -> u64 {
+        u64::from(self.drops_resource_full)
+    }
+
+    /// Compressed resource advertisements refused by a build that cannot
+    /// decompress (867).
+    pub fn drops_resource_compressed(&self) -> u64 {
+        u64::from(self.drops_resource_compressed)
+    }
+
     /// Link requests for a local client's destination that arrived with an
     /// empty path table and were handed to the connected clients instead of
     /// dying as overheard/no-path (#374). Not a drop; not part of
@@ -2528,6 +2561,8 @@ impl TransportStats {
             + self.drops_rtt_invalid()
             + self.drops_request_no_handler()
             + self.drops_channel_decrypt_fail()
+            + self.drops_resource_full()
+            + self.drops_resource_compressed()
     }
 
     /// Single choke point for every packet drop (OBS-2b).
@@ -2575,6 +2610,12 @@ impl TransportStats {
             }
             DropReason::ChannelDecryptFail => {
                 self.drops_channel_decrypt_fail = self.drops_channel_decrypt_fail.saturating_add(1)
+            }
+            DropReason::ResourceFull => {
+                self.drops_resource_full = self.drops_resource_full.saturating_add(1)
+            }
+            DropReason::ResourceCompressed => {
+                self.drops_resource_compressed = self.drops_resource_compressed.saturating_add(1)
             }
         }
         debug_assert_eq!(
@@ -5144,6 +5185,8 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 rtt_invalid = self.stats.drops_rtt_invalid,
                 request_no_handler = self.stats.drops_request_no_handler,
                 channel_decrypt_fail = self.stats.drops_channel_decrypt_fail,
+                resource_full = self.stats.drops_resource_full,
+                resource_compressed = self.stats.drops_resource_compressed,
                 total = self.stats.packets_dropped,
                 // Outside `total` on purpose: a redirect is a delivery, not
                 // a drop (#374); it rides this line because the operators
@@ -6195,7 +6238,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// recall source is the cached announce for the destination
     /// (`get_announce_cache`, keyed by destination hash, holding the raw announce
     /// whose payload starts with the 64-byte public key), the same source the
-    /// link-request path uses at transport.rs:4357. A destination with no cached
+    /// link-request path uses at transport.rs:4398. A destination with no cached
     /// announce cannot be associated with an identity, so it is left untouched,
     /// exactly as Python keeps a path whose `Identity.recall` returns `None`.
     ///
@@ -12190,7 +12233,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // Emit the STORED path-table count, matching Python
                 // Transport.py:2956 (`packet.hops = path_table[dst][IDX_PT_HOPS]`).
                 // The cached raw's hop byte is the PRE-increment wire value
-                // (`stored - 1`): the receipt increment (`transport.rs:2827`) only
+                // (`stored - 1`): the receipt increment (`transport.rs:2868`) only
                 // touches the in-memory packet, never the raw buffer stashed by
                 // `set_announce_cache`. Using it here would put `stored - 1` on the
                 // wire and every peer that learns via this response would be one hop
@@ -18429,7 +18472,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // `random_blobs` (transport.rs:7756), a deliberate anti-replay
+            // `random_blobs` (transport.rs:7799), a deliberate anti-replay
             // extension — so the blob count is not a rejection indicator.)
             transport
                 .clock

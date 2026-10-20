@@ -143,7 +143,9 @@
 //! What a refusal no longer shows as is a missing proof, so every
 //! refusing arm now logs `PN_REJECT reason=<word> via=<carrier>` — the
 //! same fixed-word line `lnpnd` keeps — and the accepted arm still
-//! reports its flush as `PN_ACCEPT ... durable=`.
+//! reports its flush as `PN_ACCEPT ... durable=`. The advertisement
+//! refused for its size adds `size=<bytes> cap=<bytes>`, the limit it
+//! failed (867: until then that arm was the one without a line).
 //!
 //! # Heap budget (#388)
 //!
@@ -188,9 +190,9 @@
 //! `links` is DERIVED, not chosen
 //! ([`crate::heap_census::max_endpoint_links`]): the fixed terms are
 //! subtracted from the heap and the remainder divided by `per_link`.
-//! With today's numbers — node box 31 736, role 21 120, reserve 18 848,
+//! With today's numbers — node box 31 744, role 21 120, reserve 18 848,
 //! sessions 4 · 3 948 = 15 792, per_link 2 696 — the remainder is
-//! 10 808 B and the division yields **4** (leaving 24 B of slack, #661, #662, #666, #852, 860): the heap affords exactly the
+//! 10 800 B and the division yields **4** (leaving 16 B of slack, #661, #662, #666, #852, 860, 867): the heap affords exactly the
 //! BLE-session count, no extra LoRa-backed links until a fixed term
 //! shrinks. The same number is handed to `NodeCoreBuilder::max_links`,
 //! so the budget's `links=` is an enforced cap, not a claim: the fifth
@@ -1282,9 +1284,12 @@ impl Engine {
                 // past this point the resource is proven before the role
                 // ever sees it.
                 let from_peer = self.validated_links.contains_key(link_id);
-                let within_limit = leviculum_pn_store::board_accepts_resource_of(
-                    &self.role, *data_size, from_peer,
-                );
+                let oversize =
+                    leviculum_pn_store::board_oversize_refusal(&self.role, *data_size, from_peer);
+                if let Some(refusal) = &oversize {
+                    crate::log::log_fmt("PN_REJECT ", format_args!("{refusal}"));
+                }
+                let within_limit = oversize.is_none();
                 let in_flight: usize = node
                     .links()
                     .map(|(_, link)| link.incoming_resource_count())

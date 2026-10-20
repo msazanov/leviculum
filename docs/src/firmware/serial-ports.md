@@ -97,7 +97,7 @@ them. Enabling it was measured on 2026-10-16: +166 596 B of flash on the
 T114 (+166 316 B on the RAK4631) against a 44 500 B (38 280 B) gap to the
 boot-record page, and +4 536 B of static RAM taken from the stack. What the
 board says about the core it says itself, from the `NodeEvent` stream
-(`leviculum-nrf/src/events.rs`): the `LINK_REFUSED`,
+(`leviculum-nrf/src/events.rs`): the `LINK_REFUSED`, `LINK_CLOSED`,
 `ANNOUNCE_LEARNED_NOT_RELAYED`, `ANN_TX` and `PKT_RELAY` event lines and the
 budgeted `[DROP]` lines, plus the periodic `[TRANSPORT]` counter line
 (`leviculum-nrf/src/transport_stats.rs`). A core event a bench needs on a

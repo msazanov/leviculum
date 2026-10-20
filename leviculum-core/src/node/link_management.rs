@@ -1595,7 +1595,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 self.handle_channel_packet(link_id, packet, raw_packet, rx, now_ms)
             }
             PacketContext::ResourceAdv => {
-                self.handle_resource_adv(link_id, packet, raw_packet, now_ms);
+                self.handle_resource_adv(link_id, packet, raw_packet, rx, now_ms);
             }
             PacketContext::ResourceReq => {
                 self.handle_resource_req(link_id, packet, now_ms);
@@ -2788,6 +2788,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         link_id: LinkId,
         packet: &Packet,
         _raw_packet: &[u8],
+        rx: LinkRx<'_>,
         now_ms: u64,
     ) {
         use crate::resource::{
@@ -2953,6 +2954,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             && link.incoming_resource_count() >= self.max_incoming_resources_per_link
         {
             self.refuse_incoming_resource(&link_id, &adv.resource_hash, now_ms, "incoming_full");
+            self.drop_link_packet(packet, rx, DropReason::ResourceFull);
             return;
         }
         // Without the `compression` feature (every board build: bz2 needs
@@ -2966,6 +2968,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             && !cfg!(feature = "compression")
         {
             self.refuse_incoming_resource(&link_id, &adv.resource_hash, now_ms, "compressed");
+            self.drop_link_packet(packet, rx, DropReason::ResourceCompressed);
             return;
         }
         let resource_hash = adv.resource_hash;
@@ -3090,6 +3093,13 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// incoming ones, `compressed` when this build cannot decompress it.
     /// Ignoring it left the sender re-advertising into silence until its
     /// whole advertisement budget ran out (Codeberg #657, audit D12).
+    ///
+    /// The event below is debug-only, compiled out on a board. Where the
+    /// advertisement packet is still in hand (`handle_resource_adv`) the
+    /// caller also records it as a `resource-full` or `resource-compressed`
+    /// drop, which a board prints as `[DROP]` (867). `accept_resource`'s
+    /// late refusal has no packet left to name; its caller learns of it from
+    /// the `TransferInProgress` it returns.
     pub(super) fn refuse_incoming_resource(
         &mut self,
         link_id: &LinkId,

@@ -1602,3 +1602,211 @@ fn a_list_write_interrupted_before_its_purge_reads_new_and_heals() {
         assert!(board_list_refresh_ops(&region).is_empty());
     });
 }
+
+// ---- 867: the oversize refusal prints its line ----
+
+/// A link from a client to a propagation node whose link is in `AcceptApp`,
+/// as the board's role decides every advertisement: the client node, the
+/// node the role sits on, and the link's id on each side.
+mod oversize_upload {
+    use alloc::boxed::Box;
+    use alloc::vec::Vec;
+    use core::cell::Cell;
+
+    use leviculum_core::link::LinkId;
+    use leviculum_core::resource::{ResourceError, ResourceStrategy};
+    use leviculum_core::{
+        Action, Clock, Destination, DestinationType, Direction, Identity, InterfaceId,
+        MemoryStorage, NodeCore, NodeCoreBuilder, NodeEvent, ProofStrategy, TickOutput,
+    };
+    use rand_core::OsRng;
+
+    const IFACE: InterfaceId = InterfaceId(0);
+
+    /// A clock that stands still: the refusal is decided at once.
+    #[derive(Clone)]
+    pub struct Still(&'static Cell<u64>);
+
+    impl Clock for Still {
+        fn now_ms(&self) -> u64 {
+            self.0.get()
+        }
+    }
+
+    pub type Node = NodeCore<OsRng, Still, MemoryStorage>;
+
+    fn node() -> Node {
+        let clock = Still(Box::leak(Box::new(Cell::new(1_780_000_000_000))));
+        NodeCoreBuilder::new().build(OsRng, clock, MemoryStorage::with_defaults())
+    }
+
+    pub fn frames(out: &TickOutput) -> Vec<Vec<u8>> {
+        out.actions
+            .iter()
+            .map(|a| match a {
+                Action::Broadcast { data, .. } | Action::SendPacket { data, .. } => data.clone(),
+            })
+            .collect()
+    }
+
+    pub struct Pair {
+        pub client: Node,
+        pub board: Node,
+        pub client_link: LinkId,
+    }
+
+    pub fn establish() -> Pair {
+        let identity = Identity::generate(&mut OsRng);
+        let signing_key = identity.ed25519_verifying().to_bytes();
+        let mut board = node();
+        let mut dest = Destination::new(
+            Some(identity),
+            Direction::In,
+            DestinationType::Single,
+            "lxmf",
+            &["propagation"],
+        )
+        .expect("destination");
+        dest.set_accepts_links(true);
+        dest.set_proof_strategy(ProofStrategy::All);
+        dest.set_resource_strategy(ResourceStrategy::AcceptApp);
+        let dest_hash = *dest.hash();
+        board.register_destination(dest);
+        let mut client = node();
+        let (client_link, _routed, out) = client.connect(dest_hash, &signing_key).expect("connect");
+        let mut to_board = frames(&out);
+        let mut up = false;
+        for _ in 0..8 {
+            let mut to_client = Vec::new();
+            for frame in to_board {
+                let out = board.handle_packet(IFACE, &frame);
+                up |= out
+                    .events
+                    .iter()
+                    .any(|e| matches!(e, NodeEvent::LinkEstablished { .. }));
+                to_client.extend(frames(&out));
+            }
+            to_board = Vec::new();
+            for frame in to_client {
+                to_board.extend(frames(&client.handle_packet(IFACE, &frame)));
+            }
+        }
+        assert!(up, "the board's side of the link is established");
+        Pair {
+            client,
+            board,
+            client_link,
+        }
+    }
+
+    /// The client's verdict on one frame from the board: the resource it
+    /// names as refused, if the frame is a refusal.
+    pub fn refused_by_board(pair: &mut Pair, frame: &[u8]) -> Option<[u8; 32]> {
+        pair.client
+            .handle_packet(IFACE, frame)
+            .events
+            .iter()
+            .find_map(|e| match e {
+                NodeEvent::ResourceFailed {
+                    resource_hash,
+                    error: ResourceError::RejectedByRemote,
+                    is_sender: true,
+                    ..
+                } => Some(*resource_hash),
+                _ => None,
+            })
+    }
+}
+
+/// 867, the 866 shape: a 122 953 B upload advertised to a board's
+/// propagation node is refused at its advertisement with one RCL naming it,
+/// as the reference lxmd refuses it (`reference/LXMF/LXMF/LXMRouter.py:2220-2224`),
+/// and the board now says so: `PN_REJECT reason=oversize via=resource
+/// size=122953 cap=<the store bound>`. The RCL is the positive control: the
+/// refusal on the wire is what it was before the line existed.
+#[test]
+fn an_oversize_upload_is_refused_with_one_rcl_and_says_so() {
+    let region = SharedRegion::new(SECTORS);
+    let mut log = block_on(fresh(SECTORS));
+    sync(&region, &mut log);
+    let role = PropagationNode::new(
+        PnStore::new(region.clone(), SECTORS),
+        board_role_config(0, 0, b"board".to_vec(), 4_000),
+    );
+    let mut pair = oversize_upload::establish();
+
+    let upload = vec![0x5Au8; 122_953];
+    let (hash, out) = pair
+        .client
+        .send_resource(&pair.client_link, &upload, None, false)
+        .expect("the client advertises its upload");
+    let adv = oversize_upload::frames(&out);
+    assert_eq!(adv.len(), 1, "one advertisement");
+    let out = pair
+        .board
+        .handle_packet(leviculum_core::InterfaceId(0), &adv[0]);
+    let (board_link, data_size) = out
+        .events
+        .iter()
+        .find_map(|e| match e {
+            leviculum_core::NodeEvent::ResourceAdvertised {
+                link_id, data_size, ..
+            } => Some((*link_id, *data_size)),
+            _ => None,
+        })
+        .expect("the advertisement is parked for the role");
+    assert_eq!(data_size, 122_953);
+
+    // The role's verdict, as `pn.rs` takes it: a client upload (no peering
+    // key validated on the link), so the store bound is the cap.
+    let refusal = board_oversize_refusal(&role, data_size, false).expect("refused for its size");
+    assert!(!board_accepts_resource_of(&role, data_size, false));
+    assert_eq!(
+        std::format!("PN_REJECT {refusal}"),
+        std::format!(
+            "PN_REJECT reason=oversize via=resource size=122953 cap={MAX_UPLOAD_RESOURCE_BYTES}"
+        )
+    );
+
+    let rcl = oversize_upload::frames(&pair.board.reject_resource(&board_link).expect("rejected"));
+    assert_eq!(rcl.len(), 1, "exactly one frame answers the advertisement");
+    assert_eq!(
+        oversize_upload::refused_by_board(&mut pair, &rcl[0]),
+        Some(hash),
+        "the one frame is an RCL naming the advertised resource"
+    );
+}
+
+/// The cap a refusal names is the limit the resource failed: a validated
+/// peer's batch is held to the announced sync limit alone, a client's upload
+/// also to the store bound, and a resource within both is not refused.
+#[test]
+fn the_oversize_refusal_names_the_limit_it_failed() {
+    let region = SharedRegion::new(SECTORS);
+    let role = PropagationNode::new(
+        PnStore::new(region, SECTORS),
+        board_role_config(0, 0, b"board".to_vec(), 4_000),
+    );
+    let sync_limit = leviculum_heap_budget::BOARD_SYNC_LIMIT_KB * 1000;
+    assert_eq!(role.resource_limit_bytes(), sync_limit);
+    assert!(MAX_UPLOAD_RESOURCE_BYTES < sync_limit);
+    assert_eq!(
+        board_oversize_refusal(&role, sync_limit + 1, true),
+        Some(OversizeRefusal {
+            size: sync_limit + 1,
+            cap: sync_limit
+        })
+    );
+    assert_eq!(board_oversize_refusal(&role, sync_limit, true), None);
+    assert_eq!(
+        board_oversize_refusal(&role, MAX_UPLOAD_RESOURCE_BYTES + 1, false),
+        Some(OversizeRefusal {
+            size: MAX_UPLOAD_RESOURCE_BYTES + 1,
+            cap: MAX_UPLOAD_RESOURCE_BYTES
+        })
+    );
+    assert_eq!(
+        board_oversize_refusal(&role, MAX_UPLOAD_RESOURCE_BYTES, false),
+        None
+    );
+}

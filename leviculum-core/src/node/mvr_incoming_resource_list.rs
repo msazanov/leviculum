@@ -630,3 +630,78 @@ fn both_refusal_paths_record_outbound_in_milliseconds() {
         "handle_resource_adv's refusal records the clock in milliseconds"
     );
 }
+
+// ---- 867: a refused advertisement is a board-visible drop ----
+
+/// The drop events a receiver call and the next pass of its event loop
+/// raised, as `(reason, names its packet)`. A node-layer drop surfaces on
+/// the next pass (see `mvr_link_silent_exits`); a board's next tick is it.
+fn refusal_drops(
+    receiver: &mut EndpointNode,
+    out: &TickOutput,
+) -> Vec<(crate::transport::DropReason, bool)> {
+    let next = receiver.process_events_and_actions();
+    out.events
+        .iter()
+        .chain(next.events.iter())
+        .filter_map(|e| match e {
+            NodeEvent::PacketDropped {
+                reason,
+                packet_hash_prefix,
+                ..
+            } => Some((*reason, packet_hash_prefix.is_some())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// 867: the advertisement a full link refuses is a `resource-full` drop,
+/// one, naming its packet, so a board prints a `[DROP]` line where it
+/// printed nothing (its refusal event is debug-only, compiled out there).
+/// The RCL naming it is the positive control: the refusal itself is
+/// unchanged.
+#[test]
+fn advertisement_beyond_the_bound_is_a_resource_full_drop() {
+    use crate::transport::DropReason;
+    let mut pair = establish(1);
+    let (_a, hash_b, _answer_a, answer_b) = advertise_two(&mut pair);
+    let rcls: Vec<Vec<u8>> = action_data(&answer_b)
+        .into_iter()
+        .filter(|p| is_context(p, PacketContext::ResourceRcl))
+        .collect();
+    assert_eq!(rcls.len(), 1, "one RCL");
+    assert_eq!(pair.named_resource(&rcls[0]), Some(hash_b));
+    assert_eq!(
+        refusal_drops(&mut pair.receiver, &answer_b),
+        [(DropReason::ResourceFull, true)],
+        "one [DROP] reason=resource-full naming the advertisement"
+    );
+    assert_eq!(pair.receiver.transport.stats().drops_resource_full(), 1);
+}
+
+/// 867: the compressed advertisement a board build refuses is a
+/// `resource-compressed` drop, beside the same RCL.
+#[cfg(not(feature = "compression"))]
+#[test]
+fn compressed_advertisement_is_a_resource_compressed_drop() {
+    use crate::transport::DropReason;
+    let mut pair = establish(crate::resource::RESOURCE_MAX_INCOMING_PER_LINK);
+    let (hash, adv) = pair.advertise(&payload(7, 3000));
+    let adv = mark_compressed(&pair, &adv);
+    let answer = pair.receiver.handle_packet(InterfaceId(pair.r_iface), &adv);
+    let rcls: Vec<Vec<u8>> = action_data(&answer)
+        .into_iter()
+        .filter(|p| is_context(p, PacketContext::ResourceRcl))
+        .collect();
+    assert_eq!(rcls.len(), 1, "one RCL");
+    assert_eq!(pair.named_resource(&rcls[0]), Some(hash));
+    assert_eq!(
+        refusal_drops(&mut pair.receiver, &answer),
+        [(DropReason::ResourceCompressed, true)],
+        "one [DROP] reason=resource-compressed naming the advertisement"
+    );
+    assert_eq!(
+        pair.receiver.transport.stats().drops_resource_compressed(),
+        1
+    );
+}

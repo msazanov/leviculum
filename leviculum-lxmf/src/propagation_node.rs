@@ -975,7 +975,13 @@ impl<S: PropagationStore> PropagationNode<S> {
     /// `reference/LXMF/LXMF/LXMRouter.py:2220-2224`; a kilobyte is 1000
     /// bytes there too).
     pub fn accepts_resource_of(&self, data_size: u64) -> bool {
-        data_size <= self.config.sync_limit_kb * 1000
+        data_size <= self.resource_limit_bytes()
+    }
+
+    /// The per-sync limit [`Self::accepts_resource_of`] holds a resource
+    /// to, in bytes: what a refusal names as the cap it failed.
+    pub fn resource_limit_bytes(&self) -> u64 {
+        self.config.sync_limit_kb.saturating_mul(1000)
     }
 
     /// Accept one client upload envelope (`[timestamp, [lxmf_data ‖ stamp]]`,

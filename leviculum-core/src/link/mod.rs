@@ -295,6 +295,23 @@ pub enum LinkCloseReason {
     Blackholed,
 }
 
+impl LinkCloseReason {
+    /// Stable kebab-case word for a log line's `reason` field: the board's
+    /// `LINK_CLOSED` line (867) takes it from here, so a capture greps the
+    /// same word on every build.
+    pub fn kebab(self) -> &'static str {
+        match self {
+            LinkCloseReason::Normal => "normal",
+            LinkCloseReason::Timeout => "timeout",
+            LinkCloseReason::InvalidProof => "invalid-proof",
+            LinkCloseReason::PeerClosed => "peer",
+            LinkCloseReason::Stale => "stale",
+            LinkCloseReason::ChannelExhausted => "channel-exhausted",
+            LinkCloseReason::Blackholed => "blackholed",
+        }
+    }
+}
+
 /// Peer's public keys from a link request
 #[derive(Debug, Clone)]
 pub struct PeerKeys {

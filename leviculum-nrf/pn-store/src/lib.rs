@@ -474,8 +474,55 @@ pub fn board_accepts_resource_of<S: PropagationStore>(
     data_size: u64,
     from_validated_peer: bool,
 ) -> bool {
-    role.accepts_resource_of(data_size)
-        && (from_validated_peer || data_size <= MAX_UPLOAD_RESOURCE_BYTES)
+    board_oversize_refusal(role, data_size, from_validated_peer).is_none()
+}
+
+/// Why [`board_accepts_resource_of`] refuses a resource, as the line the
+/// board prints for it, or `None` when it takes it.
+///
+/// `cap` is the tightest limit the resource is held to: the announced
+/// per-sync limit, and for a client's upload also
+/// [`MAX_UPLOAD_RESOURCE_BYTES`]. Until 867 this refusal was the one
+/// refusing arm of the board's role with no `PN_REJECT` line: a 122 953 B
+/// upload to a board on 2026-10-20 was refused correctly, with the RCL the
+/// reference sends, and left nothing on the capture to say so.
+pub fn board_oversize_refusal<S: PropagationStore>(
+    role: &PropagationNode<S>,
+    data_size: u64,
+    from_validated_peer: bool,
+) -> Option<OversizeRefusal> {
+    let sync_limit = role.resource_limit_bytes();
+    let cap = if from_validated_peer {
+        sync_limit
+    } else {
+        sync_limit.min(MAX_UPLOAD_RESOURCE_BYTES)
+    };
+    (data_size > cap).then_some(OversizeRefusal {
+        size: data_size,
+        cap,
+    })
+}
+
+/// A resource refused at its advertisement for its size: the body of
+/// `PN_REJECT reason=oversize via=resource size=<bytes> cap=<bytes>`, keys
+/// in the shape of every other `PN_REJECT` line, so a capture counts them
+/// with the rest and reads how far over the limit the sender was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OversizeRefusal {
+    /// The advertised (uncompressed) size, bytes.
+    pub size: u64,
+    /// The limit it failed, bytes.
+    pub cap: u64,
+}
+
+impl core::fmt::Display for OversizeRefusal {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "reason=oversize via=resource size={} cap={}",
+            self.size, self.cap
+        )
+    }
 }
 
 /// The message-store half: [`PropagationStore`] over the region.

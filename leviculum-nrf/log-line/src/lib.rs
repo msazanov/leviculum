@@ -178,6 +178,44 @@ impl core::fmt::Display for LinkRefusedBody {
     }
 }
 
+/// The body of the firmware's `LINK_CLOSED` line (867), rendered from the
+/// core's `NodeEvent::LinkClosed` for the reason [`LinkRefusedBody`] is.
+///
+/// ```text
+/// LINK_CLOSED reason=<kebab> link=<8 hex> dest=<8 hex> initiator=<0|1>
+/// ```
+///
+/// A board that lost a link said nothing until 867: 858 and 866 both had to
+/// reconstruct a peer's close from packet sizes on a capture. `reason` is the
+/// core's own word (`LinkCloseReason::kebab`), `peer` for a close the other
+/// end sent, passed through as `&'static str` so this crate keeps no
+/// dependencies. `link` and `dest` are the first 4 bytes of the link id and
+/// of the destination it was to, the same correlators the PN lines carry.
+pub struct LinkClosedBody {
+    /// Why the link closed, the core's kebab word.
+    pub reason: &'static str,
+    /// The link id.
+    pub link: [u8; 16],
+    /// The destination the link was to.
+    pub dest: [u8; 16],
+    /// Whether this node opened the link.
+    pub initiator: bool,
+}
+
+impl core::fmt::Display for LinkClosedBody {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "reason={} link=", self.reason)?;
+        for byte in &self.link[..4] {
+            write!(f, "{byte:02x}")?;
+        }
+        f.write_str(" dest=")?;
+        for byte in &self.dest[..4] {
+            write!(f, "{byte:02x}")?;
+        }
+        write!(f, " initiator={}", u8::from(self.initiator))
+    }
+}
+
 /// The body of the firmware's `ANNOUNCE_LEARNED_NOT_RELAYED` line, rendered
 /// from the core's `NodeEvent::AnnounceLearnedNotRelayed` for the same reason
 /// [`LinkRefusedBody`] is: the boards build leviculum-core without `tracing`
@@ -559,6 +597,24 @@ mod tests {
         assert_eq!(
             line("LINK_REFUSED ", format_args!("{body}"), 42),
             "LINK_REFUSED reason=budget links=5 max=5 dest=ab01cd23 t=42\r\n"
+        );
+    }
+
+    /// A peer's close on a link this board answered (867): the line a
+    /// terminus that lost its link prints, which 858 and 866 lacked.
+    #[test]
+    fn a_peer_close_renders_its_reason_the_link_and_the_destination() {
+        let mut link = [0u8; 16];
+        link[..4].copy_from_slice(&[0x6f, 0x0c, 0x1d, 0x2e]);
+        let body = LinkClosedBody {
+            reason: "peer",
+            link,
+            dest: [0xab; 16],
+            initiator: false,
+        };
+        assert_eq!(
+            line("LINK_CLOSED ", format_args!("{body}"), 7),
+            "LINK_CLOSED reason=peer link=6f0c1d2e dest=abababab initiator=0 t=7\r\n"
         );
     }
 
