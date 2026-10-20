@@ -14,11 +14,11 @@ Every board file names a `UserButton` and a `LedPin`
 (`leviculum-nrf/src/boards/t114.rs:47,162`,
 `leviculum-nrf/src/boards/rak4631.rs:53,62`,
 `leviculum-nrf/src/boards/solarnode.rs:92,98`,
-`leviculum-nrf/src/boards/t1000e.rs:276,281`). The Pocket (`rak4631.rs`)
+`leviculum-nrf/src/boards/t1000e.rs:281,286`). The Pocket (`rak4631.rs`)
 and the Solar Node add a `LedNotificationPin`
 (`leviculum-nrf/src/boards/rak4631.rs:55`,
 `leviculum-nrf/src/boards/solarnode.rs:94`), the T1000-E a `BuzzerPin`
-(`leviculum-nrf/src/boards/t1000e.rs:286`). The Pocket drives an OLED
+(`leviculum-nrf/src/boards/t1000e.rs:291`). The Pocket drives an OLED
 and the T114 an ST7789 (`leviculum-nrf/src/bin/t114.rs:496`).
 
 Today only the Pocket and the T1000-E bring the button up; the T114 and
