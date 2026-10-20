@@ -525,6 +525,78 @@ impl core::fmt::Display for OversizeRefusal {
     }
 }
 
+/// A verdict the role reached that the node then refused: the body of
+/// `PN_REJECT reason=<error> link=<16 hex> accept=<0|1>`.
+///
+/// The late one is `accept_resource`'s `incoming_full`: the link filled up
+/// while the role decided, the node sends the RCL itself and returns
+/// `TransferInProgress` (`leviculum-core/src/node/mod.rs:2332-2335`). Until
+/// 878 the board kept only the `Ok` arm of the verdict, so the sender got
+/// its RCL and the capture said nothing. `accept` tells a refused accept
+/// from a reject that failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VerdictRefusal {
+    /// What the node refused with.
+    pub error: leviculum_core::resource::ResourceError,
+    /// The link's id, first 8 bytes, as the `PN_LINK` lines print it.
+    pub link: [u8; 8],
+    /// Whether the role had accepted the resource.
+    pub accept: bool,
+}
+
+impl core::fmt::Display for VerdictRefusal {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "reason={} link=", resource_error_name(&self.error))?;
+        for byte in &self.link {
+            write!(f, "{byte:02x}")?;
+        }
+        write!(f, " accept={}", u8::from(self.accept))
+    }
+}
+
+/// The kebab-case word a `PN_REJECT` line names a resource error by.
+/// Exhaustive, so a new variant cannot reach the line unnamed.
+pub fn resource_error_name(error: &leviculum_core::resource::ResourceError) -> &'static str {
+    use leviculum_core::resource::ResourceError as E;
+    match error {
+        E::InvalidAdvertisement => "invalid-advertisement",
+        E::InvalidHashmap => "invalid-hashmap",
+        E::HashMismatch => "hash-mismatch",
+        E::Timeout => "timeout",
+        E::PartRequestTimeout => "part-request-timeout",
+        E::ProofTimeout => "proof-timeout",
+        E::Cancelled => "cancelled",
+        E::RejectedByRemote => "rejected-by-remote",
+        E::MaxRetriesExceeded => "max-retries-exceeded",
+        E::LinkNotActive => "link-not-active",
+        E::LinkClosed => "link-closed",
+        E::CompressionUnsupported => "compression-unsupported",
+        E::CompressionFailed => "compression-failed",
+        E::DecompressionFailed => "decompression-failed",
+        E::CryptoError => "crypto-error",
+        E::TransferInProgress => "transfer-in-progress",
+        E::NoPendingResource => "no-pending-resource",
+        E::InvalidProof => "invalid-proof",
+        E::InvalidRequest => "invalid-request",
+        E::ResourceTooLarge => "resource-too-large",
+        E::LinkStateChanged => "link-state-changed",
+        E::SourceFailed(_) => "source-failed",
+    }
+}
+
+/// Retire the `inbound_transfers` entry an accept pushed for `link` when
+/// the node then refused it. Nothing else would: the entry leaves on the
+/// transfer's completion or the link's close, and a refused accept has no
+/// transfer to complete, so it would hold the `/offer` gate's in-flight
+/// count up until the link closed. Only the last entry for `link` goes,
+/// the one this accept pushed; an earlier transfer on the same link keeps
+/// its own.
+pub fn retire_refused_transfer<L: PartialEq>(inbound: &mut Vec<L>, link: &L) {
+    if let Some(at) = inbound.iter().rposition(|held| held == link) {
+        inbound.remove(at);
+    }
+}
+
 /// The message-store half: [`PropagationStore`] over the region.
 pub struct PnStore<R> {
     region: R,

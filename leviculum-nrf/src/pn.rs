@@ -145,7 +145,9 @@
 //! same fixed-word line `lnpnd` keeps — and the accepted arm still
 //! reports its flush as `PN_ACCEPT ... durable=`. The advertisement
 //! refused for its size adds `size=<bytes> cap=<bytes>`, the limit it
-//! failed (867: until then that arm was the one without a line).
+//! failed (867: until then that arm was the one without a line). A verdict
+//! the node itself then refuses, the late `incoming_full` above all, logs
+//! `PN_REJECT reason=<error> link=<16 hex> accept=<0|1>` (878).
 //!
 //! # Heap budget (#388)
 //!
@@ -1311,8 +1313,28 @@ impl Engine {
                 } else {
                     node.reject_resource(link_id)
                 };
-                if let Ok(send) = verdict {
-                    out.merge(send);
+                match verdict {
+                    Ok(send) => out.merge(send),
+                    // The node refused what the role decided, the late
+                    // `incoming_full` above all: it sent the RCL itself
+                    // (`leviculum-core/src/node/mod.rs:2332-2335`), and the
+                    // line is the board's only record of it (867, 878).
+                    Err(error) => {
+                        if accept && from_peer {
+                            leviculum_pn_store::retire_refused_transfer(
+                                &mut self.inbound_transfers,
+                                link_id,
+                            );
+                        }
+                        let mut link = [0u8; 8];
+                        link.copy_from_slice(&link_id.as_bytes()[..8]);
+                        let refusal = leviculum_pn_store::VerdictRefusal {
+                            error,
+                            link,
+                            accept,
+                        };
+                        crate::log::log_fmt("PN_REJECT ", format_args!("{refusal}"));
+                    }
                 }
             }
             NodeEvent::ResourceCompleted {

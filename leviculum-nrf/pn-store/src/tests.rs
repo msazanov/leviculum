@@ -1810,3 +1810,83 @@ fn the_oversize_refusal_names_the_limit_it_failed() {
         None
     );
 }
+
+// ---- 878: a verdict the node refuses prints its line and retires ----
+
+/// 878: an accept the node refuses leaves `inbound_transfers` as it was and
+/// prints its `PN_REJECT` line. The board's arm pushes the link before
+/// `accept_resource` runs, and only a completion or the link's close
+/// removed it again, so a refused accept held the `/offer` gate's
+/// in-flight count up until the link closed.
+///
+/// The late `incoming_full` cannot be produced on the wire (a link with a
+/// parked advertisement ignores every other one,
+/// `leviculum-core/src/node/mvr_incoming_resource_list.rs:582-585`), so the
+/// refusal here is the other one the public verdict carries: a second
+/// accept on a link whose advertisement the first one already took. The
+/// arm is the same `Err`; the first transfer's entry is the one that must
+/// survive the retire.
+#[test]
+fn a_refused_accept_leaves_inbound_transfers_as_it_was() {
+    use leviculum_core::resource::ResourceError;
+
+    let mut pair = oversize_upload::establish();
+    let (_hash, out) = pair
+        .client
+        .send_resource(&pair.client_link, &[0x5Au8; 300], None, false)
+        .expect("the client advertises");
+    let adv = oversize_upload::frames(&out);
+    let board_link = pair
+        .board
+        .handle_packet(leviculum_core::InterfaceId(0), &adv[0])
+        .events
+        .iter()
+        .find_map(|e| match e {
+            leviculum_core::NodeEvent::ResourceAdvertised { link_id, .. } => Some(*link_id),
+            _ => None,
+        })
+        .expect("the advertisement is parked for the role");
+
+    // The board's arm, as `pn.rs` runs it for a validated peer's accept.
+    let mut inbound = vec![board_link];
+    assert!(pair.board.accept_resource(&board_link).is_ok());
+    let before = inbound.clone();
+
+    inbound.push(board_link);
+    let refused = pair.board.accept_resource(&board_link);
+    assert_eq!(
+        refused.as_ref().err(),
+        Some(&ResourceError::NoPendingResource)
+    );
+    // Positive control: without the retire the entry stays.
+    assert_eq!(inbound.len(), before.len() + 1);
+    retire_refused_transfer(&mut inbound, &board_link);
+    assert_eq!(inbound, before, "the earlier transfer keeps its entry");
+
+    let mut link = [0u8; 8];
+    link.copy_from_slice(&board_link.as_bytes()[..8]);
+    let line = std::format!(
+        "PN_REJECT {}",
+        VerdictRefusal {
+            error: ResourceError::TransferInProgress,
+            link,
+            accept: true,
+        }
+    );
+    let hex: std::string::String = link.iter().map(|b| std::format!("{b:02x}")).collect();
+    assert_eq!(
+        line,
+        std::format!("PN_REJECT reason=transfer-in-progress link={hex} accept=1")
+    );
+}
+
+/// The retire takes only the entry this accept pushed: another link's
+/// entry and an absent link are left alone.
+#[test]
+fn the_retire_takes_only_the_last_entry_for_its_link() {
+    let mut inbound = vec![1u8, 2, 1];
+    retire_refused_transfer(&mut inbound, &1);
+    assert_eq!(inbound, vec![1, 2]);
+    retire_refused_transfer(&mut inbound, &3);
+    assert_eq!(inbound, vec![1, 2]);
+}
