@@ -1878,9 +1878,6 @@ async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: u32)
     // #438: the sub-slot offset, a build-time arm (`subslot-offset`), off
     // by default. Off, the draw is the one before it existed, bit for bit.
     access.set_subslot_offset(cfg!(feature = "subslot-offset"));
-    // #438: the preamble-wide slot, a build-time arm (`slot-preamble-wide`),
-    // off by default. The `[LORA_CSMA_TX] slot_ms=` line names the arm.
-    access.set_slot_preamble_wide(cfg!(feature = "slot-preamble-wide"));
 
     let mut pending_tx: Option<QueuedFrame> = None;
     // Frames the host's mute has swallowed since it was set (#410), so the

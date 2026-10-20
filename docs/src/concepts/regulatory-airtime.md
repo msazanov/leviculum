@@ -28,7 +28,7 @@ Our LNode firmware enforces the same way: `AirtimeTracker`
 (`leviculum-core/src/rnode.rs:1878`) mirrors the RNode ledger, and
 the nRF TX path holds a queued frame instead of keying the radio
 while the tracker is locked (`is_locked`,
-`leviculum-nrf/src/lora.rs:2043-2139`), continuing to listen so RX is
+`leviculum-nrf/src/lora.rs:2040-2136`), continuing to listen so RX is
 not starved — until the frame has waited so long that keying it would
 be pointless, which is
 [the age rule below](#a-hold-ages-traffic-it-does-not-thin-it).

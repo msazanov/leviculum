@@ -94,12 +94,6 @@ lint-nrf:
     cd leviculum-nrf && cargo clippy --features bsp-t114,subslot-offset -- -D warnings
     cd leviculum-nrf && cargo clippy --features bsp-solarnode,subslot-offset -- -D warnings
     cd leviculum-nrf && cargo clippy --features bsp-t1000e,subslot-offset -- -D warnings
-    # The same for the #438 preamble-wide slot (`just lnflash-bundle
-    # slot-preamble-wide`).
-    cd leviculum-nrf && cargo clippy --features bsp-rak4631,rak-baseboard,slot-preamble-wide -- -D warnings
-    cd leviculum-nrf && cargo clippy --features bsp-t114,slot-preamble-wide -- -D warnings
-    cd leviculum-nrf && cargo clippy --features bsp-solarnode,slot-preamble-wide -- -D warnings
-    cd leviculum-nrf && cargo clippy --features bsp-t1000e,slot-preamble-wide -- -D warnings
     # Every other member of the leviculum-nrf workspace is a pure,
     # host-testable crate: clippy + tests run on the host triple, because the
     # workspace's own `.cargo/config.toml` defaults `build.target` to
