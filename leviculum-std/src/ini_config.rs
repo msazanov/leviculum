@@ -307,6 +307,11 @@ pub(crate) fn parse_ini(content: &str) -> Result<Config, String> {
         reticulum.shared_instance_socket = None;
     }
 
+    // Codeberg #464: the ranges, and `max_known_destinations` beside
+    // `destination_cap`, checked once the whole section is read so the
+    // conflict is found in either key order.
+    crate::config::check_storage_limits(&reticulum)?;
+
     // Carry the section name into the interface itself: it is Python's
     // `interface.name` and part of every interface's reported identity
     // (Codeberg #177), and the map key alone is lost the moment the
@@ -398,6 +403,15 @@ pub(crate) fn promote_discoverable_modes(interfaces: &mut HashMap<String, Interf
 /// A `usize` config value that only counts when it is positive.
 fn parse_positive(value: &str) -> Option<usize> {
     value.trim().parse().ok().filter(|&n: &usize| n > 0)
+}
+
+/// A whole number for a key whose bad value refuses the config, with an
+/// error that names the key.
+fn parse_whole<T: std::str::FromStr>(key: &str, value: &str) -> Result<T, String> {
+    value
+        .trim()
+        .parse()
+        .map_err(|_| format!("{key} = '{}' is not a whole number", value.trim()))
 }
 
 /// Apply one `key = value` from the `[reticulum]` section. Almost every value
@@ -526,6 +540,25 @@ fn apply_reticulum_key(config: &mut ReticulumConfig, key: &str, value: &str) -> 
         }
         "destination_cap" => {
             config.destination_cap = parse_positive(value);
+        }
+        // Storage ceilings and path expiry (Codeberg #464). Leviculum-only
+        // keys, absent from a stock rnsd config, which keeps today's values.
+        // Refused rather than tolerated, unlike the #421 caps above: a router
+        // that writes one is fitting itself under a memory ceiling, and a
+        // value that silently fell back to the default would hand it the
+        // memory profile it was written to avoid. The ranges are checked by
+        // `check_storage_limits` once the section is read.
+        "max_identities" => {
+            config.max_identities = Some(parse_whole(key, value)?);
+        }
+        "max_packet_hashes" => {
+            config.max_packet_hashes = Some(parse_whole(key, value)?);
+        }
+        "max_known_destinations" => {
+            config.max_known_destinations = Some(parse_whole(key, value)?);
+        }
+        "path_expiry_secs" => {
+            config.path_expiry_secs = Some(parse_whole(key, value)?);
         }
         // Per-path PATH_TABLE_ENTRY diagnostic dump. Leviculum-only key,
         // default off: its volume is one line per path per dump, which on a
@@ -2652,6 +2685,79 @@ mod tests {
         assert_eq!(garbage.reticulum.max_links, None);
         let absent = parse_ini("[reticulum]\n  enable_transport = True\n").unwrap();
         assert_eq!(absent.reticulum.max_links, None);
+    }
+
+    // Codeberg #464: the storage ceilings and the path expiry on the INI
+    // path. Each key: set, absent keeps today's value, out of range refused
+    // with the key named.
+    #[test]
+    fn max_identities_sets_defaults_and_refuses_zero() {
+        let set = parse_ini("[reticulum]\n  max_identities = 5000\n").unwrap();
+        assert_eq!(set.reticulum.max_identities, Some(5000));
+        assert_eq!(set.reticulum.table_caps().identity_cap, 5000);
+
+        let absent = parse_ini("[reticulum]\n  enable_transport = Yes\n").unwrap();
+        assert_eq!(absent.reticulum.max_identities, None);
+        assert_eq!(absent.reticulum.table_caps().identity_cap, 50_000);
+
+        let err = parse_ini("[reticulum]\n  max_identities = 0\n").unwrap_err();
+        assert!(err.contains("max_identities = 0"), "{err}");
+        let err = parse_ini("[reticulum]\n  max_identities = lots\n").unwrap_err();
+        assert!(err.contains("max_identities = 'lots'"), "{err}");
+    }
+
+    #[test]
+    fn max_packet_hashes_sets_defaults_and_refuses_one() {
+        let set = parse_ini("[reticulum]\n  max_packet_hashes = 25000\n").unwrap();
+        assert_eq!(set.reticulum.packet_hash_cap(), 25_000);
+
+        let absent = parse_ini("[reticulum]\n  enable_transport = Yes\n").unwrap();
+        assert_eq!(absent.reticulum.max_packet_hashes, None);
+        assert_eq!(absent.reticulum.packet_hash_cap(), 100_000);
+
+        let err = parse_ini("[reticulum]\n  max_packet_hashes = 1\n").unwrap_err();
+        assert!(err.contains("max_packet_hashes = 1"), "{err}");
+        let err = parse_ini("[reticulum]\n  max_packet_hashes = -5\n").unwrap_err();
+        assert!(err.contains("max_packet_hashes = '-5'"), "{err}");
+    }
+
+    #[test]
+    fn max_known_destinations_sets_defaults_and_refuses_zero() {
+        let set = parse_ini("[reticulum]\n  max_known_destinations = 5000\n").unwrap();
+        assert_eq!(set.reticulum.table_caps().destination_cap, 5000);
+
+        let absent = parse_ini("[reticulum]\n  enable_transport = Yes\n").unwrap();
+        assert_eq!(absent.reticulum.max_known_destinations, None);
+        assert_eq!(absent.reticulum.table_caps().destination_cap, 50_000);
+
+        let err = parse_ini("[reticulum]\n  max_known_destinations = 0\n").unwrap_err();
+        assert!(err.contains("max_known_destinations = 0"), "{err}");
+
+        // Beside the #421 spelling of the same ceiling, in either order.
+        for both in [
+            "[reticulum]\n  max_known_destinations = 5\n  destination_cap = 6\n",
+            "[reticulum]\n  destination_cap = 6\n  max_known_destinations = 5\n",
+        ] {
+            let err = parse_ini(both).unwrap_err();
+            assert!(
+                err.contains("max_known_destinations and destination_cap"),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn path_expiry_secs_sets_defaults_and_refuses_out_of_range() {
+        let set = parse_ini("[reticulum]\n  path_expiry_secs = 172800\n").unwrap();
+        assert_eq!(set.reticulum.path_expiry_secs, Some(172_800));
+
+        let absent = parse_ini("[reticulum]\n  enable_transport = Yes\n").unwrap();
+        assert_eq!(absent.reticulum.path_expiry_secs, None);
+
+        for bad in [0, crate::config::MAX_PATH_EXPIRY_SECS + 1] {
+            let err = parse_ini(&format!("[reticulum]\n  path_expiry_secs = {bad}\n")).unwrap_err();
+            assert!(err.contains(&format!("path_expiry_secs = {bad}")), "{err}");
+        }
     }
 
     #[test]

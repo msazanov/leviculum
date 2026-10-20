@@ -117,6 +117,18 @@ impl Storage {
     /// on a Raspberry Pi Zero 2W can be given a memory ceiling it fits under
     /// without a rebuild.
     pub fn new_with_caps<P: AsRef<Path>>(base_path: P, caps: TableCaps) -> Result<Self> {
+        Self::new_with_limits(base_path, caps, FILE_STORAGE_PACKET_HASH_CAP)
+    }
+
+    /// Like [`Self::new_with_caps`], with the duplicate filter's ceiling as
+    /// well (Codeberg #464): `packet_hash_cap` hashes across both
+    /// generations, each rotating at half of it. The daemon passes the
+    /// operator's `max_packet_hashes` here.
+    pub fn new_with_limits<P: AsRef<Path>>(
+        base_path: P,
+        caps: TableCaps,
+        packet_hash_cap: usize,
+    ) -> Result<Self> {
         let base_path = base_path.as_ref().to_path_buf();
 
         // Create directories if they don't exist
@@ -189,7 +201,7 @@ impl Storage {
             known_dest_entries: Arc::new(known_dest_entries),
             packet_cache,
             packet_cache_prev: HashSet::new(),
-            packet_hash_cap: FILE_STORAGE_PACKET_HASH_CAP,
+            packet_hash_cap,
             packet_hashes_dirty: false,
             identities_dirty: false,
             packet_hashes_gen: 0,

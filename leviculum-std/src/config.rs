@@ -319,6 +319,48 @@ pub struct ReticulumConfig {
     /// lowering this is what an operator trades for memory.
     #[serde(default)]
     pub destination_cap: Option<usize>,
+    /// Maximum `known_identities` entries, the public keys of the remote
+    /// destinations this node has heard announce (Codeberg #464).
+    /// Leviculum-only key, rnsd has none.
+    ///
+    /// `None` keeps the profile's: 50 000 desktop (Python keeps every
+    /// identity it hears, so this is already a ceiling Python does not have),
+    /// 1 000 compact. Exposed because it is the most expensive table per
+    /// entry, about 1.7 kB, so a router with 128 MB lowers it first. At least
+    /// [`MIN_TABLE_CAP`]; refused at load otherwise.
+    #[serde(default)]
+    pub max_identities: Option<usize>,
+    /// Maximum packet hashes the duplicate filter remembers, across its two
+    /// generations; a generation rotates at half this (Codeberg #464).
+    /// Leviculum-only key.
+    ///
+    /// `None` keeps [`DEFAULT_MAX_PACKET_HASHES`], the daemon storage's
+    /// 100 000. A lower ceiling forgets a packet sooner, so a copy that
+    /// arrives late over a slow path is forwarded once more instead of
+    /// dropped. At least [`MIN_MAX_PACKET_HASHES`], one hash per generation;
+    /// refused at load otherwise.
+    #[serde(default)]
+    pub max_packet_hashes: Option<usize>,
+    /// Maximum entries in the destination-keyed tables, the ones
+    /// [`Self::destination_cap`] sizes (Codeberg #464). Leviculum-only key.
+    ///
+    /// The #464 name for the same ceiling: `None` keeps `destination_cap` if
+    /// that is set and the profile's otherwise (50 000 desktop, 4 096
+    /// compact). Setting both is refused at load, because two keys for one
+    /// ceiling would leave an operator guessing which one won. At least
+    /// [`MIN_TABLE_CAP`].
+    #[serde(default)]
+    pub max_known_destinations: Option<usize>,
+    /// Seconds a path learned from an announce stays in the path table
+    /// without being refreshed (Codeberg #464). Python's `PATHFINDER_E`
+    /// (`Transport.py:71`), as a key; rnsd has none.
+    ///
+    /// `None` keeps [`PATHFINDER_EXPIRY_SECS`](leviculum_core::constants::PATHFINDER_EXPIRY_SECS),
+    /// Python's seven days. Access-point and roaming paths keep their own
+    /// shorter lifetimes. Between [`MIN_PATH_EXPIRY_SECS`] and
+    /// [`MAX_PATH_EXPIRY_SECS`]; refused at load otherwise.
+    #[serde(default)]
+    pub path_expiry_secs: Option<u64>,
     /// Python's `[reticulum] default_ar_target`: the announce-rate target, in
     /// seconds, a transport-enabled node gives every interface that sets no
     /// `announce_rate_target` of its own (Reticulum.py:622-625, applied at
@@ -403,11 +445,82 @@ impl ReticulumConfig {
         if let Some(n) = self.announce_table_cap {
             caps.announce_cap = n;
         }
-        if let Some(n) = self.destination_cap {
+        if let Some(n) = self.max_known_destinations.or(self.destination_cap) {
             caps.destination_cap = n;
+        }
+        if let Some(n) = self.max_identities {
+            caps.identity_cap = n;
         }
         caps
     }
+
+    /// The duplicate filter's ceiling this config asks for (Codeberg #464):
+    /// [`Self::max_packet_hashes`], or [`DEFAULT_MAX_PACKET_HASHES`].
+    pub fn packet_hash_cap(&self) -> usize {
+        self.max_packet_hashes.unwrap_or(DEFAULT_MAX_PACKET_HASHES)
+    }
+}
+
+/// Default for [`ReticulumConfig::max_packet_hashes`]: the daemon storage's
+/// own duplicate-filter ceiling, unchanged by #464.
+pub const DEFAULT_MAX_PACKET_HASHES: usize = crate::storage::FILE_STORAGE_PACKET_HASH_CAP;
+
+/// Smallest accepted [`ReticulumConfig::max_identities`] and
+/// [`ReticulumConfig::max_known_destinations`]. Zero would be a table that
+/// evicts every entry as it lands.
+pub const MIN_TABLE_CAP: usize = 1;
+
+/// Smallest accepted [`ReticulumConfig::max_packet_hashes`]: one hash in
+/// each of the two generations, which rotate at half the ceiling.
+pub const MIN_MAX_PACKET_HASHES: usize = 2;
+
+/// Smallest accepted [`ReticulumConfig::path_expiry_secs`]. Zero would expire
+/// every path the moment it is learned.
+pub const MIN_PATH_EXPIRY_SECS: u64 = 1;
+
+/// Largest accepted [`ReticulumConfig::path_expiry_secs`], about 136 years.
+/// The core adds the expiry in milliseconds to its clock, and this keeps that
+/// sum far from overflowing.
+pub const MAX_PATH_EXPIRY_SECS: u64 = u32::MAX as u64;
+
+/// Refuse a storage ceiling or path expiry (Codeberg #464) outside its range,
+/// or `max_known_destinations` beside `destination_cap`, naming the key.
+/// Shared by the INI parser and [`Config::load`], so both formats refuse the
+/// same values.
+pub(crate) fn check_storage_limits(config: &ReticulumConfig) -> std::result::Result<(), String> {
+    let floors = [
+        ("max_identities", config.max_identities, MIN_TABLE_CAP),
+        (
+            "max_known_destinations",
+            config.max_known_destinations,
+            MIN_TABLE_CAP,
+        ),
+        (
+            "max_packet_hashes",
+            config.max_packet_hashes,
+            MIN_MAX_PACKET_HASHES,
+        ),
+    ];
+    for (key, value, floor) in floors {
+        if let Some(n) = value {
+            if n < floor {
+                return Err(format!("{key} = {n} is below the floor of {floor}"));
+            }
+        }
+    }
+    if let Some(secs) = config.path_expiry_secs {
+        if !(MIN_PATH_EXPIRY_SECS..=MAX_PATH_EXPIRY_SECS).contains(&secs) {
+            return Err(format!(
+                "path_expiry_secs = {secs} is outside {MIN_PATH_EXPIRY_SECS}..={MAX_PATH_EXPIRY_SECS} s"
+            ));
+        }
+    }
+    if config.max_known_destinations.is_some() && config.destination_cap.is_some() {
+        return Err(
+            "max_known_destinations and destination_cap set the same ceiling; keep one".to_string(),
+        );
+    }
+    Ok(())
 }
 
 /// Default for [`ReticulumConfig::mgmt_announce_interval_secs`]: the core's
@@ -525,6 +638,10 @@ impl Default for ReticulumConfig {
             link_table_cap: None,
             announce_table_cap: None,
             destination_cap: None,
+            max_identities: None,
+            max_packet_hashes: None,
+            max_known_destinations: None,
+            path_expiry_secs: None,
             default_ar_target: None,
             default_ar_penalty: None,
             default_ar_grace: None,
@@ -1226,6 +1343,7 @@ impl Config {
 
         // The INI parser refuses this already; TOML reaches it only here.
         check_mgmt_announce_interval_secs(config.reticulum.mgmt_announce_interval_secs)
+            .and_then(|()| check_storage_limits(&config.reticulum))
             .map_err(|e| Error::Config(format!("Invalid config {}: {e}", path.display())))?;
 
         Ok(config)
@@ -1703,6 +1821,89 @@ mod tests {
         std::fs::write(&path, "[reticulum]\nmgmt_announce_interval_secs = 7\n").unwrap();
         let config = Config::load(&path).unwrap();
         assert_eq!(config.reticulum.mgmt_announce_interval_secs, 7);
+    }
+
+    // Codeberg #464: the storage ceilings and the path expiry on the TOML
+    // path, which reaches the range check only through `load`.
+    fn load_toml(body: &str) -> Result<Config> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, body).unwrap();
+        Config::load(&path)
+    }
+
+    #[test]
+    fn toml_max_identities_sets_defaults_and_refuses_zero() {
+        let set = load_toml("[reticulum]\nmax_identities = 5000\n").unwrap();
+        assert_eq!(set.reticulum.max_identities, Some(5000));
+        assert_eq!(set.reticulum.table_caps().identity_cap, 5000);
+
+        let absent = load_toml("[reticulum]\n").unwrap();
+        assert_eq!(absent.reticulum.max_identities, None);
+        assert_eq!(absent.reticulum.table_caps().identity_cap, 50_000);
+
+        let err = load_toml("[reticulum]\nmax_identities = 0\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("max_identities = 0"), "{err}");
+    }
+
+    #[test]
+    fn toml_max_packet_hashes_sets_defaults_and_refuses_one() {
+        let set = load_toml("[reticulum]\nmax_packet_hashes = 25000\n").unwrap();
+        assert_eq!(set.reticulum.packet_hash_cap(), 25_000);
+
+        let absent = load_toml("[reticulum]\n").unwrap();
+        assert_eq!(absent.reticulum.max_packet_hashes, None);
+        assert_eq!(absent.reticulum.packet_hash_cap(), 100_000);
+
+        let err = load_toml("[reticulum]\nmax_packet_hashes = 1\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("max_packet_hashes = 1"), "{err}");
+    }
+
+    #[test]
+    fn toml_max_known_destinations_sets_defaults_and_refuses_zero() {
+        let set = load_toml("[reticulum]\nmax_known_destinations = 5000\n").unwrap();
+        assert_eq!(set.reticulum.table_caps().destination_cap, 5000);
+
+        let absent = load_toml("[reticulum]\n").unwrap();
+        assert_eq!(absent.reticulum.max_known_destinations, None);
+        assert_eq!(absent.reticulum.table_caps().destination_cap, 50_000);
+
+        let err = load_toml("[reticulum]\nmax_known_destinations = 0\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("max_known_destinations = 0"), "{err}");
+
+        // The #421 spelling of the same ceiling still works alone, and the
+        // two together are refused rather than one silently winning.
+        let old = load_toml("[reticulum]\ndestination_cap = 77\n").unwrap();
+        assert_eq!(old.reticulum.table_caps().destination_cap, 77);
+        let err = load_toml("[reticulum]\nmax_known_destinations = 5\ndestination_cap = 5\n")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("max_known_destinations and destination_cap"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn toml_path_expiry_secs_sets_defaults_and_refuses_out_of_range() {
+        let set = load_toml("[reticulum]\npath_expiry_secs = 172800\n").unwrap();
+        assert_eq!(set.reticulum.path_expiry_secs, Some(172_800));
+
+        let absent = load_toml("[reticulum]\n").unwrap();
+        assert_eq!(absent.reticulum.path_expiry_secs, None);
+
+        for bad in [0, MAX_PATH_EXPIRY_SECS + 1] {
+            let err = load_toml(&format!("[reticulum]\npath_expiry_secs = {bad}\n"))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(&format!("path_expiry_secs = {bad}")), "{err}");
+        }
     }
 
     #[test]

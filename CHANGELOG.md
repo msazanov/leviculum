@@ -20,6 +20,15 @@ Toolchain: Rust 1.97.1
 
 ### Added
 
+- Four `[reticulum]` keys size a small router without a fork (#464):
+  `max_identities`, `max_packet_hashes`, `max_known_destinations` and
+  `path_expiry_secs`, read by the INI and the TOML parser alike. Their
+  defaults are the values the daemon used before (50 000 identities,
+  100 000 packet hashes, 50 000 known destinations, Python's seven-day
+  path expiry), so a config without them is unchanged. A value out of
+  range refuses the config and names the key. The announce queue stays
+  Python's 16384.
+
 - `lnsd` builds without BLE and without the serial family (#463):
   leviculum-std's new `ble` and `serial` features, both default, carry
   the Columba BLE interface (bluer, dbus) and the Serial, RNode,

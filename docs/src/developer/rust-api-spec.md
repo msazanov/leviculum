@@ -50,14 +50,14 @@ returns `self`.
 | `fn add_rnode_interface(self, port: String, frequency: u64, bandwidth: u32, spreading_factor: u8, coding_rate: u8, tx_power: i8) -> Self` — `builder.rs:436` | LoRa interface; required radio settings |
 | `fn add_serial_interface(self, port: String, speed: u32, databits: u8, parity: String, stopbits: u8) -> Self` — `builder.rs:492` | KISS over raw serial |
 | `fn add_auto_interface(self) -> Self` — `builder.rs:619` | IPv6 multicast LAN discovery |
-| `fn enable_transport(self, enabled: bool) -> Self` — `builder.rs:685` | Act as a relay/forwarder |
+| `fn enable_transport(self, enabled: bool) -> Self` — `builder.rs:688` | Act as a relay/forwarder |
 | `fn config(self, config: Config) -> Self` — `builder.rs:253` | Use a pre-loaded `Config` |
 | `fn config_file(self, path: PathBuf) -> Self` — `builder.rs:263` | Load an INI config file |
 | `fn storage_path(self, path: PathBuf) -> Self` — `builder.rs:271` | Identity / known-destinations / ratchet store dir |
-| `fn connect_to_shared_instance(self, name: impl Into<String>) -> Self` — `builder.rs:750` | Attach to a running `lnsd`/`rnsd` instead of bringing up own interfaces |
+| `fn connect_to_shared_instance(self, name: impl Into<String>) -> Self` — `builder.rs:753` | Attach to a running `lnsd`/`rnsd` instead of bringing up own interfaces |
 | `fn without_events(self) -> Self` — `builder.rs:220` | Daemon mode: no application event channel |
-| `async fn build(self) -> Result<ReticulumNode, Error>` — `builder.rs:1112` | Build the node (not yet running) |
-| `fn build_sync(self) -> Result<ReticulumNode, Error>` — `builder.rs:852` | Same as `build`, outside an async context |
+| `async fn build(self) -> Result<ReticulumNode, Error>` — `builder.rs:1131` | Build the node (not yet running) |
+| `fn build_sync(self) -> Result<ReticulumNode, Error>` — `builder.rs:857` | Same as `build`, outside an async context |
 
 ### `ReticulumNode`
 
@@ -158,8 +158,8 @@ Configuration, defined at `leviculum-std/src/config.rs:12`; re-exported as
 | Signature | Purpose |
 |-----------|---------|
 | `fn load<P: AsRef<Path>>(path: P) -> Result<Self>` — `config.rs:901` | Load an INI config (the `rnsd`/`lnsd` format) |
-| `fn default_config_dir() -> PathBuf` — `config.rs:1254` | Default config directory |
-| `fn default_config_path() -> PathBuf` — `config.rs:1263` | Default config file path |
+| `fn default_config_dir() -> PathBuf` — `config.rs:1372` | Default config directory |
+| `fn default_config_path() -> PathBuf` — `config.rs:1381` | Default config file path |
 
 ## `leviculum-core` (no_std, sans-IO)
 

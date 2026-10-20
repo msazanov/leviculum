@@ -70,6 +70,8 @@ pub struct ReticulumNodeBuilder {
     link_establishment_timeout_ms_explicit: Option<u32>,
     /// Explicit link-table cap override (takes priority over config, #388)
     max_links_explicit: Option<Option<usize>>,
+    /// Explicit path expiry in seconds (takes priority over config, #464)
+    path_expiry_secs_explicit: Option<u64>,
     /// Explicit auto-connect cap override (takes priority over config value).
     /// `0` disables runtime auto-connect; `N > 0` enables it capped at `N`.
     autoconnect_discovered_interfaces_explicit: Option<usize>,
@@ -122,6 +124,7 @@ impl ReticulumNodeBuilder {
             link_keepalive_secs_explicit: None,
             link_establishment_timeout_ms_explicit: None,
             max_links_explicit: None,
+            path_expiry_secs_explicit: None,
             autoconnect_discovered_interfaces_explicit: None,
             discover_interfaces_explicit: None,
             connect_instance_name: None,
@@ -827,8 +830,10 @@ impl ReticulumNodeBuilder {
     ///
     /// Paths not refreshed within this duration will be removed.
     /// Default is 7 days (604800 seconds).
+    ///
+    /// Overrides the config's `path_expiry_secs` (Codeberg #464).
     pub fn path_expiry_secs(mut self, secs: u64) -> Self {
-        self.core_builder = self.core_builder.path_expiry_secs(secs);
+        self.path_expiry_secs_explicit = Some(secs);
         self
     }
 
@@ -921,12 +926,16 @@ impl ReticulumNodeBuilder {
                 }
             });
 
-        // Storage::new_with_caps() loads persistent data (known_destinations,
+        // Storage::new_with_limits() loads persistent data (known_destinations,
         // packet_hashlist) into its inner MemoryStorage automatically, and
-        // gives every runtime table the ceiling the config asked for
-        // (Codeberg #421).
+        // gives every runtime table and the duplicate filter the ceiling the
+        // config asked for (Codeberg #421, #464).
         let table_caps = config.reticulum.table_caps();
-        let storage = Storage::new_with_caps(&storage_path, table_caps)?;
+        let storage = Storage::new_with_limits(
+            &storage_path,
+            table_caps,
+            config.reticulum.packet_hash_cap(),
+        )?;
         let clock = SystemClock::new();
         // Align the LoRa airtime bucket's anchor with Transport's
         // SystemClock so `try_send_prioritized`'s `last_update_ms` and
@@ -1035,6 +1044,16 @@ impl ReticulumNodeBuilder {
                 config.reticulum.remote_management_enabled,
                 remote_management_allowed,
             );
+
+        // Path expiry (Codeberg #464): explicit > config; unset keeps the
+        // core's PATHFINDER_E, seven days.
+        let core_builder = match self
+            .path_expiry_secs_explicit
+            .or(config.reticulum.path_expiry_secs)
+        {
+            Some(secs) => core_builder.path_expiry_secs(secs),
+            None => core_builder,
+        };
 
         // Python's `ic_max_held_announces` (Reticulum.py:635-637); unset keeps
         // the core's reference 256.
@@ -1363,6 +1382,69 @@ mod tests {
             .expect("build_sync failed");
         let core = crate::sync_ext::MutexRecover::lock_recover(&*node.inner);
         assert_eq!(core.transport_config().mgmt_announce_interval_ms, 7_000);
+    }
+
+    /// Codeberg #464: the storage ceilings reach the storage and the path
+    /// expiry reaches the core; unset keeps today's values.
+    #[test]
+    fn test_builder_storage_limits_and_path_expiry_from_config() {
+        use leviculum_core::traits::Storage as _;
+        let build = |ini: &str| {
+            let td = tempfile::tempdir().expect("tempdir");
+            let node = ReticulumNodeBuilder::new()
+                .config(crate::ini_config::parse_ini(ini).expect("parse"))
+                .storage_path(td.path().to_path_buf())
+                .build_sync()
+                .expect("build_sync failed");
+            let core = crate::sync_ext::MutexRecover::lock_recover(&*node.inner);
+            let capacity = |name: &str| {
+                core.storage()
+                    .collection_counts()
+                    .into_iter()
+                    .find(|row| row.name == name)
+                    .and_then(|row| row.capacity)
+            };
+            (
+                capacity("known_identities"),
+                capacity("packet_cache"),
+                capacity("known_dest_use"),
+                core.transport_config().path_expiry_secs,
+            )
+        };
+        assert_eq!(
+            build("[reticulum]\n"),
+            (
+                Some(50_000),
+                Some(100_000 / 2),
+                Some(50_000),
+                leviculum_core::constants::PATHFINDER_EXPIRY_SECS
+            )
+        );
+        assert_eq!(
+            build(
+                "[reticulum]\n  max_identities = 5000\n  max_packet_hashes = 25000\n  \
+                 max_known_destinations = 4000\n  path_expiry_secs = 172800\n"
+            ),
+            (Some(5_000), Some(25_000 / 2), Some(4_000), 172_800)
+        );
+    }
+
+    /// An explicit builder expiry outranks the config's, like every other
+    /// explicit override here.
+    #[test]
+    fn test_builder_path_expiry_explicit_overrides_config() {
+        let td = tempfile::tempdir().expect("tempdir");
+        let node = ReticulumNodeBuilder::new()
+            .config(
+                crate::ini_config::parse_ini("[reticulum]\n  path_expiry_secs = 172800\n")
+                    .expect("parse"),
+            )
+            .path_expiry_secs(60)
+            .storage_path(td.path().to_path_buf())
+            .build_sync()
+            .expect("build_sync failed");
+        let core = crate::sync_ext::MutexRecover::lock_recover(&*node.inner);
+        assert_eq!(core.transport_config().path_expiry_secs, 60);
     }
 
     /// L-0051: `use_implicit_proof` reaches the core's proof form instead of
