@@ -342,8 +342,12 @@ GNSS receiver sleep while the board is still, as a gate in front of the
 #401 movement proof, not a replacement for it
 ([Announce cadence](../concepts/announce-cadence.md)). The part's INT1
 (`P1.02`) is not used: the one reference that configures it maps the
-wrong bit, so the driver polls. Not in it yet: the buzzer and the button.
-The product has no display.
+wrong bit, so the driver polls. Since #459 a short press of the button
+(`P0.06`, active high) announces, as on every board with a button
+(`leviculum-nrf/src/button.rs`); the long press is the power button and
+stays unassigned. The buzzer (`P0.25`, enable `P1.05`) is not driven: its
+enable is held low, because which event it should sound for is a product
+decision nobody has made. The product has no display.
 
 The bootloader's `Board-ID` is `nRF52840-T1000-E-v1`, bound to this one
 product, so `lnflash` has a flashing entry for it at level *Verified*:

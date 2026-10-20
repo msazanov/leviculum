@@ -275,9 +275,27 @@ pub type AccInt = peripherals::P1_02;
 /// The one LED, **active HIGH** (`PIN_LED1 (0 + 24)`, `LED_STATE_ON 1`).
 pub type LedPin = peripherals::P0_24;
 /// User button, **active HIGH** with a pull-down (`BUTTON_PIN (0 + 6)`,
-/// `BUTTON_ACTIVE_LOW false`, `BUTTON_SENSE_TYPE 0x5`). Not wired to a task
-/// in this image.
+/// `BUTTON_ACTIVE_LOW false`, `BUTTON_SENSE_TYPE 0x5`). A short press
+/// announces (#459, `crate::button`); the long press is the product's power
+/// button and is left unassigned.
 pub type UserButton = peripherals::P0_06;
+
+// Buzzer
+/// The buzzer's PWM line (`PIN_BUZZER (0 + 25)`, "pwm output"). Declared and
+/// left alone.
+pub type BuzzerPin = peripherals::P0_25;
+/// The buzzer's enable (`BUZZER_EN_PIN (32 + 5)`). Meshtastic keeps it
+/// "always high" and drives the tone on [`BuzzerPin`].
+pub type BuzzerEnable = peripherals::P1_05;
+
+/// Hold the buzzer's enable **low**, so the buzzer is unpowered whatever its
+/// PWM line does. Nothing drives the buzzer on this firmware: no event has
+/// been chosen that it should sound for, and that choice is a product
+/// decision, not part of porting the board. The returned pin must be kept
+/// alive: dropping an embassy `Output` disconnects it.
+pub fn buzzer_off(pin: Peri<'static, BuzzerEnable>) -> Output<'static> {
+    Output::new(pin, Level::Low, OutputDrive::Standard)
+}
 
 /// Create the LED output. **Active HIGH**; off at boot.
 pub fn led(pin: Peri<'static, LedPin>) -> Output<'static> {

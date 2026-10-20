@@ -425,6 +425,97 @@ impl AnnounceGate {
     }
 }
 
+impl AnnounceGate {
+    /// The delivery half of an announce somebody asked for now, beside
+    /// `crate::pn::Engine::announce_now` for the propagation half: same
+    /// destination, same app data and same clock gate as
+    /// [`Self::periodic`], on every interface, at once.
+    ///
+    /// Books nothing in the cadence; the caller does that once for both
+    /// halves ([`on_button_press`]). A withhold is written every time
+    /// rather than once per change: each one answers a press somebody is
+    /// waiting on.
+    pub fn announce_now<R, C, S>(
+        &mut self,
+        node: &mut NodeCore<R, C, S>,
+        delivery_hash: Option<&DestinationHash>,
+        reason: &str,
+    ) -> Vec<Action>
+    where
+        R: CryptoRngCore,
+        C: Clock,
+        S: Storage,
+    {
+        let Some(hash) = delivery_hash else {
+            return Vec::new();
+        };
+        if !node.has_plausible_wall_clock() {
+            crate::log::log_fmt_critical(
+                "[INFO!] ",
+                format_args!(
+                    "[ANNOUNCE] withheld reason={} occasion={}",
+                    Withheld::NoClock.as_str(),
+                    reason
+                ),
+            );
+            return Vec::new();
+        }
+        let app_data = crate::telemetry::announce_app_data(node.identity());
+        match node.announce_destination(hash, Some(&app_data)) {
+            Ok(out) => {
+                log_sent(hash, reason, None);
+                out.actions
+            }
+            Err(_) => Vec::new(),
+        }
+    }
+}
+
+/// A short press of the user button got past its debouncer and its rate
+/// limit (`crate::button`): both announces, booked in the one cadence.
+///
+/// The cadence decides first ([`AnnounceCadence::manual`]) so that the
+/// press is paid for in the carrier's duty budget like every other
+/// announce. When the budget allows the set now, the delivery half
+/// ([`AnnounceGate::announce_now`], clock-gated) and the propagation half
+/// (`crate::pn::Engine::announce_now`, store-gated, not clock-gated) go out
+/// at once with `reason=button` and `reason=pn-button`. When it does not,
+/// nothing goes out here and both slots fire on their own tick as early as
+/// the band allows, which this writes as `[ANNOUNCE] deferred`.
+#[cfg(feature = "softdevice")]
+pub fn on_button_press<R, C, S>(
+    node: &mut NodeCore<R, C, S>,
+    gate: &mut AnnounceGate,
+    pn: Option<&mut crate::pn::Engine>,
+    delivery_hash: Option<&DestinationHash>,
+) -> Vec<Action>
+where
+    R: CryptoRngCore,
+    C: Clock,
+    S: Storage,
+{
+    use leviculum_announce_policy::ManualAnnounce;
+    let now_ms = node.now_ms();
+    match with_cadence(|cadence| cadence.manual(now_ms)) {
+        ManualAnnounce::Deferred { wait_ms } => {
+            crate::log::log_fmt_critical(
+                "[INFO!] ",
+                format_args!(
+                    "[ANNOUNCE] deferred reason=duty-budget occasion=button wait_ms={wait_ms}"
+                ),
+            );
+            Vec::new()
+        }
+        ManualAnnounce::Now => {
+            let mut actions = gate.announce_now(node, delivery_hash, "button");
+            if let Some(pn) = pn {
+                actions.extend(pn.announce_now(node, "pn-button").actions);
+            }
+            actions
+        }
+    }
+}
+
 /// `[ANNOUNCE] sent dst=<hex8> reason=<r> [peer=<hex8>]`, the line the
 /// desk recipe greps for. Critical, like the `reason=host` line the
 /// `lnflash --announce` arm already writes: an announce is the event a

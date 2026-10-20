@@ -2587,7 +2587,14 @@ impl Engine {
     /// out would make the interval a function of how often the harness
     /// asked. Returns no actions when the store did not mount — a role
     /// that cannot prove an upload must not invite one.
-    pub fn announce_now<R, C, S>(&mut self, node: &mut NodeCore<R, C, S>) -> TickOutput
+    ///
+    /// `reason` is the `reason=` token of the `[ANNOUNCE] sent` line:
+    /// `pn-host` for the host's command, `pn-button` for a press (#459).
+    pub fn announce_now<R, C, S>(
+        &mut self,
+        node: &mut NodeCore<R, C, S>,
+        reason: &str,
+    ) -> TickOutput
     where
         R: CryptoRngCore,
         C: Clock,
@@ -2608,8 +2615,8 @@ impl Engine {
             crate::log::log_fmt_critical(
                 "[INFO!] ",
                 format_args!(
-                    "[ANNOUNCE] sent dst={:02x}{:02x}{:02x}{:02x} reason=pn-host",
-                    d[0], d[1], d[2], d[3]
+                    "[ANNOUNCE] sent dst={:02x}{:02x}{:02x}{:02x} reason={}",
+                    d[0], d[1], d[2], d[3], reason
                 ),
             );
         }

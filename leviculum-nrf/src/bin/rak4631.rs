@@ -15,7 +15,7 @@ extern crate alloc;
 
 use alloc::collections::BTreeMap;
 use embassy_executor::Spawner;
-use embassy_futures::select::{select, select4, Either, Either4};
+use embassy_futures::select::{select, select3, select4, Either, Either3, Either4};
 use embassy_nrf::gpio::{Level, Output, OutputDrive};
 use embassy_nrf::spim;
 use embassy_time::{Duration, Instant, Timer};
@@ -524,9 +524,17 @@ async fn main(spawner: Spawner) {
     {
         leviculum_nrf::display::init(&spawner, p.TWISPI0, p.P0_13, p.P0_14, identity_hash);
         info!("display task spawned");
-        // The user button shares the same `display` feature gate — it has
-        // no purpose without something to switch on/off.
-        leviculum_nrf::button::init(&spawner, p.P0_09.into());
+        // The user button shares the same `display` feature gate: it is on
+        // the Pocket's carrier, which the bare module does not have. A short
+        // press announces (#459), the display rides the same debouncer.
+        leviculum_nrf::button::init(
+            &spawner,
+            leviculum_nrf::button::ButtonWiring {
+                pin: p.P0_09.into(),
+                active_high: false,
+                board: "rak4631",
+            },
+        );
         info!("button task spawned");
     }
     // The bare module (no baseboard) has neither; declared once, gate-free,
@@ -701,7 +709,7 @@ async fn main(spawner: Spawner) {
     // the tracker registers only on a real change.
     let mut announce_cap = leviculum_nrf::lora::AnnounceCap::new();
 
-    // Event-driven main loop, eight event sources:
+    // Event-driven main loop, ten event sources:
     // 1. Serial incoming (USB)
     // 2. LoRa incoming (radio)
     // 3. BLE incoming (defragmented Reticulum packets from phone)
@@ -711,6 +719,7 @@ async fn main(spawner: Spawner) {
     // 7. Host telemetry target (#238 control envelope, #236)
     // 8. Host fixed position (#238 control envelope)
     // 9. Telemetry evaluation tick (only while a target is configured)
+    // 10. User button press that announces (#459; never on a board without one)
     leviculum_nrf::boot_trace::phase(leviculum_nrf::boot_trace::Phase::MainLoop);
 
     // One engine pass: digest a dispatch's events, run the async half
@@ -836,7 +845,11 @@ async fn main(spawner: Spawner) {
                 fixed_position_rx.receive(),
                 serial.announce_rx.receive(),
             ),
-            select(telemetry_tick, announce_tick),
+            select3(
+                telemetry_tick,
+                announce_tick,
+                leviculum_nrf::button::announce_press(),
+            ),
         )
         .await;
         // Mirror each interface's is_online() into the core (#365): a
@@ -961,7 +974,7 @@ async fn main(spawner: Spawner) {
                 use leviculum_core::envelope;
                 let pn_announced = match pn_engine.as_mut() {
                     Some(pn) => {
-                        let out = pn.announce_now(&mut node);
+                        let out = pn.announce_now(&mut node, "pn-host");
                         if out.actions.is_empty() {
                             false
                         } else {
@@ -1060,7 +1073,7 @@ async fn main(spawner: Spawner) {
                 #[cfg(not(feature = "gnss"))]
                 let _ = unix;
             }
-            Either4::Fourth(Either::Second(())) => {
+            Either4::Fourth(Either3::Second(())) => {
                 // The periodic announce (#376 item 2). Independent of
                 // telemetry: a node that reports rarely, or has no target
                 // at all, still has to be findable, and a phone that
@@ -1074,6 +1087,24 @@ async fn main(spawner: Spawner) {
                         [&mut serial_iface, &mut lora_iface, &mut ble_iface];
                     let dispatched = dispatch_actions(&mut ifaces, actions, &ifac_configs);
                     leviculum_nrf::dispatch::settle("announce-periodic", &mut node, &dispatched);
+                }
+            }
+            Either4::Fourth(Either3::Third(())) => {
+                // A short press of the user button that got past its
+                // debouncer and its 30 s limit (#459, `leviculum_nrf::button`):
+                // both announces, booked in the cadence's duty budget. A
+                // board without a button never raises this.
+                let actions = leviculum_nrf::announce::on_button_press(
+                    &mut node,
+                    &mut announce_gate,
+                    pn_engine.as_mut(),
+                    delivery_hash.as_ref(),
+                );
+                if !actions.is_empty() {
+                    let mut ifaces: [&mut dyn Interface; 3] =
+                        [&mut serial_iface, &mut lora_iface, &mut ble_iface];
+                    let dispatched = dispatch_actions(&mut ifaces, actions, &ifac_configs);
+                    leviculum_nrf::dispatch::settle("announce-button", &mut node, &dispatched);
                 }
             }
             Either4::First(Either4::First(data)) => {
@@ -1267,7 +1298,7 @@ async fn main(spawner: Spawner) {
                 leviculum_nrf::dispatch::settle("timeout", &mut node, &dispatched);
                 pn_step!(&output.events);
             }
-            Either4::Fourth(Either::First(())) => {
+            Either4::Fourth(Either3::First(())) => {
                 // Telemetry evaluation (#236). Everything decided here is
                 // decided in the policy crate; this arm reads the board's
                 // sensors, hands them over, and dispatches whatever came

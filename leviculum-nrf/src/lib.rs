@@ -58,6 +58,9 @@ pub mod ble;
 pub mod boards;
 pub mod boot_count;
 pub mod boot_trace;
+/// The user button (#459): every board that has one announces on a short
+/// press; the Pocket V2's display toggle rides the same debouncer.
+pub mod button;
 pub mod chtm;
 pub mod clock;
 pub mod dispatch;
@@ -240,8 +243,6 @@ pub fn log_reset_reason(raw: u32) {
 pub mod baseboard;
 #[cfg(feature = "battery")]
 pub mod battery;
-#[cfg(feature = "display")]
-pub mod button;
 #[cfg(feature = "display")]
 pub mod display;
 #[cfg(feature = "gnss")]

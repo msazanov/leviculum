@@ -1418,7 +1418,7 @@ fn the_display_and_button_bring_up_is_not_dropped_by_the_runtime_gate() {
             "button.rs",
             "pub async fn button_task(",
             "loop {",
-            &["init pin=P{}.{:02} pull=up active=low debounce=none"][..],
+            &["init pin=P{}.{:02} pull={} active={} debounce={}ms"][..],
         ),
     ] {
         let src = nrf_source(file);
@@ -1453,6 +1453,7 @@ fn the_display_and_button_bring_up_is_not_dropped_by_the_runtime_gate() {
         ("bin/t114.rs", &["[BTN]"][..]),
         ("bin/solarnode.rs", &["[DISP]", "[BTN]"][..]),
         ("bin/rak4631.rs", &["[DISP]", "[BTN]"][..]),
+        ("bin/t1000e.rs", &["[DISP]"][..]),
     ] {
         let src = nrf_source(bin);
         for tag in tags {
@@ -1463,6 +1464,23 @@ fn the_display_and_button_bring_up_is_not_dropped_by_the_runtime_gate() {
             );
         }
     }
+    // The two boards with a button bring it up, and the T1000-E no longer
+    // claims it has none (#459). The debounce the init line names is the
+    // shared constant, not a literal of the task's own.
+    for bin in ["bin/t1000e.rs", "bin/rak4631.rs"] {
+        assert!(
+            nrf_source(bin).contains("leviculum_nrf::button::init("),
+            "leviculum-nrf/src/{bin} no longer spawns the button task (#459)"
+        );
+    }
+    assert!(
+        !nrf_source("bin/t1000e.rs").contains(&none("[BTN]")),
+        "bin/t1000e.rs declares `[BTN] none` although it spawns the button task"
+    );
+    assert!(
+        nrf_source("button.rs").contains("BUTTON_DEBOUNCE_MS"),
+        "button.rs no longer names the shared debounce constant in its init line"
+    );
     // On the RAK4631 the absence is the bare-module build: the Pocket image
     // (`display` feature) prints the driver's result instead.
     let rak = nrf_source("bin/rak4631.rs");
