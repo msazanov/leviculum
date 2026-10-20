@@ -33,7 +33,7 @@ runs an event-driven main loop that dispatches packets between them:
 `set_interface_name` (`leviculum-nrf/src/bin/t114.rs:270-287`) and
 `leviculum-nrf/src/bin/rak4631.rs:299-340`. The main loop selecting over
 the three RX sources plus a timer deadline begins at
-`leviculum-nrf/src/bin/t114.rs:594`.)
+`leviculum-nrf/src/bin/t114.rs:595`.)
 
 Transport routing is enabled in the node builder, so an LNode forwards
 packets and serves paths for other peers, exactly like a
@@ -342,8 +342,9 @@ samples the battery divider, and since #457 it reads the QMA6100P
 accelerometer over I²C (SDA `P0.26`, SCL `P0.27`, address 0x12, its rail
 on `P1.07`), four samples a second, and prints `MOTION state=moving|still`
 on each change and `MOTION_INIT ok|absent` at boot
-(`leviculum-nrf/motion`). Nothing acts on the state yet; step two lets the
-GNSS receiver sleep while the board is still, as a gate in front of the
+(`leviculum-nrf/motion`). Since step two the GNSS receiver sleeps while
+the board is still (Backup mode, `GNSS_POWER state=sleep|wake`), never
+before its first fix or ten minutes after boot, as a gate in front of the
 #401 movement proof, not a replacement for it
 ([Announce cadence](../concepts/announce-cadence.md)). The part's INT1
 (`P1.02`) is not used: the one reference that configures it maps the
@@ -441,8 +442,8 @@ under "The axis the policy does not have"; Codeberg #406 is the record.
 The one thing it has that no board above has is a 3-axis accelerometer.
 The announce cadence infers movement from a position delta
 (`MovementDetector`, `leviculum-nrf/announce-policy/src/cadence.rs:226`),
-and that stays the proof; since #457 the accelerometer is read and will
-gate when the receiver runs at all
+and that stays the proof; since #457 the accelerometer is read and gates
+when the receiver runs at all
 ([Announce cadence](../concepts/announce-cadence.md)).
 
 The XIAO family, now family C above, is the one case where the

@@ -6,8 +6,10 @@
 //! `MOTION state=moving|still hold_ms=<n> src=qma6100p` on each change,
 //! and every [`leviculum_motion::STAT_INTERVAL_MS`] a `MOTION_STAT` line
 //! with the window's sample count, largest delta and over-threshold count.
-//! Nothing reads the state: no coupling to the announce cadence, the GNSS
-//! task or telemetry in this step. The register map, the init order, the
+//! Each edge is also written to [`crate::baseboard::MOTION_STATE`], which
+//! the GNSS task reads to sleep its receiver while the board is still
+//! (step two); the announce cadence and telemetry do not read it. The
+//! register map, the init order, the
 //! transition rule and why the task polls although INT1 is wired are all
 //! in `leviculum_motion`, which is host-tested; this file is the bus.
 //!
@@ -22,8 +24,8 @@ use embassy_nrf::{bind_interrupts, peripherals, Peri};
 use embassy_time::{with_timeout, Duration, Instant, Timer};
 
 use leviculum_motion::{
-    BusError, InitLine, MotionDetector, ReadHealth, RegisterBus, I2C_ADDR, POLL_INTERVAL_MS,
-    POWER_UP_MS,
+    BusError, InitLine, MotionDetector, MotionState, ReadHealth, RegisterBus, I2C_ADDR,
+    POLL_INTERVAL_MS, POWER_UP_MS,
 };
 
 // TWISPI0 rather than TWISPI1: it is the instance `set_irq_priorities`
@@ -140,6 +142,7 @@ async fn motion_task(wiring: MotionWiring) {
             // is when the runtime gate opens at the latest.
             if let Some(transition) = detector.on_sample(sample, now_ms()) {
                 crate::log::log_fmt_critical("MOTION ", format_args!("{transition}"));
+                publish(transition.state);
             }
         }
         // Drain-gated, like `[BAT]`: a periodic line whose next instance
@@ -149,6 +152,25 @@ async fn motion_task(wiring: MotionWiring) {
         }
     }
 }
+
+/// Hand an edge to the GNSS task (#457 step two). Only edges reach
+/// here, and only after a good init, so a board whose part is absent
+/// never writes the watch. `Unknown` is the detector's state before its
+/// first edge and never one it moves into.
+#[cfg(feature = "gnss")]
+fn publish(state: MotionState) {
+    use crate::baseboard::{Motion, MOTION_STATE};
+    let motion = match state {
+        MotionState::Moving => Motion::Moving,
+        MotionState::Still => Motion::Still,
+        MotionState::Unknown => return,
+    };
+    MOTION_STATE.sender().send(motion);
+}
+
+/// No receiver to gate in this build.
+#[cfg(not(feature = "gnss"))]
+fn publish(_state: MotionState) {}
 
 fn now_ms() -> u64 {
     Instant::now().as_millis()

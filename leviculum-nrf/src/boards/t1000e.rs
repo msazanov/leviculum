@@ -184,8 +184,10 @@ pub type GnssVrtc = peripherals::P0_08;
 /// power enable above already gives it a clean start.
 pub type GnssReset = peripherals::P1_15;
 /// AG3335 RTC wake, **held LOW** (`GPS_RTC_INT (0 + 15)`, "normal is LOW,
-/// wake by HIGH"). Nothing here asks it to wake from an RTC sleep it is
-/// never put into.
+/// wake by HIGH"). The GNSS driver's `wake` line: set low here at boot,
+/// then handed to the driver, which pulses it high when it powers the
+/// receiver up after a sleep (#457 step two), as the Quectel LC29H
+/// hardware design (an AG3335 module) pulls WAKEUP to leave Backup mode.
 pub type GnssRtcInt = peripherals::P0_15;
 /// The AG3335's own reset output, an input with pull-up here
 /// (`GPS_RESETB_OUT (32 + 14)`, "always input pull_up"; `initVariant`
@@ -193,20 +195,23 @@ pub type GnssRtcInt = peripherals::P0_15;
 /// floating against a driving output.
 pub type GnssResetbOut = peripherals::P1_14;
 
-/// The AG3335 control lines the GNSS driver does not own, at the levels
-/// [`gnss_control`] sets. Kept alive by the caller: dropping an embassy
-/// pin returns it to its reset state, which would release VRTC.
+/// The AG3335 control lines at the levels [`gnss_control`] sets. Kept
+/// alive by the caller: dropping an embassy pin returns it to its reset
+/// state, which would release VRTC. `rtc_int` is set here, in
+/// `initVariant`'s order, and then moved into the GNSS driver's wiring as
+/// its `wake` line.
 pub struct GnssControl {
     _vrtc: Output<'static>,
     _reset: Output<'static>,
-    _rtc_int: Output<'static>,
+    pub rtc_int: Output<'static>,
     _resetb_out: Input<'static>,
 }
 
 /// Set the AG3335's static control lines for the life of the board, in
 /// the order of Meshtastic's `initVariant`: VRTC up, reset released, RTC
 /// wake low, reset output as an input. The enable and the sleep line go
-/// to the GNSS driver as `power_enable` and `standby`.
+/// to the GNSS driver as `power_enable` and `standby`, the RTC wake as
+/// its `wake`.
 pub fn gnss_control(
     vrtc: Peri<'static, GnssVrtc>,
     reset: Peri<'static, GnssReset>,
@@ -216,7 +221,7 @@ pub fn gnss_control(
     GnssControl {
         _vrtc: Output::new(vrtc, Level::High, OutputDrive::Standard),
         _reset: Output::new(reset, Level::Low, OutputDrive::Standard),
-        _rtc_int: Output::new(rtc_int, Level::Low, OutputDrive::Standard),
+        rtc_int: Output::new(rtc_int, Level::Low, OutputDrive::Standard),
         _resetb_out: Input::new(resetb_out, Pull::Up),
     }
 }

@@ -70,6 +70,23 @@
 //! switching, because on the T114 the display sits on it too
 //! ([`crate::vext`]).
 //!
+//! **Sleep while still** (#457 step two). On a board that publishes a
+//! motion state ([`crate::baseboard::MOTION_STATE`], the T1000-E's
+//! accelerometer) and whose receiver has a power enable, the task selects
+//! between its UART read and the motion watch, and the pure
+//! [`leviculum_gnss_presence::PowerGate`] decides: `still` sleeps the
+//! receiver, `moving` wakes it, and nothing sleeps before the first fix
+//! or [`leviculum_gnss_presence::GNSS_FIRST_FIX_GRACE_S`]. Sleep is the
+//! AG3335's Backup mode as the Quectel LC29H hardware design enters it:
+//! `$PAIR650,0`, then the enable low while the board holds VRTC up; wake
+//! is the enable high and a pulse on the RTC wake line, then the
+//! `$PAIR` setup again. Each edge prints `GNSS_POWER state=sleep|wake
+//! reason=still|moving t=<ms>`. While asleep the task neither reads nor
+//! polls, so the `[GNSS]` heartbeat stops, and the published presence and
+//! fix hold their last values: the board has not moved, so the last
+//! position is still its position. Every other board, and a T1000-E whose
+//! part did not answer, never gets a motion value and runs as before.
+//!
 //! The PPS pin (P1.04 on the T114) is configured as a pull-down input
 //! but not used — reserved for a future timestamp-capture iteration.
 //! Three of the four boards pass `pps: None`, and none of them means
@@ -84,6 +101,7 @@
 //! [`crate::boards::rak4631`]).
 
 use embassy_executor::Spawner;
+use embassy_futures::select::{select, Either};
 use embassy_nrf::gpio::{AnyPin, Input, Level, OutputDrive, Pull};
 use embassy_nrf::peripherals;
 use embassy_nrf::uarte::{self, Uarte};
@@ -91,7 +109,7 @@ use embassy_nrf::{bind_interrupts, Peri};
 use embassy_time::{with_timeout, Duration, Instant, Timer};
 
 use leviculum_gnss_init::{AirohaInit, L76kInit, ModuleInit, UbxInit};
-use leviculum_gnss_presence::{Output, PresenceMachine};
+use leviculum_gnss_presence::{Output, Power, PowerEdge, PowerGate, Presence, PresenceMachine};
 
 use crate::baseboard::{GnssFix, GnssPresenceState, GNSS_FIX, GNSS_PRESENCE};
 
@@ -144,7 +162,47 @@ pub struct GnssWiring {
     /// than at board level: nothing else on that carrier goes dark with
     /// it.
     pub power_enable: Option<Peri<'static, AnyPin>>,
+    /// The receiver's wake-from-Backup line, already driven LOW by the
+    /// board, pulsed HIGH for 20 ms (`WAKE_PULSE_MS`) each time the task powers
+    /// the receiver up after a sleep. Only the T1000-E has one (the
+    /// AG3335's `GPS_RTC_INT`, "wake by HIGH"); `None` elsewhere.
+    pub wake: Option<embassy_nrf::gpio::Output<'static>>,
     pub module: ModuleKind,
+}
+
+/// After the Backup-mode command, before the enable drops, in ms. The
+/// LC29H hardware design (1.3, §3.3.3, figure 9) cuts VCC after the
+/// command and names no interval; the module answers `$PAIR001,650,0`
+/// within a sentence time at 115200. 100 ms covers that answer many
+/// times over and is nothing against a sleep of at least 30 s.
+const BACKUP_ENTRY_MS: u64 = 100;
+
+/// After the enable rises, before the wake pulse, in ms. The same
+/// document's power-up sequence (§3.4, figure 10) has VCC rise in under
+/// 50 ms, and its Backup exit pulls WAKEUP once VCC is back.
+const SUPPLY_RISE_MS: u64 = 50;
+
+/// The wake pulse, in ms: WAKEUP high "for at least 10 ms" (§3.3.3,
+/// note 2), doubled.
+const WAKE_PULSE_MS: u64 = 20;
+
+impl ModuleKind {
+    /// The command that parks the receiver before its power enable drops,
+    /// if its language has one this driver sends. Only the AG3335's
+    /// (`leviculum_gnss_init::airoha::BACKUP_FRAME` says why); the other
+    /// receivers sit on boards without an accelerometer and never sleep.
+    fn backup_frame(self) -> Option<&'static [u8]> {
+        match self {
+            ModuleKind::AirohaAg3335 => Some(&leviculum_gnss_init::airoha::BACKUP_FRAME),
+            ModuleKind::UbloxM8 | ModuleKind::QuectelL76k => None,
+        }
+    }
+}
+
+/// Print a power edge: `GNSS_POWER state=sleep|wake reason=still|moving
+/// t=<ms>`. Critical: an edge is rare and nothing repeats it.
+fn log_power(edge: PowerEdge, now_ms: u64) {
+    crate::log::log_fmt_critical("GNSS_POWER ", format_args!("{edge} t={now_ms}"));
 }
 
 /// The board's boot init sequencer. An enum rather than a `dyn` object
@@ -265,6 +323,7 @@ pub async fn gnss_task(wiring: GnssWiring) {
         pps,
         standby,
         power_enable,
+        mut wake,
         module,
     } = wiring;
 
@@ -276,10 +335,11 @@ pub async fn gnss_task(wiring: GnssWiring) {
     // board gave to something else must not be driven from here.
     let _pps = pps.map(|pin| Input::new(pin, Pull::Down));
 
-    // Power first, and keep it on. Held for the life of the task for the
-    // same reason the standby line below is: dropping the output returns
-    // the pin to its reset state, which cuts the receiver's supply.
-    let _power_enable = power_enable.map(|pin| {
+    // Power first. Held for the life of the task for the same reason the
+    // standby line below is: dropping the output returns the pin to its
+    // reset state, which cuts the receiver's supply. Lowered and raised
+    // again only by the motion gate below.
+    let mut power_enable = power_enable.map(|pin| {
         crate::log::log_fmt("[GNSS] ", format_args!("power enable held high"));
         embassy_nrf::gpio::Output::new(pin, Level::High, OutputDrive::Standard)
     });
@@ -301,6 +361,19 @@ pub async fn gnss_task(wiring: GnssWiring) {
     crate::vext::wait_ready().await;
 
     let mut machine = PresenceMachine::new(Instant::now().as_millis());
+
+    // The motion gate (#457 step two): asleep while the board is still,
+    // awake while it moves, never asleep before the first fix or
+    // `GNSS_FIRST_FIX_GRACE_S`. Only a receiver this task can switch off
+    // listens to the accelerometer, and on a board without one (or whose
+    // part did not answer) the watch never gets a value, the gate never
+    // leaves `Awake`, and this task runs exactly as it did before.
+    let mut motion_rx = if power_enable.is_some() {
+        crate::baseboard::MOTION_STATE.receiver()
+    } else {
+        None
+    };
+    let mut gate = PowerGate::new(Instant::now().as_millis());
 
     // One-shot module init (#324, #69): constructed once per boot,
     // silent until the machine locks a baud, silent again forever once
@@ -350,15 +423,28 @@ pub async fn gnss_task(wiring: GnssWiring) {
         let new_baud = loop {
             let now_ms = Instant::now().as_millis();
             let mut chunk_len = 0usize;
-            match with_timeout(Duration::from_secs(1), uart_rx.read_until_idle(&mut buf)).await {
-                Ok(Ok(n)) => {
+            let read = with_timeout(Duration::from_secs(1), uart_rx.read_until_idle(&mut buf));
+            // A motion edge ends the read early. The bytes a cancelled
+            // read held are lost, as on a timeout; the edge is rare.
+            let (read, mut edge) = match motion_rx.as_mut() {
+                Some(rx) => match select(read, rx.changed()).await {
+                    Either::First(read) => (Some(read), None),
+                    Either::Second(motion) => {
+                        (None, gate.on_motion(motion, Instant::now().as_millis()))
+                    }
+                },
+                None => (Some(read.await), None),
+            };
+            match read {
+                None => {}
+                Some(Ok(Ok(n))) => {
                     bytes_total = bytes_total.saturating_add(n as u32);
                     chunk_len = n;
                     machine.on_bytes(&buf[..n], now_ms, &mut |o| {
                         apply_output(o, &mut latest, &mut pending_baud)
                     });
                 }
-                Ok(Err(_e)) => {
+                Some(Ok(Err(_e))) => {
                     // Framing/overrun. At a wrong sweep baud this can be
                     // every chunk — count it (the heartbeat reports it)
                     // instead of logging per error, and give the EasyDMA
@@ -369,7 +455,7 @@ pub async fn gnss_task(wiring: GnssWiring) {
                     });
                     Timer::after(Duration::from_millis(50)).await;
                 }
-                Err(_timeout) => {
+                Some(Err(_timeout)) => {
                     machine.poll(now_ms, &mut |o| {
                         apply_output(o, &mut latest, &mut pending_baud)
                     });
@@ -400,6 +486,58 @@ pub async fn gnss_task(wiring: GnssWiring) {
                     ),
                 );
                 last_health_log = Instant::now();
+            }
+
+            // The first fix ends the grace early; time alone ends it too.
+            let gate_now = Instant::now().as_millis();
+            if machine.published() == Some(Presence::Fix) {
+                edge = edge.or(gate.on_fix(gate_now));
+            }
+            edge = edge.or(gate.poll(gate_now));
+            if let (Some(asleep), Some(rx)) = (edge, motion_rx.as_mut()) {
+                if asleep.power == Power::Asleep {
+                    log_power(asleep, gate_now);
+                    // Park, then cut: the LC29H hardware design's way into
+                    // Backup mode, VRTC (the board's) staying up so the
+                    // wake is a warm start.
+                    if let Some(frame) = module.backup_frame() {
+                        let mut staged = [0u8; leviculum_gnss_init::MAX_FRAME];
+                        staged[..frame.len()].copy_from_slice(frame);
+                        let _ = uart_tx.write(&staged[..frame.len()]).await;
+                        Timer::after_millis(BACKUP_ENTRY_MS).await;
+                    }
+                    if let Some(pin) = power_enable.as_mut() {
+                        pin.set_low();
+                    }
+                    // Nothing to read and nothing to poll until the board
+                    // moves: the heartbeat stops with the receiver.
+                    loop {
+                        let motion = rx.changed().await;
+                        let now = Instant::now().as_millis();
+                        if let Some(awake) = gate.on_motion(motion, now) {
+                            log_power(awake, now);
+                            break;
+                        }
+                    }
+                    if let Some(pin) = power_enable.as_mut() {
+                        pin.set_high();
+                    }
+                    if let Some(pin) = wake.as_mut() {
+                        Timer::after_millis(SUPPLY_RISE_MS).await;
+                        pin.set_high();
+                        Timer::after_millis(WAKE_PULSE_MS).await;
+                        pin.set_low();
+                    }
+                    // The receiver wakes at the baud it slept at, so the
+                    // lock stands; the dark time is neither starvation nor
+                    // a lost fix. The `$PAIR` setup goes out again: the
+                    // module's answers to it are not read, so whether it
+                    // kept the settings across the cut cannot be told, and
+                    // the sequence is the same one every boot sends.
+                    machine.resume(Instant::now().as_millis());
+                    init = Init::new(module);
+                    continue;
+                }
             }
 
             if let Some(b) = pending_baud.take() {

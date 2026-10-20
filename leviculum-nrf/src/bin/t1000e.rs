@@ -156,7 +156,7 @@ async fn main(spawner: Spawner) {
     // (`boards/t1000e.rs`). Both held for the life of the board. The
     // receiver's enable and sleep lines belong to the GNSS task below.
     let _power_sensors = t1000e::power_sensors(p.P1_06);
-    let _gnss_control = t1000e::gnss_control(p.P0_08, p.P1_15, p.P0_15, p.P1_14);
+    let gnss_control = t1000e::gnss_control(p.P0_08, p.P1_15, p.P0_15, p.P1_14);
     let mut led = t1000e::led(p.P0_24);
     // The buzzer's enable held low for the life of the board: nothing drives
     // the buzzer (`boards/t1000e.rs` says why).
@@ -534,6 +534,8 @@ async fn main(spawner: Spawner) {
     // the variant names them: the MCU receives on P0.14 and transmits on
     // P0.13. P1.11 is the receiver's own power enable and P1.12 its sleep
     // line, both held high by the task; the variant names no pulse line.
+    // The enable drops while the board is still and P0.15, the RTC wake,
+    // brings the receiver back out of Backup mode (#457 step two).
     leviculum_nrf::gnss::init(
         &spawner,
         leviculum_nrf::gnss::GnssWiring {
@@ -546,6 +548,7 @@ async fn main(spawner: Spawner) {
             pps: None,
             standby: Some(p.P1_12.into()),
             power_enable: Some(p.P1_11.into()),
+            wake: Some(gnss_control.rtc_int),
             module: leviculum_nrf::gnss::ModuleKind::AirohaAg3335,
         },
     );

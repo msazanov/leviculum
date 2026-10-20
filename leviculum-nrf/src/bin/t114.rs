@@ -549,6 +549,7 @@ async fn main(spawner: Spawner) {
                 // The L76K's supply is the VEXT rail this binary raised,
                 // not a switch of the receiver's own.
                 power_enable: None,
+                wake: None,
                 module: leviculum_nrf::gnss::ModuleKind::QuectelL76k,
             },
         );

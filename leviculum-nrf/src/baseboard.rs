@@ -50,6 +50,25 @@ pub struct GnssPresenceState {
 #[cfg(feature = "gnss")]
 pub static GNSS_PRESENCE: Watch<CriticalSectionRawMutex, GnssPresenceState, 3> = Watch::new();
 
+/// What the accelerometer says, as the GNSS task reads it (#457 step
+/// two), re-exported from the pure crate whose `PowerGate` decides on it.
+#[cfg(feature = "gnss")]
+pub use leviculum_gnss_presence::Motion;
+
+/// The board's moving/still state, written by `motion::motion_task` on
+/// each `MOTION` edge and read by `gnss::gnss_task`, which sleeps the
+/// receiver on `Still` and wakes it on `Moving`.
+///
+/// A `Watch`, like the GNSS and battery snapshots above: the reader wants
+/// the current state, not every edge (an edge it misses is one it would
+/// have undone), and `changed()` is a future the GNSS task can select
+/// against its UART read. It starts empty and stays empty on a board
+/// without the part or whose part did not answer (`MOTION_INIT absent`),
+/// and an empty watch is a receiver that runs as it always did.
+/// Capacity 1: the GNSS task is the one reader.
+#[cfg(feature = "gnss")]
+pub static MOTION_STATE: Watch<CriticalSectionRawMutex, Motion, 1> = Watch::new();
+
 /// Battery snapshot published by the SAADC task and consumed by the display.
 ///
 /// `voltage_mv` is the pack voltage in millivolts at the battery terminal

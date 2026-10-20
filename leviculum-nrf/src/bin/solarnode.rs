@@ -615,6 +615,7 @@ async fn main(spawner: Spawner) {
                 // Unlike both other boards, the receiver here has a supply
                 // switch of its own and nothing else is on it.
                 power_enable: Some(p.P1_05.into()),
+                wake: None,
                 module: leviculum_nrf::gnss::ModuleKind::QuectelL76k,
             },
         );

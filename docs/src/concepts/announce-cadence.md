@@ -49,13 +49,22 @@ moved.
    src=qma6100p` on each change, with `MOTION_INIT ok|absent` at boot
    ([Structured event logs](../structured-event-logs.md)). Moving is one
    sample (of four a second) differing from the last by more than 30 mg;
-   still is 30 s without such a sample. Nothing reads the state: the
-   cadence, the GNSS task and telemetry are untouched. The driver and the
+   still is 30 s without such a sample. In this step nothing read the
+   state; step two gave it its one reader. The driver and the
    rule are `leviculum-nrf/motion`, host-tested.
-2. **The receiver sleeps while still** (a later pass). The GNSS task puts
-   the receiver to sleep on `still` and wakes it on `moving`. The proof's
-   inputs and thresholds do not change; it simply gets no fixes while the
-   board is still, which is what a still board would have produced anyway.
+2. **The receiver sleeps while still** (#457, step two). `motion_task`
+   writes each edge to a watch the GNSS task selects against its UART read;
+   on `still` the task puts the AG3335 into Backup mode (`$PAIR650,0`, then
+   its power enable low, VRTC held up so the wake is a warm start), on
+   `moving` it raises the enable, pulses the RTC wake line and sends the
+   `$PAIR` setup again. Each edge prints `GNSS_POWER state=sleep|wake
+   reason=still|moving t=<ms>`. Until the first fix, or
+   `GNSS_FIRST_FIX_GRACE_S` (10 min) after boot, `still` keeps the
+   receiver awake, so a board that boots lying still still learns where it
+   is. The decision is `leviculum-gnss-presence`'s `PowerGate`,
+   host-tested. The proof's inputs and thresholds do not change; it simply
+   gets no fixes while the board is still, which is what a still board
+   would have produced anyway: the fix snapshot holds its last position.
 
 A board without an accelerometer, or one whose part does not answer
 (`MOTION_INIT absent`), keeps its receiver awake and runs the proof as

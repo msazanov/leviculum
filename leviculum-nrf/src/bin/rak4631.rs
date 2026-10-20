@@ -573,6 +573,7 @@ async fn main(spawner: Spawner) {
                 // The ZOE-M8Q sits on the baseboard's 3V3-S rail, raised
                 // above for four peripherals at once.
                 power_enable: None,
+                wake: None,
                 module: leviculum_nrf::gnss::ModuleKind::UbloxM8,
             },
         );
