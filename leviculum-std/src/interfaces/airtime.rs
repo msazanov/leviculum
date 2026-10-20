@@ -43,6 +43,7 @@ impl AirtimeCredit {
     /// `preamble_symbols` is the programmed preamble the radio keys per
     /// frame; pricing with the modem-default 8 would undercount every
     /// charge by (preamble-8)*t_sym.
+    #[cfg_attr(not(feature = "serial"), allow(dead_code))]
     pub(crate) fn new(
         bw_hz: u32,
         sf: u8,
@@ -133,6 +134,7 @@ impl AirtimeCredit {
     /// and max_credit are recomputed from `max_payload_bytes` under
     /// the new radio profile so "one MTU in flight" stays the
     /// invariant across reconfig.
+    #[cfg_attr(not(feature = "serial"), allow(dead_code))]
     pub(crate) fn update_radio_params(
         &mut self,
         bw_hz: u32,

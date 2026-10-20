@@ -284,6 +284,7 @@ impl Node {
         self.inner.spawn_tcp_client(name, host, port, socks_proxy)
     }
 
+    #[cfg(feature = "serial")]
     /// Attach a PipeInterface subprocess to the running node. See
     /// [`ReticulumNode::spawn_pipe_client`](crate::driver::ReticulumNode::spawn_pipe_client).
     pub fn spawn_pipe_client(

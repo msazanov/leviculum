@@ -58,9 +58,9 @@
 //! corpus already writes:
 //!
 //! ```text
-//! `resolve_lt_alock` (`leviculum-std/src/driver/mod.rs:545`)   -- paren
-//! (`resolve_lt_alock`, `leviculum-std/src/driver/mod.rs:545`)  -- comma
-//! | `fn resolve_lt_alock(&self) -> bool` — `driver/mod.rs:545` -- table
+//! `resolve_lt_alock` (`leviculum-std/src/driver/mod.rs:546`)   -- paren
+//! (`resolve_lt_alock`, `leviculum-std/src/driver/mod.rs:546`)  -- comma
+//! | `fn resolve_lt_alock(&self) -> bool` — `driver/mod.rs:546` -- table
 //! ```
 //!
 //! In the paren and comma spellings nothing but whitespace may sit between
@@ -345,7 +345,7 @@ fn ident_regexes() -> [Regex; 4] {
 }
 
 /// A backticked token that is itself a citation: `Destination.py:322`,
-/// `Justfile:1662`. Tables list these next to each other, so without this
+/// `Justfile:1688`. Tables list these next to each other, so without this
 /// the second citation of a row would take the first as its subject.
 fn citation_shaped() -> Regex {
     Regex::new(r"(?:\.[A-Za-z]+|^Justfile):\d").unwrap()
@@ -1978,7 +1978,7 @@ fn a_citation_names_its_subject_in_either_spelling_and_in_nothing_else() {
         "`Transport.outbound()` is the loop, and (",
         // A citation next to a citation, the shape a comparison table has.
         "| Self-announce one-shot | `Destination.py:322`, ",
-        "the recipe moved (`Justfile:1662`, ",
+        "the recipe moved (`Justfile:1688`, ",
         // A token with no letter in its last segment cannot be searched
         // for as an identifier.
         "the VID:PID `1209:0001` (",

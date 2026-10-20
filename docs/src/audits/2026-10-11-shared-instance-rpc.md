@@ -164,7 +164,7 @@ read the answers:
   `shared_instance_name`, `leviculum-std/src/interfaces/inventory.rs:96`;
   against `reference/Reticulum/RNS/Utilities/rnstatus.py:393-401` and
   `:429-438`). The live client count decrements on disconnect
-  (`retire_from_inventory`, `leviculum-std/src/driver/mod.rs:4200`),
+  (`retire_from_inventory`, `leviculum-std/src/driver/mod.rs:4207`),
   so the `Serving : N programs` line (clients − 1,
   `reference/Reticulum/RNS/Utilities/rnstatus.py:432`) reads the same
   against either daemon. Announce-rate defaults follow Python's
@@ -373,7 +373,7 @@ connection, `tcp_server/<peer>` against `TCPInterface[Client on
 reference's client `__str__` spells it
 (`reference/Reticulum/RNS/Interfaces/TCPInterface.py:443-449`), while its
 tunnel hash still derives from the internal `tcp_client_<idx>`
-(`tcp_client_tunnel_hash`, `leviculum-std/src/driver/mod.rs:873`). Pinned by
+(`tcp_client_tunnel_hash`, `leviculum-std/src/driver/mod.rs:874`). Pinned by
 `test_rnpath_table_names_the_interface_rnstatus_reports`: the reference
 `rnpath -tj` against lnsd, joined to `rnstatus -j` by name, finds the
 row, and `rnpath -t` prints `on TCPInterface[Client on TCP
@@ -529,7 +529,7 @@ directory lookup order `/etc/reticulum` → `~/.config/reticulum` →
 with the ≥ 8 floor (`leviculum-std/src/ini_config.rs:895-905`,
 against `reference/Reticulum/RNS/Reticulum.py:747-750`) and the
 per-type default IFAC sizes pinned class by class
-(`default_ifac_size`, `leviculum-std/src/driver/mod.rs:601`);
+(`default_ifac_size`, `leviculum-std/src/driver/mod.rs:601-624`);
 `announce_cap` kept only in (0, 100]
 (`leviculum-std/src/ini_config.rs:871-873`, against
 `reference/Reticulum/RNS/Reticulum.py:819-822`); `bitrate` gated on
@@ -562,7 +562,7 @@ daemon:
 1. **`share_instance`** — Python defaults true
    (`reference/Reticulum/RNS/Reticulum.py:287`); ours defaults false
    (`leviculum-std/src/config.rs:74-79`, resolved unchanged by the
-   builder, `leviculum-std/src/driver/builder.rs:860-862`). A config
+   builder, `leviculum-std/src/driver/builder.rs:864-866`). A config
    that never names the key gives rnsd a shared instance and lnsd
    none: every Python tool answers "No shared RNS instance available"
    against lnsd. This is the central drop-in switch defaulting to the

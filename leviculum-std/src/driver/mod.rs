@@ -542,6 +542,7 @@ impl EventReceiver {
 /// `txpower` over the derived e.r.p. cap. No radio configuration is refused
 /// for a radio-regulatory reason; a silent override is the other half of that
 /// policy failing, so the warning is at WARN and needs no debug filter.
+#[cfg(feature = "serial")]
 fn resolve_lt_alock(airtime_limit_long: Option<f64>, frequency: u32) -> Option<u16> {
     match airtime_limit_long {
         Some(p) => {
@@ -1369,6 +1370,7 @@ pub struct ReticulumNode {
     inner: Arc<Mutex<StdNodeCore>>,
     /// Interface configurations
     interfaces: Vec<InterfaceConfig>,
+    #[cfg(feature = "serial")]
     /// Channel-backed RNode interfaces (host-supplied byte channels), spawned
     /// alongside the file-config interfaces in `initialize_interfaces`.
     rnode_channels: Vec<crate::interfaces::rnode::RNodeChannelConfig>,
@@ -1601,6 +1603,7 @@ impl ReticulumNode {
         Self {
             inner: Arc::new(Mutex::new(core)),
             interfaces,
+            #[cfg(feature = "serial")]
             rnode_channels: Vec::new(),
             control_tx,
             data_tx,
@@ -2280,6 +2283,7 @@ impl ReticulumNode {
             // phone USB/BLE). Same lifecycle as the serial RNode path; the
             // factory replaces the serial-port open. Ids continue past the
             // file-config interfaces via the shared `next_id` allocator.
+            #[cfg(feature = "serial")]
             for spec in std::mem::take(&mut self.rnode_channels) {
                 let id = InterfaceId(next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
                 let iface_name = format!("rnode_channel_{}", id.0);
@@ -2501,6 +2505,7 @@ impl ReticulumNode {
             })
     }
 
+    #[cfg(feature = "serial")]
     /// Called by the builder to carry channel-backed RNode interfaces
     /// (host-supplied byte channels) into `initialize_interfaces`.
     pub(crate) fn set_rnode_channels(
@@ -2558,6 +2563,7 @@ impl ReticulumNode {
         inner.set_announce_control(policy);
     }
 
+    #[cfg(feature = "serial")]
     /// Attach a channel-backed RNode interface to the **running** node at
     /// runtime, returning a lifecycle handle.
     ///
@@ -2711,6 +2717,7 @@ impl ReticulumNode {
         Ok(TcpClientHandle::new(id, shutdown_tx))
     }
 
+    #[cfg(feature = "serial")]
     /// Attach a PipeInterface subprocess to the running node.
     ///
     /// The node spawns `command` as a child process, HDLC-frames outgoing
@@ -6758,6 +6765,7 @@ mod tests {
     /// frequency only when `airtime_limit_long` is absent; an explicit value
     /// (including the harness's `0`) always wins, and non-EU frequencies stay
     /// off.
+    #[cfg(feature = "serial")]
     #[test]
     fn test_resolve_lt_alock_lawful_default() {
         // 869.525 MHz (P) with no explicit limit -> ETSI 10% = lt_alock 1000.

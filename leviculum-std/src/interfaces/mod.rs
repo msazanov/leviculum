@@ -12,35 +12,46 @@
 pub(crate) mod airtime;
 pub mod auto_interface;
 // BLE rides BlueZ over D-Bus, which exists only on Linux (see this crate's
-// Cargo.toml for why the dependency is target-gated).
-#[cfg(target_os = "linux")]
+// Cargo.toml for why the dependency is target-gated), and only with the `ble`
+// feature (#463).
+#[cfg(all(feature = "ble", target_os = "linux"))]
 pub(crate) mod ble;
 pub(crate) mod byte_channel;
 pub(crate) mod census;
+pub(crate) mod firmware_request;
 pub use byte_channel::ByteChannelHandle;
+pub use firmware_request::{
+    request_firmware, request_firmware_announce, request_firmware_media_restore,
+    request_firmware_media_silence, request_firmware_reset, FirmwareRequest,
+    FIRMWARE_ANNOUNCE_SIGNAL, FIRMWARE_MEDIA_RESTORE_SIGNAL, FIRMWARE_MEDIA_SILENCE_SIGNAL,
+};
 pub mod hdlc;
 pub(crate) mod i2p;
 pub(crate) mod inventory;
 pub(crate) mod ipc;
 pub use ipc::{set_shared_instance_transport, shared_instance_transport, SharedInstanceTransport};
+// The byte-stream family below (kiss, pipe, rnode, serial) is the `serial`
+// feature (#463).
+#[cfg(feature = "serial")]
 pub(crate) mod kiss;
 pub(crate) mod local;
 pub use local::{shared_instance_rpc_socket_display, shared_instance_socket_display};
 pub(crate) mod netdevice;
+#[cfg(feature = "serial")]
 pub(crate) mod pipe;
+#[cfg(feature = "serial")]
 pub use pipe::PipeClientHandle;
+#[cfg(feature = "serial")]
 pub(crate) mod rnode;
+#[cfg(feature = "serial")]
 pub use rnode::{
     RNodeChannelConfig, RNodeChannelFactory, RNodeChannelHalves, RNodeChannelHandle,
     RNodeChannelOpenFuture, TX_HOLD_SPREAD_SLOTS,
 };
+#[cfg(feature = "serial")]
 pub(crate) mod serial;
-pub use serial::{
-    radio_bring_up, radio_pricing_phy, remembered_media_profile, request_firmware,
-    request_firmware_announce, request_firmware_media_restore, request_firmware_media_silence,
-    request_firmware_reset, FirmwareRequest, RadioBringUp, FIRMWARE_ANNOUNCE_SIGNAL,
-    FIRMWARE_MEDIA_RESTORE_SIGNAL, FIRMWARE_MEDIA_SILENCE_SIGNAL,
-};
+#[cfg(feature = "serial")]
+pub use serial::{radio_bring_up, radio_pricing_phy, remembered_media_profile, RadioBringUp};
 pub(crate) mod tcp;
 pub use tcp::{disable_fault_injection, enable_fault_injection, TcpClientHandle};
 pub(crate) mod udp;
@@ -157,6 +168,9 @@ pub(crate) struct InterfaceCounters {
     pub tx_bytes: Counter64,
     /// Frames dropped by the TEST-ONLY `test_drop_direct_ingress` filter
     /// (see [`test_drop_direct_ingress_frame`]). Always 0 in production.
+    /// Only the `serial` family arms the filter, so without that feature
+    /// nothing reads it; the counter stays real either way (#463).
+    #[cfg_attr(not(feature = "serial"), allow(dead_code))]
     pub test_direct_ingress_drops: Counter64,
     /// Outgoing frames dropped from the RNode host-side send queue because
     /// it exceeded its cap while TX was held (a dropped frame must be
@@ -247,6 +261,7 @@ impl InterfaceCounters {
     /// Record the duty hold opening or lifting (leviculum#493). Called by
     /// the owning interface task only, on the hold's edges; readers use
     /// [`duty_hold`](Self::duty_hold).
+    #[cfg_attr(not(feature = "serial"), allow(dead_code))]
     pub(crate) fn set_duty_hold(&self, held: bool) {
         self.duty_hold.store(held, Ordering::Release);
     }
@@ -259,6 +274,7 @@ impl InterfaceCounters {
     /// Mark this interface as radio-capable so `interface_stats` always emits
     /// the RNode radio keys (with their `0.0`/`None` defaults) even before the
     /// first `CMD_STAT_*` frame arrives. Called once at RNode spawn.
+    #[cfg_attr(not(feature = "serial"), allow(dead_code))]
     pub(crate) fn enable_radio_stats(&self) {
         let mut guard = self.radio.lock_recover();
         if guard.is_none() {
@@ -269,6 +285,7 @@ impl InterfaceCounters {
     /// Apply an update to the stored radio stats, creating the record if the
     /// interface was not pre-marked. Called by the RNode I/O task on each
     /// parsed `CMD_STAT_*` frame.
+    #[cfg_attr(not(feature = "serial"), allow(dead_code))]
     pub(crate) fn update_radio(&self, f: impl FnOnce(&mut RadioStats)) {
         let mut guard = self.radio.lock_recover();
         f(guard.get_or_insert_with(RadioStats::default));
@@ -283,9 +300,10 @@ impl InterfaceCounters {
     /// the last one; `None` withdraws it (the tables are gone).
     ///
     /// Only the BLE interface publishes one, and it is Linux-only (BlueZ over
-    /// D-Bus), so off Linux this has no caller. The census itself, and the
+    /// D-Bus) and behind the `ble` feature, so off Linux or without it this
+    /// has no caller. The census itself, and the
     /// dump that reads it, exist on every target.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    #[cfg_attr(not(all(feature = "ble", target_os = "linux")), allow(dead_code))]
     pub(crate) fn publish_census(&self, census: Option<census::InterfaceCensus>) {
         *self.census.lock_recover() = census;
     }
@@ -479,9 +497,10 @@ pub(crate) struct IncomingPacket {
 /// cull re-arm exactly the trap the pull exists to clear.
 ///
 /// Only the BLE interface constructs the variants, and it is Linux-only
-/// (it needs BlueZ over D-Bus), so off Linux they have no constructor.
+/// (it needs BlueZ over D-Bus) and behind the `ble` feature, so off Linux
+/// or without it they have no constructor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg_attr(not(all(feature = "ble", target_os = "linux")), allow(dead_code))]
 pub(crate) enum PeerEvent {
     /// The identity gained its FIRST link on the interface; the loop
     /// counts it into the core's peer mirror and reports the arrival
@@ -518,12 +537,14 @@ pub(crate) enum PeerEvent {
 /// green run over an open channel). Info level, so it survives log
 /// filtering that keeps only the default level: per-drop events are debug
 /// volume, this is one line per connection.
+#[cfg(feature = "serial")]
 pub(crate) fn log_direct_ingress_filter_armed(enabled: bool, name: &str) {
     if enabled {
         tracing::info!("DIRECT_INGRESS_FILTER armed iface={name}");
     }
 }
 
+#[cfg(feature = "serial")]
 pub(crate) fn test_drop_direct_ingress_frame(
     enabled: bool,
     name: &str,
@@ -600,6 +621,7 @@ pub(crate) struct OutgoingPacket {
     /// High-priority packets (link requests, proofs, channel data) are sent
     /// before normal-priority packets (announce rebroadcasts) on constrained
     /// interfaces like LoRa. Read by RNode send queue (behind `serial` feature).
+    #[cfg_attr(not(feature = "serial"), allow(dead_code))]
     pub high_priority: bool,
     /// The peer behind this interface the core addressed these bytes to
     /// (Codeberg #376), or `None` for a broadcast and for every interface
@@ -607,15 +629,18 @@ pub(crate) struct OutgoingPacket {
     /// holds several point-to-point links at once, and delivering a routed
     /// packet on all of them costs airtime on links the packet was never
     /// meant for — and, in the field, a second copy relayed back to the
-    /// addressee by the neighbour that received the stray one. Off Linux
-    /// there is no BLE interface, so nothing reads it there.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    /// addressee by the neighbour that received the stray one. Off Linux, or
+    /// without the `ble` feature, there is no BLE interface, so nothing reads
+    /// it there.
+    #[cfg_attr(not(all(feature = "ble", target_os = "linux")), allow(dead_code))]
     pub peer: Option<[u8; leviculum_core::constants::TRUNCATED_HASHBYTES]>,
     /// The packet's journey correlator, the `ph` the core's `PKT_TX` named
     /// for these bytes, or `None` when the core computed none (T-0013).
     /// Opaque to every interface: the RNode interface prints it on its
     /// transmit and drop lines so a tool can say WHICH packet went out or
-    /// died, and nothing may branch on it.
+    /// died, and nothing may branch on it. Without the `serial` feature
+    /// there is no RNode interface to print it.
+    #[cfg_attr(not(feature = "serial"), allow(dead_code))]
     pub ph: Option<leviculum_core::traits::FrameTag>,
 }
 

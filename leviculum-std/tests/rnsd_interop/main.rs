@@ -87,6 +87,8 @@ mod mtu_tests;
 mod multihop_tests;
 mod node_api_tests;
 mod nomad_page_tests;
+// Drives an in-process RNode channel; nothing to test without `serial` (#463).
+#[cfg(feature = "serial")]
 mod packet_radio_stats_tests;
 mod path_gap_tests;
 mod path_recovery_tests;

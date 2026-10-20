@@ -45,7 +45,7 @@ nothing may treat it as one.
 A node that is not told otherwise obeys the band it is on. When no
 `airtime_limit_long` is configured, the host derives the lawful
 long-term limit from the TX frequency (`resolve_lt_alock`,
-`leviculum-std/src/driver/mod.rs:545-579`) and sends it to the modem; a
+`leviculum-std/src/driver/mod.rs:546-580`) and sends it to the modem; a
 standalone LNode whose host never sent one derives it in the firmware
 from its own frequency (`firmware_default_lt_alock`,
 `leviculum-core/src/rnode.rs:1684`). Both read the same table,
@@ -158,7 +158,7 @@ them is not a judgement about anybody's licence.
 Prose alone has drifted twice here — the code once, this page once —
 so both halves are mechanical now. The code is pinned behaviourally
 by `no_radio_configuration_is_refused_for_a_regulatory_reason`
-(`leviculum-std/src/driver/interface_build/mod.rs:1060`), which drives
+(`leviculum-std/src/driver/interface_build/mod.rs:1181`), which drives
 the known regulatory edge cases through the config-building entry
 point and asserts each one builds *and* warns at WARN, with a second
 half pinning the capability refusals so the first cannot be satisfied

@@ -60,9 +60,17 @@ assets = [
 ]
 changelog = "../target/deb-changelog/lnomad"
 
+[features]
+# leviculum-std's interface families, forwarded and on by default (#463);
+# see lnpnd's manifest for why they are forwarded and not inherited.
+default = ["ble", "serial"]
+ble = ["leviculum-std/ble"]
+serial = ["leviculum-std/serial"]
+
 [dependencies]
 leviculum-micron = { path = "../leviculum-micron" }
-leviculum-std = { path = "../leviculum-std" }
+# Default features off, see `[features]`.
+leviculum-std = { path = "../leviculum-std", default-features = false, features = ["compression"] }
 leviculum-core = { path = "../leviculum-core" }
 rmpv.workspace = true
 thiserror.workspace = true

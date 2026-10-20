@@ -84,14 +84,15 @@ pub(crate) struct CensusSection {
 /// busiest moment grew it to.
 ///
 /// This and [`hash_map_row`] serve the BLE interface's census, which is
-/// Linux-only, so off Linux they have no caller.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+/// Linux-only and behind the `ble` feature, so off Linux or without it
+/// they have no caller.
+#[cfg_attr(not(all(feature = "ble", target_os = "linux")), allow(dead_code))]
 pub(crate) fn hash_map_bytes<K, V>(map: &std::collections::HashMap<K, V>) -> u64 {
     (map.capacity() * (size_of::<(K, V)>() + 1)) as u64
 }
 
 /// The row for a `HashMap<K, V>` of fixed-size entries.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg_attr(not(all(feature = "ble", target_os = "linux")), allow(dead_code))]
 pub(crate) fn hash_map_row<K, V>(
     name: &'static str,
     map: &std::collections::HashMap<K, V>,

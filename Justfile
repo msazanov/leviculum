@@ -546,6 +546,30 @@ changelog-links:
 core-no-tracing:
     {{manifest}} core-no-tracing -- cargo test -p leviculum-core --no-default-features
 
+# Codeberg #463: lnsd and leviculum-std without the `ble` and `serial`
+# features, the set a router node or a TCP-only transit host builds. The
+# features exist so those users stop stripping the interfaces by hand; this
+# recipe is what keeps the set compiling and green, the way `core-no-tracing`
+# keeps core's. `compression` stays on: it is the bz2 codec a Python peer's
+# compressed resources need, so a daemon without it is not a smaller lnsd but
+# a broken one. leviculum-cli's default `alloc-mimalloc` goes, because the set
+# is the minimal one, and the libc allocator is what `--no-default-features`
+# always meant for it.
+#
+# Clippy over every target compiles the integration suites in this set too,
+# which is what catches a test that reaches for a gated item; the test lines
+# run leviculum-std's unit tests and all of leviculum-cli's, whose
+# `lnsd_without_interface_features` target exists only here and starts the
+# minimal lnsd against a SerialInterface and a BLEInterface section.
+# leviculum-std's integration targets are not run: they spawn the release
+# integ binaries, which are built with the defaults.
+[doc('Build and test leviculum-std and lnsd without ble and serial')]
+lnsd-minimal:
+    cargo clippy -p leviculum-std --no-default-features --features compression --all-targets -- -D warnings
+    cargo clippy -p leviculum-cli --no-default-features --features compression --all-targets -- -D warnings
+    {{manifest}} lnsd-minimal-std -- cargo test -p leviculum-std --no-default-features --features compression --lib
+    {{manifest}} lnsd-minimal-cli -- cargo test -p leviculum-cli --no-default-features --features compression
+
 # Every `event = "NAME"` literal in the workspace has its row in EVENT_CATALOG
 # (leviculum-std/src/event_log.rs), and nothing else. The test lives in
 # leviculum-std but the emitters live mostly in leviculum-core, so a pass that
@@ -1351,6 +1375,8 @@ tree-clean-selftest:
 #   leviculum-core/src/lib.rs` with this lane's six touched crates
 #   (measured 2026-09-27), and it checks host workspace crates
 # not-in-guards: core-no-tracing -- a cargo test target (clause c)
+# not-in-guards: lnsd-minimal -- cargo test targets (clause c) and a second
+#   feature set of leviculum-std and leviculum-cli to build (clause b)
 # not-in-guards: event-catalog -- a cargo test target (clause c) and a host
 #   build of leviculum-std (clause b): 0.4 s warm, 33 s standing alone after
 #   `touch leviculum-core/src/transport.rs` (measured 2026-10-11). RUN IT BY
@@ -1447,7 +1473,7 @@ guards: tree-snapshot tree-clean-selftest check-submodules check-third-party che
 # `check-all-targets` dependency compiles those targets but does not lint
 # them, which is exactly the gap.
 [doc('Tier 0 (~3.5 min): the gate every git push runs')]
-fast: tree-snapshot tree-clean-selftest check-submodules check-third-party check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest site-unpack-docs-selftest deb-stamp-selftest lock-contention-selftest toolchain-status-selftest sweep-selftest btvirt-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-test-ports check-ignored-source check-just-docs check-guards-subset check-standard-integ check-config-table-citations prepush-guard check-processor-seam mvr supervised-spawn lint-nrf lint-lr11xx nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck hw-witness check-fuzz-lock fuzz-selftest fuzz-regress notices-guard doc-touched doc-gate changelog-links core-no-tracing event-catalog m0-build-gate lxmf-embedded-gate i686-usize-gate no-atomic64-gate check-all-targets citation-guard source-invariant-tests tmp-leftovers
+fast: tree-snapshot tree-clean-selftest check-submodules check-third-party check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest site-unpack-docs-selftest deb-stamp-selftest lock-contention-selftest toolchain-status-selftest sweep-selftest btvirt-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-test-ports check-ignored-source check-just-docs check-guards-subset check-standard-integ check-config-table-citations prepush-guard check-processor-seam mvr supervised-spawn lint-nrf lint-lr11xx nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck hw-witness check-fuzz-lock fuzz-selftest fuzz-regress notices-guard doc-touched doc-gate changelog-links core-no-tracing lnsd-minimal event-catalog m0-build-gate lxmf-embedded-gate i686-usize-gate no-atomic64-gate check-all-targets citation-guard source-invariant-tests tmp-leftovers
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib

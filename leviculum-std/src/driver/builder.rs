@@ -14,6 +14,7 @@ use leviculum_core::ProofStrategy;
 use crate::clock::SystemClock;
 use crate::config::{Config, InterfaceConfig};
 use crate::error::Error;
+#[cfg(feature = "serial")]
 use crate::interfaces::rnode::{
     RNodeChannelConfig, RNodeChannelFactory, RNODE_DEFAULT_BUFFER_SIZE,
 };
@@ -43,6 +44,7 @@ pub struct ReticulumNodeBuilder {
     config_path: Option<PathBuf>,
     storage_path: Option<PathBuf>,
     interfaces: Vec<InterfaceConfig>,
+    #[cfg(feature = "serial")]
     /// Channel-backed RNode interfaces (host-supplied byte channels). Kept
     /// separate from `interfaces` because a factory closure is not
     /// representable in the serializable `InterfaceConfig`.
@@ -106,6 +108,7 @@ impl ReticulumNodeBuilder {
             config_path: None,
             storage_path: None,
             interfaces: Vec::new(),
+            #[cfg(feature = "serial")]
             rnode_channels: Vec::new(),
             corrupt_every: None,
             outbound_socket_hook: None,
@@ -463,6 +466,7 @@ impl ReticulumNodeBuilder {
     /// [`add_rnode_interface`](Self::add_rnode_interface); only the transport
     /// differs. Optional tuning (airtime limits, flow control, buffer size)
     /// uses the driver defaults.
+    #[cfg(feature = "serial")]
     pub fn add_rnode_channel_interface(
         mut self,
         factory: Arc<dyn RNodeChannelFactory>,
@@ -941,6 +945,7 @@ impl ReticulumNodeBuilder {
         interfaces.extend(self.interfaces);
 
         // Channel-backed RNode interfaces (factory closures, not file-config).
+        #[cfg(feature = "serial")]
         let rnode_channels = self.rnode_channels;
 
         // Load or generate transport identity via FileIdentityStore
@@ -1074,6 +1079,7 @@ impl ReticulumNodeBuilder {
         }
         node.set_rpc_key(config.reticulum.rpc_key.clone());
         node.set_storage_path(storage_path.clone());
+        #[cfg(feature = "serial")]
         node.set_rnode_channels(rnode_channels);
         node.set_autoconnect_max(autoconnect_max);
         node.set_discovery_network_identity(discovery_network_identity);

@@ -12,9 +12,19 @@ description = "Standard library extensions for reticulum - networking, file I/O,
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
 
 [features]
-default = ["compression"]
+default = ["compression", "ble", "serial"]
 # Enable compression support (uses no_std compatible compression from leviculum-core)
 compression = ["leviculum-core/compression"]
+# The Columba BLE interface (`interfaces::ble`, `BLEInterface`): bluer and
+# dbus, Linux only. Off, a `BLEInterface` section is a config error naming
+# this feature (Codeberg #463: a router or a TCP-only transit host has no
+# BlueZ, and stripped the interface by hand).
+ble = ["dep:bluer", "dep:dbus"]
+# The byte-stream family: `SerialInterface` (the LNode), `RNodeInterface`,
+# `RNodeMultiInterface`, `KISSInterface`/`AX25KISSInterface` and
+# `PipeInterface`, and tokio-serial under them. Off, each of those sections is
+# a config error naming this feature (#463).
+serial = ["dep:tokio-serial"]
 # Off by default. The census gap line subtracts the counting shim's measured
 # live bytes (`heap_accounting::live_bytes`) instead of the modelled total.
 # Only meaningful in a binary that installs `CountingAllocator` as its global
@@ -43,7 +53,8 @@ tokio.workspace = true
 if-addrs.workspace = true
 socket2.workspace = true
 libc.workspace = true
-tokio-serial.workspace = true
+# `serial` only; see it.
+tokio-serial = { workspace = true, optional = true }
 tracing = { workspace = true, features = ["std"] }
 # Used by `test_support::tracing_setup` (and from commit 2 onward
 # `test_support::event_log`) for the test-harness subscriber.  The
@@ -128,18 +139,24 @@ tracing-subscriber.workspace = true
 hex = "0.4"
 regex = "1"
 tempfile = "3"
+# The three dev-only cycles below (lnomad, leviculum-cli, lnpnd) take their
+# dependency on this crate with default features off and forward `ble` and
+# `serial` through their own defaults, which are off here: otherwise feature
+# unification would switch both families back on in `--no-default-features`
+# test builds, and `just lnsd-minimal` would test the default set (#463).
+#
 # lnomad is the NomadNet browser backend; its shared-instance fetch path is
 # drop-in tested here against both lnsd and rnsd. This is a dev-only cycle
 # (lnomad depends on leviculum-std at build time), which Cargo permits.
-lnomad = { path = "../lnomad" }
+lnomad = { path = "../lnomad", default-features = false }
 # The `lncp` transfer logic, driven directly by the interop suite so the test
 # exercises the tool's own push loop rather than a copy of it. Dev-only cycle,
 # same shape as lnomad above.
-leviculum-cli = { path = "../leviculum-cli" }
+leviculum-cli = { path = "../leviculum-cli", default-features = false }
 # lnpnd's production Engine, attached to a shared instance beside a stock
 # lxmd so the propagation drop-ins (the `lxmd_peer` fixture) test the
 # daemon's own wiring, not a copy. Dev-only cycle, same shape as above.
-lnpnd = { path = "../lnpnd" }
+lnpnd = { path = "../lnpnd", default-features = false }
 # The board's heap budget (`HEAP_SIZE`, `SERVE_MARGIN_BYTES`,
 # `SERVE_RESOURCE_SDU`, the announced limits), read by the propagation
 # serve mvrs instead of mirrored as literals that drift the day the
@@ -154,6 +171,8 @@ leviculum-heap-budget = { path = "../leviculum-nrf/heap-budget" }
 # only to switch on its `vendored` feature (build libdbus from source) so the
 # musl-static default target links self-contained; feature unification applies
 # it to bluer's own dbus edge.
+#
+# Both are optional behind `ble` (#463); off Linux the feature enables nothing.
 [target.'cfg(target_os = "linux")'.dependencies]
-bluer.workspace = true
-dbus.workspace = true
+bluer = { workspace = true, optional = true }
+dbus = { workspace = true, optional = true }

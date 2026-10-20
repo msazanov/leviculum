@@ -379,6 +379,10 @@ mod alloc_probe_self_test {
 }
 
 mod a_dead_sync_link_ends_the_round_beside_a_second_node;
+// The `serial`-gated modules drive the RNode channel or the serial radio
+// bring-up in-process, so a build without that feature has nothing for them
+// to test (#463, `just lnsd-minimal`).
+#[cfg(feature = "serial")]
 mod a_frame_the_modem_consumed_without_transmitting;
 mod a_returning_phone_is_asked_for_its_stored_mail;
 mod an_application_path_request_inside_the_interval_leaves;
@@ -393,15 +397,18 @@ mod forwarding_daemon_forgets_the_request_before_the_proof_returns;
 mod iface_online_after_task_death;
 mod link_failure_recovery_silent_resume;
 mod lncp_fetch_rust_responder;
+#[cfg(feature = "serial")]
 mod local_client_announce_burst_half_duplex;
 mod lxmf_opportunistic_fallback_threshold;
 mod media_silence_restore_signal;
+#[cfg(feature = "serial")]
 mod one_frame_in_the_modem_at_a_time;
 mod pn_offer_outgrows_the_link_mdu;
 mod pn_serve_cap_bounds_one_fetch;
 mod pn_serve_cap_survives_a_shrinking_heap;
 mod pn_serve_peak_outgrows_the_board_heap;
 mod radio_config_sleeps_through_the_peer_yield_window;
+#[cfg(feature = "serial")]
 mod radio_config_wedges_without_lora_task;
 mod ratchet_rotation_single_packet;
 mod rate_window_withholds_no_reference_relay;

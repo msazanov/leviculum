@@ -20,13 +20,18 @@ use leviculum_core::transport::InterfaceId;
 use super::AutoPeerCount;
 
 mod auto;
-#[cfg(target_os = "linux")]
+#[cfg(all(feature = "ble", target_os = "linux"))]
 mod ble;
 mod i2p;
+#[cfg(feature = "serial")]
 mod kiss;
+#[cfg(feature = "serial")]
 mod pipe;
+#[cfg(feature = "serial")]
 mod rnode;
+#[cfg(feature = "serial")]
 mod rnode_multi;
+#[cfg(feature = "serial")]
 mod serial;
 mod tcp;
 mod udp;
@@ -41,9 +46,10 @@ pub(super) struct InterfaceBuildCtx<'a> {
     /// Per-peer transition reports (loss + arrival) from multi-peer
     /// interfaces (Codeberg #365); today only the BLE builder hands it
     /// to its interface task — and that builder is Linux-only (it needs
-    /// BlueZ over D-Bus), so off Linux this field has no reader and
+    /// BlueZ over D-Bus) and behind the `ble` feature, so off Linux or
+    /// without it this field has no reader and
     /// `-D warnings` would fail the lane.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    #[cfg_attr(not(all(feature = "ble", target_os = "linux")), allow(dead_code))]
     pub peer_event_tx: &'a mpsc::Sender<(InterfaceId, crate::interfaces::PeerEvent)>,
     /// Test-only frame-corruption cadence.
     pub corrupt_every: Option<u64>,
@@ -67,7 +73,7 @@ pub(super) struct InterfaceBuildCtx<'a> {
     /// the Columba Identity characteristic, handshakes with it, and derives
     /// its advertised `LN-<hex8>` name from it — the same derivation the
     /// firmware uses (`leviculum_ble_tx::device_name`).
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    #[cfg_attr(not(all(feature = "ble", target_os = "linux")), allow(dead_code))]
     pub identity_hash: [u8; 16],
 }
 
@@ -125,14 +131,31 @@ pub(super) fn build_interface(
         "TCPServerInterface" => tcp::build_server(idx, config, ctx),
         "UDPInterface" => udp::build(idx, config, ctx),
         "AutoInterface" => auto::build(config, ctx, auto_peer_count),
+        #[cfg(feature = "serial")]
         "RNodeInterface" => rnode::build(idx, config, ctx),
+        #[cfg(feature = "serial")]
         "RNodeMultiInterface" => rnode_multi::build(idx, config, ctx),
+        #[cfg(feature = "serial")]
         "SerialInterface" => serial::build(idx, config, ctx),
+        #[cfg(feature = "serial")]
         "PipeInterface" => pipe::build(idx, config, ctx),
+        #[cfg(feature = "serial")]
         "KISSInterface" | "AX25KISSInterface" => kiss::build(idx, config, ctx),
+        // A kind this build left out is a configuration error that names the
+        // feature, never a silent skip: the operator wrote the section because
+        // they expect the interface (#463).
+        #[cfg(not(feature = "serial"))]
+        kind @ ("RNodeInterface"
+        | "RNodeMultiInterface"
+        | "SerialInterface"
+        | "PipeInterface"
+        | "KISSInterface"
+        | "AX25KISSInterface") => Err(feature_off(config, kind, "serial")),
         "I2PInterface" => i2p::build(idx, config, ctx),
-        #[cfg(target_os = "linux")]
+        #[cfg(all(feature = "ble", target_os = "linux"))]
         "BLEInterface" => ble::build(idx, config, ctx),
+        #[cfg(all(not(feature = "ble"), target_os = "linux"))]
+        "BLEInterface" => Err(feature_off(config, "BLEInterface", "ble")),
         // A BLE section in a config file on a non-Linux host is a
         // configuration error worth naming, not a silent no-op.
         #[cfg(not(target_os = "linux"))]
@@ -146,12 +169,26 @@ pub(super) fn build_interface(
     }
 }
 
+/// The refusal for an interface kind whose Cargo feature this build left out.
+#[cfg(any(
+    not(feature = "serial"),
+    all(not(feature = "ble"), target_os = "linux")
+))]
+fn feature_off(config: &InterfaceConfig, kind: &str, feature: &str) -> Error {
+    Error::Config(format!(
+        "interface '{}': {kind} needs the leviculum-std `{feature}` feature, which this \
+         build was compiled without; rebuild with `--features {feature}` or remove the section",
+        config.name
+    ))
+}
+
 /// The bandwidth an RNode is sent: the SX127x spelling of the configured
 /// value, which is the one the firmware echoes back and the bring-up compares
 /// for equality (L-0007). `validate_config` accepts both spellings; an SX1262
 /// spelling sent raw would mismatch the echo, and below 10.4 kHz program the
 /// next bandwidth up. A value outside the table is left for `validate_config`
 /// to refuse by name.
+#[cfg(feature = "serial")]
 pub(super) fn rnode_wire_bandwidth(name: &str, bandwidth: u32) -> u32 {
     let wire = leviculum_core::sx126x::sx127x_bandwidth_hz(bandwidth).unwrap_or(bandwidth);
     if wire != bandwidth {
@@ -175,6 +212,7 @@ mod tests {
     /// one RNode_Firmware's `getSignalBandwidth` reports for the register it
     /// programs (`reference/RNode_Firmware/sx126x.cpp:768`, the same values
     /// in `sx127x.cpp:397`), so the bring-up's equality check holds.
+    #[cfg(feature = "serial")]
     #[test]
     fn an_rnode_is_sent_the_bandwidth_spelling_it_echoes() {
         const RNODE_ECHOES_HZ: [u32; 10] = [
@@ -250,6 +288,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "serial")]
     fn rnode_config(frequency: u64) -> InterfaceConfig {
         InterfaceConfig {
             interface_type: "RNodeInterface".to_string(),
@@ -270,6 +309,7 @@ mod tests {
     ///
     /// Until 2026-08-27 this was an `Err`, which is the one refusal on the
     /// RNode path that was about radio law rather than device capability.
+    #[cfg(feature = "serial")]
     #[tokio::test]
     async fn rnode_build_warns_about_a_carrier_in_an_alarm_band_and_honours_it() {
         let owner = CtxOwner::new();
@@ -290,6 +330,7 @@ mod tests {
     /// not the neighbourhood. Needs a runtime because a successful build
     /// spawns the interface tasks (the port itself may fail later; the
     /// reconnect loop owns that).
+    #[cfg(feature = "serial")]
     #[tokio::test]
     async fn rnode_build_accepts_a_carrier_in_a_listed_sub_band() {
         let owner = CtxOwner::new();
@@ -306,6 +347,7 @@ mod tests {
     /// RNode — the same predicate, the same band, the same reason, on the path
     /// our own hardware uses. Needs a runtime: a successful build spawns the
     /// interface tasks.
+    #[cfg(feature = "serial")]
     #[tokio::test]
     async fn serial_build_warns_about_a_carrier_in_an_alarm_band_and_honours_it() {
         let owner = CtxOwner::new();
@@ -343,6 +385,7 @@ mod tests {
     /// frame (#402, 2026-09-14), so a formula that silently lost its preamble
     /// or its coding rate fails them even if both sides of the equality moved
     /// together.
+    #[cfg(feature = "serial")]
     #[tokio::test]
     async fn rnode_without_a_bitrate_key_declares_its_announce_cap_bitrate() {
         use leviculum_core::rnode::{
@@ -413,6 +456,7 @@ mod tests {
     }
 
     /// Every `warn!` message emitted while the returned guard lives.
+    #[cfg(feature = "serial")]
     fn warn_tap() -> (
         std::sync::Arc<std::sync::Mutex<Vec<String>>>,
         impl tracing::Subscriber + Send + Sync,
@@ -457,6 +501,7 @@ mod tests {
     ///
     /// Both halves are the control for each other: same builder, same PHY,
     /// same port, one differing key.
+    #[cfg(feature = "serial")]
     #[tokio::test]
     async fn a_preamble_pin_over_the_ceiling_is_warned_at_build_time() {
         let lora_block = |preamble: u16| InterfaceConfig {
@@ -525,6 +570,58 @@ mod tests {
         }
     }
 
+    /// #463: a build without `serial` refuses every kind of that family as a
+    /// config error naming the kind and the feature. A silent skip would
+    /// start a node without the radio its operator configured.
+    #[cfg(not(feature = "serial"))]
+    #[test]
+    fn a_serial_kind_without_its_feature_is_refused_naming_the_feature() {
+        let owner = CtxOwner::new();
+        for kind in [
+            "RNodeInterface",
+            "RNodeMultiInterface",
+            "SerialInterface",
+            "PipeInterface",
+            "KISSInterface",
+            "AX25KISSInterface",
+        ] {
+            let config = InterfaceConfig {
+                name: "radio".to_string(),
+                interface_type: kind.to_string(),
+                ..Default::default()
+            };
+            match build_interface(0, &config, &owner.ctx(), &AutoPeerCount::default()) {
+                Err(Error::Config(msg)) => assert!(
+                    msg.contains("'radio'") && msg.contains(kind) && msg.contains("`serial`"),
+                    "{kind}: {msg}"
+                ),
+                Err(other) => panic!("{kind}: not a config error: {other}"),
+                Ok(_) => panic!("{kind}: built without the serial feature"),
+            }
+        }
+    }
+
+    /// #463: the same for `BLEInterface` without `ble`, on the one OS where
+    /// the feature could have provided it.
+    #[cfg(all(not(feature = "ble"), target_os = "linux"))]
+    #[test]
+    fn ble_without_its_feature_is_refused_naming_the_feature() {
+        let owner = CtxOwner::new();
+        let config = InterfaceConfig {
+            name: "columba".to_string(),
+            interface_type: "BLEInterface".to_string(),
+            ..Default::default()
+        };
+        match build_interface(0, &config, &owner.ctx(), &AutoPeerCount::default()) {
+            Err(Error::Config(msg)) => assert!(
+                msg.contains("'columba'") && msg.contains("BLEInterface") && msg.contains("`ble`"),
+                "{msg}"
+            ),
+            Err(other) => panic!("not a config error: {other}"),
+            Ok(_) => panic!("BLEInterface built without the ble feature"),
+        }
+    }
+
     /// The knob on a type that does not implement the filter is refused
     /// rather than silently ignored — a rig config that thinks it emulates
     /// range but does not would invalidate a hardware run.
@@ -549,6 +646,7 @@ mod tests {
     /// The multi builder checks each subinterface's own frequency, and warns
     /// per subinterface rather than refusing the whole port: one
     /// out-of-sub-band vport must not take the other three off the air.
+    #[cfg(feature = "serial")]
     #[tokio::test]
     async fn rnode_multi_build_warns_about_a_subinterface_in_an_alarm_band() {
         let owner = CtxOwner::new();
@@ -590,6 +688,7 @@ mod tests {
     // naming the key it refuses on, and each shape it can build has one.
 
     /// A subinterface lawful on its own: BW125 / SF7 / CR4:5 at `frequency`.
+    #[cfg(feature = "serial")]
     fn multi_sub(name: &str, vport: u8, frequency: u64) -> crate::config::SubinterfaceConfig {
         crate::config::SubinterfaceConfig {
             name: name.to_string(),
@@ -602,6 +701,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "serial")]
     fn multi_config(subinterfaces: Vec<crate::config::SubinterfaceConfig>) -> InterfaceConfig {
         InterfaceConfig {
             interface_type: "RNodeMultiInterface".to_string(),
@@ -611,12 +711,14 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "serial")]
     fn multi_plan(
         config: &InterfaceConfig,
     ) -> Result<crate::interfaces::rnode::RNodeMultiInterfaceConfig, Error> {
         rnode_multi::plan(3, config, &CtxOwner::new().ctx())
     }
 
+    #[cfg(feature = "serial")]
     fn multi_refusal(config: &InterfaceConfig) -> String {
         match multi_plan(config) {
             Ok(_) => panic!("the section must be refused"),
@@ -624,6 +726,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "serial")]
     #[test]
     fn rnode_multi_without_a_port_is_refused() {
         let mut config = multi_config(vec![multi_sub("a", 0, 869_525_000)]);
@@ -632,6 +735,7 @@ mod tests {
         assert!(msg.contains("requires port"), "{msg}");
     }
 
+    #[cfg(feature = "serial")]
     #[test]
     fn rnode_multi_subinterface_without_a_vport_is_refused() {
         let mut sub = multi_sub("a", 0, 869_525_000);
@@ -640,6 +744,7 @@ mod tests {
         assert!(msg.contains("'a' requires vport"), "{msg}");
     }
 
+    #[cfg(feature = "serial")]
     #[test]
     fn rnode_multi_vport_past_the_last_radio_is_refused() {
         let max = leviculum_core::rnode::MAX_SUBINTERFACES;
@@ -655,6 +760,7 @@ mod tests {
     /// Two subinterfaces on one vport would share one radio: the later PHY
     /// overwrites the earlier, and the hub routes that vport's receptions to
     /// only one of them. Refused, naming both and the vport.
+    #[cfg(feature = "serial")]
     #[test]
     fn rnode_multi_duplicate_vport_is_refused_naming_both() {
         let msg = multi_refusal(&multi_config(vec![
@@ -668,6 +774,7 @@ mod tests {
     }
 
     /// Each PHY key is refused by its own name when it is missing.
+    #[cfg(feature = "serial")]
     #[test]
     fn rnode_multi_subinterface_missing_a_phy_key_is_refused_by_that_key() {
         type Clear = fn(&mut crate::config::SubinterfaceConfig);
@@ -685,6 +792,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "serial")]
     #[test]
     fn rnode_multi_frequency_past_u32_is_refused() {
         let msg = multi_refusal(&multi_config(vec![multi_sub("a", 0, 1 << 32)]));
@@ -695,6 +803,7 @@ mod tests {
     }
 
     /// The RNode wire field is a u8, so a negative `txpower` cannot be sent.
+    #[cfg(feature = "serial")]
     #[test]
     fn rnode_multi_negative_txpower_is_refused() {
         let mut sub = multi_sub("a", 0, 869_525_000);
@@ -705,6 +814,7 @@ mod tests {
 
     /// The capability check shared with the single builder, attributed to
     /// the subinterface that failed it.
+    #[cfg(feature = "serial")]
     #[test]
     fn rnode_multi_capability_refusal_names_the_subinterface() {
         let mut sub = multi_sub("wide", 0, 869_525_000);
@@ -713,6 +823,7 @@ mod tests {
         assert!(msg.contains("subinterface 'wide':"), "{msg}");
     }
 
+    #[cfg(feature = "serial")]
     #[test]
     fn rnode_multi_with_no_enabled_subinterface_is_refused() {
         let mut off = multi_sub("off", 0, 869_525_000);
@@ -730,6 +841,7 @@ mod tests {
     /// own id, the next drawn from the shared counter, each named after its
     /// block and carrying its own PHY. A disabled block is skipped entirely:
     /// it draws no id, and the vport it names stays free.
+    #[cfg(feature = "serial")]
     #[test]
     fn rnode_multi_two_vports_plan_two_subinterfaces_on_their_own_phys() {
         let owner = CtxOwner::new();
@@ -799,6 +911,7 @@ mod tests {
     /// the long-term lock is the lawful duty cycle of that vport's own
     /// sub-band (10 % at 869.525 MHz, 1 % at 868.1 MHz), and explicit
     /// percentages are carried per vport in hundredths.
+    #[cfg(feature = "serial")]
     #[test]
     fn rnode_multi_airtime_locks_follow_each_vports_own_phy() {
         let mut capped = multi_sub("capped", 2, 869_525_000);
@@ -826,6 +939,7 @@ mod tests {
 
     /// An absent `txpower` is derived from each vport's own frequency and
     /// marked as derived; an explicit one, 0 included, is taken as written.
+    #[cfg(feature = "serial")]
     #[test]
     fn rnode_multi_txpower_is_derived_per_vport_unless_written() {
         let mut quiet = multi_sub("quiet", 2, 869_525_000);
@@ -857,6 +971,7 @@ mod tests {
 
     /// An SX1262 spelling of a bandwidth reaches the RNode as the spelling
     /// it echoes, per vport, as in the single builder.
+    #[cfg(feature = "serial")]
     #[test]
     fn rnode_multi_bandwidth_is_sent_in_the_rnode_spelling() {
         let mut sub = multi_sub("narrow", 0, 869_525_000);
@@ -870,6 +985,7 @@ mod tests {
 
     /// What reaches the transport: one interface per vport, under the planned
     /// names and ids, each reporting the bitrate of its own PHY.
+    #[cfg(feature = "serial")]
     #[tokio::test]
     async fn rnode_multi_build_yields_one_interface_per_vport_with_its_own_bitrate() {
         let owner = CtxOwner::new();
@@ -940,6 +1056,7 @@ mod tests {
 
     /// One radio block, so each case differs from the lawful control by
     /// exactly the key under test.
+    #[cfg(feature = "serial")]
     #[derive(Clone, Copy)]
     struct Radio {
         frequency: u64,
@@ -950,6 +1067,7 @@ mod tests {
         airtime_limit_long: Option<f64>,
     }
 
+    #[cfg(feature = "serial")]
     impl Radio {
         /// 869.525 MHz / BW125 / SF7 / CR4:5 — ERC 70-03 sub-band h1.7,
         /// inside every listed limit, with nothing explicitly configured that
@@ -1024,6 +1142,7 @@ mod tests {
     /// survive by living only in one the guard does not drive. Driven through
     /// `build_interface`, the dispatch a config file actually reaches, not the
     /// submodule entry points.
+    #[cfg(feature = "serial")]
     fn radio_shapes(radio: &Radio) -> [(&'static str, InterfaceConfig); 3] {
         [
             ("RNodeInterface", radio.single()),
@@ -1043,6 +1162,7 @@ mod tests {
     /// driver's `resolve_lt_alock`, which is where that warning lives. The gap
     /// is data here, not prose, so it cannot widen unnoticed: a shape added to
     /// `radio_shapes` is refusal-checked whether or not anyone remembers it.
+    #[cfg(feature = "serial")]
     struct Case {
         what: &'static str,
         radio: Radio,
@@ -1056,6 +1176,7 @@ mod tests {
     /// "Warns" is asserted at WARN specifically: a decision narrated at debug
     /// is invisible in a default daemon log, which is the silent-substitution
     /// defect of Codeberg #349/#350 rather than a fix for it.
+    #[cfg(feature = "serial")]
     #[tokio::test]
     async fn no_radio_configuration_is_refused_for_a_regulatory_reason() {
         const RADIO_SHAPES: &[&str] = &["RNodeInterface", "RNodeMultiInterface", "SerialInterface"];
@@ -1136,6 +1257,7 @@ mod tests {
     /// the other four bounds with it — unremarked, and therefore unpinned for
     /// two weeks while this comment still said the gap was open. Driving the
     /// shape here is what makes the claim checkable rather than prose.
+    #[cfg(feature = "serial")]
     #[tokio::test]
     async fn capability_refusals_are_untouched_by_the_regulatory_guard() {
         let cases: [(&str, Radio); 5] = [
