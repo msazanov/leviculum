@@ -904,7 +904,7 @@ impl Engine {
         );
         let role = PropagationNode::new(store, role_config);
 
-        let peer_store = PnPeerStore::new(region);
+        let mut peer_store = PnPeerStore::new(region);
         // The operator's lists, written at flash time (`lnflash
         // --static-peer`, `--auth-allowed`, `--control-allowed`; audit
         // 2026-10-12 D4, D18). Read once: a list written while the role runs
@@ -923,8 +923,21 @@ impl Engine {
             BOARD_REMOTE_PEERING_COST_MAX,
             lists.static_peers,
         ));
+        // A record already unheard past the reference's 14 days is left
+        // out and purged here, so a table that holds dead peers heals on
+        // load (leviculum#466): nothing below may dial it or refresh it.
         if let Ok(records) = peer_store.load_all() {
-            peers.restore(records);
+            for dropped in peers.restore(records, node.emission_secs()) {
+                let _ = peer_store.remove(&dropped);
+                crate::log::log_fmt(
+                    "PN_PEER ",
+                    format_args!(
+                        "peer={} action=drop reason=unreachable peers={}",
+                        Hex(&dropped),
+                        peers.len()
+                    ),
+                );
+            }
         }
         // The reference's order (`enable_propagation`,
         // `reference/LXMF/LXMF/LXMRouter.py:615-642`), lnpnd's too: the
@@ -1134,10 +1147,12 @@ impl Engine {
         }
     }
 
-    /// The calendar just jumped from the birth anchor to real time:
-    /// refresh every liveness stamp taken before the jump so the 14-day
-    /// unreachability cull does not read the jump as fourteen days of
-    /// silence. "Heard this boot" is the honest reading of those stamps.
+    /// The calendar just jumped from the birth anchor or the restored
+    /// floor to real time: carry every liveness stamp and backoff booking
+    /// taken before the jump across it, by the jump, so the 14-day
+    /// unreachability cull neither reads the jump as fourteen days of
+    /// silence nor forgets a silence it had already counted
+    /// ([`PeerTable::refresh_after_calendar_jump`], leviculum#466).
     ///
     /// `before` is the estimate the old calendar gave at the moment of the
     /// jump, so `last_heard <= before` is exactly "stamped on the old

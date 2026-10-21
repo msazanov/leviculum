@@ -398,8 +398,14 @@ impl Peer {
     /// already deferred; [`note_link_established`](Self::note_link_established)
     /// and [`release_yielded_round`](Self::release_yielded_round) are the two
     /// ways it is taken back. The board's engine (`leviculum-nrf/src/pn.rs`,
-    /// `start_round`) calls this; no rig cell exercises the accumulation,
-    /// because none holds a peer unreachable (leviculum#413).
+    /// `start_round`) calls this. Every board PN cell on the rig holds peers
+    /// unreachable: the harness mutes the LNodes a cell does not bind, and
+    /// they stay in the bound boards' tables (leviculum#466). One attempt
+    /// costs the core's `1 + LINK_REQUEST_MAX_RETRIES` link requests
+    /// (`leviculum-core/src/constants.rs`; the reference sends one), each
+    /// after one establishment timeout, 12 s at one hop plus up to 25 %
+    /// jitter: the ~13 s trains in the captures are one booking each, not
+    /// one per sync pass.
     pub fn book_sync_attempt(&mut self, now: u64) {
         self.sync_backoff_secs += SYNC_BACKOFF_STEP_SECS;
         self.next_sync_attempt = now + self.sync_backoff_secs;
@@ -792,19 +798,35 @@ impl PeerTable {
     }
 
     /// The calendar just jumped from `before`, the estimate the old
-    /// calendar gave at the moment of the jump, to `now`: refresh every
-    /// liveness stamp taken on the old calendar, so the 14-day
+    /// calendar gave at the moment of the jump, to `now`: carry every stamp
+    /// taken on the old calendar across the jump, so the 14-day
     /// unreachability cull does not read the jump as fourteen days of
-    /// silence. "Heard this boot" is the honest reading of those stamps.
-    /// Returns the peers it refreshed, which the caller persists.
+    /// silence. Returns the peers whose `last_heard` moved, which the caller
+    /// persists.
     ///
     /// `last_heard <= before` is exactly "stamped on the old calendar": no
     /// fixed date can say that, because a board's birth anchor is itself a
-    /// plausible-looking value (Codeberg #247). A jump that does not move
-    /// the calendar forward refreshes nothing. The board's engine
-    /// (`leviculum-nrf/src/pn.rs`, `seed_clock`) calls this; no rig cell
-    /// seeds a board's clock mid-run with peers in its table
-    /// (leviculum#413).
+    /// plausible-looking value (Codeberg #247). Such a stamp moves by the
+    /// jump, `now - before`, so the age it had on the old calendar survives:
+    /// a peer heard a minute before the jump reads a minute old after it.
+    /// A stamp of 0 is "never heard", not a stamp, and stays 0 (the
+    /// static-peer path-response rule reads it, `Handlers.py:70`). The
+    /// backoff deferral moves the same way: every booking still in RAM at
+    /// the jump was made on the old calendar, and left alone it would read
+    /// as long past and release a peer that never answered.
+    ///
+    /// Until leviculum#466 the stamps were set to `now` instead. A board
+    /// whose clock is seeded from an overheard announce on every boot then
+    /// read its whole persisted table as "heard this boot" on every boot,
+    /// and a peer that never answered again stayed in the table for good:
+    /// on the rig, where the bound boards reboot for every cell, a board
+    /// peer muted by the cell was dialled again in each one. Moving by the
+    /// jump keeps the age; what it does not count is the time a board spent
+    /// powered off, which its old calendar never saw, so the cull is never
+    /// earlier than the reference's wall-clock one.
+    ///
+    /// A jump that does not move the calendar forward moves nothing. The
+    /// board's engine (`leviculum-nrf/src/pn.rs`, `seed_clock`) calls this.
     pub fn refresh_after_calendar_jump(
         &mut self,
         before: u64,
@@ -814,23 +836,39 @@ impl PeerTable {
         if now <= before {
             return refreshed;
         }
+        let jump = now - before;
         for peer in self.peers.values_mut() {
-            if peer.last_heard <= before {
-                peer.last_heard = now;
+            if peer.next_sync_attempt != 0 {
+                peer.next_sync_attempt = peer.next_sync_attempt.saturating_add(jump);
+            }
+            if peer.last_heard != 0 && peer.last_heard <= before {
+                peer.last_heard += jump;
                 refreshed.push(peer.destination_hash);
             }
         }
         refreshed
     }
 
-    /// Restore persisted peers (engine start-up).
-    pub fn restore(&mut self, records: Vec<PeerRecord>) {
+    /// Restore persisted peers (engine start-up). A non-static record
+    /// already unheard past [`MAX_UNREACHABLE_SECS`] at `now` is not
+    /// restored: it is returned instead, and the caller removes it from its
+    /// store. The reference restores such a peer and culls it in its first
+    /// `sync_peers` pass (`LXMRouter.py:615-628`, `:2136-2140`); doing it
+    /// here makes the load heal a persisted table on its own, before any
+    /// sync pass or clock seed can dial or refresh the dead entry.
+    pub fn restore(&mut self, records: Vec<PeerRecord>, now: u64) -> Vec<[u8; DESTINATION_LENGTH]> {
+        let mut dropped = Vec::new();
         for record in records {
             let mut peer = record.into_peer();
             peer.is_static =
                 self.config.static_peers.contains(&peer.destination_hash) || peer.is_static;
+            if unreachable_at(&peer, now) {
+                dropped.push(peer.destination_hash);
+                continue;
+            }
             self.peers.insert(peer.destination_hash, peer);
         }
+        dropped
     }
 
     /// Give every configured static peer a table entry, the reference's
@@ -1139,9 +1177,7 @@ impl PeerTable {
         let dropped: Vec<[u8; DESTINATION_LENGTH]> = self
             .peers
             .values()
-            .filter(|peer| {
-                !peer.is_static && now > peer.last_heard.saturating_add(MAX_UNREACHABLE_SECS)
-            })
+            .filter(|peer| unreachable_at(peer, now))
             .map(|peer| peer.destination_hash)
             .collect();
         for hash in &dropped {
@@ -1325,6 +1361,14 @@ impl PeerTable {
             !miner_busy || peer.peering_key_held()
         })
     }
+}
+
+/// The cull rule, shared by [`PeerTable::cull`] and [`PeerTable::restore`]:
+/// a non-static peer unheard for more than [`MAX_UNREACHABLE_SECS`]
+/// (`time.time() > peer.last_heard + LXMPeer.MAX_UNREACHABLE`,
+/// `reference/LXMF/LXMF/LXMRouter.py:2139-2140`).
+fn unreachable_at(peer: &Peer, now: u64) -> bool {
+    !peer.is_static && now > peer.last_heard.saturating_add(MAX_UNREACHABLE_SECS)
 }
 
 /// Peering-key material: the peer's identity hash followed by ours —

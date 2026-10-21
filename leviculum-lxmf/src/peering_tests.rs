@@ -102,10 +102,11 @@ fn the_cap_declines_new_peers_first_heard_wins() {
 /// rotation tests: every peer tested, alive, offered 10 and took 9.
 /// A board whose calendar ran on its birth anchor (the build time) seeds
 /// real time: the peers it heard on the old calendar, the one at the jump
-/// instant included, read "heard now"; a peer restored with a stamp the
-/// previous boot took on real time, later than the anchor, keeps it.
+/// instant included, move by the jump and keep the age the old calendar
+/// gave them; a peer restored with a stamp the previous boot took on real
+/// time, later than the anchor, keeps it.
 #[test]
-fn a_calendar_jump_refreshes_the_peers_heard_on_the_old_calendar() {
+fn a_calendar_jump_carries_the_old_calendar_stamps_by_the_jump() {
     const ANCHOR: u64 = 1_760_000_000;
     let before = ANCHOR + 300;
     let now = ANCHOR + 100_000;
@@ -120,9 +121,92 @@ fn a_calendar_jump_refreshes_the_peers_heard_on_the_old_calendar() {
     let refreshed = table.refresh_after_calendar_jump(before, now);
 
     assert_eq!(refreshed, vec![[1; 16], [2; 16]]);
-    assert_eq!(table.get(&[1; 16]).unwrap().last_heard, now);
+    assert_eq!(table.get(&[1; 16]).unwrap().last_heard, now - 200);
     assert_eq!(table.get(&[2; 16]).unwrap().last_heard, now);
     assert_eq!(table.get(&[3; 16]).unwrap().last_heard, ANCHOR + 50_000);
+}
+
+/// The rig's #466 shape: a board that reboots often and seeds its clock
+/// from an overheard announce on every boot. Its peer, muted for good, was
+/// last heard at `HEARD`. Before #466 every seed set the persisted stamp to
+/// "now", so the peer never aged and was dialled again on every boot. Moved
+/// by the jump, the silence the old calendar counted survives each seed,
+/// and once it passes the reference's 14 days the load leaves the peer out.
+#[test]
+fn a_peer_silent_across_seeded_boots_ages_and_is_dropped_at_load() {
+    const HEARD: u64 = 1_790_000_000;
+    // Each boot: up for a day on the restored floor (the last real time the
+    // previous boot persisted), seeded ten minutes in, a seed 30 minutes
+    // ahead of the floor (the time the board spent off).
+    const UP: u64 = 24 * 60 * 60;
+    const SEED_AFTER: u64 = 10 * 60;
+    const OFF: u64 = 30 * 60;
+    let mut store = MemoryPeerStore::default();
+    let mut heard = Peer::from_announce([7; 16], &announce(1), false, HEARD);
+    heard.cursor = 1;
+    store.save(&PeerRecord::of(&heard)).unwrap();
+
+    let mut floor = HEARD;
+    let mut boots = 0u64;
+    loop {
+        let mut table = table();
+        let dropped = table.restore(store.load_all().unwrap(), floor);
+        if !dropped.is_empty() {
+            assert_eq!(dropped, vec![[7; 16]]);
+            store.remove(&[7; 16]).unwrap();
+            break;
+        }
+        let before = floor + SEED_AFTER;
+        let now = before + OFF;
+        for moved in table.refresh_after_calendar_jump(before, now) {
+            store
+                .save(&PeerRecord::of(table.get(&moved).unwrap()))
+                .unwrap();
+        }
+        let peer = table.get(&[7; 16]).unwrap();
+        assert_eq!(
+            now - peer.last_heard,
+            before - HEARD - boots * OFF,
+            "boot {boots}: the seed keeps the age the old calendar counted"
+        );
+        floor = now + UP - SEED_AFTER;
+        boots += 1;
+        assert!(boots < 100, "the silent peer never left the table");
+    }
+    // Fourteen days of awake time, the off time not counted: 15 boots.
+    assert_eq!(boots, 15);
+    assert!(store.load_all().unwrap().is_empty());
+}
+
+/// A booking made on the old calendar moves with the jump: a peer that
+/// never answered is still deferred the same time after the seed, instead
+/// of reading a deferral long past and being dialled at once. A stamp of 0
+/// ("never heard", a configured static peer) is no stamp and stays 0.
+#[test]
+fn a_calendar_jump_keeps_the_backoff_and_the_never_heard_static_peer() {
+    const ANCHOR: u64 = 1_760_000_000;
+    let mut table = static_table(vec![[9; 16]]);
+    assert_eq!(table.activate_static_peers(), vec![[9; 16]]);
+    table.handle_announce([1; 16], &announce(1), Some(1), ANCHOR, false);
+    {
+        let peer = table.get_mut(&[1; 16]).unwrap();
+        peer.book_sync_attempt(ANCHOR + 10);
+        peer.state = SyncPhase::Idle;
+    }
+    let before = ANCHOR + 20;
+    let now = ANCHOR + 1_000_000;
+
+    table.refresh_after_calendar_jump(before, now);
+
+    let peer = table.get(&[1; 16]).unwrap();
+    assert_eq!(
+        peer.next_sync_attempt,
+        now - 10 + SYNC_BACKOFF_STEP_SECS,
+        "still one step from the attempt, on the new calendar"
+    );
+    assert_eq!(table.next_due(now + 1, 5, None), None);
+    assert_eq!(table.get(&[9; 16]).unwrap().last_heard, 0);
+    assert_eq!(table.static_peers_unheard(), vec![[9; 16]]);
 }
 
 /// A seed that does not move the calendar forward is no jump: nothing is
@@ -1179,6 +1263,78 @@ fn response_actions_match_the_reference_semantics() {
     );
 }
 
+/// The schedule a peer that never answers is held to, end to end: the
+/// reference's ladder (`SYNC_BACKOFF_STEP = 12*60` booked before every link
+/// attempt, `LXMPeer.py:45`, `:321-322`) and its drop (`MAX_UNREACHABLE =
+/// 14*24*60*60`, `LXMPeer.py:39`, culled in `sync_peers`,
+/// `LXMRouter.py:2139-2140`). The first failure holds the peer 12 minutes,
+/// the n-th `n` times 12 minutes after it, so the n-th attempt lands
+/// `6·n·(n−1)` minutes after the first; 58 attempts fit in the 14 days, and
+/// the peer leaves the table one second past them.
+#[test]
+fn a_peer_that_never_answers_climbs_the_ladder_and_leaves_after_fourteen_days() {
+    const HEARD: u64 = 1_790_000_000;
+    let mut table = table();
+    table.handle_announce([1; 16], &announce(1), Some(1), HEARD, false);
+
+    let mut now = HEARD;
+    let mut attempts = Vec::new();
+    while now <= HEARD + MAX_UNREACHABLE_SECS {
+        assert!(table.cull(now).is_empty(), "inside the 14 days at {now}");
+        assert_eq!(table.next_due(now, 5, None), Some([1; 16]));
+        let peer = table.get_mut(&[1; 16]).unwrap();
+        peer.book_sync_attempt(now);
+        // The link never comes up; the round ends and the peer idles.
+        peer.state = SyncPhase::Idle;
+        attempts.push(now - HEARD);
+        let next = peer.next_sync_attempt;
+        assert_eq!(table.next_due(next - 1, 5, None), None);
+        now = next;
+    }
+
+    // First failure: due again 12 minutes after the attempt.
+    assert_eq!(attempts[1] - attempts[0], SYNC_BACKOFF_STEP_SECS);
+    // The n-th failure (n = 5): n × 12 minutes.
+    assert_eq!(attempts[5] - attempts[4], 5 * SYNC_BACKOFF_STEP_SECS);
+    for (index, at) in attempts.iter().enumerate() {
+        let n = index as u64 + 1;
+        assert_eq!(*at, SYNC_BACKOFF_STEP_SECS * n * (n - 1) / 2);
+    }
+    assert_eq!(attempts.len(), 58);
+    // The drop: unheard for exactly 14 days is kept, one second more is not.
+    assert!(table.cull(HEARD + MAX_UNREACHABLE_SECS).is_empty());
+    assert_eq!(table.cull(HEARD + MAX_UNREACHABLE_SECS + 1), vec![[1; 16]]);
+    assert!(table.is_empty());
+}
+
+/// A persisted table that already holds dead peers heals on load: a
+/// non-static record unheard past 14 days is not restored, and is handed
+/// back for the store to purge; a live one and a static one, however long
+/// unheard, are restored (the static cull exemption, `LXMRouter.py:2140`).
+#[test]
+fn restore_leaves_out_and_hands_back_the_peers_unheard_past_fourteen_days() {
+    const NOW: u64 = 1_790_000_000;
+    let mut table = static_table(vec![[3; 16]]);
+    let dead = Peer::from_announce([1; 16], &announce(1), false, NOW - MAX_UNREACHABLE_SECS - 1);
+    let edge = Peer::from_announce([2; 16], &announce(1), false, NOW - MAX_UNREACHABLE_SECS);
+    let quiet_static = Peer::from_announce([3; 16], &announce(1), false, 1);
+
+    let dropped = table.restore(
+        vec![
+            PeerRecord::of(&dead),
+            PeerRecord::of(&edge),
+            PeerRecord::of(&quiet_static),
+        ],
+        NOW,
+    );
+
+    assert_eq!(dropped, vec![[1; 16]]);
+    assert!(table.get(&[1; 16]).is_none());
+    assert!(table.get(&[2; 16]).is_some());
+    assert!(table.get(&[3; 16]).is_some_and(|peer| peer.is_static));
+    assert_eq!(table.len(), 2);
+}
+
 // ---- persistence ----
 
 #[test]
@@ -1190,7 +1346,7 @@ fn peer_records_round_trip_through_a_store_and_restore() {
     store.save(&PeerRecord::of(&peer)).unwrap();
 
     let mut table = table();
-    table.restore(store.load_all().unwrap());
+    assert!(table.restore(store.load_all().unwrap(), 0).is_empty());
     let restored = table.get(&peer.destination_hash).unwrap();
     assert_eq!(restored.cursor, 42);
     assert_eq!(restored.peering_key, Some(([0xEE; 32], 19)));
@@ -1295,7 +1451,7 @@ fn captured_keys_survive_store_restore() {
     let mut store = MemoryPeerStore::default();
     store.save(&PeerRecord::of(&peer)).unwrap();
     let mut restored = table();
-    restored.restore(store.load_all().unwrap());
+    assert!(restored.restore(store.load_all().unwrap(), 0).is_empty());
     let recalled = restored
         .get(&peer.destination_hash)
         .unwrap()
@@ -1392,7 +1548,7 @@ fn activation_creates_missing_static_entries_and_names_the_unheard() {
     // [2] was heard before the restart and persisted.
     let mut heard = Peer::from_announce([2; 16], &announce(100), true, 500);
     heard.cursor = 4;
-    table.restore(vec![PeerRecord::of(&heard)]);
+    assert!(table.restore(vec![PeerRecord::of(&heard)], 500).is_empty());
 
     assert_eq!(table.activate_static_peers(), vec![[1; 16], [3; 16]]);
     assert_eq!(table.len(), 3);

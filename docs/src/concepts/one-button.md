@@ -109,7 +109,7 @@ LEDs keep their activity pulses between patterns. Three things play:
 - **A held button reaching 2 s** (`leviculum-nrf/src/button.rs:130`)
   plays `release-now` on the LED and the buzzer.
 - **A message for this board's own `lxmf.delivery` destination stored by
-  the propagation role** (`leviculum-nrf/src/pn.rs:3300,3580`, a client
+  the propagation role** (`leviculum-nrf/src/pn.rs:3315,3595`, a client
   upload and a peer sync; a duplicate is not news) plays `notify` on the
   notification LED where the board has one, else on the LED, and on the
   buzzer. The board has no inbox, so its propagation store is the one

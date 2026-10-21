@@ -1277,7 +1277,7 @@ fn after_a_reset_a_syncing_neighbour_is_peered_from_its_recalled_announce() {
         // The reset.
         let rebooted = PnPeerStore::new(region.clone());
         let mut table = PeerTable::new(board_peering_config(1, 18, Vec::new()));
-        table.restore(rebooted.load_all().unwrap());
+        assert!(table.restore(rebooted.load_all().unwrap(), 100).is_empty());
         assert!(table.get(&neighbour).is_none());
 
         // The sync lands over a three-hop link; the path table is empty.
@@ -1388,7 +1388,7 @@ fn a_static_peer_set_at_flash_time_is_in_the_table_at_boot_and_never_culled() {
         assert!(directory(&PnStore::new(region.clone(), SECTORS)).is_empty());
 
         let mut table = PeerTable::new(board_peering_config(1, 18, lists.static_peers));
-        table.restore(rebooted.load_all().unwrap());
+        assert!(table.restore(rebooted.load_all().unwrap(), 100).is_empty());
         assert_eq!(table.activate_static_peers(), vec![home]);
         assert!(table.get(&home).is_some_and(|peer| peer.is_static));
         assert_eq!(
