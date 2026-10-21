@@ -44,6 +44,7 @@ pub mod drain;
 pub mod gap;
 pub mod gatt_bytes;
 pub mod hold;
+pub mod link_down;
 pub mod peer;
 pub mod registry;
 pub mod saturation;
@@ -79,6 +80,9 @@ pub use gatt_bytes::{
     fragment_mtu, GattBytes, OversizeFrom, OversizeLine, ATT_MTU, GATT_VALUE_MAX,
 };
 pub use hold::TxHold;
+pub use link_down::{
+    disconnect_settle_ms, DisconnectReason, LinkDownLine, DISCONNECT_SETTLE_MARGIN_MS,
+};
 pub use peer::{
     addr_value, parse_peer_advertisement, should_initiate, ConnectDecision, PeerAdvertisement,
     ScanMode,

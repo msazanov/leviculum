@@ -31,19 +31,19 @@ use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Timer};
 use leviculum_ble_tx::{
     abort_disconnects, addr_value, admit, advertise_pass_pause_ms, connect_failure_condemns,
-    dial_preference, dial_stage_failure, drain_table_refusal, fragment_mtu, identity_hint,
-    incoming_verdict, judge_read_identity, judge_supervision_timeout, link_queue_verdict,
-    manufacturer_data_with_hint, parse_peer_advertisement, refused_dial, scan_pass_pause_ms,
-    with_free_slots, AdvReport, AdvertisePass, CandidateTable, CarrierPath, CarrierStep,
-    ChurnLedger, ChurnPolicy, ConnParams, ConnParamsAsk, ConnParamsLine, ConnParamsReq,
-    ConnParamsReqLine, ConnectDecision, DeadEnds, DialBackoff, DialFailure, DialLedger,
-    DialRefusedLine, DialStage, Enqueue, Exclusion, Fill, GattBytes, LedgerPolicy, Ledgers,
-    LinkItem, LinkPhase, LinkRole, LinkUp, LinkVerdict, Local, Origin, OversizeFrom, OversizeLine,
-    PeerAddr, PeerRegistry, PhaseEvent, PhaseNeighbours, ReadIdentity, ScanMode, ScanPass,
-    ScanPhase, StageError, TxGap, ADV_BYTES_USED, CAP_PERIPHERAL_ONLY, DEAD_END_SLOTS,
-    DEAD_END_TTL_MS, DIAL_BACKOFF_SLOTS, GATT_VALUE_MAX, IDENTITY_HINT_LEN, LEGACY_AD_CAPACITY,
-    MANUFACTURER_DATA_HINT_LEN, PERIPH_SLOTS, PHASE_NEIGHBOUR_SLOTS, SCAN_WINDOW_COLLECT_MS,
-    WINDOW_CANDIDATES,
+    dial_preference, dial_stage_failure, disconnect_settle_ms, drain_table_refusal, fragment_mtu,
+    identity_hint, incoming_verdict, judge_read_identity, judge_supervision_timeout,
+    link_queue_verdict, manufacturer_data_with_hint, parse_peer_advertisement, refused_dial,
+    scan_pass_pause_ms, with_free_slots, AdvReport, AdvertisePass, CandidateTable, CarrierPath,
+    CarrierStep, ChurnLedger, ChurnPolicy, ConnParams, ConnParamsAsk, ConnParamsLine,
+    ConnParamsReq, ConnParamsReqLine, ConnectDecision, DeadEnds, DialBackoff, DialFailure,
+    DialLedger, DialRefusedLine, DialStage, DisconnectReason, Enqueue, Exclusion, Fill, GattBytes,
+    LedgerPolicy, Ledgers, LinkDownLine, LinkItem, LinkPhase, LinkRole, LinkUp, LinkVerdict, Local,
+    Origin, OversizeFrom, OversizeLine, PeerAddr, PeerRegistry, PhaseEvent, PhaseNeighbours,
+    ReadIdentity, ScanMode, ScanPass, ScanPhase, StageError, TxGap, ADV_BYTES_USED,
+    CAP_PERIPHERAL_ONLY, DEAD_END_SLOTS, DEAD_END_TTL_MS, DIAL_BACKOFF_SLOTS, GATT_VALUE_MAX,
+    IDENTITY_HINT_LEN, LEGACY_AD_CAPACITY, MANUFACTURER_DATA_HINT_LEN, PERIPH_SLOTS,
+    PHASE_NEIGHBOUR_SLOTS, SCAN_WINDOW_COLLECT_MS, WINDOW_CANDIDATES,
 };
 use leviculum_core::framing::ble::{
     self as ble_framing, BleDefragmenter, DefragResult, FRAGMENT_HEADER_SIZE, KEEPALIVE_BYTE,
@@ -543,7 +543,8 @@ async fn peripheral_task(
                 let handle = conn.handle().unwrap_or(u16::MAX);
                 log_conn_params(&conn, handle, LinkRole::Peripheral, LinkPhase::Open);
                 ask_for_a_survivable_timeout(&conn, handle);
-                gatt_events(&conn, server, &incoming_tx).await;
+                let peer = gatt_events(&conn, server, &incoming_tx).await;
+                log_link_down(&conn, handle, LinkRole::Peripheral, peer).await;
                 // The ATT MTU the peer and we settled on, reported here
                 // rather than at connect because the Exchange MTU Request
                 // arrives after the connection event. `on_disconnected` does
@@ -619,6 +620,55 @@ fn log_conn_params(conn: &Connection, handle: u16, role: LinkRole, phase: LinkPh
         ),
     );
 }
+
+/// Write the link's end (912): `BLE_LINK_DOWN role= conn= peer=
+/// reason=`, one per connection in either role, once the SoftDevice has
+/// said why the link ended.
+///
+/// A link the peer ended, or the air ended, is already disconnected
+/// when the session returns and its reason is read at once. A link we
+/// are ending ourselves may still be disconnecting: the session asked
+/// for it and returned, or never asked and relied on the
+/// `Connection`'s drop. So the link is closed here if it is not closed
+/// already (the drop a few lines later would close it the same way)
+/// and the event awaited, at most [`disconnect_settle_ms`]; an event
+/// that never came prints `reason=unknown`.
+///
+/// Critical, not gated: an edge, at most one per link, and the one
+/// line a departure is read by.
+async fn log_link_down(conn: &Connection, handle: u16, role: LinkRole, peer: Option<[u8; 16]>) {
+    let _ = conn.disconnect();
+    let deadline =
+        Instant::now() + Duration::from_millis(disconnect_settle_ms(live_conn_params(conn)));
+    let status = loop {
+        if let Some(reason) = conn.disconnect_reason() {
+            break Some(u8::from(reason));
+        }
+        if Instant::now() >= deadline {
+            break None;
+        }
+        Timer::after_millis(DISCONNECT_POLL_MS).await;
+    };
+    crate::log::log_fmt_critical(
+        "[BLE ] ",
+        format_args!(
+            "{}",
+            LinkDownLine {
+                role,
+                conn: handle,
+                peer,
+                reason: DisconnectReason::from_hci(status),
+            }
+        ),
+    );
+}
+
+/// The poll step of [`log_link_down`]'s wait. The waits that hear the
+/// disconnect event directly (`gatt_server::run`, `gatt_client::run`)
+/// need the role's server or client, which a central give-up before
+/// discovery does not hold; the state the event leaves behind is
+/// readable on every path.
+const DISCONNECT_POLL_MS: u64 = 10;
 
 /// The parameters this connection is running on right now, in the
 /// units [`ConnParams`] speaks.
@@ -791,6 +841,10 @@ async fn serve_tx_gap(gap: &TxGap, conn_handle: u16) {
 /// closure (Columba defrag + handshake state); outbound BLE_OUTGOING and
 /// keepalive timer feed `gatt_server::notify_value`. The two halves run
 /// concurrently via `embassy_futures::select`.
+///
+/// Returns the identity the peer's handshake presented, refused or
+/// not, for the `BLE_LINK_DOWN` line the caller writes (912); `None`
+/// when the connection ended before it wrote one.
 async fn gatt_events(
     conn: &Connection,
     server: &NotifyAwareServer,
@@ -800,7 +854,7 @@ async fn gatt_events(
         (Option<[u8; 16]>, alloc::vec::Vec<u8>),
         4,
     >,
-) {
+) -> Option<[u8; 16]> {
     // This connection's drain edge. Claimed for the lifetime of the
     // connection and released below, so a reconnect (or a second link,
     // since phase B) never inherits another link's pending edge. The
@@ -809,7 +863,7 @@ async fn gatt_events(
     // entry the handshake fills.
     let Some(conn_handle) = conn.handle() else {
         crate::warn!("BLE: connection without a handle, dropping it");
-        return;
+        return None;
     };
     let Some((slot_index, drain)) = HVN_DRAIN.claim_indexed(conn_handle) else {
         crate::log::log_fmt(
@@ -825,7 +879,7 @@ async fn gatt_events(
         if drain_table_refusal(LinkRole::Peripheral).disconnects {
             let _ = conn.disconnect();
         }
-        return;
+        return None;
     };
     // The connection event, before any identity: the peer's address
     // enters the registry (pre-dial exclusion) and, when it is a new
@@ -857,6 +911,9 @@ async fn gatt_events(
     // tagging inbound packets with their ingress link (Codeberg #365).
     // `None` until the handshake lands.
     let link_peer: Cell<Option<[u8; 16]>> = Cell::new(None);
+    // The identity the handshake presented, kept even when the
+    // registry refuses it: the link-down line names whoever it was.
+    let read_peer: Cell<Option<[u8; 16]>> = Cell::new(None);
 
     // This link's private outbound queue (fed by the fan-out; see
     // super::LINK_OUT). Drain packets left over from the slot's
@@ -906,6 +963,7 @@ async fn gatt_events(
                     );
                     let mut peer_id = [0u8; 16];
                     peer_id.copy_from_slice(data);
+                    read_peer.set(Some(peer_id));
                     if !peer_link_up(
                         slot_index,
                         conn_handle,
@@ -1160,6 +1218,7 @@ async fn gatt_events(
     super::defrag_held_set(slot_index, 0);
     super::session_held_reset(slot_index);
     HVN_DRAIN.release(conn_handle);
+    read_peer.get()
 }
 
 // --- The central half (#255 phase B): scan, decide, initiate ---
@@ -2477,17 +2536,31 @@ async fn central_link(
             return Some(DialFailure::Transport);
         }
     };
-    log_conn_params(
-        &conn,
-        conn.handle().unwrap_or(u16::MAX),
-        LinkRole::Central,
-        LinkPhase::Open,
-    );
+    let handle = conn.handle().unwrap_or(u16::MAX);
+    log_conn_params(&conn, handle, LinkRole::Central, LinkPhase::Open);
+    let read_peer: Cell<Option<[u8; 16]>> = Cell::new(None);
+    let failure = central_connected(&conn, own_identity, typed_peer, &read_peer).await;
+    // Every way out of the connected half ends here, so this is the one
+    // place the central link's end is written (912).
+    log_link_down(&conn, handle, LinkRole::Central, read_peer.get()).await;
+    failure
+}
 
+/// The connected half of [`central_link`]: discovery, identity, the
+/// registry and the session, with every early give-up. `read_peer`
+/// receives the identity once the Identity read returns it, for the
+/// caller's `BLE_LINK_DOWN` line.
+async fn central_connected(
+    conn: &Connection,
+    own_identity: &[u8; 16],
+    typed_peer: PeerAddr,
+    read_peer: &Cell<Option<[u8; 16]>>,
+) -> Option<DialFailure> {
+    let peer_value = typed_peer.value;
     // v2.2 §Connection Phase, in the spec's order: service discovery
     // (3), read the Identity characteristic (4) — with the checks the
     // registry exists for — then subscribe (5) and handshake (6).
-    let client: ReticulumClient = match gatt_client::discover(&conn).await {
+    let client: ReticulumClient = match gatt_client::discover(conn).await {
         Ok(client) => client,
         Err(err) => {
             crate::log::log_fmt(
@@ -2506,7 +2579,10 @@ async fn central_link(
         }
     };
     let peer_id = match client.identity_read().await {
-        Ok(id) => id,
+        Ok(id) => {
+            read_peer.set(Some(id));
+            id
+        }
         Err(err) => {
             crate::log::log_fmt(
                 "[BLE ] ",
@@ -2612,7 +2688,7 @@ async fn central_link(
     let heard = Cell::new(false);
 
     let failure = run_central_session(
-        &conn,
+        conn,
         &client,
         own_identity,
         peer_id,
