@@ -99,6 +99,12 @@ and polygons for each zoom level, and writes a compact tile set to the
 device's flash. The device draws polylines, its own GNSS position, and
 the telemetry positions of other nodes.
 
+The measured precedent is raster, not vector: Meshtastic's device UI
+on the M9 reads PNG raster tiles from the microSD card at
+`/maps/<style>/{z}/{x}/{y}.png` ([The ThinkNode M9](thinknode-m9.md),
+"Storage"). The vector idea stays the first-step measurement below,
+compared against that raster path.
+
 **The first step is a measurement, not code.** Measure, for one city at
 three zoom levels:
 

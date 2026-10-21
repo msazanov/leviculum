@@ -12,12 +12,147 @@ anywhere](handheld-messenger.md)).
 
 | Part | What the M9 carries |
 |---|---|
-| MCU | ESP32-S3R8: 512 KB SRAM, 8 MB PSRAM, 16 MB flash |
+| MCU | ESP32-S3R8: 512 KB SRAM, 8 MB PSRAM, 16 MB NOR flash |
+| Storage | microSD slot, a card with map tiles in the box |
 | Radio | Semtech LR1110, EU868 |
 | Display | 2.4-inch 240x320 ST7789, no touch |
-| Input | 37-key QWERTY keyboard |
-| Sensors | GNSS, magnetometer, RTC |
-| Other | buzzer, 2300 mAh battery, USB-C |
+| Input | 37-key QWERTY keyboard behind its own controller |
+| Sensors | GNSS, RTC, magnetometer, IMU |
+| Other | buzzer, 2300 mAh battery, USB-C through a USB-UART bridge |
+
+## The hardware from the public record
+
+No schematic is public. Elecrow's wiki quotes the V1.0 schematic, and
+Elecrow's technical support is the address for it. Until it is here,
+the facts below come from four public sources, and each one names the
+source it rests on:
+
+- **the wiki**: Elecrow's ThinkNode M9 wiki, Meshtastic edition,
+  document version of 2026-08-26, describing "ThinkNode M9 V1.0";
+- **the product page**: Elecrow's shop page and its PDF on formatting
+  the microSD card;
+- **the Meshtastic variant**: `variants/esp32s3/ELECROW-ThinkNode-M9/`
+  in the Meshtastic firmware, develop branch;
+- **the MeshCore variant**: `variants/thinknode_m9/` in MeshCore, main
+  branch.
+
+The two variants were read on 2026-10-21. None of these sources is the
+hardware reference (rule `feedback_schematic_is_the_hardware_reference`),
+so where they disagree this page keeps the disagreement and does not
+pick a side. The device settles it.
+
+### Storage
+
+- **A microSD slot (TF) exists.** The wiki shows it, and both variants
+  drive it: chip select on GPIO48 (the Meshtastic variant's build flags,
+  the MeshCore variant's `SDCARD_CS`).
+- The card shares one SPI bus with the LR1110 and the LCD: SCK 40,
+  MOSI 47, MISO 38 (both variants). Only one of the three chip selects
+  may be low at a time; the Meshtastic variant drives all three high
+  before anything else runs.
+- The product page's "16 GB" is the microSD card in the box, which
+  carries map tiles. The flash is a ZD25Q128, 16 MB of NOR (the wiki,
+  from the schematic), which is what the MeshCore variant's 16 MB
+  partition table configures. The "16 GB against 16 MB" question in
+  #178 is therefore two different parts, not a contradiction.
+
+### Display
+
+- 2.4-inch TFT, 240x320, ST7789, no touch. Both variants configure the
+  ST7789.
+- Pins (both variants): CS 16, DC 15, RESET 14, TE 19, backlight 17.
+  The backlight is on when the pin is low (`TFT_BACKLIGHT_ON LOW` in
+  both).
+- Peripheral power: GPIO18, on when low (`VEXT_ENABLE`/`VEXT_ON_VALUE`
+  in both). MeshCore's board code switches it on to power the screen.
+
+### Keyboard
+
+- 37-key QWERTY plus navigation and function keys (the wiki), read
+  through a controller on its own I2C bus, SDA 20 and SCL 21 (both
+  variants).
+- KB_INT on GPIO12 signals a key press and wakes the chip from light
+  sleep; the Meshtastic variant says it rests low and rises on a press.
+  The keyboard light is on GPIO46 (both variants).
+- **Contradiction:** the wiki names an ESP32-S2 as the controller (U10,
+  reading a 5x10 matrix); the Meshtastic variant's comments name an
+  STC8H. Which chip it is decides nothing for a port as long as the I2C
+  protocol is the same, but neither source documents that protocol; the
+  Meshtastic variant writes one command (register 0x03, the long-press
+  time).
+
+### Two hardware revisions
+
+The Meshtastic variant tells two revisions apart by the keyboard
+controller's I2C address: **0x6C is V1.0, 0x6D is V1.1** (`m9Version`).
+The GNSS enable line has the opposite polarity on the two: **active low
+on V1.0, active high on V1.1**. The MeshCore variant knows only active
+low, which is V1.0. A port has to probe the address at boot, as the
+Meshtastic variant does, before it touches the GNSS enable line. The
+wiki describes V1.0 only.
+
+### GNSS
+
+- **Contradiction, three ways:**
+  - the wiki names an ATGM336H-5NR32 (and a BM72A);
+  - the Meshtastic variant says "AG3352 without RTC_INT" at 115200 baud,
+    and puts it to sleep with `$PAIR003` followed by EN low;
+  - the MeshCore variant's header declares `GPS_L76K` at 9600 baud,
+    while its build file sets 115200 baud, so MeshCore disagrees with
+    itself as well.
+- Pins (both variants): UART on GPIO2 and GPIO3, 1PPS 4, RESET 5,
+  standby or wake line 10, EN 11. The variants name the two UART pins
+  in opposite directions, so which one the chip transmits on is read
+  off the device. Backup power comes from GPS_BAT (the wiki). The wiki
+  lists GPS, BDS, Galileo and GLONASS.
+- Our T1000-E GNSS work is for an AG3335 (#456). If the receiver is an
+  AG3352, that work may transfer, since it is the same family; if it is
+  an ATGM336H or an L76K, it does not. The receiver has to be
+  identified on the device before any GNSS code is written for it.
+
+### Sensors
+
+On a second I2C bus, SCL 6 and SDA 7 (both variants):
+
+- a PCF8563 RTC at 0x51 (both variants), backed by its own RTC_3V3
+  supply (the wiki);
+- a QMC6309 magnetometer (the wiki);
+- a QMI8658B IMU (the wiki).
+
+One review article claims the M9 has no accelerometer. This page
+follows the wiki, which names the part.
+
+### Radio
+
+A Semtech LR1110 with a 3.3 V TCXO on DIO3 (both variants), the RF
+switch on DIO5 and DIO6 with the same table in both variants (standby
+LL, RX HL, TX HH, TX_HP LH, DIO5 first), and NSS 39, BUSY 41, IRQ 42
+(DIO9), NRESET 45. The MeshCore variant transmits at 22 dBm. The
+`leviculum-lr11xx` README carries these values as a `Board` sketch,
+with what was probed on a bench and what stays unknown without the
+schematic: see its section "Worked example: ThinkNode M9 (incomplete)"
+(`leviculum-lr11xx/README.md`).
+
+### Power
+
+- A 2300 mAh LiPo with protection (the wiki).
+- An LGS4056HDA charger ending the charge at 4.35 V (the wiki).
+- Battery voltage on GPIO13 through a 2:1 divider (the wiki; the
+  Meshtastic variant's `BATTERY_PIN 13` with `ADC_MULTIPLIER 2.0`).
+- USB power detected on GPIO1, low when present (the wiki's 5V_TEST;
+  `EXT_PWR_DETECT 1` in both variants).
+- A slide switch for on and off, a hidden RESET button, and BOOT on
+  GPIO0 (the wiki). The slide switch is one more reason the one-button
+  grammar does not apply (see "Decided").
+
+### USB and the rest
+
+- USB-C reaches the ESP32-S3 through a CH340K USB-UART bridge at full
+  speed (the wiki), not through the chip's own USB. There is no
+  `uf2-msc` path: flashing goes over the ROM's UART bootloader with an
+  esptool-class tool. Both variants upload with `esptool`.
+- A buzzer behind a transistor, enabled on GPIO9 (the wiki; `PIN_BUZZER
+  9` in both variants).
 
 ## What changed since August
 
@@ -129,15 +264,19 @@ compared with the T1000-E's numbers.
 
 ## Open
 
-- **Storage:** whether the M9 has a usable SD slot or only its 16 MB
-  flash. #178 records the contradiction: Elecrow claims 16 GB, MeshCore
-  configures 16 MB.
+- **The schematic**, asked of Elecrow's technical support: the PA table,
+  the DC-DC inductor, and every contradiction under "The hardware from
+  the public record" wait for it or for the device.
+- **Which revision the unit is**, read off the keyboard controller's
+  I2C address at the first boot.
+- **The GNSS receiver:** AG3352, ATGM336H or L76K, identified on the
+  device.
 - **SRAM after WiFi and BLE:** how much of the 512 KB is left once both
   stacks are up.
 - **WiFi as a TCP interface** without a host attached.
-- **The keyboard:** its layout, and the input model on top of it. The
-  controller sends key events over I2C, and its type, address and
-  protocol can only be read off the device (#178).
+- **The keyboard:** which controller it is (ESP32-S2 or STC8H), its
+  I2C protocol beyond the one command the Meshtastic variant writes,
+  and the input model on top of it.
 
 ## Not yet built
 
