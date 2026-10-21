@@ -3,7 +3,7 @@
 //! The core already does the front half: it registers
 //! `rnstransport.remote.management`, gates `/status` behind the USB-loaded
 //! allow-list, and raises `NodeEvent::RequestReceived` for a request that
-//! passed both (`leviculum-core/src/node/mod.rs:790`). Until this module
+//! passed both (`leviculum-core/src/node/mod.rs:792`). Until this module
 //! nothing on the board answered that event, so a query got path, link,
 //! accepted identify — and then a timeout.
 //!

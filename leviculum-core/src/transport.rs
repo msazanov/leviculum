@@ -14331,6 +14331,55 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     }
 }
 
+// Declared after the main impl so the line numbers cited in it stay where
+// they are.
+impl<C: Clock, S: Storage> Transport<C, S> {
+    /// Cull every pending announce addressed to `interface_index` alone,
+    /// which has gone away (924). Called from `handle_interface_down`
+    /// beside [`remove_discovery_requesters_for_interface`](Self::remove_discovery_requesters_for_interface).
+    ///
+    /// Such an entry is the answer to a path request: for one of this
+    /// node's own destinations, NodeCore schedules it targeted at the
+    /// requesting interface after `PATH_REQUEST_GRACE_MS`; for a cached
+    /// path, `handle_path_request` does the same. An entry whose target
+    /// went inside that grace was sent to an index the driver no longer
+    /// has (`PKT_DROP reason=no-such-interface`, the miauhaus soak frame,
+    /// hops 0, 167 bytes). The live entry and any held one targeted there
+    /// both go; an untargeted entry held behind a culled one (Codeberg
+    /// #170) is reinstated, as the retransmit path does when it retires
+    /// an entry. Returns how many entries went.
+    ///
+    /// Deviation rule: the wire and the semantics are unchanged, for the
+    /// reason the discovery cull gives: a requester on a gone interface
+    /// cannot be answered there, and the reference attaches the answer to
+    /// an interface outside `Transport.interfaces`, which
+    /// `Transport.outbound` never transmits on (1.3.5 Transport.py:1182-1191).
+    pub fn remove_targeted_announces_for_interface(&mut self, interface_index: usize) -> usize {
+        let target = Some(interface_index);
+        let mut culled = 0;
+
+        let held_before = self.held_announce_entries.len();
+        self.held_announce_entries
+            .retain(|_, e| e.target_interface != target);
+        culled += held_before - self.held_announce_entries.len();
+
+        let mut live = Vec::new();
+        self.storage.for_each_announce(&mut |hash, e| {
+            if e.target_interface == target {
+                live.push(*hash);
+            }
+        });
+        for hash in live {
+            self.storage.remove_announce(&hash);
+            culled += 1;
+            if let Some(held) = self.held_announce_entries.remove(&hash) {
+                self.storage.set_announce(hash, held);
+            }
+        }
+        culled
+    }
+}
+
 // Tests
 #[cfg(test)]
 mod tests {

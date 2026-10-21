@@ -1332,7 +1332,7 @@ impl Engine {
                     Ok(send) => out.merge(send),
                     // The node refused what the role decided, the late
                     // `incoming_full` above all: it sent the RCL itself
-                    // (`leviculum-core/src/node/mod.rs:2332-2335`), and the
+                    // (`leviculum-core/src/node/mod.rs:2334-2337`), and the
                     // line is the board's only record of it (867, 878).
                     Err(error) => {
                         if accept && from_peer {

@@ -165,6 +165,8 @@ mod mvr_offline_iface_no_path;
 mod mvr_orphaned_path_cache;
 #[cfg(test)]
 mod mvr_overheard_direct_data;
+#[cfg(all(test, feature = "tracing"))]
+mod mvr_own_path_response_gone_requester;
 #[cfg(test)]
 mod mvr_path_request_prune;
 #[cfg(test)]
@@ -3072,15 +3074,22 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let discovery = self
             .transport
             .remove_discovery_requesters_for_interface(iface_idx);
+        // Likewise a path response held for the grace and addressed to it
+        // alone (924).
+        #[cfg_attr(not(feature = "tracing"), allow(unused_variables))]
+        let targeted = self
+            .transport
+            .remove_targeted_announces_for_interface(iface_idx);
 
         // Log before removing the name so the message still shows the human-readable name
         crate::tracing::debug!(
-            "Interface {} went down, removed {} paths, {} discovery windows ({} handed on, {} batched requesters)",
+            "Interface {} went down, removed {} paths, {} discovery windows ({} handed on, {} batched requesters), {} targeted announces",
             self.transport.iface_name(iface_idx),
             lost_paths.len(),
             discovery.windows,
             discovery.handed_on,
-            discovery.batched
+            discovery.batched,
+            targeted
         );
 
         for hash in &lost_paths {
