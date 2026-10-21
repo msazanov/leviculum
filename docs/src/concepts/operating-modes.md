@@ -133,3 +133,5 @@ sources, the stored key and path, and the `lnflash` default.
 - [Telemetry](telemetry.md), for the report a tracker sends.
 - [Supported boards](../firmware/boards.md), for which boards carry a
   battery, a button and an accelerometer.
+- [The ThinkNode M9](thinknode-m9.md), a handheld that runs both modes
+  with a keyboard instead of one button.

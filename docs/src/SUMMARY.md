@@ -33,6 +33,8 @@
   - [lnmsg: the mailbox, and who you talk to](concepts/lnmsg-mailbox.md)
 - [Public channels over LXMF](concepts/public-channels.md)
 - [Telemetry](concepts/telemetry.md)
+- [The ThinkNode M9](concepts/thinknode-m9.md)
+- [A messenger whose core runs anywhere](concepts/handheld-messenger.md)
 - [An LXMF propagation node on a board](concepts/propagation-node-on-a-board.md)
 - [Evidence and honesty in testing](concepts/evidence-and-honesty.md)
 - [Checks that are actually checks](concepts/checks-and-citations.md)

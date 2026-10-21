@@ -58,6 +58,10 @@ The same table on every board means a user who knows one board knows all
 of them, and a gesture never does something on one board that it does
 not do on another.
 
+This grammar is for boards with one button. A board with a keyboard,
+such as the ThinkNode M9, makes the mode switch, the status and the
+position report menu items instead ([The ThinkNode M9](thinknode-m9.md)).
+
 ## The feedback grammar
 
 One grammar for the LED, the buzzer and the display text:
@@ -245,3 +249,5 @@ and stays lit (`leviculum-nrf/src/st7789.rs:33-34`).
   press adds to.
 - [Supported boards](../firmware/boards.md), for each board's button,
   LEDs, buzzer and display.
+- [The ThinkNode M9](thinknode-m9.md), the board with a keyboard
+  instead.
