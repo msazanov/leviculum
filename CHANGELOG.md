@@ -721,6 +721,16 @@ Toolchain: Rust 1.97.1
 
 ### Fixed
 
+- A board no longer loses the second frame of a back-to-back LoRa burst
+  to its own receive re-arm (#466): an empty IRQ latch younger than the
+  preamble detector's horizon (entry slack plus eight symbols at the live
+  modulation) is now waited out in RX and read again before the window
+  may be stood down for a different one or for a transmit. Measured on
+  the T1000-E's LR1110 against an RNode's queue flush, where the loop's
+  restart 7–10 ms after `RxDone` landed inside the follower's preamble
+  and cost it sync every time, while an adopted window kept its follower;
+  the same discipline runs on the SX1262 (refs #454).
+
 - A BLE dial of lnsd's that lands with an outgoing slot still free no
   longer restarts the 30 s fallback clock, so a node only fallbacks can
   link out pays one clock for its outgoing links, not one per link; in

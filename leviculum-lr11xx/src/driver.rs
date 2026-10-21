@@ -1066,6 +1066,15 @@ where
         )
     }
 
+    /// Forwards to `sx126x::latch_settle_ms` against the same cached
+    /// modulation the other two bounds use. This part is where the bound was
+    /// measured (925): a status read 7–10 ms after the arm, inside a
+    /// back-to-back follower's preamble, reads `preamble=0` and must not be
+    /// believed yet.
+    fn latch_settle_ms(&self) -> Option<u64> {
+        leviculum_core::sx126x::latch_settle_ms(self.rx_ext_bw_hz, self.rx_ext_sf)
+    }
+
     async fn wait_for_frame(&mut self, wait_ms: u64) -> u64 {
         let started = Instant::now();
         self.wait_rx_irq(Duration::from_millis(wait_ms)).await;

@@ -502,7 +502,7 @@ Two asymmetries, neither a defect of ours:
    channel-access crate's derivation table
    (`leviculum-nrf/channel-access/src/lib.rs:28-59`). The unsourced
    `cadDetPeak` ladder is already honestly declared where it lives
-   (`cad_params`, `leviculum-core/src/sx126x.rs:392-460`, open on
+   (`cad_params`, `leviculum-core/src/sx126x.rs:440-508`, open on
    #351) — the audit adds nothing to it.
 
 ## The three I would fix first

@@ -266,6 +266,54 @@ pub fn false_preamble_ms(bw_hz: u32, sf: u8, preamble_symbols: u16) -> Option<u6
     Some((preamble_ms + header_ms).max(1))
 }
 
+/// Symbols the receiver's preamble detector needs before `PreambleDetected`
+/// can latch, counted from the first preamble symbol the listening chip
+/// actually hears.
+///
+/// The family's own conservative figure: the CAD parameter tables use 8
+/// symbols from SF10 up ([`cad_params`], Semtech's SX126x and LR11xx example
+/// values alike), and the RX detector is not faster. 4 symbols is refuted by
+/// measurement: in the 2026-10-21 `t1000e_rnode_pair` captures (925), latch
+/// reads 7–10 ms (≈7–10 symbols at SF7/BW125) after an arm that joined a
+/// preamble at its start still read `preamble=0`, and the same windows latched
+/// the bit later.
+pub const PREAMBLE_DETECT_SYMBOLS: u16 = 8;
+
+/// What one `SetRx` from STDBY_RC costs before the chip is actually
+/// listening: TCXO start (~4 ms, the same figure [`SOFT_TIMEOUT_SLACK_MS`]
+/// names), PLL lock, the SPI+BUSY cost of the surrounding commands, and
+/// executor latency between the arming state and the command — doubled
+/// against that sum, because an entry estimated short reads a frame as an
+/// empty channel while one estimated long costs a bounded wait.
+pub const RX_ENTRY_SLACK_MS: u64 = 8;
+
+/// How long after its arming a window's **empty** latch becomes evidence of
+/// an empty channel.
+///
+/// Before this bound, `preamble=0 header=0 rxdone=0` says nothing: a frame
+/// whose preamble began at the arm has not been listened to for the
+/// [`PREAMBLE_DETECT_SYMBOLS`] the detector needs, part of that preamble fell
+/// into the [`RX_ENTRY_SLACK_MS`] the chip spent getting into RX, and the
+/// detector's bit is all a standing window can be asked. A decision that
+/// stands such a window down on that read restarts the receiver inside the
+/// preamble, and the restarted detector no longer has enough preamble left to
+/// sync — which is how the T1000-E's LR1110 lost the second of every
+/// back-to-back RNode pair while the adjacent window that was *adopted*
+/// kept its follower (925, `t1000e_rnode_pair`, 2026-10-21: six losses, all
+/// with a teardown 7–10 ms after the previous `RxDone`; the one adopted
+/// back-to-back window kept its frame).
+///
+/// `None` for the inputs that have no symbol time, the same guards
+/// [`false_preamble_ms`] carries: a caller with no honest bound reads the
+/// latch as it always did.
+pub fn latch_settle_ms(bw_hz: u32, sf: u8) -> Option<u64> {
+    if bw_hz == 0 || sf == 0 || sf > 63 {
+        return None;
+    }
+    let t_sym_us = (1u64 << sf) * 1_000_000 / bw_hz as u64;
+    Some(RX_ENTRY_SLACK_MS + (PREAMBLE_DETECT_SYMBOLS as u64 * t_sym_us).div_ceil(1_000))
+}
+
 /// Slack added on top of a computed on-air time when sizing the software
 /// timeout around a started radio operation (TX completion, CAD completion).
 ///
@@ -1547,6 +1595,42 @@ mod tests {
         assert_eq!(false_preamble_ms(125_000, 0, 18), None);
         assert_eq!(false_preamble_ms(125_000, 64, 18), None);
         assert_eq!(tx_defer_ms(IRQ_PREAMBLE_DETECTED, 0, 8, 5, 18), None);
+    }
+
+    /// The settle bound is the entry slack plus the detector's symbols, and at
+    /// the measured profile it covers the measured blind reads: the 925 losses
+    /// were latch reads 7–10 ms after the arm at SF7/BW125 that read
+    /// `preamble=0` inside a live preamble, so the bound there must exceed
+    /// 10 ms — and it must stay a fraction of the false-preamble bound, which
+    /// is the wait the same site may spend next.
+    #[test]
+    fn the_latch_settle_bound_covers_the_measured_blind_reads() {
+        let fast = latch_settle_ms(125_000, 7).expect("a configured radio");
+        assert_eq!(
+            fast,
+            RX_ENTRY_SLACK_MS + (PREAMBLE_DETECT_SYMBOLS as u64 * 1_024).div_ceil(1_000)
+        );
+        assert!(fast > 10, "settle bound {fast} ms re-opens the blind spot");
+        let carrier = false_preamble_ms(125_000, 7, 18).expect("a configured radio");
+        assert!(fast < carrier, "{fast} ms against {carrier} ms");
+        // At the slow profile the detector's symbols dominate the slack.
+        let (bw, sf, _) = SLOW;
+        let slow = latch_settle_ms(bw, sf).expect("a configured radio");
+        assert_eq!(
+            slow,
+            RX_ENTRY_SLACK_MS
+                + (PREAMBLE_DETECT_SYMBOLS as u64 * (1u64 << sf) * 1_000_000 / bw as u64)
+                    .div_ceil(1_000)
+        );
+        assert!(slow > fast, "{slow} ms against {fast} ms");
+    }
+
+    /// Same guards as every other bound here: no modulation, no number.
+    #[test]
+    fn an_unconfigured_radio_has_no_latch_settle_bound() {
+        assert_eq!(latch_settle_ms(0, 7), None);
+        assert_eq!(latch_settle_ms(125_000, 0), None);
+        assert_eq!(latch_settle_ms(125_000, 64), None);
     }
 
     /// The defect instance: a 184-byte announce at SF12/BW125/CR4:8 with the

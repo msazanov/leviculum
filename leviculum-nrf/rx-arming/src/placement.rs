@@ -249,6 +249,10 @@ mod tests {
             None
         }
 
+        fn latch_settle_ms(&self) -> Option<u64> {
+            None
+        }
+
         async fn wait_for_frame(&mut self, _wait_ms: u64) -> u64 {
             0
         }

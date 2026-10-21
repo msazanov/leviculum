@@ -1601,6 +1601,14 @@ impl<SPI: SpiDeviceTrait> leviculum_rx_arming::RxWindowProbe for Sx1262<SPI> {
         irq::false_preamble_ms(self.rx_ext_bw_hz, self.rx_ext_sf, self.preamble_len)
     }
 
+    /// Forwards to `sx126x::latch_settle_ms` against the same cached
+    /// modulation: how long after an arm this chip's empty latch becomes
+    /// evidence of an empty channel rather than a detector that has not had
+    /// its symbols yet.
+    fn latch_settle_ms(&self) -> Option<u64> {
+        irq::latch_settle_ms(self.rx_ext_bw_hz, self.rx_ext_sf)
+    }
+
     /// The DIO1 wait, bounded, with the chip left in RX for its whole
     /// duration — no command goes out here, which is the entire point.
     ///

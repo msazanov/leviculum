@@ -501,11 +501,12 @@ pub struct RxHarvest {
     /// How long the window had been standing, in milliseconds, measured from
     /// its own arming.
     pub armed_ms: u32,
-    /// How long the site waited before it took the frame. `0` by construction
-    /// today: a harvest is taken from the pre-wait read, so the frame was
-    /// already whole when the site asked. It is on the line because
-    /// [`RxTeardown`] carries it, and the two lines answer for each other only
-    /// while they stay field for field.
+    /// How long the site waited before it took the frame. `0` when the frame
+    /// was already whole at the pre-wait read; the settle wait when the frame
+    /// completed while an empty latch was being given the detector's horizon
+    /// (see `settle_latch`). It is on the line because [`RxTeardown`] carries
+    /// it, and the two lines answer for each other only while they stay field
+    /// for field.
     pub waited_ms: u64,
 }
 
@@ -775,6 +776,22 @@ pub trait RxWindowProbe: RxPort {
     /// Touches no bus: it is a question about the programmed modulation.
     fn false_preamble_ms(&self) -> Option<u64>;
 
+    /// How long after its arming a window's **empty** latch becomes evidence
+    /// of an empty channel, or `None` when the port has no modulation to
+    /// compute one from.
+    ///
+    /// Before this bound an empty latch is blind, not clear: a frame whose
+    /// preamble began at the arm has not yet been listened to for the symbols
+    /// the chip's preamble detector needs, and the detector's bit is all a
+    /// standing window can be asked. The driver forwards to
+    /// `leviculum_core::sx126x::latch_settle_ms`, where the arithmetic has a
+    /// host test and where the measured losses that sized it are cited;
+    /// nothing in this crate re-derives it, for the same reason nothing here
+    /// re-derives the frame bound.
+    ///
+    /// Touches no bus: it is a question about the programmed modulation.
+    fn latch_settle_ms(&self) -> Option<u64>;
+
     /// Keep listening for up to `wait_ms` for the standing window's
     /// terminating IRQ, and answer how long that actually took.
     ///
@@ -884,13 +901,14 @@ where
                     return Ok(Arming::Armed);
                 }
             };
+            let (latch, waited_ms) = settle_latch(radio, ADOPT_SITE, &standing, latch).await;
             if !latch.caught_something() {
                 // An empty window the caller does not want: this is half
                 // duplex working, and it is stood down where it always was.
                 // `tear_down` rather than `arm`'s own head, so the latch is
                 // read once and the line is the same one the capture has
                 // always carried.
-                tear_down(radio, RE_ARM_SITE, standing, latch, 0).await?;
+                tear_down(radio, RE_ARM_SITE, standing, latch, waited_ms).await?;
                 radio.arm(window).await?;
                 return Ok(Arming::Armed);
             }
@@ -1092,7 +1110,7 @@ where
         // entry point that exists to stop a frame being destroyed must not
         // destroy one it was handed.
         if latch.rxdone {
-            let Some(frame) = harvest_frame(radio, site, standing, latch, buf).await? else {
+            let Some(frame) = harvest_frame(radio, site, standing, latch, 0, buf).await? else {
                 return Ok(None);
             };
             stand_down(radio, site).await?;
@@ -1134,6 +1152,62 @@ where
         None => radio.disarm().await?,
     }
     Ok(frame)
+}
+
+/// Give an empty latch the time it needs to be believable, with the chip left
+/// in RX for the whole wait.
+///
+/// A latch that has caught something is evidence already and is returned
+/// unwaited; so is one on a window that has stood past
+/// [`RxWindowProbe::latch_settle_ms`], and one on a port that has no bound to
+/// offer. The remaining case is the blind read: an empty latch younger than
+/// the bound, where a frame whose preamble began at the arm has not yet been
+/// listened to for the symbols the detector needs. The remainder of the bound
+/// is waited out through [`RxWindowProbe::wait_for_frame`] — which moves
+/// nothing, so the decision is only postponed, never changed by the waiting
+/// itself — and the latch is read again. The caller decides from the settled
+/// reading exactly as it would have from the first; what changes is that a
+/// reception the first read could not see yet is now in it.
+///
+/// This is what tonight's witness refuted the teardown sites with (925,
+/// `t1000e_rnode_pair`, 2026-10-21): every one of the six receiver-side losses
+/// was a teardown whose latch read came 7–10 ms after the previous `RxDone`,
+/// inside the preamble of a back-to-back follower the witness decoded clean —
+/// and the one follower whose window was adopted instead was kept.
+///
+/// A failed re-read loses the sample, not the window: it is reported, and the
+/// first (empty) reading stands, which is what the caller had before this
+/// function existed.
+async fn settle_latch<R>(
+    radio: &mut R,
+    site: &'static str,
+    standing: &StandingWindow<R::Window>,
+    latch: RxLatch,
+) -> (RxLatch, u64)
+where
+    R: RxWindowProbe,
+{
+    if latch.caught_something() {
+        return (latch, 0);
+    }
+    let Some(settle_ms) = radio.latch_settle_ms() else {
+        return (latch, 0);
+    };
+    let remaining_ms = settle_ms.saturating_sub(standing.stood_ms as u64);
+    if remaining_ms == 0 {
+        return (latch, 0);
+    }
+    let waited_ms = radio.wait_for_frame(remaining_ms).await;
+    match radio.latched().await {
+        Ok(settled) => (settled, waited_ms),
+        Err(e) => {
+            radio.report(RxEvent::ProbeFailed {
+                at: site,
+                error: &e,
+            });
+            (latch, waited_ms)
+        }
+    }
 }
 
 /// Report one teardown and spend its standby, from a latch that has already
@@ -1189,6 +1263,7 @@ async fn harvest<R, S>(
     site: &'static str,
     standing: StandingWindow<R::Window>,
     latch: RxLatch,
+    waited_ms: u64,
     buf: &mut [u8],
     sink: &mut S,
 ) -> Result<(), R::Error>
@@ -1196,7 +1271,8 @@ where
     R: RxWindowProbe,
     S: FrameSink<Meta = R::Meta>,
 {
-    let Some((len, meta)) = harvest_frame(radio, site, standing, latch, buf).await? else {
+    let Some((len, meta)) = harvest_frame(radio, site, standing, latch, waited_ms, buf).await?
+    else {
         // Nothing came out; the teardown and its standby already happened
         // inside, at this site and with this latch.
         return Ok(());
@@ -1223,20 +1299,21 @@ async fn harvest_frame<R>(
     site: &'static str,
     standing: StandingWindow<R::Window>,
     latch: RxLatch,
+    waited_ms: u64,
     buf: &mut [u8],
 ) -> Result<Option<(u8, R::Meta)>, R::Error>
 where
     R: RxWindowProbe,
 {
     let Ok(Some((len, meta))) = radio.take_latched_frame(buf).await else {
-        tear_down(radio, site, standing, latch, 0).await?;
+        tear_down(radio, site, standing, latch, waited_ms).await?;
         return Ok(None);
     };
     let harvested = RxHarvest {
         site,
         latch,
         armed_ms: standing.stood_ms,
-        waited_ms: 0,
+        waited_ms,
     };
     // Before the hand-off, which yields, for the reason `stand_down_for_tx`
     // gives for the deferral line: a line emitted after the sink had yielded
@@ -1378,6 +1455,9 @@ where
             return radio.disarm().await;
         }
     };
+    // An empty latch younger than the detector's horizon is blind, not clear:
+    // the settled reading is what the deferral decision below is honest on.
+    let (latch, settled_ms) = settle_latch(radio, site, &standing, latch).await;
     // `zip` rather than two ifs: a bound with no reason, or a reason with no
     // bound, is the two halves of the decision having read different bits.
     let Some((bound_ms, reason)) = radio
@@ -1389,9 +1469,9 @@ where
         // other is holding a frame that already finished arriving, and ending
         // *that* one destroys it. Only the first is free.
         if latch.rxdone {
-            return harvest(radio, site, standing, latch, buf, sink).await;
+            return harvest(radio, site, standing, latch, settled_ms, buf, sink).await;
         }
-        return tear_down(radio, site, standing, latch, 0).await;
+        return tear_down(radio, site, standing, latch, settled_ms).await;
     };
 
     let (waited_ms, released) = wait_out(radio, site, policy, bound_ms, reason).await;
@@ -1427,8 +1507,9 @@ where
     // chip left RX at the reception and this is the no-op it always is; on the
     // others the window is still standing and this is the teardown that was
     // deferred, counted at its own site with the latch as it now reads and
-    // carrying the wait it was held for.
-    stand_down_waited(radio, site, waited_ms).await
+    // carrying the whole wait it was held for — the settle included, which is
+    // time this site spent listening like any other.
+    stand_down_waited(radio, site, settled_ms + waited_ms).await
 }
 
 /// Spend the wait the policy allows, and say whether it was the policy that
@@ -1677,6 +1758,15 @@ mod tests {
         /// reason `defer_bound_ms` is one: the arithmetic is
         /// `leviculum_core::sx126x::false_preamble_ms`'s and is tested there.
         false_preamble_bound_ms: u64,
+        /// The bound `latch_settle_ms` hands back. `None` by default, which is
+        /// the unconfigured radio: every test written before the settle existed
+        /// runs the sequence it always ran.
+        latch_settle_bound_ms: Option<u64>,
+        /// How long after the wait starts `PreambleDetected` latches, if it
+        /// ever does — the back-to-back follower whose preamble the chip is
+        /// already inside but whose detector has not had its symbols yet.
+        /// Like the header, it never reaches the pin and never ends a wait.
+        preamble_latches_after_ms: Option<u64>,
         /// Milliseconds spent inside the current deferral, across its stages.
         /// The fake chip's own clock does not restart per stage, and neither
         /// does the frame that is arriving.
@@ -1700,6 +1790,8 @@ mod tests {
                 frame_completes_after_ms: None,
                 header_latches_after_ms: None,
                 false_preamble_bound_ms: 78,
+                latch_settle_bound_ms: None,
+                preamble_latches_after_ms: None,
                 deferred_ms: 0,
             }
         }
@@ -1812,6 +1904,10 @@ mod tests {
             Some(self.false_preamble_bound_ms)
         }
 
+        fn latch_settle_ms(&self) -> Option<u64> {
+            self.latch_settle_bound_ms
+        }
+
         /// The chip keeps listening for up to `wait_ms`. If the frame
         /// completes inside that, the wait ends there and `RxDone` is latched
         /// — which is what makes the elapsed figure a measurement rather than
@@ -1832,8 +1928,15 @@ mod tests {
             let advance = completes.unwrap_or(wait_ms);
             self.deferred_ms = spent + advance;
             self.now += advance as u32;
-            // The header latches where the modulation puts it, without waking
-            // anything: the pin carries only the terminating interrupts.
+            // The preamble and the header latch where the modulation puts
+            // them, without waking anything: the pin carries only the
+            // terminating interrupts.
+            if let Some(at) = self.preamble_latches_after_ms {
+                if at <= self.deferred_ms {
+                    self.latch.preamble = true;
+                    self.latch.raw |= 0x0004;
+                }
+            }
             if let Some(at) = self.header_latches_after_ms {
                 if at <= self.deferred_ms {
                     self.latch.header = true;
@@ -2241,6 +2344,182 @@ mod tests {
                 _ => None,
             }),
             "site=arm preamble=1 header=0 rxdone=0 armed_ms=9 waited_ms=0"
+        );
+    }
+
+    /// **The 925 defect, at the arming site.** The provisional re-arm after an
+    /// `RxDone` joins a back-to-back follower's preamble at its start, but the
+    /// chip's preamble detector has not had its symbols when the loop's next
+    /// decision reads the latch 7–10 ms later — so the read says `preamble=0`
+    /// inside a live preamble, and the teardown it licenses restarts the
+    /// receiver with too little preamble left to sync. Six of six receiver-side
+    /// losses in the 2026-10-21 `t1000e_rnode_pair` runs carried exactly that
+    /// teardown; the one back-to-back follower whose window was adopted was
+    /// kept. The fix: an empty latch younger than the port's settle bound is
+    /// waited out in RX and read again before it is believed.
+    ///
+    /// Red before the fix: the mismatched window was torn down on the first
+    /// (blind) read, and the follower died with it.
+    #[test]
+    fn a_blind_empty_latch_is_waited_out_before_a_mismatched_window_is_replaced() {
+        let log = OpLog::default();
+        let mut port = FakePort::new(&log, Vec::new());
+        port.latch_settle_bound_ms = Some(17);
+        // The follower's preamble began at the arm; the detector latches it
+        // 12 ms in — after the blind read, inside the settle wait.
+        port.preamble_latches_after_ms = Some(12);
+        block_on(port.arm(CSMA)).expect("provisional re-arm");
+        port.now += 5;
+        let before = log.ops().len();
+
+        let arming = block_on(ensure_armed(&mut port, IDLE)).expect("keep the reception");
+
+        assert_eq!(arming, Arming::Adopted);
+        let after = &log.ops()[before..];
+        assert_eq!(
+            after
+                .iter()
+                .filter(|op| matches!(op, Op::Teardown(_) | Op::Disarm | Op::Arm(_)))
+                .count(),
+            0,
+            "the follower must survive the loop's next window, after={after:?}"
+        );
+        assert_eq!(
+            after.iter().filter(|op| **op == Op::DeferWait(12)).count(),
+            1,
+            "the blind remainder of the 17 ms bound is waited, once, after={after:?}"
+        );
+        assert_eq!(
+            after.iter().filter(|op| **op == Op::ProbeIrq).count(),
+            2,
+            "the latch is read again after the wait, after={after:?}"
+        );
+        assert_eq!(
+            log.one_line(|op| match op {
+                Op::Adopt(s) => Some(s.clone()),
+                _ => None,
+            }),
+            "latched=0x0004 preamble=1 header=0 rxdone=0 stood_ms=5",
+            "the capture says what the settled read found"
+        );
+        assert_eq!(
+            port.standing_window().expect("standing").window,
+            CSMA,
+            "the window holding the frame is the one still listening"
+        );
+    }
+
+    /// **The control.** The settle buys the detector its symbols and nothing
+    /// else: a channel that is still empty at the settled read is stood down
+    /// exactly as it always was, with the wait on the line.
+    #[test]
+    fn a_settled_empty_latch_is_still_replaced() {
+        let log = OpLog::default();
+        let mut port = FakePort::new(&log, Vec::new());
+        port.latch_settle_bound_ms = Some(17);
+        block_on(port.arm(CSMA)).expect("first arm");
+        port.now += 5;
+        let before = log.ops().len();
+
+        let arming = block_on(ensure_armed(&mut port, IDLE)).expect("re-arm");
+
+        assert_eq!(arming, Arming::Armed);
+        let after = &log.ops()[before..];
+        assert_eq!(
+            after.iter().filter(|op| **op == Op::Disarm).count(),
+            1,
+            "exactly one standby, after={after:?}"
+        );
+        assert_eq!(
+            log.one_line(|op| match op {
+                Op::Teardown(s) => Some(s.clone()),
+                _ => None,
+            }),
+            "site=arm preamble=0 header=0 rxdone=0 armed_ms=5 waited_ms=12",
+            "half duplex still works, and the line carries the wait it cost"
+        );
+        assert_eq!(port.standing_window().expect("standing").window, IDLE);
+    }
+
+    /// **The bound's other edge.** A window that has already stood past the
+    /// settle bound has nothing blind about its empty latch, and a caller in
+    /// the common case — standing down a long-stood idle listen for a
+    /// transmit — pays no wait at all.
+    #[test]
+    fn an_aged_empty_latch_is_not_waited_for() {
+        let log = OpLog::default();
+        let mut port = FakePort::new(&log, Vec::new());
+        port.latch_settle_bound_ms = Some(17);
+        block_on(port.arm(CSMA)).expect("first arm");
+        port.now += 40;
+        let before = log.ops().len();
+
+        let arming = block_on(ensure_armed(&mut port, IDLE)).expect("re-arm");
+
+        assert_eq!(arming, Arming::Armed);
+        let after = &log.ops()[before..];
+        assert_eq!(
+            after
+                .iter()
+                .filter(|op| matches!(op, Op::DeferWait(_)))
+                .count(),
+            0,
+            "no wait on a latch that has had its time, after={after:?}"
+        );
+        assert_eq!(
+            log.one_line(|op| match op {
+                Op::Teardown(s) => Some(s.clone()),
+                _ => None,
+            }),
+            "site=arm preamble=0 header=0 rxdone=0 armed_ms=40 waited_ms=0"
+        );
+    }
+
+    /// **The 925 defect, at the transmit site.** The other three of the six
+    /// losses were `site=select` teardowns: the loop had the proof's ack to
+    /// send, read the blind latch 5–7 ms after the `RxDone`, and keyed its
+    /// jitter window into the follower's preamble. With the settle, the blind
+    /// read is waited out in RX, the settled read shows the preamble, and the
+    /// transmit defers to the frame exactly as it does at any other site —
+    /// the frame reaches the sink and the key-up follows it.
+    #[test]
+    fn a_transmit_over_a_blind_latch_defers_to_the_frame_it_could_not_see() {
+        let log = OpLog::default();
+        let payload = alloc::vec![0x66, 0x77];
+        let mut port = FakePort::new(&log, alloc::vec![Some(payload.clone())]);
+        port.latch_settle_bound_ms = Some(17);
+        port.preamble_latches_after_ms = Some(12);
+        port.frame_completes_after_ms = Some(150);
+        block_on(port.arm(CSMA)).expect("provisional re-arm");
+        port.now += 5;
+        let mut buf = [0u8; 8];
+        let mut sink = FakeSink {
+            log: &log,
+            pends: 0,
+        };
+
+        block_on(port.transmit_deferring(&mut buf, &mut sink)).expect("defer then key");
+
+        assert_eq!(
+            log.count(|op| matches!(op, Op::Teardown(_))),
+            0,
+            "nothing was torn down, ops={:?}",
+            log.ops()
+        );
+        let delivered = log.position(|op| matches!(op, Op::Deliver(_)));
+        let keyed = log.position(|op| *op == Op::Transmit);
+        assert!(
+            delivered.is_some() && delivered < keyed,
+            "the frame reaches the sink before the key-up, ops={:?}",
+            log.ops()
+        );
+        assert_eq!(
+            log.one_line(|op| match op {
+                Op::Defer(s) => Some(s.clone()),
+                _ => None,
+            }),
+            "waited_ms=138 reason=preamble outcome=frame",
+            "the deferral is the ordinary one, counted from its own start"
         );
     }
 
