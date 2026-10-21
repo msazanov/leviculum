@@ -267,6 +267,52 @@ impl ReportReason {
     }
 }
 
+/// Who asked for a report: the `trigger=` of the `[TELEMETRY] report`
+/// line, so a capture tells a press from a request from the cadence
+/// (order 914).
+///
+/// [`ReportReason`] says which rule of [`SendPolicy::poll`] fired; this
+/// says who armed it. Every [`ReportReason::Immediate`] was armed by one
+/// of the four occasions below, and the movement and heartbeat reports
+/// are the cadence's own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReportTrigger {
+    /// The cadence: a movement or heartbeat report.
+    Cadence,
+    /// A target became usable: set with its key, or its key arrived.
+    TargetSet,
+    /// The fixed position was set or cleared
+    /// ([`SendPolicy::note_position_config_changed`]).
+    PositionSet,
+    /// The target asked over the air ([`SendPolicy::note_report_request`]).
+    Request,
+    /// The user's double press ([`SendPolicy::note_button_press`]).
+    Button,
+}
+
+impl ReportTrigger {
+    /// The `trigger=` token.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Cadence => "cadence",
+            Self::TargetSet => "target-set",
+            Self::PositionSet => "position-set",
+            Self::Request => "request",
+            Self::Button => "button",
+        }
+    }
+
+    /// Whether the proof of a report with this trigger is played to the
+    /// user (`report-delivered`, `docs/src/concepts/one-button.md`). Only
+    /// the press: the user who pressed is the one person waiting for an
+    /// answer, and a proof of a report nobody standing at the board asked
+    /// for, played every heartbeat, is noise that teaches them to ignore
+    /// the LED.
+    pub const fn plays_proof(self) -> bool {
+        matches!(self, Self::Button)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Position
 // ---------------------------------------------------------------------------
@@ -485,6 +531,45 @@ impl RequestOutcome {
     }
 }
 
+/// What became of a double press's report (order 914): the caller's
+/// `[TELEMETRY] report=` line names this outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ButtonOutcome {
+    /// The immediate report is armed with [`ReportTrigger::Button`] and
+    /// goes out on the next tick past the attempt floor; `wait_ms` is how
+    /// far off that floor is now, 0 when the next tick may send.
+    Armed {
+        /// Milliseconds until [`SendPolicy::may_spend_airtime`] clears.
+        wait_ms: u64,
+    },
+    /// No target configured: there is nobody to send a report to.
+    NoRecipient,
+    /// A target, but not [`TargetState::Ready`]: still resolving its key,
+    /// or no position source. Nothing armed, as for a request
+    /// ([`RequestOutcome::NotReady`]); the state is the line's reason.
+    NotReady(TargetState),
+}
+
+impl ButtonOutcome {
+    /// The `report=` token: `armed` or `skipped`.
+    pub const fn report(&self) -> &'static str {
+        match self {
+            Self::Armed { .. } => "armed",
+            Self::NoRecipient | Self::NotReady(_) => "skipped",
+        }
+    }
+
+    /// The `reason=` token of a skipped report: `no-recipient`, or the
+    /// target state that is not ready. `None` when armed.
+    pub const fn reason(&self) -> Option<&'static str> {
+        match self {
+            Self::Armed { .. } => None,
+            Self::NoRecipient => Some("no-recipient"),
+            Self::NotReady(state) => Some(state.as_str()),
+        }
+    }
+}
+
 /// The send policy and target lifecycle of one node.
 ///
 /// Drive it with [`set_target`](Self::set_target) /
@@ -518,6 +603,9 @@ pub struct SendPolicy {
     position_source: bool,
     /// Armed when the target became usable and not yet spent.
     immediate_pending: bool,
+    /// Who armed the pending immediate report; meaningless while none is
+    /// pending. See [`arm_immediate`](Self::arm_immediate).
+    immediate_trigger: ReportTrigger,
     /// When the first fix passing the accuracy gate was seen; the settle
     /// window is measured from here.
     first_fix_ms: Option<u64>,
@@ -567,6 +655,7 @@ impl SendPolicy {
             key_state: TargetState::Off,
             position_source: false,
             immediate_pending: false,
+            immediate_trigger: ReportTrigger::TargetSet,
             first_fix_ms: None,
             last_report_ms: None,
             last_attempt_ms: None,
@@ -657,7 +746,7 @@ impl SendPolicy {
         self.last_reported_fix = None;
         if key_known {
             self.key_state = TargetState::Ready;
-            self.immediate_pending = true;
+            self.arm_immediate(ReportTrigger::TargetSet);
         } else {
             self.key_state = TargetState::AwaitingKey;
             // Not armed yet: the immediate report cannot be sent without
@@ -691,7 +780,7 @@ impl SendPolicy {
     pub fn note_key_available(&mut self) -> bool {
         if self.key_state == TargetState::AwaitingKey {
             self.key_state = TargetState::Ready;
-            self.immediate_pending = true;
+            self.arm_immediate(ReportTrigger::TargetSet);
             true
         } else {
             false
@@ -708,7 +797,7 @@ impl SendPolicy {
     /// awaiting-key arms the immediate on key arrival anyway.
     pub fn note_position_config_changed(&mut self) {
         if self.key_state == TargetState::Ready {
-            self.immediate_pending = true;
+            self.arm_immediate(ReportTrigger::PositionSet);
         }
     }
 
@@ -739,8 +828,78 @@ impl SendPolicy {
             }
         }
         self.last_request_ms = Some(now_ms);
-        self.immediate_pending = true;
+        self.arm_immediate(ReportTrigger::Request);
         RequestOutcome::Armed
+    }
+
+    /// The user double-pressed the button (order 914,
+    /// `docs/src/concepts/one-button.md`): after the two announces, one
+    /// immediate position report when a recipient is configured.
+    ///
+    /// The same immediate report a target write or a request arms, so it
+    /// keeps every rule that report has: owed until actually sent,
+    /// announce first, and the attempt floor in [`poll`](Self::poll). The
+    /// floor is kept on purpose, a press is not a licence to spend
+    /// airtime the profile does not allow: on a station a press within the
+    /// hour of the last attempt is owed, not dropped, and `wait_ms` says
+    /// how long until it goes out. There is no request window on top: the
+    /// button's own 30 s limit (`leviculum-announce-policy`'s
+    /// `ButtonGate`) already bounds how often a press gets here, and the
+    /// floor bounds what it costs.
+    ///
+    /// With no target there is nobody to report to
+    /// ([`ButtonOutcome::NoRecipient`]); a target that is not
+    /// [`TargetState::Ready`] arms nothing either
+    /// ([`ButtonOutcome::NotReady`]), as for a request, because a report
+    /// that fires minutes later when the key arrives is not an answer to
+    /// the press (and key arrival arms its own).
+    pub fn note_button_press(&mut self, now_ms: u64) -> ButtonOutcome {
+        match self.state() {
+            TargetState::Off => ButtonOutcome::NoRecipient,
+            TargetState::Ready => {
+                self.arm_immediate(ReportTrigger::Button);
+                ButtonOutcome::Armed {
+                    wait_ms: self.floor_wait_ms(now_ms),
+                }
+            }
+            other => ButtonOutcome::NotReady(other),
+        }
+    }
+
+    /// Arm the immediate report on behalf of `trigger`.
+    ///
+    /// One report answers every occasion that arms it before it goes out,
+    /// and it is named after the press if a press is among them: the user
+    /// who pressed is waiting for the `report-delivered` feedback
+    /// ([`ReportTrigger::plays_proof`]), and a request or a position change
+    /// landing in the same seconds must not take that answer away. Among
+    /// the others the latest wins, which is only a log label.
+    fn arm_immediate(&mut self, trigger: ReportTrigger) {
+        if !(self.immediate_pending && self.immediate_trigger == ReportTrigger::Button) {
+            self.immediate_trigger = trigger;
+        }
+        self.immediate_pending = true;
+    }
+
+    /// Who armed a report [`poll`](Self::poll) returned `reason` for: the
+    /// arming occasion for [`ReportReason::Immediate`], the cadence for the
+    /// others. Ask it between `poll` and [`note_emitted`](Self::note_emitted),
+    /// the moment the report line's fields are taken.
+    pub const fn trigger(&self, reason: ReportReason) -> ReportTrigger {
+        match reason {
+            ReportReason::Immediate => self.immediate_trigger,
+            ReportReason::Movement | ReportReason::Heartbeat => ReportTrigger::Cadence,
+        }
+    }
+
+    /// Milliseconds until the attempt floor clears, 0 when it is clear.
+    pub const fn floor_wait_ms(&self, now_ms: u64) -> u64 {
+        match self.last_attempt_ms {
+            Some(attempt) => attempt
+                .saturating_add(self.params.min_interval_ms)
+                .saturating_sub(now_ms),
+            None => 0,
+        }
     }
 
     /// The key went away again (a target changed to one we do not hold).
@@ -1077,6 +1236,9 @@ pub struct ProvenReport {
     pub first: PacketHash,
     /// Milliseconds from the first send to the proof.
     pub after_ms: u64,
+    /// Who asked for the report; [`ReportTrigger::plays_proof`] decides
+    /// whether its proof is played to the user (order 914).
+    pub trigger: ReportTrigger,
 }
 
 /// What a delivery failure means for the tracked report.
@@ -1153,6 +1315,8 @@ enum ProofState {
 #[derive(Debug, Clone)]
 pub struct ProofTracker {
     state: ProofState,
+    /// Who asked for the tracked report, handed back with its proof.
+    trigger: ReportTrigger,
 }
 
 impl Default for ProofTracker {
@@ -1165,17 +1329,21 @@ impl ProofTracker {
     pub const fn new() -> Self {
         Self {
             state: ProofState::Idle,
+            trigger: ReportTrigger::Cadence,
         }
     }
 
     /// A report went out (the dispatch settled as sent): watch its
     /// receipt. Replaces whatever was tracked before — an old report's
-    /// pending retry included.
-    pub fn note_report_sent(&mut self, first: PacketHash, now_ms: u64) {
+    /// pending retry included. `trigger` is who asked for it
+    /// ([`SendPolicy::trigger`]), returned with the proof so the caller
+    /// knows whether a user is waiting for it.
+    pub fn note_report_sent(&mut self, first: PacketHash, now_ms: u64, trigger: ReportTrigger) {
         self.state = ProofState::AwaitingProof {
             first,
             sent_ms: now_ms,
         };
+        self.trigger = trigger;
     }
 
     /// The first send's hash while a retransmission is owed and not yet
@@ -1223,6 +1391,7 @@ impl ProofTracker {
         Some(ProvenReport {
             first,
             after_ms: now_ms.saturating_sub(sent_ms),
+            trigger: self.trigger,
         })
     }
 

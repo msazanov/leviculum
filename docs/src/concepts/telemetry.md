@@ -400,6 +400,27 @@ destination nor runs a telemetry policy today, so there is nothing for
 a request to trigger there; the screen in `leviculum-lxmf` is the seam
 a host-side consumer will reuse when that changes.
 
+### A double press on the board triggers one report
+
+The user's own button is the third trigger beside the target write and
+the target's request (order 914, [One button](one-button.md#the-double-presss-report)):
+a double press, after its two announces, arms the same immediate report
+(`SendPolicy::note_button_press`,
+`leviculum-nrf/telemetry-policy/src/lib.rs:856`), under the same rules:
+owed until sent, announce first, the attempt floor. There is no request
+window on top, because the button's own 30 s limit bounds how often a
+press arrives and the floor bounds what it costs. Without a target
+nothing is sent and the board says so
+(`[TELEMETRY] report=skipped reason=no-recipient trigger=button`).
+
+Every report line names who asked for it, `trigger=cadence` (movement
+or heartbeat), `target-set` (a target became usable), `position-set`
+(the fixed position changed), `request` or `button`
+(`ReportTrigger`, `leviculum-nrf/telemetry-policy/src/lib.rs:279`), so a
+capture tells them apart. The proof of a press's report is the one proof
+the board plays to its user (`report-delivered`); silence means "not
+confirmed", not "not sent".
+
 ### Fan-out is the expensive shape; collection is the cheaper one
 
 Telemetry to *n* recipients is *n* individually addressed and

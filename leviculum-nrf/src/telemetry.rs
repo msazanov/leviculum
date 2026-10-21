@@ -62,9 +62,9 @@ use leviculum_telemetry_policy::reporter::{
     Withhold, SAVE_RETRIES,
 };
 use leviculum_telemetry_policy::{
-    command_from_wire, EmissionRoute, FailureVerdict, Fix, PacketHash, PositionSource, Profile,
-    ProofTracker, ReportReason, RequestOutcome, RetryStep, SendPolicy, TargetCommand, TargetState,
-    FIXED_POSITION_HDOP_E2,
+    command_from_wire, ButtonOutcome, EmissionRoute, FailureVerdict, Fix, PacketHash,
+    PositionSource, Profile, ProofTracker, ReportReason, ReportTrigger, RequestOutcome, RetryStep,
+    SendPolicy, TargetCommand, TargetState, FIXED_POSITION_HDOP_E2,
 };
 
 /// Re-exported for the same reason [`TargetOutcome`] is: the board
@@ -1074,6 +1074,9 @@ pub struct Reporter {
 #[derive(Clone, Copy)]
 struct PendingLine {
     reason: ReportReason,
+    /// Who asked for it (order 914): the line's `trigger=`, and what the
+    /// proof wait hands back to decide whether the proof is played.
+    trigger: ReportTrigger,
     include_position: bool,
     /// Which source the position slot answered from — `fixed` while a
     /// fixed position is set, `gnss` otherwise, whether or not a position
@@ -1653,6 +1656,7 @@ impl Reporter {
                 self.policy.note_emitted(now_ms, reported);
                 self.pending_line = Some(PendingLine {
                     reason,
+                    trigger: self.policy.trigger(reason),
                     include_position,
                     possrc,
                     unix_secs,
@@ -1725,6 +1729,12 @@ impl Reporter {
                                 proven.after_ms
                             ),
                         );
+                        // The user who double-pressed for this report is
+                        // told it arrived (order 914). Only them: a proof
+                        // of a cadence report plays nothing.
+                        if proven.trigger.plays_proof() {
+                            crate::feedback::report_delivered();
+                        }
                     }
                     continue;
                 }
@@ -1882,22 +1892,34 @@ impl Reporter {
         // On the air: from here the proof decides. A report that gets no
         // proof within the receipt timeout is retransmitted once from
         // these kept bytes (#373).
-        self.proof.note_report_sent(line.packet_hash, line.sent_ms);
+        self.proof
+            .note_report_sent(line.packet_hash, line.sent_ms, line.trigger);
         self.retry_payload = self.pending_payload.take();
         self.retry_path_requested = false;
         self.last_withheld = None;
         crate::log::log_fmt_critical(
             "[INFO!] ",
             format_args!(
-                "[TELEMETRY] report target={:08x} reason={} position={} possrc={} unix={} src={}",
+                "[TELEMETRY] report target={:08x} reason={} trigger={} position={} possrc={} unix={} src={}",
                 self.target_short(),
                 line.reason.as_str(),
+                line.trigger.as_str(),
                 line.include_position as u8,
                 line.possrc.as_str(),
                 line.unix_secs,
                 crate::time_source_str()
             ),
         );
+    }
+
+    /// A double press (order 914, `docs/src/concepts/one-button.md`): ask
+    /// for one immediate report through the same arming a target write or
+    /// a request uses ([`SendPolicy::note_button_press`]). Nothing is sent
+    /// from here; the next [`tick`](Self::tick) emits it under every rule
+    /// the immediate report has. One line says what became of the press.
+    pub fn note_button_press(&mut self, now_ms: u64) {
+        let outcome = self.policy.note_button_press(now_ms);
+        log_button_outcome(&outcome);
     }
 
     /// The banner line, emitted beside `[TIME_SOURCE]` so a log tail
@@ -1918,6 +1940,41 @@ impl Reporter {
                 self.profile().as_str()
             ),
         );
+    }
+}
+
+/// What a double press did about the report, from the node loop's
+/// button arm after the two announces (order 914). A board whose reporter
+/// does not exist (no delivery destination) has no recipient either.
+pub fn on_button_press(reporter: Option<&mut Reporter>, now_ms: u64) {
+    match reporter {
+        Some(reporter) => reporter.note_button_press(now_ms),
+        None => log_button_outcome(&ButtonOutcome::NoRecipient),
+    }
+}
+
+/// `[TELEMETRY] report=armed trigger=button wait_ms=<n>` or
+/// `[TELEMETRY] report=skipped reason=<r> trigger=button`. Critical, like
+/// the `BTN_PRESS` line it follows: a capture taken for a press must see
+/// what the press did without raising the log level.
+fn log_button_outcome(outcome: &ButtonOutcome) {
+    match (outcome, outcome.reason()) {
+        (ButtonOutcome::Armed { wait_ms }, _) => crate::log::log_fmt_critical(
+            "[INFO!] ",
+            format_args!(
+                "[TELEMETRY] report={} trigger=button wait_ms={}",
+                outcome.report(),
+                wait_ms
+            ),
+        ),
+        (_, reason) => crate::log::log_fmt_critical(
+            "[INFO!] ",
+            format_args!(
+                "[TELEMETRY] report={} reason={} trigger=button",
+                outcome.report(),
+                reason.unwrap_or("?")
+            ),
+        ),
     }
 }
 

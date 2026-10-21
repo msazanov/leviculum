@@ -20,6 +20,13 @@ Toolchain: Rust 1.97.1
 
 ### Added
 
+- A double press on a board's button now also sends one position report
+  when a telemetry recipient is configured, through the ordinary telemetry
+  path, and the board blinks (and on the T1000-E beeps) two short when the
+  recipient's proof comes back. No proof, no blink: silence means "not
+  confirmed", not "not sent". Every `[TELEMETRY] report` line now names
+  its `trigger=` (cadence, target-set, position-set, request, button).
+
 - Four `[reticulum]` keys size a small router without a fork (#464):
   `max_identities`, `max_packet_hashes`, `max_known_destinations` and
   `path_expiry_secs`, read by the INI and the TOML parser alike. Their

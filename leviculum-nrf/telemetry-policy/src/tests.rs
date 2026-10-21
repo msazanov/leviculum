@@ -1467,12 +1467,13 @@ fn pkt(n: u8) -> PacketHash {
 #[test]
 fn a_proof_inside_the_timeout_is_success_and_owes_nothing() {
     let mut t = ProofTracker::new();
-    t.note_report_sent(pkt(1), 1_000);
+    t.note_report_sent(pkt(1), 1_000, ReportTrigger::Cadence);
     assert_eq!(
         t.note_proof(&pkt(1), 1_160),
         Some(ProvenReport {
             first: pkt(1),
-            after_ms: 160
+            after_ms: 160,
+            trigger: ReportTrigger::Cadence,
         })
     );
     assert_eq!(t.awaiting_retry(), None);
@@ -1485,7 +1486,7 @@ fn a_proof_inside_the_timeout_is_success_and_owes_nothing() {
 #[test]
 fn no_proof_within_the_timeout_owes_exactly_one_resend() {
     let mut t = ProofTracker::new();
-    t.note_report_sent(pkt(1), 0);
+    t.note_report_sent(pkt(1), 0, ReportTrigger::Cadence);
     assert_eq!(
         t.note_failure(&pkt(1), 22_098),
         FailureVerdict::RetryDue { first: pkt(1) }
@@ -1501,7 +1502,7 @@ fn no_proof_within_the_timeout_owes_exactly_one_resend() {
 #[test]
 fn a_proof_for_the_resend_is_one_success() {
     let mut t = ProofTracker::new();
-    t.note_report_sent(pkt(1), 0);
+    t.note_report_sent(pkt(1), 0, ReportTrigger::Cadence);
     assert_eq!(
         t.note_failure(&pkt(1), 22_000),
         FailureVerdict::RetryDue { first: pkt(1) }
@@ -1512,7 +1513,8 @@ fn a_proof_for_the_resend_is_one_success() {
         t.note_proof(&pkt(2), 24_300),
         Some(ProvenReport {
             first: pkt(1),
-            after_ms: 24_300
+            after_ms: 24_300,
+            trigger: ReportTrigger::Cadence,
         })
     );
     assert_eq!(t.note_proof(&pkt(2), 24_301), None, "counted once");
@@ -1523,7 +1525,7 @@ fn a_proof_for_the_resend_is_one_success() {
 #[test]
 fn no_proof_after_the_resend_gives_up_with_no_third_attempt() {
     let mut t = ProofTracker::new();
-    t.note_report_sent(pkt(1), 0);
+    t.note_report_sent(pkt(1), 0, ReportTrigger::Cadence);
     assert_eq!(
         t.note_failure(&pkt(1), 22_000),
         FailureVerdict::RetryDue { first: pkt(1) }
@@ -1550,7 +1552,7 @@ fn no_proof_after_the_resend_gives_up_with_no_third_attempt() {
 #[test]
 fn a_late_proof_for_the_first_send_counts_once_and_ends_the_chain() {
     let mut t = ProofTracker::new();
-    t.note_report_sent(pkt(1), 0);
+    t.note_report_sent(pkt(1), 0, ReportTrigger::Cadence);
     assert_eq!(
         t.note_failure(&pkt(1), 22_000),
         FailureVerdict::RetryDue { first: pkt(1) }
@@ -1560,7 +1562,8 @@ fn a_late_proof_for_the_first_send_counts_once_and_ends_the_chain() {
         t.note_proof(&pkt(1), 23_000),
         Some(ProvenReport {
             first: pkt(1),
-            after_ms: 23_000
+            after_ms: 23_000,
+            trigger: ReportTrigger::Cadence,
         })
     );
     // The retransmission's receipt will still time out; that is not a
@@ -1574,7 +1577,7 @@ fn a_late_proof_for_the_first_send_counts_once_and_ends_the_chain() {
 #[test]
 fn a_proof_while_the_retry_is_owed_cancels_it() {
     let mut t = ProofTracker::new();
-    t.note_report_sent(pkt(1), 0);
+    t.note_report_sent(pkt(1), 0, ReportTrigger::Cadence);
     assert_eq!(
         t.note_failure(&pkt(1), 22_000),
         FailureVerdict::RetryDue { first: pkt(1) }
@@ -1583,7 +1586,8 @@ fn a_proof_while_the_retry_is_owed_cancels_it() {
         t.note_proof(&pkt(1), 22_500),
         Some(ProvenReport {
             first: pkt(1),
-            after_ms: 22_500
+            after_ms: 22_500,
+            trigger: ReportTrigger::Cadence,
         })
     );
     assert_eq!(
@@ -1599,12 +1603,12 @@ fn a_proof_while_the_retry_is_owed_cancels_it() {
 #[test]
 fn a_new_report_supersedes_the_old_wait_and_its_retry() {
     let mut t = ProofTracker::new();
-    t.note_report_sent(pkt(1), 0);
+    t.note_report_sent(pkt(1), 0, ReportTrigger::Cadence);
     assert_eq!(
         t.note_failure(&pkt(1), 22_000),
         FailureVerdict::RetryDue { first: pkt(1) }
     );
-    t.note_report_sent(pkt(3), 60_000);
+    t.note_report_sent(pkt(3), 60_000, ReportTrigger::Cadence);
     assert_eq!(
         t.awaiting_retry(),
         None,
@@ -1615,7 +1619,8 @@ fn a_new_report_supersedes_the_old_wait_and_its_retry() {
         t.note_proof(&pkt(3), 60_200),
         Some(ProvenReport {
             first: pkt(3),
-            after_ms: 200
+            after_ms: 200,
+            trigger: ReportTrigger::Cadence,
         })
     );
 }
@@ -1627,7 +1632,7 @@ fn untracked_hashes_are_ignored() {
     let mut t = ProofTracker::new();
     assert_eq!(t.note_failure(&pkt(9), 1), FailureVerdict::NotTracked);
     assert_eq!(t.note_proof(&pkt(9), 2), None);
-    t.note_report_sent(pkt(1), 0);
+    t.note_report_sent(pkt(1), 0, ReportTrigger::Cadence);
     assert_eq!(t.note_failure(&pkt(9), 3), FailureVerdict::NotTracked);
     assert_eq!(t.note_proof(&pkt(9), 4), None);
     assert_eq!(t.awaiting_retry(), None);
@@ -1637,7 +1642,7 @@ fn untracked_hashes_are_ignored() {
 #[test]
 fn clear_forgets_the_tracked_report() {
     let mut t = ProofTracker::new();
-    t.note_report_sent(pkt(1), 0);
+    t.note_report_sent(pkt(1), 0, ReportTrigger::Cadence);
     assert_eq!(
         t.note_failure(&pkt(1), 22_000),
         FailureVerdict::RetryDue { first: pkt(1) }
@@ -1811,4 +1816,165 @@ fn an_owed_retry_waits_for_the_answer_and_never_asks_twice() {
 #[test]
 fn an_owed_retry_goes_out_along_the_path_the_answer_brought() {
     assert_eq!(retry_step(true, true), RetryStep::Send);
+}
+
+// ---------------------------------------------------------------------------
+// The double press's report and its proof (order 914)
+// ---------------------------------------------------------------------------
+
+/// Drive one report through the board's order: poll, emit, settle as sent.
+/// Returns who triggered it.
+fn send_due(p: &mut SendPolicy, t: u64) -> Option<ReportTrigger> {
+    let reason = p.poll(t, Some(good_fix()))?;
+    let trigger = p.trigger(reason);
+    p.note_emitted(t, Some(good_fix()));
+    assert!(p.note_dispatch(true));
+    Some(trigger)
+}
+
+#[test]
+fn a_double_press_with_a_recipient_arms_one_report() {
+    let mut p = ready(Profile::Station, 0);
+    assert_eq!(p.poll(1_000, Some(good_fix())), None, "nothing owed yet");
+    assert_eq!(
+        p.note_button_press(1_000),
+        ButtonOutcome::Armed { wait_ms: 0 }
+    );
+    assert_eq!(send_due(&mut p, 1_000), Some(ReportTrigger::Button));
+    // One report, not one per tick: the press is spent by the send, and
+    // what the clock owes next is the cadence's own (the station's heartbeat
+    // falls due with its floor).
+    let floor = p.params().min_interval_ms;
+    assert_ne!(
+        p.poll(1_000 + floor, Some(good_fix())),
+        Some(ReportReason::Immediate)
+    );
+}
+
+#[test]
+fn a_double_press_without_a_recipient_arms_nothing() {
+    let mut p = reporting_node();
+    assert_eq!(p.note_button_press(1_000), ButtonOutcome::NoRecipient);
+    assert_eq!(p.note_button_press(1_000).report(), "skipped");
+    assert_eq!(p.note_button_press(1_000).reason(), Some("no-recipient"));
+    assert_eq!(p.poll(1_000, Some(good_fix())), None);
+    assert_eq!(p.poll(10 * 60 * 60_000, Some(good_fix())), None);
+}
+
+#[test]
+fn a_double_press_on_a_target_that_is_not_ready_arms_nothing() {
+    let mut p = reporting_node();
+    p.set_target(Profile::Tracker, false);
+    let outcome = p.note_button_press(1_000);
+    assert_eq!(outcome, ButtonOutcome::NotReady(TargetState::AwaitingKey));
+    assert_eq!(outcome.reason(), Some("awaiting-key"));
+    // Key arrival owes its own report, and it is the target's, not the press's.
+    assert!(p.note_key_available());
+    assert_eq!(send_due(&mut p, 2_000), Some(ReportTrigger::TargetSet));
+}
+
+#[test]
+fn a_double_press_inside_the_attempt_floor_is_owed_and_says_how_long() {
+    let mut p = reporting_node();
+    p.set_target(Profile::Tracker, true);
+    assert_eq!(send_due(&mut p, 0), Some(ReportTrigger::TargetSet));
+    let floor = p.params().min_interval_ms;
+    assert_eq!(
+        p.note_button_press(10_000),
+        ButtonOutcome::Armed {
+            wait_ms: floor - 10_000
+        }
+    );
+    assert_eq!(p.poll(10_000, Some(good_fix())), None, "the floor holds");
+    assert_eq!(send_due(&mut p, floor), Some(ReportTrigger::Button));
+}
+
+#[test]
+fn a_request_landing_on_a_pending_press_keeps_the_press_trigger() {
+    let mut p = ready(Profile::Tracker, 0);
+    let floor = p.params().min_interval_ms;
+    assert!(matches!(
+        p.note_button_press(floor),
+        ButtonOutcome::Armed { .. }
+    ));
+    assert_eq!(p.note_report_request(floor), RequestOutcome::Armed);
+    assert_eq!(send_due(&mut p, floor), Some(ReportTrigger::Button));
+}
+
+#[test]
+fn the_cadence_and_the_other_occasions_name_their_own_trigger() {
+    let mut p = reporting_node();
+    p.set_target(Profile::Tracker, true);
+    assert_eq!(send_due(&mut p, 0), Some(ReportTrigger::TargetSet));
+    let floor = p.params().min_interval_ms;
+    p.note_position_config_changed();
+    assert_eq!(send_due(&mut p, floor), Some(ReportTrigger::PositionSet));
+    assert_eq!(p.note_report_request(2 * floor), RequestOutcome::Armed);
+    assert_eq!(send_due(&mut p, 2 * floor), Some(ReportTrigger::Request));
+    let heartbeat = 2 * floor + p.params().max_interval_ms;
+    assert_eq!(send_due(&mut p, heartbeat), Some(ReportTrigger::Cadence));
+    let tokens = [
+        ReportTrigger::Cadence,
+        ReportTrigger::TargetSet,
+        ReportTrigger::PositionSet,
+        ReportTrigger::Request,
+        ReportTrigger::Button,
+    ]
+    .map(ReportTrigger::as_str);
+    assert_eq!(
+        tokens,
+        ["cadence", "target-set", "position-set", "request", "button"]
+    );
+}
+
+#[test]
+fn the_proof_of_a_button_report_plays_once() {
+    let mut t = ProofTracker::new();
+    t.note_report_sent(pkt(1), 0, ReportTrigger::Button);
+    let proven = t.note_proof(&pkt(1), 900).map(|p| p.trigger.plays_proof());
+    assert_eq!(proven, Some(true));
+    // A second proof of the same report (a late duplicate) plays nothing.
+    assert_eq!(t.note_proof(&pkt(1), 950), None);
+}
+
+#[test]
+fn the_proof_of_a_retransmitted_button_report_still_plays() {
+    let mut t = ProofTracker::new();
+    t.note_report_sent(pkt(1), 0, ReportTrigger::Button);
+    assert_eq!(
+        t.note_failure(&pkt(1), 30_000),
+        FailureVerdict::RetryDue { first: pkt(1) }
+    );
+    t.note_retry_sent(pkt(2));
+    let proven = t.note_proof(&pkt(2), 31_000);
+    assert_eq!(proven.map(|p| p.trigger), Some(ReportTrigger::Button));
+    assert_eq!(t.note_proof(&pkt(1), 31_100), None);
+}
+
+#[test]
+fn the_proof_of_a_report_nobody_pressed_for_plays_nothing() {
+    for trigger in [
+        ReportTrigger::Cadence,
+        ReportTrigger::TargetSet,
+        ReportTrigger::PositionSet,
+        ReportTrigger::Request,
+    ] {
+        let mut t = ProofTracker::new();
+        t.note_report_sent(pkt(1), 0, trigger);
+        let proven = t.note_proof(&pkt(1), 900);
+        assert_eq!(proven.map(|p| p.trigger), Some(trigger));
+        assert!(!trigger.plays_proof(), "{} played", trigger.as_str());
+    }
+}
+
+#[test]
+fn a_cadence_report_superseding_a_button_wait_plays_nothing() {
+    // The next report replaces the wait (one report in flight), and with it
+    // the trigger: the press's proof can no longer come.
+    let mut t = ProofTracker::new();
+    t.note_report_sent(pkt(1), 0, ReportTrigger::Button);
+    t.note_report_sent(pkt(3), 60_000, ReportTrigger::Cadence);
+    assert_eq!(t.note_proof(&pkt(1), 60_100), None);
+    let proven = t.note_proof(&pkt(3), 60_200);
+    assert_eq!(proven.map(|p| p.trigger.plays_proof()), Some(false));
 }

@@ -9,6 +9,7 @@
 //! | fast flicker | error | [`error`] |
 //! | one short | a message for the user arrived | [`notify`] |
 //! | one blip | a held button has reached 2 s: release now | [`release_now`] |
+//! | two short | the report a double press sent was proven delivered | [`report_delivered`] |
 //!
 //! A [`Pattern`] is a short list of [`Step`]s, each an on time and the
 //! off time after it, and it is the same list for every sink: the LED, the
@@ -168,6 +169,24 @@ pub fn notify() -> Pattern {
     }
 }
 
+/// The position report a double press sent has been proven delivered
+/// (order 914): two short.
+///
+/// Two, because the answer echoes the question: the user pressed twice to
+/// send, and two blinks say "what you sent arrived". One short is taken:
+/// it is [`notify`], a message *for* the user, and the opposite direction
+/// must not look the same. The shape is battery-2's, and the two do not
+/// meet: the battery answers a single press within half a second of its
+/// release, this one answers a double press after a proof round trip,
+/// seconds later, and nothing else plays it. Silence is "not confirmed",
+/// not "not sent": a report whose proof never comes plays nothing.
+pub fn report_delivered() -> Pattern {
+    Pattern {
+        name: "report-delivered",
+        steps: &SHORTS[..2],
+    }
+}
+
 /// A held button has reached the long press: one blip, so the user knows
 /// to let go.
 pub fn release_now() -> Pattern {
@@ -324,6 +343,15 @@ mod tests {
         assert_eq!(r.total_ms(), 60);
     }
 
+    #[test]
+    fn report_delivered_is_two_short() {
+        let d = report_delivered();
+        assert_eq!(d.name, "report-delivered");
+        assert_eq!(d.steps, &[SHORT, SHORT]);
+        assert_eq!(d.total_ms(), 650);
+        assert_ne!(d.steps, notify().steps, "not the inbound message's one");
+    }
+
     // The timings keep the signals apart. Checked at compile time, so a
     // constant moved past its reason does not build.
     const _: () = {
@@ -351,6 +379,7 @@ mod tests {
             error(),
             notify(),
             release_now(),
+            report_delivered(),
         ];
         for (i, a) in all.iter().enumerate() {
             assert!(a
@@ -395,6 +424,7 @@ mod tests {
             error(),
             notify(),
             release_now(),
+            report_delivered(),
         ] {
             let p = Playback::new(pattern, 0);
             let total = u64::from(pattern.total_ms());

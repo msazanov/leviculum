@@ -31,8 +31,10 @@
 //! What raises a pattern: [`status`](crate::feedback::status) (a short
 //! press, after the display wake),
 //! [`release_now`](crate::feedback::release_now) (a held button reaching
-//! 2 s) and [`notify`](crate::feedback::notify) (the propagation role
-//! storing a message for this board's own `lxmf.delivery` destination).
+//! 2 s), [`notify`](crate::feedback::notify) (the propagation role
+//! storing a message for this board's own `lxmf.delivery` destination) and
+//! [`report_delivered`](crate::feedback::report_delivered) (the proof of
+//! the report a double press sent, order 914).
 //! The mode blink ([`leviculum_feedback::mode`]) has no caller until
 //! Tracker mode exists.
 
@@ -146,6 +148,15 @@ pub fn notify() {
     } else {
         raise(Sink::Led, pattern);
     }
+    raise(Sink::Buzzer, pattern);
+}
+
+/// The report a double press sent was proven delivered (order 914): two
+/// short on the LED and the buzzer, the sinks the press's own status answer
+/// uses. A report whose proof never comes plays nothing.
+pub fn report_delivered() {
+    let pattern = leviculum_feedback::report_delivered();
+    raise(Sink::Led, pattern);
     raise(Sink::Buzzer, pattern);
 }
 

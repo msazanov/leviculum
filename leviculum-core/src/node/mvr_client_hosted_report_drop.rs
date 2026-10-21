@@ -730,7 +730,9 @@ struct RetryTrace {
 /// `leviculum-nrf/src/telemetry.rs` calls on every tick) and its own
 /// [`ProofTracker`](leviculum_telemetry_policy::ProofTracker).
 fn run_retry_after_the_relay_departs() -> RetryTrace {
-    use leviculum_telemetry_policy::{retry_step, FailureVerdict, ProofTracker, RetryStep};
+    use leviculum_telemetry_policy::{
+        retry_step, FailureVerdict, ProofTracker, ReportTrigger, RetryStep,
+    };
 
     let RelayDeparted {
         mut lnsd,
@@ -760,7 +762,11 @@ fn run_retry_after_the_relay_departs() -> RetryTrace {
     let (first, out) = board
         .send_single_packet(&target, b"[TELEMETRY] report reason=movement")
         .expect("the board holds a path, so the report must be routable");
-    tracker.note_report_sent(first, board.transport().clock().now_ms());
+    tracker.note_report_sent(
+        first,
+        board.transport().clock().now_ms(),
+        ReportTrigger::Cadence,
+    );
     for f in bound_for(&out, BOARD_RADIO) {
         air.push((true, f));
     }

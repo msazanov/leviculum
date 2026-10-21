@@ -1107,6 +1107,11 @@ async fn main(spawner: Spawner) {
                     let dispatched = dispatch_actions(&mut ifaces, actions, &ifac_configs);
                     leviculum_nrf::dispatch::settle("announce-button", &mut node, &dispatched);
                 }
+                // Then one immediate position report when a recipient is
+                // configured (order 914): armed here, sent by the next
+                // telemetry tick through the reporter's own path.
+                let now_ms = node.now_ms();
+                leviculum_nrf::telemetry::on_button_press(reporter.as_mut(), now_ms);
             }
             Either4::First(Either4::First(data)) => {
                 info!("SER RX {} bytes", data.len());

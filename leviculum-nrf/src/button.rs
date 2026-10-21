@@ -13,7 +13,7 @@
 //! | Gesture | `action=` | Does |
 //! |---|---|---|
 //! | short | `status` | wakes the display (Pocket V2), then the battery in quarters on the LED and the buzzer (`crate::feedback`) |
-//! | double | `announce` / `rate-limited` | both announces, at most one set per 30 s |
+//! | double | `announce` / `rate-limited` | both announces, at most one set per 30 s, then one position report if a recipient is set (`crate::telemetry::on_button_press`) |
 //! | long, 2 s | `long` | nothing yet: the mode switch, once Tracker mode exists; the 2 s mark blips "release now" |
 //! | very long, 8 s | `hold8` | nothing yet: the power off, once the board can sleep |
 //!
