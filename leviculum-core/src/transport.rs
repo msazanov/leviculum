@@ -2725,6 +2725,19 @@ impl DiscoveryWindow {
     }
 }
 
+/// What an interface's departure took from the live-discovery records
+/// ([`Transport::remove_discovery_requesters_for_interface`], 923).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DiscoveryRequesterCull {
+    /// Windows the gone interface opened, removed with nobody left to answer.
+    pub windows: usize,
+    /// Windows the gone interface opened that a batched requester took over.
+    pub handed_on: usize,
+    /// Batched requesters (#433) on the gone interface, removed from windows
+    /// someone else opened or took over.
+    pub batched: usize,
+}
+
 /// What a transport node did with ONE packet a neighbour addressed to it for
 /// relay.
 ///
@@ -6265,7 +6278,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// recall source is the cached announce for the destination
     /// (`get_announce_cache`, keyed by destination hash, holding the raw announce
     /// whose payload starts with the 64-byte public key), the same source the
-    /// link-request path uses at transport.rs:4425. A destination with no cached
+    /// link-request path uses at transport.rs:4438. A destination with no cached
     /// announce cannot be associated with an identity, so it is left untouched,
     /// exactly as Python keeps a path whose `Identity.recall` returns `None`.
     ///
@@ -12260,7 +12273,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // Emit the STORED path-table count, matching Python
                 // Transport.py:2956 (`packet.hops = path_table[dst][IDX_PT_HOPS]`).
                 // The cached raw's hop byte is the PRE-increment wire value
-                // (`stored - 1`): the receipt increment (`transport.rs:2895`) only
+                // (`stored - 1`): the receipt increment (`transport.rs:2908`) only
                 // touches the in-memory packet, never the raw buffer stashed by
                 // `set_announce_cache`. Using it here would put `stored - 1` on the
                 // wire and every peer that learns via this response would be one hop
@@ -14032,6 +14045,70 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         }
         self.discovery_extra_requesters
             .insert((*dest_hash, interface_index));
+    }
+
+    /// Cull every live-discovery record whose requester is `interface_index`,
+    /// which has gone away (923). Called from `handle_interface_down`.
+    ///
+    /// A window the gone interface opened is removed with its
+    /// `discovery_request_peers` entry and its one-shot marker; when other
+    /// interfaces were batched onto it (#433), the lowest of them takes the
+    /// entry over instead, so their answer still lands. A batched requester
+    /// on the gone interface leaves its window.
+    ///
+    /// Deviation rule: the wire is unchanged, and so are the semantics,
+    /// because a requester on a gone interface cannot be answered on it, and
+    /// its own next retry opens a fresh window (the withheld-retry comment in
+    /// `retry_pending_discoveries` already says so). What goes is a dead send:
+    /// the window kept routing its answer to the index the driver no longer
+    /// has (`PKT_DROP reason=no-such-interface`, the 919 soak line), and every
+    /// retry tick until expiry was withheld under the gone index's default
+    /// mode. An interface that comes back under the same index (an lnsd TCP
+    /// reconnect) costs its requester one retry; no link state is involved.
+    /// The reference removes interfaces at runtime
+    /// (`Transport.remove_interface`, 1.3.5 Transport.py:429-432) but culls
+    /// `discovery_path_requests` only by timeout (:802-907); its answer is
+    /// then attached to an interface no longer in `Transport.interfaces`,
+    /// which `Transport.outbound` never transmits on (:1182-1191), so the
+    /// cull reaches the reference's wire outcome without the dead send.
+    pub fn remove_discovery_requesters_for_interface(
+        &mut self,
+        interface_index: usize,
+    ) -> DiscoveryRequesterCull {
+        let mut cull = DiscoveryRequesterCull::default();
+        let batched_before = self.discovery_extra_requesters.len();
+        self.discovery_extra_requesters
+            .retain(|&(_, iface)| iface != interface_index);
+        cull.batched = batched_before - self.discovery_extra_requesters.len();
+
+        for dest_hash in self.storage.discovery_path_request_dest_hashes() {
+            let timeout_ms = match self.storage.get_discovery_path_request(&dest_hash) {
+                Some((iface, timeout_ms)) if iface == interface_index => timeout_ms,
+                _ => continue,
+            };
+            self.discovery_request_peers.remove(&dest_hash);
+            let heir = self
+                .discovery_extra_requesters
+                .iter()
+                .find(|(d, _)| *d == dest_hash)
+                .copied();
+            match heir {
+                Some(entry @ (_, iface)) => {
+                    self.discovery_extra_requesters.remove(&entry);
+                    // The store keeps a first request, so the entry is
+                    // re-keyed by removing it first.
+                    self.storage.remove_discovery_path_request(&dest_hash);
+                    self.storage
+                        .set_discovery_path_request(dest_hash, iface, timeout_ms);
+                    cull.handed_on += 1;
+                }
+                None => {
+                    self.forget_discovery_requesters(&dest_hash);
+                    cull.windows += 1;
+                }
+            }
+        }
+        cull
     }
 
     /// How many interfaces a pending discovery will answer: the entry's own
@@ -18499,7 +18576,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // `random_blobs` (transport.rs:7826), a deliberate anti-replay
+            // `random_blobs` (transport.rs:7839), a deliberate anti-replay
             // extension — so the blob count is not a rejection indicator.)
             transport
                 .clock

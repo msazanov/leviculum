@@ -85,6 +85,8 @@ mod mvr_client_hosted_report_drop;
 mod mvr_default_announce_app_data;
 #[cfg(all(test, feature = "tracing"))]
 mod mvr_diamond_return_path;
+#[cfg(all(test, feature = "tracing"))]
+mod mvr_discovery_window_gone_requester;
 #[cfg(test)]
 mod mvr_duty_held_lrproof;
 #[cfg(test)]
@@ -3063,11 +3065,22 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // Remove path entries referencing this interface
         let lost_paths = self.transport.remove_paths_for_interface(iface_idx);
 
+        // Cull the discovery windows this interface asked for: their answer
+        // could only be addressed to an index the driver no longer has (923;
+        // the deviation note is on the transport method).
+        #[cfg_attr(not(feature = "tracing"), allow(unused_variables))]
+        let discovery = self
+            .transport
+            .remove_discovery_requesters_for_interface(iface_idx);
+
         // Log before removing the name so the message still shows the human-readable name
         crate::tracing::debug!(
-            "Interface {} went down, removed {} paths",
+            "Interface {} went down, removed {} paths, {} discovery windows ({} handed on, {} batched requesters)",
             self.transport.iface_name(iface_idx),
-            lost_paths.len()
+            lost_paths.len(),
+            discovery.windows,
+            discovery.handed_on,
+            discovery.batched
         );
 
         for hash in &lost_paths {
