@@ -157,7 +157,8 @@ fast goes red on a slow day. Before landing a test that waits on a
 worker, a daemon or a timer, run it under a quarter of a CPU:
 
 ```sh
-just test-under-quota          # whole workspace, normal and under 25 %
+just test-under-quota                       # whole workspace, normal and under 25 %
+just test-under-quota quota=25% only=mvr    # one target key, here the mvr suite
 ```
 
 It prints every test that takes 10 s or more under the quota beside its

@@ -2250,12 +2250,35 @@ site-unpack-docs-selftest:
 # under ~/.local/state/leviculum-ci/under-quota/. A coder pass, held to 600 s a
 # command, runs the script itself with --budget (see its header). The test
 # binaries build unconstrained first: the question is the tests, not rustc.
-[doc('Every workspace test under a CPU quota: which ones wait on the host')]
-test-under-quota quota="25%":
+#
+# `only` narrows both runs to the target keys containing it (the script's
+# `--only`); `report` still reads the whole survey directory. just 1.40 has no
+# named recipe arguments and hands `quota=25%` to the recipe as a literal
+# positional value (895 ran the whole survey that way), so the body reads
+# `quota=` and `only=` by name in either slot and takes a bare value by
+# position: `just test-under-quota quota=25% only=mvr`, `just test-under-quota
+# 25% mvr` and `just test-under-quota only=mvr` all mean what they say.
+[doc('Tests under a CPU quota: just test-under-quota quota=25% only=mvr')]
+test-under-quota quota="25%" only="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    q="25%" o="" slot=0
+    for a in "{{quota}}" "{{only}}"; do
+        slot=$((slot + 1))
+        case "$a" in
+            quota=*) q="${a#quota=}" ;;
+            only=*) o="${a#only=}" ;;
+            *=*) echo "test-under-quota: unknown argument '$a' (quota=, only=)" >&2; exit 2 ;;
+            "") ;;
+            *) if [ "$slot" = 1 ]; then q="$a"; else o="$a"; fi ;;
+        esac
+    done
+    narrow=()
+    if [ -n "$o" ]; then narrow=(--only "$o"); fi
     {{just_executable()}} build-integ-bins
-    -python3 scripts/test-under-quota.py run --quota none
-    -python3 scripts/test-under-quota.py run --quota {{quota}}
-    python3 scripts/test-under-quota.py report --quota {{quota}}
+    python3 scripts/test-under-quota.py run --quota none "${narrow[@]}" || true
+    python3 scripts/test-under-quota.py run --quota "$q" "${narrow[@]}" || true
+    python3 scripts/test-under-quota.py report --quota "$q"
 
 # 730: `cargo test --workspace` leaves nothing behind in the temp directory.
 # /tmp on the coder host is a tmpfs, so a leaked scratch directory is RAM, and
