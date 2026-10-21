@@ -119,10 +119,12 @@ Every boot, on the debug CDC, before anything can have moved:
 
 The two carrier fields are what the board is **running**; `src=` is
 `flash` for a profile read off the page and `default` for the both-on
-fallback. It is re-emitted with the `[FW_BUILD]` banner every five
-seconds, so a capture attached after the boot window still reads the
-carriers off the board rather than off an operator's memory, and a
-runtime change shows up within five seconds.
+fallback. It is re-emitted with the `[FW_BUILD]` banner (every five
+seconds for the first two minutes after boot, every five minutes after
+that, and at once on a `b` byte on the debug port), so a capture attached
+after the boot window still reads the carriers off the board rather than
+off an operator's memory, and a runtime change shows up on the next
+banner.
 
 **The shape is an interface.** Assertions read it; it is frozen in
 `docs/src/structured-event-logs.md` and must not drift.

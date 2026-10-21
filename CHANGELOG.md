@@ -448,6 +448,13 @@ Toolchain: Rust 1.97.1
 
 ### Changed
 
+- The boards' build banner (`[FW_BUILD]` with `[TIME_SOURCE]`, `[MEDIA]`,
+  `[NAME ]` and `[IDENTITY]`) repeats every 5 s only for the first two
+  minutes after boot, where every post-flash reader reads it, and every
+  5 minutes after that: about 311 banners a day instead of 17 280, which
+  had been the first thing every capture grep returned. A `b` byte on the
+  debug port prints it at once; the flash runners' read-back sends it.
+
 - `lnflash --board` is repeatable and names the board models present: a
   shared Board-ID is written without a question when its model is named, a
   board whose model is not named is skipped, so `--board t114 --board

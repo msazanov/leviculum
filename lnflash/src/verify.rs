@@ -10,8 +10,9 @@
 //!
 //! **The `[FW_BUILD]` banner.** Our firmware re-emits
 //! `[FW_BUILD] git_sha=<sha> dirty=<bool>` on the debug port every five
-//! seconds (`leviculum-nrf/src/bin/t114.rs:999`,
-//! `leviculum-nrf/src/bin/rak4631.rs:1047`). Comparing that SHA against the
+//! seconds for the first two minutes after a reset, which is when this tool
+//! reads it, and every five minutes after that (`leviculum_nrf::banner`,
+//! 911). Comparing that SHA against the
 //! one the manifest records is what catches a silent touch-flash that did
 //! not actually take — board back, old firmware still resident.
 //!
@@ -75,7 +76,9 @@ use crate::sys::Fd;
 /// that; the budget is larger because two periods can be lost without the
 /// board being at fault. The port is opened when the application device
 /// appears on the bus, which is before the banner task's first tick (it
-/// sleeps 5 s before its first line, `leviculum-nrf/src/bin/t114.rs:1000`),
+/// sleeps 5 s before its first line, `leviculum_nrf::banner::run`; the
+/// 5 s period holds for the first two minutes after the reset, far past this
+/// budget),
 /// and the line that would have landed in that first period can be the one
 /// the flush cut in half. A board that has still said nothing after three
 /// periods is not slow, it is silent — which is `unknown`, and never a

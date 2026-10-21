@@ -39,7 +39,7 @@ again (`leviculum-nrf/src/bin/t114.rs:597`,
 `leviculum-nrf/src/bin/t1000e.rs:601`). The Pocket V2's two LEDs pulsed
 LoRa TX and RX activity (`leviculum-nrf/src/led.rs`), and a bare RAK4631
 module without the baseboard blinks a 1 Hz heartbeat
-(`leviculum-nrf/src/bin/rak4631.rs:1444`). The Solar Node's blue LED was
+(`leviculum-nrf/src/bin/rak4631.rs:1432`). The Solar Node's blue LED was
 lit only by a HardFault. The T1000-E's buzzer had its enable held low
 for the life of the board.
 

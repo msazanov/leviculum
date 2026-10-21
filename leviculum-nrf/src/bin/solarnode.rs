@@ -1464,24 +1464,12 @@ async fn boot_log_repeater(initial_len: usize) {
     }
 }
 
-/// Re-emit the firmware build banner periodically so a debug-serial
-/// reader can verify the running git_sha at any time, not only inside the
-/// short boot window. The CI auto-flash verify reads this back. Uses the
-/// embassy time driver (same timing infra the other periodic tasks use);
-/// no SD-reserved peripheral is touched directly.
-///
-/// The `[MEDIA]` and `[NAME ]` lines ride along for the same reason and
-/// read their state live, so a runtime change shows up here within five
-/// seconds and a capture attached after the boot window still learns
-/// which carriers this board is on and what it is called.
+/// The build banner group (`[FW_BUILD]`, `[TIME_SOURCE]`, `[MEDIA]`,
+/// `[NAME ]`, `[IDENTITY]`): every 5 s for the first two minutes after
+/// boot, every 5 minutes after that, and at once on a `b` byte on the debug
+/// port. Cadence, readers and the on-demand request:
+/// `leviculum_nrf::banner` (911).
 #[embassy_executor::task]
 async fn fw_build_banner(media_src: leviculum_nrf::media::Source) {
-    loop {
-        Timer::after(Duration::from_secs(5)).await;
-        log_critical!("[FW_BUILD] {}", leviculum_nrf::FW_BUILD_STAMP);
-        log_critical!("[TIME_SOURCE] source={}", leviculum_nrf::time_source_str());
-        leviculum_nrf::media::log_banner(media_src);
-        leviculum_nrf::name::log_banner();
-        leviculum_nrf::identity::log_banner();
-    }
+    leviculum_nrf::banner::run(media_src).await
 }

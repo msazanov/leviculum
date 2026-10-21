@@ -694,6 +694,13 @@ fn each_command_byte_asks_for_its_command() {
             ..none
         }
     );
+    assert_eq!(
+        debug_commands(b"b"),
+        DebugCommands {
+            banner: true,
+            ..none
+        }
+    );
 }
 
 #[test]
@@ -702,15 +709,15 @@ fn a_terminal_line_runs_each_command_once() {
     // packet; the query runs once, not once per byte.
     let asked = debug_commands(b"ppp\r\n");
     assert!(asked.postmortem);
-    assert!(!asked.stack_reset && !asked.heap_census);
-    let all = debug_commands(b"c s p\n");
-    assert!(all.postmortem && all.stack_reset && all.heap_census);
+    assert!(!asked.stack_reset && !asked.heap_census && !asked.banner);
+    let all = debug_commands(b"c s p b\n");
+    assert!(all.postmortem && all.stack_reset && all.heap_census && all.banner);
 }
 
 #[test]
 fn stray_input_asks_for_nothing() {
     assert_eq!(debug_commands(b"\r\n"), DebugCommands::default());
-    assert_eq!(debug_commands(b"PSC"), DebugCommands::default());
+    assert_eq!(debug_commands(b"PSCB"), DebugCommands::default());
     assert_eq!(debug_commands(b""), DebugCommands::default());
 }
 

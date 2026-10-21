@@ -54,6 +54,7 @@ compile_error!(
 compile_error!("`radio-sx1262` and `radio-lr11xx` are mutually exclusive — the BSP picks one");
 
 pub mod announce;
+pub mod banner;
 pub mod ble;
 pub mod boards;
 pub mod boot_count;

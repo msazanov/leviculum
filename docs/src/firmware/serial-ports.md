@@ -84,9 +84,10 @@ picocom /dev/leviculum-debug -b 115200
 
 On the debug port you will see the boot banner, the firmware git SHA and
 the periodic diagnostics the firmware emits: the `[FW_BUILD]` banner
-every 5 s, the `[STACK]` watermark lines, and the LoRa TX/RX events.
-(`fw_build_banner`, `leviculum-nrf/src/bin/t114.rs:1377-1388`, for the
-banner task.) Do
+group (every 5 s for the first two minutes after boot, every 5 minutes
+after that), the `[STACK]` watermark lines, and the LoRa TX/RX events.
+Type `b` to get the banner group, and with it the running git SHA, at
+once (`leviculum-nrf/src/banner.rs` for the cadence and the request). Do
 **not** point `lnsd` at the debug port; it carries log text, not HDLC
 frames.
 

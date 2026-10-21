@@ -1278,13 +1278,20 @@ fn the_identity_lines_are_not_dropped_by_the_runtime_gate() {
             }
         }
         // The rescue for a reader that attaches after the 8 KiB ring has
-        // lapped: the periodic banner says it again.
+        // lapped: the periodic banner says it again. The loop is shared
+        // (`leviculum_nrf::banner`, 911), so the binary has to run it and
+        // the loop has to carry the identity line.
         assert!(
-            src.contains("leviculum_nrf::identity::log_banner()"),
-            "leviculum-nrf/src/{bin} no longer repeats the [IDENTITY] banner, so a \
-             late reader has only the boot window to catch it in"
+            src.contains("leviculum_nrf::banner::run("),
+            "leviculum-nrf/src/{bin} no longer runs the banner loop, so a late \
+             reader has only the boot window to catch the [IDENTITY] line in"
         );
     }
+    assert!(
+        nrf_source("banner.rs").contains("crate::identity::log_banner()"),
+        "leviculum-nrf/src/banner.rs no longer repeats the [IDENTITY] banner, so a \
+         late reader has only the boot window to catch it in"
+    );
     let identity = nrf_source("identity.rs");
     assert!(
         identity.contains("crate::log_critical!"),

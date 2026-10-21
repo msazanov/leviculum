@@ -17,7 +17,8 @@
 # rather than "the named board runs the named image".
 #
 # The step that was missing is a read-back. Our firmware prints
-# `[FW_BUILD] <stamp>` on the debug CDC at boot and every 5 s, where <stamp> is
+# `[FW_BUILD] <stamp>` on the debug CDC at boot, every 5 s for two minutes and
+# every 5 minutes after (911, or at once on a `b` byte), where <stamp> is
 # `leviculum_nrf::FW_BUILD_STAMP`; the runner greps the same stamp out of the
 # flat image it is about to write. Attribution then follows from what a board
 # says about itself, not from the order the bus enumerated it.
@@ -36,8 +37,9 @@
 # purely so the test can replace them.
 
 # Seconds of debug-serial listening per read attempt. The firmware re-emits the
-# banner every 5 s, so one window catches a healthy board; the extra margin
-# covers a boot that lands mid-window.
+# banner every 5 s for the first two minutes after boot and answers the `b`
+# byte the reader sends at once after that, so one window catches a healthy
+# board; the extra margin covers a boot that lands mid-window.
 FW_READ_WINDOW="${LEVICULUM_FW_READ_WINDOW:-8}"
 
 # Read windows before a silent board is called UNCONFIRMED. A board that has
@@ -54,7 +56,7 @@ FW_READ_OTHER_ATTEMPTS="${LEVICULUM_FW_READ_OTHER_ATTEMPTS:-1}"
 # Where the bytes a read-back window saw are kept. The first window after a
 # flash is the only place the lines a boot prints once ever reach the host:
 # `leviculum SolarNode booting`, `[QSPI] JEDEC ... state=ok`, `[QSPI] STORE`,
-# `[MEDIA]`. A reader attached after the runner has let go sees only the 5 s
+# `[MEDIA]`. A reader attached after the runner has let go sees only the banner
 # heartbeat, and a DTR pulse on the transport port does not reset the board
 # (the boot proof of 0c3845d9, #413), so a window that discards those bytes
 # discards the boot. `LEVICULUM_FLASH_BOOT_LOG` names one file for every board
@@ -212,6 +214,14 @@ try:
         # No modem-control lines on this fd (a pty, a pipe). Read anyway: a
         # port that cannot be told to raise DTR is not a reason to report a
         # board as silent, and on a real CDC-ACM this call does not fail.
+        pass
+    # Ask for the banner now (`b`, 911): past its first two minutes a board
+    # repeats it only every 5 minutes, and a board this window reads without
+    # having reset it (attribution's other candidates) would otherwise read
+    # as silent. Firmware before 911 ignores the byte.
+    try:
+        os.write(fd, b'b')
+    except OSError:
         pass
     deadline = time.monotonic() + secs
     buf, last = b'', ''

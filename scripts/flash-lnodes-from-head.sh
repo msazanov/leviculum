@@ -119,7 +119,8 @@ read_fw_build_banner() { fw_read_banner "$1" "$2"; }
 #
 # Zero tolerance for false positives: the read is ROBUST FIRST. The debug serial
 # can lag udev after a fresh re-enumeration, so resolving it is retried; a board
-# running current firmware re-emits [FW_BUILD] every ~5 s, so the banner read is
+# running current firmware re-emits [FW_BUILD] every ~5 s for the first two
+# minutes after the flash's reset (911), so the banner read is
 # retried across ~3 windows (~24 s total) before concluding "no banner". A
 # genuinely-current board catches its banner on the first window and returns 0
 # immediately, so the happy path pays no extra latency.
@@ -146,7 +147,8 @@ verify_lnode_banner() {
         return 1
     fi
     log "[CI_HW] $board debug serial resolved to $port"
-    # The firmware re-emits the banner every ~5 s. Read robustly over up to 3
+    # The firmware re-emits the banner every ~5 s for two minutes after the
+    # reset, and fw_read_banner asks for it (`b`) besides. Read robustly over up to 3
     # windows (~24 s total) so a current board reliably yields at least one
     # banner before we ever conclude "none".
     local banner="" attempt=0

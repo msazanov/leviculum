@@ -59,6 +59,7 @@
 #[cfg(test)]
 extern crate std;
 
+pub mod banner;
 pub mod facts;
 
 use core::fmt::Write;

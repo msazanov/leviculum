@@ -68,8 +68,9 @@ use rand_core::CryptoRngCore;
 /// transmission that caused it, which is what separates "the relay never saw
 /// it" from "the relay saw it and dropped it".
 ///
-/// Cost: two wake-ups per minute against the 2 s `[STACK]` task and the 5 s
-/// `[FW_BUILD]` banner already running, i.e. invisible; and ~80 bytes per
+/// Cost: two wake-ups per minute against the 2 s `[STACK]` task and the
+/// `[FW_BUILD]` banner (5 s, then 300 s past two minutes) already running,
+/// i.e. invisible; and ~80 bytes per
 /// 30 s on the debug port, ~3 B/s, against an 8 KiB log ring.
 pub const PERIOD: Duration = Duration::from_secs(30);
 

@@ -20,7 +20,8 @@
 //! on the line, one `[DROP]` line is up to ~90 bytes (the worst case is
 //! rendered, not estimated, in `the_ring_derivation_still_holds` below).
 //! The periodic traffic a reader needs beside the drops — `[STACK]` every
-//! 2 s, `[FW_BUILD]` every 5 s, `[TRANSPORT]` every 30 s — is about 2.3 KiB
+//! 2 s, `[FW_BUILD]` every 5 s (its first two minutes after boot, the worst
+//! case; every 300 s after that since 911), `[TRANSPORT]` every 30 s — is about 2.3 KiB
 //! per 30 s window.
 //!
 //! [`LINES_PER_WINDOW`] = 2 per 2 s [`WINDOW_MS`] window keeps a full

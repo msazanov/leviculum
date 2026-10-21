@@ -322,7 +322,7 @@ async fn debug_writer_task(mut cdc: cdc_acm::Sender<'static, UsbDriver>) {
 }
 
 /// RX side of the debug CDC port. The debug console was historically
-/// write-only; two single-byte commands are implemented here:
+/// write-only; four single-byte commands are implemented here:
 ///
 /// - `p` — post-mortem query. Replays `[PANIC_COUNT]` and the stored
 ///   post-mortem block through the normal log path (host helper:
@@ -337,6 +337,10 @@ async fn debug_writer_task(mut cdc: cdc_acm::Sender<'static, UsbDriver>) {
 ///   reads; the `[HEAP_CENSUS]` line follows within one loop wake-up
 ///   (≤ 30 s, the `[TRANSPORT]` clamp), because only that loop owns the
 ///   state the census walks.
+/// - `b` — build banner now (911). The banner group (`[FW_BUILD]` and
+///   the lines beside it) repeats only every 5 minutes once a board is
+///   past its first two minutes; `b` prints it at once, so a reader of a
+///   long-running board does not wait for it ([`crate::banner`]).
 ///
 /// All other bytes are ignored, so terminal line endings and stray input
 /// are harmless.
@@ -361,6 +365,9 @@ async fn debug_reader_task(mut cdc: cdc_acm::Receiver<'static, UsbDriver>) {
             #[cfg(feature = "softdevice")]
             if asked.heap_census {
                 crate::heap_census::request();
+            }
+            if asked.banner {
+                crate::banner::request();
             }
         }
     }

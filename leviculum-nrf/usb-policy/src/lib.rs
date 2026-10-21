@@ -61,9 +61,9 @@
 //!
 //! # The debug port's commands
 //!
-//! [`debug_commands`] says which of the three one-byte commands a packet
+//! [`debug_commands`] says which of the four one-byte commands a packet
 //! read on the debug port carries: `p` the post-mortem query, `s` the stack
-//! watermark reset, `c` the heap census.
+//! watermark reset, `c` the heap census, `b` the build banner now.
 
 extern crate alloc;
 
@@ -653,6 +653,11 @@ pub struct DebugCommands {
     pub stack_reset: bool,
     /// `c`: print a heap census on the main loop's next wake.
     pub heap_census: bool,
+    /// `b`: print the build banner group now, whatever its cadence
+    /// (`leviculum-log-line`'s `banner` module). A reader of a board that
+    /// has been up past the fast window sends it instead of waiting up to
+    /// five minutes for the next one.
+    pub banner: bool,
 }
 
 /// Which commands `packet` carries. Each runs at most once per packet,
@@ -664,6 +669,7 @@ pub fn debug_commands(packet: &[u8]) -> DebugCommands {
         postmortem: packet.contains(&b'p'),
         stack_reset: packet.contains(&b's'),
         heap_census: packet.contains(&b'c'),
+        banner: packet.contains(&b'b'),
     }
 }
 

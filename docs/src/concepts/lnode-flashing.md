@@ -874,7 +874,11 @@ The fix is a read-back, and it turns attribution into a measurement:
 
 - The firmware carries `leviculum_nrf::FW_BUILD_STAMP`, one contiguous
   literal `git_sha=<sha> dirty=<bool>`, and prints it after
-  `[FW_BUILD] ` at boot and every five seconds thereafter.
+  `[FW_BUILD] ` at boot, every five seconds for the two minutes after
+  it and every five minutes after that, or at once when the debug port
+  receives a `b` byte (`leviculum_nrf::banner`, 911). The runner reads
+  inside the two minutes, and its reader sends the `b` anyway, so a
+  board it did not reset still answers inside one window.
 - The runner greps that same literal out of the **flat image it is
   about to write** (`tools/fw-readback.sh`, `fw_image_stamp`). Not out
   of `git rev-parse`: that describes the working tree at the moment of
@@ -962,7 +966,8 @@ creates, and only accepts what comes after it
 - **A banner that is not the one we wrote does not end the read.** The
   read is told which sha it is waiting for: a matching banner is an
   answer and stops it, anything else is kept as evidence while the read
-  goes on. The board repeats its banner every five seconds, so the
+  goes on. The board repeats its banner every five seconds for two
+  minutes after the reset, so the
   expected build gets another chance for as long as the budget lasts,
   and a stale line — from the replay or from anywhere else — gets
   exactly one. Only the last non-matching line, once the budget is
@@ -970,7 +975,8 @@ creates, and only accepts what comes after it
   flash therefore costs the whole 15 s budget; the alternative is
   believing the first line on the port, which is what #372 did.
 - **The budget is three banner periods, 15 s.** The firmware emits one
-  every 5 s, so a healthy board answers inside the first; the margin
+  every 5 s for the first two minutes after a reset, so a healthy board
+  answers inside the first; the margin
   covers a board whose banner task ticks just before the port opens and
   a line the flush cut in half. A board still silent after that is
   silent, and silence is `unknown`.

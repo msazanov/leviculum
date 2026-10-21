@@ -143,6 +143,7 @@ because the list below is what is actually left:
 | The announce scheduler's inputs: new neighbours, movement evidence and sampling, a slot with no destination | `leviculum-announce-policy` (`scheduler`) | leviculum#413, 2026-10-11 |
 | The transport reader's step on a disconnect or a torn frame, the outgoing queue's drop, the debug port's drain and its gate | `leviculum-usb-policy` | leviculum#413, 2026-10-11 |
 | The panic and HardFault post-mortems: replay once, query always, the message ring, the way out of a fault | `leviculum-boot-trace` (`postmortem`) | leviculum#413, 2026-10-11 |
+| The build banner's cadence: 5 s for two minutes after boot, 300 s after, and the debug port's `b` byte | `leviculum-log-line` (`banner`), `leviculum-usb-policy` (`debug_commands`) | 911, 2026-10-21 |
 
 The answer windows moved as constants, not as functions of the
 modulation. What the modulation moves is the delay they must cover, one
@@ -160,9 +161,9 @@ this page singled out first, in the order it is cheap to move:
 
 **1. The `[TRANSPORT]` ticker.** The re-arm deliberately drops missed
 periods so a busy loop does not then emit a burst of catch-up lines
-(`poll`, `leviculum-nrf/src/transport_stats.rs:106`), and the line is
+(`poll`, `leviculum-nrf/src/transport_stats.rs:107`), and the line is
 byte-exact because capture consumers grep it (`log`,
-`leviculum-nrf/src/transport_stats.rs:114`). `leviculum-log-line` already
+`leviculum-nrf/src/transport_stats.rs:115`). `leviculum-log-line` already
 exists for the second half.
 
 See also: [Checks that are actually
