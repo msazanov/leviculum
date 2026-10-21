@@ -1084,6 +1084,95 @@ mod tests {
         assert_eq!(table.link_count(), 0, "the link is released");
     }
 
+    /// Write `writes` from a central on its own thread, as fast as the
+    /// socket takes them, while the reader and the orchestrator's
+    /// `PeriphWrite` arm run concurrently over the interface's 64-deep
+    /// event channel (`mod.rs`, `session`). Returns the packets the
+    /// link table delivered and every abandonment report it made.
+    async fn deliver_under_load(
+        writes: Vec<Vec<u8>>,
+    ) -> (Vec<Vec<u8>>, Vec<(IdentityHash, u32, u32)>) {
+        let (central, ours) = acquired_socket();
+        let writer = std::thread::spawn(move || {
+            for w in &writes {
+                central.send(w).expect("central write");
+            }
+        });
+        let (ev_tx, mut ev_rx) = mpsc::channel(64);
+        let reader = tokio::spawn(periph_reader(ADDR, MTU, socket_frames(ours), ev_tx));
+
+        let mut table = LinkTable::new(OWN, DEFAULT_MAX_LINKS, DEFAULT_CENTRAL_LINKS);
+        let mut delivered = Vec::new();
+        let mut abandoned = Vec::new();
+        while let Some(ev) = ev_rx.recv().await {
+            match ev {
+                Ev::PeriphWrite { addr, mtu, data } => {
+                    if let Inbound::Packet(p) = table.peripheral_frame(addr.0, mtu, &data, 0) {
+                        delivered.push(p);
+                    }
+                    abandoned.extend(table.take_abandon_reports());
+                }
+                Ev::PeriphGone { .. } => break,
+                _ => panic!("reader reports only writes and its end"),
+            }
+        }
+        writer.join().expect("writer");
+        reader.await.expect("reader");
+        (delivered, abandoned)
+    }
+
+    /// The handshake, then 400 packets of one to five fragments each.
+    fn load_writes() -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
+        let packets: Vec<Vec<u8>> = (0..400u16)
+            .map(|i| {
+                let len = 40 + usize::from(i % 5) * 180;
+                let [hi, lo] = i.to_be_bytes();
+                (0..len).map(|j| hi ^ lo.wrapping_add(j as u8)).collect()
+            })
+            .collect();
+        let mut writes = vec![PEER.to_vec()];
+        for p in &packets {
+            writes.extend(fragment_packet(p, MTU));
+        }
+        (packets, writes)
+    }
+
+    /// #436, under load: a central writes 400 packets of up to five
+    /// fragments back to back, the reader and the link table run on
+    /// other threads, and the channel between them fills. Every packet
+    /// arrives, in the order written, and the link reports no
+    /// `BLE_RX_ABANDON`: on the acquired socket nothing reorders, so the
+    /// one-frame park of bc07cee3 is never needed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_write_socket_keeps_order_under_load_without_an_abandon() {
+        let (packets, writes) = load_writes();
+        assert!(writes.len() > 1000, "{} writes", writes.len());
+
+        let (delivered, abandoned) = deliver_under_load(writes).await;
+        assert_eq!(abandoned, vec![], "no BLE_RX_ABANDON");
+        assert_eq!(delivered.len(), packets.len());
+        assert!(delivered == packets, "packets arrive in write order");
+    }
+
+    /// The control for the test above: the same load with one packet's
+    /// three fragments written in reverse, the shuffle WriteValue's
+    /// per-write tasks could produce, is an abandonment the counter
+    /// sees. Without this the clean count above could be a counter that
+    /// never fires.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_shuffled_packet_under_the_same_load_is_a_counted_abandon() {
+        let (packets, mut writes) = load_writes();
+        // Packet 2 (len 400) is three fragments; reverse them.
+        let first =
+            1 + fragment_packet(&packets[0], MTU).len() + fragment_packet(&packets[1], MTU).len();
+        assert_eq!(fragment_packet(&packets[2], MTU).len(), 3);
+        writes[first..first + 3].reverse();
+
+        let (delivered, abandoned) = deliver_under_load(writes).await;
+        assert!(!abandoned.is_empty(), "the shuffle is counted");
+        assert!(!delivered.contains(&packets[2]), "and the packet is lost");
+    }
+
     /// A discovery that hears nothing and records when each run started
     /// and ended, on the paused test clock.
     struct CountingDiscovery {
