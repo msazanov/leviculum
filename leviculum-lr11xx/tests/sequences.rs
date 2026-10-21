@@ -1059,6 +1059,31 @@ fn a_header_error_is_not_a_completed_payload_crc_reception() {
     assert!(spi.0.borrow().answers.is_empty());
 }
 
+/// The firmware's receive census reads the window's flags after a window
+/// that delivered nothing (`leviculum-nrf/channel-access/src/rx_census.rs`):
+/// a header error has to still be there, in the SX126x's position, and the
+/// next arming has to start from nothing.
+#[test]
+fn a_header_error_stays_in_the_window_flags_until_the_next_arming() {
+    let _clock = test_clock();
+    let (mut r, spi) = radio();
+    block_on(r.configure_lora(869_463_000, 8, 0x04, 0x01, 14, 18)).expect("configure");
+    block_on(r.arm_rx(500, leviculum_core::sx126x::RxSite::Idle)).expect("arm");
+    assert_eq!(r.rx_window_flags(), 0);
+    status(&spi, irq::PREAMBLE_DETECTED | irq::HEADER_ERROR);
+    let mut buf = [0u8; 255];
+    assert!(matches!(
+        block_on(r.await_rx(&mut buf)),
+        Err(Error::HeaderError)
+    ));
+    assert_eq!(
+        r.rx_window_flags(),
+        leviculum_core::sx126x::IRQ_PREAMBLE_DETECTED | leviculum_core::sx126x::IRQ_HEADER_ERR
+    );
+    block_on(r.arm_rx(500, leviculum_core::sx126x::RxSite::Idle)).expect("re-arm");
+    assert_eq!(r.rx_window_flags(), 0);
+}
+
 #[test]
 fn a_header_error_raises_the_irq_and_ends_the_window() {
     let _clock = test_clock();

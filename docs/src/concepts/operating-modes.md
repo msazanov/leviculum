@@ -15,7 +15,7 @@ today:
 
 - **LoRa transport, with the receiver always on.** When the queue is
   empty the radio task parks in continuous receive and does not re-arm a
-  window (`leviculum-nrf/src/lora.rs:2475-2477`). There is no receive
+  window (`leviculum-nrf/src/lora.rs:2559-2561`). There is no receive
   duty cycle anywhere in the image.
 - **BLE for Columba** ([Bluetooth interfaces](bluetooth-interfaces.md)).
 - **The propagation node role** ([An LXMF propagation node on a

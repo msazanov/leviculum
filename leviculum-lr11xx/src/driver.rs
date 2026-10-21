@@ -212,6 +212,11 @@ pub struct Lr11xx<SPI, NRST, BUSY, IRQ> {
     rx_ext_cr_denom: u8,
     rx_arm: RxArmClock,
     rx_state: RxArmState<ArmedWindow>,
+    /// Every IRQ flag the standing window latched, in the SX126x's
+    /// positions (`irq::to_sx126x`), OR-ed over each read that concluded
+    /// it; cleared when a window is armed. What the firmware's receive
+    /// census classifies a window that delivered no frame by.
+    rx_window_flags: u16,
     channel_sampler: Option<ChannelSampler>,
     log: Option<LogFn>,
     /// The `CalibImage` band last run, so a retune within it skips the calibration.
@@ -242,6 +247,7 @@ where
             rx_ext_cr_denom: 0,
             rx_arm: RxArmClock::new(),
             rx_state: RxArmState::new(),
+            rx_window_flags: 0,
             channel_sampler: None,
             log: None,
             image_band: None,
@@ -252,6 +258,14 @@ where
     /// The board this driver was built for.
     pub fn board(&self) -> &'static Board {
         self.board
+    }
+
+    /// The IRQ flags the last window latched before it ended, in the
+    /// SX126x's positions; `0` until a window concludes. Read after a window
+    /// that delivered no frame: a receive that delivered one has already
+    /// re-armed, which clears it.
+    pub fn rx_window_flags(&self) -> u16 {
+        self.rx_window_flags
     }
 
     /// Sample the channel while waiting in RX. Sampling is disabled by default
@@ -692,6 +706,7 @@ where
         self.clear_irq(irq::ALL).await?;
         // Recorded before the command goes out: a future dropped inside the
         // transaction still owes a standby.
+        self.rx_window_flags = 0;
         self.rx_state.arming(ArmedWindow {
             timeout_ms,
             site,
@@ -830,6 +845,7 @@ where
         if self.rx_state.window().is_none() {
             return Err(Error::NotArmed);
         }
+        self.rx_window_flags |= irq::to_sx126x(flags);
         if header_error_only(flags) {
             return self.end_on_header_error(flags).await;
         }
@@ -850,6 +866,7 @@ where
             self.wait_rx_irq(Duration::from_millis(extend_ms)).await;
             self.rx_arm.window_ended(now_ms());
             flags = self.get_irq_status().await?;
+            self.rx_window_flags |= irq::to_sx126x(flags);
             if header_error_only(flags) {
                 return self.end_on_header_error(flags).await;
             }

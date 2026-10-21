@@ -24,11 +24,11 @@ because the answer is made of the same five artifacts.
 
 | Term | Value | Where |
 |---|---|---|
-| Slot | 12 symbol times, clamped to `[24, 100]` ms, floor 6 ms above 30 kbps | `csma_slot_ms` (`leviculum-core/src/rnode.rs:1051`), reached as `jitter_slot_ms` (`leviculum-nrf/channel-access/src/lib.rs:228`) |
-| DIFS | 2 slots (SIFS is 0) | `JITTER_DIFS_SLOTS` (`leviculum-nrf/channel-access/src/lib.rs:196`) |
-| Contention window | uniform over 0..=13 slots in band 1; 14 draws from slot 15, 30 or 45 above 8, 39 or 78 % own airtime | `JITTER_CW_SLOTS` (`leviculum-nrf/channel-access/src/lib.rs:200`), `band_window` (`leviculum-nrf/channel-access/src/lib.rs:186`) |
-| Owed when | once per channel acquisition, never per packet | `channel_released` (`leviculum-nrf/channel-access/src/lib.rs:593`) |
-| Discharged by | listening it through over quiet medium, not by being asked for it; a reception that ends the window pauses the wait (#438) | `jitter_spent` (`leviculum-nrf/channel-access/src/lib.rs:655`) |
+| Slot | 12 symbol times, clamped to `[24, 100]` ms, floor 6 ms above 30 kbps | `csma_slot_ms` (`leviculum-core/src/rnode.rs:1051`), reached as `jitter_slot_ms` (`leviculum-nrf/channel-access/src/lib.rs:229`) |
+| DIFS | 2 slots (SIFS is 0) | `JITTER_DIFS_SLOTS` (`leviculum-nrf/channel-access/src/lib.rs:197`) |
+| Contention window | uniform over 0..=13 slots in band 1; 14 draws from slot 15, 30 or 45 above 8, 39 or 78 % own airtime | `JITTER_CW_SLOTS` (`leviculum-nrf/channel-access/src/lib.rs:201`), `band_window` (`leviculum-nrf/channel-access/src/lib.rs:187`) |
+| Owed when | once per channel acquisition, never per packet | `channel_released` (`leviculum-nrf/channel-access/src/lib.rs:594`) |
+| Discharged by | listening it through over quiet medium, not by being asked for it; a reception that ends the window pauses the wait (#438) | `jitter_spent` (`leviculum-nrf/channel-access/src/lib.rs:656`) |
 
 ## 1. What is the window sized from?
 
@@ -47,7 +47,7 @@ that yields, at the PHYs the corpus actually runs:
 
 The table is pinned, not quoted:
 `the_widest_acquisition_wait_is_a_function_of_the_modulation`
-(`leviculum-nrf/channel-access/src/lib.rs:817`).
+(`leviculum-nrf/channel-access/src/lib.rs:818`).
 
 **And there is one slot, not two.** The slot is a compatibility figure:
 it is the unit a neighbour running the reference firmware counts its own
@@ -67,7 +67,7 @@ counted its backoff in `max(24, airtime(500)/10)` — a tenth of a
 into the gate's doubling window, so a board could owe 63 of those slots
 on one busy channel where its RNode neighbours owe at most 58 of theirs.
 The gate now counts in the same slot the draw does
-(`leviculum-nrf/channel-access/src/lib.rs:756`), and the before/after
+(`leviculum-nrf/channel-access/src/lib.rs:757`), and the before/after
 figures are pinned in `csma_slot_is_no_longer_a_tenth_of_a_500_byte_airtime`
 (`leviculum-core/src/rnode.rs:3430`).
 
@@ -111,7 +111,7 @@ the crate docs of `leviculum-channel-access` and its tests
 
 Until then we mirrored band 1 only and argued that the CAD retry gate's
 doubling window, from `CAD_CW_INITIAL` to `CAD_CW_MAX`
-(`leviculum-nrf/channel-access/src/lib.rs:153`), widened on something
+(`leviculum-nrf/channel-access/src/lib.rs:154`), widened on something
 better. It widens on something else: a probe that found a preamble,
 which says nothing about a channel that is loaded on average and clear
 at the instant of the probe. Beside reference modems that had widened, a
@@ -144,14 +144,14 @@ The two predict a median gap of 216 ms and 204 ms; the bench measured
 we are already transmitting owes nothing, because the frame before it
 served the wait. The wait comes back when the channel is handed back,
 which the transmit path does after its post-TX listening window
-(`leviculum-nrf/src/lora.rs:2471`).
+(`leviculum-nrf/src/lora.rs:2555`).
 
 Asking for the wait does not discharge it. The wait is spent listening
 and the listen returns early on a reception, so a wait cut short by an
 incoming frame has de-tiled nothing: the frame that ended it released
 every other waiting node at the same instant. Only listening it through
 counts (`acquisition_jitter_ms`,
-`leviculum-nrf/channel-access/src/lib.rs:624`).
+`leviculum-nrf/channel-access/src/lib.rs:625`).
 
 **What it costs.** At the project default PHY the mean cost is 204 ms
 per acquisition and the worst case 360 ms. A link setup is three
@@ -249,12 +249,12 @@ Codeberg #423, and it is fixed here rather than described.
 
 The window the transmit path opens after a transmission is one full
 single-frame reply airtime plus the peer's turnaround
-(`post_tx_rx_window_ms`, `leviculum-nrf/src/lora.rs:886`, deciding in
+(`post_tx_rx_window_ms`, `leviculum-nrf/src/lora.rs:951`, deciding in
 `leviculum-channel-access` where the peer's window is defined). The right
 comparison is against the peer's time to *key up*, not to finish its
 frame: the receiver stops its timeout on preamble detect and then runs
 to packet completion regardless of length
-(`SET_STOP_RX_TIMER_ON_PREAMBLE`, `leviculum-nrf/src/sx1262.rs:754`), so
+(`SET_STOP_RX_TIMER_ON_PREAMBLE`, `leviculum-nrf/src/sx1262.rs:768`), so
 a reply that starts inside the window is heard whole even when it ends
 outside it.
 
@@ -297,16 +297,16 @@ our own transmit path — so the coverage is structural rather than
 arithmetical luck: the quantity the window has to cover is a *summand* of
 the window, and no PHY, preamble override or clamp can take it back out.
 The window is computed in `post_tx_rx_window_ms`
-(`leviculum-nrf/channel-access/src/lib.rs:311`) and its rows are pinned
+(`leviculum-nrf/channel-access/src/lib.rs:312`) and its rows are pinned
 where they are computed, from `leviculum-core`'s own airtime rather than
 transcribed: `the_post_tx_window_is_one_reply_plus_the_peers_whole_turnaround`
-(`leviculum-nrf/channel-access/src/lib.rs:940`) for the table, and
+(`leviculum-nrf/channel-access/src/lib.rs:941`) for the table, and
 `the_post_tx_window_covers_the_peers_keyup_at_every_modulation`
-(`leviculum-nrf/channel-access/src/lib.rs:966`) for the property it is one
+(`leviculum-nrf/channel-access/src/lib.rs:967`) for the property it is one
 sample of, over five bandwidths x SF5..SF12 x CR4/5..4/8. The pre-#423
 arithmetic is kept as an assertion of its own,
 `budgeting_only_the_peers_difs_closed_the_window_before_it_could_key_up`
-(`leviculum-nrf/channel-access/src/lib.rs:904`), so a revert of the term
+(`leviculum-nrf/channel-access/src/lib.rs:905`), so a revert of the term
 goes red at SF7/500 kHz rather than silently.
 
 The cost is the second column against the third: every PHY but SF12/125
@@ -328,7 +328,7 @@ that went deaf would trade a collision for a missed frame, which is the
 same loss at the layer that counts. The transmit path arms the receiver
 for the drawn duration and reports back what it actually listened
 through, and a reception that cuts the wait short leaves the debt
-standing (`leviculum-nrf/src/lora.rs:2190`).
+standing (`leviculum-nrf/src/lora.rs:2274`).
 
 ## 6. Does the window's floor matter?
 
@@ -368,14 +368,14 @@ a losing direction here, priced in
 **Our pre-TX wait has never been able to be zero anyway.** The draw's own
 floor is zero, but a floor of zero draws is not a floor of zero
 milliseconds: every acquisition also owes DIFS unconditionally, two slots
-(`JITTER_DIFS_SLOTS`, `leviculum-nrf/channel-access/src/lib.rs:196`), which
+(`JITTER_DIFS_SLOTS`, `leviculum-nrf/channel-access/src/lib.rs:197`), which
 is the `narrowest` column of question 1's table — 48 ms at the bench PHY,
 12 ms at SF5/500 kHz, 200 ms at SF12
 (`the_widest_acquisition_wait_is_a_function_of_the_modulation`,
-`leviculum-nrf/channel-access/src/lib.rs:817`), and pinned again through
+`leviculum-nrf/channel-access/src/lib.rs:818`), and pinned again through
 the draw itself for a thousand seeds in
 `boot_owes_jitter_and_the_draw_is_difs_plus_a_bounded_window`
-(`leviculum-nrf/channel-access/src/lib.rs:1007`). The reference is no
+(`leviculum-nrf/channel-access/src/lib.rs:1008`). The reference is no
 different: `tx_queue_handler`
 (`reference/RNode_Firmware/RNode_Firmware.ino:1623`) waits `difs_ms`
 (`reference/RNode_Firmware/Config.h:119`), also two slots, and waits it

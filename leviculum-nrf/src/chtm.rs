@@ -59,6 +59,13 @@ pub fn last() -> Option<ChannelSnapshot> {
 /// The once-a-second line, the board's twin of the host's `LORA_CHTM`
 /// event. Kept out of the persistent crash tail, which a 1 Hz line would
 /// otherwise own (`log_fmt_volatile`).
+///
+/// The receive census rides at the end (`rx_ok= rx_crc= rx_hdr= rx_tmo=
+/// rx_other=`, cumulative since boot, Codeberg #466), after the keys the
+/// host's line shares, so a reader of those is unaffected.
 fn report(snapshot: &ChannelSnapshot) {
-    crate::log::log_fmt_volatile("[LORA_CHTM] ", format_args!("{}", snapshot));
+    crate::log::log_fmt_volatile(
+        "[LORA_CHTM] ",
+        format_args!("{} {}", snapshot, crate::lora::LORA_RX_CENSUS.counts()),
+    );
 }

@@ -134,6 +134,7 @@
 //! access always drew, bit for bit.
 
 pub mod load;
+pub mod rx_census;
 
 /// Maximum CAD attempts before a frame is transmitted even though the
 /// channel appears busy — the documented give-up that keeps a frame from

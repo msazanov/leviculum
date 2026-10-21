@@ -266,6 +266,12 @@ pub struct Sx1262<SPI> {
     /// with. The single source of truth for "the chip is armed"; every path
     /// that leaves RX consults it and spends at most one standby.
     rx_state: leviculum_rx_arming::RxArmState<ArmedWindow>,
+    /// Every IRQ flag the standing window has latched, OR-ed over each read
+    /// that concluded it; cleared when a window is armed. What the receive
+    /// census classifies a window that delivered no frame by
+    /// (`leviculum_channel_access::rx_census`): the SX1262 does not end a
+    /// window on `HeaderErr`, so a header error is only ever found here.
+    rx_window_flags: u16,
     /// Which way the antenna switch points, and the board's external
     /// RX-enable line where it has one.
     ///
@@ -356,7 +362,15 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
             iq_probe_done: false,
             rx_arm: leviculum_core::sx126x::RxArmClock::new(),
             rx_state: leviculum_rx_arming::RxArmState::new(),
+            rx_window_flags: 0,
         }
+    }
+
+    /// The IRQ flags the last window latched before it ended; `0` until a
+    /// window concludes. Read after a window that delivered no frame: a
+    /// receive that delivered one has already re-armed, which clears it.
+    pub fn rx_window_flags(&self) -> u16 {
+        self.rx_window_flags
     }
 
     /// Wait for BUSY pin LOW via GPIOTE interrupt, with timeout.
@@ -1053,6 +1067,7 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
         // outgoing data. A drop inside the SPI transaction below leaves a chip
         // that may or may not be listening, and the safe reading of "may" is
         // that a standby is owed.
+        self.rx_window_flags = 0;
         self.rx_state.arming(ArmedWindow {
             timeout_ms,
             hw_timeout,
@@ -1281,6 +1296,7 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
         let Some(&ArmedWindow { hw_timeout, .. }) = self.rx_state.window() else {
             return Err(Error::NotArmed);
         };
+        self.rx_window_flags |= flags;
 
         // The software wait (timeout_ms + 500) can expire while a slow-SF frame
         // is still on the air; see `sx126x::rx_extend_ms` for the mechanism and
@@ -1308,6 +1324,7 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
             self.rx_arm
                 .window_ended(embassy_time::Instant::now().as_millis());
             flags = self.get_irq_status().await?;
+            self.rx_window_flags |= flags;
         }
 
         // The two terminating IRQs both return the chip to STBY_RC on their

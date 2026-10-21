@@ -96,9 +96,7 @@ pub mod irq {
             out |= leviculum_core::sx126x::IRQ_HEADER_VALID;
         }
         if flags & HEADER_ERROR != 0 {
-            // SX126x `HeaderErr` (datasheet table 8-4, bit 5); not named in
-            // core because nothing there decides on it.
-            out |= 0x0020;
+            out |= leviculum_core::sx126x::IRQ_HEADER_ERR;
         }
         if flags & CRC_ERROR != 0 {
             out |= leviculum_core::sx126x::IRQ_CRC_ERR;

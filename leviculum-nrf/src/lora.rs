@@ -37,6 +37,71 @@ pub static LORA_TX_COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::At
 /// reassembler feed).
 pub static LORA_RX_COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
+/// Every frame the radio heard since boot, by what it made of it: decoded,
+/// or failed on its payload CRC, its header, or a carrier that never became
+/// a frame (Codeberg #466). Counted per *frame*, where [`LORA_RX_COUNT`]
+/// counts reassembled packets; printed on `[LORA_CHTM]` (`chtm.rs`).
+pub static LORA_RX_CENSUS: leviculum_channel_access::rx_census::RxCensus =
+    leviculum_channel_access::rx_census::RxCensus::new();
+
+/// One frame the radio decoded: counted, and stated as `LORA_RX_FRAME` with
+/// the radio's own figures (Codeberg #466). `packet` is what the frame
+/// completed, if anything; its hash prefix is what lets a witness's line be
+/// found beside the sender's journey lines.
+///
+/// The hash is a SHA-256 over the packet, so it is not spent on a line the
+/// gate is about to drop. The count is kept either way.
+fn note_frame_decoded(len: usize, status: &crate::radio::RxStatus, packet: Option<&[u8]>) {
+    LORA_RX_CENSUS.note_frame();
+    if !crate::log::RUNTIME_DRAIN_OPEN.load(core::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let ph = packet.map(|p| {
+        let h = leviculum_core::packet::packet_hash(p);
+        [h[0], h[1], h[2], h[3]]
+    });
+    crate::log::log_fmt(
+        "LORA_RX_FRAME ",
+        format_args!(
+            "{}",
+            leviculum_channel_access::rx_census::RxFrameLine {
+                len,
+                rssi: status.rssi,
+                snr: status.snr,
+                ph,
+            }
+        ),
+    );
+}
+
+/// One receive window that delivered no frame, classified from the driver's
+/// verdict and the flags the window latched; a frame the radio heard and did
+/// not decode is counted and stated as `LORA_RX_ERR` (Codeberg #466), a
+/// window that heard nothing is neither. `figures` is `(len, rssi, snr)`,
+/// which only a CRC failure has.
+fn note_window_failed(
+    kind: leviculum_channel_access::rx_census::RxErrKind,
+    flags: u16,
+    figures: Option<(u8, i16, i16)>,
+) {
+    let Some(reason) = leviculum_channel_access::rx_census::rx_err_reason(kind, flags) else {
+        return;
+    };
+    LORA_RX_CENSUS.note_err(reason);
+    crate::log::log_fmt(
+        "LORA_RX_ERR ",
+        format_args!(
+            "{}",
+            leviculum_channel_access::rx_census::RxErrLine {
+                reason,
+                rssi: figures.map(|f| f.1),
+                snr: figures.map(|f| f.2),
+                len: figures.map(|f| f.0),
+            }
+        ),
+    );
+}
+
 /// The last frame this radio received, for the telemetry reporter's
 /// physical-link sensor (Codeberg #236). `None` until the first one.
 ///
@@ -1247,7 +1312,9 @@ impl leviculum_rx_arming::FrameSink for CoreHandoff<'_> {
                 ),
             );
         }
-        if let Some(data) = self.reassembler.feed(frame, self.rx_timeout_count) {
+        let reassembled = self.reassembler.feed(frame, self.rx_timeout_count);
+        note_frame_decoded(len, status, reassembled.as_deref());
+        if let Some(data) = reassembled {
             match leviculum_core::packet::peek_wire_class(&data) {
                 // `ctx=` is appended AFTER `dst=` on purpose: every existing
                 // consumer of this line (`lnflash --summarize`, the field
@@ -1505,6 +1572,11 @@ async fn rx_window(
             if rx_timeout_count.is_multiple_of(60) {
                 crate::log::log_fmt("[LORA] ", format_args!("RX idle ({})", *rx_timeout_count));
             }
+            note_window_failed(
+                leviculum_channel_access::rx_census::RxErrKind::Timeout,
+                radio.rx_window_flags(),
+                None,
+            );
             // Window expired with no reception.
             WindowExit::NOTHING
         }
@@ -1534,6 +1606,11 @@ async fn rx_window(
                             frame.len, frame.rssi, frame.snr
                         ),
                     );
+                    note_window_failed(
+                        leviculum_channel_access::rx_census::RxErrKind::Crc,
+                        radio.rx_window_flags(),
+                        Some((frame.len, frame.rssi, frame.snr)),
+                    );
                     // Not a reception to the callers, but a frame on the air
                     // all the same: its header passed its own CRC, so the
                     // length is the one the sender keyed.
@@ -1544,6 +1621,13 @@ async fn rx_window(
                 }
                 _ => {
                     crate::log::log_fmt("[LORA] ", format_args!("RX err: {:?}", e));
+                    // The LR11xx's header error arrives here; its flag
+                    // names it (`rx_census::rx_err_reason`).
+                    note_window_failed(
+                        leviculum_channel_access::rx_census::RxErrKind::Other,
+                        radio.rx_window_flags(),
+                        None,
+                    );
                     // Radio error, treat as no reception.
                     WindowExit::NOTHING
                 }

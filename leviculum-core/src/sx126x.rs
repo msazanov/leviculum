@@ -36,6 +36,11 @@ pub const IRQ_RX_DONE: u16 = 0x0002;
 pub const IRQ_PREAMBLE_DETECTED: u16 = 0x0004;
 /// HeaderValid: an explicit header passed its CRC. Read back, never routed.
 pub const IRQ_HEADER_VALID: u16 = 0x0010;
+/// HeaderErr: an explicit header failed its own CRC. Read back, never
+/// routed: on this part it does not end the window, so it is found latched
+/// when the window ends for another reason (the receive census,
+/// `leviculum-nrf/channel-access/src/rx_census.rs`).
+pub const IRQ_HEADER_ERR: u16 = 0x0020;
 /// CrcErr: the payload CRC failed.
 pub const IRQ_CRC_ERR: u16 = 0x0040;
 /// CadDone.
