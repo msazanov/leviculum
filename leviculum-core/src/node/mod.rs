@@ -114,6 +114,8 @@ mod mvr_inert_announce_retire;
 #[cfg(test)]
 mod mvr_ingress_link_exclusion;
 #[cfg(all(test, feature = "tracing"))]
+mod mvr_interface_gone_dispatch;
+#[cfg(all(test, feature = "tracing"))]
 mod mvr_link_cap;
 #[cfg(all(test, feature = "tracing"))]
 mod mvr_link_data_echo_storm;

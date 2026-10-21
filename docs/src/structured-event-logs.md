@@ -55,13 +55,23 @@ to stitch one packet's path across nodes:
   the context byte is semantic, not routing information.  A rising
   `unknown-context` on a node that is also an endpoint means a peer
   speaks a dialect (newer RNS, third implementation) we do not.
-- `no-such-interface` is the one `PKT_DROP` on the OUTBOUND path, and
-  the one with a different field set: the action was routed to an
-  interface the driver's dispatch slice does not contain, so it never
-  became a received packet and carries `iface_out` and `len` instead of
-  `dst`, `type` and `iface_in`.  Non-zero means the driver and the core
-  disagree about interface numbering — a configuration fault in the
-  driver, not a mesh condition, which is why it does not share a counter
+- Every `PKT_DROP` carries the same keys: `ph`, `dst`, `type`, `hops`,
+  `iface_in` and `reason` (one catalogue shape, enforced against the
+  source by `just event-catalog`).  `iface_in=None` marks a packet this
+  node originated.
+- `no-such-interface` is the one `PKT_DROP` on the OUTBOUND path: the
+  action was addressed to an interface the driver's dispatch slice does
+  not contain.  It reads `dst`, `type` and `hops` from the frame's own
+  bytes, writes `iface_in=None`, and adds `iface_out` (the index it
+  wanted) and `len`.  On a node whose interfaces come and go at runtime
+  (autoconnect, TCP sessions) a rare one is expected: a link this node
+  holds keeps its attached interface after that interface went, and an
+  output committed from an API task can reach the dispatch after the
+  driver removed the interface (919,
+  `leviculum-core/src/node/mvr_interface_gone_dispatch.rs`).  The path
+  table is never the source; `handle_interface_down` removes its entries.
+  A steady rate on a node with fixed interfaces means the driver and the
+  core disagree about interface numbering.  It does not share a counter
   with `no-path`.
 - A relay whose outbound path points back out of the arrival interface
   forwards there — same-interface relay on a shared medium is a normal

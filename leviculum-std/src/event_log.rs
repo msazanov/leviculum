@@ -271,18 +271,16 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "OUTBOUND_WITHHELD",
         required_keys: &["dst", "iface", "next_hop", "reason"],
     },
+    // ONE shape for every PKT_DROP site (919). The outbound drop in
+    // `dispatch_actions` (`no-such-interface`, Codeberg #344) used to have a
+    // second shape without `dst`, `type` and `iface_in`, and was the one
+    // record a soak analyser's schema check flagged in 45 M events. It now
+    // reads `dst` and `type` from the frame's own bytes and writes
+    // `iface_in=None` like every other drop of an originated packet; the
+    // interface it was addressed to rides along as `iface_out`, with `len`.
     EventSchema {
         name: "PKT_DROP",
         required_keys: &["dst", "hops", "iface_in", "ph", "reason", "type"],
-    },
-    // Second PKT_DROP shape, for the one drop on the OUTBOUND path
-    // (`dispatch_actions`, Codeberg #344). The action never reached an
-    // interface, so there is no `iface_in`; it was never a parsed `Packet`
-    // at this layer, so there is no `dst` or `type`. What it does carry is
-    // the interface it was ADDRESSED to, which is the whole diagnosis.
-    EventSchema {
-        name: "PKT_DROP",
-        required_keys: &["hops", "iface_out", "len", "ph", "reason"],
     },
     EventSchema {
         name: "PKT_FORWARD",

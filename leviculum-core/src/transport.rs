@@ -779,6 +779,41 @@ pub fn dispatch_actions<I: crate::traits::AsInterface>(
     for action in actions {
         match action {
             Action::SendPacket { iface, data, peer } => {
+                let Some(iface_obj) = interfaces
+                    .iter_mut()
+                    .map(|i| i.as_interface())
+                    .find(|i| i.id() == iface)
+                else {
+                    // No interface in this slice answers to the id the core
+                    // addressed. This is the one dispatch outcome with nowhere
+                    // to go: not a `BufferFull` a driver can re-queue, not a
+                    // `Disconnected` it can re-home — the addressee does not
+                    // exist here, so the frame ends at this line. It used to
+                    // end at this line SILENTLY.
+                    //
+                    // Checked before the IFAC wrap, so every field is read
+                    // from the frame as the core built it: `ph` matches its
+                    // `PKT_TX`, and `hops`, `dst` and `type` are not masked.
+                    // The line has the one `PKT_DROP` shape (919): there is
+                    // no arrival interface at this layer, so `iface_in` is
+                    // `None` as for any originated packet, and the interface
+                    // the frame was addressed to is `iface_out`. Hashing here
+                    // is free in practice: the branch is rare.
+                    drops.push((iface, DropReason::NoSuchInterface));
+                    crate::tracing::debug!(
+                        target: PKT_EVENT_TARGET,
+                        event = "PKT_DROP",
+                        ph = %HexShort(&ph8(&packet_hash(&data))),
+                        dst = %HexShort(wire_dst(&data)),
+                        r#type = ?wire_type(&data),
+                        hops = wire_hops(&data),
+                        iface_in = "None",
+                        iface_out = iface.0,
+                        len = data.len(),
+                        reason = DropReason::NoSuchInterface.kebab(),
+                    );
+                    continue;
+                };
                 // Hashed before the IFAC wrap, so the tag is the `ph` this
                 // frame's `PKT_TX` named (T-0013).
                 let tag = frame_tag(&data);
@@ -796,52 +831,22 @@ pub fn dispatch_actions<I: crate::traits::AsInterface>(
                     },
                     None => data,
                 };
-                if let Some(iface_obj) = interfaces
-                    .iter_mut()
-                    .map(|i| i.as_interface())
-                    .find(|i| i.id() == iface)
-                {
-                    // SendPacket = directed traffic (link requests, proofs, channel data)
-                    // → high priority on constrained interfaces like LoRa.
-                    // `peer` rides along as the delivery hint (Codeberg
-                    // #376): a multi-peer interface serves the one link it
-                    // names, every other interface ignores it.
-                    iface_obj.tag_next_frame(tag);
-                    if let Err(e) = iface_obj.try_send_to_peer(&send_data, peer.as_ref(), true) {
-                        errors.push((iface, e));
-                        if matches!(e, crate::traits::InterfaceError::BufferFull) {
-                            retries.push(SendRetry {
-                                iface_idx: iface.0,
-                                data: send_data,
-                                peer,
-                                ph: tag,
-                            });
-                        }
+                // SendPacket = directed traffic (link requests, proofs, channel data)
+                // → high priority on constrained interfaces like LoRa.
+                // `peer` rides along as the delivery hint (Codeberg
+                // #376): a multi-peer interface serves the one link it
+                // names, every other interface ignores it.
+                iface_obj.tag_next_frame(tag);
+                if let Err(e) = iface_obj.try_send_to_peer(&send_data, peer.as_ref(), true) {
+                    errors.push((iface, e));
+                    if matches!(e, crate::traits::InterfaceError::BufferFull) {
+                        retries.push(SendRetry {
+                            iface_idx: iface.0,
+                            data: send_data,
+                            peer,
+                            ph: tag,
+                        });
                     }
-                } else {
-                    // No interface in this slice answers to the id the core
-                    // addressed. This is the one dispatch outcome with nowhere
-                    // to go: not a `BufferFull` a driver can re-queue, not a
-                    // `Disconnected` it can re-home — the addressee does not
-                    // exist here, so the frame ends at this line. It used to
-                    // end at this line SILENTLY.
-                    //
-                    // `ph` is the hash of the bytes as they would have gone
-                    // out, so it matches the `PKT_TX` correlator for this
-                    // frame on every interface without an IFAC passphrase
-                    // (with one, the wrapping already happened above and the
-                    // two differ). Hashing here is free in practice: the
-                    // branch fires only when interface ids disagree.
-                    drops.push((iface, DropReason::NoSuchInterface));
-                    crate::tracing::debug!(
-                        target: PKT_EVENT_TARGET,
-                        event = "PKT_DROP",
-                        ph = %HexShort(&ph8(&packet_hash(&send_data))),
-                        iface_out = iface.0,
-                        hops = wire_hops(&send_data),
-                        len = send_data.len(),
-                        reason = DropReason::NoSuchInterface.kebab(),
-                    );
                 }
             }
             Action::Broadcast {
@@ -2215,6 +2220,28 @@ pub(crate) const PKT_PH_BYTES: usize = 8;
 /// the fallback is unreachable and only exists to keep this total.
 fn wire_hops(data: &[u8]) -> u8 {
     data.get(1).copied().unwrap_or(0)
+}
+
+/// The packet type the flags byte of raw outbound bytes states, for the
+/// outbound PKT_DROP, which has no parsed `Packet` to read it from.
+fn wire_type(data: &[u8]) -> PacketType {
+    match data.first().copied().unwrap_or(0) & 0x03 {
+        0x01 => PacketType::Announce,
+        0x02 => PacketType::LinkRequest,
+        0x03 => PacketType::Proof,
+        _ => PacketType::Data,
+    }
+}
+
+/// The destination hash in raw outbound bytes: behind the transport id on
+/// a header-type-2 frame, right after the hops byte otherwise. Empty when
+/// the bytes are too short to hold one.
+fn wire_dst(data: &[u8]) -> &[u8] {
+    let header_2 = data
+        .first()
+        .is_some_and(|f| f & crate::packet::FLAG_HEADER_TYPE_MASK != 0);
+    let start = if header_2 { 2 + TRUNCATED_HASHBYTES } else { 2 };
+    data.get(start..start + TRUNCATED_HASHBYTES).unwrap_or(&[])
 }
 
 /// Take the `ph` correlator prefix from a full (32-byte) or truncated
@@ -6238,7 +6265,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// recall source is the cached announce for the destination
     /// (`get_announce_cache`, keyed by destination hash, holding the raw announce
     /// whose payload starts with the 64-byte public key), the same source the
-    /// link-request path uses at transport.rs:4398. A destination with no cached
+    /// link-request path uses at transport.rs:4425. A destination with no cached
     /// announce cannot be associated with an identity, so it is left untouched,
     /// exactly as Python keeps a path whose `Identity.recall` returns `None`.
     ///
@@ -7039,7 +7066,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             path_response = is_path_response,
         );
 
-        // Gate on the already-incremented hops (transport.rs:1755 ran in the
+        // Gate on the already-incremented hops (transport.rs:1760 ran in the
         // inbound path before handle_announce, and local-client/shared-instance
         // accounting has already been applied there). Announces whose hop count
         // exceeds max_hops are neither stored in the path table nor scheduled
@@ -12233,7 +12260,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // Emit the STORED path-table count, matching Python
                 // Transport.py:2956 (`packet.hops = path_table[dst][IDX_PT_HOPS]`).
                 // The cached raw's hop byte is the PRE-increment wire value
-                // (`stored - 1`): the receipt increment (`transport.rs:2868`) only
+                // (`stored - 1`): the receipt increment (`transport.rs:2895`) only
                 // touches the in-memory packet, never the raw buffer stashed by
                 // `set_announce_cache`. Using it here would put `stored - 1` on the
                 // wire and every peer that learns via this response would be one hop
@@ -18472,7 +18499,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // `random_blobs` (transport.rs:7799), a deliberate anti-replay
+            // `random_blobs` (transport.rs:7826), a deliberate anti-replay
             // extension — so the blob count is not a rejection indicator.)
             transport
                 .clock
@@ -24766,7 +24793,7 @@ mod tests {
         // (PATHFINDER_MAX_HOPS=128) must NOT be stored in the path table nor
         // scheduled for rebroadcast, mirroring Python RNS Transport.py:1750
         // (`local_and_hops_condition = packet.hops < PATHFINDER_M+1`, M=128).
-        // The inbound path increments hops once (transport.rs:1755) before
+        // The inbound path increments hops once (transport.rs:1760) before
         // handle_announce, so `packet.hops` inside the handler is already the
         // post-increment value — same accounting as the RNS gate.
         #[test]
@@ -34958,6 +34985,15 @@ mod tests {
                     logs.contains("iface_out=7"),
                     "the event must name the interface that was asked for; \
                      logs:\n{logs}"
+                );
+                // The one PKT_DROP shape (919): read from the frame's bytes,
+                // all zero here, and `iface_in` for an originated packet.
+                assert!(
+                    logs.contains(&std::format!("dst={}", "00".repeat(16)))
+                        && logs.contains("type=Data")
+                        && logs.contains("iface_in="),
+                    "the event must carry dst, type and iface_in like every \
+                     other PKT_DROP; logs:\n{logs}"
                 );
             }
 

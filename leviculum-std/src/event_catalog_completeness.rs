@@ -66,6 +66,10 @@ struct Site {
     /// A string literal at the macro's top level that is not a field
     /// value — i.e. the format/message argument.
     message: bool,
+    /// The field names the site writes, `r#` stripped, `event` and the
+    /// `target:` directive excluded: exactly the keys its line renders
+    /// besides `node=` and `t=`.
+    keys: BTreeSet<String>,
 }
 
 // ---------------------------------------------------------------------
@@ -441,7 +445,13 @@ fn scan(file: &str, text: &str) -> Vec<Site> {
         let mut depth = 0usize;
         let mut event: Option<String> = None;
         let mut message = false;
+        let mut keys = BTreeSet::new();
         while i < b.len() {
+            if depth == 1 && (i == body_open + 1 || b[i - 1] == b',') {
+                if let Some(key) = field_key(&text[i..]) {
+                    keys.insert(key);
+                }
+            }
             match b[i] {
                 b'(' | b'[' | b'{' => {
                     depth += 1;
@@ -495,15 +505,41 @@ fn scan(file: &str, text: &str) -> Vec<Site> {
         }
 
         if let Some(event) = event {
+            keys.remove("event");
             sites.push(Site {
                 event,
                 file: file.to_string(),
                 line: text[..at].matches('\n').count() + 1,
                 message,
+                keys,
             });
         }
     }
     sites
+}
+
+/// The field name a macro argument starting at `arg` writes, if it is a
+/// field: `name = value`, `r#name = value`, or the shorthand `%name`,
+/// `?name`, `name`. `None` for the `target:` directive, a message literal,
+/// or anything else that renders no key.
+fn field_key(arg: &str) -> Option<String> {
+    let arg = arg.trim_start();
+    let arg = arg.strip_prefix(['%', '?']).unwrap_or(arg).trim_start();
+    let raw = arg.strip_prefix("r#").unwrap_or(arg);
+    let len = raw
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '.'))
+        .unwrap_or(raw.len());
+    let name = &raw[..len];
+    if name.is_empty() || !name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') {
+        return None;
+    }
+    let rest = raw[len..].trim_start();
+    let is_field = match rest.as_bytes() {
+        [b'=', b'=', ..] => false,
+        [b'=', ..] | [b',', ..] | [b')', ..] | [] => true,
+        _ => false,
+    };
+    is_field.then(|| name.to_string())
 }
 
 fn all_sites() -> Vec<Site> {
@@ -631,6 +667,87 @@ fn every_emitted_event_is_catalogued() {
             .collect::<Vec<_>>()
             .join("\n")
     );
+}
+
+/// Every event site writes every key of at least one catalogued shape.
+///
+/// The name check above makes the layer validate an event; this one makes
+/// the declared shape true of the source, so a site that renders a
+/// different field set is red here the day it is written instead of on a
+/// soak node's analyser. The miauhaus soak of 2026-10 found exactly that:
+/// one `PKT_DROP` in 45 M events (`reason=no-such-interface`) carried
+/// `iface_out` and no `dst`, `type` or `iface_in`, legal only because the
+/// catalogue had grown a second shape for it (919).
+#[test]
+fn every_event_site_writes_a_catalogued_shape() {
+    let mut offenders = Vec::new();
+    for site in all_sites() {
+        let shapes: Vec<&[&str]> = EVENT_CATALOG
+            .iter()
+            .filter(|s| s.name == site.event)
+            .map(|s| s.required_keys)
+            .collect();
+        if shapes.is_empty() {
+            // Undeclared names are `every_emitted_event_is_catalogued`'s.
+            continue;
+        }
+        let fits = shapes
+            .iter()
+            .any(|keys| keys.iter().all(|k| site.keys.contains(*k)));
+        if !fits {
+            let missing: Vec<&&str> = shapes
+                .iter()
+                .map(|keys| {
+                    keys.iter()
+                        .filter(|k| !site.keys.contains(**k))
+                        .collect::<Vec<_>>()
+                })
+                .min_by_key(Vec::len)
+                .unwrap_or_default();
+            offenders.push(format!(
+                "  {} at {}:{} misses {missing:?} (writes {:?})",
+                site.event, site.file, site.line, site.keys
+            ));
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "these event sites write none of their event's catalogued shapes; \
+         every line they emit is an EVENT_SCHEMA_VIOLATION:\n{}",
+        offenders.join("\n")
+    );
+}
+
+/// The packet-journey events keep ONE shape each.
+///
+/// A collector stitches a packet across nodes by these lines and reads the
+/// same keys from every one of them; a second shape is a second parser
+/// every consumer has to grow. `PKT_DROP` had one for its outbound drop
+/// until 919 gave that site the common key set.
+#[test]
+fn journey_events_have_one_shape() {
+    for name in ["PKT_RX", "PKT_TX", "PKT_FORWARD", "PKT_DROP", "DEDUP_DROP"] {
+        let shapes = EVENT_CATALOG.iter().filter(|s| s.name == name).count();
+        assert_eq!(
+            shapes, 1,
+            "{name} is declared with {shapes} shapes in EVENT_CATALOG; the \
+             journey contract allows exactly one"
+        );
+    }
+}
+
+/// The key reader is shown working on the spellings the tree uses before
+/// the shape check's silence means anything.
+#[test]
+fn field_key_reads_every_spelling() {
+    assert_eq!(field_key(" ph = %HexShort(&h)").as_deref(), Some("ph"));
+    assert_eq!(field_key("\n  r#type = ?t").as_deref(), Some("type"));
+    assert_eq!(field_key(" %peer,").as_deref(), Some("peer"));
+    assert_eq!(field_key(" ?state)").as_deref(), Some("state"));
+    assert_eq!(field_key(" hops").as_deref(), Some("hops"));
+    assert_eq!(field_key(" target: PKT_EVENT_TARGET"), None);
+    assert_eq!(field_key(" \"prose\""), None);
+    assert_eq!(field_key(" a == b"), None);
 }
 
 /// No event site carries a free-text message.
