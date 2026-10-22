@@ -390,4 +390,28 @@ mod tests {
         writer.sync();
         assert_eq!(writer.read_latest(&path).unwrap(), b"new");
     }
+
+    #[test]
+    fn failed_disk_write_releases_capacity_and_a_later_write_can_retry() {
+        let (writer, dir) = writer(2);
+        let blocker = dir.path().join("not-a-directory");
+        std::fs::write(&blocker, b"block").unwrap();
+        let path = blocker.join("record");
+
+        // Enqueue succeeds asynchronously; the worker reports the filesystem
+        // failure and releases the latest mirror/capacity instead of claiming
+        // a durable write.
+        writer.write(path.clone(), b"first attempt".to_vec()).unwrap();
+        writer.sync();
+        assert!(matches!(
+            writer.read_latest(&path).unwrap_err().kind(),
+            io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+        ));
+
+        std::fs::remove_file(blocker).unwrap();
+        writer.write(path.clone(), b"retry".to_vec()).unwrap();
+        assert_eq!(writer.read_latest(&path).unwrap(), b"retry");
+        writer.sync();
+        assert_eq!(std::fs::read(&path).unwrap(), b"retry");
+    }
 }
