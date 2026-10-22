@@ -2772,16 +2772,34 @@ impl ReticulumNode {
         dest_hash: &DestinationHash,
         dest_signing_key: &[u8; 32],
     ) -> Result<LinkHandle, Error> {
+        self.connect_inner(dest_hash, dest_signing_key, None).await
+    }
+
+    /// [`Self::connect`] with an explicit cipher for this link only.
+    pub async fn connect_with_cipher(
+        &self,
+        dest_hash: &DestinationHash,
+        dest_signing_key: &[u8; 32],
+        cipher: leviculum_core::LinkCipher,
+    ) -> Result<LinkHandle, Error> {
+        self.connect_inner(dest_hash, dest_signing_key, Some(cipher)).await
+    }
+
+    async fn connect_inner(
+        &self,
+        dest_hash: &DestinationHash,
+        dest_signing_key: &[u8; 32],
+        cipher: Option<leviculum_core::LinkCipher>,
+    ) -> Result<LinkHandle, Error> {
         let first_hop_timeout_ms = self.shared_instance_first_hop_timeout_ms(dest_hash).await;
         // Request link from NodeCore. A refusal by the configured link cap
         // (`max_links`, #388) surfaces as `Error::Link(TableFull)`.
         let (link_id, _was_routed, output) = {
             let mut inner = self.inner.lock_recover();
-            inner.connect_with_first_hop_timeout(
-                *dest_hash,
-                dest_signing_key,
-                first_hop_timeout_ms,
-            )?
+            match cipher {
+                Some(c) => inner.connect_with_cipher(*dest_hash, dest_signing_key, first_hop_timeout_ms, c)?,
+                None => inner.connect_with_first_hop_timeout(*dest_hash, dest_signing_key, first_hop_timeout_ms)?,
+            }
         };
         // Send output to event loop for dispatch (backpressure, waits if full)
         self.action_dispatch_tx

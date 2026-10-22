@@ -42,6 +42,7 @@ pub struct NodeCoreBuilder {
     proof_strategy: ProofStrategy,
     proof_binding: ProofBinding,
     link_cipher: crate::LinkCipher,
+    accept_cbc_links: bool,
     transport_config: TransportConfig,
     respond_to_probes: bool,
     remote_management: bool,
@@ -65,6 +66,7 @@ impl NodeCoreBuilder {
             proof_strategy: ProofStrategy::None,
             proof_binding: ProofBinding::default(),
             link_cipher: crate::LinkCipher::default(),
+            accept_cbc_links: false,
             transport_config: TransportConfig::default(),
             respond_to_probes: false,
             remote_management: false,
@@ -115,6 +117,12 @@ impl NodeCoreBuilder {
 
     pub fn link_cipher(mut self, cipher: crate::LinkCipher) -> Self {
         self.link_cipher = cipher;
+        self
+    }
+
+    /// Also accept inbound links that ask for standard CBC (see [`Node::set_accept_cbc_links`]).
+    pub fn accept_cbc_links(mut self, accept: bool) -> Self {
+        self.accept_cbc_links = accept;
         self
     }
 
@@ -316,6 +324,7 @@ impl NodeCoreBuilder {
         node.set_proof_binding(self.proof_binding);
         node.set_link_cipher(self.link_cipher)
             .expect("fresh node has no links");
+        node.set_accept_cbc_links(self.accept_cbc_links);
 
         if self.respond_to_probes {
             node.enable_probe_responder();
@@ -376,6 +385,7 @@ impl NodeCoreBuilder {
         node.set_proof_binding(self.proof_binding);
         node.set_link_cipher(self.link_cipher)
             .expect("fresh node has no links");
+        node.set_accept_cbc_links(self.accept_cbc_links);
 
         if self.respond_to_probes {
             node.enable_probe_responder();

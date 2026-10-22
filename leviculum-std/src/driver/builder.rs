@@ -234,6 +234,12 @@ impl ReticulumNodeBuilder {
         self
     }
 
+    /// Also accept inbound links that ask for standard CBC (links that cross stock Reticulum transports).
+    pub fn accept_cbc_links(mut self, accept: bool) -> Self {
+        self.core_builder = self.core_builder.accept_cbc_links(accept);
+        self
+    }
+
     pub fn proof_strategy(mut self, strategy: ProofStrategy) -> Self {
         self.core_builder = self.core_builder.proof_strategy(strategy);
         self

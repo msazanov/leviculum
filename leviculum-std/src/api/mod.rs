@@ -212,6 +212,12 @@ impl NodeBuilder {
         self
     }
 
+    /// Also accept inbound links that ask for standard CBC (links that cross stock Reticulum transports).
+    pub fn accept_cbc_links(mut self, accept: bool) -> Self {
+        self.inner = self.inner.accept_cbc_links(accept);
+        self
+    }
+
     /// Load interface and node configuration from an INI config file, the same
     /// format `rnsd`/`lnsd` use. This brings every interface type, including
     /// RNode and serial, into the node, so a C app can adopt the user's
@@ -515,6 +521,16 @@ impl Node {
         signing_key: &[u8; 32],
     ) -> Result<LinkHandle> {
         self.inner.connect(dest_hash, signing_key).await
+    }
+
+    /// [`Self::connect_with_key`] with an explicit cipher for this link only (standard CBC for links that cross stock Reticulum transports).
+    pub async fn connect_with_key_cipher(
+        &self,
+        dest_hash: &DestinationHash,
+        signing_key: &[u8; 32],
+        cipher: LinkCipher,
+    ) -> Result<LinkHandle> {
+        self.inner.connect_with_cipher(dest_hash, signing_key, cipher).await
     }
 
     /// Obtain a writable handle to an already-established inbound link.
