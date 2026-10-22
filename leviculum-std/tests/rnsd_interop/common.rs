@@ -1479,6 +1479,9 @@ pub fn create_test_transport() -> (
 /// Build a Rust node connected to a daemon via TCP, ready for single-packet
 /// operations. Returns `(node, event_rx, storage)`; the node is started and
 /// the storage guard must outlive the test.
+///
+/// The peer is a stock Python daemon on a CBC Link, which proves data with the
+/// packet hash, so the node resolves its proof binding per cipher.
 pub async fn build_rust_node(
     daemon: &crate::harness::TestDaemon,
 ) -> (
@@ -1486,7 +1489,7 @@ pub async fn build_rust_node(
     EventReceiver,
     tempfile::TempDir,
 ) {
-    build_rust_node_with_proof_binding_policy(daemon, leviculum_core::ProofBindingPolicy::default())
+    build_rust_node_with_proof_binding_policy(daemon, leviculum_core::ProofBindingPolicy::ByCipher)
         .await
 }
 
