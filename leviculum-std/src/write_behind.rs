@@ -17,7 +17,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -35,6 +35,14 @@ enum Job {
         path: PathBuf,
         seq: u64,
     },
+    /// Remove a discovery record only if the worker still sees the semantic
+    /// version observed by the expiry scan.
+    ConditionalRemove {
+        path: PathBuf,
+        expected: [u8; 32],
+        now: f64,
+        seq: u64,
+    },
     #[cfg(test)]
     Barrier(SyncSender<()>),
     #[cfg(test)]
@@ -46,15 +54,23 @@ enum Job {
     Panic,
 }
 
+#[derive(Clone, PartialEq, Eq)]
+enum LatestValue {
+    Write(Vec<u8>),
+    Remove,
+    ConditionalRemove([u8; 32]),
+}
+
 #[derive(Default)]
 struct State {
     /// Last queued state per path, including the in-flight write. It is
     /// removed only when the matching job has settled.
-    latest: Mutex<BTreeMap<PathBuf, (u64, Option<Vec<u8>>)>>,
+    latest: Mutex<BTreeMap<PathBuf, (u64, LatestValue)>>,
     failed_writes: Mutex<HashSet<PathBuf>>,
     pending: AtomicUsize,
     pending_bytes: AtomicUsize,
     next_seq: AtomicU64,
+    worker_failed: AtomicBool,
 }
 
 #[derive(Clone)]
@@ -93,8 +109,10 @@ impl Writer {
 
     fn remove_unless_pending_write(&self, path: PathBuf) -> io::Result<bool> {
         let mut latest = self.state.latest.lock().unwrap_or_else(|e| e.into_inner());
-        if latest.get(&path).is_some_and(|(_, value)| value.is_some()) {
-            return Ok(false);
+        match latest.get(&path).map(|(_, value)| value) {
+            Some(LatestValue::Write(_)) => return Ok(false),
+            Some(LatestValue::Remove | LatestValue::ConditionalRemove(_)) => return Ok(true),
+            None => {}
         }
         if !self.reserve(0) {
             return Err(io::Error::new(
@@ -107,7 +125,7 @@ impl Writer {
             .next_seq
             .fetch_add(1, Ordering::Relaxed)
             .wrapping_add(1);
-        let previous = latest.insert(path.clone(), (seq, None));
+        let previous = latest.insert(path.clone(), (seq, LatestValue::Remove));
         match self.tx.try_send(Job::Remove {
             path: path.clone(),
             seq,
@@ -124,6 +142,66 @@ impl Writer {
             Err(mpsc::TrySendError::Disconnected(_)) => {
                 restore_latest(&mut latest, path, seq, previous);
                 self.release(0);
+                Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "write-behind worker stopped",
+                ))
+            }
+        }
+    }
+
+    /// Queue an expiry unlink guarded by the record version observed by the
+    /// scan. The disk read and predicate run in this same FIFO worker directly
+    /// before unlink, so no queued write can interleave between check and use.
+    /// The fixed-size digest participates in both queue and byte reservations.
+    fn remove_if_discovery_version(
+        &self,
+        path: PathBuf,
+        expected: [u8; 32],
+        now: f64,
+    ) -> io::Result<bool> {
+        let mut latest = self.state.latest.lock().unwrap_or_else(|e| e.into_inner());
+        match latest.get(&path).map(|(_, value)| value) {
+            Some(LatestValue::Write(_)) => return Ok(false),
+            Some(LatestValue::Remove) => return Ok(true),
+            Some(LatestValue::ConditionalRemove(queued)) if *queued == expected => return Ok(true),
+            _ => {}
+        }
+
+        let bytes = expected.len();
+        if !self.reserve(bytes) {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "write-behind queue or byte budget is full",
+            ));
+        }
+        let seq = self
+            .state
+            .next_seq
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_add(1);
+        let previous = latest.insert(
+            path.clone(),
+            (seq, LatestValue::ConditionalRemove(expected)),
+        );
+        match self.tx.try_send(Job::ConditionalRemove {
+            path: path.clone(),
+            expected,
+            now,
+            seq,
+        }) {
+            Ok(()) => Ok(true),
+            Err(mpsc::TrySendError::Full(_)) => {
+                restore_latest(&mut latest, path, seq, previous);
+                self.release(bytes);
+                Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "write-behind queue is full",
+                ))
+            }
+            Err(mpsc::TrySendError::Disconnected(_)) => {
+                restore_latest(&mut latest, path, seq, previous);
+                self.release(bytes);
                 Err(io::Error::new(
                     io::ErrorKind::BrokenPipe,
                     "write-behind worker stopped",
@@ -208,7 +286,11 @@ impl Writer {
             .next_seq
             .fetch_add(1, Ordering::Relaxed)
             .wrapping_add(1);
-        let previous = latest.insert(path.clone(), (seq, data.clone()));
+        let latest_value = match &data {
+            Some(data) => LatestValue::Write(data.clone()),
+            None => LatestValue::Remove,
+        };
+        let previous = latest.insert(path.clone(), (seq, latest_value));
         if data.is_some() {
             self.state
                 .failed_writes
@@ -261,17 +343,20 @@ impl Writer {
     }
 
     fn read_latest(&self, path: &Path) -> io::Result<Vec<u8>> {
+        if self.state.worker_failed.load(Ordering::Acquire) {
+            return Err(worker_unavailable());
+        }
         let pending = self
             .state
             .latest
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(path)
-            .map(|(_, data)| data.clone());
+            .map(|(_, value)| value.clone());
         match pending {
-            Some(Some(data)) => Ok(data),
-            Some(None) => Err(io::ErrorKind::NotFound.into()),
-            None => std::fs::read(path),
+            Some(LatestValue::Write(data)) => Ok(data),
+            Some(LatestValue::Remove) => Err(io::ErrorKind::NotFound.into()),
+            Some(LatestValue::ConditionalRemove(_)) | None => std::fs::read(path),
         }
     }
 
@@ -331,10 +416,10 @@ impl Writer {
 }
 
 fn restore_latest(
-    latest: &mut BTreeMap<PathBuf, (u64, Option<Vec<u8>>)>,
+    latest: &mut BTreeMap<PathBuf, (u64, LatestValue)>,
     path: PathBuf,
     seq: u64,
-    previous: Option<(u64, Option<Vec<u8>>)>,
+    previous: Option<(u64, LatestValue)>,
 ) {
     if latest
         .get(&path)
@@ -354,21 +439,36 @@ fn restore_latest(
 fn run(rx: Receiver<Job>, state: Arc<State>) {
     let worker_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         for job in rx {
-            let (path, seq, bytes, result) = match job {
+            let (path, seq, bytes, result, is_write, is_conditional_remove) = match job {
                 Job::Write { path, data, seq } => {
                     let bytes = data.len();
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         write_now(&path, &data)
                     }))
                     .unwrap_or_else(|_| Err(io::Error::other("write-behind write panicked")));
-                    (path, seq, bytes, result)
+                    (path, seq, bytes, result, true, false)
                 }
                 Job::Remove { path, seq } => {
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         remove_now(&path)
                     }))
                     .unwrap_or_else(|_| Err(io::Error::other("write-behind remove panicked")));
-                    (path, seq, 0, result)
+                    (path, seq, 0, result, false, false)
+                }
+                Job::ConditionalRemove {
+                    path,
+                    expected,
+                    now,
+                    seq,
+                } => {
+                    let bytes = expected.len();
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        remove_discovery_if_version_now(&path, expected, now)
+                    }))
+                    .unwrap_or_else(|_| {
+                        Err(io::Error::other("write-behind conditional remove panicked"))
+                    });
+                    (path, seq, bytes, result, false, true)
                 }
                 #[cfg(test)]
                 Job::Barrier(done) => {
@@ -386,17 +486,28 @@ fn run(rx: Receiver<Job>, state: Arc<State>) {
             };
             if let Err(error) = &result {
                 tracing::warn!("write-behind operation failed: {error}");
-                let mut failures = state
-                    .failed_writes
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                if failures.contains(&path) || failures.len() < MAX_FAILED_WRITES {
-                    failures.insert(path.clone());
-                } else {
-                    tracing::warn!(
-                        "write-behind failure markers are full; retry signal for this path was not retained"
-                    );
+                if is_write {
+                    let mut failures = state
+                        .failed_writes
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    if failures.contains(&path) || failures.len() < MAX_FAILED_WRITES {
+                        failures.insert(path.clone());
+                    } else {
+                        tracing::warn!(
+                            "write-behind failure markers are full; retry signal for this path was not retained"
+                        );
+                    }
                 }
+            }
+            if is_conditional_remove && result.is_ok() {
+                // Conditional expiry jobs may have skipped deletion because
+                // a newer record reached disk, or may have failed to inspect
+                // its version semantically. Invalidate cache after the
+                // predicate/file operation and before clearing this job's
+                // latest marker. On I/O error, don't force another immediate
+                // cleanup attempt; normal cache revalidation provides retry.
+                crate::discovery::note_record_job_settled(&path);
             }
             settled(&state, &path, seq);
             state.pending.fetch_sub(1, Ordering::AcqRel);
@@ -404,6 +515,7 @@ fn run(rx: Receiver<Job>, state: Arc<State>) {
         }
     }));
     if worker_result.is_err() {
+        state.worker_failed.store(true, Ordering::Release);
         state
             .latest
             .lock()
@@ -441,6 +553,35 @@ fn remove_now(path: &Path) -> io::Result<()> {
     }
 }
 
+fn remove_discovery_if_version_now(path: &Path, expected: [u8; 32], now: f64) -> io::Result<()> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let Some(record) = leviculum_core::discovery::DiscoveredInterfaceRecord::decode_msgpack(&bytes)
+    else {
+        // An unreadable or forward-incompatible record is never deleted by an
+        // expiry job. A later revalidation can decide what to do with it.
+        return Ok(());
+    };
+    if !record.should_remove(now) {
+        return Ok(());
+    }
+    let actual = crate::discovery::record_version(&record);
+    if actual != expected {
+        return Ok(());
+    }
+    remove_now(path)
+}
+
+fn worker_unavailable() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::BrokenPipe,
+        "background disk writer unavailable",
+    )
+}
+
 static QUEUE: OnceLock<Option<Writer>> = OnceLock::new();
 
 fn queue() -> Option<&'static Writer> {
@@ -448,22 +589,30 @@ fn queue() -> Option<&'static Writer> {
         .get_or_init(|| match Writer::spawn(MAX_PENDING) {
             Ok(writer) => Some(writer),
             Err(error) => {
-                tracing::warn!(
-                    "background disk writer unavailable; using synchronous writes: {error}"
-                );
+                tracing::warn!("background disk writer unavailable: {error}");
                 None
             }
         })
         .as_ref()
 }
 
+/// Start/check the async writer before a caller performs any disk fallback.
+/// A failed worker is reported; cache-only persistence is deferred rather than
+/// synchronously writing on the engine thread.
+pub(crate) fn ensure_worker() -> io::Result<()> {
+    match queue() {
+        Some(writer) if !writer.state.worker_failed.load(Ordering::Acquire) => Ok(()),
+        _ => Err(worker_unavailable()),
+    }
+}
+
 /// Queue an atomic write. `WouldBlock` means the bounded queue is saturated;
-/// the state was not committed and the caller may retry on a later update.
-/// Synchronous fallback is used only when the worker thread could not start.
+/// `BrokenPipe` means the worker could not start or has failed. Neither case
+/// falls back to filesystem I/O on the caller thread.
 pub(crate) fn write(path: PathBuf, data: Vec<u8>) -> io::Result<()> {
     match queue() {
         Some(writer) => writer.write(path, data).map(|_| ()),
-        None => write_now(&path, &data),
+        None => Err(worker_unavailable()),
     }
 }
 
@@ -471,7 +620,7 @@ pub(crate) fn write(path: PathBuf, data: Vec<u8>) -> io::Result<()> {
 pub(crate) fn remove(path: PathBuf) -> io::Result<()> {
     match queue() {
         Some(writer) => writer.remove(path).map(|_| ()),
-        None => remove_now(&path),
+        None => Err(worker_unavailable()),
     }
 }
 
@@ -479,10 +628,21 @@ pub(crate) fn remove(path: PathBuf) -> io::Result<()> {
 pub(crate) fn remove_unless_pending_write(path: PathBuf) -> io::Result<bool> {
     match queue() {
         Some(writer) => writer.remove_unless_pending_write(path),
-        None => {
-            remove_now(&path)?;
-            Ok(true)
-        }
+        None => Err(worker_unavailable()),
+    }
+}
+
+/// Queue a discovery expiry unlink guarded by the scanned record version.
+/// `false` means a newer queued write already owns this path; otherwise the
+/// bounded worker will compare immediately before deleting.
+pub(crate) fn remove_discovery_if_version(
+    path: PathBuf,
+    expected: [u8; 32],
+    now: f64,
+) -> io::Result<bool> {
+    match queue() {
+        Some(writer) => writer.remove_if_discovery_version(path, expected, now),
+        None => Err(worker_unavailable()),
     }
 }
 
@@ -501,8 +661,9 @@ pub(crate) fn take_write_failure(path: &Path) -> bool {
 
 /// Read a path through the latest queued state, falling back to disk.
 pub(crate) fn read_latest(path: &Path) -> io::Result<Vec<u8>> {
-    match QUEUE.get().and_then(Option::as_ref) {
-        Some(writer) => writer.read_latest(path),
+    match QUEUE.get() {
+        Some(Some(writer)) => writer.read_latest(path),
+        Some(None) => Err(worker_unavailable()),
         None => std::fs::read(path),
     }
 }
@@ -577,6 +738,40 @@ mod tests {
         release.send(()).expect("release worker");
         writer.sync();
         assert_eq!(std::fs::read(&path).unwrap(), b"new");
+    }
+
+    #[test]
+    fn conditional_expiry_is_coalesced_bounded_and_releases_on_io_error() {
+        let (writer, dir) = writer(1);
+        let release = writer.pause_worker();
+        let path = dir.path().join("directory-is-not-a-record");
+        std::fs::create_dir(&path).unwrap();
+        let expected = [0x5a; 32];
+
+        assert!(writer
+            .remove_if_discovery_version(path.clone(), expected, 10_000.0)
+            .unwrap());
+        // Same path/version coalesces to one bounded queue slot.
+        assert!(writer
+            .remove_if_discovery_version(path.clone(), expected, 10_000.0)
+            .unwrap());
+        assert_eq!(writer.pending(), 1);
+        assert_eq!(writer.pending_bytes(), expected.len());
+        assert_eq!(
+            writer
+                .write(dir.path().join("over-cap"), b"x".to_vec())
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
+        assert_eq!(writer.pending(), 1);
+        assert_eq!(writer.pending_bytes(), expected.len());
+
+        release.send(()).unwrap();
+        writer.sync();
+        assert!(path.is_dir(), "read I/O error must never unlink the path");
+        assert_eq!(writer.pending(), 0);
+        assert_eq!(writer.pending_bytes(), 0);
     }
 
     #[test]
@@ -792,8 +987,8 @@ mod tests {
         assert_eq!(writer.pending_bytes(), 0);
         assert_eq!(
             writer.read_latest(&path).unwrap_err().kind(),
-            io::ErrorKind::NotFound,
-            "worker panic clears unpersisted read-your-writes state"
+            io::ErrorKind::BrokenPipe,
+            "worker panic fails closed without a synchronous disk read"
         );
         assert_eq!(
             writer.write(path, b"retry".to_vec()).unwrap_err().kind(),
