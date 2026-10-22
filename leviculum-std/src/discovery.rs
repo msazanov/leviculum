@@ -161,14 +161,11 @@ pub(crate) fn persist_discovered(
     // Запись уходит в фоновый поток (write_behind.rs): создание и переименование файла на рабочем потоке
     // движка ждут журнал диска и останавливают все Link. Атомарность сохраняется: tmp + rename выполняются
     // в фоне. Предыдущая запись, которую читает эта функция, может отставать на время очереди.
-    crate::write_behind::write(path.clone(), encoded)?;
+    // Serialize local discovery writes with expiry decisions. This is a
+    // process-local directory epoch, not a write-behind seq or durability claim.
     let mut generations = GENERATION.lock().unwrap_or_else(|e| e.into_inner());
-    match generations.get_mut(&dir) {
-        Some(generation) => *generation = generation.wrapping_add(1),
-        None => {
-            generations.insert(dir, 1);
-        }
-    }
+    crate::write_behind::write(path.clone(), encoded)?;
+    bump_generation(&mut generations, &dir);
     Ok(())
 }
 
@@ -204,14 +201,36 @@ pub(crate) type DiscoveredList = Arc<Vec<Arc<DiscoveredInterfaceRecord>>>;
 /// Per directory, so a write to one registry leaves another one cached (the
 /// test binary keeps hundreds side by side). A mutex rather than an atomic
 /// both for the map and because leviculum-std builds for triples without
-/// 64-bit atomics (`just no-atomic64-gate`). It is held for one map lookup
-/// only, never across file I/O.
+/// 64-bit atomics (`just no-atomic64-gate`). It also serializes discovery
+/// enqueue against expiry enqueue. On the normal worker path the lock covers
+/// only bounded queue operations; if the worker could not start, the existing
+/// synchronous persistence fallback can perform file I/O while it is held.
 static GENERATION: Mutex<BTreeMap<PathBuf, u64>> = Mutex::new(BTreeMap::new());
 
 /// The write count of `dir` so far, 0 for a directory never written here.
 fn generation_of(dir: &Path) -> u64 {
     let generations = GENERATION.lock().unwrap_or_else(|e| e.into_inner());
     generations.get(dir).copied().unwrap_or(0)
+}
+
+fn bump_generation(generations: &mut BTreeMap<PathBuf, u64>, dir: &Path) {
+    match generations.get_mut(dir) {
+        Some(generation) => *generation = generation.wrapping_add(1),
+        None => {
+            generations.insert(dir.to_path_buf(), 1);
+        }
+    }
+}
+
+/// Queue expiry removal only if no local announce was enqueued since the
+/// listing's directory-generation snapshot. Keep the generation lock across
+/// compare and enqueue, ordering a racing write wholly before or after remove.
+fn remove_if_generation(dir: &Path, expected: u64, path: PathBuf) -> std::io::Result<Option<bool>> {
+    let generations = GENERATION.lock().unwrap_or_else(|e| e.into_inner());
+    if generations.get(dir).copied().unwrap_or(0) != expected {
+        return Ok(None);
+    }
+    crate::write_behind::remove_unless_pending_write(path).map(Some)
 }
 
 /// What [`list_discovered_interfaces`] saw last, per discovery directory
@@ -378,11 +397,19 @@ impl DirCache {
             .collect();
         for name in &expired {
             // Prune stale/unknown-type records from disk, matching Python (в фоне, см. write_behind.rs).
-            match crate::write_behind::remove_unless_pending_write(dir.join(name)) {
-                Ok(true) => {
+            // The scan generation protects against writes which have already
+            // settled and therefore disappeared from write_behind::LATEST.
+            match remove_if_generation(dir, self.generation, dir.join(name)) {
+                Ok(None) => {
+                    // The scan is stale. Hide this expired cache entry for
+                    // this result, but do not read disk or unlink it here; the
+                    // next generation-triggered revalidation will decide anew.
                     self.files.remove(name);
                 }
-                Ok(false) => {
+                Ok(Some(true)) => {
+                    self.files.remove(name);
+                }
+                Ok(Some(false)) => {
                     // A newer announce is already queued for this filename.
                     // Refresh the listing from its read-your-writes bytes so
                     // the stale on-disk record is neither deleted nor served.
@@ -611,6 +638,49 @@ mod tests {
         let record = DiscoveredInterfaceRecord::decode_msgpack(&std::fs::read(path).unwrap())
             .expect("fresh record is kept on disk");
         assert_eq!(record.last_heard, fresh_at);
+    }
+
+    #[test]
+    fn expiry_generation_rejects_a_write_that_settled_after_scan() {
+        use leviculum_core::discovery::THRESHOLD_REMOVE;
+        let td = tempfile::tempdir().unwrap();
+        let di = rnode_di("Settled between scan and unlink", 0x32);
+        persist_discovered(td.path(), &di, 1, 1_000.0).unwrap();
+        crate::write_behind::sync();
+        let dir = discovery_dir(td.path());
+        let path = dir.join(crate::storage::hex_encode(&di.discovery_hash));
+        let scanned_generation = generation_of(&dir);
+
+        // Exercise the real scan/expiry methods directly. The public listing
+        // wrapper has a cfg(test) sync at entry, which would erase the exact
+        // interleaving this regression needs to preserve.
+        let mut cache = DirCache::new();
+        let dir_mtime = std::fs::metadata(&dir).unwrap().modified().ok();
+        cache.revalidate(&dir, dir_mtime, scanned_generation);
+        assert!(cache.files.contains_key(path.file_name().unwrap()));
+
+        let fresh_at = 1_000.0 + THRESHOLD_REMOVE + 20.0;
+        persist_discovered(td.path(), &di, 1, fresh_at).unwrap();
+        // This FIFO barrier places a settled atomic write strictly between the
+        // stale scan and expiry assembly; it is not the listing wrapper's
+        // pre-scan sync and cannot hide the race.
+        crate::write_behind::sync();
+
+        cache.assemble(&dir, fresh_at, true);
+        assert!(cache.sorted.is_empty(), "stale scan is not served");
+        // Drain a buggy stale Remove before observing the filesystem. With the
+        // former unconditional expiry path this deletes the fresh file.
+        crate::write_behind::sync();
+        let record = DiscoveredInterfaceRecord::decode_msgpack(&std::fs::read(path).unwrap())
+            .expect("fresh record remains on disk");
+        assert_eq!(record.last_heard, fresh_at);
+
+        let fresh_generation = generation_of(&dir);
+        let dir_mtime = std::fs::metadata(&dir).unwrap().modified().ok();
+        cache.revalidate(&dir, dir_mtime, fresh_generation);
+        cache.assemble(&dir, fresh_at, true);
+        assert_eq!(cache.sorted.len(), 1);
+        assert_eq!(cache.sorted[0].last_heard, fresh_at);
     }
 
     /// Codeberg #157: a corrupt record used to be re-warned on every scan, so
