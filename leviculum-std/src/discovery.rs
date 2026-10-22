@@ -145,7 +145,8 @@ pub(crate) fn persist_discovered(
     // Preserve `discovered` + `heard_count` across re-announces (Python reads
     // the prior record, keeps its first-seen time, and bumps the counter). A
     // corrupt/unreadable prior record re-creates fresh, like Python.
-    let (discovered, heard_count) = match std::fs::read(&path) {
+    // Видит и ещё не записанное фоновой очередью состояние, чтобы повторное наблюдение не сбрасывало first-seen.
+    let (discovered, heard_count) = match crate::write_behind::read_latest(&path) {
         Ok(bytes) => match DiscoveredInterfaceRecord::decode_msgpack(&bytes) {
             Some(prev) => (prev.discovered, prev.heard_count + 1),
             None => (now, 0),
@@ -157,11 +158,10 @@ pub(crate) fn persist_discovered(
         DiscoveredInterfaceRecord::from_discovered(di, hops, now, discovered, now, heard_count);
     let encoded = record.encode_msgpack();
 
-    // Atomic-ish write: temp file then rename, so a concurrent reader never sees
-    // a half-written record (Python writes in place; rename is strictly safer).
-    let tmp = dir.join(format!("{filename}.tmp"));
-    std::fs::write(&tmp, &encoded)?;
-    std::fs::rename(&tmp, &path)?;
+    // Запись уходит в фоновый поток (write_behind.rs): создание и переименование файла на рабочем потоке
+    // движка ждут журнал диска и останавливают все Link. Атомарность сохраняется: tmp + rename выполняются
+    // в фоне. Предыдущая запись, которую читает эта функция, может отставать на время очереди.
+    crate::write_behind::write(path.clone(), encoded);
     let mut generations = GENERATION.lock().unwrap_or_else(|e| e.into_inner());
     match generations.get_mut(&dir) {
         Some(generation) => *generation = generation.wrapping_add(1),
@@ -377,8 +377,8 @@ impl DirCache {
             .map(|(name, _)| name.clone())
             .collect();
         for name in &expired {
-            // Prune stale/unknown-type records from disk, matching Python.
-            let _ = std::fs::remove_file(dir.join(name));
+            // Prune stale/unknown-type records from disk, matching Python (в фоне, см. write_behind.rs).
+            crate::write_behind::remove(dir.join(name));
             self.files.remove(name);
         }
 
@@ -447,6 +447,9 @@ fn decode_record_file(path: &Path) -> Option<CachedEntry> {
 /// from [`REGISTRY_CACHE`], and only a record file whose stamp changed is
 /// decoded anew (Codeberg #437).
 pub(crate) fn list_discovered_interfaces(storage_root: &Path, now: f64) -> DiscoveredList {
+    // Тесты читают диск сразу после записи; в работе листинг не ждёт фоновую очередь.
+    #[cfg(test)]
+    crate::write_behind::sync();
     let dir = discovery_dir(storage_root);
     // Read before the directory, so a write racing the scan bumps it past
     // what the cache records and the next listing looks again.
@@ -540,6 +543,7 @@ mod tests {
         let now = THRESHOLD_REMOVE + 10.0;
         let list = list_discovered_interfaces(td.path(), now);
         assert!(list.is_empty(), "expired record dropped from listing");
+        crate::write_behind::sync();
         let dir = discovery_dir(td.path());
         let remaining: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().collect();
         assert!(remaining.is_empty(), "expired record unlinked from disk");
@@ -645,6 +649,8 @@ mod tests {
     /// the registry looks the way it does on a node between announces rather
     /// than a moment after a write.
     fn settle(root: &Path) {
+        // Дождаться фоновой очереди: иначе её переименование сдвинет mtime уже после "устаканивания".
+        crate::write_behind::sync();
         let past = SystemTime::now() - std::time::Duration::from_secs(3600);
         let dir = discovery_dir(root);
         for entry in std::fs::read_dir(&dir).unwrap().flatten() {
@@ -761,6 +767,7 @@ mod tests {
         let list = list_discovered_interfaces(td.path(), later);
         assert_eq!(list.len(), 1, "the two old records expired");
         assert_eq!(list[0].name, "Fresh");
+        crate::write_behind::sync();
         let on_disk = std::fs::read_dir(discovery_dir(td.path())).unwrap().count();
         assert_eq!(on_disk, 1, "expired records are unlinked");
     }

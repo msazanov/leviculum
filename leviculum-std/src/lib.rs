@@ -63,6 +63,7 @@ pub(crate) mod storage;
 pub(crate) mod sync_ext;
 pub mod test_support;
 pub mod user;
+pub(crate) mod write_behind;
 
 // Re-export commonly used core types for the high-level API
 pub use leviculum_core::node::{DeliveryError, EventClass, LinkStats, NodeEvent};

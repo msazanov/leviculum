@@ -2330,7 +2330,8 @@ mod tests {
         let ratchet = [0xaa; 32];
         CoreStorage::remember_known_ratchet(&mut storage, hash, ratchet, 5000);
 
-        // Verify file exists
+        // Verify file exists (запись идёт в фоновом потоке, дождаться её)
+        crate::write_behind::sync();
         let hex = hex_encode(&hash);
         let file_path = path.path().join(RATCHETS_DIR).join(&hex);
         assert!(file_path.exists(), "Ratchet file should exist on disk");
@@ -2349,22 +2350,26 @@ mod tests {
         let file_path = path.join(RATCHETS_DIR).join(hex_encode(&hash));
 
         CoreStorage::remember_known_ratchet(&mut storage, hash, [0xaa; 32], 5_000);
+        crate::write_behind::sync();
         assert!(file_path.exists());
         // mark the file so a rewrite is detectable
         std::fs::write(&file_path, b"marker").unwrap();
 
         // same key again, well inside the window: memory is refreshed, disk is not touched
         CoreStorage::remember_known_ratchet(&mut storage, hash, [0xaa; 32], 5_000 + RATCHET_REFRESH_MS - 1);
+        crate::write_behind::sync();
         assert_eq!(std::fs::read(&file_path).unwrap(), b"marker", "unchanged ratchet must not be rewritten");
         assert_eq!(CoreStorage::get_known_ratchet(&storage, &hash), Some([0xaa; 32]));
 
         // window elapsed: timestamp refresh reaches the disk
         CoreStorage::remember_known_ratchet(&mut storage, hash, [0xaa; 32], 5_000 + RATCHET_REFRESH_MS);
+        crate::write_behind::sync();
         assert_ne!(std::fs::read(&file_path).unwrap(), b"marker", "stale timestamp must be refreshed");
 
         // a different key is always written at once
         std::fs::write(&file_path, b"marker").unwrap();
         CoreStorage::remember_known_ratchet(&mut storage, hash, [0xbb; 32], 5_000 + RATCHET_REFRESH_MS + 1);
+        crate::write_behind::sync();
         assert_ne!(std::fs::read(&file_path).unwrap(), b"marker", "changed ratchet must be written");
         assert_eq!(CoreStorage::get_known_ratchet(&storage, &hash), Some([0xbb; 32]));
 
@@ -2378,6 +2383,7 @@ mod tests {
             storage2.mono_offset_ms,
         );
         CoreStorage::remember_known_ratchet(&mut storage2, hash, [0xbb; 32], mono + 10);
+        crate::write_behind::sync();
         assert_eq!(std::fs::read(&file_path).unwrap(), b"marker", "freshly loaded ratchet must not be rewritten at once");
         let _ = std::fs::remove_dir_all(&path);
     }
@@ -2412,6 +2418,7 @@ mod tests {
 
         CoreStorage::remember_known_ratchet(&mut storage, h1, ratchet, 1000);
         CoreStorage::remember_known_ratchet(&mut storage, h2, ratchet, 5000);
+        crate::write_behind::sync();
 
         // Both files should exist
         let hex1 = hex_encode(&h1);
@@ -2422,6 +2429,7 @@ mod tests {
         // Expire: h1 is 4000ms old at now=5000, threshold=3000
         let removed = CoreStorage::expire_known_ratchets(&mut storage, 5000, 3000);
         assert_eq!(removed, 1);
+        crate::write_behind::sync();
 
         // h1 file should be deleted, h2 should remain
         assert!(
