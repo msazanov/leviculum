@@ -2309,11 +2309,9 @@ mod tests {
 
     // MAX_TRIES and Pacing MD Tests
     #[test]
-    fn test_max_tries_matches_reference() {
-        // Python's `_max_tries` is 5 (`Channel.py:295`): the first send sets
-        // tries to 1, each timeout below 5 resends with tries + 1
-        // (`Channel.py:569-572`), and the timeout at tries 5 tears the link
-        // down. That is 4 retransmits, then TearDownLink.
+    fn test_max_tries_preserves_knothop_budget() {
+        // KnotHop deliberately retains 8 total tries; upstream/reference's
+        // value 5 is a retry-budget change that requires owner approval.
         let mut channel = Channel::new();
         let rtt_ms = 100;
 
@@ -2321,7 +2319,7 @@ mod tests {
         channel.send(&msg, MDU, 0, rtt_ms).unwrap();
 
         let mut t = 0u64;
-        for i in 0..4 {
+        for i in 0..7 {
             t += 1_000_000; // far enough in the future to trigger timeout
             let actions = channel.poll(t, rtt_ms);
             assert_eq!(
@@ -2339,13 +2337,13 @@ mod tests {
             );
         }
 
-        // 5th timeout, tries=5 >= max_tries=5 -> TearDownLink
+        // 8th timeout, tries=8 >= max_tries=8 -> TearDownLink
         t += 1_000_000;
         let actions = channel.poll(t, rtt_ms);
         assert_eq!(actions.len(), 1);
         assert!(
             matches!(&actions[0], ChannelAction::TearDownLink),
-            "5th timeout should tear down link, got {:?}",
+            "8th timeout should tear down link, got {:?}",
             actions[0]
         );
     }
