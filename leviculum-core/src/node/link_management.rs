@@ -10,7 +10,7 @@ use alloc::vec::Vec;
 
 use crate::constants::{
     CHANNEL_DEFAULT_RTT_MS, CHANNEL_HELD_DRAIN_POLL_MS, DATA_RECEIPT_TIMEOUT_MS,
-    KEEPALIVE_INITIATOR_BYTE, LINK_REQUEST_MAX_RETRIES, MODE_AES256_CBC, MS_PER_SECOND,
+    KEEPALIVE_INITIATOR_BYTE, LINK_REQUEST_MAX_RETRIES, MS_PER_SECOND,
     PROOF_DATA_SIZE, TRAFFIC_TIMEOUT_FACTOR, TRAFFIC_TIMEOUT_MIN_MS, TRUNCATED_HASHBYTES,
 };
 use crate::destination::{DestinationHash, ProofBinding, ProofStrategy};
@@ -1716,7 +1716,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             PacketContext::Channel => {
                 self.handle_channel_packet(link_id, packet, raw_packet, rx, now_ms)
             }
-            PacketContext::Tunnel => self.handle_tunnel_packet(link_id, packet, now_secs),
+            PacketContext::Tunnel => self.handle_tunnel_packet(link_id, packet, now_ms),
             PacketContext::ResourceAdv => {
                 self.handle_resource_adv(link_id, packet, raw_packet, rx, now_ms);
             }
@@ -2173,14 +2173,14 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// No proof (an unreliable datagram is never acknowledged), no receipt, no ring, no hash: the
     /// cipher is the only integrity and replay check, and for GCM the record counter window rejects
     /// duplicates. A failure drops exactly this packet.
-    fn handle_tunnel_packet(&mut self, link_id: LinkId, packet: &Packet, now_secs: u64) {
+    fn handle_tunnel_packet(&mut self, link_id: LinkId, packet: &Packet, now_ms: u64) {
         let Some(link) = self.links.get_mut(&link_id) else {
             return;
         };
         if link.state() != LinkState::Active {
             return;
         }
-        link.record_inbound(now_secs);
+        link.record_inbound(now_ms);
         let sealed = packet.data.as_slice();
         let mut plaintext = alloc::vec![0u8; sealed.len()];
         match link.decrypt_for_context(sealed, &mut plaintext, packet.context) {
