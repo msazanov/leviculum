@@ -11,6 +11,7 @@ use leviculum_core::ratchet_store::{KnownRatchetEntry, RatchetStore};
 
 use crate::error::Error;
 use crate::storage::{atomic_write, hex_decode, hex_encode, note_unreadable_entry};
+use crate::write_behind;
 
 pub(crate) const RATCHETS_DIR: &str = "ratchets";
 pub(crate) const RATCHETKEYS_DIR: &str = "ratchetkeys";
@@ -74,12 +75,10 @@ impl FileRatchetStore {
     }
 
     /// Delete a known ratchet file (for expiry). Not part of the trait.
+    /// Удаление уходит в фоновую очередь: на рабочем потоке движка не ждём диск (write_behind.rs).
     pub(crate) fn delete_known_ratchet(&self, dest_hash: &[u8; TRUNCATED_HASHBYTES]) {
         let hex_name = hex_encode(dest_hash);
-        let path = self.ratchets_dir.join(&hex_name);
-        if path.exists() {
-            let _ = std::fs::remove_file(&path);
-        }
+        write_behind::remove(self.ratchets_dir.join(&hex_name));
     }
 
     fn ensure_dir(dir: &Path) {
@@ -160,7 +159,10 @@ impl RatchetStore for FileRatchetStore {
         Self::ensure_dir(&self.ratchets_dir);
         let hex_name = hex_encode(dest_hash);
         let data = encode_known_ratchet(&entry.ratchet, entry.received_at_secs);
-        atomic_write(&self.ratchets_dir.join(&hex_name), &data)
+        // Изменившийся ratchet приходит из анонсов на рабочем потоке движка: запись - в фоновом потоке,
+        // иначе создание файла ждёт журнал диска и останавливает все Link (write_behind.rs).
+        write_behind::write(self.ratchets_dir.join(&hex_name), data);
+        Ok(())
     }
 
     fn load_dest_ratchet_keys(
@@ -261,6 +263,7 @@ mod tests {
             std::fs::write(target.join(raw), b"not ours either").expect("stray file");
         }
 
+        crate::write_behind::sync();
         let known = store.load_known_ratchets().expect("load ratchets");
         assert_eq!(known.len(), 1);
         assert_eq!(known[0].0, dest);
