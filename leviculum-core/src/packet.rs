@@ -108,7 +108,7 @@ pub enum PacketContext {
     Command,
     CommandStatus,
     Channel,
-    /// rawg-private: one tunnelled IP packet, sealed by the link cipher, no Channel, no receipt.
+    /// knothop-private: one tunnelled IP packet, sealed by the link cipher, no Channel, no receipt.
     ///
     /// An unreliable datagram: it is not acknowledged, not retransmitted and not ordered, so a lost
     /// or late packet costs exactly that packet and nothing else. 0xF0 sits in the unassigned gap below

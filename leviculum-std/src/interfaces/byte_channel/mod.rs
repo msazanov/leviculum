@@ -33,7 +33,7 @@ pub(crate) const BYTE_CHANNEL_DEFAULT_READ_BUF: usize = 1024;
 /// Tunables of a byte-channel interface. [`Default`] reproduces the upstream
 /// behaviour exactly (HW_MTU 1064, 64-packet channels, 1 KiB reads).
 ///
-/// Fork addition (rawg tuning): the upstream values are sized for serial-like
+/// Fork addition (KnotHop tuning): the upstream values are sized for serial-like
 /// pipes and cap throughput over a fast reliable stream such as QUIC.
 #[derive(Debug, Clone, Copy)]
 pub struct ByteChannelOptions {

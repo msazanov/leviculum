@@ -243,7 +243,7 @@ pub struct MemoryStorage {
     ///
     /// `Transport::next_deadline` runs after every inbound packet, and a scan
     /// of a public-mesh-sized table (tens of thousands of paths) per packet
-    /// was the hottest function on relay nodes (rawg W63 profile, 12-20% of
+    /// was the hottest function on relay nodes (KnotHop W63 profile, 12-20% of
     /// samples even when idle). `None` = unknown, recomputed lazily on the
     /// next query; `Some(None)` = table empty. Inserts keep it exact in O(1);
     /// it is dropped only when the entry holding the minimum leaves (refresh,

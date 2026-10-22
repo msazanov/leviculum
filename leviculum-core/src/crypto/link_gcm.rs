@@ -1,4 +1,4 @@
-//! rawg Link GCM v1. Only negotiated Link tokens use this format; identity
+//! KnotHop Link GCM v1. Only negotiated Link tokens use this format; identity
 //! tokens and the separately encrypted Resource body keep their existing format.
 use core::cell::{Cell, RefCell};
 
@@ -108,8 +108,8 @@ impl LinkGcm {
         let hk = hkdf::Hkdf::<sha2::Sha256>::new(Some(link_id), master);
         let mut i2r = [0u8; 36];
         let mut r2i = [0u8; 36];
-        hk.expand(b"rawg/link/aes256-gcm/v1/i2r", &mut i2r).unwrap();
-        hk.expand(b"rawg/link/aes256-gcm/v1/r2i", &mut r2i).unwrap();
+        hk.expand(b"knothop/link/aes256-gcm/v1/i2r", &mut i2r).unwrap();
+        hk.expand(b"knothop/link/aes256-gcm/v1/r2i", &mut r2i).unwrap();
         let (tx, rx, tx_dir) = if initiator {
             (&i2r, &r2i, 0)
         } else {

@@ -4,7 +4,7 @@
 //! HDLC; here the carrier already has packet boundaries (QUIC DATAGRAM frames, a UDP socket, a message bus),
 //! so a packet is one datagram and nothing is added or searched for.
 //!
-//! Why it exists (rawg): an IPv4 tunnel carries IP packets, which are datagrams. Over a reliable ordered
+//! Why it exists (KnotHop): an IPv4 tunnel carries IP packets, which are datagrams. Over a reliable ordered
 //! stream a single lost carrier packet stalls every packet behind it (head-of-line blocking: measured p95
 //! of 1.3 s on a 50 ms path at 0.5% loss), and the inner TCP/QUIC then sees delay spikes instead of loss.
 //! A datagram carrier loses exactly the packet that was lost.
