@@ -164,7 +164,7 @@ pub use announce::{
 };
 pub use destination::{
     Destination, DestinationError, DestinationHash, DestinationType, Direction, ProofBinding,
-    ProofStrategy, SingleDestDecryptor,
+    ProofBindingPolicy, ProofStrategy, SingleDestDecryptor,
 };
 pub use identity::Identity;
 pub use link::{LinkCipher, LinkCloseReason, LinkError, LinkId, PeerKeys};

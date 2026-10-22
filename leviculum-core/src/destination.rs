@@ -183,11 +183,12 @@ pub enum ProofStrategy {
 /// What a data proof is bound to.
 ///
 /// Both options put exactly 32 bytes on the wire, so the proof packet is the
-/// same size either way; only the meaning of those bytes differs. The two ends
-/// must agree, so this is a node-wide setting, not a per-packet decision.
+/// same size either way; only the meaning of those bytes differs. Both ends of
+/// a Link must agree on its binding. [`ProofBindingPolicy`] resolves this value
+/// for each Link cipher when requested.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ProofBinding {
-    /// Bind proofs to the token's HMAC tag (default).
+    /// Bind proofs to the token's HMAC tag (legacy generic API default).
     ///
     /// The tag is already computed when the packet is encrypted or verified, so
     /// this costs no extra hashing. Binding is no weaker than the hash: the tag
@@ -203,6 +204,41 @@ pub enum ProofBinding {
     /// 23.2 vs 27.3 MiB/s on the bench, about 17% of throughput. Use it only
     /// when talking to a peer that speaks the old binding.
     PacketHash = 1,
+}
+
+/// How a node selects the proof binding for each Link.
+///
+/// The generic builder keeps the historical node-wide TokenTag default via
+/// [`Explicit`](Self::Explicit). Applications that mix vanilla Reticulum and
+/// KnotHop Links should opt into [`ByCipher`](Self::ByCipher): standard CBC
+/// Links use PacketHash and explicitly negotiated KnotHop GCM mode 7 uses
+/// TokenTag. `Explicit` remains available for deployments whose peers share a
+/// custom proof-binding configuration; do not use it for mixed vanilla links.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProofBindingPolicy {
+    /// Select PacketHash for CBC and TokenTag for GCM mode 7.
+    ByCipher,
+    /// Apply one binding to every Link, preserving the legacy generic API.
+    Explicit(ProofBinding),
+}
+
+impl Default for ProofBindingPolicy {
+    fn default() -> Self {
+        Self::Explicit(ProofBinding::default())
+    }
+}
+
+impl ProofBindingPolicy {
+    /// Resolve the effective binding for a Link's already-selected cipher.
+    pub const fn for_cipher(self, cipher: crate::LinkCipher) -> ProofBinding {
+        match self {
+            Self::ByCipher => match cipher {
+                crate::LinkCipher::Cbc => ProofBinding::PacketHash,
+                crate::LinkCipher::Gcm => ProofBinding::TokenTag,
+            },
+            Self::Explicit(binding) => binding,
+        }
+    }
 }
 
 /// A 16-byte destination hash (truncated hash of name_hash + identity_hash)

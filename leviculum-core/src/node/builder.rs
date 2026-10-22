@@ -5,7 +5,7 @@
 
 use alloc::vec::Vec;
 
-use crate::destination::{ProofBinding, ProofStrategy};
+use crate::destination::{ProofBinding, ProofBindingPolicy, ProofStrategy};
 use crate::identity::Identity;
 use crate::resource::{WindowPolicy, RESOURCE_MAX_INCOMING_PER_LINK, RESOURCE_MAX_INCOMING_SIZE};
 use crate::transport::{PathChoice, TransportConfig};
@@ -40,7 +40,7 @@ use super::NodeCore;
 pub struct NodeCoreBuilder {
     identity: Option<Identity>,
     proof_strategy: ProofStrategy,
-    proof_binding: ProofBinding,
+    proof_binding_policy: ProofBindingPolicy,
     link_cipher: crate::LinkCipher,
     accept_cbc_links: bool,
     transport_config: TransportConfig,
@@ -65,7 +65,7 @@ impl NodeCoreBuilder {
         Self {
             identity: None,
             proof_strategy: ProofStrategy::None,
-            proof_binding: ProofBinding::default(),
+            proof_binding_policy: ProofBindingPolicy::default(),
             link_cipher: crate::LinkCipher::default(),
             accept_cbc_links: false,
             transport_config: TransportConfig::default(),
@@ -108,12 +108,19 @@ impl NodeCoreBuilder {
         self
     }
 
-    /// Choose what data proofs are bound to; see
-    /// [`ProofBinding`]. `PacketHash` is the only mode that
-    /// exchanges data with vanilla Reticulum, and costs a SHA-256 pass per
-    /// packet at both ends.
+    /// Apply one explicit proof binding to every Link. This preserves the
+    /// historical generic-node behavior; mixed CBC/vanilla profiles should
+    /// prefer [`Self::proof_binding_policy`] with `ByCipher`.
     pub fn proof_binding(mut self, binding: ProofBinding) -> Self {
-        self.proof_binding = binding;
+        self.proof_binding_policy = ProofBindingPolicy::Explicit(binding);
+        self
+    }
+
+    /// Select proof binding per Link cipher (CBC → PacketHash, GCM mode 7 →
+    /// TokenTag), or explicitly override that policy. The default remains the
+    /// legacy node-wide TokenTag setting for generic API compatibility.
+    pub fn proof_binding_policy(mut self, policy: ProofBindingPolicy) -> Self {
+        self.proof_binding_policy = policy;
         self
     }
 
@@ -378,7 +385,8 @@ impl NodeCoreBuilder {
             storage,
         );
         node.max_incoming_resources_per_link = self.max_incoming_resources_per_link;
-        node.set_proof_binding(self.proof_binding);
+        node.set_proof_binding_policy(self.proof_binding_policy)
+            .expect("fresh NodeCore has no links");
         node.set_link_cipher(self.link_cipher)
             .expect("fresh node has no links");
         node.set_accept_cbc_links(self.accept_cbc_links);
@@ -456,7 +464,8 @@ impl NodeCoreBuilder {
             storage,
         ));
         node.max_incoming_resources_per_link = self.max_incoming_resources_per_link;
-        node.set_proof_binding(self.proof_binding);
+        node.set_proof_binding_policy(self.proof_binding_policy)
+            .expect("fresh NodeCore has no links");
         node.set_link_cipher(self.link_cipher)
             .expect("fresh node has no links");
         node.set_accept_cbc_links(self.accept_cbc_links);

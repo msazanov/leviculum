@@ -252,7 +252,9 @@ use alloc::vec::Vec;
 
 use crate::announce::{AnnounceControl, AnnounceError};
 use crate::constants::{RATCHET_SIZE, TRUNCATED_HASHBYTES};
-use crate::destination::{Destination, DestinationHash, Direction, ProofBinding, ProofStrategy};
+use crate::destination::{
+    Destination, DestinationHash, Direction, ProofBinding, ProofBindingPolicy, ProofStrategy,
+};
 use crate::identity::Identity;
 use crate::link::{Link, LinkId};
 use crate::packet::packet_hash;
@@ -486,8 +488,8 @@ pub struct NodeCore<R: CryptoRngCore, C: Clock, S: Storage> {
     destinations: BTreeMap<DestinationHash, Destination>,
     /// Default proof strategy for new destinations
     default_proof_strategy: ProofStrategy,
-    /// What data proofs are bound to; see [`crate::destination::ProofBinding`]
-    proof_binding: ProofBinding,
+    /// How each Link binds data proofs; see [`ProofBindingPolicy`].
+    proof_binding_policy: ProofBindingPolicy,
     link_cipher: crate::LinkCipher,
     /// Accept standard-CBC link requests besides `link_cipher` (default off).
     accept_cbc_links: bool,
@@ -651,7 +653,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             channel_backpressure_last_log_ms: 0,
             destinations: BTreeMap::new(),
             default_proof_strategy: proof_strategy,
-            proof_binding: ProofBinding::default(),
+            proof_binding_policy: ProofBindingPolicy::default(),
             link_cipher: crate::LinkCipher::default(),
             accept_cbc_links: false,
             events: Vec::new(),
@@ -2916,11 +2918,36 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// cheaper because the value already exists; `PacketHash` is the only mode
     /// that interoperates with vanilla Reticulum.
     pub fn set_proof_binding(&mut self, binding: ProofBinding) {
-        self.proof_binding = binding;
+        self.proof_binding_policy = ProofBindingPolicy::Explicit(binding);
     }
 
+    /// Set the Link proof-binding policy. The legacy `set_proof_binding()`
+    /// remains an explicit node-wide override.
+    pub fn set_proof_binding_policy(
+        &mut self,
+        policy: ProofBindingPolicy,
+    ) -> Result<(), crate::LinkError> {
+        if !self.links.is_empty() {
+            return Err(crate::LinkError::InvalidState);
+        }
+        self.proof_binding_policy = policy;
+        Ok(())
+    }
+
+    /// Effective proof binding for the node's default outgoing cipher.
+    /// Inspect [`proof_binding_policy`](Self::proof_binding_policy) when the
+    /// policy is cipher-derived and links may use different ciphers.
     pub fn proof_binding(&self) -> ProofBinding {
-        self.proof_binding
+        self.proof_binding_policy.for_cipher(self.link_cipher)
+    }
+
+    /// Configured policy used to resolve the binding for each Link.
+    pub fn proof_binding_policy(&self) -> ProofBindingPolicy {
+        self.proof_binding_policy
+    }
+
+    pub(crate) fn proof_binding_for_cipher(&self, cipher: crate::LinkCipher) -> ProofBinding {
+        self.proof_binding_policy.for_cipher(cipher)
     }
 
     /// As responder also accept links that ask for standard CBC (links that cross stock Reticulum transports can only be CBC).
@@ -2931,20 +2958,36 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
     /// Explicit cipher policy, set before establishing links. No automatic downgrade.
     pub fn set_link_cipher(&mut self, cipher: crate::LinkCipher) -> Result<(), crate::LinkError> {
-        if !self.links.is_empty() { return Err(crate::LinkError::InvalidState); }
+        if !self.links.is_empty() {
+            return Err(crate::LinkError::InvalidState);
+        }
         self.link_cipher = cipher;
         Ok(())
     }
 
-    pub fn set_link_send_window_limit(&mut self, id: &crate::LinkId, limit: usize) -> Result<(), crate::LinkError> {
+    pub fn set_link_send_window_limit(
+        &mut self,
+        id: &crate::LinkId,
+        limit: usize,
+    ) -> Result<(), crate::LinkError> {
         let id = self.resolve_link_id(id);
-        self.links.get_mut(&id).ok_or(crate::LinkError::NotFound)?.set_send_window_limit(limit);
+        self.links
+            .get_mut(&id)
+            .ok_or(crate::LinkError::NotFound)?
+            .set_send_window_limit(limit);
         Ok(())
     }
 
-    pub fn set_link_send_pacing_enabled(&mut self, id: &crate::LinkId, enabled: bool) -> Result<(), crate::LinkError> {
+    pub fn set_link_send_pacing_enabled(
+        &mut self,
+        id: &crate::LinkId,
+        enabled: bool,
+    ) -> Result<(), crate::LinkError> {
         let id = self.resolve_link_id(id);
-        self.links.get_mut(&id).ok_or(crate::LinkError::NotFound)?.set_send_pacing_enabled(enabled);
+        self.links
+            .get_mut(&id)
+            .ok_or(crate::LinkError::NotFound)?
+            .set_send_pacing_enabled(enabled);
         Ok(())
     }
 
@@ -3764,13 +3807,17 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     ///
     /// Used after a route failed: the interface that carried the dead route is left out, so a
     /// neighbour that still lists the dead route cannot answer first and put it back.
-    pub fn request_path_on(&mut self, dest_hash: &DestinationHash, interfaces: &[usize]) -> crate::transport::TickOutput {
+    pub fn request_path_on(
+        &mut self,
+        dest_hash: &DestinationHash,
+        interfaces: &[usize],
+    ) -> crate::transport::TickOutput {
         let mut tag = [0u8; TRUNCATED_HASHBYTES];
         self.rng.fill_bytes(&mut tag);
         for &idx in interfaces {
-            if let Err(e) = self
-                .transport
-                .request_path_unthrottled(dest_hash.as_bytes(), Some(idx), &tag)
+            if let Err(e) =
+                self.transport
+                    .request_path_unthrottled(dest_hash.as_bytes(), Some(idx), &tag)
             {
                 crate::tracing::debug!(
                     "Failed to send path request for <{}> on interface {}: {}",
@@ -6208,29 +6255,76 @@ mod tests {
         resp_cipher: crate::LinkCipher,
         accept_cbc: bool,
         init_cipher: crate::LinkCipher,
-    ) -> Option<(NodeCore<OsRng, MockClock, NoStorage>, NodeCore<OsRng, MockClock, NoStorage>, LinkId, LinkId)> {
+    ) -> Option<(
+        NodeCore<OsRng, MockClock, NoStorage>,
+        NodeCore<OsRng, MockClock, NoStorage>,
+        LinkId,
+        LinkId,
+    )> {
+        cipher_pair_with_policy(
+            resp_cipher,
+            accept_cbc,
+            init_cipher,
+            ProofBindingPolicy::default(),
+        )
+    }
+
+    fn cipher_pair_with_policy(
+        resp_cipher: crate::LinkCipher,
+        accept_cbc: bool,
+        init_cipher: crate::LinkCipher,
+        policy: ProofBindingPolicy,
+    ) -> Option<(
+        NodeCore<OsRng, MockClock, NoStorage>,
+        NodeCore<OsRng, MockClock, NoStorage>,
+        LinkId,
+        LinkId,
+    )> {
         use crate::transport::InterfaceId;
         let resp_identity = Identity::generate(&mut OsRng);
         let resp_signing_key = resp_identity.ed25519_verifying().to_bytes();
         let mut responder = NodeCoreBuilder::new()
             .link_cipher(resp_cipher)
+            .proof_binding_policy(policy)
             .accept_cbc_links(accept_cbc)
             .build(OsRng, MockClock::new(TEST_TIME_MS), NoStorage);
-        let mut resp_dest = Destination::new(Some(resp_identity), Direction::In, DestinationType::Single, "testapp", &["echo"]).unwrap();
+        let mut resp_dest = Destination::new(
+            Some(resp_identity),
+            Direction::In,
+            DestinationType::Single,
+            "testapp",
+            &["echo"],
+        )
+        .unwrap();
         resp_dest.set_accepts_links(true);
         let dest_hash = *resp_dest.hash();
         responder.register_destination(resp_dest);
         // the initiator's node default is whatever; the cipher of this link is chosen per connect
-        let mut initiator = NodeCoreBuilder::new().build(OsRng, MockClock::new(TEST_TIME_MS), NoStorage);
-        let (init_id, _, output) = initiator.connect_with_cipher(dest_hash, &resp_signing_key, None, init_cipher).expect("connect");
+        let mut initiator = NodeCoreBuilder::new().proof_binding_policy(policy).build(
+            OsRng,
+            MockClock::new(TEST_TIME_MS),
+            NoStorage,
+        );
+        let (init_id, _, output) = initiator
+            .connect_with_cipher(dest_hash, &resp_signing_key, None, init_cipher)
+            .expect("connect");
         let req = extract_broadcast_data(&output);
         let resp_id = Link::calculate_link_id(&req);
         let out = responder.handle_packet(InterfaceId(0), &req);
-        let proof = out.actions.iter().map(|a| match a {
-            crate::transport::Action::Broadcast { data, .. } | crate::transport::Action::SendPacket { data, .. } => data.clone(),
-        }).next()?;
+        let proof = out
+            .actions
+            .iter()
+            .map(|a| match a {
+                crate::transport::Action::Broadcast { data, .. }
+                | crate::transport::Action::SendPacket { data, .. } => data.clone(),
+            })
+            .next()?;
         let out = initiator.handle_packet(InterfaceId(0), &proof);
-        if !out.events.iter().any(|e| matches!(e, NodeEvent::LinkEstablished { .. })) {
+        if !out
+            .events
+            .iter()
+            .any(|e| matches!(e, NodeEvent::LinkEstablished { .. }))
+        {
             return None;
         }
         let rtt = extract_broadcast_data(&out);
@@ -6241,10 +6335,18 @@ mod tests {
     #[test]
     fn test_cbc_request_needs_the_accept_flag_on_a_gcm_responder() {
         use crate::LinkCipher::{Cbc, Gcm};
-        assert!(cipher_pair(Gcm, false, Cbc).is_none(), "GCM-only responder must drop a CBC request");
-        let (init, resp, i, r) = cipher_pair(Gcm, true, Cbc).expect("accepting responder answers a CBC request");
+        assert!(
+            cipher_pair(Gcm, false, Cbc).is_none(),
+            "GCM-only responder must drop a CBC request"
+        );
+        let (init, resp, i, r) =
+            cipher_pair(Gcm, true, Cbc).expect("accepting responder answers a CBC request");
         assert_eq!(init.link(&i).unwrap().cipher(), Cbc);
-        assert_eq!(resp.link(&r).unwrap().cipher(), Cbc, "the link keeps the cipher it asked for, it is not upgraded");
+        assert_eq!(
+            resp.link(&r).unwrap().cipher(),
+            Cbc,
+            "the link keeps the cipher it asked for, it is not upgraded"
+        );
     }
 
     #[test]
@@ -6253,20 +6355,111 @@ mod tests {
         let (init, resp, i, r) = cipher_pair(Gcm, true, Gcm).expect("GCM link between GCM nodes");
         assert_eq!(init.link(&i).unwrap().cipher(), Gcm);
         assert_eq!(resp.link(&r).unwrap().cipher(), Gcm);
-        assert!(cipher_pair(Cbc, false, Gcm).is_none(), "a default (CBC) node must not take a GCM request");
-        assert!(cipher_pair(Cbc, true, Gcm).is_none(), "accepting CBC never widens to GCM");
+        assert!(
+            cipher_pair(Cbc, false, Gcm).is_none(),
+            "a default (CBC) node must not take a GCM request"
+        );
+        assert!(
+            cipher_pair(Cbc, true, Gcm).is_none(),
+            "accepting CBC never widens to GCM"
+        );
     }
 
     #[test]
     fn test_cbc_link_on_a_gcm_node_carries_channel_data_with_proofs() {
-        use crate::LinkCipher::{Cbc, Gcm};
         use crate::transport::InterfaceId;
+        use crate::LinkCipher::{Cbc, Gcm};
         let (mut init, mut resp, i, _r) = cipher_pair(Gcm, true, Cbc).unwrap();
         let out = init.send_on_link(&i, b"enroll").unwrap();
         let wire = extract_broadcast_data(&out);
         let delivered = resp.handle_packet(InterfaceId(0), &wire);
-        assert!(delivered.events.iter().any(|e| matches!(e, NodeEvent::MessageReceived { .. })), "CBC link on a GCM node delivers");
+        assert!(
+            delivered
+                .events
+                .iter()
+                .any(|e| matches!(e, NodeEvent::MessageReceived { .. })),
+            "CBC link on a GCM node delivers"
+        );
         assert!(init.receipt_count_for_link(&i) <= 1);
+    }
+
+    #[test]
+    fn by_cipher_policy_proves_channel_messages_in_both_directions_for_cbc_and_gcm() {
+        use crate::packet::{Packet, PacketContext, PacketType};
+        use crate::transport::InterfaceId;
+        use crate::LinkCipher::{Cbc, Gcm};
+
+        for cipher in [Cbc, Gcm] {
+            let (mut initiator, mut responder, init_id, resp_id) =
+                cipher_pair_with_policy(cipher, true, cipher, ProofBindingPolicy::ByCipher)
+                    .expect("cipher pair establishes");
+
+            let outbound = initiator
+                .send_on_link(&init_id, b"initiator to responder")
+                .unwrap();
+            let wire = extract_broadcast_data(&outbound);
+            let received = responder.handle_packet(InterfaceId(0), &wire);
+            assert!(received.events.iter().any(|event| matches!(
+                event,
+                NodeEvent::MessageReceived { data, .. } if data == b"initiator to responder"
+            )));
+            let proof = received
+                .actions
+                .iter()
+                .find_map(|action| {
+                    let raw = match action {
+                        crate::transport::Action::Broadcast { data, .. }
+                        | crate::transport::Action::SendPacket { data, .. } => data,
+                    };
+                    Packet::unpack(raw).ok().and_then(|packet| {
+                        (packet.flags.packet_type == PacketType::Proof
+                            && packet.context == PacketContext::None
+                            && packet.data.len() == crate::constants::PROOF_DATA_SIZE)
+                            .then(|| raw.clone())
+                    })
+                })
+                .expect("receiver emits a data proof");
+            assert_eq!(initiator.receipt_count_for_link(&init_id), 1);
+            let confirmed = initiator.handle_packet(InterfaceId(0), &proof);
+            assert!(confirmed.events.iter().any(|event| matches!(
+                event,
+                NodeEvent::LinkDeliveryConfirmed { link_id, .. } if *link_id == init_id
+            )));
+            assert_eq!(initiator.receipt_count_for_link(&init_id), 0);
+
+            let outbound = responder
+                .send_on_link(&resp_id, b"responder to initiator")
+                .unwrap();
+            let wire = extract_broadcast_data(&outbound);
+            let received = initiator.handle_packet(InterfaceId(0), &wire);
+            assert!(received.events.iter().any(|event| matches!(
+                event,
+                NodeEvent::MessageReceived { data, .. } if data == b"responder to initiator"
+            )));
+            let proof = received
+                .actions
+                .iter()
+                .find_map(|action| {
+                    let raw = match action {
+                        crate::transport::Action::Broadcast { data, .. }
+                        | crate::transport::Action::SendPacket { data, .. } => data,
+                    };
+                    Packet::unpack(raw).ok().and_then(|packet| {
+                        (packet.flags.packet_type == PacketType::Proof
+                            && packet.context == PacketContext::None
+                            && packet.data.len() == crate::constants::PROOF_DATA_SIZE)
+                            .then(|| raw.clone())
+                    })
+                })
+                .expect("receiver emits a data proof");
+            assert_eq!(responder.receipt_count_for_link(&resp_id), 1);
+            let confirmed = responder.handle_packet(InterfaceId(0), &proof);
+            assert!(confirmed.events.iter().any(|event| matches!(
+                event,
+                NodeEvent::LinkDeliveryConfirmed { link_id, .. } if *link_id == resp_id
+            )));
+            assert_eq!(responder.receipt_count_for_link(&resp_id), 0);
+        }
     }
 
     fn establish_nodecore_link_pair() -> NodeCoreLinkPair {
@@ -6499,7 +6692,8 @@ mod tests {
                 .send_link_tunnel(&pair.initiator_link_id, &payload)
                 .unwrap();
             assert_eq!(
-                pair.initiator.receipt_count_for_link(&pair.initiator_link_id),
+                pair.initiator
+                    .receipt_count_for_link(&pair.initiator_link_id),
                 0,
                 "a tunnel datagram must not retain a receipt"
             );
@@ -6523,7 +6717,8 @@ mod tests {
                 "no proof or ack may be emitted for a datagram even under ProofStrategy::All"
             );
             assert_eq!(
-                pair.initiator.receipt_count_for_link(&pair.initiator_link_id),
+                pair.initiator
+                    .receipt_count_for_link(&pair.initiator_link_id),
                 0
             );
 
@@ -10994,7 +11189,9 @@ mod tests {
         establish_link_pair_without_rtt_with_cipher(crate::LinkCipher::Cbc)
     }
 
-    fn establish_link_pair_without_rtt_with_cipher(cipher: crate::LinkCipher) -> LinkPairWithoutRtt {
+    fn establish_link_pair_without_rtt_with_cipher(
+        cipher: crate::LinkCipher,
+    ) -> LinkPairWithoutRtt {
         use crate::transport::InterfaceId;
 
         let resp_identity = Identity::generate(&mut OsRng);
@@ -11055,7 +11252,10 @@ mod tests {
 
         let (mut initiator, _responder, init_link_id, _resp_link_id, rtt_data) =
             establish_link_pair_without_rtt();
-        assert_eq!(initiator.link(&init_link_id).unwrap().cipher(), crate::LinkCipher::Cbc);
+        assert_eq!(
+            initiator.link(&init_link_id).unwrap().cipher(),
+            crate::LinkCipher::Cbc
+        );
         assert_eq!(
             Packet::unpack(&rtt_data).expect("rtt packet").context,
             PacketContext::Lrrtt
@@ -11093,30 +11293,38 @@ mod tests {
         let init_link = initiator.link(&init_link_id).unwrap();
         assert_eq!(init_link.cipher(), crate::LinkCipher::Gcm);
         assert_eq!(init_link.rtt_send_count(), 1);
-        assert_eq!(Packet::unpack(&first_rtt).unwrap().context, PacketContext::Lrrtt);
+        assert_eq!(
+            Packet::unpack(&first_rtt).unwrap().context,
+            PacketContext::Lrrtt
+        );
 
         // Drop the initial LRRTT. At the old mode-7 retry interval, exactly one
         // fresh GCM record is emitted; it is not an application/data retry.
         let interval = init_link.rtt_retry_interval_ms();
-        initiator
-            .transport()
-            .clock()
-            .set(TEST_TIME_MS + interval);
+        initiator.transport().clock().set(TEST_TIME_MS + interval);
         let output = initiator.handle_timeout();
         let rtts: Vec<Vec<u8>> = extract_all_action_data(&output)
             .into_iter()
-            .filter(|raw| Packet::unpack(raw).is_ok_and(|packet| packet.context == PacketContext::Lrrtt))
+            .filter(|raw| {
+                Packet::unpack(raw).is_ok_and(|packet| packet.context == PacketContext::Lrrtt)
+            })
             .collect();
         assert_eq!(rtts.len(), 1, "one bounded mode-7 retry becomes due");
         assert_ne!(rtts[0], first_rtt, "GCM retry uses a fresh nonce/record");
         assert_eq!(initiator.link(&init_link_id).unwrap().rtt_send_count(), 2);
 
         let established = responder.handle_packet(InterfaceId(0), &rtts[0]);
-        assert!(established
-            .events
-            .iter()
-            .any(|event| matches!(event, NodeEvent::LinkEstablished { is_initiator: false, .. })));
-        assert_eq!(responder.link(&resp_link_id).unwrap().state(), LinkState::Active);
+        assert!(established.events.iter().any(|event| matches!(
+            event,
+            NodeEvent::LinkEstablished {
+                is_initiator: false,
+                ..
+            }
+        )));
+        assert_eq!(
+            responder.link(&resp_link_id).unwrap().state(),
+            LinkState::Active
+        );
     }
 
     #[test]
@@ -11172,7 +11380,11 @@ mod tests {
             establish_link_pair_without_rtt_with_cipher(crate::LinkCipher::Gcm);
         let first = responder.handle_packet(InterfaceId(0), &rtt_data);
         assert_eq!(
-            first.events.iter().filter(|event| matches!(event, NodeEvent::LinkEstablished { .. })).count(),
+            first
+                .events
+                .iter()
+                .filter(|event| matches!(event, NodeEvent::LinkEstablished { .. }))
+                .count(),
             1
         );
         let link = responder.link(&resp_link_id).unwrap();
@@ -11183,7 +11395,10 @@ mod tests {
 
         // Even a stale link is not recovered by a duplicate LRRTT: it is a
         // handshake packet, not new authenticated Link activity.
-        responder.link_mut(&resp_link_id).unwrap().set_state(LinkState::Stale);
+        responder
+            .link_mut(&resp_link_id)
+            .unwrap()
+            .set_state(LinkState::Stale);
         let duplicate = responder.handle_packet(InterfaceId(0), &rtt_data);
         assert!(!duplicate.events.iter().any(|event| matches!(
             event,

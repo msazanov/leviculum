@@ -27,7 +27,7 @@ pub use leviculum_core::node::NodeEvent;
 pub use leviculum_core::resource::ResourceStrategy;
 pub use leviculum_core::transport::InterfaceId;
 pub use leviculum_core::transport::TickOutput;
-pub use leviculum_core::{Identity, LinkCipher, ProofBinding, RequestPolicy};
+pub use leviculum_core::{Identity, LinkCipher, ProofBinding, ProofBindingPolicy, RequestPolicy};
 
 /// Generate a new random identity using the system RNG.
 ///
@@ -195,7 +195,9 @@ impl NodeBuilder {
         self
     }
 
-    /// Choose what data proofs are bound to; see [`leviculum_core::ProofBinding`].
+    /// Apply one explicit binding to every Link; see
+    /// [`leviculum_core::ProofBinding`]. The generic facade retains its legacy
+    /// node-wide TokenTag default.
     ///
     /// `TokenTag` (the default) binds proofs to the token's HMAC tag, which is
     /// free because encryption already computes it. `PacketHash` matches vanilla
@@ -203,6 +205,13 @@ impl NodeBuilder {
     /// every payload byte at both ends. Both ends of a link must agree.
     pub fn proof_binding(mut self, binding: ProofBinding) -> Self {
         self.inner = self.inner.proof_binding(binding);
+        self
+    }
+
+    /// Resolve proof binding per Link cipher: CBC uses PacketHash for vanilla
+    /// RNS, while explicitly negotiated GCM mode 7 uses TokenTag.
+    pub fn proof_binding_policy(mut self, policy: ProofBindingPolicy) -> Self {
+        self.inner = self.inner.proof_binding_policy(policy);
         self
     }
 
@@ -538,7 +547,9 @@ impl Node {
         signing_key: &[u8; 32],
         cipher: LinkCipher,
     ) -> Result<LinkHandle> {
-        self.inner.connect_with_cipher(dest_hash, signing_key, cipher).await
+        self.inner
+            .connect_with_cipher(dest_hash, signing_key, cipher)
+            .await
     }
 
     /// Obtain a writable handle to an already-established inbound link.
