@@ -161,7 +161,7 @@ pub(crate) fn persist_discovered(
     // Запись уходит в фоновый поток (write_behind.rs): создание и переименование файла на рабочем потоке
     // движка ждут журнал диска и останавливают все Link. Атомарность сохраняется: tmp + rename выполняются
     // в фоне. Предыдущая запись, которую читает эта функция, может отставать на время очереди.
-    crate::write_behind::write(path.clone(), encoded);
+    crate::write_behind::write(path.clone(), encoded)?;
     let mut generations = GENERATION.lock().unwrap_or_else(|e| e.into_inner());
     match generations.get_mut(&dir) {
         Some(generation) => *generation = generation.wrapping_add(1),
@@ -378,7 +378,9 @@ impl DirCache {
             .collect();
         for name in &expired {
             // Prune stale/unknown-type records from disk, matching Python (в фоне, см. write_behind.rs).
-            crate::write_behind::remove(dir.join(name));
+            if let Err(error) = crate::write_behind::remove(dir.join(name)) {
+                tracing::warn!("discovery record removal was not queued: {error}");
+            }
             self.files.remove(name);
         }
 

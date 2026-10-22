@@ -1350,7 +1350,9 @@ impl leviculum_core::traits::Storage for Storage {
 
         // Delete corresponding files from disk
         for hash in &expired_hashes {
-            self.ratchet_store.delete_known_ratchet(hash);
+            if let Err(e) = self.ratchet_store.delete_known_ratchet(hash) {
+                tracing::warn!("Failed to queue expired known ratchet deletion: {e}");
+            }
             self.ratchet_saved_ms.remove(hash);
         }
 

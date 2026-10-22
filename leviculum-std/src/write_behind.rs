@@ -1,223 +1,393 @@
-//! Запись на диск вне рабочего потока движка.
+//! Bounded disk writes outside the node engine thread.
 //!
-//! Движок узла работает на одном рабочем потоке (`reticulum-node`, см. driver): блокирующий вызов в нём
-//! останавливает обработку всех Link, включая ответы на пинги. Сохранение изменившегося ratchet, запись и
-//! удаление записей discovery создают или переименовывают файлы. На диске, где журнал ext4 ждёт коммита,
-//! такой вызов занимает секунды (fin1, W72: поток стоит в D-состоянии до ~3,9 с на `rename` в `ratchets/`).
-//! Поэтому эти операции ставятся в очередь одного фонового потока: порядок сохраняется, значение в памяти
-//! уже актуально, на диск попадает с задержкой. Чтение состояния, которое ещё не записано на диск, идёт
-//! через [`read_latest`]. При аварийной остановке последние записи могут не попасть на диск: ratchet заново
-//! выучится из следующего анонса, запись discovery обновится при следующем анонсе.
-//!
-//! Фоновый поток живёт до конца процесса. Если создать его не удалось, запись выполняется синхронно.
+//! Announce processing must not wait for filesystem latency. Public known
+//! ratchets and discovery records are therefore serialized by one worker. The
+//! bounded sync channel and atomic outstanding-job reservation apply equally to
+//! writes and removals. If saturated, an operation fails promptly without
+//! changing the read-your-writes view or doing disk I/O on the caller thread.
+//! Private ratchet keys do not use this module; they remain synchronous through
+//! `atomic_write_secret`.
 
 use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::Relaxed};
-use std::sync::mpsc::{self, Sender};
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::sync::{Arc, Mutex, OnceLock};
 
-/// Предел ожидающих записей. При очень медленном диске очередь не растёт без границы:
-/// лишняя запись пропускается с предупреждением (значение в памяти остаётся актуальным).
 const MAX_PENDING: usize = 4096;
 
 enum Job {
-    /// `seq` - порядковый номер постановки: по нему состояние пути сбрасывается, только если оно не сменилось.
-    Write { path: PathBuf, data: Vec<u8>, seq: u64 },
-    Remove { path: PathBuf, seq: u64 },
-    /// Ответить, когда все задания, поставленные раньше, выполнены (только для `sync` в тестах).
+    Write {
+        path: PathBuf,
+        data: Vec<u8>,
+        seq: u64,
+    },
+    Remove {
+        path: PathBuf,
+        seq: u64,
+    },
     #[cfg(test)]
-    Barrier(Sender<()>),
+    Barrier(SyncSender<()>),
+    #[cfg(test)]
+    Pause {
+        entered: SyncSender<()>,
+        release: Receiver<()>,
+    },
 }
 
-static PENDING: AtomicUsize = AtomicUsize::new(0);
-static SEQ: AtomicU64 = AtomicU64::new(0);
-static QUEUE: OnceLock<Option<Sender<Job>>> = OnceLock::new();
-/// Последнее поставленное состояние каждого пути: `Some(данные)` - запись, `None` - удаление.
-/// Пока задание не выполнено, `read_latest` отдаёт это состояние, а не старый файл.
-static LATEST: Mutex<BTreeMap<PathBuf, (u64, Option<Vec<u8>>)>> = Mutex::new(BTreeMap::new());
-
-fn latest() -> std::sync::MutexGuard<'static, BTreeMap<PathBuf, (u64, Option<Vec<u8>>)>> {
-    LATEST.lock().unwrap_or_else(|e| e.into_inner())
+#[derive(Default)]
+struct State {
+    /// Last queued state per path, including the in-flight write. It is
+    /// removed only when the matching job has settled.
+    latest: Mutex<BTreeMap<PathBuf, (u64, Option<Vec<u8>>)>>,
+    pending: AtomicUsize,
+    next_seq: AtomicU64,
 }
 
-fn queue() -> Option<&'static Sender<Job>> {
+#[derive(Clone)]
+struct Writer {
+    tx: SyncSender<Job>,
+    state: Arc<State>,
+    capacity: usize,
+}
+
+impl Writer {
+    fn spawn(capacity: usize) -> io::Result<Self> {
+        let (tx, rx) = mpsc::sync_channel(capacity);
+        let state = Arc::new(State::default());
+        let worker_state = Arc::clone(&state);
+        std::thread::Builder::new()
+            .name("leviculum-writer".into())
+            .spawn(move || run(rx, worker_state))?;
+        Ok(Self {
+            tx,
+            state,
+            capacity,
+        })
+    }
+
+    fn write(&self, path: PathBuf, data: Vec<u8>) -> io::Result<u64> {
+        self.enqueue(path, Some(data))
+    }
+
+    fn remove(&self, path: PathBuf) -> io::Result<u64> {
+        self.enqueue(path, None)
+    }
+
+    fn reserve(&self) -> bool {
+        let mut current = self.state.pending.load(Ordering::Acquire);
+        loop {
+            if current >= self.capacity {
+                return false;
+            }
+            match self.state.pending.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return true,
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
+    fn enqueue(&self, path: PathBuf, data: Option<Vec<u8>>) -> io::Result<u64> {
+        if !self.reserve() {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "write-behind queue is full",
+            ));
+        }
+
+        // Serialize sequence assignment, read-your-writes replacement, and
+        // channel enqueue. The worker's settle path takes this same mutex, so
+        // same-path disk order is identical to the visible latest order.
+        let mut latest = self.state.latest.lock().unwrap_or_else(|e| e.into_inner());
+        let seq = self
+            .state
+            .next_seq
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_add(1);
+        let previous = latest.insert(path.clone(), (seq, data.clone()));
+        let job = match data {
+            Some(data) => Job::Write { path: path.clone(), data, seq },
+            None => Job::Remove { path: path.clone(), seq },
+        };
+
+        match self.tx.try_send(job) {
+            Ok(()) => Ok(seq),
+            Err(mpsc::TrySendError::Full(_)) => {
+                restore_latest(&mut latest, path, seq, previous);
+                self.state.pending.fetch_sub(1, Ordering::AcqRel);
+                Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "write-behind queue is full",
+                ))
+            }
+            Err(mpsc::TrySendError::Disconnected(_)) => {
+                restore_latest(&mut latest, path, seq, previous);
+                self.state.pending.fetch_sub(1, Ordering::AcqRel);
+                Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "write-behind worker stopped",
+                ))
+            }
+        }
+    }
+
+    fn read_latest(&self, path: &Path) -> io::Result<Vec<u8>> {
+        let pending = self
+            .state
+            .latest
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(path)
+            .map(|(_, data)| data.clone());
+        match pending {
+            Some(Some(data)) => Ok(data),
+            Some(None) => Err(io::ErrorKind::NotFound.into()),
+            None => std::fs::read(path),
+        }
+    }
+
+    #[cfg(test)]
+    fn sync(&self) {
+        let (done, wait) = mpsc::sync_channel(0);
+        if self.tx.send(Job::Barrier(done)).is_ok() {
+            let _ = wait.recv();
+        }
+    }
+
+    #[cfg(test)]
+    fn pause_worker(&self) -> SyncSender<()> {
+        let (entered, wait_entered) = mpsc::sync_channel(0);
+        let (release, wait_release) = mpsc::sync_channel(0);
+        self.tx
+            .send(Job::Pause {
+                entered,
+                release: wait_release,
+            })
+            .expect("pause worker");
+        wait_entered.recv().expect("worker entered pause");
+        release
+    }
+}
+
+fn restore_latest(
+    latest: &mut BTreeMap<PathBuf, (u64, Option<Vec<u8>>)>,
+    path: PathBuf,
+    seq: u64,
+    previous: Option<(u64, Option<Vec<u8>>)>,
+) {
+    if latest.get(&path).is_some_and(|(current, _)| *current == seq) {
+        match previous {
+            Some(previous) => {
+                latest.insert(path, previous);
+            }
+            None => {
+                latest.remove(&path);
+            }
+        }
+    }
+}
+
+fn run(rx: Receiver<Job>, state: Arc<State>) {
+    for job in rx {
+        let (path, seq, result) = match job {
+            Job::Write { path, data, seq } => {
+                let result = write_now(&path, &data);
+                (path, seq, result)
+            }
+            Job::Remove { path, seq } => {
+                let result = remove_now(&path);
+                (path, seq, result)
+            }
+            #[cfg(test)]
+            Job::Barrier(done) => {
+                let _ = done.send(());
+                continue;
+            }
+            #[cfg(test)]
+            Job::Pause { entered, release } => {
+                let _ = entered.send(());
+                let _ = release.recv();
+                continue;
+            }
+        };
+        if let Err(error) = result {
+            tracing::warn!("write-behind operation failed: {error}");
+        }
+        settled(&state, &path, seq);
+        state.pending.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+fn settled(state: &State, path: &Path, seq: u64) {
+    let mut latest = state.latest.lock().unwrap_or_else(|e| e.into_inner());
+    if latest.get(path).is_some_and(|(current, _)| *current == seq) {
+        latest.remove(path);
+    }
+}
+
+fn write_now(path: &Path, data: &[u8]) -> io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    crate::storage::atomic_write(path, data).map_err(|error| io::Error::other(error.to_string()))
+}
+
+fn remove_now(path: &Path) -> io::Result<()> {
+    match std::fs::remove_file(path) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
+    }
+}
+
+static QUEUE: OnceLock<Option<Writer>> = OnceLock::new();
+
+fn queue() -> Option<&'static Writer> {
     QUEUE
-        .get_or_init(|| {
-            let (tx, rx) = mpsc::channel();
-            match std::thread::Builder::new().name("leviculum-writer".into()).spawn(move || run(rx)) {
-                Ok(_) => Some(tx),
-                Err(e) => {
-                    tracing::warn!("фоновая запись на диск недоступна, запись синхронная: {e}");
-                    None
-                }
+        .get_or_init(|| match Writer::spawn(MAX_PENDING) {
+            Ok(writer) => Some(writer),
+            Err(error) => {
+                tracing::warn!("background disk writer unavailable; using synchronous writes: {error}");
+                None
             }
         })
         .as_ref()
 }
 
-fn run(rx: mpsc::Receiver<Job>) {
-    for job in rx {
-        match job {
-            Job::Write { path, data, seq } => {
-                PENDING.fetch_sub(1, Relaxed);
-                write_now(&path, &data);
-                settled(&path, seq);
-            }
-            Job::Remove { path, seq } => {
-                PENDING.fetch_sub(1, Relaxed);
-                remove_now(&path);
-                settled(&path, seq);
-            }
-            #[cfg(test)]
-            Job::Barrier(done) => {
-                let _ = done.send(());
-            }
-        }
+/// Queue an atomic write. `WouldBlock` means the bounded queue is saturated;
+/// the state was not committed and the caller may retry on a later update.
+/// Synchronous fallback is used only when the worker thread could not start.
+pub(crate) fn write(path: PathBuf, data: Vec<u8>) -> io::Result<()> {
+    match queue() {
+        Some(writer) => writer.write(path, data).map(|_| ()),
+        None => write_now(&path, &data),
     }
 }
 
-/// Задание по пути выполнено: если это последнее поставленное состояние, оно больше не «ожидает».
-fn settled(path: &Path, seq: u64) {
-    let mut m = latest();
-    if m.get(path).is_some_and(|(s, _)| *s == seq) {
-        m.remove(path);
+/// Queue an unlink using the same bounded capacity and ordering as writes.
+pub(crate) fn remove(path: PathBuf) -> io::Result<()> {
+    match queue() {
+        Some(writer) => writer.remove(path).map(|_| ()),
+        None => remove_now(&path),
     }
 }
 
-fn write_now(path: &Path, data: &[u8]) {
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    if let Err(e) = crate::storage::atomic_write(path, data) {
-        tracing::warn!("запись на диск не выполнена: {e}");
-    }
-}
-
-fn remove_now(path: &Path) {
-    if let Err(e) = std::fs::remove_file(path) {
-        if e.kind() != io::ErrorKind::NotFound {
-            tracing::warn!("удаление с диска не выполнено: {e}");
-        }
-    }
-}
-
-/// Поставить атомарную запись файла в очередь. Не ждёт диск, кроме случая без фонового потока.
-pub(crate) fn write(path: PathBuf, data: Vec<u8>) {
-    let Some(tx) = queue() else {
-        write_now(&path, &data);
-        return;
-    };
-    if PENDING.load(Relaxed) >= MAX_PENDING {
-        tracing::warn!("очередь записи на диск полна, запись пропущена");
-        return;
-    }
-    let seq = SEQ.fetch_add(1, Relaxed);
-    latest().insert(path.clone(), (seq, Some(data.clone())));
-    PENDING.fetch_add(1, Relaxed);
-    if let Err(mpsc::SendError(job)) = tx.send(Job::Write { path, data, seq }) {
-        // Поток уже не работает: записываем сами, значение не теряем.
-        PENDING.fetch_sub(1, Relaxed);
-        if let Job::Write { path, data, seq } = job {
-            write_now(&path, &data);
-            settled(&path, seq);
-        }
-    }
-}
-
-/// Поставить удаление файла в очередь (после ранее поставленных записей того же пути). Отсутствие файла - не ошибка.
-pub(crate) fn remove(path: PathBuf) {
-    let Some(tx) = queue() else {
-        remove_now(&path);
-        return;
-    };
-    let seq = SEQ.fetch_add(1, Relaxed);
-    latest().insert(path.clone(), (seq, None));
-    PENDING.fetch_add(1, Relaxed);
-    if let Err(mpsc::SendError(job)) = tx.send(Job::Remove { path, seq }) {
-        PENDING.fetch_sub(1, Relaxed);
-        if let Job::Remove { path, seq } = job {
-            remove_now(&path);
-            settled(&path, seq);
-        }
-    }
-}
-
-/// Прочитать файл с учётом очереди: если по пути есть невыполненная запись, вернуть её данные;
-/// если удаление - `NotFound`; иначе прочитать диск.
+/// Read a path through the latest queued state, falling back to disk.
 pub(crate) fn read_latest(path: &Path) -> io::Result<Vec<u8>> {
-    let pending = latest().get(path).map(|(_, data)| data.clone());
-    match pending {
-        Some(Some(data)) => Ok(data),
-        Some(None) => Err(io::ErrorKind::NotFound.into()),
+    match QUEUE.get().and_then(Option::as_ref) {
+        Some(writer) => writer.read_latest(path),
         None => std::fs::read(path),
     }
 }
 
-/// Дождаться выполнения всех записей и удалений, поставленных до вызова. Только для тестов:
-/// на рабочем потоке движка такой вызов снова блокирует его на диске.
+/// Wait until all jobs queued before this call have settled. Test-only: never
+/// call this from the engine thread because worker I/O can block.
 #[cfg(test)]
 pub(crate) fn sync() {
-    let Some(tx) = queue() else { return };
-    let (done, wait) = mpsc::channel();
-    if tx.send(Job::Barrier(done)).is_ok() {
-        let _ = wait.recv();
+    if let Some(writer) = queue() {
+        writer.sync();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
 
-    #[test]
-    fn queued_writes_land_in_order_and_last_value_wins() {
-        let dir = tempfile::tempdir().unwrap();
-        let p = dir.path().join("sub").join("ratchet");
-        write(p.clone(), b"first".to_vec());
-        write(p.clone(), b"second".to_vec());
-        sync();
-        assert_eq!(std::fs::read(&p).unwrap(), b"second");
-        assert!(!p.with_extension("tmp").exists(), "temp file must be renamed away");
+    fn writer(capacity: usize) -> (Writer, tempfile::TempDir) {
+        (Writer::spawn(capacity).expect("writer thread"), tempfile::tempdir().unwrap())
     }
 
     #[test]
-    fn remove_after_write_leaves_no_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let p = dir.path().join("gone");
-        write(p.clone(), b"value".to_vec());
-        remove(p.clone());
-        sync();
-        assert!(!p.exists());
+    fn writes_and_removes_share_bounded_capacity_and_keep_latest_on_rejection() {
+        let (writer, dir) = writer(2);
+        let release = writer.pause_worker();
+        let path = dir.path().join("ratchet");
+        let other = dir.path().join("discovery");
+
+        writer.write(path.clone(), b"first".to_vec()).unwrap();
+        writer.remove(other.clone()).unwrap();
+        assert_eq!(writer.write(path.clone(), b"rejected".to_vec()).unwrap_err().kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(writer.remove(path.clone()).unwrap_err().kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(writer.read_latest(&path).unwrap(), b"first");
+        assert_eq!(writer.read_latest(&other).unwrap_err().kind(), io::ErrorKind::NotFound);
+
+        release.send(()).expect("release worker");
+        writer.sync();
+        assert_eq!(std::fs::read(&path).unwrap(), b"first");
+        assert!(!other.exists());
     }
 
     #[test]
-    fn removing_a_missing_file_is_not_an_error() {
-        let dir = tempfile::tempdir().unwrap();
-        remove(dir.path().join("never-written"));
-        sync();
+    fn remove_then_newer_write_leaves_latest_write_on_disk() {
+        let (writer, dir) = writer(4);
+        let release = writer.pause_worker();
+        let path = dir.path().join("same-path");
+
+        writer.remove(path.clone()).unwrap();
+        writer.write(path.clone(), b"new".to_vec()).unwrap();
+        assert_eq!(writer.read_latest(&path).unwrap(), b"new");
+        release.send(()).expect("release worker");
+        writer.sync();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
     }
 
     #[test]
-    fn read_latest_sees_queued_state_before_it_reaches_disk() {
-        let dir = tempfile::tempdir().unwrap();
-        let p = dir.path().join("queued");
-        write(p.clone(), b"new".to_vec());
-        // Состояние либо ещё в очереди (тогда данные из памяти), либо уже на диске: в обоих случаях "new".
-        assert_eq!(read_latest(&p).unwrap(), b"new");
-        sync();
-        assert_eq!(read_latest(&p).unwrap(), b"new");
+    fn concurrent_same_path_writes_and_removes_match_linearized_latest() {
+        let (writer, dir) = writer(256);
+        let path = dir.path().join("contended");
+        let expected = Arc::new(Mutex::new((0u64, None::<Vec<u8>>)));
+        let mut threads = Vec::new();
+
+        for producer in 0..8u8 {
+            let writer = writer.clone();
+            let path = path.clone();
+            let expected = Arc::clone(&expected);
+            threads.push(std::thread::spawn(move || {
+                for index in 0..16u8 {
+                    let data = if (producer + index) % 3 == 0 {
+                        None
+                    } else {
+                        Some(vec![producer, index])
+                    };
+                    let seq = writer.enqueue(path.clone(), data.clone()).unwrap();
+                    let mut last = expected.lock().unwrap();
+                    if seq > last.0 {
+                        *last = (seq, data);
+                    }
+                }
+            }));
+        }
+        for thread in threads {
+            thread.join().unwrap();
+        }
+
+        let last = expected.lock().unwrap().1.clone();
+        match &last {
+            Some(data) => assert_eq!(writer.read_latest(&path).unwrap(), *data),
+            None => assert_eq!(writer.read_latest(&path).unwrap_err().kind(), io::ErrorKind::NotFound),
+        }
+        writer.sync();
+        match last {
+            Some(data) => assert_eq!(std::fs::read(&path).unwrap(), data),
+            None => assert!(!path.exists()),
+        }
     }
 
     #[test]
-    fn read_latest_reports_a_queued_removal_as_missing() {
-        let dir = tempfile::tempdir().unwrap();
-        let p = dir.path().join("doomed");
-        write(p.clone(), b"old".to_vec());
-        sync();
-        remove(p.clone());
-        assert_eq!(read_latest(&p).unwrap_err().kind(), io::ErrorKind::NotFound);
-        sync();
-        assert!(!p.exists());
+    fn read_latest_sees_queued_state_and_completed_state() {
+        let (writer, dir) = writer(2);
+        let release = writer.pause_worker();
+        let path = dir.path().join("queued");
+        writer.write(path.clone(), b"new".to_vec()).unwrap();
+        assert_eq!(writer.read_latest(&path).unwrap(), b"new");
+        release.send(()).expect("release worker");
+        writer.sync();
+        assert_eq!(writer.read_latest(&path).unwrap(), b"new");
     }
 }
