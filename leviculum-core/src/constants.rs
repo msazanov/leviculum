@@ -516,7 +516,9 @@ pub const CHANNEL_RX_RING_MAX: usize = 512;
 /// `_max_tries` (`Channel.py:295`), checked at `Channel.py:569`. Was 8 until
 /// the 2026-10-12 link audit (D18): three retries more than a Python sender
 /// spends before giving a struggling link up.
-pub const CHANNEL_MAX_TRIES: u8 = 5;
+// KnotHop keeps the base-branch retry budget; upstream's reference-parity
+// value of 5 is a behavioral change requiring an explicit owner decision.
+pub const CHANNEL_MAX_TRIES: u8 = 8;
 
 /// How soon the timer looks again at a channel message held for a full host
 /// sink (749). The core cannot see the host drain its sink, so while a
