@@ -9180,7 +9180,6 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 // id and found in the link table (`handle_proof`), so a reverse
                 // entry keyed by the packet hash would never be read.
                 let now = self.clock.now_ms();
-<<<<<<< HEAD
                 if !hash_free {
                     self.storage.set_reverse(
                         truncated_hash,

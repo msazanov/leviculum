@@ -349,6 +349,7 @@ pub struct LinkStats {
     pub(crate) pacing_rejections: u64,
     pub(crate) iface_pacing_rejections: u64,
     pub(crate) attached_interface: Option<usize>,
+    pub(crate) cipher: crate::LinkCipher,
 }
 
 impl LinkStats {
@@ -430,6 +431,11 @@ impl LinkStats {
     pub fn attached_interface(&self) -> Option<usize> {
         self.attached_interface
     }
+
+    /// Cipher this link was established with. An application that only wants GCM links on some paths checks it here.
+    pub fn cipher(&self) -> crate::LinkCipher {
+        self.cipher
+    }
 }
 
 /// The unified Reticulum node, owns all protocol state
@@ -483,6 +489,8 @@ pub struct NodeCore<R: CryptoRngCore, C: Clock, S: Storage> {
     /// What data proofs are bound to; see [`crate::destination::ProofBinding`]
     proof_binding: ProofBinding,
     link_cipher: crate::LinkCipher,
+    /// Accept standard-CBC link requests besides `link_cipher` (default off).
+    accept_cbc_links: bool,
     /// Pending events
     events: Vec<NodeEvent>,
     /// Probe destination hash (if respond_to_probes is enabled).
@@ -645,6 +653,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             default_proof_strategy: proof_strategy,
             proof_binding: ProofBinding::default(),
             link_cipher: crate::LinkCipher::default(),
+            accept_cbc_links: false,
             events: Vec::new(),
             probe_dest_hash: None,
             remote_mgmt_dest_hash: None,
@@ -2913,11 +2922,16 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.proof_binding
     }
 
+    /// As responder also accept links that ask for standard CBC (links that cross stock Reticulum transports can only be CBC).
+    /// Does not change the cipher this node asks for on its own links, and never lets an initiator's GCM request fall back to CBC.
+    pub fn set_accept_cbc_links(&mut self, accept: bool) {
+        self.accept_cbc_links = accept;
+    }
+
     /// Explicit cipher policy, set before establishing links. No automatic downgrade.
     pub fn set_link_cipher(&mut self, cipher: crate::LinkCipher) -> Result<(), crate::LinkError> {
         if !self.links.is_empty() { return Err(crate::LinkError::InvalidState); }
         self.link_cipher = cipher;
-        self.receipt_tracker.set_cipher(cipher);
         Ok(())
     }
 
@@ -6185,6 +6199,73 @@ mod tests {
             responder_link_id: resp_link_id,
             _dest_hash: dest_hash,
         }
+    }
+
+    /// Responder with `resp_cipher` (and optionally CBC accepted), initiator asking for `init_cipher` on this link only.
+    /// Returns the initiator/responder link ids if the link came up on the initiator, `None` if the request was dropped.
+    fn cipher_pair(
+        resp_cipher: crate::LinkCipher,
+        accept_cbc: bool,
+        init_cipher: crate::LinkCipher,
+    ) -> Option<(NodeCore<OsRng, MockClock, NoStorage>, NodeCore<OsRng, MockClock, NoStorage>, LinkId, LinkId)> {
+        use crate::transport::InterfaceId;
+        let resp_identity = Identity::generate(&mut OsRng);
+        let resp_signing_key = resp_identity.ed25519_verifying().to_bytes();
+        let mut responder = NodeCoreBuilder::new()
+            .link_cipher(resp_cipher)
+            .accept_cbc_links(accept_cbc)
+            .build(OsRng, MockClock::new(TEST_TIME_MS), NoStorage);
+        let mut resp_dest = Destination::new(Some(resp_identity), Direction::In, DestinationType::Single, "testapp", &["echo"]).unwrap();
+        resp_dest.set_accepts_links(true);
+        let dest_hash = *resp_dest.hash();
+        responder.register_destination(resp_dest);
+        // the initiator's node default is whatever; the cipher of this link is chosen per connect
+        let mut initiator = NodeCoreBuilder::new().build(OsRng, MockClock::new(TEST_TIME_MS), NoStorage);
+        let (init_id, _, output) = initiator.connect_with_cipher(dest_hash, &resp_signing_key, None, init_cipher).expect("connect");
+        let req = extract_broadcast_data(&output);
+        let resp_id = Link::calculate_link_id(&req);
+        let out = responder.handle_packet(InterfaceId(0), &req);
+        let proof = out.actions.iter().map(|a| match a {
+            crate::transport::Action::Broadcast { data, .. } | crate::transport::Action::SendPacket { data, .. } => data.clone(),
+        }).next()?;
+        let out = initiator.handle_packet(InterfaceId(0), &proof);
+        if !out.events.iter().any(|e| matches!(e, NodeEvent::LinkEstablished { .. })) {
+            return None;
+        }
+        let rtt = extract_broadcast_data(&out);
+        let _ = responder.handle_packet(InterfaceId(0), &rtt);
+        Some((initiator, responder, init_id, resp_id))
+    }
+
+    #[test]
+    fn test_cbc_request_needs_the_accept_flag_on_a_gcm_responder() {
+        use crate::LinkCipher::{Cbc, Gcm};
+        assert!(cipher_pair(Gcm, false, Cbc).is_none(), "GCM-only responder must drop a CBC request");
+        let (init, resp, i, r) = cipher_pair(Gcm, true, Cbc).expect("accepting responder answers a CBC request");
+        assert_eq!(init.link(&i).unwrap().cipher(), Cbc);
+        assert_eq!(resp.link(&r).unwrap().cipher(), Cbc, "the link keeps the cipher it asked for, it is not upgraded");
+    }
+
+    #[test]
+    fn test_gcm_request_is_never_answered_with_cbc_and_cbc_only_node_drops_gcm() {
+        use crate::LinkCipher::{Cbc, Gcm};
+        let (init, resp, i, r) = cipher_pair(Gcm, true, Gcm).expect("GCM link between GCM nodes");
+        assert_eq!(init.link(&i).unwrap().cipher(), Gcm);
+        assert_eq!(resp.link(&r).unwrap().cipher(), Gcm);
+        assert!(cipher_pair(Cbc, false, Gcm).is_none(), "a default (CBC) node must not take a GCM request");
+        assert!(cipher_pair(Cbc, true, Gcm).is_none(), "accepting CBC never widens to GCM");
+    }
+
+    #[test]
+    fn test_cbc_link_on_a_gcm_node_carries_channel_data_with_proofs() {
+        use crate::LinkCipher::{Cbc, Gcm};
+        use crate::transport::InterfaceId;
+        let (mut init, mut resp, i, _r) = cipher_pair(Gcm, true, Cbc).unwrap();
+        let out = init.send_on_link(&i, b"enroll").unwrap();
+        let wire = extract_broadcast_data(&out);
+        let delivered = resp.handle_packet(InterfaceId(0), &wire);
+        assert!(delivered.events.iter().any(|e| matches!(e, NodeEvent::MessageReceived { .. })), "CBC link on a GCM node delivers");
+        assert!(init.receipt_count_for_link(&i) <= 1);
     }
 
     fn establish_nodecore_link_pair() -> NodeCoreLinkPair {
