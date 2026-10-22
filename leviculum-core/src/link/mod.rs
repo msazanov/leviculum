@@ -47,7 +47,8 @@ use crate::constants::{
     KEEPALIVE_INITIATOR_BYTE, KEEPALIVE_PAYLOAD_SIZE, KEEPALIVE_RESPONDER_BYTE,
     LINK_KEEPALIVE_MAX_RTT, LINK_KEEPALIVE_MIN_SECS, LINK_KEEPALIVE_SECS,
     LINK_KEEPALIVE_TIMEOUT_FACTOR, LINK_STALE_FACTOR, LINK_STALE_GRACE_SECS, MS_PER_SECOND, MTU,
-    PROOF_DATA_SIZE, SIGNALING_MODE_MASK, SIGNALING_MODE_SHIFT, SIGNALING_MTU_MASK,
+    PROOF_DATA_SIZE, RTT_RETRY_INTERVAL_MULTIPLIER, RTT_RETRY_MAX_ATTEMPTS,
+    RTT_RETRY_MIN_INTERVAL_MS, SIGNALING_MODE_MASK, SIGNALING_MODE_SHIFT, SIGNALING_MTU_MASK,
     TRUNCATED_HASHBYTES, US_PER_MS, X25519_KEY_SIZE,
 };
 use crate::crypto::{derive_key, truncated_hash};
@@ -481,6 +482,11 @@ pub struct Link {
     /// Count of keepalive responses received (initiator), since establishment.
     /// Diagnostic counter only; not used for any timeout decision.
     keepalives_acked: u64,
+    /// Last LRRTT transmit and retry state for mode-7 GCM initiators.
+    /// CBC Links remain one-shot for Python-RNS interoperability.
+    rtt_sent_at_ms: Option<u64>,
+    rtt_send_count: u8,
+    rtt_confirmed: bool,
     /// When the link was established (clock milliseconds)
     established_at_ms: Option<u64>,
     /// Proof strategy for received data on this link (responder only)
@@ -641,6 +647,9 @@ impl Link {
             last_keepalive_ms: 0,
             keepalives_sent: 0,
             keepalives_acked: 0,
+            rtt_sent_at_ms: None,
+            rtt_send_count: 0,
+            rtt_confirmed: false,
             established_at_ms: None,
             proof_strategy: ProofStrategy::None,
             dest_signing_key: None,
@@ -787,6 +796,9 @@ impl Link {
             last_keepalive_ms: 0,
             keepalives_sent: 0,
             keepalives_acked: 0,
+            rtt_sent_at_ms: None,
+            rtt_send_count: 0,
+            rtt_confirmed: false,
             established_at_ms: None,
             proof_strategy: ProofStrategy::None,
             dest_signing_key: None,
@@ -1641,6 +1653,43 @@ impl Link {
     /// Number of keepalive responses received since establishment (diagnostic).
     pub fn keepalives_acked(&self) -> u64 {
         self.keepalives_acked
+    }
+
+    pub(crate) fn rtt_sent_at_ms(&self) -> Option<u64> {
+        self.rtt_sent_at_ms
+    }
+
+    pub(crate) fn rtt_send_count(&self) -> u8 {
+        self.rtt_send_count
+    }
+
+    pub(crate) fn rtt_confirmed(&self) -> bool {
+        self.rtt_confirmed
+    }
+
+    pub(crate) fn rtt_retry_interval_ms(&self) -> u64 {
+        self.rtt_ms()
+            .saturating_mul(RTT_RETRY_INTERVAL_MULTIPLIER)
+            .max(RTT_RETRY_MIN_INTERVAL_MS)
+    }
+
+    pub(crate) fn needs_rtt_retry(&self) -> bool {
+        self.cipher == LinkCipher::Gcm
+            && self.initiator
+            && self.state() == LinkState::Active
+            && !self.rtt_confirmed
+            && self.rtt_send_count > 0
+            && self.rtt_send_count <= RTT_RETRY_MAX_ATTEMPTS
+    }
+
+    pub(crate) fn record_rtt_sent(&mut self, now_ms: u64) {
+        self.rtt_sent_at_ms = Some(now_ms);
+        self.rtt_send_count = self.rtt_send_count.saturating_add(1);
+    }
+
+    pub(crate) fn confirm_rtt(&mut self) {
+        self.rtt_confirmed = true;
+        self.rtt_sent_at_ms = None;
     }
 
     /// Mark the link as established (clock milliseconds)

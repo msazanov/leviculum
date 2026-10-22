@@ -296,11 +296,20 @@ pub const ESTABLISHMENT_TIMEOUT_PER_HOP_MS: u64 = DEFAULT_PER_HOP_TIMEOUT * 1000
 pub const UNKNOWN_BITRATE_ASSUMPTION_BPS: u32 = 300;
 
 /// Responder establishment bonus (milliseconds), where Python adds its
-/// 360 s keepalive ceiling (`Link.py:207`). Sized when our initiator still
-/// resent the RTT packet over a ~50 s budget (removed in 662, the reference
-/// sends it once); the window is kept as it was. Reaping of dead links is
-/// handled by the keepalive/stale watchdog.
+/// 360 s keepalive ceiling (`Link.py:207`). Keeps the handshake alive across
+/// the bounded mode-7 GCM LRRTT retry window; CBC remains one-shot. Reaping of
+/// dead links is handled by the keepalive/stale watchdog.
 pub const ESTABLISHMENT_RESPONDER_BONUS_MS: u64 = 54_000;
+
+/// Maximum LRRTT retransmissions after the initial packet, for explicitly
+/// negotiated KnotHop GCM mode 7 only. Vanilla CBC keeps upstream one-shot
+/// behavior so Python RNS does not process the same RTT callback repeatedly.
+pub const RTT_RETRY_MAX_ATTEMPTS: u8 = 5;
+/// Minimum delay between mode-7 LRRTT sends.
+pub const RTT_RETRY_MIN_INTERVAL_MS: u64 = 10_000;
+/// Retry delay is the greater of this multiplier times measured RTT and the
+/// minimum interval above.
+pub const RTT_RETRY_INTERVAL_MULTIPLIER: u64 = 3;
 
 /// Upper bound (permille of the base timeout) for the per-link random
 /// establishment jitter (Codeberg #129). Two nodes that initiate links to

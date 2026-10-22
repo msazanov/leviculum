@@ -11,7 +11,8 @@ use alloc::vec::Vec;
 use crate::constants::{
     CHANNEL_DEFAULT_RTT_MS, CHANNEL_HELD_DRAIN_POLL_MS, DATA_RECEIPT_TIMEOUT_MS,
     KEEPALIVE_INITIATOR_BYTE, LINK_REQUEST_MAX_RETRIES, MS_PER_SECOND,
-    PROOF_DATA_SIZE, TRAFFIC_TIMEOUT_FACTOR, TRAFFIC_TIMEOUT_MIN_MS, TRUNCATED_HASHBYTES,
+    PROOF_DATA_SIZE, RTT_RETRY_MAX_ATTEMPTS, TRAFFIC_TIMEOUT_FACTOR, TRAFFIC_TIMEOUT_MIN_MS,
+    TRUNCATED_HASHBYTES,
 };
 use crate::destination::{DestinationHash, ProofBinding, ProofStrategy};
 use crate::event_scalar::MsOrNone;
@@ -1467,6 +1468,9 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // Build RTT packet and route via attached interface
         match link.build_rtt_packet(rtt_seconds_wire, &mut self.rng) {
             Ok(rtt_packet) => {
+                if link.cipher() == crate::LinkCipher::Gcm {
+                    link.record_rtt_sent(now_ms);
+                }
                 self.events.push(NodeEvent::LinkEstablished {
                     link_id,
                     is_initiator: true,
@@ -1551,6 +1555,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             if let Some(link) = self.links.get_mut(link_id) {
                 link.record_inbound(now_ms);
             }
+            self.try_confirm_rtt(link_id);
 
             // confirm_delivery removes the entry entirely (fixes orphan path #1).
             // Event only fires when the receipt still exists, a valid proof for
@@ -1578,6 +1583,19 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             }
         } else {
             crate::tracing::debug!("link_mgr: data proof — signature validation failed");
+        }
+    }
+
+    /// Any non-LRRTT inbound Link packet confirms delivery of a mode-7 GCM
+    /// RTT. CBC remains one-shot and never enters the retry state machine.
+    fn try_confirm_rtt(&mut self, link_id: &LinkId) {
+        if let Some(link) = self.links.get_mut(link_id) {
+            if link.cipher() == crate::LinkCipher::Gcm
+                && link.is_initiator()
+                && !link.rtt_confirmed()
+            {
+                link.confirm_rtt();
+            }
         }
     }
 
@@ -1675,7 +1693,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
         // Recover stale links on any inbound traffic (Python Link.py:983-984).
         // A keepalive recovers only once its byte validates, in its handler.
-        if packet.context != PacketContext::Keepalive {
+        if !matches!(packet.context, PacketContext::Keepalive | PacketContext::Lrrtt) {
             self.try_recover_stale(&link_id, now_ms);
         }
 
@@ -1690,6 +1708,10 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             );
             self.drop_link_packet(packet, rx, DropReason::LinkDataNoLink);
             return;
+        }
+
+        if packet.context != PacketContext::Lrrtt {
+            self.try_confirm_rtt(&link_id);
         }
 
         // Any non-keepalive inbound link packet resets the inactivity watchdog
@@ -4262,6 +4284,54 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         }
     }
 
+    /// Retry only the explicitly signalled mode-7 GCM LRRTT. CBC remains a
+    /// single-shot packet for Python-RNS callback/RTT parity. Retries are
+    /// bounded and use the original KnotHop interval: max(3 × RTT, 10 s).
+    pub(super) fn check_rtt_retry(&mut self, now_ms: u64) {
+        let due: Vec<LinkId> = self
+            .links
+            .iter()
+            .filter(|(_, link)| {
+                link.needs_rtt_retry()
+                    && link.rtt_sent_at_ms().is_some_and(|sent| {
+                        now_ms.saturating_sub(sent) >= link.rtt_retry_interval_ms()
+                    })
+            })
+            .map(|(link_id, _)| *link_id)
+            .collect();
+
+        for link_id in due {
+            let packet = {
+                let Some(link) = self.links.get_mut(&link_id) else {
+                    continue;
+                };
+                let rtt_seconds = link
+                    .rtt_secs()
+                    .unwrap_or(CHANNEL_DEFAULT_RTT_MS as f64 / MS_PER_SECOND as f64);
+                match link.build_rtt_packet(rtt_seconds, &mut self.rng) {
+                    Ok(packet) => {
+                        link.record_rtt_sent(now_ms);
+                        crate::tracing::debug!(
+                            link = %HexShort(link_id.as_bytes()),
+                            attempt = link.rtt_send_count(),
+                            retry_budget = RTT_RETRY_MAX_ATTEMPTS,
+                            "Resending LRRTT on explicitly negotiated GCM Link"
+                        );
+                        packet
+                    }
+                    Err(error) => {
+                        crate::tracing::warn!(
+                            link = %HexShort(link_id.as_bytes()),
+                            "GCM LRRTT retry packet build failed: {error:?}"
+                        );
+                        continue;
+                    }
+                }
+            };
+            self.route_link_packet(&link_id, &packet);
+        }
+    }
+
     /// Check if any active links need to send keepalives (initiator only)
     pub(super) fn check_keepalives(&mut self, now_ms: u64) {
         let need_keepalive: Vec<LinkId> = self
@@ -4727,6 +4797,11 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 update(
                     started_at.saturating_add(link.establishment_timeout_ms_with(timeout_override)),
                 );
+            }
+            if link.needs_rtt_retry() {
+                if let Some(sent_at) = link.rtt_sent_at_ms() {
+                    update(sent_at.saturating_add(link.rtt_retry_interval_ms()));
+                }
             }
         }
 

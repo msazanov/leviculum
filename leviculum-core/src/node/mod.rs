@@ -2721,6 +2721,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
         // Run link-layer periodic tasks
         self.check_timeouts(now_ms);
+        self.check_rtt_retry(now_ms);
         self.check_keepalives(now_ms);
         self.check_stale_links(now_ms);
         self.check_channel_timeouts(now_ms);
@@ -10990,12 +10991,18 @@ mod tests {
     ///
     /// Returns (initiator, responder, init_link_id, resp_link_id, rtt_packet).
     fn establish_link_pair_without_rtt() -> LinkPairWithoutRtt {
+        establish_link_pair_without_rtt_with_cipher(crate::LinkCipher::Cbc)
+    }
+
+    fn establish_link_pair_without_rtt_with_cipher(cipher: crate::LinkCipher) -> LinkPairWithoutRtt {
         use crate::transport::InterfaceId;
 
         let resp_identity = Identity::generate(&mut OsRng);
         let resp_signing_key = resp_identity.ed25519_verifying().to_bytes();
         let clock = MockClock::new(TEST_TIME_MS);
-        let mut responder = NodeCoreBuilder::new().build(OsRng, clock, NoStorage);
+        let mut responder = NodeCoreBuilder::new()
+            .link_cipher(cipher)
+            .build(OsRng, clock, NoStorage);
         let mut resp_dest = Destination::new(
             Some(resp_identity),
             Direction::In,
@@ -11009,7 +11016,9 @@ mod tests {
         responder.register_destination(resp_dest);
 
         let clock = MockClock::new(TEST_TIME_MS);
-        let mut initiator = NodeCoreBuilder::new().build(OsRng, clock, NoStorage);
+        let mut initiator = NodeCoreBuilder::new()
+            .link_cipher(cipher)
+            .build(OsRng, clock, NoStorage);
 
         // Initiator connects
         let (init_link_id, _, output) = initiator
@@ -11038,18 +11047,15 @@ mod tests {
         (initiator, responder, init_link_id, resp_link_id, rtt_data)
     }
 
-    /// 662: the initiator sends the RTT packet once, as the reference does
-    /// (`reference/Reticulum/RNS/Link.py:440-442`). A Python responder runs
-    /// `rtt_packet` on every LRRTT it receives (`Link.py:1059` has no state
-    /// gate), so each duplicate re-fires its `link_established` callback and
-    /// inflates its RTT (`Link.py:540, 550`; periculum 659 counted six
-    /// callbacks and an rtt of 51.39 s on a quiet rnsd 1.5.2 responder).
+    /// CBC remains single-shot for Python-RNS parity. Mode-7 GCM retries are
+    /// covered separately because a Python responder has no idempotency gate.
     #[test]
     fn test_rtt_packet_sent_once_to_silent_responder() {
         use crate::packet::{Packet, PacketContext};
 
         let (mut initiator, _responder, init_link_id, _resp_link_id, rtt_data) =
             establish_link_pair_without_rtt();
+        assert_eq!(initiator.link(&init_link_id).unwrap().cipher(), crate::LinkCipher::Cbc);
         assert_eq!(
             Packet::unpack(&rtt_data).expect("rtt packet").context,
             PacketContext::Lrrtt
@@ -11075,6 +11081,74 @@ mod tests {
 
         assert_eq!(resent, 0, "the RTT packet must not be resent");
         assert!(initiator.link(&init_link_id).is_some());
+    }
+
+    #[test]
+    fn test_gcm_rtt_retry_recovers_when_first_packet_is_lost() {
+        use crate::packet::{Packet, PacketContext};
+        use crate::transport::InterfaceId;
+
+        let (mut initiator, mut responder, init_link_id, resp_link_id, first_rtt) =
+            establish_link_pair_without_rtt_with_cipher(crate::LinkCipher::Gcm);
+        let init_link = initiator.link(&init_link_id).unwrap();
+        assert_eq!(init_link.cipher(), crate::LinkCipher::Gcm);
+        assert_eq!(init_link.rtt_send_count(), 1);
+        assert_eq!(Packet::unpack(&first_rtt).unwrap().context, PacketContext::Lrrtt);
+
+        // Drop the initial LRRTT. At the old mode-7 retry interval, exactly one
+        // fresh GCM record is emitted; it is not an application/data retry.
+        let interval = init_link.rtt_retry_interval_ms();
+        initiator
+            .transport()
+            .clock()
+            .set(TEST_TIME_MS + interval);
+        let output = initiator.handle_timeout();
+        let rtts: Vec<Vec<u8>> = extract_all_action_data(&output)
+            .into_iter()
+            .filter(|raw| Packet::unpack(raw).is_ok_and(|packet| packet.context == PacketContext::Lrrtt))
+            .collect();
+        assert_eq!(rtts.len(), 1, "one bounded mode-7 retry becomes due");
+        assert_ne!(rtts[0], first_rtt, "GCM retry uses a fresh nonce/record");
+        assert_eq!(initiator.link(&init_link_id).unwrap().rtt_send_count(), 2);
+
+        let established = responder.handle_packet(InterfaceId(0), &rtts[0]);
+        assert!(established
+            .events
+            .iter()
+            .any(|event| matches!(event, NodeEvent::LinkEstablished { is_initiator: false, .. })));
+        assert_eq!(responder.link(&resp_link_id).unwrap().state(), LinkState::Active);
+    }
+
+    #[test]
+    fn test_gcm_duplicate_rtt_does_not_reestablish_or_change_activity() {
+        use crate::transport::InterfaceId;
+
+        let (_initiator, mut responder, _init_link_id, resp_link_id, rtt_data) =
+            establish_link_pair_without_rtt_with_cipher(crate::LinkCipher::Gcm);
+        let first = responder.handle_packet(InterfaceId(0), &rtt_data);
+        assert_eq!(
+            first.events.iter().filter(|event| matches!(event, NodeEvent::LinkEstablished { .. })).count(),
+            1
+        );
+        let link = responder.link(&resp_link_id).unwrap();
+        assert_eq!(link.state(), LinkState::Active);
+        let rtt_us = link.rtt_us();
+        let last_inbound_ms = link.last_inbound_ms();
+        let last_data_age = link.no_data_for_ms(TEST_TIME_MS);
+
+        // Even a stale link is not recovered by a duplicate LRRTT: it is a
+        // handshake packet, not new authenticated Link activity.
+        responder.link_mut(&resp_link_id).unwrap().set_state(LinkState::Stale);
+        let duplicate = responder.handle_packet(InterfaceId(0), &rtt_data);
+        assert!(!duplicate.events.iter().any(|event| matches!(
+            event,
+            NodeEvent::LinkEstablished { .. } | NodeEvent::LinkRecovered { .. }
+        )));
+        let link = responder.link(&resp_link_id).unwrap();
+        assert_eq!(link.state(), LinkState::Stale);
+        assert_eq!(link.rtt_us(), rtt_us);
+        assert_eq!(link.last_inbound_ms(), last_inbound_ms);
+        assert_eq!(link.no_data_for_ms(TEST_TIME_MS), last_data_age);
     }
 
     #[test]
