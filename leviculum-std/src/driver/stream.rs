@@ -319,7 +319,12 @@ mod tests {
         let (tx, mut rx) = mpsc::channel::<TickOutput>(1);
         tx.try_send(TickOutput::empty()).expect("fill the one slot");
 
-        let mut handle = LinkHandle::new(link_id, Arc::clone(&inner), tx);
+        let mut handle = LinkHandle::new(
+            link_id,
+            Arc::clone(&inner),
+            tx,
+            super::super::completions::CompletionRegistry::new(),
+        );
         let task = tokio::spawn(async move { handle.close().await });
         // Let the task run until it parks on the full channel.
         for _ in 0..10 {

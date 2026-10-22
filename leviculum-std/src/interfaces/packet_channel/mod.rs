@@ -31,9 +31,9 @@ use super::{
 /// Datagrams dropped because the interface's incoming queue was full, i.e. the node's event loop did not keep
 /// up with the carrier. Process-wide, monotonic. A datagram interface must drop here rather than stall the carrier,
 /// but the loss is invisible anywhere else, so it is counted.
-pub static RX_QUEUE_DROPPED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub(crate) static RX_QUEUE_DROPPED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// Datagrams the carrier refused to send (too big for the current path MTU, send buffer full).
-pub static TX_REFUSED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub(crate) static TX_REFUSED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// `(rx_queue_dropped, tx_refused)` since process start.
 pub fn drop_counters() -> (u64, u64) {

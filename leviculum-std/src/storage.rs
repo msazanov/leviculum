@@ -2347,7 +2347,7 @@ mod tests {
     fn test_unchanged_known_ratchet_is_not_rewritten_within_refresh_window() {
         let (mut storage, path) = unique_temp_storage("kr_skip");
         let hash = [0x21; TRUNCATED_HASHBYTES];
-        let file_path = path.join(RATCHETS_DIR).join(hex_encode(&hash));
+        let file_path = path.path().join(RATCHETS_DIR).join(hex_encode(&hash));
 
         CoreStorage::remember_known_ratchet(&mut storage, hash, [0xaa; 32], 5_000);
         crate::write_behind::sync();
