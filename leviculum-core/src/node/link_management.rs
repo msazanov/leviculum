@@ -3783,7 +3783,11 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             // of the link's incoming resources ends
             // (`reference/Reticulum/RNS/Link.py:1134-1141`).
             let mut plaintext = alloc::vec![0u8; packet.data.len()];
-            let Ok(len) = link.decrypt(packet.data.as_slice(), &mut plaintext) else {
+            let Ok(len) = link.decrypt_for_context(
+                packet.data.as_slice(),
+                &mut plaintext,
+                PacketContext::ResourceIcl,
+            ) else {
                 crate::tracing::debug!("Resource ICL decryption failed");
                 return;
             };
