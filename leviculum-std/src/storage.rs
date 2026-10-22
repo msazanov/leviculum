@@ -192,18 +192,26 @@ impl Storage {
         // Load ratchets via store
         let mut ratchet_store = FileRatchetStore::new(&base_path);
         let mut ratchet_saved_ms = HashMap::new();
-        if let Ok(ratchets) = ratchet_store.load_known_ratchets() {
-            for (dest_hash, entry) in ratchets {
-                let mono_ms = wallclock_secs_to_mono_ms(entry.received_at_secs, mono_offset_ms);
-                inner.remember_known_ratchet(dest_hash, entry.ratchet, mono_ms);
-                // the file on disk carries exactly this timestamp
-                ratchet_saved_ms.insert(dest_hash, mono_ms);
+        match ratchet_store.load_known_ratchets() {
+            Ok(ratchets) => {
+                for (dest_hash, entry) in ratchets {
+                    let mono_ms = wallclock_secs_to_mono_ms(entry.received_at_secs, mono_offset_ms);
+                    inner.remember_known_ratchet(dest_hash, entry.ratchet, mono_ms);
+                    // the file on disk carries exactly this timestamp
+                    ratchet_saved_ms.insert(dest_hash, mono_ms);
+                }
             }
+            Err(error) => tracing::warn!("Failed to load known ratchets: {error}"),
         }
-        if let Ok(keys) = ratchet_store.load_dest_ratchet_keys() {
-            for (dest_hash, data) in keys {
-                CoreStorage::store_dest_ratchet_keys(&mut inner, dest_hash, data);
+        match ratchet_store.load_dest_ratchet_keys() {
+            Ok(keys) => {
+                for (dest_hash, data) in keys {
+                    CoreStorage::store_dest_ratchet_keys(&mut inner, dest_hash, data);
+                }
             }
+            Err(error) => tracing::error!(
+                "Failed to load private ratchet keys; preserving fail-closed behavior: {error}"
+            ),
         }
 
         Ok(Self {
@@ -1310,6 +1318,13 @@ impl leviculum_core::traits::Storage for Storage {
         ratchet: [u8; leviculum_core::constants::RATCHET_SIZE],
         received_at_ms: u64,
     ) {
+        let path = self
+            .base_path
+            .join(crate::file_ratchet_store::RATCHETS_DIR)
+            .join(hex_encode(&dest_hash));
+        if crate::write_behind::take_write_failure(&path) {
+            self.ratchet_saved_ms.remove(&dest_hash);
+        }
         let unchanged = self.inner.get_known_ratchet(&dest_hash) == Some(ratchet);
         self.inner
             .remember_known_ratchet(dest_hash, ratchet, received_at_ms);
@@ -1334,7 +1349,12 @@ impl leviculum_core::traits::Storage for Storage {
             Ok(()) => {
                 self.ratchet_saved_ms.insert(dest_hash, received_at_ms);
             }
-            Err(e) => tracing::warn!("Failed to persist known ratchet: {e}"),
+            Err(e) => {
+                // A changed in-memory key must not inherit the refresh window
+                // of the old on-disk key after a rejected enqueue.
+                self.ratchet_saved_ms.remove(&dest_hash);
+                tracing::warn!("Failed to persist known ratchet: {e}");
+            }
         }
     }
     fn expire_known_ratchets(&mut self, now_ms: u64, expiry_ms: u64) -> usize {
@@ -2358,22 +2378,55 @@ mod tests {
         std::fs::write(&file_path, b"marker").unwrap();
 
         // same key again, well inside the window: memory is refreshed, disk is not touched
-        CoreStorage::remember_known_ratchet(&mut storage, hash, [0xaa; 32], 5_000 + RATCHET_REFRESH_MS - 1);
+        CoreStorage::remember_known_ratchet(
+            &mut storage,
+            hash,
+            [0xaa; 32],
+            5_000 + RATCHET_REFRESH_MS - 1,
+        );
         crate::write_behind::sync();
-        assert_eq!(std::fs::read(&file_path).unwrap(), b"marker", "unchanged ratchet must not be rewritten");
-        assert_eq!(CoreStorage::get_known_ratchet(&storage, &hash), Some([0xaa; 32]));
+        assert_eq!(
+            std::fs::read(&file_path).unwrap(),
+            b"marker",
+            "unchanged ratchet must not be rewritten"
+        );
+        assert_eq!(
+            CoreStorage::get_known_ratchet(&storage, &hash),
+            Some([0xaa; 32])
+        );
 
         // window elapsed: timestamp refresh reaches the disk
-        CoreStorage::remember_known_ratchet(&mut storage, hash, [0xaa; 32], 5_000 + RATCHET_REFRESH_MS);
+        CoreStorage::remember_known_ratchet(
+            &mut storage,
+            hash,
+            [0xaa; 32],
+            5_000 + RATCHET_REFRESH_MS,
+        );
         crate::write_behind::sync();
-        assert_ne!(std::fs::read(&file_path).unwrap(), b"marker", "stale timestamp must be refreshed");
+        assert_ne!(
+            std::fs::read(&file_path).unwrap(),
+            b"marker",
+            "stale timestamp must be refreshed"
+        );
 
         // a different key is always written at once
         std::fs::write(&file_path, b"marker").unwrap();
-        CoreStorage::remember_known_ratchet(&mut storage, hash, [0xbb; 32], 5_000 + RATCHET_REFRESH_MS + 1);
+        CoreStorage::remember_known_ratchet(
+            &mut storage,
+            hash,
+            [0xbb; 32],
+            5_000 + RATCHET_REFRESH_MS + 1,
+        );
         crate::write_behind::sync();
-        assert_ne!(std::fs::read(&file_path).unwrap(), b"marker", "changed ratchet must be written");
-        assert_eq!(CoreStorage::get_known_ratchet(&storage, &hash), Some([0xbb; 32]));
+        assert_ne!(
+            std::fs::read(&file_path).unwrap(),
+            b"marker",
+            "changed ratchet must be written"
+        );
+        assert_eq!(
+            CoreStorage::get_known_ratchet(&storage, &hash),
+            Some([0xbb; 32])
+        );
 
         // after a restart the loaded timestamp counts as already saved
         drop(storage);
@@ -2386,8 +2439,38 @@ mod tests {
         );
         CoreStorage::remember_known_ratchet(&mut storage2, hash, [0xbb; 32], mono + 10);
         crate::write_behind::sync();
-        assert_eq!(std::fs::read(&file_path).unwrap(), b"marker", "freshly loaded ratchet must not be rewritten at once");
+        assert_eq!(
+            std::fs::read(&file_path).unwrap(),
+            b"marker",
+            "freshly loaded ratchet must not be rewritten at once"
+        );
         let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[test]
+    fn changed_ratchet_enqueue_failure_does_not_suppress_the_next_observation() {
+        let (mut storage, path) = unique_temp_storage("kr_retry_enqueue");
+        let hash = [0x2A; TRUNCATED_HASHBYTES];
+        let dir = path.path().join(RATCHETS_DIR);
+        CoreStorage::remember_known_ratchet(&mut storage, hash, [0xA1; 32], 1_000);
+        crate::write_behind::sync();
+
+        std::fs::remove_file(dir.join(hex_encode(&hash))).unwrap();
+        std::fs::remove_dir(&dir).unwrap();
+        std::fs::write(&dir, b"not a directory").unwrap();
+        CoreStorage::remember_known_ratchet(&mut storage, hash, [0xB2; 32], 10_000);
+        std::fs::remove_file(&dir).unwrap();
+        std::fs::create_dir(&dir).unwrap();
+
+        // Same key well inside the refresh window: this must retry because the
+        // first changed-key enqueue failed and cannot inherit A's saved time.
+        CoreStorage::remember_known_ratchet(&mut storage, hash, [0xB2; 32], 70_000);
+        crate::write_behind::sync();
+        let restored = Storage::new(path.path()).unwrap();
+        assert_eq!(
+            CoreStorage::get_known_ratchet(&restored, &hash),
+            Some([0xB2; 32])
+        );
     }
 
     #[test]

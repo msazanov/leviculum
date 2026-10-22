@@ -378,10 +378,28 @@ impl DirCache {
             .collect();
         for name in &expired {
             // Prune stale/unknown-type records from disk, matching Python (в фоне, см. write_behind.rs).
-            if let Err(error) = crate::write_behind::remove(dir.join(name)) {
-                tracing::warn!("discovery record removal was not queued: {error}");
+            match crate::write_behind::remove_unless_pending_write(dir.join(name)) {
+                Ok(true) => {
+                    self.files.remove(name);
+                }
+                Ok(false) => {
+                    // A newer announce is already queued for this filename.
+                    // Refresh the listing from its read-your-writes bytes so
+                    // the stale on-disk record is neither deleted nor served.
+                    let path = dir.join(name);
+                    if let Ok(bytes) = crate::write_behind::read_latest(&path) {
+                        if let Some(entry) = decode_record_bytes(&path, &bytes) {
+                            if let Some(file) = self.files.get_mut(name) {
+                                file.entry = entry;
+                            }
+                        }
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!("discovery record removal was not queued: {error}");
+                    self.files.remove(name);
+                }
             }
-            self.files.remove(name);
         }
 
         if rebuild || !expired.is_empty() {
@@ -427,6 +445,10 @@ fn listing_order(
 /// directory both stacks share (Codeberg #157).
 fn decode_record_file(path: &Path) -> Option<CachedEntry> {
     let bytes = std::fs::read(path).ok()?;
+    decode_record_bytes(path, &bytes)
+}
+
+fn decode_record_bytes(path: &Path, bytes: &[u8]) -> Option<CachedEntry> {
     if let Some(record) = DiscoveredInterfaceRecord::decode_msgpack(&bytes) {
         return Some(CachedEntry::Record(Arc::new(record)));
     }
@@ -452,6 +474,10 @@ pub(crate) fn list_discovered_interfaces(storage_root: &Path, now: f64) -> Disco
     // Тесты читают диск сразу после записи; в работе листинг не ждёт фоновую очередь.
     #[cfg(test)]
     crate::write_behind::sync();
+    list_discovered_interfaces_impl(storage_root, now)
+}
+
+fn list_discovered_interfaces_impl(storage_root: &Path, now: f64) -> DiscoveredList {
     let dir = discovery_dir(storage_root);
     // Read before the directory, so a write racing the scan bumps it past
     // what the cache records and the next listing looks again.
@@ -476,6 +502,11 @@ pub(crate) fn list_discovered_interfaces(storage_root: &Path, now: f64) -> Disco
     }
     cache.assemble(&dir, now, rebuild);
     Arc::clone(&cache.sorted)
+}
+
+#[cfg(test)]
+fn list_discovered_interfaces_no_sync(storage_root: &Path, now: f64) -> DiscoveredList {
+    list_discovered_interfaces_impl(storage_root, now)
 }
 
 #[cfg(test)]
@@ -549,6 +580,37 @@ mod tests {
         let dir = discovery_dir(td.path());
         let remaining: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().collect();
         assert!(remaining.is_empty(), "expired record unlinked from disk");
+    }
+
+    #[test]
+    fn expiry_does_not_remove_a_newer_queued_announce_for_the_same_record() {
+        use leviculum_core::discovery::THRESHOLD_REMOVE;
+        let td = tempfile::tempdir().unwrap();
+        let di = rnode_di("Reannounced", 0x31);
+        persist_discovered(td.path(), &di, 1, 1_000.0).unwrap();
+        crate::write_behind::sync();
+        assert_eq!(
+            list_discovered_interfaces_no_sync(td.path(), 1_000.0).len(),
+            1
+        );
+
+        let release = crate::write_behind::pause_global();
+        let fresh_at = 1_000.0 + THRESHOLD_REMOVE + 20.0;
+        persist_discovered(td.path(), &di, 1, fresh_at).unwrap();
+        let list = list_discovered_interfaces_no_sync(td.path(), fresh_at);
+        assert_eq!(
+            list.len(),
+            1,
+            "the fresh queued re-announce remains visible"
+        );
+        assert_eq!(list[0].last_heard, fresh_at);
+
+        release.send(()).unwrap();
+        crate::write_behind::sync();
+        let path = discovery_dir(td.path()).join(crate::storage::hex_encode(&di.discovery_hash));
+        let record = DiscoveredInterfaceRecord::decode_msgpack(&std::fs::read(path).unwrap())
+            .expect("fresh record is kept on disk");
+        assert_eq!(record.last_heard, fresh_at);
     }
 
     /// Codeberg #157: a corrupt record used to be re-warned on every scan, so

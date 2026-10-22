@@ -64,6 +64,7 @@ fn decode_known_ratchet(data: &[u8]) -> Option<([u8; RATCHET_SIZE], f64)> {
 pub(crate) struct FileRatchetStore {
     ratchets_dir: PathBuf,
     ratchetkeys_dir: PathBuf,
+    permissions_checked: bool,
 }
 
 impl FileRatchetStore {
@@ -71,6 +72,7 @@ impl FileRatchetStore {
         Self {
             ratchets_dir: storage_dir.join(RATCHETS_DIR),
             ratchetkeys_dir: storage_dir.join(RATCHETKEYS_DIR),
+            permissions_checked: false,
         }
     }
 
@@ -106,15 +108,21 @@ impl FileRatchetStore {
     /// files. Open the directory without following the final symlink, then use
     /// openat(O_NOFOLLOW) for entries so a symlink or arbitrary filename can
     /// never redirect chmod outside this store.
-    fn secure_existing_ratchetkeys(&self) -> std::io::Result<()> {
+    fn secure_existing_ratchetkeys(&mut self) -> std::io::Result<()> {
+        if self.permissions_checked {
+            return Ok(());
+        }
+        if !self.ratchetkeys_dir.exists() {
+            return Ok(());
+        }
         #[cfg(unix)]
         {
-            secure_existing_private_dir(&self.ratchetkeys_dir)
+            secure_existing_private_dir(&self.ratchetkeys_dir)?;
         }
         #[cfg(not(unix))]
-        {
-            Ok(())
-        }
+        {}
+        self.permissions_checked = true;
+        Ok(())
     }
 
     fn write(path: &Path, data: &[u8]) -> core::result::Result<(), Error> {
@@ -156,7 +164,9 @@ fn secure_existing_private_dir(dir: &Path) -> std::io::Result<()> {
     }
 
     // Tighten the directory first, so other users cannot race the migration.
-    directory.set_permissions(std::fs::Permissions::from_mode(0o700))?;
+    if opened.mode() & 0o777 != 0o700 {
+        directory.set_permissions(std::fs::Permissions::from_mode(0o700))?;
+    }
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
@@ -165,10 +175,23 @@ fn secure_existing_private_dir(dir: &Path) -> std::io::Result<()> {
         if !hex_decode(&name).is_some_and(|bytes| bytes.len() == TRUNCATED_HASHBYTES) {
             continue;
         }
-        if let Some(file) = open_private_key_file_at(&directory, &name)? {
-            if file.metadata()?.nlink() == 1 {
-                file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        match open_private_key_file_at(&directory, &name) {
+            Ok(Some(file)) => {
+                let metadata = match file.metadata() {
+                    Ok(metadata) => metadata,
+                    Err(error) => {
+                        tracing::warn!("ratchetkeys: cannot inspect key file {name}: {error}");
+                        continue;
+                    }
+                };
+                if metadata.nlink() == 1 && metadata.mode() & 0o777 != 0o600 {
+                    if let Err(error) = file.set_permissions(std::fs::Permissions::from_mode(0o600)) {
+                        tracing::warn!("ratchetkeys: cannot secure key file {name}: {error}");
+                    }
+                }
             }
+            Ok(None) => tracing::warn!("ratchetkeys: refusing unsafe key file {name} (symlink, hardlink, owner, or file type check)"),
+            Err(error) => tracing::warn!("ratchetkeys: cannot inspect key file {name}: {error}"),
         }
     }
     Ok(())
@@ -365,7 +388,14 @@ impl RatchetStore for FileRatchetStore {
                     let _ = std::fs::remove_file(entry.path());
                     continue;
                 }
-                Ok(None) | Err(_) => continue,
+                Ok(None) => {
+                    tracing::warn!("ratchetkeys: refusing unsafe key file {name} (symlink, hardlink, owner, or file type check)");
+                    continue;
+                }
+                Err(error) => {
+                    tracing::warn!("ratchetkeys: cannot read key file {name}: {error}");
+                    continue;
+                }
             };
 
             entries.push((hash_bytes, data));
@@ -384,6 +414,16 @@ impl RatchetStore for FileRatchetStore {
         self.secure_existing_ratchetkeys()
             .map_err(|e| Error::Storage(format!("ratchetkeys permissions: {e}")))?;
         let hex_name = hex_encode(dest_hash);
+        #[cfg(unix)]
+        if self.ratchetkeys_dir.join(&hex_name).exists()
+            && !read_private_key_file(&self.ratchetkeys_dir, &hex_name)
+                .map_err(|e| Error::Storage(format!("ratchetkeys key preflight {hex_name}: {e}")))?
+                .is_some()
+        {
+            return Err(Error::Storage(format!(
+                "ratchetkeys key preflight {hex_name}: refusing to replace unsafe existing key"
+            )));
+        }
         Self::write(&self.ratchetkeys_dir.join(&hex_name), serialized)
     }
 }
@@ -479,7 +519,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn existing_private_store_permissions_are_migrated_without_following_links() {
-        use std::os::unix::fs::{PermissionsExt, symlink};
+        use std::os::unix::fs::{symlink, PermissionsExt};
 
         let root = tempfile::tempdir().unwrap();
         let dir = root.path().join(RATCHETKEYS_DIR);
@@ -506,24 +546,57 @@ mod tests {
         let mut store = FileRatchetStore::new(root.path());
         let keys = store.load_dest_ratchet_keys().unwrap();
         assert_eq!(keys, vec![(owned_hash, b"owned private key".to_vec())]);
-        let mode = |path: &Path| {
-            std::fs::metadata(path).unwrap().permissions().mode() & 0o777
-        };
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(&dir), 0o700);
         assert_eq!(mode(&owned_key), 0o600);
         assert_eq!(mode(&foreign_name), 0o644);
         assert_eq!(mode(&victim), 0o644);
-        assert!(std::fs::symlink_metadata(dir.join(hex_encode(&linked_hash)))
-            .unwrap()
-            .file_type()
-            .is_symlink());
+        assert!(
+            std::fs::symlink_metadata(dir.join(hex_encode(&linked_hash)))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
         assert!(dir.join(hex_encode(&hardlinked_hash)).exists());
+        assert!(
+            store
+                .save_dest_ratchet_keys(&hardlinked_hash, b"replacement")
+                .is_err(),
+            "an unsafe existing private key must not be silently replaced"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_permissions_migrate_once_and_leave_already_secure_key_ctime_alone() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join(RATCHETKEYS_DIR);
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let first = [0x41; TRUNCATED_HASHBYTES];
+        let first_path = dir.join(hex_encode(&first));
+        std::fs::write(&first_path, b"private key").unwrap();
+        std::fs::set_permissions(&first_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let mut store = FileRatchetStore::new(root.path());
+        store.load_dest_ratchet_keys().unwrap();
+        let ctime = std::fs::metadata(&first_path).unwrap().ctime_nsec();
+        store
+            .save_dest_ratchet_keys(&[0x42; TRUNCATED_HASHBYTES], b"another key")
+            .unwrap();
+        assert_eq!(
+            std::fs::metadata(&first_path).unwrap().ctime_nsec(),
+            ctime,
+            "saving another destination must not re-chmod every existing key"
+        );
     }
 
     #[cfg(unix)]
     #[test]
     fn private_store_directory_symlink_is_rejected_without_chmodding_target() {
-        use std::os::unix::fs::{PermissionsExt, symlink};
+        use std::os::unix::fs::{symlink, PermissionsExt};
 
         let root = tempfile::tempdir().unwrap();
         let target = tempfile::tempdir().unwrap();
@@ -536,7 +609,11 @@ mod tests {
         let mut store = FileRatchetStore::new(root.path());
         assert!(store.load_dest_ratchet_keys().is_err());
         assert_eq!(
-            std::fs::metadata(target.path()).unwrap().permissions().mode() & 0o777,
+            std::fs::metadata(target.path())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
             0o755
         );
         assert_eq!(
