@@ -566,6 +566,51 @@ mod tests {
         );
     }
 
+    /// One key file the owner cannot read (mode 000) used to abort the
+    /// migration, and with it the load and every later save of all private
+    /// ratchet keys. Per-file errors are isolated; only directory-level errors
+    /// stay fatal.
+    #[cfg(unix)]
+    #[test]
+    fn one_unreadable_key_file_does_not_block_the_other_private_keys() {
+        use std::os::unix::fs::PermissionsExt;
+        if unsafe { libc::geteuid() } == 0 {
+            return; // root ignores file mode bits
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join(RATCHETKEYS_DIR);
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let bad = [0x51; TRUNCATED_HASHBYTES];
+        let good = [0x52; TRUNCATED_HASHBYTES];
+        for (hash, mode) in [(bad, 0o000), (good, 0o644)] {
+            let path = dir.join(hex_encode(&hash));
+            std::fs::write(&path, b"private key").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+
+        let mut store = FileRatchetStore::new(root.path());
+        let loaded = store
+            .load_dest_ratchet_keys()
+            .expect("a single bad key file is not a directory-level failure");
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].0, good);
+        let mode = |hash: &[u8; TRUNCATED_HASHBYTES]| {
+            std::fs::metadata(dir.join(hex_encode(hash)))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777
+        };
+        assert_eq!(mode(&good), 0o600, "the readable key is still migrated");
+        assert_eq!(mode(&bad), 0o000, "the unreadable key is left alone");
+
+        store
+            .save_dest_ratchet_keys(&[0x53; TRUNCATED_HASHBYTES], b"new key")
+            .expect("saving another destination is not blocked");
+    }
+
     #[cfg(unix)]
     #[test]
     fn private_permissions_migrate_once_and_leave_already_secure_key_ctime_alone() {

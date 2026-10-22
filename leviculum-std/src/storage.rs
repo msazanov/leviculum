@@ -2473,6 +2473,45 @@ mod tests {
         );
     }
 
+    /// The enqueue succeeds, then the worker fails (directory not writable):
+    /// the later observation of the same key must retry instead of inheriting
+    /// the refresh window of data that never reached disk.
+    #[cfg(unix)]
+    #[test]
+    fn async_known_ratchet_write_failure_is_retried_on_the_next_observation() {
+        use std::os::unix::fs::PermissionsExt;
+        if unsafe { libc::geteuid() } == 0 {
+            return; // root ignores directory mode bits
+        }
+        let (mut storage, path) = unique_temp_storage("kr_retry_async");
+        let hash = [0x2B; TRUNCATED_HASHBYTES];
+        let dir = path.path().join(RATCHETS_DIR);
+        CoreStorage::remember_known_ratchet(&mut storage, hash, [0xA1; 32], 1_000);
+        crate::write_behind::sync();
+
+        let release = crate::write_behind::pause_global();
+        CoreStorage::remember_known_ratchet(&mut storage, hash, [0xB2; 32], 10_000);
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        release.send(()).unwrap();
+        crate::write_behind::sync();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let on_disk = Storage::new(path.path()).unwrap();
+        assert_eq!(
+            CoreStorage::get_known_ratchet(&on_disk, &hash),
+            Some([0xA1; 32]),
+            "the failed worker write left the old key on disk"
+        );
+
+        // Same key, well inside the refresh window of the (lost) save.
+        CoreStorage::remember_known_ratchet(&mut storage, hash, [0xB2; 32], 70_000);
+        crate::write_behind::sync();
+        let restored = Storage::new(path.path()).unwrap();
+        assert_eq!(
+            CoreStorage::get_known_ratchet(&restored, &hash),
+            Some([0xB2; 32])
+        );
+    }
+
     #[test]
     fn test_dest_ratchet_keys_persist_to_disk() {
         let (mut storage, path) = unique_temp_storage("drk_persist");
