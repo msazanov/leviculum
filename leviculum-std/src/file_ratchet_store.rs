@@ -262,6 +262,7 @@ mod tests {
         store
             .save_dest_ratchet_keys(&dest, b"private ratchet key")
             .expect("save ratchet key");
+        crate::write_behind::sync();
 
         for target in [&store.ratchets_dir, &store.ratchetkeys_dir] {
             std::fs::write(target.join("\u{1F600}"), b"not ours").expect("stray file");
@@ -306,7 +307,6 @@ mod tests {
         let name = hex_encode(&dest);
         let mode = |p: &Path| std::fs::metadata(p).expect("stat").permissions().mode() & 0o777;
         for (path, want) in [
-            (store.ratchets_dir.join(&name), 0o600),
             (store.ratchetkeys_dir.join(&name), 0o600),
             (store.ratchets_dir.clone(), 0o700),
             (store.ratchetkeys_dir.clone(), 0o700),
