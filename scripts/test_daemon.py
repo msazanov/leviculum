@@ -225,6 +225,7 @@ class TestDaemon:
         # i.e. whether its data proof reached this Python peer's PacketReceipt.
         self.packet_receipts = {}  # receipt_id -> RNS.PacketReceipt
         self.next_receipt_id = 1
+        self.channel_sends = {}  # (link_hash, sequence) -> RNS.Channel.Envelope
         # Tracked RequestReceipts from send_link_request (Python as Link.request
         # client against a Rust responder).
         self.request_receipts = {}  # request_id -> RNS.RequestReceipt
@@ -1050,6 +1051,44 @@ class TestDaemon:
                 return {"result": "sent"}
             except Exception as e:
                 return {"error": f"Send failed: {str(e)}"}
+
+        elif method == "send_channel_message":
+            # Send a RawBytesMessage through RNS.Channel (not RNS.Packet), for
+            # CBC PacketHash proof/ACK interop tests.
+            link_hash = params.get("link_hash")
+            data = params.get("data")
+            if not link_hash or data is None:
+                return {"error": "link_hash and data required"}
+            link = self.links.get(link_hash)
+            if link is None:
+                return {"error": f"Link {link_hash} not found"}
+            try:
+                channel = link.get_channel()
+                channel.register_message_type(RawBytesMessage)
+                message = RawBytesMessage()
+                message.data = bytes.fromhex(data)
+                envelope = channel.send(message)
+                key = (link_hash, envelope.sequence)
+                self.channel_sends[key] = envelope
+                return {"result": {"sequence": envelope.sequence}}
+            except Exception as e:
+                return {"error": f"Channel send failed: {str(e)}"}
+
+        elif method == "get_channel_send_state":
+            link_hash = params.get("link_hash")
+            sequence = params.get("sequence")
+            if not link_hash or sequence is None:
+                return {"error": "link_hash and sequence required"}
+            envelope = self.channel_sends.get((link_hash, int(sequence)))
+            link = self.links.get(link_hash)
+            if envelope is None or link is None:
+                return {"error": "tracked channel send not found"}
+            channel = link.get_channel()
+            state = channel._outlet.get_packet_state(envelope.packet)
+            with channel._lock:
+                pending = any(item.sequence == int(sequence) for item in channel._tx_ring)
+                tries = envelope.tries
+            return {"result": {"state": state.name, "pending": pending, "tries": tries}}
 
         elif method == "add_client_interface":
             # Connect this daemon to another daemon's TCPServerInterface
