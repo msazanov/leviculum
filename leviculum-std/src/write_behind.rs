@@ -8,8 +8,11 @@
 //! Private ratchet keys do not use this module; they remain synchronous through
 //! `atomic_write_secret`. This is a cache, not a durability boundary: queued
 //! public ratchet/discovery writes can be lost on process shutdown or power
-//! failure and are learned again from later announces. Private ratchet keys do
-//! not use this module.
+//! failure and are learned again from later announces.
+//!
+//! The byte budget counts each queued payload once. A pending write is held
+//! twice (in the job and in the read-your-writes mirror), so the worst-case
+//! heap use is about twice `MAX_PENDING_BYTES`.
 
 use std::collections::{BTreeMap, HashSet};
 use std::io;
@@ -39,6 +42,8 @@ enum Job {
         entered: SyncSender<()>,
         release: Receiver<()>,
     },
+    #[cfg(test)]
+    Panic,
 }
 
 #[derive(Default)]
@@ -110,7 +115,7 @@ impl Writer {
             Ok(()) => Ok(true),
             Err(mpsc::TrySendError::Full(_)) => {
                 restore_latest(&mut latest, path, seq, previous);
-                self.state.pending.fetch_sub(1, Ordering::AcqRel);
+                self.release(0);
                 Err(io::Error::new(
                     io::ErrorKind::WouldBlock,
                     "write-behind queue is full",
@@ -118,13 +123,30 @@ impl Writer {
             }
             Err(mpsc::TrySendError::Disconnected(_)) => {
                 restore_latest(&mut latest, path, seq, previous);
-                self.state.pending.fetch_sub(1, Ordering::AcqRel);
+                self.release(0);
                 Err(io::Error::new(
                     io::ErrorKind::BrokenPipe,
                     "write-behind worker stopped",
                 ))
             }
         }
+    }
+
+    /// Give back a reservation that never reached the worker. Saturating: a
+    /// dead worker resets the counters, and a racing producer must not wrap them.
+    fn release(&self, bytes: usize) {
+        let _ = self
+            .state
+            .pending
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                Some(n.saturating_sub(1))
+            });
+        let _ = self
+            .state
+            .pending_bytes
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                Some(n.saturating_sub(bytes))
+            });
     }
 
     fn reserve(&self, bytes: usize) -> bool {
@@ -149,11 +171,11 @@ impl Writer {
         let mut current_bytes = self.state.pending_bytes.load(Ordering::Acquire);
         loop {
             let Some(next_bytes) = current_bytes.checked_add(bytes) else {
-                self.state.pending.fetch_sub(1, Ordering::AcqRel);
+                self.release(0);
                 return false;
             };
             if next_bytes > MAX_PENDING_BYTES {
-                self.state.pending.fetch_sub(1, Ordering::AcqRel);
+                self.release(0);
                 return false;
             }
             match self.state.pending_bytes.compare_exchange_weak(
@@ -221,8 +243,7 @@ impl Writer {
             Ok(()) => Ok(seq),
             Err(mpsc::TrySendError::Full(_)) => {
                 restore_latest(&mut latest, path, seq, previous);
-                self.state.pending.fetch_sub(1, Ordering::AcqRel);
-                self.state.pending_bytes.fetch_sub(bytes, Ordering::AcqRel);
+                self.release(bytes);
                 Err(io::Error::new(
                     io::ErrorKind::WouldBlock,
                     "write-behind queue is full",
@@ -230,8 +251,7 @@ impl Writer {
             }
             Err(mpsc::TrySendError::Disconnected(_)) => {
                 restore_latest(&mut latest, path, seq, previous);
-                self.state.pending.fetch_sub(1, Ordering::AcqRel);
-                self.state.pending_bytes.fetch_sub(bytes, Ordering::AcqRel);
+                self.release(bytes);
                 Err(io::Error::new(
                     io::ErrorKind::BrokenPipe,
                     "write-behind worker stopped",
@@ -332,49 +352,71 @@ fn restore_latest(
 }
 
 fn run(rx: Receiver<Job>, state: Arc<State>) {
-    for job in rx {
-        let (path, seq, bytes, result) = match job {
-            Job::Write { path, data, seq } => {
-                let bytes = data.len();
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    write_now(&path, &data)
-                }))
-                .unwrap_or_else(|_| Err(io::Error::other("write-behind write panicked")));
-                (path, seq, bytes, result)
+    let worker_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        for job in rx {
+            let (path, seq, bytes, result) = match job {
+                Job::Write { path, data, seq } => {
+                    let bytes = data.len();
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        write_now(&path, &data)
+                    }))
+                    .unwrap_or_else(|_| Err(io::Error::other("write-behind write panicked")));
+                    (path, seq, bytes, result)
+                }
+                Job::Remove { path, seq } => {
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        remove_now(&path)
+                    }))
+                    .unwrap_or_else(|_| Err(io::Error::other("write-behind remove panicked")));
+                    (path, seq, 0, result)
+                }
+                #[cfg(test)]
+                Job::Barrier(done) => {
+                    let _ = done.send(());
+                    continue;
+                }
+                #[cfg(test)]
+                Job::Pause { entered, release } => {
+                    let _ = entered.send(());
+                    let _ = release.recv();
+                    continue;
+                }
+                #[cfg(test)]
+                Job::Panic => panic!("injected worker panic"),
+            };
+            if let Err(error) = &result {
+                tracing::warn!("write-behind operation failed: {error}");
+                let mut failures = state
+                    .failed_writes
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                if failures.contains(&path) || failures.len() < MAX_FAILED_WRITES {
+                    failures.insert(path.clone());
+                } else {
+                    tracing::warn!(
+                        "write-behind failure markers are full; retry signal for this path was not retained"
+                    );
+                }
             }
-            Job::Remove { path, seq } => {
-                let result =
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| remove_now(&path)))
-                        .unwrap_or_else(|_| Err(io::Error::other("write-behind remove panicked")));
-                (path, seq, 0, result)
-            }
-            #[cfg(test)]
-            Job::Barrier(done) => {
-                let _ = done.send(());
-                continue;
-            }
-            #[cfg(test)]
-            Job::Pause { entered, release } => {
-                let _ = entered.send(());
-                let _ = release.recv();
-                continue;
-            }
-        };
-        if let Err(error) = &result {
-            tracing::warn!("write-behind operation failed: {error}");
-            let mut failures = state
-                .failed_writes
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            if failures.contains(&path) || failures.len() < MAX_FAILED_WRITES {
-                failures.insert(path.clone());
-            } else {
-                tracing::warn!("write-behind failure markers are full; retry signal for this path was not retained");
-            }
+            settled(&state, &path, seq);
+            state.pending.fetch_sub(1, Ordering::AcqRel);
+            state.pending_bytes.fetch_sub(bytes, Ordering::AcqRel);
         }
-        settled(&state, &path, seq);
-        state.pending.fetch_sub(1, Ordering::AcqRel);
-        state.pending_bytes.fetch_sub(bytes, Ordering::AcqRel);
+    }));
+    if worker_result.is_err() {
+        state
+            .latest
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        state
+            .failed_writes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        state.pending.store(0, Ordering::Release);
+        state.pending_bytes.store(0, Ordering::Release);
+        tracing::error!("write-behind worker panicked; stale in-memory cache cleared");
     }
 }
 
@@ -725,5 +767,37 @@ mod tests {
         writer.sync();
         assert_eq!(std::fs::read(path).unwrap(), b"fresh");
         assert_eq!(writer.pending(), 0);
+    }
+
+    #[test]
+    fn unexpected_worker_panic_clears_stale_mirror_and_accounting() {
+        let (writer, dir) = writer(4);
+        let release = writer.pause_worker();
+        let path = dir.path().join("queued-before-worker-panic");
+        writer
+            .tx
+            .try_send(Job::Panic)
+            .expect("inject panic after pause");
+        writer
+            .write(path.clone(), b"not persisted".to_vec())
+            .unwrap();
+        assert_eq!(writer.read_latest(&path).unwrap(), b"not persisted");
+        release.send(()).unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while writer.pending() != 0 && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert_eq!(writer.pending(), 0);
+        assert_eq!(writer.pending_bytes(), 0);
+        assert_eq!(
+            writer.read_latest(&path).unwrap_err().kind(),
+            io::ErrorKind::NotFound,
+            "worker panic clears unpersisted read-your-writes state"
+        );
+        assert_eq!(
+            writer.write(path, b"retry".to_vec()).unwrap_err().kind(),
+            io::ErrorKind::BrokenPipe
+        );
     }
 }
