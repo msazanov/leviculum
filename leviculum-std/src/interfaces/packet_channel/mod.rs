@@ -147,7 +147,7 @@ where
                         }
                         task_counters.rx_bytes.fetch_add(data.len() as u64, Ordering::Relaxed);
                         // A full queue drops the packet (this is a datagram interface), it never stalls the carrier.
-                        match incoming_tx.try_send(IncomingPacket { data }) {
+                        match incoming_tx.try_send(IncomingPacket { data, peer: None, radio: None }) {
                             Ok(()) => {}
                             Err(mpsc::error::TrySendError::Full(_)) => {
                                 RX_QUEUE_DROPPED.fetch_add(1, Ordering::Relaxed);
@@ -159,7 +159,7 @@ where
                             match source.try_recv() {
                                 Some(Ok(data)) if data.len() <= hw_mtu => {
                                     task_counters.rx_bytes.fetch_add(data.len() as u64, Ordering::Relaxed);
-                                    match incoming_tx.try_send(IncomingPacket { data }) {
+                                    match incoming_tx.try_send(IncomingPacket { data, peer: None, radio: None }) {
                                         Ok(()) => {}
                                         Err(mpsc::error::TrySendError::Full(_)) => {
                                             RX_QUEUE_DROPPED.fetch_add(1, Ordering::Relaxed);
@@ -233,6 +233,8 @@ where
         // Reliable-or-not, the carrier does its own pacing (QUIC congestion control): no airtime budget.
         credit: None,
         ready,
+        teardown: None,
+        next_tag: None,
     }
 }
 

@@ -4439,6 +4439,7 @@ fn prepare_cheap(iface: InterfaceId, data: Vec<u8>) -> PreparedRx {
 fn prepare_hash_free(iface: InterfaceId, data: Vec<u8>) -> PreparedRx {
     PreparedRx {
         iface,
+        peer: None,
         data,
         pre: leviculum_core::node::PrecomputedRx::default(),
         evict_decryptor_for: None,

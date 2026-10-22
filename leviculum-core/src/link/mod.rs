@@ -4641,7 +4641,7 @@ mod tests {
         assert!(a.process_proof(&corrupted[19..]).is_err());
         a.process_proof(&proof[19..]).unwrap();
         let rtt = a.build_rtt_packet(0.001, &mut OsRng).unwrap();
-        b.process_rtt(&rtt[19..]).unwrap();
+        b.process_rtt(&rtt[19..], 1_000).unwrap();
         let mut token = alloc::vec![0; 16100];
         let mut out = alloc::vec![0; 16100];
         let n = a.encrypt(&[7; 16000], &mut token, &mut OsRng).unwrap();

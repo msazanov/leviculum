@@ -27728,6 +27728,8 @@ mod tests {
                     proof_timeout_ms: now + 900_000,
                     destination_hash: [0xBB; TRUNCATED_HASHBYTES],
                     peer_signing_key: None,
+                    received_peer: None,
+                    next_hop_peer: None,
                 },
             );
             transport
