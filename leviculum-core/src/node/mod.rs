@@ -11120,6 +11120,51 @@ mod tests {
     }
 
     #[test]
+    fn test_gcm_rtt_retry_stops_at_previous_five_retry_budget() {
+        use crate::packet::{Packet, PacketContext};
+
+        let (mut initiator, _responder, init_link_id, _resp_link_id, _lost_rtt) =
+            establish_link_pair_without_rtt_with_cipher(crate::LinkCipher::Gcm);
+        initiator
+            .link_mut(&init_link_id)
+            .unwrap()
+            .set_timing_for_test(3_600_000, 3_600_000, TEST_TIME_MS);
+        let interval = initiator
+            .link(&init_link_id)
+            .unwrap()
+            .rtt_retry_interval_ms();
+
+        for retry in 1..=crate::constants::RTT_RETRY_MAX_ATTEMPTS {
+            initiator
+                .transport()
+                .clock()
+                .set(TEST_TIME_MS + interval * retry as u64);
+            let output = initiator.handle_timeout();
+            let rtts = extract_all_action_data(&output)
+                .iter()
+                .filter_map(|raw| Packet::unpack(raw).ok())
+                .filter(|packet| packet.context == PacketContext::Lrrtt)
+                .count();
+            assert_eq!(rtts, 1, "retry {retry} should send exactly one LRRTT");
+            assert_eq!(
+                initiator.link(&init_link_id).unwrap().rtt_send_count(),
+                retry + 1
+            );
+        }
+
+        initiator
+            .transport()
+            .clock()
+            .set(TEST_TIME_MS + interval * (crate::constants::RTT_RETRY_MAX_ATTEMPTS as u64 + 1));
+        let exhausted = initiator.handle_timeout();
+        assert!(!extract_all_action_data(&exhausted)
+            .iter()
+            .filter_map(|raw| Packet::unpack(raw).ok())
+            .any(|packet| packet.context == PacketContext::Lrrtt));
+        assert_eq!(initiator.link(&init_link_id).unwrap().rtt_send_count(), 6);
+    }
+
+    #[test]
     fn test_gcm_duplicate_rtt_does_not_reestablish_or_change_activity() {
         use crate::transport::InterfaceId;
 

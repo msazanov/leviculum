@@ -3887,6 +3887,19 @@ mod tests {
     }
 
     #[test]
+    fn gcm_rtt_retry_interval_is_three_rtts_with_ten_second_floor() {
+        let dest_hash = DestinationHash::new([0x4A; TRUNCATED_HASHBYTES]);
+        let mut link = Link::new_outgoing(dest_hash, &mut OsRng);
+        link.set_rtt_ms(3_000);
+        assert_eq!(link.rtt_retry_interval_ms(), RTT_RETRY_MIN_INTERVAL_MS);
+        link.set_rtt_ms(4_000);
+        assert_eq!(
+            link.rtt_retry_interval_ms(),
+            4_000 * RTT_RETRY_INTERVAL_MULTIPLIER
+        );
+    }
+
+    #[test]
     fn test_link_established_at_clock_zero_can_go_stale() {
         let dest_hash = DestinationHash::new([0x42; TRUNCATED_HASHBYTES]);
         let mut link = Link::new_outgoing(dest_hash, &mut OsRng);
