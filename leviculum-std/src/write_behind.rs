@@ -112,8 +112,15 @@ impl Writer {
             .wrapping_add(1);
         let previous = latest.insert(path.clone(), (seq, data.clone()));
         let job = match data {
-            Some(data) => Job::Write { path: path.clone(), data, seq },
-            None => Job::Remove { path: path.clone(), seq },
+            Some(data) => Job::Write {
+                path: path.clone(),
+                data,
+                seq,
+            },
+            None => Job::Remove {
+                path: path.clone(),
+                seq,
+            },
         };
 
         match self.tx.try_send(job) {
@@ -181,7 +188,10 @@ fn restore_latest(
     seq: u64,
     previous: Option<(u64, Option<Vec<u8>>)>,
 ) {
-    if latest.get(&path).is_some_and(|(current, _)| *current == seq) {
+    if latest
+        .get(&path)
+        .is_some_and(|(current, _)| *current == seq)
+    {
         match previous {
             Some(previous) => {
                 latest.insert(path, previous);
@@ -252,7 +262,9 @@ fn queue() -> Option<&'static Writer> {
         .get_or_init(|| match Writer::spawn(MAX_PENDING) {
             Ok(writer) => Some(writer),
             Err(error) => {
-                tracing::warn!("background disk writer unavailable; using synchronous writes: {error}");
+                tracing::warn!(
+                    "background disk writer unavailable; using synchronous writes: {error}"
+                );
                 None
             }
         })
@@ -300,7 +312,10 @@ mod tests {
     use std::sync::Mutex;
 
     fn writer(capacity: usize) -> (Writer, tempfile::TempDir) {
-        (Writer::spawn(capacity).expect("writer thread"), tempfile::tempdir().unwrap())
+        (
+            Writer::spawn(capacity).expect("writer thread"),
+            tempfile::tempdir().unwrap(),
+        )
     }
 
     #[test]
@@ -312,10 +327,22 @@ mod tests {
 
         writer.write(path.clone(), b"first".to_vec()).unwrap();
         writer.remove(other.clone()).unwrap();
-        assert_eq!(writer.write(path.clone(), b"rejected".to_vec()).unwrap_err().kind(), io::ErrorKind::WouldBlock);
-        assert_eq!(writer.remove(path.clone()).unwrap_err().kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(
+            writer
+                .write(path.clone(), b"rejected".to_vec())
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
+        assert_eq!(
+            writer.remove(path.clone()).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
         assert_eq!(writer.read_latest(&path).unwrap(), b"first");
-        assert_eq!(writer.read_latest(&other).unwrap_err().kind(), io::ErrorKind::NotFound);
+        assert_eq!(
+            writer.read_latest(&other).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
 
         release.send(()).expect("release worker");
         writer.sync();
@@ -370,7 +397,10 @@ mod tests {
         let last = expected.lock().unwrap().1.clone();
         match &last {
             Some(data) => assert_eq!(writer.read_latest(&path).unwrap(), *data),
-            None => assert_eq!(writer.read_latest(&path).unwrap_err().kind(), io::ErrorKind::NotFound),
+            None => assert_eq!(
+                writer.read_latest(&path).unwrap_err().kind(),
+                io::ErrorKind::NotFound
+            ),
         }
         writer.sync();
         match last {
@@ -401,7 +431,9 @@ mod tests {
         // Enqueue succeeds asynchronously; the worker reports the filesystem
         // failure and releases the latest mirror/capacity instead of claiming
         // a durable write.
-        writer.write(path.clone(), b"first attempt".to_vec()).unwrap();
+        writer
+            .write(path.clone(), b"first attempt".to_vec())
+            .unwrap();
         writer.sync();
         assert!(matches!(
             writer.read_latest(&path).unwrap_err().kind(),

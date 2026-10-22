@@ -11,9 +11,9 @@ use crate::sync_ext::MutexRecover;
 
 use tokio::sync::mpsc;
 
-use leviculum_core::SendError;
 use leviculum_core::link::LinkId;
 use leviculum_core::transport::TickOutput;
+use leviculum_core::SendError;
 
 use super::StdNodeCore;
 use crate::error::Error;
@@ -389,7 +389,8 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         let (tx, mut rx) = mpsc::channel::<TickOutput>(1);
-        tx.try_send(TickOutput::empty()).expect("fill dispatch queue");
+        tx.try_send(TickOutput::empty())
+            .expect("fill dispatch queue");
         let commits = Arc::new(AtomicUsize::new(0));
         let task_tx = tx.clone();
         let task_commits = Arc::clone(&commits);
@@ -408,7 +409,11 @@ mod tests {
         assert_eq!(commits.load(Ordering::SeqCst), 0);
         task.abort();
         let _ = task.await;
-        assert_eq!(commits.load(Ordering::SeqCst), 0, "cancelled call did not commit");
+        assert_eq!(
+            commits.load(Ordering::SeqCst),
+            0,
+            "cancelled call did not commit"
+        );
 
         let _ = rx.try_recv().expect("remove queue filler");
         let committed = Arc::clone(&commits);
