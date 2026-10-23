@@ -37,7 +37,7 @@ and lnpnd takes announce-policy, one of the five
 telemetry-policy (`leviculum-core/Cargo.toml:55`). So "nRF" in their
 path is a misstatement of ownership, not a description.
 
-Above them, `leviculum-nrf/src` (34,930 lines with the binaries) glues
+Above them, `leviculum-nrf/src` (34,948 lines with the binaries) glues
 the policy to the nRF52840, and the glue has three shapes mixed in one
 tree:
 
@@ -62,7 +62,7 @@ tree:
   CDC (`usb.rs` 1464, which also holds the control-frame executor, see
   [the seams](#the-seams-and-their-shape)), QSPI and internal flash
   (`qspi.rs` 1188, `record_store.rs` 788, `flash.rs` 79), the SX1262
-  driver (`sx1262.rs` 1686), entropy from the SoftDevice (`rng.rs` 194),
+  driver (`sx1262.rs` 1704), entropy from the SoftDevice (`rng.rs` 194),
   the allocator and the panic post-mortem (`lib.rs` 1160: the allocator
   at `leviculum-nrf/src/lib.rs:266-269`, the panic counter at
   `leviculum-nrf/src/lib.rs:315-363`, the post-mortem records, panic
@@ -96,7 +96,7 @@ below a relocation rather than a design.
 
 | stratum | what | crates | knows |
 |---|---|---|---|
-| 1 Policy | every protocol and behaviour decision, host-tested | `leviculum-core`, `leviculum-lxmf`, the thirty-five policy crates | no executor, no HAL, no board. One chip lives here already and stays: `leviculum-core/src/sx126x.rs` (2,817 lines) is the SX126x command set behind `RegisterBus` (`leviculum-core/src/sx126x.rs:1007`) and `CommandBus` (`leviculum-core/src/sx126x.rs:866`), implemented by our `Sx1262` (`leviculum-nrf/src/sx1262.rs:1662`, `leviculum-nrf/src/sx1262.rs:1682`) and by the fork's `leviculum-esp/src/sx1262.rs`; a chip's wire protocol is policy, its bus is a backend |
+| 1 Policy | every protocol and behaviour decision, host-tested | `leviculum-core`, `leviculum-lxmf`, the thirty-five policy crates | no executor, no HAL, no board. One chip lives here already and stays: `leviculum-core/src/sx126x.rs` (2,906 lines) is the SX126x command set behind `RegisterBus` (`leviculum-core/src/sx126x.rs:1065`) and `CommandBus` (`leviculum-core/src/sx126x.rs:924`), implemented by our `Sx1262` (`leviculum-nrf/src/sx1262.rs:1680`, `leviculum-nrf/src/sx1262.rs:1700`) and by the fork's `leviculum-esp/src/sx1262.rs`; a chip's wire protocol is policy, its bus is a backend |
 | 2 Orchestration | the node loop, once; every module of the orchestration list above; the control-frame executor | one new crate, working name `leviculum-firmware` | `embassy-executor`, `embassy-time`, `embassy-sync`, `alloc`, the seams below; no HAL crate, no chip name, no `cfg(feature = "bsp-*")` |
 | 3 Bind | pins, backends, `main` | `leviculum-nrf`, `leviculum-esp`, `leviculum-rp` | one chip family each |
 
