@@ -100,6 +100,7 @@ skip  leviculum-core  compression_vectors        # reads a vector corpus, but th
 skip  leviculum-core  embedded_eviction_alloc    # allocation behaviour under an embedded budget; subject is the code
 skip  leviculum-core  heap_census                # heap accounting; subject is the code
 skip  leviculum-core  heap_fragmentation         # allocator behaviour over long runs; subject is the code
+skip  leviculum-core  link_packet_memory         # 16 KiB link receive under a tracking allocator; subject is the code
 skip  leviculum-core  heap_leak                  # allocator behaviour; subject is the code
 skip  leviculum-core  heap_leak_mgmt             # allocator behaviour; subject is the code
 skip  leviculum-core  periculum_airtime_pins     # close to the line: fast and pure, but it pins arithmetic, not a file
