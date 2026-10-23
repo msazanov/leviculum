@@ -331,28 +331,28 @@ multiple of a word because `sd_flash_write` takes a length in words.
 | body | `len` |
 | padding to a multiple of 4 | 0 to 3 |
 
-(`HEADER_LEN`, `leviculum-nrf/record-log/src/lib.rs:220`; the layout is
+(`HEADER_LEN`, `leviculum-nrf/record-log/src/lib.rs:232`; the layout is
 tabulated at `leviculum-nrf/record-log/src/lib.rs:108-119`.) The
 destination hash is not a field: it is the first 16 bytes of the body,
 as it is in the reference, which reads it back from the head of its file
 (`LXMRouter.py:2498`).
 
 Each page carries a 12-byte header written once per erase
-(`SECTOR_HEADER_LEN`, `leviculum-nrf/record-log/src/lib.rs:222`), which
+(`SECTOR_HEADER_LEN`, `leviculum-nrf/record-log/src/lib.rs:234`), which
 leaves 4 084 B of the 4 096 for records (`SECTOR_PAYLOAD`,
-`leviculum-nrf/record-log/src/lib.rs:227`). A record never straddles a
+`leviculum-nrf/record-log/src/lib.rs:239`). A record never straddles a
 page.
 
 At the measured median body of 304 B the stride is
 `align_up(42 + 304)` = **348 B** (`record_stride`,
-`leviculum-nrf/record-log/src/lib.rs:260`), so 4 084 / 348 = 11 records
+`leviculum-nrf/record-log/src/lib.rs:272`), so 4 084 / 348 = 11 records
 to a page with 256 B of tail (6.3 %).
 
 | Body | Stride | Per page | In the 16-page region |
 |---|---|---|---|
 | 304 B — the field median | 348 B | 11 | **176** |
 | 256 B — the smallest the walk produced | 300 B | 13 | 208 |
-| 4 042 B — the largest the format allows (`MAX_BODY`, `leviculum-nrf/record-log/src/lib.rs:229`) | 4 084 B | 1 | 16 |
+| 4 042 B — the largest the format allows (`MAX_BODY`, `leviculum-nrf/record-log/src/lib.rs:241`) | 4 084 B | 1 | 16 |
 
 The 176 is the count at the brim. Reclaim is round-robin — when the
 active page cannot fit the next record the *next* page is erased and
@@ -498,19 +498,19 @@ the second row: the peer sets scale with peers, and we control neither
 how many peer with us nor, therefore, that number.
 
 **What a full scan costs.** `for_each`
-(`leviculum-nrf/record-log/src/lib.rs:543`) walks every page, reads each
+(`leviculum-nrf/record-log/src/lib.rs:555`) walks every page, reads each
 record's 42-byte header and then its body, because `probe_record`
-(`leviculum-nrf/record-log/src/lib.rs:903`) checks the CRC over both. A
+(`leviculum-nrf/record-log/src/lib.rs:915`) checks the CRC over both. A
 full region is therefore one pass over at most 64 KiB.
 
 **This is arithmetic, not a measurement, and the assumption is stated:**
 the read is a `memcpy` from mapped flash, so the work is the bit-serial
 CRC-16 at eight shift-and-test steps a byte (`crc16_update`,
-`leviculum-nrf/record-log/src/lib.rs:272`) — 524 288 steps for the whole
+`leviculum-nrf/record-log/src/lib.rs:284`) — 524 288 steps for the whole
 region, and at one to four cycles a step on the Cortex-M4 at 64 MHz that
 is **8 to 33 ms**. The measured number is owed and nearly free, because
 the mount already performs exactly this scan and reports what it found
-(`count`, `leviculum-nrf/record-log/src/lib.rs:408`).
+(`count`, `leviculum-nrf/record-log/src/lib.rs:420`).
 
 Either way the conclusion is the same and it is not close: a `/get` list
 request costing tens of milliseconds of CPU, and nothing of the radio
@@ -756,7 +756,7 @@ built delivers that with a one-word commit rather than with a
 probability: a record counts as present only if its flags byte reads
 live or purged, that byte sits in a single word programmed last, and a
 word cannot be half-written (`FLAG_LIVE`,
-`leviculum-nrf/record-log/src/lib.rs:240`). Any cut before that word
+`leviculum-nrf/record-log/src/lib.rs:252`). Any cut before that word
 leaves the record invisible, deterministically; the CRC is then
 catching a dropped bit rather than standing in for a commit protocol.
 
@@ -975,7 +975,7 @@ once per peer, not per reboot.
 
 The record log is append-ordered: pages carry a monotone sequence
 written once per erase (`SECTOR_HEADER_LEN` header,
-`leviculum-nrf/record-log/src/lib.rs:222`), records within a page are
+`leviculum-nrf/record-log/src/lib.rs:234`), records within a page are
 ordered by offset. **A store position is therefore the pair
 `(page_sequence: u32, offset: u16)`, and each peer holds one cursor:
 everything at or below it has been offered and concluded.** As built,

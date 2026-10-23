@@ -371,7 +371,7 @@ priced in `ROLE_BUDGET_BYTES`.
 **D9 — the store is 64 KiB of flash in ≤ 4 042 B records, against
 lnpnd's 500 MB default.** The region is one linker number
 (`memory.x:93`, 16 pages); a record never straddles a page
-(`MAX_BODY`, `leviculum-nrf/record-log/src/lib.rs:229` = 4096 − 12 −
+(`MAX_BODY`, `leviculum-nrf/record-log/src/lib.rs:241` = 4096 − 12 −
 42), and the peer records share the region. lnpnd defaults to 500 MB
 (`message_storage_limit`, `lnpnd/src/config.rs:353`); the reference
 is unlimited until configured
