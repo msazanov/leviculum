@@ -698,6 +698,36 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.process_events_and_actions()
     }
 
+    /// Close every own link attached to `iface_idx`, which was removed for
+    /// good (931, Codeberg #468). Unlike [`close_link`](Self::close_link) no
+    /// close frame is built: the interface it would go out on is gone, and
+    /// addressing it would only produce a `no-such-interface` drop. Returns
+    /// how many links were closed.
+    pub(super) fn close_links_on_removed_interface(&mut self, iface_idx: usize) -> usize {
+        let gone: Vec<LinkId> = self
+            .links
+            .iter()
+            .filter(|(_, link)| link.attached_interface() == Some(iface_idx))
+            .map(|(id, _)| *id)
+            .collect();
+        for link_id in &gone {
+            let Some(link) = self.links.get_mut(link_id) else {
+                continue;
+            };
+            let is_initiator = link.is_initiator();
+            let destination_hash = *link.destination_hash();
+            link.close();
+            self.remove_link(link_id);
+            self.emit_link_closed(
+                *link_id,
+                LinkCloseReason::InterfaceRemoved,
+                is_initiator,
+                destination_hash,
+            );
+        }
+        gone.len()
+    }
+
     /// Get a link by ID
     pub fn link(&self, link_id: &LinkId) -> Option<&crate::link::Link> {
         self.links

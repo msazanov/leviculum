@@ -147,11 +147,11 @@ fn window_owner(relay: &Node, dest_hash: &DestinationHash) -> Option<usize> {
         .map(|(iface, _)| iface)
 }
 
-/// `GONE` goes; returns the teardown's debug line.
+/// `GONE` goes; returns the teardown's `IFACE_DOWN` line.
 fn teardown_gone(relay: &mut Node) -> String {
     let (_, logs) = with_captured_logs(|| relay.handle_interface_down(InterfaceId(GONE)));
     logs.lines()
-        .find(|l| l.contains("went down"))
+        .find(|l| l.contains("IFACE_DOWN"))
         .unwrap_or_else(|| panic!("no teardown line\n--- logs ---\n{logs}"))
         .into()
 }
@@ -218,7 +218,7 @@ fn a_window_whose_requester_went_is_culled_with_it() {
     );
     assert_eq!(relay.transport().stats().path_request_retry_withholds(), 0);
     assert!(
-        line.contains("1 discovery windows (0 handed on, 0 batched requesters)"),
+        line.contains("discovery_windows=1 handed_on=0 batched=0"),
         "the teardown counts the culled window: {line}"
     );
 }
@@ -277,7 +277,7 @@ fn a_batched_requester_takes_over_a_window_whose_opener_went() {
     );
     assert_eq!(owner, Some(OTHER), "the window's owner after the teardown");
     assert!(
-        line.contains("0 discovery windows (1 handed on, 0 batched requesters)"),
+        line.contains("discovery_windows=0 handed_on=1 batched=0"),
         "the teardown counts the handed-on window: {line}"
     );
 }
@@ -308,7 +308,7 @@ fn a_batched_requester_on_the_gone_interface_leaves_the_window() {
     );
     assert_eq!(owner, Some(OTHER), "the window's owner after the teardown");
     assert!(
-        line.contains("0 discovery windows (0 handed on, 1 batched requesters)"),
+        line.contains("discovery_windows=0 handed_on=0 batched=1"),
         "the teardown counts the batched requester: {line}"
     );
 }

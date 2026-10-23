@@ -73,6 +73,26 @@ to stitch one packet's path across nodes:
   A steady rate on a node with fixed interfaces means the driver and the
   core disagree about interface numbering.  It does not share a counter
   with `no-path`.
+- The link half of that is limited to teardowns that may return (931,
+  Codeberg #468).  Each teardown logs `IFACE_DOWN` with `idx` (the number
+  a later drop names as `iface_out`), `teardown=final|transient` and
+  `links_closed`.  A `final` teardown closes every own link on the
+  interface at once, `LinkClosed` with reason `interface-removed` and no
+  close frame, so its links produce no further drop; a `transient` one
+  keeps them for an interface that comes back under the same index.  The
+  driver's table (`TeardownCause::class`, `leviculum-std/src/driver/mod.rs`):
+
+  | Teardown site | Class | Why |
+  | --- | --- | --- |
+  | `remove_interface` (operator) | `final` | taken away for good |
+  | auto-connect peer retired (record expired, offline past the threshold) | `final` | a return draws a fresh index |
+  | `bootstrap_only` detach | `transient` | re-attached under its original index |
+  | incoming channel closed (TCP session ended, serial, BLE, RNode task ended) | `transient` | the handle does not say whether it returns |
+
+  When a site cannot be sure it is `transient`: a wrong `transient`
+  costs a link that lingers to its stale timeout, a wrong `final` closes
+  one that would have carried on.  The peer sees the same either way:
+  silence, then its own stale timeout.
 - A relay whose outbound path points back out of the arrival interface
   forwards there — same-interface relay on a shared medium is a normal
   hop, not a drop (see

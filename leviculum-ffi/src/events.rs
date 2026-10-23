@@ -122,6 +122,10 @@ pub const LEV_CLOSE_CHANNEL_EXHAUSTED: c_int = 5;
 /// The peer identified as a blackholed identity and the link was torn down.
 /// **Do not retry**: every attempt will be torn down the same way.
 pub const LEV_CLOSE_BLACKHOLED: c_int = 6;
+/// The interface the link was attached to was removed for good, so nothing
+/// could carry it any more. Reconnect: the path is re-resolved over the
+/// interfaces that remain.
+pub const LEV_CLOSE_INTERFACE_REMOVED: c_int = 7;
 /// A close reason this ABI version has no constant for. The engine enum is
 /// extensible; `event_projection_coverage` fails on a new variant that reaches
 /// here, so this is a forward-compatibility floor and not a silent bucket.
@@ -522,6 +526,7 @@ fn close_reason_code(reason: leviculum_std::LinkCloseReason) -> c_int {
         R::Stale => LEV_CLOSE_STALE,
         R::ChannelExhausted => LEV_CLOSE_CHANNEL_EXHAUSTED,
         R::Blackholed => LEV_CLOSE_BLACKHOLED,
+        R::InterfaceRemoved => LEV_CLOSE_INTERFACE_REMOVED,
         // `LinkCloseReason` is `#[non_exhaustive]`, so this arm is required to
         // compile. It is not a silent bucket: `every_close_reason_has_a_c_constant`
         // fails on a variant that has no arm above, which is what keeps a new
@@ -1502,6 +1507,7 @@ mod tests {
             (R::Stale, LEV_CLOSE_STALE),
             (R::ChannelExhausted, LEV_CLOSE_CHANNEL_EXHAUSTED),
             (R::Blackholed, LEV_CLOSE_BLACKHOLED),
+            (R::InterfaceRemoved, LEV_CLOSE_INTERFACE_REMOVED),
         ];
         let mut seen = std::collections::BTreeSet::new();
         for (reason, want) in expected {

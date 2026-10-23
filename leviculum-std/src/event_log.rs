@@ -957,6 +957,26 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "PR_RETRY_WITHHELD",
         required_keys: &["dst", "iface_req"],
     },
+    // An interface went down (`node/mod.rs::handle_interface_teardown`).
+    // `idx` is the index a later `PKT_DROP reason=no-such-interface` names
+    // as `iface_out`; `teardown` is `final` or `transient` (931, the driver
+    // classifies each site), and `links_closed` the own links a `final`
+    // teardown closed with `InterfaceRemoved`. The rest count what the
+    // transport culled with it.
+    EventSchema {
+        name: "IFACE_DOWN",
+        required_keys: &[
+            "iface",
+            "idx",
+            "teardown",
+            "links_closed",
+            "paths",
+            "discovery_windows",
+            "handed_on",
+            "batched",
+            "targeted",
+        ],
+    },
     // The management destination's own announce (`node/mod.rs`); `iface` is
     // the literal `all`, since it goes out on every interface at once.
     EventSchema {
@@ -1556,7 +1576,7 @@ enum SinkMode {
 /// hundred lines apart in `handle_announce`, and nothing between them
 /// can take seconds.  What can is the emission itself: the driver's
 /// event loop calls `tracing::debug!` while it holds the core mutex
-/// (`apply_inbound`, `leviculum-std/src/driver/mod.rs:4758`), the layer
+/// (`apply_inbound`, `leviculum-std/src/driver/mod.rs:4824`), the layer
 /// wrote the line with a blocking `write(2)` on that very thread, and a
 /// `write(2)` to a USB disk under writeback throttling blocks for
 /// seconds.  Every other task then queued behind the core mutex, so the

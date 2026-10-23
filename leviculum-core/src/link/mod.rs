@@ -293,6 +293,12 @@ pub enum LinkCloseReason {
     /// The peer identified (LINKIDENTIFY) as a blackholed identity and the
     /// link was torn down (Codeberg #88; Python Link.py:1021-1023).
     Blackholed,
+    /// The interface the link was attached to was removed for good (an
+    /// operator removal, an expired auto-connect peer), so nothing could
+    /// carry the link's traffic any more. No close frame was sent: there is
+    /// no medium for it, and the peer finds out by its own stale timeout
+    /// (931, Codeberg #468).
+    InterfaceRemoved,
 }
 
 impl LinkCloseReason {
@@ -308,6 +314,7 @@ impl LinkCloseReason {
             LinkCloseReason::Stale => "stale",
             LinkCloseReason::ChannelExhausted => "channel-exhausted",
             LinkCloseReason::Blackholed => "blackholed",
+            LinkCloseReason::InterfaceRemoved => "interface-removed",
         }
     }
 }

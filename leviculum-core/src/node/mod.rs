@@ -118,6 +118,8 @@ mod mvr_ingress_link_exclusion;
 #[cfg(all(test, feature = "tracing"))]
 mod mvr_interface_gone_dispatch;
 #[cfg(all(test, feature = "tracing"))]
+mod mvr_interface_gone_final_teardown;
+#[cfg(all(test, feature = "tracing"))]
 mod mvr_link_cap;
 #[cfg(all(test, feature = "tracing"))]
 mod mvr_link_data_echo_storm;
@@ -261,6 +263,34 @@ use crate::transport::{Transport, TransportConfig, TransportEvent, TransportStat
 use rand_core::CryptoRngCore;
 
 use crate::hex_fmt::{HexFmt, HexShort};
+
+/// Whether an interface that went down can come back under the same index
+/// (931, Codeberg #468). Passed to
+/// [`NodeCore::handle_interface_teardown`]; the driver classifies each of
+/// its teardown sites, and a site that cannot be sure says `Transient`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Teardown {
+    /// The interface may return under the same index (a TCP client that
+    /// re-dials, a detached bootstrap interface that is re-attached), and a
+    /// link attached to it carries on when it does. Own links are kept;
+    /// until then their sends are dropped as `no-such-interface`, and a link
+    /// whose interface never returns dies on its stale timeout.
+    Transient,
+    /// The index will not be used for this interface again. Every own link
+    /// attached to it is closed at once with
+    /// [`LinkCloseReason::InterfaceRemoved`](crate::link::LinkCloseReason::InterfaceRemoved).
+    Final,
+}
+
+impl Teardown {
+    /// The word the `IFACE_DOWN` event's `teardown` field carries.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Teardown::Transient => "transient",
+            Teardown::Final => "final",
+        }
+    }
+}
 
 /// Delay before the first management announce after startup.
 /// Python defers by `mgmt_announce_interval - 15` so first fires at ~15s.
@@ -3058,11 +3088,47 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// longer available (e.g., TCP disconnect, serial port closed). Core
     /// removes routing entries referencing this interface and emits
     /// appropriate events.
+    ///
+    /// This is the [`Teardown::Transient`] teardown: own links attached to
+    /// the interface are kept, because it may come back under the same
+    /// index. A caller that knows the interface is gone for good uses
+    /// [`handle_interface_teardown`](Self::handle_interface_teardown) with
+    /// [`Teardown::Final`].
     pub fn handle_interface_down(
         &mut self,
         iface: crate::transport::InterfaceId,
     ) -> crate::transport::TickOutput {
+        self.handle_interface_teardown(iface, Teardown::Transient)
+    }
+
+    /// [`handle_interface_down`](Self::handle_interface_down) with the
+    /// teardown's class named (931, Codeberg #468).
+    ///
+    /// On [`Teardown::Final`] every own link attached to the interface is
+    /// closed at once: removed from the link table, `LinkClosed` with
+    /// [`LinkCloseReason::InterfaceRemoved`](crate::link::LinkCloseReason::InterfaceRemoved)
+    /// to the application, no close frame (there is no medium left for
+    /// it). Python keeps `Link.attached_interface` and lets
+    /// `Transport.outbound` skip a missing interface (Transport.py:1182-1191),
+    /// so its link lives on until its stale timeout. The deviation is local:
+    /// the peer sees what it sees from Python, silence and then its own
+    /// stale timeout, and only the local application learns earlier.
+    ///
+    /// On [`Teardown::Transient`] own links are kept, the behaviour
+    /// `mvr_interface_gone_dispatch` pins: an interface that returns under
+    /// the same index carries them on.
+    pub fn handle_interface_teardown(
+        &mut self,
+        iface: crate::transport::InterfaceId,
+        teardown: Teardown,
+    ) -> crate::transport::TickOutput {
         let iface_idx = iface.0;
+
+        #[cfg_attr(not(feature = "tracing"), allow(unused_variables))]
+        let links_closed = match teardown {
+            Teardown::Final => self.close_links_on_removed_interface(iface_idx),
+            Teardown::Transient => 0,
+        };
 
         // Remove path entries referencing this interface
         let lost_paths = self.transport.remove_paths_for_interface(iface_idx);
@@ -3081,15 +3147,20 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             .transport
             .remove_targeted_announces_for_interface(iface_idx);
 
-        // Log before removing the name so the message still shows the human-readable name
+        // Log before removing the name so the line still shows the
+        // human-readable name. `idx` is the number a later
+        // `PKT_DROP reason=no-such-interface` names as `iface_out`.
         crate::tracing::debug!(
-            "Interface {} went down, removed {} paths, {} discovery windows ({} handed on, {} batched requesters), {} targeted announces",
-            self.transport.iface_name(iface_idx),
-            lost_paths.len(),
-            discovery.windows,
-            discovery.handed_on,
-            discovery.batched,
-            targeted
+            event = "IFACE_DOWN",
+            iface = %self.transport.iface_name(iface_idx),
+            idx = iface_idx,
+            teardown = teardown.as_str(),
+            links_closed = links_closed,
+            paths = lost_paths.len(),
+            discovery_windows = discovery.windows,
+            handed_on = discovery.handed_on,
+            batched = discovery.batched,
+            targeted = targeted,
         );
 
         for hash in &lost_paths {

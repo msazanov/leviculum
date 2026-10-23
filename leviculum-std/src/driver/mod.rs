@@ -89,7 +89,7 @@ use crate::interfaces::IncomingPacket;
 use leviculum_announce_policy::{Decision, PeerAnnounceLimiter};
 use leviculum_core::constants::TRUNCATED_HASHBYTES;
 use leviculum_core::link::LinkId;
-use leviculum_core::node::{EventClass, FrameDropReason, NodeCore, NodeEvent};
+use leviculum_core::node::{EventClass, FrameDropReason, NodeCore, NodeEvent, Teardown};
 use leviculum_core::traits::{InterfaceError, Storage as StorageTrait};
 use leviculum_core::transport::{InterfaceId, TickOutput};
 use leviculum_core::{AnnounceControl, Destination, DestinationHash};
@@ -1204,8 +1204,71 @@ struct DiscoveryAnnounceWiring {
 enum RecvEvent {
     /// A complete packet from an interface
     Packet(InterfaceId, IncomingPacket),
-    /// An interface disconnected (its incoming channel closed)
-    Disconnected(InterfaceId),
+    /// An interface disconnected: its incoming channel closed, or the
+    /// operator removed it.
+    Disconnected(InterfaceId, TeardownCause),
+}
+
+/// Why the event loop tears an interface down (931, Codeberg #468).
+///
+/// Every site that calls into the core's interface teardown names one of
+/// these, and [`TeardownCause::class`] is the one place that maps it to the
+/// core's [`Teardown`]. A `Final` teardown closes the node's own links on the
+/// interface at once; a `Transient` one keeps them for an interface that may
+/// return under the same index. When a site cannot be sure, it is
+/// `Transient`: a wrong `Transient` costs a link that lingers to its stale
+/// timeout (the behaviour before 931), a wrong `Final` closes a link that
+/// would have carried on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TeardownCause {
+    /// The interface's incoming channel closed (`recv_any`). Interfaces that
+    /// re-dial keep their channel across the gap (the reconnecting TCP
+    /// client, `interfaces/tcp.rs::tcp_client_reconnect_task`), so a close
+    /// is an interface task that ended: an accepted TCP connection whose
+    /// socket closed, a client out of reconnect tries, a serial, BLE or
+    /// RNode task that gave up. The handle does not say which, and a serial
+    /// or RNode section can come back under its section index, so this one
+    /// stays `Transient` out of doubt.
+    ChannelClosed,
+    /// [`ReticulumNode::remove_interface`]: the operator detached it.
+    OperatorRemoved,
+    /// The auto-connect manager retired a discovered peer (its record
+    /// expired, or it stayed offline past the detach threshold). A
+    /// re-discovered endpoint is spawned under a fresh id from `next_id`.
+    AutoconnectRetired,
+    /// A `bootstrap_only` interface detached once enough discovered
+    /// interfaces are online (Codeberg #416). `reattach_bootstrap_interfaces`
+    /// brings it back under its ORIGINAL index when they are gone.
+    BootstrapDetached,
+}
+
+impl TeardownCause {
+    /// The teardown class of this cause, the table 931 asks for:
+    ///
+    /// | cause                | class       | why                                     |
+    /// |----------------------|-------------|-----------------------------------------|
+    /// | `ChannelClosed`      | `Transient` | cannot tell a final close from one that returns |
+    /// | `OperatorRemoved`    | `Final`     | the operator took it away               |
+    /// | `AutoconnectRetired` | `Final`     | a return draws a fresh index            |
+    /// | `BootstrapDetached`  | `Transient` | re-attached under the same index        |
+    fn class(self) -> Teardown {
+        match self {
+            TeardownCause::ChannelClosed => Teardown::Transient,
+            TeardownCause::OperatorRemoved => Teardown::Final,
+            TeardownCause::AutoconnectRetired => Teardown::Final,
+            TeardownCause::BootstrapDetached => Teardown::Transient,
+        }
+    }
+
+    /// The word the driver's teardown log lines carry.
+    fn label(self) -> &'static str {
+        match self {
+            TeardownCause::ChannelClosed => "channel-closed",
+            TeardownCause::OperatorRemoved => "removed",
+            TeardownCause::AutoconnectRetired => "auto-connected",
+            TeardownCause::BootstrapDetached => "bootstrap-only",
+        }
+    }
 }
 
 /// Reason a `wait_for_interface_ready` call did not return `Ok(())`.
@@ -4162,7 +4225,7 @@ async fn recv_any(
 ) -> RecvEvent {
     std::future::poll_fn(|cx| {
         if let Poll::Ready(Some(id)) = remove_rx.poll_recv(cx) {
-            return Poll::Ready(RecvEvent::Disconnected(id));
+            return Poll::Ready(RecvEvent::Disconnected(id, TeardownCause::OperatorRemoved));
         }
 
         if !registry.is_empty() {
@@ -4181,7 +4244,10 @@ async fn recv_any(
                     }
                     Poll::Ready(None) => {
                         *poll_start = (idx + 1) % len;
-                        return Poll::Ready(RecvEvent::Disconnected(id));
+                        return Poll::Ready(RecvEvent::Disconnected(
+                            id,
+                            TeardownCause::ChannelClosed,
+                        ));
                     }
                     Poll::Pending => {}
                 }
@@ -4757,8 +4823,8 @@ async fn run_event_loop(
                         prepared.peer = pkt.peer;
                         apply_inbound!(prepared);
                     }
-                    RecvEvent::Disconnected(iface_id) => {
-                        tracing::warn!("Interface {} ({}) disconnected", iface_id, registry.name_of(iface_id));
+                    RecvEvent::Disconnected(iface_id, cause) => {
+                        tracing::warn!("Interface {} ({}) disconnected ({})", iface_id, registry.name_of(iface_id), cause.label());
                         // The core forgets its peer-count mirror in
                         // handle_interface_down; forget the driver's
                         // half too so a re-registered index starts at
@@ -4766,7 +4832,7 @@ async fn run_event_loop(
                         live_peer_counts.remove(&iface_id.0);
                         let output = {
                             let mut core = inner.lock_recover();
-                            core.handle_interface_down(iface_id)
+                            core.handle_interface_teardown(iface_id, cause.class())
                         };
                         let processor_delay = dispatch_output(
                             output,
@@ -5326,10 +5392,10 @@ async fn run_event_loop(
                         transport_enabled,
                     };
                     manager.poll(&live, now_unix, &mut spawner);
-                    let mut teardown_ids: Vec<(InterfaceId, &'static str)> = spawner
+                    let mut teardown_ids: Vec<(InterfaceId, TeardownCause)> = spawner
                         .teardown_ids
                         .into_iter()
-                        .map(|id| (id, "auto-connected"))
+                        .map(|id| (id, TeardownCause::AutoconnectRetired))
                         .collect();
 
                     // Bootstrap-only lifecycle (Codeberg #416). A seed
@@ -5345,7 +5411,9 @@ async fn run_event_loop(
                             crate::autoconnect::BootstrapAction::Detach => {
                                 for b in bootstrap.ifaces.iter_mut() {
                                     teardown_ids.extend(
-                                        b.ids.drain(..).map(|id| (id, "bootstrap-only")),
+                                        b.ids
+                                            .drain(..)
+                                            .map(|id| (id, TeardownCause::BootstrapDetached)),
                                     );
                                 }
                             }
@@ -5368,17 +5436,17 @@ async fn run_event_loop(
                     // Complete each requested teardown through the same cleanup
                     // path a hard `Disconnected` uses, so path/link state and
                     // the per-interface maps are consistently torn down.
-                    for (iface_id, reason) in teardown_ids {
+                    for (iface_id, cause) in teardown_ids {
                         tracing::info!(
                             "discovery: tearing down {} interface {} ({})",
-                            reason,
+                            cause.label(),
                             iface_id,
                             registry.name_of(iface_id),
                         );
                         live_peer_counts.remove(&iface_id.0);
                         let output = {
                             let mut core = inner.lock_recover();
-                            core.handle_interface_down(iface_id)
+                            core.handle_interface_teardown(iface_id, cause.class())
                         };
                         let processor_delay = dispatch_output(
                             output,
@@ -6646,6 +6714,98 @@ mod tests {
             crate::storage::hex_encode(&tcp_client_tunnel_hash(3)),
             "fe987f1066cdbb7b2f90c5845561ef9596e0c20e08d540763eabd722b078a6e1"
         );
+    }
+
+    /// 931 (Codeberg #468): every teardown cause maps to the class its
+    /// documentation claims, and only the two causes whose interface cannot
+    /// return under the same index close the node's own links.
+    #[test]
+    fn each_teardown_cause_has_the_class_it_claims() {
+        let table = [
+            (
+                TeardownCause::ChannelClosed,
+                Teardown::Transient,
+                "channel-closed",
+            ),
+            (TeardownCause::OperatorRemoved, Teardown::Final, "removed"),
+            (
+                TeardownCause::AutoconnectRetired,
+                Teardown::Final,
+                "auto-connected",
+            ),
+            (
+                TeardownCause::BootstrapDetached,
+                Teardown::Transient,
+                "bootstrap-only",
+            ),
+        ];
+        for (cause, class, label) in table {
+            // Exhaustive on purpose: a new cause fails to compile here until
+            // it has a row above.
+            match cause {
+                TeardownCause::ChannelClosed
+                | TeardownCause::OperatorRemoved
+                | TeardownCause::AutoconnectRetired
+                | TeardownCause::BootstrapDetached => {}
+            }
+            assert_eq!(cause.class(), class, "{cause:?}");
+            assert_eq!(cause.label(), label, "{cause:?}");
+        }
+    }
+
+    /// 931: the two sources `recv_any` folds into `Disconnected` carry their
+    /// own cause, so an operator removal is `Final` and a channel close is
+    /// not.
+    #[tokio::test]
+    async fn recv_any_names_the_cause_of_a_disconnect() {
+        use crate::interfaces::{InterfaceCounters, InterfaceInfo};
+        let mut registry = InterfaceRegistry::new();
+        let (inc_tx, inc_rx) = mpsc::channel(4);
+        let (out_tx, _out_rx) = mpsc::channel(4);
+        registry.register(InterfaceHandle {
+            next_tag: None,
+            info: InterfaceInfo {
+                id: InterfaceId(7),
+                name: "closing".into(),
+                hw_mtu: None,
+                is_local_client: false,
+                bitrate: None,
+                announce_cap_bitrate: None,
+                tx_jitter_max_ms: None,
+                tx_hold_spread_max_ms: None,
+                acquisition: None,
+                frame_turnaround_ms: None,
+                ifac: None,
+                mode: leviculum_core::traits::InterfaceMode::default(),
+                kind: leviculum_core::traits::InterfaceKind::Unknown,
+                ingress_control: None,
+            },
+            incoming: inc_rx,
+            outgoing: out_tx,
+            counters: Arc::new(InterfaceCounters::new()),
+            credit: None,
+            ready: crate::interfaces::ReadySignal::ready_immediate(),
+            teardown: None,
+        });
+        let (remove_tx, mut remove_rx) = mpsc::channel(1);
+
+        remove_tx.send(InterfaceId(9)).await.expect("remove");
+        match recv_any(&mut registry, &mut remove_rx).await {
+            RecvEvent::Disconnected(id, cause) => {
+                assert_eq!(id, InterfaceId(9));
+                assert_eq!(cause, TeardownCause::OperatorRemoved);
+            }
+            RecvEvent::Packet(..) => panic!("expected the removal"),
+        }
+
+        drop(inc_tx);
+        match recv_any(&mut registry, &mut remove_rx).await {
+            RecvEvent::Disconnected(id, cause) => {
+                assert_eq!(id, InterfaceId(7));
+                assert_eq!(cause, TeardownCause::ChannelClosed);
+            }
+            RecvEvent::Packet(..) => panic!("expected the channel close"),
+        }
     }
 
     /// A radio reading is filed under the hash of the packet the core will
