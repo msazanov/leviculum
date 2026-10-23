@@ -7,7 +7,7 @@ This page records the design as decided, the facts it rests on, the
 measurements the cells took before any of it was built, and the order it
 is built in.
 
-Step 1 is built (below); nothing after it is. Citations into this tree are against
+Steps 1 and 2 are built (below); nothing after them is. Citations into this tree are against
 master at the commit that adds the page; citations into the Python
 reference are against the pinned `reference/Reticulum` (1.3.5). The
 cells live in periculum (`regression/`, periculum `cb51b8c`), so they
@@ -71,6 +71,58 @@ transport off, a shared instance named `default`, log level 4,
   AutoInterface's peers) takes the origin all sections share
   (`origin_of`, `leviculum-std/src/interfaces/inventory.rs:252`).
 
+## Step 2, as built
+
+The switches are in place; the only medium they move today is the LAN,
+because the others have nothing to start yet.
+
+- **`[auto]`**, four keys, `lan`, `servers`, `bluetooth`, `serial`, each
+  yes or no, read by our INI reader (`apply_auto_key`,
+  `leviculum-std/src/ini_config.rs`) and by the TOML path through serde.
+  A value that is no boolean refuses the file. A file without the section
+  is every key `no`. Without a file lnsd runs `LNSD_DEFAULT_CONFIG`
+  (`leviculum-std/src/config.rs`): rnsd's first-start file, unchanged,
+  followed by `[auto]` with the shipped defaults (`lan = yes`, the rest
+  `no`) and a comment line per key. `lnsd --writeconfig` writes that
+  text, and a test runs it through the reference's own ConfigObj, which
+  reads rnsd's three sections unchanged beside `[auto]`.
+- **The rule** is one function with its table in the doc comment
+  (`decide`, `leviculum-std/src/auto_layer.rs`):
+
+  | configuration | marker | `LEVICULUM_NO_AUTO` | media | reason |
+  |---|---|---|---|---|
+  | asks for a medium | any | `1` | none | `env` |
+  | asks for a medium | present | unset | none | `marker` |
+  | no file: the shipped defaults | absent, or lifted by `0` | unset or `0` | `lan` | `default` |
+  | a file: its `[auto]` keys | absent, or lifted by `0` | unset or `0` | the keys that are `yes` | `config` |
+  | a file asking for nothing | any | any | none | `config` |
+
+  The marker and the variable are named only when they turned off
+  something the configuration asked for. A file that asks for nothing,
+  which is every periculum cell's file, therefore reads `reason=config`
+  on a marked host too, and the corpus guard can hold every daemon to
+  that one reading.
+- **The LAN** (`apply`, same file): with `lan` on and no AutoInterface
+  section in the configuration, enabled or not, lnsd adds
+  `[[Default Interface]]` from rnsd's first-start file, origin `default`.
+  With `lan` off, every interface of origin `default` goes, which on a
+  start without a file is that same AutoInterface; a file's own sections
+  are never touched, so a file that names an AutoInterface keeps it on a
+  marked host.
+- **The line**, once per start, before the `IFACE_CONFIG` lines, and
+  catalogued (`AUTO_LAYER`, `leviculum-std/src/event_log.rs`):
+  `AUTO_LAYER state=on|off reason=config|default|marker|env lan= servers=
+  bluetooth= serial=`, each medium `yes` or `no`. A marker or variable
+  that turned the layer off also gets a plain line naming it.
+  `interface_stats` serves the same fields after `state=` as the
+  top-level `auto_layer` key, and `lnstatus` prints them as its last line,
+  `Auto layer   : on reason=default lan=yes servers=no bluetooth=no
+  serial=no`.
+- **The marker** is installed by `scripts/install-ci.sh`, step 10b,
+  beside the hardware probe: every host that script sets up runs the
+  suites with adapters and boards in reach, in `--vm-mode` too. It uses
+  `sudo -n` and warns with the command when it cannot.
+
 The page's open question 1 is sharper now: a Python tool pointed at a
 fresh lnsd's directory writes the same bytes `--writeconfig` writes, and
 from the next start lnsd reads them as a file, with every interface
@@ -84,11 +136,12 @@ Two facts about the files decide the opt-out format:
   Nothing iterates the rest of the file. `rnstatus` and `rncp` read
   `[reticulum]` only. A file with an `[auto]` section stays readable for
   rnsd and the stock tools.
-- **lnsd warns about it today and goes on.** A file with `[auto]
-  bluetooth = no` starts, and lnsd logs `'bluetooth' is in section
-  '[auto]', which lnsd does not read, and is ignored`
+- **lnsd warned about it before step 2 and went on.** A file with
+  `[auto] bluetooth = no` started, and lnsd logged `'bluetooth' is in
+  section '[auto]', which lnsd does not read, and is ignored`, the
+  warning it still gives for any other section it does not read
   (`leviculum-std/src/ini_config.rs:192`). Measured in the cell
-  `ble_room_auto_start`.
+  `ble_room_auto_start`. Since step 2 lnsd reads the section.
 
 And one fact about the Python tools, which the cells ran into: **a Python
 client pointed at a config directory without a file writes rnsd's stock
@@ -121,12 +174,12 @@ The layer that decides sits in front of the core. The core and
 `transport.rs` never learn that an interface was started automatically:
 the medium knowledge stays in the interface, as
 [Interface isolation](interface-isolation.md) requires. `lnstatus` shows
-where each interface came from (`config` or `auto`), and lnsd states its
-decision once at start:
+where each interface came from (`configured` or `default`, step 1), and
+lnsd states its decision once at start (as built in step 2, above):
 
 ```
-AUTO_LAYER state=off reason=config
-AUTO_LAYER state=on reason=no_config media=lan,servers,bluetooth,serial
+AUTO_LAYER state=off reason=config lan=no servers=no bluetooth=no serial=no
+AUTO_LAYER state=on reason=default lan=yes servers=no bluetooth=no serial=no
 ```
 
 `lnsd --writeconfig` writes the file lnsd would otherwise hold in memory,
@@ -144,11 +197,14 @@ schneckenschreck have Bluetooth adapters and boards on USB:
 1. **Configuration.** Every periculum cell renders a file, so the rule
    above already says `off`. The periculum guard `periculum auto-layer`
    reads every lnsd log of a corpus run and is red when any daemon logged
-   `state=on`. Against the conformance run of 2026-10-23 it reads
-   `lnsd_logs=115 off=0 on=0 absent=115`: the line does not exist yet.
+   `state=on`. Against the conformance run of 2026-10-23 it read
+   `lnsd_logs=115 off=0 on=0 absent=115`: the line did not exist yet.
+   Since step 2 the guard requires the line, `state=off reason=config`
+   in every lnsd log, and is red on an absent line or any other reason
+   (`--allow-absent` reads a run from before the step).
 2. **A host marker.** `/etc/leviculum/no-auto` makes lnsd treat a start
-   without a file as `state=off reason=host_marker`, and so does
-   `LEVICULUM_NO_AUTO=1` in its environment. `scripts/install-ci.sh`
+   without a file as `state=off reason=marker`, and `LEVICULUM_NO_AUTO=1`
+   in its environment as `state=off reason=env`. `scripts/install-ci.sh`
    installs the marker on the rig hosts. The environment wins over the
    marker in both directions: `LEVICULUM_NO_AUTO=0` is how a cell
    measures the automatic layer on a marked host, and the zero-config
@@ -264,7 +320,7 @@ line today and gaining its `expect` when its step lands. Their lines on
 |---|---|---|---|
 | 0 | the cells | all five, and the corpus guard | |
 | 1 (built) | default configuration in memory with AutoInterface (what rnsd writes to disk), a shared instance, transport off, `lnsd --writeconfig`, origin in `lnstatus` | `zero_config_lan_neighbour` | before: `shared_instance=no interfaces=0 neighbour=none neighbour_by=log`; since step 1: `shared_instance=yes interfaces=2 neighbour=found neighbour_by=path_request origin=default` (from `neighbour=` on asserted; `interfaces=` counts the two AutoInterface peers) |
-| 2 | the `[auto]` section, the per-medium rule, the host marker and `LEVICULUM_NO_AUTO`, the `AUTO_LAYER` line | `config_present_means_only_config`; `periculum auto-layer` | `configured=1 running=1 extra=none serial_bytes=0` (asserted); `absent=115` |
+| 2 (built) | the `[auto]` section, the per-medium rule, the host marker and `LEVICULUM_NO_AUTO`, the `AUTO_LAYER` line | `config_present_means_only_config`; `periculum auto-layer` | `configured=1 running=1 extra=none serial_bytes=0` (asserted); `absent=115` |
 | 3 | the server list, choice persisted and logged, pinnable, fail-over, autoconnect ceiling | `zero_config_server_list` | `shared_instance=no connected=none discovered=0 failover=n/a` |
 | 4 | "find the instance or start one" in `leviculum-std`, then lnomad and the other tools | none yet | |
 | 5 | serial: LNodes by string, RNodes by silence plus `CMD_DETECT`, `TIOCEXCL`, bootloader ids, hotplug | `serial_probe_writes_nothing_to_strangers` | `strangers=0 quiet=0 talker=0 rnode=0 rnode_probe=absent` (`strangers=0` asserted) |
@@ -298,7 +354,11 @@ daemon a controller without a configured BLE interface.
    serial stop without the user having changed anything. Either lnsd
    reads that exact stock file as "no file", or `lnsd --writeconfig` runs
    on the first start after all, or the shared instance tells clients its
-   config directory. To be decided before step 2.
+   config directory. Step 2 was built without deciding it: the switches
+   change nothing a Python-written file means today (its AutoInterface is
+   a section of its own, and the other media start nothing yet), so the
+   question has to be answered before step 3, the first medium a stock
+   file would silently lose.
 2. **Which AutoInterface group.** A fresh install joins the default
    `group_id`, `reticulum`. The cells had to render their AutoInterface
    links with that group, because periculum derives one per cell by
