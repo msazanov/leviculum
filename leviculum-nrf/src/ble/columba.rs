@@ -46,8 +46,8 @@ use leviculum_ble_tx::{
     PHASE_NEIGHBOUR_SLOTS, SCAN_WINDOW_COLLECT_MS, WINDOW_CANDIDATES,
 };
 use leviculum_core::framing::ble::{
-    self as ble_framing, BleDefragmenter, DefragResult, FRAGMENT_HEADER_SIZE, KEEPALIVE_BYTE,
-    KEEPALIVE_INTERVAL_MS,
+    self as ble_framing, BleDefragmenter, BleReassemblyLimits, DefragResult, FRAGMENT_HEADER_SIZE,
+    KEEPALIVE_BYTE, KEEPALIVE_INTERVAL_MS,
 };
 use nrf_softdevice::ble::advertisement_builder::{
     AdvertisementDataType, Flag, LegacyAdvertisementBuilder, LegacyAdvertisementPayload,
@@ -62,6 +62,13 @@ use static_cell::StaticCell;
 
 use super::notify::{notify_fragments, BLE_TX_DRAIN_UNROUTED, BLE_TX_DROPPED, BLE_TX_PACKETS};
 use super::{CarrierWaiter, BLE_INCOMING, HVN_DRAIN, MAX_LINKS};
+
+// Size the receive profile by the advertised packet bound, not this connection's
+// negotiated ATT width: peers may still send normal ATT23-sized fragments.
+const REASSEMBLY_LIMITS: BleReassemblyLimits = BleReassemblyLimits::new(
+    super::INTERFACE_MTU,
+    super::INTERFACE_MTU.div_ceil(ble_framing::payload_per_fragment(ble_framing::MIN_MTU)) as u16,
+);
 
 /// The value type of every characteristic a peer can write or notify:
 /// [`GattBytes`] under the `GattValue` trait, with a `from_gatt` that
@@ -894,7 +901,7 @@ async fn gatt_events(
     // `gatt_server::run` mutate handshake_done while the outbound branch
     // reads it. Single-task context (the executor polls one future at a
     // time), so no Mutex is needed.
-    let defrag: Cell<BleDefragmenter> = Cell::new(BleDefragmenter::new());
+    let defrag: Cell<BleDefragmenter> = Cell::new(BleDefragmenter::new(REASSEMBLY_LIMITS));
     let handshake_done: Cell<bool> = Cell::new(false);
     let last_keepalive: Cell<Instant> = Cell::new(Instant::now());
     // The drain hold (#376): nothing is notified — packets or
@@ -1044,7 +1051,7 @@ async fn gatt_events(
                     // evidence the duplicate rule consults (#360).
                     note_data(slot_index);
                     let now = Instant::now().as_millis();
-                    let mut d = defrag.replace(BleDefragmenter::new());
+                    let mut d = defrag.replace(BleDefragmenter::new(REASSEMBLY_LIMITS));
                     let result = process_logged(&mut d, data, now, slot_index);
                     let frags = d.last_completed_fragments();
                     defrag.set(d);
@@ -2827,7 +2834,7 @@ async fn run_central_session(
     );
 
     let incoming_tx = BLE_INCOMING.sender();
-    let defrag: Cell<BleDefragmenter> = Cell::new(BleDefragmenter::new());
+    let defrag: Cell<BleDefragmenter> = Cell::new(BleDefragmenter::new(REASSEMBLY_LIMITS));
     let last_keepalive: Cell<Instant> = Cell::new(Instant::now());
 
     // This link's outbound queue. Already drained of the previous
@@ -2877,7 +2884,7 @@ async fn run_central_session(
         note_data(slot_index);
         heard.set(true);
         let now = Instant::now().as_millis();
-        let mut d = defrag.replace(BleDefragmenter::new());
+        let mut d = defrag.replace(BleDefragmenter::new(REASSEMBLY_LIMITS));
         let result = process_logged(&mut d, data, now, slot_index);
         let frags = d.last_completed_fragments();
         defrag.set(d);

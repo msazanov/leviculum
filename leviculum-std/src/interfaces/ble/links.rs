@@ -31,9 +31,19 @@ use leviculum_ble_tx::{
     WINDOW_CANDIDATES,
 };
 use leviculum_core::framing::ble::{
-    fragment_packet, BleDefragmenter, DefragResult, FRAGMENT_HEADER_SIZE, FRAGMENT_TYPE_CONTINUE,
-    FRAGMENT_TYPE_END, KEEPALIVE_INTERVAL_MS, MIN_MTU,
+    fragment_packet, payload_per_fragment, BleDefragmenter, BleReassemblyLimits, DefragResult,
+    FRAGMENT_HEADER_SIZE, FRAGMENT_TYPE_CONTINUE, FRAGMENT_TYPE_END, KEEPALIVE_INTERVAL_MS,
+    MIN_MTU,
 };
+
+// BLE signals no HW-MTU upgrade. Keep the full base packet and the largest
+// identity-signature-sized IFAC, independently of the negotiated ATT MTU.
+const REASSEMBLY_PACKET_BYTES: usize =
+    leviculum_core::constants::MTU + leviculum_core::constants::IDENTITY_KEY_SIZE;
+const REASSEMBLY_LIMITS: BleReassemblyLimits = BleReassemblyLimits::new(
+    REASSEMBLY_PACKET_BYTES,
+    REASSEMBLY_PACKET_BYTES.div_ceil(payload_per_fragment(MIN_MTU)) as u16,
+);
 
 /// A BLE address in display order (`AA:BB:CC:DD:EE:FF` → `[0xAA, …]`),
 /// the byte order `bluer::Address` carries.
@@ -739,7 +749,7 @@ impl LinkTable {
             addr,
             role,
             mtu: mtu.max(MIN_MTU),
-            defrag: BleDefragmenter::new(),
+            defrag: BleDefragmenter::new(REASSEMBLY_LIMITS),
             oo_tail: None,
             tails_dropped: 0,
             last_heard_ms: now_ms,
@@ -897,6 +907,7 @@ impl LinkTable {
         let parked = link.oo_tail.take();
         let mut parked_replayed = false;
         let before = link.defrag.abandoned_count() + link.tails_dropped;
+        let had_partial = link.defrag.pending_fragments() != 0;
         let mut result = link.defrag.process(data, now_ms);
         match &result {
             DefragResult::Error => {
@@ -910,7 +921,7 @@ impl LinkTable {
                 // carrier it is almost always the END of the very
                 // next frame's packet, delivered inverted (see
                 // [`Link::oo_tail`]).
-                if is_orphan_tail(data) {
+                if !had_partial && is_orphan_tail(data) {
                     link.oo_tail = Some(data.to_vec());
                     result = DefragResult::NeedMore;
                 }
@@ -1156,7 +1167,11 @@ fn is_orphan_tail(frame: &[u8]) -> bool {
     let ftype = frame[0];
     let seq = u16::from_be_bytes([frame[1], frame[2]]);
     let total = u16::from_be_bytes([frame[3], frame[4]]);
-    (ftype == FRAGMENT_TYPE_CONTINUE || ftype == FRAGMENT_TYPE_END) && seq >= 1 && seq < total
+    (ftype == FRAGMENT_TYPE_CONTINUE || ftype == FRAGMENT_TYPE_END)
+        && seq >= 1
+        && seq < total
+        && total <= REASSEMBLY_LIMITS.fragments()
+        && frame.len() - FRAGMENT_HEADER_SIZE <= REASSEMBLY_LIMITS.packet_bytes()
 }
 
 // ---------------------------------------------------------------------
@@ -2626,6 +2641,65 @@ mod tests {
     /// shape most of these tests were written against.
     fn table() -> LinkTable {
         LinkTable::new(OWN, DEFAULT_MAX_LINKS, BOARD_CENTRAL_LINKS)
+    }
+
+    #[test]
+    fn the_standard_profile_keeps_full_packets_at_minimum_and_large_att_mtus() {
+        let packet: Vec<u8> = (0..REASSEMBLY_PACKET_BYTES)
+            .map(|i| (i % 251) as u8)
+            .collect();
+        for role in [Role::Central, Role::Peripheral] {
+            for mtu in [23, 185, 517] {
+                let mut t = table();
+                assert_eq!(t.admit(ID_A, ADDR_1, role, mtu, 0).0, Admission::Accept);
+                let fragments = fragment_packet(&packet, mtu);
+                let mut result = Inbound::NeedMore;
+                for fragment in &fragments {
+                    result = match role {
+                        Role::Central => t.central_frame(ADDR_1, fragment, 1),
+                        Role::Peripheral => t.peripheral_frame(ADDR_1, mtu, fragment, 1),
+                    };
+                }
+                let Inbound::Packet(received) = result else {
+                    panic!("a full base packet with IFAC must work in either role");
+                };
+                assert_eq!(received, packet);
+                assert_eq!(received.capacity(), packet.len());
+                assert!(t.link_census().all(|row| row.defrag_bytes == 0));
+            }
+        }
+    }
+
+    #[test]
+    fn rejected_overflow_and_count_trains_do_not_become_parked_orphan_copies() {
+        let mut t = table();
+        assert_eq!(
+            t.admit(ID_A, ADDR_1, Role::Central, 517, 0).0,
+            Admission::Accept
+        );
+        let too_large = fragment_packet(&vec![0x73; REASSEMBLY_PACKET_BYTES + 1], 517);
+        assert_eq!(t.central_frame(ADDR_1, &too_large[0], 1), Inbound::NeedMore);
+        assert_eq!(t.central_frame(ADDR_1, &too_large[1], 2), Inbound::Error);
+        for count in [REASSEMBLY_LIMITS.fragments() + 1, u16::MAX] {
+            let tail = [
+                FRAGMENT_TYPE_END,
+                0,
+                1,
+                (count >> 8) as u8,
+                count as u8,
+                0x74,
+            ];
+            assert_eq!(t.central_frame(ADDR_1, &tail, 3), Inbound::Error);
+        }
+        assert!(t.link_census().all(|row| {
+            row.defrag_bytes == 0 && row.defrag_fragments == 0 && row.parked_tail_bytes == 0
+        }));
+        let valid = fragment_packet(&vec![0x75; REASSEMBLY_PACKET_BYTES], 23);
+        let mut result = Inbound::NeedMore;
+        for fragment in &valid {
+            result = t.central_frame(ADDR_1, fragment, 4);
+        }
+        assert_eq!(result, Inbound::Packet(vec![0x75; REASSEMBLY_PACKET_BYTES]));
     }
 
     /// lnsd paces every BLE link at the firmware's compiled default gap

@@ -51,8 +51,8 @@ use std::process::Command;
 
 use leviculum_ble_tx::{Action, Event, NotifyOutcome, PacketTx};
 use leviculum_core::framing::ble::{
-    fragment_packet, payload_per_fragment, DefragResult, DEFAULT_MTU, FRAGMENT_HEADER_SIZE,
-    FRAGMENT_TYPE_END, FRAGMENT_TYPE_START,
+    fragment_packet, payload_per_fragment, BleReassemblyLimits, DefragResult, DEFAULT_MTU,
+    FRAGMENT_HEADER_SIZE, FRAGMENT_TYPE_END, FRAGMENT_TYPE_START, MIN_MTU,
 };
 use leviculum_core::identity::Identity;
 use leviculum_core::packet::{
@@ -408,7 +408,13 @@ fn glued_announce_head_report_tail_is_pythons_invalid_signature() {
         // yields the intact report instead. The corruption is created by
         // the sender-side tear; the receiver policy only picks which
         // packet survives.
-        let mut ours = leviculum_core::framing::ble::BleDefragmenter::new();
+        let packet_bytes =
+            leviculum_core::constants::MTU + leviculum_core::constants::IDENTITY_KEY_SIZE;
+        let limits = BleReassemblyLimits::new(
+            packet_bytes,
+            packet_bytes.div_ceil(payload_per_fragment(MIN_MTU)) as u16,
+        );
+        let mut ours = leviculum_core::framing::ble::BleDefragmenter::new(limits);
         let mut recovered = Vec::new();
         for frag in [&announce_frags[0], &report_frags[0], &report_frags[1]] {
             if let DefragResult::Complete(p) = ours.process(frag, 1_000) {

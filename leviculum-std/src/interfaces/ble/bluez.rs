@@ -1121,11 +1121,11 @@ mod tests {
         (delivered, abandoned)
     }
 
-    /// The handshake, then 400 packets of one to five fragments each.
+    /// The handshake, then 400 packets of one to four fragments each, inside `REASSEMBLY_LIMITS`.
     fn load_writes() -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
         let packets: Vec<Vec<u8>> = (0..400u16)
             .map(|i| {
-                let len = 40 + usize::from(i % 5) * 180;
+                let len = 40 + usize::from(i % 4) * 170;
                 let [hi, lo] = i.to_be_bytes();
                 (0..len).map(|j| hi ^ lo.wrapping_add(j as u8)).collect()
             })
@@ -1137,7 +1137,7 @@ mod tests {
         (packets, writes)
     }
 
-    /// #436, under load: a central writes 400 packets of up to five
+    /// #436, under load: a central writes 400 packets of up to four
     /// fragments back to back, the reader and the link table run on
     /// other threads, and the channel between them fills. Every packet
     /// arrives, in the order written, and the link reports no
@@ -1162,7 +1162,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_shuffled_packet_under_the_same_load_is_a_counted_abandon() {
         let (packets, mut writes) = load_writes();
-        // Packet 2 (len 400) is three fragments; reverse them.
+        // Packet 2 (len 380) is three fragments; reverse them.
         let first =
             1 + fragment_packet(&packets[0], MTU).len() + fragment_packet(&packets[1], MTU).len();
         assert_eq!(fragment_packet(&packets[2], MTU).len(), 3);
