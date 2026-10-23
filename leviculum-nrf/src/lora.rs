@@ -32,6 +32,33 @@ use crate::radio::Radio;
 /// always-present atomics cost nothing on display-less builds.
 pub static LORA_TX_COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
+/// Packets the interface has accepted into `LORA_OUTGOING`, wrapping. The
+/// count after a packet's acceptance is that packet's number: the button
+/// arm reads it around a dispatch to learn which packets were its
+/// announces (order 930, `leviculum_feedback::AirWatch`).
+static LORA_ACCEPTED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// Packets the LoRa task has settled, keyed or dropped, wrapping. The queue
+/// is FIFO and every packet leaves it through `admit_for_transmit` into
+/// either the mute's drop or `pending_tx`, which ends in the stale drop or
+/// a transmission; those three settle it, in acceptance order, so the
+/// count after a settle is the settled packet's number.
+static LORA_SETTLED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// Packets accepted so far, which is the number of the latest one.
+pub fn accepted_packets() -> u32 {
+    LORA_ACCEPTED.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Settle the oldest unsettled packet; `keyed` is whether it went on the
+/// air. Only the LoRa task calls this.
+fn settle_packet(keyed: bool) {
+    let packet = LORA_SETTLED
+        .fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+        .wrapping_add(1);
+    crate::feedback::lora_packet_settled(packet, keyed);
+}
+
 /// Cumulative count of fully reassembled LoRa packets handed off to NodeCore
 /// (one increment per `[LORA] RX … bytes` followed by a successful
 /// reassembler feed).
@@ -481,7 +508,10 @@ impl Interface for LoRaInterface {
             // unframed packet as the interface accepts it
             // (`RNodeInterface.py:725`), so split-frame headers and the
             // airtime a retry costs stay out of the number.
-            .map(|()| crate::iface_bytes::note_tx(crate::iface_bytes::LORA, bytes))
+            .map(|()| {
+                LORA_ACCEPTED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                crate::iface_bytes::note_tx(crate::iface_bytes::LORA, bytes)
+            })
             .map_err(|_| {
                 // Unreachable while the reservation and the channel agree — the
                 // slot bound the budget enforces is the channel's own capacity.
@@ -1117,13 +1147,15 @@ fn apply_airtime_limits(config: &RadioConfig) {
 /// spacing is the number that appears on the air. The spacing applies per
 /// *packet*: the split frames below still go out back-to-back, because the
 /// receiver's reassembler requires that.
+///
+/// Returns whether the packet counts as sent, the `TX done` verdict.
 async fn transmit_all_frames(
     radio: &mut Radio,
     data: &[u8],
     rng_state: &mut u32,
     config: &RadioConfig,
     spacer: &mut leviculum_tx_spacing::TxSpacer,
-) {
+) -> bool {
     let wait_ms = spacer.wait_ms(embassy_time::Instant::now().as_millis());
     if wait_ms > 0 {
         embassy_time::Timer::after(embassy_time::Duration::from_millis(wait_ms)).await;
@@ -1242,6 +1274,7 @@ async fn transmit_all_frames(
         "[T114_LORA_LOOP] ",
         format_args!("op=tx duration_ms={}", tx_ms),
     );
+    packet.sent()
 }
 
 // RX helper
@@ -1757,7 +1790,8 @@ async fn apply_runtime_config(
 
 /// What the task does with a packet the outgoing queue has just handed it:
 /// either it becomes the packet being transmitted, or the host's mute
-/// swallows it here. Returns whether it became `pending_tx`.
+/// swallows it here, which settles it unkeyed. Returns whether it became
+/// `pending_tx`.
 ///
 /// The mute is the LEASE and not `RadioConfig::radio_silent`, which is only
 /// the host's request for one. The two differ exactly where it matters: a
@@ -1789,6 +1823,7 @@ fn admit_for_transmit(
     access: &mut leviculum_channel_access::ChannelAccess,
 ) -> bool {
     if lease.is_muted(now_ms) {
+        settle_packet(false);
         if let Some(run) = muted.dropped(frame.data.len()) {
             leviculum_log_line::facts::lora_tx_muted(
                 &mut FirmwareLog,
@@ -2181,6 +2216,7 @@ async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: u32)
                     // backlog of fossils is swept in consecutive turns rather
                     // than one age per frame.
                     pending_tx = None;
+                    settle_packet(false);
                     continue;
                 }
                 HoldVerdict::Hold { .. } => {
@@ -2421,9 +2457,11 @@ async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: u32)
                             access.drawn_band()
                         ),
                     );
-                    transmit_all_frames(&mut radio, data, &mut rng_state, &config, &mut spacer)
-                        .await;
+                    let keyed =
+                        transmit_all_frames(&mut radio, data, &mut rng_state, &config, &mut spacer)
+                            .await;
                     pending_tx = None;
+                    settle_packet(keyed);
                     // Counted on every key-up, the one that skips the ack
                     // window below included, so the burst bounds stay
                     // accurate.

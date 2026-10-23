@@ -39,7 +39,7 @@ again (`leviculum-nrf/src/bin/t114.rs:597`,
 `leviculum-nrf/src/bin/t1000e.rs:601`). The Pocket V2's two LEDs pulsed
 LoRa TX and RX activity (`leviculum-nrf/src/led.rs`), and a bare RAK4631
 module without the baseboard blinks a 1 Hz heartbeat
-(`leviculum-nrf/src/bin/rak4631.rs:1437`). The Solar Node's blue LED was
+(`leviculum-nrf/src/bin/rak4631.rs:1442`). The Solar Node's blue LED was
 lit only by a HardFault. The T1000-E's buzzer had its enable held low
 for the life of the board.
 
@@ -48,7 +48,7 @@ for the life of the board.
 | gesture | does |
 |---|---|
 | short press | Status. The display wakes for one minute and goes dark by itself; there is no display switch. The LED blinks mode and battery, the buzzer joins where present. No announce. |
-| double press | Announce, both identities (what the short press did before 889, 869), plus one immediate position report when a recipient is configured (914). Two short when the proof comes back. |
+| double press | Announce, both identities (what the short press did before 889, 869), plus one immediate position report when a recipient is configured (914). One short and one blip when the announces have left the radio (930); two short when the proof of the report comes back. |
 | long press, 2 s | Mode switch Mesh/Tracker ([Operating modes](operating-modes.md)). The board signals at 2 s, the user releases, the board confirms the new mode. |
 | very long press, 8 s | Power off. A press powers on. |
 | any press in Tracker mode | Also opens the wake window: BLE on, listening. |
@@ -74,6 +74,7 @@ One grammar for the LED, the buzzer and the display text:
 | fast flicker | error |
 | notification LED, or one short buzz | a message for the user arrived |
 | two short | the report a double press sent arrived |
+| one short, one blip | the announces a double press made have left the radio |
 
 Since 892 the board plays this grammar. The patterns are
 `leviculum-feedback` (`leviculum-nrf/feedback/src/lib.rs`), host-tested
@@ -82,12 +83,13 @@ on/off steps built from these constants:
 
 | constant | value | reason |
 |---|---|---|
-| `SHORT_ON_MS` (`leviculum-nrf/feedback/src/lib.rs:69`) | 150 ms | one counted blink; seen as deliberate, not as the 80 ms traffic pulse |
-| `COUNT_GAP_MS` (`leviculum-nrf/feedback/src/lib.rs:73`) | 350 ms | over twice the blink, so the gaps are what the eye counts; two blinks a second |
-| `LONG_ON_MS` (`leviculum-nrf/feedback/src/lib.rs:77`) | 1000 ms | the Mesh long, over six shorts |
-| `FLICKER_MS` (`leviculum-nrf/feedback/src/lib.rs:81`) | 50 ms on, 50 ms off | 10 Hz, too fast to count, far below the fusion rate |
-| `ERROR_FLASHES` (`leviculum-nrf/feedback/src/lib.rs:85`) | 20 | the error is two seconds of flicker, bounded |
-| `RELEASE_BLIP_MS` (`leviculum-nrf/feedback/src/lib.rs:90`) | 60 ms | shorter than a counted blink; Meshtastic's 62 ms click |
+| `SHORT_ON_MS` (`leviculum-nrf/feedback/src/lib.rs:73`) | 150 ms | one counted blink; seen as deliberate, not as the 80 ms traffic pulse |
+| `COUNT_GAP_MS` (`leviculum-nrf/feedback/src/lib.rs:77`) | 350 ms | over twice the blink, so the gaps are what the eye counts; two blinks a second |
+| `LONG_ON_MS` (`leviculum-nrf/feedback/src/lib.rs:81`) | 1000 ms | the Mesh long, over six shorts |
+| `FLICKER_MS` (`leviculum-nrf/feedback/src/lib.rs:85`) | 50 ms on, 50 ms off | 10 Hz, too fast to count, far below the fusion rate |
+| `ERROR_FLASHES` (`leviculum-nrf/feedback/src/lib.rs:89`) | 20 | the error is two seconds of flicker, bounded |
+| `RELEASE_BLIP_MS` (`leviculum-nrf/feedback/src/lib.rs:94`) | 60 ms | shorter than a counted blink; Meshtastic's 62 ms click |
+| `FIGURE_GAP_MS` (`leviculum-nrf/feedback/src/lib.rs:98`) | 150 ms | the gap inside `announce-sent`; under half the counting gap, so the pair is one figure, not a count of two |
 
 | pattern | steps | total |
 |---|---|---|
@@ -98,14 +100,15 @@ on/off steps built from these constants:
 | `notify` | 1 short | 150 ms |
 | `release-now` | 1 blip | 60 ms |
 | `report-delivered` | 2 short | 650 ms |
+| `announce-sent` | 1 short, 150 ms dark, 1 blip | 360 ms |
 
 The players are `leviculum-nrf/src/feedback.rs`: one per LED
-(`led_task`, `leviculum-nrf/src/feedback.rs:213`) and the T1000-E's buzzer
-(`buzzer_task`, `leviculum-nrf/src/feedback.rs:277`). The buzzer sounds
-`BUZZER_TONE_HZ` (247 Hz, `leviculum-nrf/src/feedback.rs:269`), the B3 of
+(`led_task`, `leviculum-nrf/src/feedback.rs:265`) and the T1000-E's buzzer
+(`buzzer_task`, `leviculum-nrf/src/feedback.rs:329`). The buzzer sounds
+`BUZZER_TONE_HZ` (247 Hz, `leviculum-nrf/src/feedback.rs:321`), the B3 of
 Meshtastic's own beep on this board, while a step is on. A pattern
 raised while another plays on the same sink replaces it. The Pocket V2's
-LEDs keep their activity pulses between patterns. Four things play:
+LEDs keep their activity pulses between patterns. Five things play:
 
 - **A short press** (`leviculum-nrf/src/button.rs:158`) plays the
   battery in quarters on the LED and the buzzer, after the display wake.
@@ -123,10 +126,62 @@ LEDs keep their activity pulses between patterns. Four things play:
 - **The proof of the report a double press sent** plays
   `report-delivered` on the LED and the buzzer
   (`leviculum-nrf/src/telemetry.rs:1735`), see the next section.
+- **The announces of a double press leaving the radio** play
+  `announce-sent` on the LED and the buzzer, see "The double press's
+  announces" below.
 
 Each play prints `FEEDBACK pattern=<name> sink=led|notify|buzzer`
 ([Structured event logs](../structured-event-logs.md)); the rig reads
-that line, not the light.
+that line, not the light. A double press on the T1000-E, for example,
+writes `FEEDBACK pattern=announce-sent sink=led` and
+`FEEDBACK pattern=announce-sent sink=buzzer` once its announces are on
+the air.
+
+## The double press's announces
+
+Until 930 a double press on a board without a report recipient, which is
+most boards, answered with nothing at all: the announces went out, the
+log said so (`[ANNOUNCE] sent`), and the user at the board could not
+know (Lew at the T1000-E, 2026-10-23). Now every double press that
+announces plays `announce-sent`, one short and one blip, when its
+announces have left the radio.
+
+**The air, not the queue.** `[ANNOUNCE] sent` is written when the
+announce is built and handed to the interfaces, which for LoRa means a
+queue that the duty lock, the mute and CSMA stand between and the air.
+So the press is answered from the LoRa task. The interface numbers every
+packet it accepts (`accepted_packets`, `leviculum-nrf/src/lora.rs:49`) and
+the task settles each one in that order, keyed or dropped
+(`settle_packet`, `leviculum-nrf/src/lora.rs:55`, called at the mute's
+drop, the stale drop and after a transmission,
+`leviculum-nrf/src/lora.rs:1826,2219,2464`). The button arm notes the
+count before and after its dispatch
+(`leviculum-nrf/src/feedback.rs:191`, called from each binary, e.g.
+`leviculum-nrf/src/bin/t1000e.rs:1125`), and the press's last LoRa
+packet settling keyed plays the pattern
+(`leviculum-nrf/src/feedback.rs:211`). The rule is
+`leviculum_feedback::AirWatch` (`leviculum-nrf/feedback/src/lib.rs:245`),
+host-tested: one watch per press on its last packet, so a press plays
+once however many announces it made; a packet that settles before the
+arm has closed its watch is still caught.
+
+**Silence means "not on the air".** The last announce dropped by the
+mute or the stale rule, a TX the radio refused, an announce the duty
+budget defers, a queue that refused it: nothing plays. With LoRa
+switched off the announces go to BLE and serial only, which have no air
+hook, and the dispatch itself is the answer.
+
+**Both answers.** With a recipient configured the double press plays
+`announce-sent` at the air and `report-delivered` seconds later at the
+proof. Without one the report is skipped
+(`report=skipped reason=no-recipient`) and `announce-sent` is all that
+plays.
+
+Why one short and one blip: one short alone is `battery-1` and `notify`,
+one blip alone is `release-now`, and two short is `report-delivered`.
+The blip after the short is what none of them has, on the LED and by
+ear, and with a gap under half the counting gap the pair reads as one
+figure, 360 ms against the 650 ms of two short.
 
 ## The double press's report
 
@@ -134,7 +189,7 @@ Since 914 the double press does what the gesture table says: after the
 two announces the node loop's button arm asks the telemetry reporter for
 one report (`leviculum_nrf::telemetry::on_button_press`,
 `leviculum-nrf/src/telemetry.rs:1949`, called from each binary, e.g.
-`leviculum-nrf/src/bin/t1000e.rs:1125`). There is no second sender. The
+`leviculum-nrf/src/bin/t1000e.rs:1130`). There is no second sender. The
 press arms the same immediate report a target write or a request from
 the target arms ([Telemetry](telemetry.md), "Setting a target emits one
 immediate report" and "A request from the target triggers one report"),

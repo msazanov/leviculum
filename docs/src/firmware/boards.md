@@ -602,7 +602,7 @@ RNode configuration on the same LoRa network.
 | TX power | 22 dBm |
 
 (`leviculum-nrf/README.md:8`. The profile the firmware loads at boot,
-`eu_medium` (`leviculum-nrf/src/lora.rs:562-601`), applied at
+`eu_medium` (`leviculum-nrf/src/lora.rs:592-631`), applied at
 `leviculum-nrf/src/bin/t114.rs:305` and
 `leviculum-nrf/src/bin/rak4631.rs:405`.)
 

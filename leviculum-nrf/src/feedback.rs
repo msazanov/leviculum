@@ -34,19 +34,24 @@
 //! 2 s), [`notify`](crate::feedback::notify) (the propagation role
 //! storing a message for this board's own `lxmf.delivery` destination) and
 //! [`report_delivered`](crate::feedback::report_delivered) (the proof of
-//! the report a double press sent, order 914).
+//! the report a double press sent, order 914) and the air watch of a double
+//! press ([`announce_press_begin`](crate::feedback::announce_press_begin),
+//! order 930), which plays `announce-sent` when the LoRa task settles the
+//! press's last announce keyed (`crate::lora`'s `settle_packet`).
 //! The mode blink ([`leviculum_feedback::mode`]) has no caller until
 //! Tracker mode exists.
 
+use core::cell::Cell;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use embassy_executor::Spawner;
 use embassy_futures::select::{select, Either};
 use embassy_nrf::gpio::Output;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Timer};
-use leviculum_feedback::{Pattern, Phase, Playback};
+use leviculum_feedback::{AirWatch, Pattern, Phase, Playback};
 
 /// Where a pattern plays.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -158,6 +163,53 @@ pub fn report_delivered() {
     let pattern = leviculum_feedback::report_delivered();
     raise(Sink::Led, pattern);
     raise(Sink::Buzzer, pattern);
+}
+
+// The double press's watch on the air. The node loop opens and closes it,
+// the LoRa task, on its own executor above the node loop, settles packets
+// into it: a critical section, not a signal, because both sides read and
+// write the same state.
+static AIR_WATCH: Mutex<CriticalSectionRawMutex, Cell<AirWatch>> =
+    Mutex::new(Cell::new(AirWatch::new()));
+
+fn with_air_watch(f: impl FnOnce(&mut AirWatch) -> Option<Pattern>) {
+    let pattern = AIR_WATCH.lock(|cell| {
+        let mut watch = cell.get();
+        let pattern = f(&mut watch);
+        cell.set(watch);
+        pattern
+    });
+    if let Some(pattern) = pattern {
+        raise(Sink::Led, pattern);
+        raise(Sink::Buzzer, pattern);
+    }
+}
+
+/// A double press is about to dispatch its announces (order 930). Returns
+/// the LoRa accept count before the dispatch, for
+/// [`announce_press_end`].
+pub fn announce_press_begin() -> u32 {
+    with_air_watch(|watch| {
+        watch.open();
+        None
+    });
+    crate::lora::accepted_packets()
+}
+
+/// The double press's dispatch is done; `announced` is whether the press
+/// made any announce. `announce-sent` plays on the LED and the buzzer when
+/// the last LoRa packet the dispatch queued has been keyed, at once if it
+/// already was, and at once when LoRa is off and the announces went to the
+/// other carriers only (`leviculum_feedback::AirWatch::close`).
+pub fn announce_press_end(lora_before: u32, announced: bool) {
+    let after = crate::lora::accepted_packets();
+    let lora_active = crate::media::lora_active();
+    with_air_watch(|watch| watch.close(lora_before, after, announced, lora_active));
+}
+
+/// The LoRa task settled packet number `packet`, keyed or not.
+pub(crate) fn lora_packet_settled(packet: u32, keyed: bool) {
+    with_air_watch(|watch| watch.settled(packet, keyed));
 }
 
 /// Play `pattern` on `sink` through `drive` (`true` = on) until it ends,

@@ -1201,19 +1201,24 @@ async fn main(spawner: Spawner) {
                 // A double press of the user button that got past its
                 // debouncer and its 30 s limit (#459, `leviculum_nrf::button`):
                 // both announces, booked in the cadence's duty budget. A
-                // board without a button never raises this.
+                // board without a button never raises this. The air watch
+                // around the dispatch plays `announce-sent` once the last
+                // LoRa packet it queued is keyed (order 930).
+                let lora_before = leviculum_nrf::feedback::announce_press_begin();
                 let actions = leviculum_nrf::announce::on_button_press(
                     &mut node,
                     &mut announce_gate,
                     pn_engine.as_mut(),
                     delivery_hash.as_ref(),
                 );
-                if !actions.is_empty() {
+                let announced = !actions.is_empty();
+                if announced {
                     let mut ifaces: [&mut dyn Interface; 3] =
                         [&mut serial_iface, &mut lora_iface, &mut ble_iface];
                     let dispatched = dispatch_actions(&mut ifaces, actions, &ifac_configs);
                     leviculum_nrf::dispatch::settle("announce-button", &mut node, &dispatched);
                 }
+                leviculum_nrf::feedback::announce_press_end(lora_before, announced);
                 // Then one immediate position report when a recipient is
                 // configured (order 914): armed here, sent by the next
                 // telemetry tick through the reporter's own path.
