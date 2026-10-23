@@ -404,7 +404,7 @@ with Python's keys, order, flag bits and nil-able `q`
 `reference/Reticulum/RNS/Resource.py:1333`, flags at
 `reference/Reticulum/RNS/Resource.py:1307`; byte-for-byte vector
 pinned in `test_advertisement_python_interop_vector`,
-`leviculum-core/src/resource/mod.rs:1005`); parts are the bulk-encrypted
+`leviculum-core/src/resource/mod.rs:1026`); parts are the bulk-encrypted
 stream cut at the resource SDU, sent raw in RESOURCE context
 (`build_raw_data_packet`, `leviculum-core/src/link/mod.rs:2495`,
 against the RESOURCE arm of Packet.pack,
@@ -420,7 +420,7 @@ the negotiated one (`HASHMAP_MAX_LEN`,
 against `reference/Reticulum/RNS/Resource.py:1237`); the HMU is
 `resource_hash + msgpack([segment, hashmap])` with checked segment
 arithmetic on our side (`handle_hashmap_update`,
-`leviculum-core/src/resource/incoming.rs:624`, against
+`leviculum-core/src/resource/incoming.rs:640`, against
 `hashmap_update_packet`, `reference/Reticulum/RNS/Resource.py:483`);
 the part count is derived from the advertised transfer size, never
 from the peer's `n` (`from_advertisement`,
@@ -428,7 +428,7 @@ from the peer's `n` (`from_advertisement`,
 `leviculum-core/src/resource/incoming.rs:290`, against
 `reference/Reticulum/RNS/Resource.py:187`); the proof is
 `resource_hash + full_hash(data + resource_hash)`
-(`build_proof`, `leviculum-core/src/resource/incoming.rs:865`, against
+(`build_proof`, `leviculum-core/src/resource/incoming.rs:881`, against
 `prove`, `reference/Reticulum/RNS/Resource.py:752`), cached and
 re-served on an unencrypted CACHE_REQUEST (`handle_cache_request`,
 `leviculum-core/src/node/link_management.rs:2599`, against the
@@ -445,7 +445,7 @@ next-segment-on-proof (`OutgoingSegmentPlan`,
 `validate_proof` advertising `next_segment`,
 `reference/Reticulum/RNS/Resource.py:804-821`); metadata as the 3-byte
 length prefix, stripped on segment 1 only
-(`leviculum-core/src/resource/incoming.rs:820`, against
+(`leviculum-core/src/resource/incoming.rs:836`, against
 `reference/Reticulum/RNS/Resource.py:696-704`); and the salted
 `original_hash` (never a content hash — Codeberg #165;
 `leviculum-core/src/resource/outgoing.rs:885`, against
@@ -518,7 +518,7 @@ advertisement (`reference/Reticulum/RNS/Resource.py:190`, `:210`).
 Class: **deviation ours (deliberate)** — DoS hardening, interop-neutral
 for stock senders (pinned by
 `default_incoming_limit_admits_the_largest_python_advertisement`,
-`leviculum-core/src/resource/mod.rs:1129`).
+`leviculum-core/src/resource/mod.rs:1150`).
 
 **D14 — the default receive-window policy is not the reference's
 algorithm.** Our default `WindowPolicy::Current`
@@ -552,7 +552,7 @@ lacks.** On top of the reference's policy wait (ours:
 `part_policy_wait_ms`, `leviculum-core/src/resource/mod.rs:207`,
 mirroring `reference/Reticulum/RNS/Resource.py:604-606` with the same
 4→2 factor switch and per-retry delay), `part_timeout_ms`
-(`leviculum-core/src/resource/incoming.rs:937`) floors the wait at
+(`leviculum-core/src/resource/incoming.rs:953`) floors the wait at
 (a) what the attached interface says a window costs on the air —
 `window × frame_turnaround + acquisition + rtt` (#36/#374) — and
 (b) the observed median inter-part gap × window, bounded by the
@@ -751,7 +751,7 @@ LoRa, it does so through two numbers the *interface* declares —
 `frame_turnaround_ms` and `acquisition_max_ms` — stored on the link as
 plain figures (`note_frame_turnaround_ms`,
 `leviculum-core/src/link/mod.rs:1240`) and consumed as timeout floors
-(`part_timeout_ms`, `leviculum-core/src/resource/incoming.rs:937`).
+(`part_timeout_ms`, `leviculum-core/src/resource/incoming.rs:953`).
 What the medium changes is which divergences carry weight. On TCP, D5,
 D6 and D19 are noise. On a half-duplex carrier, timing *is* the
 protocol: the receiver's part timeout must exceed what the sender's

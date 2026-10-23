@@ -401,9 +401,9 @@ impl Packet {
 
     /// Unpack a packet from bytes
     ///
-    /// No upper size limit is enforced: a transport relay must accept
-    /// any deframed packet, including those using a negotiated link MTU
-    /// larger than the base protocol MTU (link MTU discovery).
+    /// Announcements use the base protocol MTU. Other packets may use a
+    /// negotiated link MTU larger than that base, so relays do not apply a
+    /// blanket upper limit.
     pub fn unpack(raw: &[u8]) -> Result<Self, PacketError> {
         let header = PacketHeader::parse(raw)?;
         Ok(Self {
@@ -444,7 +444,7 @@ impl PacketHeader {
     /// Parse the header of `raw`, failing exactly where [`Packet::unpack`]
     /// fails.
     ///
-    /// No upper size limit is enforced, for the reason `unpack` gives.
+    /// Announcements retain the base-MTU bound; larger link traffic remains valid.
     pub fn parse(raw: &[u8]) -> Result<Self, PacketError> {
         // HEADER_MINSIZE includes flags(1) + hops(1) + dest_hash(16) + context(1) = 19 bytes
         if raw.len() < HEADER_MINSIZE {
@@ -455,6 +455,12 @@ impl PacketHeader {
 
         // Flags
         let flags = PacketFlags::from_byte(raw[pos])?;
+        // Announcements are not link traffic and never negotiate a larger MTU
+        // (reference/Reticulum/RNS/Packet.py:153-156,235-236). Check before
+        // allocating payload/cache copies or admitting a held announcement.
+        if flags.packet_type == PacketType::Announce && raw.len() > crate::constants::MTU {
+            return Err(PacketError::TooLong);
+        }
         pos += 1;
 
         // Hops
@@ -1018,5 +1024,45 @@ mod tests {
         assert_eq!(decoded.transport_type as u8, TransportType::Transport as u8);
         assert_eq!(decoded.dest_type as u8, DestinationType::Link as u8);
         assert_eq!(decoded.packet_type as u8, PacketType::Proof as u8);
+    }
+
+    #[test]
+    fn announce_bound_does_not_reduce_negotiated_link_packets() {
+        for header_type in [HeaderType::Type1, HeaderType::Type2] {
+            let mut flags = PacketFlags {
+                ifac_flag: false,
+                header_type,
+                context_flag: false,
+                transport_type: TransportType::Broadcast,
+                dest_type: DestinationType::Single,
+                packet_type: PacketType::Announce,
+            };
+            let header_bytes = match header_type {
+                HeaderType::Type1 => HEADER_MINSIZE,
+                HeaderType::Type2 => HEADER_MAXSIZE,
+            };
+            let mut raw = alloc::vec![0x37; MTU];
+            raw[0] = flags.to_byte();
+            raw[header_bytes - 1] = PacketContext::None.to_byte();
+            assert_eq!(
+                Packet::unpack(&raw).unwrap().data.as_slice(),
+                &raw[header_bytes..]
+            );
+            raw.push(0x37);
+            assert!(matches!(
+                PacketHeader::parse(&raw),
+                Err(PacketError::TooLong)
+            ));
+            assert!(matches!(Packet::unpack(&raw), Err(PacketError::TooLong)));
+
+            flags.dest_type = DestinationType::Link;
+            flags.packet_type = PacketType::Data;
+            raw.resize(16_384, 0x37);
+            raw[0] = flags.to_byte();
+            assert_eq!(
+                Packet::unpack(&raw).unwrap().data.as_slice(),
+                &raw[header_bytes..]
+            );
+        }
     }
 }

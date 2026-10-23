@@ -704,6 +704,12 @@ impl ResourceAdvertisement {
                 b"q" => {
                     let val = msgpack::read_msgpack_bin_or_nil(data, &mut pos)
                         .ok_or(ResourceError::InvalidAdvertisement)?;
+                    // Requests and responses use a truncated packet/content
+                    // hash (reference/Reticulum/RNS/Link.py:515,931,1035).
+                    // Check the borrowed field before allocating its owner.
+                    if val.is_some_and(|id| id.len() != crate::constants::TRUNCATED_HASHBYTES) {
+                        return Err(ResourceError::InvalidAdvertisement);
+                    }
                     request_id = Some(val.map(|b| b.to_vec()));
                 }
                 b"f" => {
@@ -875,11 +881,26 @@ mod tests {
     }
 
     #[test]
-    fn test_advertisement_pack_unpack_with_request_id() {
-        let adv = make_test_adv(Some(vec![0xDE, 0xAD, 0xBE, 0xEF]));
-        let packed = adv.pack();
-        let unpacked = ResourceAdvertisement::unpack(&packed).unwrap();
-        assert_eq!(adv, unpacked);
+    fn request_identifier_uses_the_protocol_hash_width() {
+        for length in [0, 4, 15, 17, 64, 16_000] {
+            let advertisement = make_test_adv(Some(vec![0x35; length])).pack();
+            assert!(
+                matches!(
+                    ResourceAdvertisement::unpack(&advertisement),
+                    Err(ResourceError::InvalidAdvertisement)
+                ),
+                "request identifier length {length}"
+            );
+        }
+        let id = crate::crypto::truncated_hash(b"resource request");
+        let advertisement = make_test_adv(Some(id.to_vec())).pack();
+        let decoded = ResourceAdvertisement::unpack(&advertisement).unwrap();
+        assert_eq!(decoded.request_id.as_deref(), Some(id.as_slice()));
+        let advertisement = make_test_adv(None).pack();
+        assert!(ResourceAdvertisement::unpack(&advertisement)
+            .unwrap()
+            .request_id
+            .is_none());
     }
 
     #[test]
@@ -984,7 +1005,7 @@ mod tests {
             original_hash: [0xFF; 32],
             segment_index: 5,
             total_segments: 10,
-            request_id: Some(vec![0u8; 64]),
+            request_id: Some(vec![0u8; crate::constants::TRUNCATED_HASHBYTES]),
             flags: ResourceFlags {
                 encrypted: true,
                 compressed: true,
