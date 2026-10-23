@@ -20,6 +20,18 @@ Toolchain: Rust 1.97.1
 
 ### Added
 
+- lnsd reads an `[auto]` section, which rnsd ignores: `lan`, `servers`,
+  `bluetooth`, `serial`, each yes or no, the media lnsd may start on its
+  own (#471 step 2). A file without the section starts nothing automatic;
+  no file runs the shipped defaults (`lan = yes`, the rest `no` until their
+  steps land), which `lnsd --writeconfig` now appends to rnsd's
+  first-start file. `[auto] lan = yes` adds an AutoInterface to a file that
+  names none. The host marker `/etc/leviculum/no-auto` and
+  `LEVICULUM_NO_AUTO=1` turn every medium off; `scripts/install-ci.sh`
+  installs the marker. lnsd states the decision once at start,
+  `AUTO_LAYER state= reason= lan= servers= bluetooth= serial=`, and
+  `lnstatus` prints it as `Auto layer`.
+
 - lnsd started on a config directory without a `config` file runs the
   configuration rnsd writes on its first start, held in memory and written
   nowhere: one AutoInterface, a shared instance, transport off (#471 step

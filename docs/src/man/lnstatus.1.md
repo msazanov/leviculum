@@ -12,7 +12,7 @@ lnstatus -- Reticulum network stack status
 
 **lnstatus** displays the status of the interfaces on a running Reticulum daemon. It is compatible with Python's **rnstatus** and produces the same per-interface layout. It connects to a running daemon (**lnsd** or **rnsd**) via shared instance IPC, querying `interface_stats` (and `link_count` for **-l**), so `lnstatus | diff rnstatus` against the same **rnsd** passes.
 
-Against **lnsd**, each interface carries one line **rnstatus** does not print, `Origin    : configured` or `Origin    : default`: whether the interface comes from a configuration file or from the configuration **lnsd** runs when there is none (see lnsd(1)). The same value is the `origin` key of **-j**. Against **rnsd**, which serves no such key, the line is absent and the output stays the same as **rnstatus**'s.
+Against **lnsd**, each interface carries one line **rnstatus** does not print, `Origin    : configured` or `Origin    : default`: whether the interface comes from a configuration file or from the configuration **lnsd** runs when there is none (see lnsd(1)). The same value is the `origin` key of **-j**. Against **rnsd**, which serves no such key, the line is absent and the output stays the same as **rnstatus**'s. The same holds for the last line, `Auto layer   : off reason=config lan=no servers=no bluetooth=no serial=no`, **lnsd**'s automatic-layer decision at start (its `AUTO_LAYER` line, see lnsd(1)), served as the top-level `auto_layer` key of **-j**.
 
 Without a *filter*, all up interfaces are shown. Give a *filter* string to only display interfaces whose name contains it.
 

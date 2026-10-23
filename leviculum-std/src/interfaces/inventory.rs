@@ -41,6 +41,7 @@ use std::sync::{Arc, Mutex};
 
 use leviculum_core::traits::InterfaceMode;
 
+use crate::auto_layer::AutoLayer;
 use crate::config::InterfaceOrigin;
 
 /// Python renders an IPv6 literal in brackets and an IPv4 literal bare
@@ -182,6 +183,9 @@ pub(crate) struct InterfaceInventory {
     /// The origin of every configured section, by section name (#471): what
     /// a row reports as `origin`.
     section_origins: BTreeMap<String, InterfaceOrigin>,
+    /// The automatic layer's decision at start (#471 step 2), served as the
+    /// top-level `auto_layer` key; `None` for a node built in code.
+    auto_layer: Option<AutoLayer>,
 }
 
 /// Shared handle: the accept loops write, the stats builder reads.
@@ -226,6 +230,16 @@ impl InterfaceInventory {
     /// are built.
     pub(crate) fn set_section_origin(&mut self, section: &str, origin: InterfaceOrigin) {
         self.section_origins.insert(section.to_string(), origin);
+    }
+
+    /// Record the automatic layer's decision, once, before the node runs.
+    pub(crate) fn set_auto_layer(&mut self, layer: Option<AutoLayer>) {
+        self.auto_layer = layer;
+    }
+
+    /// The automatic layer's decision, if this node took one.
+    pub(crate) fn auto_layer(&self) -> Option<AutoLayer> {
+        self.auto_layer
     }
 
     /// The origin a row reports. A row whose short name is a section's name,

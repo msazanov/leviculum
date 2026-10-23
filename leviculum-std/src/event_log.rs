@@ -1128,6 +1128,13 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "IFACE_CONFIG",
         required_keys: &["name", "type", "enabled", "origin"],
     },
+    // The automatic layer's decision (`lnsd.rs`, `auto_layer::AutoLayer::log`,
+    // #471 step 2): `on` or `off`, why (`config`, `marker`, `env`,
+    // `default`), and each `[auto]` medium as `yes`/`no`. Once at startup.
+    EventSchema {
+        name: "AUTO_LAYER",
+        required_keys: &["state", "reason", "lan", "servers", "bluetooth", "serial"],
+    },
     EventSchema {
         name: "LOCK_DEPTH_OVERFLOW",
         required_keys: &["max_depth", "tripwire"],

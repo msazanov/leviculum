@@ -910,3 +910,30 @@ fn origin_renders_where_lnsd_serves_it_and_nowhere_else() {
     assert_eq!(ifs[0]["origin"], serde_json::json!("default"));
     assert!(ifs[2].get("origin").is_none());
 }
+
+#[test]
+fn auto_layer_renders_where_lnsd_serves_it_and_nowhere_else() {
+    // `auto_layer` (#471 step 2) is lnsd's start decision, served as its
+    // `AUTO_LAYER` line reads after `state=`. One line at the end of the
+    // trailer where it is served; a stats dict without it (rnsd, a node built
+    // in code) renders exactly as before.
+    let bare = serde_json::json!({
+        "interfaces": [iface("UDPInterface[Bare]", 10_000_000, 0, 0)],
+        "rxb": 0, "txb": 0, "rxs": 0.0, "txs": 0.0, "rss": null
+    });
+    let mut served = bare.clone();
+    served["auto_layer"] =
+        serde_json::json!("off reason=config lan=no servers=no bluetooth=no serial=no");
+
+    let without = render_status(&bare, None, &StatusOptions::default());
+    let with = render_status(&served, None, &StatusOptions::default());
+    assert!(!without.contains("Auto layer"), "{without}");
+    assert_eq!(
+        with,
+        format!(
+            "{}\n\n Auto layer   : off reason=config lan=no servers=no bluetooth=no serial=no\n\n",
+            without.trim_end_matches('\n')
+        ),
+        "the line is the only difference:\n{with}"
+    );
+}

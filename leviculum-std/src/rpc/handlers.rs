@@ -1101,6 +1101,15 @@ pub(crate) fn build_interface_stats(
         (pickle_str_key("txq"), pickle_none()),
     ];
 
+    // #471 step 2: the automatic layer's decision, as the `AUTO_LAYER` line
+    // states it without its `state=` key (`off reason=config lan=no ...`).
+    // Additive like the per-row `origin`: rnstatus reads top-level keys by
+    // name, so it passes unread; lnstatus prints it. Absent for a node built
+    // in code, which took no decision.
+    if let Some(layer) = inv.auto_layer() {
+        entries.push((pickle_str_key("auto_layer"), pickle_str(&layer.summary())));
+    }
+
     if transport_enabled {
         entries.push((
             pickle_str_key("transport_id"),
@@ -3345,6 +3354,52 @@ mod tests {
             row.get(&HashableValue::String("tx_jitter_max".into())),
             Some(&Value::F64(2.926)),
             "overriding the bitrate must not hide the contention bound"
+        );
+    }
+
+    /// #471 step 2: the automatic layer's decision is a top-level key, the
+    /// `AUTO_LAYER` line after `state=`, served only by a node that took one.
+    #[test]
+    fn build_interface_stats_serves_the_auto_layer_decision() {
+        use crate::auto_layer::{AutoLayer, AutoMedia, AutoReason};
+        use crate::clock::SystemClock;
+        use crate::interfaces::inventory::InterfaceInventory;
+        use crate::interfaces::InterfaceStatsMap;
+        use leviculum_core::node::NodeCoreBuilder;
+        use std::collections::BTreeMap;
+        use std::sync::{Arc, Mutex};
+
+        let tmp = tempfile::Builder::new()
+            .prefix("rpc-auto-layer-")
+            .tempdir()
+            .unwrap();
+        let mut core: StdNodeCore = NodeCoreBuilder::new().build(
+            rand_core::OsRng,
+            SystemClock::new(),
+            crate::storage::Storage::new(&tmp).unwrap(),
+        );
+        let stats: InterfaceStatsMap = Arc::new(Mutex::new(BTreeMap::new()));
+        let inventory = InterfaceInventory::shared();
+        let auto_layer = |core: &mut StdNodeCore| -> Option<Value> {
+            let Value::Dict(top) =
+                build_interface_stats(core, std::time::Instant::now(), &stats, &inventory, 0)
+            else {
+                panic!("interface_stats must be a dict")
+            };
+            top.get(&HashableValue::String("auto_layer".into()))
+                .cloned()
+        };
+
+        assert_eq!(auto_layer(&mut core), None, "a node built in code");
+        inventory.lock_recover().set_auto_layer(Some(AutoLayer {
+            media: AutoMedia::SHIPPED,
+            reason: AutoReason::Default,
+        }));
+        assert_eq!(
+            auto_layer(&mut core),
+            Some(Value::String(
+                "on reason=default lan=yes servers=no bluetooth=no serial=no".into()
+            ))
         );
     }
 

@@ -13,6 +13,7 @@
 #![warn(unreachable_pub)]
 
 pub mod api;
+pub mod auto_layer;
 pub(crate) mod autoconnect;
 pub(crate) mod clock;
 pub mod config;

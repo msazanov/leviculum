@@ -21,12 +21,12 @@ with lnsd started as `lnsd -c` on an empty directory:
 - **No interface.** Without a file lnsd took `Config::default()`, whose
   interface map is empty. It logged `Node started with 0 interface(s)`.
 - **No shared instance.** The default is `shared_instance: false`
-  (`shared_instance`, `leviculum-std/src/config.rs:611`), where rnsd
+  (`shared_instance`, `leviculum-std/src/config.rs:621`), where rnsd
   defaults to yes. No client could attach, so lnomad, lnstatus and the
   Python tools saw nothing at all. Every cell line therefore states
   `shared_instance=` first.
 - **Transport on.** The default is `enable_transport: true`
-  (`enable_transport`, `leviculum-std/src/config.rs:607`), and lnsd said
+  (`enable_transport`, `leviculum-std/src/config.rs:617`), and lnsd said
   so in its `CONFIG_DEFAULT` line (`value=true rnsd=false`). The stock
   file rnsd writes on its first start says `enable_transport = False`
   (`Reticulum.py:1879`).
@@ -42,15 +42,15 @@ start moved.
 ## Step 1, as built
 
 Without a `config` file lnsd now runs the file rnsd would have written,
-from memory (`load_or_default`, `leviculum-std/src/config.rs:1448`). The
-text is `RNSD_DEFAULT_CONFIG` (`leviculum-std/src/config.rs:713`): not
+from memory (`load_or_default`, `leviculum-std/src/config.rs:1469`). The
+text is `RNSD_DEFAULT_CONFIG` (`leviculum-std/src/config.rs:724`): not
 the template literal of `Reticulum.py:1860` but what ConfigObj makes of
 it on `write()`, which indents every key by two spaces and drops the
 last empty line. Captured from the vendored ConfigObj of the pinned
 reference, 4013 bytes. Two tests hold it: its lines are the template's
 lines, and, where `python3` runs, the template through the reference's
 own ConfigObj is byte for byte the same file. lnsd parses it with its
-own INI reader (`rnsd_default`, `leviculum-std/src/config.rs:1435`), so
+own INI reader (`rnsd_default`, `leviculum-std/src/config.rs:1456`), so
 what it runs and what rnsd would write cannot drift apart. It means:
 transport off, a shared instance named `default`, log level 4,
 `discover_interfaces` at lnsd's default, and one AutoInterface,
@@ -59,17 +59,17 @@ transport off, a shared instance named `default`, log level 4,
 - `lnsd --writeconfig` writes the same text to `<dir>/config` and exits;
   it never replaces an existing file.
 - Every interface section carries an origin, `configured` or `default`
-  (`InterfaceOrigin`, `leviculum-std/src/config.rs:657`). lnsd logs one
+  (`InterfaceOrigin`, `leviculum-std/src/config.rs:667`). lnsd logs one
   `IFACE_CONFIG name= type= enabled= origin=` line per section before it
   builds any (`leviculum-std/src/driver/mod.rs:2334`), and once
-  `CONFIG source=file|default path=` (`leviculum-cli/src/lnsd.rs:194`).
+  `CONFIG source=file|default path=` (`leviculum-cli/src/lnsd.rs:195`).
 - `interface_stats` serves the origin as the `origin` key
   (`leviculum-std/src/rpc/handlers.rs:675`), and `lnstatus` prints it as
   an `Origin` line under `Status`; rnsd serves no such key, so against
   rnsd the output stays rnstatus's. A row named after a section takes that
   section's origin; a row no section names (the shared instance, an
   AutoInterface's peers) takes the origin all sections share
-  (`origin_of`, `leviculum-std/src/interfaces/inventory.rs:238`).
+  (`origin_of`, `leviculum-std/src/interfaces/inventory.rs:252`).
 
 The page's open question 1 is sharper now: a Python tool pointed at a
 fresh lnsd's directory writes the same bytes `--writeconfig` writes, and
@@ -87,7 +87,7 @@ Two facts about the files decide the opt-out format:
 - **lnsd warns about it today and goes on.** A file with `[auto]
   bluetooth = no` starts, and lnsd logs `'bluetooth' is in section
   '[auto]', which lnsd does not read, and is ignored`
-  (`leviculum-std/src/ini_config.rs:187`). Measured in the cell
+  (`leviculum-std/src/ini_config.rs:192`). Measured in the cell
   `ble_room_auto_start`.
 
 And one fact about the Python tools, which the cells ran into: **a Python
@@ -164,8 +164,8 @@ random from a list shipped in the binary, each marked `bootstrap_only`
 (`bootstrap_only`, `leviculum-std/src/driver/builder.rs:639`): it exists
 to join the network and is detached once enough discovered connections
 stand. Discovery is already on by default (`default_discover_interfaces`,
-`leviculum-std/src/config.rs:564`); autoconnect is not
-(`autoconnect_discovered_interfaces`, `leviculum-std/src/config.rs:632`),
+`leviculum-std/src/config.rs:574`); autoconnect is not
+(`autoconnect_discovered_interfaces`, `leviculum-std/src/config.rs:642`),
 and the automatic layer raises it to a ceiling of two or three. The
 ceiling and the entry count are configuration keys with the defaults in
 the code, changed after a measurement, not before. Transport stays off

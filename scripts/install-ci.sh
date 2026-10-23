@@ -537,6 +537,29 @@ if ! ls /dev/ttyACM* >/dev/null 2>&1; then
     echo "[install-ci] WARNING: no /dev/ttyACM* devices found — LoRa tests will skip in nightly."
 fi
 
+# 10b. The automatic-layer host marker (#471, docs/src/concepts/zero-config.md).
+#     A host this script sets up is a rig or coder host: it runs the suites
+#     and the periculum cells, with Bluetooth adapters and boards on USB in
+#     reach. An lnsd started there without a config file (a test, a stray
+#     `lnsd` in a shell) would bring up the automatic layer and join the
+#     measurement room. /etc/leviculum/no-auto turns that layer off for every
+#     lnsd on the host; a cell that measures the layer sets
+#     LEVICULUM_NO_AUTO=0. It sits here, beside the hardware probe and outside
+#     the --vm-mode switch, because the marker belongs to the host the runners
+#     run on, whichever mode installed them. `sudo -n`: an idempotent
+#     installer never stops at a password prompt; without passwordless sudo
+#     it warns and names the command instead.
+AUTO_MARKER=/etc/leviculum/no-auto
+if [[ -e "$AUTO_MARKER" ]]; then
+    echo "[install-ci] automatic-layer marker present: $AUTO_MARKER"
+elif sudo -n mkdir -p "$(dirname "$AUTO_MARKER")" 2>/dev/null \
+    && sudo -n touch "$AUTO_MARKER" 2>/dev/null; then
+    echo "[install-ci] automatic-layer marker installed: $AUTO_MARKER"
+else
+    echo "[install-ci] WARNING: could not install $AUTO_MARKER (no passwordless sudo)."
+    echo "[install-ci] Hint: sudo mkdir -p /etc/leviculum && sudo touch $AUTO_MARKER"
+fi
+
 # 11. Worktree-scoped vm-mode marker.  Tier-runners check for this
 #     file inside their git-dir before running _repo-sync.sh.  Marker
 #     is per-worktree (not per-user) so a manual `bash run-tier2.sh`

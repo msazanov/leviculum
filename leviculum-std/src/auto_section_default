@@ -1,0 +1,12 @@
+
+# What lnsd may start on its own, per medium. rnsd ignores this
+# section. A file without it starts nothing automatically.
+[auto]
+  # An AutoInterface on the LAN when this file names none.
+  lan = yes
+  # The shipped list of public servers (not built yet).
+  servers = no
+  # BLE when an adapter is present (not built yet).
+  bluetooth = no
+  # LNodes and RNodes on USB serial ports (not built yet).
+  serial = no

@@ -16,6 +16,16 @@ pub struct Config {
     /// Interface configurations by name
     #[serde(default)]
     pub interfaces: HashMap<String, InterfaceConfig>,
+    /// The `[auto]` section (#471 step 2): which media lnsd may start on its
+    /// own. Every key `no` when the file has no such section; the shipped
+    /// defaults in [`Config::rnsd_default`]. lnsd reads it, rnsd ignores it.
+    #[serde(default)]
+    pub auto: crate::auto_layer::AutoMedia,
+    /// The decision lnsd took from [`Self::auto`], the host marker and the
+    /// environment ([`crate::auto_layer::apply`]); `None` for a node built in
+    /// code, which has no automatic layer. Not a config key.
+    #[serde(skip)]
+    pub auto_layer: Option<crate::auto_layer::AutoLayer>,
 }
 
 /// `path_choice` as a config value (Codeberg #230): the serde face of
@@ -660,7 +670,8 @@ pub enum InterfaceOrigin {
     #[default]
     Configured,
     /// A section of [`RNSD_DEFAULT_CONFIG`], which lnsd runs when its config
-    /// directory holds no file.
+    /// directory holds no file, or the AutoInterface the automatic layer adds
+    /// to a file whose `[auto] lan = yes` names none (#471 step 2).
     Default,
 }
 
@@ -711,6 +722,15 @@ impl ConfigSource {
 /// shared instance named `default`, log level 4, and one AutoInterface,
 /// `[[Default Interface]]`, in the default group.
 pub const RNSD_DEFAULT_CONFIG: &str = include_str!("rnsd_default_config");
+
+/// What lnsd runs without a file and what `lnsd --writeconfig` writes (#471
+/// step 2): [`RNSD_DEFAULT_CONFIG`] followed by the `[auto]` section with the
+/// shipped defaults ([`crate::auto_layer::AUTO_SECTION_DEFAULT`]). rnsd reads
+/// it as its own first-start file, because it never looks at `[auto]`.
+pub const LNSD_DEFAULT_CONFIG: &str = concat!(
+    include_str!("rnsd_default_config"),
+    include_str!("auto_section_default")
+);
 
 /// Interface configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1430,10 +1450,11 @@ impl Config {
     }
 
     /// The configuration lnsd runs when its config directory holds no file:
-    /// [`RNSD_DEFAULT_CONFIG`], parsed by the same INI reader a file goes
-    /// through, with every interface marked [`InterfaceOrigin::Default`].
+    /// [`LNSD_DEFAULT_CONFIG`], rnsd's first-start file and the shipped
+    /// `[auto]` section, parsed by the same INI reader a file goes through,
+    /// with every interface marked [`InterfaceOrigin::Default`].
     pub fn rnsd_default() -> Result<Self> {
-        let mut config = crate::ini_config::parse_ini(RNSD_DEFAULT_CONFIG).map_err(|e| {
+        let mut config = crate::ini_config::parse_ini(LNSD_DEFAULT_CONFIG).map_err(|e| {
             Error::Config(format!("Failed to parse the built-in default config: {e}"))
         })?;
         for iface in config.interfaces.values_mut() {
@@ -1583,6 +1604,67 @@ mod tests {
         assert_eq!(r.discover_interfaces, default_discover_interfaces());
         assert_eq!(r.shared_instance_type, None);
         assert_eq!(r.shared_instance_port, None);
+        // The shipped `[auto]` section (#471 step 2), the const and the text
+        // `--writeconfig` writes agreeing.
+        assert_eq!(config.auto, crate::auto_layer::AutoMedia::SHIPPED);
+        assert_eq!(config.auto_layer, None, "decided by lnsd, not by parsing");
+    }
+
+    /// lnsd's default is rnsd's first-start file with `[auto]` after it,
+    /// nothing changed in between.
+    #[test]
+    fn lnsd_default_is_the_rnsd_file_and_the_auto_section() {
+        assert_eq!(
+            LNSD_DEFAULT_CONFIG.strip_prefix(RNSD_DEFAULT_CONFIG),
+            Some(crate::auto_layer::AUTO_SECTION_DEFAULT)
+        );
+    }
+
+    /// rnsd's own reader takes `--writeconfig`'s file: the reference's
+    /// vendored ConfigObj parses it and finds rnsd's three sections unchanged
+    /// beside `[auto]`, which `Reticulum.py` never reads.
+    #[test]
+    fn configobj_reads_the_written_file() {
+        let vendor =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../reference/Reticulum/RNS/vendor");
+        if !vendor.join("configobj.py").exists() {
+            eprintln!("reference/Reticulum not checked out, skipping");
+            return;
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config");
+        std::fs::write(&path, LNSD_DEFAULT_CONFIG).expect("write");
+        let script = "import sys\n\
+                      sys.path.insert(0, sys.argv[1])\n\
+                      from configobj import ConfigObj\n\
+                      c = ConfigObj(sys.argv[2])\n\
+                      print(' '.join(c.keys()))\n\
+                      print(' '.join(c['interfaces'].keys()))\n\
+                      print(' '.join(k + '=' + v for k, v in c['auto'].items()))\n";
+        let run = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(script)
+            .arg(&vendor)
+            .arg(&path)
+            .output();
+        let output = match run {
+            Ok(output) => output,
+            Err(e) => {
+                eprintln!("python3 not runnable ({e}), skipping");
+                return;
+            }
+        };
+        assert!(
+            output.status.success(),
+            "ConfigObj refused the file: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "reticulum logging interfaces auto\n\
+             Default Interface\n\
+             lan=yes servers=no bluetooth=no serial=no\n"
+        );
     }
 
     /// A file is used as it is: its interfaces were configured.
@@ -1601,6 +1683,9 @@ mod tests {
         assert_eq!(source, ConfigSource::File);
         let auto = config.interfaces.get("Default Interface").expect("section");
         assert_eq!(auto.origin, InterfaceOrigin::Configured);
+        // rnsd's file has no `[auto]`: a file without the section starts
+        // nothing automatic.
+        assert_eq!(config.auto, crate::auto_layer::AutoMedia::NONE);
     }
 
     /// `__default_rns_config__` out of the pinned reference, as rnsd hands it

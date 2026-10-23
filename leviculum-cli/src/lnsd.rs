@@ -12,7 +12,7 @@ use tracing::info;
 // env var is honoured for structured-event capture.  Codeberg #39
 // piece 1.)
 
-use leviculum_std::config::{Config, RNSD_DEFAULT_CONFIG};
+use leviculum_std::config::{Config, LNSD_DEFAULT_CONFIG};
 use leviculum_std::Reticulum;
 
 /// Measured live heap, under the default-off `heap-accounting` feature.
@@ -94,8 +94,9 @@ struct Args {
     exampleconfig: bool,
 
     /// Write the configuration lnsd runs without a file to `<config>/config`
-    /// and exit. It is the file rnsd writes on its first start, byte for
-    /// byte, so rnsd reads it unchanged. Refuses to replace an existing file.
+    /// and exit: the file rnsd writes on its first start, byte for byte,
+    /// followed by an `[auto]` section with the shipped defaults, which rnsd
+    /// ignores. Refuses to replace an existing file.
     #[arg(long)]
     writeconfig: bool,
 
@@ -195,6 +196,13 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         source = %source.as_str(),
         path = %leviculum_std::event_log::Scalar(&config_file.display().to_string()),
     );
+    // The automatic layer (#471 step 2): the file's `[auto]` section, or the
+    // shipped defaults without a file, unless the host marker or
+    // LEVICULUM_NO_AUTO turns it off. Decided and stated once, before the
+    // driver logs the interface sections it was handed.
+    let auto_layer = leviculum_std::auto_layer::decide_for_host(source, config.auto);
+    leviculum_std::auto_layer::apply(&mut config, auto_layer)?;
+    auto_layer.log();
     config.reticulum.log_defaulted_keys();
 
     // Storage precedence: --storage > config `storage_path` > <config_dir>/storage.
@@ -384,7 +392,7 @@ fn resolve_default_filter(
     "info".to_string()
 }
 
-/// Write [`RNSD_DEFAULT_CONFIG`] to `path`, creating its directory as rnsd
+/// Write [`LNSD_DEFAULT_CONFIG`] to `path`, creating its directory as rnsd
 /// does (`Reticulum.py:1200-1202`). An existing file is somebody's
 /// configuration and is never replaced.
 fn write_default_config(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
@@ -398,7 +406,7 @@ fn write_default_config(path: &std::path::Path) -> Result<(), Box<dyn std::error
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    std::fs::write(path, RNSD_DEFAULT_CONFIG)?;
+    std::fs::write(path, LNSD_DEFAULT_CONFIG)?;
     Ok(())
 }
 
@@ -516,7 +524,7 @@ mod cli_tests {
         let path = dir.path().join("fresh").join("config");
         write_default_config(&path).expect("write into a fresh directory");
         let written = std::fs::read(&path).expect("read back");
-        assert_eq!(written, RNSD_DEFAULT_CONFIG.as_bytes());
+        assert_eq!(written, LNSD_DEFAULT_CONFIG.as_bytes());
 
         // A later --writeconfig leaves the file alone, edited or not.
         std::fs::write(&path, "[reticulum]\n").expect("edit");

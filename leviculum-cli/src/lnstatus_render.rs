@@ -1407,6 +1407,12 @@ fn render_trailer(out: &mut String, stats: &Value, link_count: Option<i64>, opts
         pln(out, &format!("\n{lstr}"));
     }
 
+    // The automatic layer (#471 step 2), as lnsd's `AUTO_LAYER` line states
+    // it. Ours; rnsd serves no such key, so the trailer stays rnstatus's.
+    if let Some(auto) = js(stats, "auto_layer") {
+        pln(out, &format!("\n Auto layer   : {auto}"));
+    }
+
     pln(out, "");
 }
 

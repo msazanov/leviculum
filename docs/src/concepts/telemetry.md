@@ -451,8 +451,8 @@ A collector redistributes positions of people who are not asking for
 that redistribution. It therefore answers requests only from an explicit
 allow-list, empty by default, set only through a path that is not the
 radio: on a host that is the config file, as `remote_management_allowed`
-is (`leviculum-std/src/config.rs:146`, empty by default at
-`leviculum-std/src/config.rs:585`); on a firmware with no filesystem it
+is (`leviculum-std/src/config.rs:156`, empty by default at
+`leviculum-std/src/config.rs:595`); on a firmware with no filesystem it
 is the local control channel, which is the same requirement in a
 different envelope.
 

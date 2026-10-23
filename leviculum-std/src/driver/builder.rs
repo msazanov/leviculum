@@ -1121,6 +1121,10 @@ impl ReticulumNodeBuilder {
             node.set_connect_instance(name.clone());
         }
         node.set_rpc_key(config.reticulum.rpc_key.clone());
+        // What lnsd decided about the automatic layer (#471), for
+        // `interface_stats` to serve; a node built in code has none.
+        crate::sync_ext::MutexRecover::lock_recover(&*node.inventory)
+            .set_auto_layer(config.auto_layer);
         node.set_storage_path(storage_path.clone());
         #[cfg(feature = "serial")]
         node.set_rnode_channels(rnode_channels);

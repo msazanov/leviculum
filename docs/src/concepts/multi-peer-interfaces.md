@@ -366,8 +366,8 @@ what Codeberg #365 and #376 built, and what runs today.
 inventory.** C, plus the one thing A gives away for free: the
 inventory already models a parent with spawned children and merges a
 departed child's bytes into its parent (`add_spawned`,
-`leviculum-std/src/interfaces/inventory.rs:202`; `remove_spawned`,
-`leviculum-std/src/interfaces/inventory.rs:208`), and it is
+`leviculum-std/src/interfaces/inventory.rs:206`; `remove_spawned`,
+`leviculum-std/src/interfaces/inventory.rs:212`), and it is
 driver-owned and deliberately outside the routing map. A BLE peer
 appearing and disappearing already crosses the driver boundary as a
 peer event, so it can create and retire an inventory row without ever
