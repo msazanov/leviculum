@@ -18,6 +18,7 @@
 - [OTA stage 2: the image itself over the mesh](concepts/ota-stage-2-mesh-image.md)
 - [Python-RNS compatibility](concepts/python-rns-compatibility.md)
 - [Client tools](concepts/client-tools.md)
+- [Zero-config lnsd](concepts/zero-config.md)
 - [Cryptographic identity and forward secrecy](concepts/identity-and-forward-secrecy.md)
 - [Storage and embedding](concepts/storage-and-embedding.md)
 - [Time and clocks](concepts/time-and-clocks.md)

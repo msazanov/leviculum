@@ -311,3 +311,10 @@ there is.
    required before it is relied on even as a secondary path.
 5. **Signing:** SSH vs GPG commit signing for attribution; whether
    release signing uses a dedicated identity.
+
+## See also
+
+- [Zero-config lnsd](zero-config.md): `leviculum.network` is the first
+  entry of the server list every fresh install dials, and what that
+  entry owes (monitoring, a privacy statement, consent of further
+  operators) before it ships.
