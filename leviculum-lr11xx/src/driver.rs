@@ -179,7 +179,14 @@ pub struct ChipStatus {
 /// awaiting half (see the SX1262's `ArmedWindow`).
 #[derive(Clone, Copy)]
 struct ArmedWindow {
+    /// The bound the loop asked for — what adoption compares, so a
+    /// provisional re-arm with the same ask stays the same window.
     timeout_ms: u32,
+    /// The bound the chip's timer actually runs:
+    /// [`leviculum_core::sx126x::rx_arm_bound_ms`] of the ask, which pads the
+    /// two transmit-gating sites by the detector settle. The software wait is
+    /// sized from this one.
+    bound_ms: u32,
     site: RxSite,
     armed_at_ms: u64,
 }
@@ -704,17 +711,29 @@ where
         )
         .await?;
         self.clear_irq(irq::ALL).await?;
+        // The chip's timer runs the settle past the ask on the two
+        // transmit-gating sites, so a preamble beginning inside the window's
+        // last detector horizon latches and stops it (929, #466); see
+        // `rx_arm_bound_ms` for the measured losses. The ask itself stays in
+        // the window for adoption.
+        let bound_ms = leviculum_core::sx126x::rx_arm_bound_ms(
+            timeout_ms,
+            site,
+            self.rx_ext_bw_hz,
+            self.rx_ext_sf,
+        );
         // Recorded before the command goes out: a future dropped inside the
         // transaction still owes a standby.
         self.rx_window_flags = 0;
         self.rx_state.arming(ArmedWindow {
             timeout_ms,
+            bound_ms,
             site,
             armed_at_ms: now_ms(),
         });
-        self.write_command(op::SET_RX, &cmd::set_rx(cmd::ms_to_rtc_steps(timeout_ms)))
+        self.write_command(op::SET_RX, &cmd::set_rx(cmd::ms_to_rtc_steps(bound_ms)))
             .await?;
-        let arm = self.rx_arm.arm(site, timeout_ms, now_ms());
+        let arm = self.rx_arm.arm(site, bound_ms, now_ms());
         self.log("[SX_RX_ARM] ", format_args!("{arm}"));
         Ok(())
     }
@@ -733,13 +752,13 @@ where
     /// returns, finish with [`Self::read_ready_rx`] outside that select; the
     /// software wait expiring is not itself a receive verdict.
     pub async fn wait_rx_ready(&mut self) -> Result<(), Error> {
-        let Some(&ArmedWindow { timeout_ms, .. }) = self.rx_state.window() else {
+        let Some(&ArmedWindow { bound_ms, .. }) = self.rx_state.window() else {
             return Err(Error::NotArmed);
         };
-        let sw_timeout_ms = if timeout_ms == 0 {
+        let sw_timeout_ms = if bound_ms == 0 {
             60_000u64
         } else {
-            timeout_ms as u64 + 500
+            bound_ms as u64 + 500
         };
         self.wait_rx_irq(Duration::from_millis(sw_timeout_ms)).await;
         Ok(())

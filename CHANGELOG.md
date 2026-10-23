@@ -721,6 +721,22 @@ Toolchain: Rust 1.97.1
 
 ### Fixed
 
+- A board no longer loses a frame whose preamble begins inside the last
+  detector horizon of a pre-transmit listening window (#466): the
+  acquisition-jitter and CSMA-backoff windows now run their hardware RX
+  timeout one latch-settle bound (~25 ms at SF8/BW125, about one CSMA
+  slot) past the asked bound, so such a preamble latches and
+  stop-timer-on-preamble holds the window through the frame instead of
+  the chip leaving RX mid-preamble on its own. Before the pad, the CAD
+  that followed read the dying frame as a busy channel — correctly — but
+  the backoff re-arms it licensed restarted the preamble detector with
+  too little preamble left to sync, so the frame was lost without ever
+  being receivable: both witnessed receiver-side losses in the 2026-10-22
+  `t1000e_rnode_pair` acceptance runs were jitter expiries 11–17 ms into
+  the lost probe's preamble, followed by `busy=true` CAD runs through the
+  rest of the frame. Both drivers (LR11xx, SX1262); the asked bound still
+  governs adoption, so the pad cannot compound across re-arms.
+
 - A board no longer loses the second frame of a back-to-back LoRa burst
   to its own receive re-arm (#466): an empty IRQ latch younger than the
   preamble detector's horizon (entry slack plus eight symbols at the live

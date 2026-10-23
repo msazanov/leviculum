@@ -624,8 +624,12 @@ fn the_firmware_still_emits_the_receiver_arming_line() {
     // Matched on `.arm(` rather than the whole receiver expression: rustfmt
     // splits `self.rx_arm.arm(..)` across lines once the argument list grows,
     // and a pin that a reformat can break is a pin nobody keeps.
+    // `bound_ms`, not `timeout_ms`: the line carries the bound the chip's
+    // timer actually runs — the ask plus the transmit-gating sites' settle
+    // pad (929, #466) — so a capture's `timeout_ms=` stays matchable against
+    // the expiry that follows it.
     let arm = sx
-        .find(".arm(site, timeout_ms,")
+        .find(".arm(site, bound_ms,")
         .expect("leviculum-nrf/src/sx1262.rs no longer reports the arming");
     let wait = sx[set_rx..]
         .find("self.dio1.wait_for_high()")

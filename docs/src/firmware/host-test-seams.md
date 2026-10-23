@@ -921,18 +921,18 @@ own issue, not a finding of this page.
 | 191 | `leviculum-nrf/src/sx1262.rs:824` | TX ok is tx_done, else force standby | on_air result | none | - | - | `leviculum_core::sx126x::tests::only_a_reported_tx_done_leaves_the_transmitter_without_a_forced_standby` |
 | 192 | `leviculum-nrf/src/sx1262.rs:841` | TX wait floor 100 ms | timeout_ms | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 | `leviculum_core::sx126x::tests::the_tx_wait_has_a_floor_no_computed_timeout_reaches` |
 | 193 | `leviculum-nrf/src/sx1262.rs:849` | TX success only with IRQ_TX_DONE | IRQ flags | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 | `leviculum_core::sx126x::tests::a_frame_left_the_air_only_if_tx_done_is_latched` |
-| 194 | `leviculum-nrf/src/sx1262.rs:1060` | RX hardware timeout: 0 single mode, else ms*64 capped at 0xFFFFFF | timeout_ms | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 195 | `leviculum-nrf/src/sx1262.rs:1118` | awaiting an unarmed window is NotArmed | rx_state | none | - | - | no decision: unreachable guard, the one caller (`leviculum_rx_arming::receive_and_hand_up`) awaits only after `ensure_armed` succeeded |
-| 196 | `leviculum-nrf/src/sx1262.rs:1129` | software wait: 60 s single mode, else timeout plus 500 ms | timeout_ms | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 197 | `leviculum-nrf/src/sx1262.rs:1203` | latched take: not armed is an error, no RxDone/Timeout is None | rx_state, IRQ | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 198 | `leviculum-nrf/src/sx1262.rs:1337` | the chip left RX on RxDone or Timeout | IRQ flags | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 199 | `leviculum-nrf/src/sx1262.rs:1345` | erratum 15.3 workaround only for timed RX | hw_timeout | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 200 | `leviculum-nrf/src/sx1262.rs:1349` | classify: CRC error drops the payload, RxDone is a frame, Timeout, else WaitExpired | IRQ flags | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 201 | `leviculum-nrf/src/sx1262.rs:1372` | truncate the read to the buffer | len | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 202 | `leviculum-nrf/src/sx1262.rs:1421` | CAD detMin 0x0A, CAD-only exit mode | constants | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 203 | `leviculum-nrf/src/sx1262.rs:1479` | CAD done: busy iff CAD_DETECTED; timeout goes standby with an error | DIO1, IRQ | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 204 | `leviculum-nrf/src/sx1262.rs:1541` | standing-window age (clamped) fed to adoption | rx_state | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
-| 205 | `leviculum-nrf/src/sx1262.rs:1558` | a window ends itself iff its timeout is non-zero | window | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
+| 194 | `leviculum-nrf/src/sx1262.rs:1064` | RX hardware timeout: 0 single mode, else the bound (the ask, padded by the detector settle on the tx-gating sites) *64 capped at 0xFFFFFF | timeout_ms, site | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 | `leviculum_core::sx126x::tests::a_tx_gating_window_is_padded_by_the_settle_bound_and_no_other_is`<br>`leviculum_core::sx126x::tests::the_arm_bound_keeps_single_mode_and_survives_no_modulation` |
+| 195 | `leviculum-nrf/src/sx1262.rs:1129` | awaiting an unarmed window is NotArmed | rx_state | none | - | - | no decision: unreachable guard, the one caller (`leviculum_rx_arming::receive_and_hand_up`) awaits only after `ensure_armed` succeeded |
+| 196 | `leviculum-nrf/src/sx1262.rs:1147` | software wait: 60 s single mode, else the programmed bound plus 500 ms | timeout_ms, hw_timeout | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
+| 197 | `leviculum-nrf/src/sx1262.rs:1221` | latched take: not armed is an error, no RxDone/Timeout is None | rx_state, IRQ | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
+| 198 | `leviculum-nrf/src/sx1262.rs:1355` | the chip left RX on RxDone or Timeout | IRQ flags | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
+| 199 | `leviculum-nrf/src/sx1262.rs:1363` | erratum 15.3 workaround only for timed RX | hw_timeout | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
+| 200 | `leviculum-nrf/src/sx1262.rs:1367` | classify: CRC error drops the payload, RxDone is a frame, Timeout, else WaitExpired | IRQ flags | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
+| 201 | `leviculum-nrf/src/sx1262.rs:1390` | truncate the read to the buffer | len | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
+| 202 | `leviculum-nrf/src/sx1262.rs:1439` | CAD detMin 0x0A, CAD-only exit mode | constants | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
+| 203 | `leviculum-nrf/src/sx1262.rs:1497` | CAD done: busy iff CAD_DETECTED; timeout goes standby with an error | DIO1, IRQ | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
+| 204 | `leviculum-nrf/src/sx1262.rs:1559` | standing-window age (clamped) fed to adoption | rx_state | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
+| 205 | `leviculum-nrf/src/sx1262.rs:1576` | a window ends itself iff its timeout is non-zero | window | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
 | 206 | `leviculum-nrf/src/announce.rs:153` | announce set is 2 frames with the PN role, else 1 | propagation_hash | `ble_pn_board_upload` | 1800 | 3/2 (>2) |  |
 | 207 | `leviculum-nrf/src/announce.rs:188` | the first announce heard from a destination triggers our own at once | NEIGHBOURS | `lora_path_discovery_slow_lnode_pair` | 90 | 2/2 |  |
 | 208 | `leviculum-nrf/src/announce.rs:188` | neighbour-known test, round-robin eviction at 32 | slots | none | - | - | `leviculum_announce_policy::scheduler::tests::a_known_neighbour_buys_nothing`<br>`leviculum_announce_policy::scheduler::tests::a_thirty_third_neighbour_displaces_the_first_round_robin` |
