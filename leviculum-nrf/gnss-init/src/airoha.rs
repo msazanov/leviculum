@@ -54,8 +54,13 @@
 //! reference's `initVariant` sets for the life of the board, which is a
 //! GPIO act and therefore the board file's, not this crate's
 //! (`leviculum-nrf/src/boards/t1000e.rs`).
+//!
+//! The AG3352 (ThinkNode M9) adds a `$PAIR382,1` sleep lock first ([`AirohaInit::ag3352`]).
 
 use crate::{nmea_frame, AckOutcome, LiteralScanner, ModuleInit, Output};
+
+/// `$PAIR382,1` — lock system sleep (AG3352 only).
+pub const SLEEP_LOCK_FRAME: [u8; 15] = nmea_frame(b"PAIR382,1");
 
 /// `$PAIR021` — version query (reference: `GPS.cpp:1356`).
 pub const PROBE_FRAME: [u8; 13] = nmea_frame(b"PAIR021");
@@ -107,6 +112,9 @@ const _: () = assert!(crate::MAX_FRAME >= BACKUP_FRAME.len());
 /// The firmware build string follows it and is not parsed.
 pub const PROBE_ANSWER: &[u8] = b"$PAIR021,AG3335";
 
+/// The AG3352's answer prefix to `$PAIR021`.
+pub const AG3352_PROBE_ANSWER: &[u8] = b"$PAIR021,AG3352";
+
 /// Wait for the probe answer, in ms. The reference allows 1000 ms
 /// (`GPS.cpp:1356`); tripled for the reason [`crate::l76k`] gives — the
 /// driver reads in burst-aligned ~1 s chunks.
@@ -123,6 +131,8 @@ pub const POST_STEP_SETTLE_MS: u64 = 250;
 /// UBX module's tokens.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Step {
+    /// `$PAIR382`: lock system sleep (AG3352 only).
+    SleepLock,
     /// `$PAIR021`: version query, the one step with an answer.
     Probe,
     /// `$PAIR066`: GPS + GLONASS + Galileo + BeiDou.
@@ -139,6 +149,7 @@ pub enum Step {
 impl Step {
     pub fn as_str(self) -> &'static str {
         match self {
+            Step::SleepLock => "pair-sleep-lock",
             Step::Probe => "pair-probe",
             Step::Constellations => "pair-constellations",
             Step::Gga => "pair-gga",
@@ -155,6 +166,7 @@ impl Step {
     /// stages it into RAM for EasyDMA.
     pub fn frame(self) -> &'static [u8] {
         match self {
+            Step::SleepLock => &SLEEP_LOCK_FRAME,
             Step::Probe => &PROBE_FRAME,
             Step::Constellations => &CONSTELLATIONS_FRAME,
             Step::Gga => &GGA_FRAME,
@@ -170,6 +182,7 @@ impl Step {
     /// The step after this one, `None` after the last.
     fn next(self) -> Option<Step> {
         match self {
+            Step::SleepLock => Some(Step::Probe),
             Step::Probe => Some(Step::Constellations),
             Step::Constellations => Some(Step::Gga),
             Step::Gga => Some(Step::Gll),
@@ -206,6 +219,7 @@ enum State {
 pub struct AirohaInit {
     state: State,
     scanner: LiteralScanner,
+    first: Step,
 }
 
 impl Default for AirohaInit {
@@ -215,10 +229,21 @@ impl Default for AirohaInit {
 }
 
 impl AirohaInit {
+    /// The AG3335 (the T1000-E).
     pub fn new() -> Self {
         Self {
             state: State::AwaitLock,
             scanner: LiteralScanner::new(PROBE_ANSWER),
+            first: Step::Probe,
+        }
+    }
+
+    /// The AG3352 (the ThinkNode M9): sleep lock first, its own probe answer.
+    pub fn ag3352() -> Self {
+        Self {
+            state: State::AwaitLock,
+            scanner: LiteralScanner::new(AG3352_PROBE_ANSWER),
+            first: Step::SleepLock,
         }
     }
 
@@ -269,7 +294,7 @@ impl ModuleInit for AirohaInit {
         match self.state {
             State::AwaitLock => {
                 if locked {
-                    self.send(Step::Probe, now_ms, emit);
+                    self.send(self.first, now_ms, emit);
                 }
             }
             State::AwaitAnswer { deadline_ms } => {
