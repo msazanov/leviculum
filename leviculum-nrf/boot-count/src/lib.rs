@@ -194,41 +194,39 @@ pub struct Scan {
 /// Read the page: count the records, find the newest, find where the next
 /// one goes.
 ///
-/// Scanning stops at the first slot that is not a readable record,
-/// because that is the only place one can be: records are appended in
-/// order and nothing is ever written past the free slot. If that slot is
-/// still erased it is the free one. If it is not, it holds a torn write
-/// (or bytes that were there before this page became a boot log), the
-/// slot is retired unread, and the one after it is the free one — if
-/// *that* one is not erased either, the page is not something to append
-/// to and [`Scan::free`] is `None`.
+/// The first erased slot is free. A torn slot is retired and may be followed
+/// by a successfully appended record from a later boot; keep scanning that
+/// valid suffix rather than losing its count at the old tear. If the next
+/// slot is also unreadable and non-erased, the page cannot be appended to
+/// safely and [`Scan::free`] is `None`.
 pub fn scan(page: &[u8]) -> Scan {
     let slots = page.len() / RECORD_SIZE;
     let mut last = None;
     let mut records = 0usize;
+    let mut retired = false;
     for i in 0..slots {
         let slot = &page[i * RECORD_SIZE..(i + 1) * RECORD_SIZE];
         match decode(slot) {
             Some(record) => {
                 last = Some(record);
                 records += 1;
+                retired = false;
             }
-            None => {
-                let free = if is_erased(slot) {
-                    Some(i)
-                } else if i + 1 < slots
-                    && is_erased(&page[(i + 1) * RECORD_SIZE..(i + 2) * RECORD_SIZE])
-                {
-                    Some(i + 1)
-                } else {
-                    None
-                };
+            None if is_erased(slot) => {
                 return Scan {
                     last,
                     records,
-                    free: free.map(|s| s * RECORD_SIZE),
+                    free: Some(i * RECORD_SIZE),
                 };
             }
+            None if retired => {
+                return Scan {
+                    last,
+                    records,
+                    free: None,
+                };
+            }
+            None => retired = true,
         }
     }
     Scan {

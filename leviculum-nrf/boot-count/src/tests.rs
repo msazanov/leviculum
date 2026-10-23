@@ -260,6 +260,15 @@ fn a_partial_record_from_a_cut_is_not_counted() {
         "the retired slot is spent all the same"
     );
     assert_eq!(decode(page.slot(4)).map(|r| r.boot), Some(4));
+    // Every later boot must see the valid suffix beyond the retired slot.
+    for expected in 5..=9 {
+        assert_eq!(page.boot(0, false).record.boot, expected);
+        assert_eq!(
+            super::scan(&page.bytes).last.map(|record| record.boot),
+            Some(expected)
+        );
+    }
+    assert_eq!(page.erases, 0);
 }
 
 #[test]
