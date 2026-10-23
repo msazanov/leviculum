@@ -295,3 +295,5 @@ runs.
   ESP32 class and the LR11xx driver.
 - [Supported boards](../firmware/boards.md), for the T1000-E and the
   Heltec V4.
+- [Firmware layers](firmware-layers.md), for the shared orchestration
+  the M9's bind crate is meant to sit under.

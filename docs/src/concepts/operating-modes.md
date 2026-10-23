@@ -135,3 +135,5 @@ sources, the stored key and path, and the `lnflash` default.
   battery, a button and an accelerometer.
 - [The ThinkNode M9](thinknode-m9.md), a handheld that runs both modes
   with a keyboard instead of one button.
+- [Firmware layers](firmware-layers.md), for where the mode logic lives
+  once it runs on more than one chip family.

@@ -215,3 +215,8 @@ can still be written onto a board it does not fit.
 
 So the reach of a build and the precision of its identification have to
 be argued together. A family is only as wide as the narrowest of the two.
+
+## See also
+
+- [Firmware layers](firmware-layers.md), for the strata a build is cut
+  into, so that a new family adds a bind crate rather than a copy.
