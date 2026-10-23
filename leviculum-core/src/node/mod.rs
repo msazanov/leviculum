@@ -257,12 +257,11 @@ use crate::constants::{RATCHET_SIZE, TRUNCATED_HASHBYTES};
 use crate::destination::{Destination, DestinationHash, Direction, ProofStrategy};
 use crate::identity::Identity;
 use crate::link::{Link, LinkId};
-use crate::packet::packet_hash;
 use crate::traits::{Clock, Storage};
 use crate::transport::{Transport, TransportConfig, TransportEvent, TransportStats};
 use rand_core::CryptoRngCore;
 
-use crate::hex_fmt::{HexFmt, HexShort};
+use crate::hex_fmt::HexShort;
 
 /// Whether an interface that went down can come back under the same index
 /// (931, Codeberg #468). Passed to
@@ -4424,34 +4423,8 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                         && self.links.contains_key(&LinkId::new(destination_hash)))
                 {
                     // Route to link packet handler
-                    let Some(raw) = self.repack_packet(&packet) else {
-                        // repack_packet logs the error; drop the packet
-                        return;
-                    };
-
-                    // Verify repack symmetry: if original wire hash is known,
-                    // check that repacking produces the same hashable bytes.
-                    if let Some(original_hash) = raw_hash {
-                        let repacked_hash = packet_hash(&raw);
-                        if original_hash != repacked_hash {
-                            crate::tracing::warn!(
-                                original = %HexFmt(&original_hash),
-                                repacked = %HexFmt(&repacked_hash),
-                                ptype = ?packet.flags.packet_type,
-                                ctx = ?packet.context,
-                                "REPACK HASH MISMATCH — proof chain will fail"
-                            );
-                        }
-                    }
-
                     let now_ms = self.transport.clock().now_ms();
-                    self.process_link_packet(
-                        &packet,
-                        &raw,
-                        raw_hash.as_ref(),
-                        now_ms,
-                        interface_index,
-                    );
+                    self.process_link_packet(&packet, raw_hash.as_ref(), now_ms, interface_index);
                 } else {
                     // Regular packet: decrypt per destination type (Single via
                     // identity/ratchets, Group via the shared token, Plain

@@ -2871,7 +2871,7 @@ pub enum TransportEvent {
         packet: Box<Packet>,
         /// Interface it arrived on
         interface_index: usize,
-        /// Hash of original wire bytes (for repack symmetry verification)
+        /// Hash of original wire bytes: the link path proves and names requests by it
         raw_hash: Option<[u8; 32]>,
     },
     /// Path to a destination was found (from announce)

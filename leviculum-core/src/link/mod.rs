@@ -2020,6 +2020,22 @@ impl Link {
         LinkId::new(truncated_hash(&hashable))
     }
 
+    /// Calculate the same link ID from a parsed request without repacking it.
+    ///
+    /// Signalling never participates in link identity: only the first
+    /// `LINK_REQUEST_BASE_SIZE` payload bytes join the canonical header.
+    /// Request validation remains in `new_incoming`, including mode and MTU.
+    pub(crate) fn calculate_link_id_from_packet(packet: &crate::packet::Packet) -> LinkId {
+        let data = packet.data.as_slice();
+        let hash = crate::packet::packet_hash_with_data(
+            packet,
+            &data[..data.len().min(LINK_REQUEST_BASE_SIZE)],
+        );
+        let mut truncated = [0u8; TRUNCATED_HASHBYTES];
+        truncated.copy_from_slice(&hash[..TRUNCATED_HASHBYTES]);
+        LinkId::new(truncated)
+    }
+
     /// Set the link ID (called after calculating it from the sent packet)
     pub fn set_link_id(&mut self, link_id: LinkId) {
         self.id = link_id;

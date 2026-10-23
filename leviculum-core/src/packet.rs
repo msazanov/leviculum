@@ -637,6 +637,24 @@ pub fn packet_hash(raw: &[u8]) -> [u8; 32] {
     }
 }
 
+/// Compute the canonical packet hash from an unpacked packet without serializing it.
+///
+/// Like [`packet_hash`], this excludes hops, transport ID, and the upper flag
+/// nibble. All payload bytes and the original context byte remain hashable.
+pub fn packet_hash_from_packet(packet: &Packet) -> [u8; 32] {
+    packet_hash_with_data(packet, packet.data.as_slice())
+}
+
+/// Hash the canonical header with a selected payload (link IDs strip signalling).
+pub(crate) fn packet_hash_with_data(packet: &Packet, data: &[u8]) -> [u8; 32] {
+    crate::crypto::full_hash_parts(&[
+        &[packet.flags.to_byte() & 0x0F],
+        &packet.destination_hash,
+        &[packet.context.to_byte()],
+        data,
+    ])
+}
+
 /// Compute the truncated packet hash (16 bytes)
 ///
 /// Returns the first 16 bytes of the packet hash, used for reverse_table
@@ -712,6 +730,51 @@ mod tests {
                     crate::crypto::sha256(&get_hashable_part(&raw)),
                     "flags {flags:#04x} len {len}"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn structured_hashes_preserve_header_and_link_signalling_boundaries() {
+        for flags in [0x00u8, 0x0E, 0x2B, 0x9C, 0xFF] {
+            for header_type in [HeaderType::Type1, HeaderType::Type2] {
+                for len in [0usize, 63, 64, 65, 66, 67, 68, 16_384] {
+                    for context in [
+                        PacketContext::None,
+                        PacketContext::Request,
+                        PacketContext::Unknown(0x42),
+                    ] {
+                        let mut packet_flags = PacketFlags::from_byte(flags).unwrap();
+                        packet_flags.header_type = header_type;
+                        let packet = Packet {
+                            flags: packet_flags,
+                            hops: 17,
+                            transport_id: (header_type == HeaderType::Type2)
+                                .then_some([0xA7; TRUNCATED_HASHBYTES]),
+                            destination_hash: [0x5C; TRUNCATED_HASHBYTES],
+                            context,
+                            data: PacketData::Owned((0..len).map(|i| (i % 251) as u8).collect()),
+                        };
+                        let mut raw = alloc::vec![0u8; packet.packed_size()];
+                        packet.pack(&mut raw).unwrap();
+                        let hashable = get_hashable_part(&raw);
+                        assert_eq!(
+                            packet_hash_from_packet(&packet),
+                            crate::crypto::sha256(&hashable)
+                        );
+                        assert_eq!(packet_hash_from_packet(&packet), packet_hash(&raw));
+
+                        let id_bytes =
+                            &hashable[..18 + len.min(crate::link::LINK_REQUEST_BASE_SIZE)];
+                        let expected_id =
+                            crate::link::LinkId::new(crate::crypto::truncated_hash(id_bytes));
+                        assert_eq!(crate::link::Link::calculate_link_id(&raw), expected_id);
+                        assert_eq!(
+                            crate::link::Link::calculate_link_id_from_packet(&packet),
+                            expected_id
+                        );
+                    }
+                }
             }
         }
     }
