@@ -840,6 +840,280 @@ impl fmt::Display for BatteryPercentLine {
     }
 }
 
+/// A 1 Hz step a cell does not make on external power, and a charger hunting without one does.
+pub const HUNTING_STEP_MV: u16 = 20;
+/// Steps among the last 32 external-power samples that mark a charger without a cell.
+pub const HUNTING_STEPS: u32 = 3;
+/// External-power samples before presence is decided.
+pub const PRESENCE_WARMUP: u8 = 10;
+
+/// Whether a cell is behind the gauge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Presence {
+    Undecided,
+    Cell,
+    NoCell,
+}
+
+impl Presence {
+    /// The `presence=` value of the `BATTERY_CELL` line.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Undecided => "undecided",
+            Self::Cell => "cell",
+            Self::NoCell => "none",
+        }
+    }
+}
+
+/// Cell presence: a board running on battery has one; on external power a gauge without one reads the hunting charger.
+#[derive(Debug, Clone, Copy)]
+pub struct CellPresence {
+    last_mv: u16,
+    steps: u32,
+    seen: u8,
+    on_battery: bool,
+}
+
+impl CellPresence {
+    /// Start from the first reading, undecided until the warm-up has run.
+    pub const fn new(first_mv: u16, on_battery: bool) -> Self {
+        Self {
+            last_mv: first_mv,
+            steps: 0,
+            seen: 0,
+            on_battery,
+        }
+    }
+
+    /// Fold in one sample; running on battery clears the history, so load steps never count against a cell.
+    pub fn observe(&mut self, mv: u16, on_battery: bool) {
+        let step = mv.abs_diff(self.last_mv) >= HUNTING_STEP_MV;
+        self.last_mv = mv;
+        self.on_battery = on_battery;
+        if on_battery {
+            self.steps = 0;
+            self.seen = 0;
+            return;
+        }
+        self.steps = (self.steps << 1) | step as u32;
+        self.seen = self.seen.saturating_add(1);
+    }
+
+    /// Steps among the last 32 external-power samples.
+    pub const fn steps(&self) -> u32 {
+        self.steps.count_ones()
+    }
+
+    /// Whether the last sample was taken on battery.
+    pub const fn on_battery(&self) -> bool {
+        self.on_battery
+    }
+
+    /// The decision for the samples seen so far.
+    pub const fn presence(&self) -> Presence {
+        if self.on_battery {
+            Presence::Cell
+        } else if self.seen < PRESENCE_WARMUP {
+            Presence::Undecided
+        } else if self.steps() >= HUNTING_STEPS {
+            Presence::NoCell
+        } else {
+            Presence::Cell
+        }
+    }
+}
+
+/// The `BATTERY_CELL` line's body, said when presence changes.
+pub struct PresenceLine(pub CellPresence);
+
+impl fmt::Display for PresenceLine {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "BATTERY_CELL presence={} power={} steps={}/32",
+            self.0.presence().as_str(),
+            if self.0.on_battery() {
+                "battery"
+            } else {
+                "external"
+            },
+            self.0.steps(),
+        )
+    }
+}
+
+/// MAX17048 fuel-gauge registers: the gauge's own charge, behind the divider boards' one-cell band guard.
+pub mod max17048 {
+    use super::pack_band_mv;
+
+    /// The gauge's fixed 7-bit I2C address.
+    pub const ADDRESS: u8 = 0x36;
+    /// Cell voltage, 78.125 µV per LSB.
+    pub const REG_VCELL: u8 = 0x02;
+    /// State of charge: high byte whole percent, low byte 1/256 %.
+    pub const REG_SOC: u8 = 0x04;
+    /// Mode register; writing [`MODE_QUICK_START`] restarts the charge estimate from the present voltage.
+    pub const REG_MODE: u8 = 0x06;
+    /// The Quick-Start bit, for a cell inserted while the gauge was already powered.
+    pub const MODE_QUICK_START: u16 = 0x4000;
+    /// Production version of the IC.
+    pub const REG_VERSION: u8 = 0x08;
+    /// Charge rate, signed, 0.208 %/h per LSB.
+    pub const REG_CRATE: u8 = 0x16;
+    /// Cells a MAX17048 measures.
+    pub const CELLS: u8 = 1;
+
+    /// VCELL in millivolts: 78.125 µV is 5/64 mV, full scale 5119 mV.
+    pub const fn vcell_mv(raw: u16) -> u16 {
+        (raw as u32 * 5 / 64) as u16
+    }
+
+    /// SOC rounded to whole percent, clamped because the register can read above 100 %.
+    pub const fn soc_percent(raw: u16) -> u8 {
+        let whole = (raw >> 8) as u32 + ((raw & 0xFF) >= 0x80) as u32;
+        if whole > 100 {
+            100
+        } else {
+            whole as u8
+        }
+    }
+
+    /// The gauge's charge, or `None` while the cell voltage is outside the one-cell band.
+    pub fn percent(vcell_mv: u16, soc_raw: u16) -> Option<u8> {
+        let (lo, hi) = pack_band_mv(CELLS)?;
+        (lo..=hi).contains(&vcell_mv).then(|| soc_percent(soc_raw))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::{CELL_CEILING_MV, CELL_FLOOR_MV};
+
+        #[test]
+        fn vcell_converts_at_78_125_microvolts_per_lsb() {
+            assert_eq!(vcell_mv(0), 0);
+            assert_eq!(vcell_mv(0xB900), 3700);
+            assert_eq!(vcell_mv(0xD200), 4200);
+            assert_eq!(vcell_mv(u16::MAX), 5119);
+        }
+
+        #[test]
+        fn soc_rounds_on_the_fraction_and_clamps_at_100() {
+            assert_eq!(soc_percent(0x0000), 0);
+            assert_eq!(soc_percent(0x547F), 84);
+            assert_eq!(soc_percent(0x5480), 85);
+            assert_eq!(soc_percent(0x6400), 100);
+            assert_eq!(soc_percent(0x6480), 100);
+            assert_eq!(soc_percent(0xFFFF), 100);
+        }
+
+        #[test]
+        fn a_reading_below_the_band_reports_no_percentage() {
+            assert_eq!(percent(vcell_mv(0x0000), 0x0000), None);
+            assert_eq!(percent(vcell_mv(0x0010), 0x0000), None);
+        }
+
+        #[test]
+        fn a_live_cell_reports_the_gauges_percentage() {
+            assert_eq!(percent(3700, 0x5400), Some(84));
+            assert_eq!(percent(3000, 0x0000), Some(0));
+        }
+
+        #[test]
+        fn the_band_is_the_divider_boards_one_cell_band() {
+            assert_eq!(percent(CELL_FLOOR_MV, 0x0100), Some(1));
+            assert_eq!(percent(CELL_FLOOR_MV - 1, 0x0100), None);
+            assert_eq!(percent(CELL_CEILING_MV, 0x6400), Some(100));
+            assert_eq!(percent(CELL_CEILING_MV + 1, 0x6400), None);
+        }
+    }
+}
+
+#[cfg(test)]
+mod presence_tests {
+    use super::*;
+    use std::string::ToString;
+
+    // 1 Hz VCELL from a RedBoard on USB with no cell attached (2026-10-18): the MCP73831 output.
+    const NO_CELL_MV: [u16; 26] = [
+        4157, 4115, 4102, 4111, 4103, 4117, 4150, 4113, 4116, 4105, 4113, 4100, 4111, 4083, 4152,
+        4156, 4102, 4145, 4107, 4117, 4105, 4092, 4100, 4102, 4100, 4102,
+    ];
+
+    fn run(first: u16, samples: &[u16], on_battery: bool) -> CellPresence {
+        let mut p = CellPresence::new(first, on_battery);
+        for &mv in samples {
+            p.observe(mv, on_battery);
+        }
+        p
+    }
+
+    #[test]
+    fn a_charger_without_a_cell_is_no_cell() {
+        let p = run(NO_CELL_MV[0], &NO_CELL_MV[1..], false);
+        assert_eq!(p.presence(), Presence::NoCell);
+        assert!(p.steps() >= HUNTING_STEPS);
+    }
+
+    #[test]
+    fn presence_waits_for_the_warmup() {
+        let p = run(4100, &[4100; (PRESENCE_WARMUP - 1) as usize], false);
+        assert_eq!(p.presence(), Presence::Undecided);
+        let p = run(4100, &[4100; PRESENCE_WARMUP as usize], false);
+        assert_eq!(p.presence(), Presence::Cell);
+    }
+
+    #[test]
+    fn a_charging_cell_with_one_recharge_step_is_a_cell() {
+        let mut mv = [0u16; 31];
+        for (i, v) in mv.iter_mut().enumerate() {
+            *v = 4040 + i as u16 + if i >= 15 { 70 } else { 0 };
+        }
+        assert_eq!(run(4040, &mv, false).presence(), Presence::Cell);
+    }
+
+    #[test]
+    fn load_steps_on_battery_never_count_against_the_cell() {
+        let p = run(NO_CELL_MV[0], &NO_CELL_MV[1..], true);
+        assert_eq!(p.presence(), Presence::Cell);
+        let mut p = p;
+        p.observe(4100, false);
+        assert_eq!(p.steps(), 0);
+        assert_eq!(p.presence(), Presence::Undecided);
+    }
+
+    #[test]
+    fn hunting_older_than_32_samples_is_forgotten() {
+        let mut p = run(NO_CELL_MV[0], &NO_CELL_MV[1..], false);
+        for _ in 0..32 {
+            p.observe(4100, false);
+        }
+        assert_eq!(p.steps(), 0);
+        assert_eq!(p.presence(), Presence::Cell);
+    }
+
+    #[test]
+    fn the_cell_line_is_byte_exact() {
+        let p = run(NO_CELL_MV[0], &NO_CELL_MV[1..], false);
+        assert_eq!(
+            PresenceLine(p).to_string(),
+            std::format!(
+                "BATTERY_CELL presence=none power=external steps={}/32",
+                p.steps()
+            )
+        );
+        assert_eq!(
+            PresenceLine(CellPresence::new(3900, true)).to_string(),
+            "BATTERY_CELL presence=cell power=battery steps=0/32"
+        );
+        assert_eq!(
+            PresenceLine(CellPresence::new(3900, false)).to_string(),
+            "BATTERY_CELL presence=undecided power=external steps=0/32"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
