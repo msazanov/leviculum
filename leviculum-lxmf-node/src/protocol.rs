@@ -79,7 +79,9 @@ pub enum Command {
     /// stays identical across stacks. This one also takes
     /// `announce_at_start` (`true`/`false`, default `false`): `lnpnd`'s
     /// second start announce, which the Python helper's router-only path
-    /// does not send.
+    /// does not send, and `serve_limit_bytes`: a board's serve ceiling
+    /// (`PropagationNodeConfig::serve_limit_bytes`), which the reference
+    /// has no counterpart for.
     PnEnable {
         announce_delay_secs: Option<u64>,
         options: Vec<(String, String)>,

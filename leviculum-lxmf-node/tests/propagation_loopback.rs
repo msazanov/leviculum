@@ -46,21 +46,19 @@ where
     }
 }
 
-#[tokio::test]
-async fn a_sender_uploads_and_the_recipient_drains_through_the_pn_helper() {
-    let mut hub = Helper::start(Setup {
-        transport: true,
-        ..Setup::new("pn-hub", Wire::listen_any())
-    })
-    .await;
-    let hub_addr = hub.listen_addr();
-    let mut sender = Helper::start(Setup::new("pn-sender", Wire::Dial(hub_addr))).await;
-    let mut recipient = Helper::start(Setup::new("pn-recipient", Wire::Dial(hub_addr))).await;
-
+/// Three helpers dialed in, the hub's role enabled with `pn_enable`, both
+/// clients on the hub's node, and one propagated message from the sender in
+/// the hub's store. Returns the sender's delivery hash and the body sent.
+async fn one_message_stored(
+    hub: &mut Helper,
+    sender: &mut Helper,
+    recipient: &mut Helper,
+    pn_enable: &str,
+) -> (String, String) {
     let ready = pump3(
-        &mut hub,
-        &mut sender,
-        &mut recipient,
+        hub,
+        sender,
+        recipient,
         Duration::from_secs(20),
         |a, b, c| {
             a.delivery_hash.is_some() && b.delivery_hash.is_some() && c.delivery_hash.is_some()
@@ -71,11 +69,11 @@ async fn a_sender_uploads_and_the_recipient_drains_through_the_pn_helper() {
     let recipient_hash = recipient.delivery_hash.clone().expect("recipient hash");
 
     // The hub takes the role; the first announce is due after one second.
-    hub.command("pn_enable 1");
+    hub.command(pn_enable);
     let pn_ready = pump3(
-        &mut hub,
-        &mut sender,
-        &mut recipient,
+        hub,
+        sender,
+        recipient,
         Duration::from_secs(10),
         |a, _, _| a.seen("lxmf_pn_ready"),
     )
@@ -95,9 +93,9 @@ async fn a_sender_uploads_and_the_recipient_drains_through_the_pn_helper() {
     // `set_pn` exactly as a scenario polls it.
     recipient.command("announce");
     let selected = pump3(
-        &mut hub,
-        &mut sender,
-        &mut recipient,
+        hub,
+        sender,
+        recipient,
         Duration::from_secs(30),
         |_, b, c| {
             if b.seen("lxmf_pn_selected") && c.seen("lxmf_pn_selected") {
@@ -112,9 +110,9 @@ async fn a_sender_uploads_and_the_recipient_drains_through_the_pn_helper() {
     assert!(selected, "both clients must select the announced node");
     sender.command(&format!("wait_for_peer {recipient_hash} 20"));
     let peer_known = pump3(
-        &mut hub,
-        &mut sender,
-        &mut recipient,
+        hub,
+        sender,
+        recipient,
         Duration::from_secs(25),
         |_, b, _| b.seen("lxmf_wait_for_peer_ok"),
     )
@@ -127,9 +125,9 @@ async fn a_sender_uploads_and_the_recipient_drains_through_the_pn_helper() {
     let body = body_b64("stored and drained through the helper pn");
     sender.command(&format!("send_propagated {recipient_hash} {body}"));
     let stored = pump3(
-        &mut hub,
-        &mut sender,
-        &mut recipient,
+        hub,
+        sender,
+        recipient,
         Duration::from_secs(30),
         |a, b, _| {
             if !b.seen("lxmf_msg_sent") {
@@ -148,6 +146,28 @@ async fn a_sender_uploads_and_the_recipient_drains_through_the_pn_helper() {
          hub logs: {:?}; sender logs: {:?}",
         hub.events, sender.events, hub.logs, sender.logs
     );
+
+    let sender_hash = sender.delivery_hash.clone().expect("sender hash");
+    (sender_hash, body)
+}
+
+async fn three_helpers() -> (Helper, Helper, Helper) {
+    let hub = Helper::start(Setup {
+        transport: true,
+        ..Setup::new("pn-hub", Wire::listen_any())
+    })
+    .await;
+    let hub_addr = hub.listen_addr();
+    let sender = Helper::start(Setup::new("pn-sender", Wire::Dial(hub_addr))).await;
+    let recipient = Helper::start(Setup::new("pn-recipient", Wire::Dial(hub_addr))).await;
+    (hub, sender, recipient)
+}
+
+#[tokio::test]
+async fn a_sender_uploads_and_the_recipient_drains_through_the_pn_helper() {
+    let (mut hub, mut sender, mut recipient) = three_helpers().await;
+    let (sender_hash, body) =
+        one_message_stored(&mut hub, &mut sender, &mut recipient, "pn_enable 1").await;
 
     // Drain: list, fetch, confirm-purge. The message reaches the recipient
     // and the confirmed fetch empties the store.
@@ -169,7 +189,6 @@ async fn a_sender_uploads_and_the_recipient_drains_through_the_pn_helper() {
         "the sync must fetch exactly one message; recipient events: {:?}; recipient logs: {:?}",
         recipient.events, recipient.logs
     );
-    let sender_hash = sender.delivery_hash.clone().expect("sender hash");
     assert!(
         recipient.received(&sender_hash, &body).is_some(),
         "the drained message must be delivered with its body intact: {:?}",
@@ -192,6 +211,66 @@ async fn a_sender_uploads_and_the_recipient_drains_through_the_pn_helper() {
     assert!(
         emptied,
         "the store must be empty after the confirmed fetch: {:?}",
+        hub.find_last("lxmf_pn_store")
+    );
+}
+
+/// `serve_limit_bytes` reaches the node: a ceiling no message fits serves
+/// nothing, and the unconfirmed message stays in the store for a later
+/// round, as a board's serve limit leaves it
+/// (`PropagationNodeConfig::serve_limit_bytes`). 40 B still lists one id
+/// (`PropagationNode::list_capacity`), so the round is a list and a fetch
+/// that comes back empty, not a throttled list; 24 B of response overhead
+/// plus 16 B per message leave no room for any body.
+#[tokio::test]
+async fn a_serve_limit_the_message_does_not_fit_serves_nothing_and_keeps_it() {
+    let (mut hub, mut sender, mut recipient) = three_helpers().await;
+    one_message_stored(
+        &mut hub,
+        &mut sender,
+        &mut recipient,
+        "pn_enable 1 serve_limit_bytes=40",
+    )
+    .await;
+
+    recipient.command("sync");
+    let synced = pump3(
+        &mut hub,
+        &mut sender,
+        &mut recipient,
+        Duration::from_secs(30),
+        |_, _, c| c.seen("lxmf_sync_done"),
+    )
+    .await;
+    assert!(
+        synced,
+        "the sync must conclude; recipient events: {:?}; recipient logs: {:?}",
+        recipient.events, recipient.logs
+    );
+    assert_eq!(
+        recipient
+            .find_last("lxmf_sync_done")
+            .and_then(|event| event.field("count")),
+        Some("0"),
+        "a 40-byte serve limit must serve nothing: {:?}",
+        recipient.events
+    );
+    hub.command("pn_store_size");
+    let kept = pump3(
+        &mut hub,
+        &mut sender,
+        &mut recipient,
+        Duration::from_secs(10),
+        |a, _, _| {
+            a.find_last("lxmf_pn_store")
+                .and_then(|event| event.field("size"))
+                == Some("1")
+        },
+    )
+    .await;
+    assert!(
+        kept,
+        "the unserved message must stay in the store: {:?}",
         hub.find_last("lxmf_pn_store")
     );
 }
