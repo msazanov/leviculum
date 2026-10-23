@@ -1159,6 +1159,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "leviculum-rtc-pcf8563"
+version = "0.1.0"
+
+[[package]]
 name = "leviculum-rx-arming"
 version = "0.1.0"
 dependencies = [
