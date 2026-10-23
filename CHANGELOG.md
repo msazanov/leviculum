@@ -20,6 +20,15 @@ Toolchain: Rust 1.97.1
 
 ### Added
 
+- lnsd started on a config directory without a `config` file runs the
+  configuration rnsd writes on its first start, held in memory and written
+  nowhere: one AutoInterface, a shared instance, transport off (#471 step
+  1). It said "0 interfaces" before and served no shared instance. `lnsd
+  --writeconfig` writes that file, byte for byte what rnsd would have
+  written. `lnstatus` prints each interface's `Origin` (`configured` or
+  `default`), served as the `origin` key; lnsd logs `CONFIG source=` and one
+  `IFACE_CONFIG ... origin=` per section at start.
+
 - A double press on a board's button now also sends one position report
   when a telemetry recipient is configured, through the ordinary telemetry
   path, and the board blinks (and on the T1000-E beeps) two short when the

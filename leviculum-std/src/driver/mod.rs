@@ -2323,6 +2323,23 @@ impl ReticulumNode {
                 default_announce_rate: self.default_announce_rate(),
                 identity_hash: self.identity_hash(),
             };
+            {
+                // Every section once, enabled or not, before anything is
+                // built: which interfaces the daemon was asked for and where
+                // each request came from, a file or the default lnsd holds
+                // when there is none (#471).
+                let mut inv = self.inventory.lock_recover();
+                for config in &self.interfaces {
+                    tracing::info!(
+                        event = "IFACE_CONFIG",
+                        name = %crate::event_log::Scalar(&config.name),
+                        r#type = %crate::event_log::Scalar(&config.interface_type),
+                        enabled = config.enabled,
+                        origin = %config.origin.as_str(),
+                    );
+                    inv.set_section_origin(&config.name, config.origin);
+                }
+            }
             for (idx, config) in self.interfaces.iter().enumerate() {
                 if !config.enabled {
                     continue;

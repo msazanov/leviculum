@@ -1115,6 +1115,19 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "CONFIG_DEFAULT",
         required_keys: &["key", "value", "rnsd"],
     },
+    // Which configuration lnsd runs (`lnsd.rs`, #471): the file at `path`,
+    // or the built-in default because there is none. Once at startup.
+    EventSchema {
+        name: "CONFIG",
+        required_keys: &["source", "path"],
+    },
+    // One per configured interface section, before any is built
+    // (`driver/mod.rs`, `initialize_interfaces`, #471): `origin=configured`
+    // for a file's section, `default` for the built-in default's.
+    EventSchema {
+        name: "IFACE_CONFIG",
+        required_keys: &["name", "type", "enabled", "origin"],
+    },
     EventSchema {
         name: "LOCK_DEPTH_OVERFLOW",
         required_keys: &["max_depth", "tripwire"],
@@ -1576,7 +1589,7 @@ enum SinkMode {
 /// hundred lines apart in `handle_announce`, and nothing between them
 /// can take seconds.  What can is the emission itself: the driver's
 /// event loop calls `tracing::debug!` while it holds the core mutex
-/// (`apply_inbound`, `leviculum-std/src/driver/mod.rs:4824`), the layer
+/// (`apply_inbound`, `leviculum-std/src/driver/mod.rs:4841`), the layer
 /// wrote the line with a blocking `write(2)` on that very thread, and a
 /// `write(2)` to a USB disk under writeback throttling blocks for
 /// seconds.  Every other task then queued behind the core mutex, so the

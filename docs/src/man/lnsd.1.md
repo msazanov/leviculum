@@ -6,7 +6,7 @@ lnsd -- Reticulum network daemon
 
 ## SYNOPSIS
 
-**lnsd** [**-c** *dir*] [**--storage** *dir*] [**-s**] [**--exampleconfig**] [**-v**...] [**-q**...]
+**lnsd** [**-c** *dir*] [**--storage** *dir*] [**-s**] [**--exampleconfig**] [**--writeconfig**] [**-v**...] [**-q**...]
 
 ## DESCRIPTION
 
@@ -14,7 +14,7 @@ lnsd -- Reticulum network daemon
 
 The drop-in does not hold in one place, where the same config file gives a different daemon (docs/src/audits/2026-10-11-shared-instance-rpc.md, D12). A config that omits `share_instance` gets no shared instance under **lnsd** (default `false`, **rnsd** `true`); one that omits `enable_transport` gets transport under **lnsd** (default `true`, **rnsd** `false`); an interface section without `enabled` is live under **lnsd** and skipped by **rnsd**. Configs written by `lnsd --exampleconfig` set the three defaulted keys explicitly.
 
-On startup, **lnsd** reads `config` from the configuration directory, opens all configured interfaces, and begins routing packets. It keeps running until it receives SIGINT or SIGTERM.
+On startup, **lnsd** reads `config` from the configuration directory, opens all configured interfaces, and begins routing packets. When the directory holds no `config`, **lnsd** runs the configuration **rnsd** writes on its first start, held in memory and written nowhere: transport off, a shared instance named `default`, and one AutoInterface, `[[Default Interface]]`, in the default group. It logs which one it runs, `CONFIG source=file|default path=<file>`, and one `IFACE_CONFIG name= type= enabled= origin=configured|default` line per interface section. It keeps running until it receives SIGINT or SIGTERM.
 
 Sending SIGUSR1 prints a diagnostic dump of internal state to stderr.
 
@@ -31,6 +31,9 @@ Sending SIGUSR1 prints a diagnostic dump of internal state to stderr.
 
 **--exampleconfig**
 :   Print an example configuration to standard output and exit, like `rnsd --exampleconfig`. The output loads through **lnsd**'s own config loader.
+
+**--writeconfig**
+:   Write the configuration **lnsd** runs without a file to `<dir>/config` and exit, creating the directory if needed. The file is byte for byte the one **rnsd** writes on its first start, so **rnsd** reads it unchanged. An existing file is never replaced.
 
 **-v**, **--verbose**
 :   Increase log verbosity. Once for debug, twice for trace.

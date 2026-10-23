@@ -41,6 +41,8 @@ use std::sync::{Arc, Mutex};
 
 use leviculum_core::traits::InterfaceMode;
 
+use crate::config::InterfaceOrigin;
+
 /// Python renders an IPv6 literal in brackets and an IPv4 literal bare
 /// (TCPInterface.py:444-448 / 667-671).
 fn ip_str(ip: IpAddr) -> String {
@@ -177,6 +179,9 @@ pub(crate) struct InterfaceInventory {
     /// reference order (Python starts the local interface before the config
     /// interfaces, Reticulum.py:696).
     shared_instance: Option<usize>,
+    /// The origin of every configured section, by section name (#471): what
+    /// a row reports as `origin`.
+    section_origins: BTreeMap<String, InterfaceOrigin>,
 }
 
 /// Shared handle: the accept loops write, the stats builder reads.
@@ -215,6 +220,37 @@ impl InterfaceInventory {
 
     pub(crate) fn listeners(&self) -> impl Iterator<Item = (usize, &ListenerRow)> {
         self.listeners.iter().map(|(&id, row)| (id, row))
+    }
+
+    /// Record where a configured section came from, before its interfaces
+    /// are built.
+    pub(crate) fn set_section_origin(&mut self, section: &str, origin: InterfaceOrigin) {
+        self.section_origins.insert(section.to_string(), origin);
+    }
+
+    /// The origin a row reports. A row whose short name is a section's name,
+    /// or that a listener built from a section spawned, has that section's
+    /// origin. Every other row (the shared instance, its local clients, an
+    /// AutoInterface's peers, whose names carry no section) comes from the
+    /// `[reticulum]` and `[interfaces]` of the same configuration, so it
+    /// takes the origin all sections share; with no sections, or sections of
+    /// both origins, it was configured.
+    pub(crate) fn origin_of(&self, short_name: &str, parent: Option<usize>) -> InterfaceOrigin {
+        let parent_section = parent
+            .and_then(|p| self.listeners.get(&p))
+            .map(|l| l.identity.short_name.as_str());
+        if let Some(origin) = self
+            .section_origins
+            .get(short_name)
+            .or_else(|| parent_section.and_then(|s| self.section_origins.get(s)))
+        {
+            return *origin;
+        }
+        let mut origins = self.section_origins.values();
+        match origins.next() {
+            Some(&first) if origins.all(|&o| o == first) => first,
+            _ => InterfaceOrigin::Configured,
+        }
     }
 
     /// Reporting order: the shared-instance server first (the reference starts
@@ -281,6 +317,61 @@ mod tests {
         assert_eq!(
             tcp_listener_name("v6", "[::1]:4242".parse().unwrap()),
             "TCPServerInterface[v6/[::1]:4242]"
+        );
+    }
+
+    /// A row takes its section's origin, directly or through its listener;
+    /// a row no section names takes the origin the sections share.
+    #[test]
+    fn rows_take_the_origin_of_their_section() {
+        let mut inv = InterfaceInventory::default();
+        // No section at all: an empty file, configured.
+        assert_eq!(
+            inv.origin_of("Shared Instance", None),
+            InterfaceOrigin::Configured
+        );
+
+        inv.set_section_origin("Default Interface", InterfaceOrigin::Default);
+        assert_eq!(
+            inv.origin_of("Default Interface", None),
+            InterfaceOrigin::Default
+        );
+        // The shared instance and an AutoInterface peer of a default config.
+        assert_eq!(inv.origin_of("rns/default", None), InterfaceOrigin::Default);
+        assert_eq!(inv.origin_of("fe80::1", None), InterfaceOrigin::Default);
+
+        inv.add_listener(
+            3,
+            ListenerRow {
+                identity: InterfaceIdentity {
+                    name: "TCPServerInterface[s/127.0.0.1:1]".into(),
+                    short_name: "s".into(),
+                    type_name: "TCPServerInterface",
+                    parent: None,
+                },
+                bitrate: 10_000_000,
+                hw_mtu: 262_144,
+                mode: InterfaceMode::default(),
+                announce_rate: (None, None, None),
+                ifac_size_bits: None,
+                departed_rxb: 0,
+                departed_txb: 0,
+                bound_addr: None,
+            },
+        );
+        inv.set_section_origin("s", InterfaceOrigin::Configured);
+        assert_eq!(
+            inv.origin_of("Client on s", Some(3)),
+            InterfaceOrigin::Configured
+        );
+        assert_eq!(
+            inv.origin_of("Default Interface", None),
+            InterfaceOrigin::Default
+        );
+        // Mixed origins: a row no section names was configured.
+        assert_eq!(
+            inv.origin_of("rns/default", None),
+            InterfaceOrigin::Configured
         );
     }
 

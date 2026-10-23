@@ -889,6 +889,14 @@ fn render_interface(out: &mut String, ifstat: &Value, opts: &StatusOptions) {
         pln(out, &format!("    {clients_string}"));
     }
 
+    // Origin (#471): where lnsd took the interface from, `configured` (a
+    // file) or `default` (the configuration it holds when there is none).
+    // Ours; rnsd serves no such key, so against rnsd, or any stats dict
+    // without it, the output stays byte-identical to rnstatus.
+    if let Some(origin) = js(ifstat, "origin") {
+        pln(out, &format!("    Origin    : {origin}"));
+    }
+
     if !(name.starts_with("Shared Instance[")
         || name.starts_with("TCPInterface[Client")
         || name.starts_with("LocalInterface["))

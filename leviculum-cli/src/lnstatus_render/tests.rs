@@ -873,3 +873,40 @@ fn announce_rate_discount_follows_the_observer_footprint() {
          got:\n{attached}"
     );
 }
+
+#[test]
+fn origin_renders_where_lnsd_serves_it_and_nowhere_else() {
+    // `origin` (#471) says whether lnsd took the interface from a file or
+    // from the configuration it holds when there is none. A line under
+    // Status where the key is served; an rnsd entry has no key and renders
+    // as rnstatus renders it.
+    let mut from_default = iface("AutoInterface[Default Interface]", 10_000_000, 0, 0);
+    from_default["origin"] = serde_json::json!("default");
+    let mut from_file = iface("TCPInterface[Uplink/127.0.0.1:4242]", 10_000_000, 0, 0);
+    from_file["origin"] = serde_json::json!("configured");
+    let rnsd_shaped = iface("UDPInterface[Bare]", 10_000_000, 0, 0);
+    let stats = serde_json::json!({
+        "interfaces": [from_default, from_file, rnsd_shaped],
+        "rxb": 0, "txb": 0, "rxs": 0.0, "txs": 0.0, "rss": null
+    });
+
+    let text = render_status(&stats, None, &StatusOptions::default());
+    let blocks: Vec<&str> = text.split("\n\n").collect();
+    assert!(
+        blocks[0].contains("    Status    : Up\n    Origin    : default\n"),
+        "the default's interface says so under Status:\n{text}"
+    );
+    assert!(
+        blocks[1].contains("    Origin    : configured\n"),
+        "a file's interface says configured:\n{text}"
+    );
+    assert!(
+        !blocks[2].contains("Origin"),
+        "an rnsd entry without the key renders no line:\n{text}"
+    );
+
+    let json: Value = serde_json::from_str(&render_json(&stats)).unwrap();
+    let ifs = json["interfaces"].as_array().unwrap();
+    assert_eq!(ifs[0]["origin"], serde_json::json!("default"));
+    assert!(ifs[2].get("origin").is_none());
+}

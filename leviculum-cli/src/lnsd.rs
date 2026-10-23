@@ -12,7 +12,7 @@ use tracing::info;
 // env var is honoured for structured-event capture.  Codeberg #39
 // piece 1.)
 
-use leviculum_std::config::Config;
+use leviculum_std::config::{Config, RNSD_DEFAULT_CONFIG};
 use leviculum_std::Reticulum;
 
 /// Measured live heap, under the default-off `heap-accounting` feature.
@@ -93,6 +93,12 @@ struct Args {
     #[arg(long)]
     exampleconfig: bool,
 
+    /// Write the configuration lnsd runs without a file to `<config>/config`
+    /// and exit. It is the file rnsd writes on its first start, byte for
+    /// byte, so rnsd reads it unchanged. Refuses to replace an existing file.
+    #[arg(long)]
+    writeconfig: bool,
+
     /// Increase log verbosity (repeat for more: -v debug, -vv trace)
     #[arg(short, long, action = ArgAction::Count)]
     verbose: u8,
@@ -132,6 +138,17 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let config_dir = args.config.unwrap_or_else(Config::default_config_dir);
     let config_file = config_dir.join("config");
 
+    // --writeconfig, like --exampleconfig, acts before any logging or stack
+    // init: it is a file operation, not a daemon start.
+    if args.writeconfig {
+        write_default_config(&config_file)?;
+        println!(
+            "Wrote the default configuration to {}",
+            config_file.display()
+        );
+        return Ok(());
+    }
+
     // Log-level precedence (matches rnsd, CLI overrides config):
     //   RUST_LOG > CLI -v/-q (when non-zero) > config [logging] loglevel > info.
     // RUST_LOG is applied by EnvFilter inside install_global_subscriber; here we
@@ -168,12 +185,16 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     info!("Config dir: {}", config_dir.display());
     info!("Config file: {}", config_file.display());
 
-    // Load and configure Reticulum
-    let mut config = if config_file.exists() {
-        Config::load(&config_file)?
-    } else {
-        Config::default()
-    };
+    // Load and configure Reticulum. Without a file lnsd runs the
+    // configuration rnsd would write on its first start, from memory: one
+    // AutoInterface, a shared instance, transport off (#471 step 1). The
+    // directory is left as it was; `--writeconfig` is how a file appears.
+    let (mut config, source) = Config::load_or_default(&config_file)?;
+    info!(
+        event = "CONFIG",
+        source = %source.as_str(),
+        path = %leviculum_std::event_log::Scalar(&config_file.display().to_string()),
+    );
     config.reticulum.log_defaulted_keys();
 
     // Storage precedence: --storage > config `storage_path` > <config_dir>/storage.
@@ -363,6 +384,24 @@ fn resolve_default_filter(
     "info".to_string()
 }
 
+/// Write [`RNSD_DEFAULT_CONFIG`] to `path`, creating its directory as rnsd
+/// does (`Reticulum.py:1200-1202`). An existing file is somebody's
+/// configuration and is never replaced.
+fn write_default_config(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    if path.exists() {
+        return Err(format!(
+            "{} exists; --writeconfig does not replace a configuration",
+            path.display()
+        )
+        .into());
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(path, RNSD_DEFAULT_CONFIG)?;
+    Ok(())
+}
+
 /// A concise, representative example configuration, printed by
 /// `--exampleconfig`. It is deliberately short (a `[reticulum]` block, a
 /// `[logging]` level, a `[[Default Interface]]` AutoInterface, and a commented
@@ -468,6 +507,30 @@ mod cli_tests {
         assert_eq!(rns_loglevel_to_filter(5), "debug");
         assert_eq!(rns_loglevel_to_filter(6), "debug");
         assert_eq!(rns_loglevel_to_filter(7), "trace");
+    }
+
+    #[test]
+    fn writeconfig_writes_the_template_and_never_replaces_a_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // rnsd creates the directory too.
+        let path = dir.path().join("fresh").join("config");
+        write_default_config(&path).expect("write into a fresh directory");
+        let written = std::fs::read(&path).expect("read back");
+        assert_eq!(written, RNSD_DEFAULT_CONFIG.as_bytes());
+
+        // A later --writeconfig leaves the file alone, edited or not.
+        std::fs::write(&path, "[reticulum]\n").expect("edit");
+        assert!(write_default_config(&path).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            "[reticulum]\n"
+        );
+    }
+
+    #[test]
+    fn writeconfig_flag_parses() {
+        assert!(parse(&["--writeconfig"]).writeconfig);
+        assert!(!parse(&[]).writeconfig);
     }
 
     #[test]
