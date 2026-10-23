@@ -1,0 +1,11 @@
+[package]
+name = "leviculum-serial-mux"
+version = "0.1.0"
+edition = "2021"
+authors = ["Lew Palm"]
+license = "AGPL-3.0-or-later"
+description = "Debug text and HDLC frames on one serial line: the firmware's text escape and the host's splitter, host-testable"
+
+[dependencies]
+# FLAG and ESCAPE from the one HDLC codec both ends already frame with.
+leviculum-core = { path = "../../leviculum-core", default-features = false }

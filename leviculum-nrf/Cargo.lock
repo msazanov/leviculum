@@ -1178,6 +1178,13 @@ name = "leviculum-sd-policy"
 version = "0.1.0"
 
 [[package]]
+name = "leviculum-serial-mux"
+version = "0.1.0"
+dependencies = [
+ "leviculum-core",
+]
+
+[[package]]
 name = "leviculum-settle-budget"
 version = "0.1.0"
 dependencies = [
