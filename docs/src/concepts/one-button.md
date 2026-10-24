@@ -39,7 +39,7 @@ again (`leviculum-nrf/src/bin/t114.rs:597`,
 `leviculum-nrf/src/bin/t1000e.rs:601`). The Pocket V2's two LEDs pulsed
 LoRa TX and RX activity (`leviculum-nrf/src/led.rs`), and a bare RAK4631
 module without the baseboard blinks a 1 Hz heartbeat
-(`leviculum-nrf/src/bin/rak4631.rs:1442`). The Solar Node's blue LED was
+(`leviculum-nrf/src/bin/rak4631.rs:1446`). The Solar Node's blue LED was
 lit only by a HardFault. The T1000-E's buzzer had its enable held low
 for the life of the board.
 
@@ -157,7 +157,7 @@ drop, the stale drop and after a transmission,
 `leviculum-nrf/src/lora.rs:1829,2222,2467`). The button arm notes the
 count before and after its dispatch
 (`leviculum-nrf/src/feedback.rs:191`, called from each binary, e.g.
-`leviculum-nrf/src/bin/t1000e.rs:1125`), and the press's last LoRa
+`leviculum-nrf/src/bin/t1000e.rs:1129`), and the press's last LoRa
 packet settling keyed plays the pattern
 (`leviculum-nrf/src/feedback.rs:211`). The rule is
 `leviculum_feedback::AirWatch` (`leviculum-nrf/feedback/src/lib.rs:245`),
@@ -189,7 +189,7 @@ Since 914 the double press does what the gesture table says: after the
 two announces the node loop's button arm asks the telemetry reporter for
 one report (`leviculum_nrf::telemetry::on_button_press`,
 `leviculum-nrf/src/telemetry.rs:1949`, called from each binary, e.g.
-`leviculum-nrf/src/bin/t1000e.rs:1130`). There is no second sender. The
+`leviculum-nrf/src/bin/t1000e.rs:1134`). There is no second sender. The
 press arms the same immediate report a target write or a request from
 the target arms ([Telemetry](telemetry.md), "Setting a target emits one
 immediate report" and "A request from the target triggers one report"),

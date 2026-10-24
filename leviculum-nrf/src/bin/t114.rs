@@ -734,7 +734,7 @@ async fn main(spawner: Spawner) {
                         [&mut serial_iface, &mut lora_iface, &mut ble_iface];
                     let dispatched =
                         dispatch_actions(&mut ifaces, status_out.actions, &ifac_configs);
-                    leviculum_nrf::dispatch::settle("remote-status", &mut node, &dispatched);
+                    leviculum_firmware::dispatch::settle("remote-status", &mut node, &dispatched);
                 }
             }
             if let Some(pn) = pn_engine.as_mut() {
@@ -744,7 +744,7 @@ async fn main(spawner: Spawner) {
                     let mut ifaces: [&mut dyn Interface; 3] =
                         [&mut serial_iface, &mut lora_iface, &mut ble_iface];
                     let dispatched = dispatch_actions(&mut ifaces, pn_out.actions, &ifac_configs);
-                    leviculum_nrf::dispatch::settle("pn", &mut node, &dispatched);
+                    leviculum_firmware::dispatch::settle("pn", &mut node, &dispatched);
                 }
             }
         };
@@ -1001,7 +1001,7 @@ async fn main(spawner: Spawner) {
                                 [&mut serial_iface, &mut lora_iface, &mut ble_iface];
                             let dispatched =
                                 dispatch_actions(&mut ifaces, out.actions, &ifac_configs);
-                            leviculum_nrf::dispatch::settle(
+                            leviculum_firmware::dispatch::settle(
                                 "pn-announce-host",
                                 &mut node,
                                 &dispatched,
@@ -1037,7 +1037,7 @@ async fn main(spawner: Spawner) {
                                     [&mut serial_iface, &mut lora_iface, &mut ble_iface];
                                 let dispatched =
                                     dispatch_actions(&mut ifaces, out.actions, &ifac_configs);
-                                leviculum_nrf::dispatch::settle(
+                                leviculum_firmware::dispatch::settle(
                                     "announce-host",
                                     &mut node,
                                     &dispatched,
@@ -1090,7 +1090,7 @@ async fn main(spawner: Spawner) {
                         // (#344). `settle` counts and logs afterwards, as at
                         // every other site.
                         reporter.note_dispatch(&dispatched);
-                        leviculum_nrf::dispatch::settle("telemetry", &mut node, &dispatched);
+                        leviculum_firmware::dispatch::settle("telemetry", &mut node, &dispatched);
                     }
                 }
             }
@@ -1107,7 +1107,11 @@ async fn main(spawner: Spawner) {
                     let mut ifaces: [&mut dyn Interface; 3] =
                         [&mut serial_iface, &mut lora_iface, &mut ble_iface];
                     let dispatched = dispatch_actions(&mut ifaces, actions, &ifac_configs);
-                    leviculum_nrf::dispatch::settle("announce-periodic", &mut node, &dispatched);
+                    leviculum_firmware::dispatch::settle(
+                        "announce-periodic",
+                        &mut node,
+                        &dispatched,
+                    );
                 }
             }
             Either4::Fourth(Either3::Third(())) => {
@@ -1129,7 +1133,7 @@ async fn main(spawner: Spawner) {
                     let mut ifaces: [&mut dyn Interface; 3] =
                         [&mut serial_iface, &mut lora_iface, &mut ble_iface];
                     let dispatched = dispatch_actions(&mut ifaces, actions, &ifac_configs);
-                    leviculum_nrf::dispatch::settle("announce-button", &mut node, &dispatched);
+                    leviculum_firmware::dispatch::settle("announce-button", &mut node, &dispatched);
                 }
                 leviculum_nrf::feedback::announce_press_end(lora_before, announced);
                 // Then one immediate position report when a recipient is
@@ -1150,7 +1154,7 @@ async fn main(spawner: Spawner) {
                 let mut ifaces: [&mut dyn Interface; 3] =
                     [&mut serial_iface, &mut lora_iface, &mut ble_iface];
                 let dispatched = dispatch_actions(&mut ifaces, output.actions, &ifac_configs);
-                leviculum_nrf::dispatch::settle("ser-rx", &mut node, &dispatched);
+                leviculum_firmware::dispatch::settle("ser-rx", &mut node, &dispatched);
                 pn_step!(&output.events);
             }
             Either4::First(Either4::Second(data)) => {
@@ -1175,7 +1179,7 @@ async fn main(spawner: Spawner) {
                 let mut ifaces: [&mut dyn Interface; 3] =
                     [&mut serial_iface, &mut lora_iface, &mut ble_iface];
                 let dispatched = dispatch_actions(&mut ifaces, output.actions, &ifac_configs);
-                leviculum_nrf::dispatch::settle("lora-rx", &mut node, &dispatched);
+                leviculum_firmware::dispatch::settle("lora-rx", &mut node, &dispatched);
                 pn_step!(&output.events);
             }
             Either4::First(Either4::Third(Either::First((peer, data)))) => {
@@ -1208,7 +1212,7 @@ async fn main(spawner: Spawner) {
                 let mut ifaces: [&mut dyn Interface; 3] =
                     [&mut serial_iface, &mut lora_iface, &mut ble_iface];
                 let dispatched = dispatch_actions(&mut ifaces, output.actions, &ifac_configs);
-                leviculum_nrf::dispatch::settle("ble-rx", &mut node, &dispatched);
+                leviculum_firmware::dispatch::settle("ble-rx", &mut node, &dispatched);
                 pn_step!(&output.events);
             }
             Either4::First(Either4::Third(Either::Second(event))) => {
@@ -1264,7 +1268,7 @@ async fn main(spawner: Spawner) {
                 let mut ifaces: [&mut dyn Interface; 3] =
                     [&mut serial_iface, &mut lora_iface, &mut ble_iface];
                 let dispatched = dispatch_actions(&mut ifaces, output.actions, &ifac_configs);
-                leviculum_nrf::dispatch::settle(label, &mut node, &dispatched);
+                leviculum_firmware::dispatch::settle(label, &mut node, &dispatched);
                 pn_step!(&output.events);
             }
             Either4::First(Either4::Fourth(())) => {
@@ -1281,7 +1285,7 @@ async fn main(spawner: Spawner) {
                 let mut ifaces: [&mut dyn Interface; 3] =
                     [&mut serial_iface, &mut lora_iface, &mut ble_iface];
                 let dispatched = dispatch_actions(&mut ifaces, output.actions, &ifac_configs);
-                leviculum_nrf::dispatch::settle("timeout", &mut node, &dispatched);
+                leviculum_firmware::dispatch::settle("timeout", &mut node, &dispatched);
                 pn_step!(&output.events);
             }
         }

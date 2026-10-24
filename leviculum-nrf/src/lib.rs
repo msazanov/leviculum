@@ -64,7 +64,6 @@ pub mod boot_trace;
 pub mod button;
 pub mod chtm;
 pub mod clock;
-pub mod dispatch;
 pub mod events;
 /// The feedback grammar's players (#459, order 892): the LED, the
 /// notification LED and the T1000-E's buzzer answer the button.

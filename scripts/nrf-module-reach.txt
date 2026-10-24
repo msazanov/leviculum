@@ -8,11 +8,11 @@ src/banner.rs (53): identity log_critical media name time_source_str
 src/baseboard.rs (133):
 src/battery.rs (441): baseboard log
 src/bin/qspi-selftest.rs (634):
-src/bin/rak4631.rs (1449):
+src/bin/rak4631.rs (1453):
 src/bin/sd-ram-probe.rs (294):
-src/bin/solarnode.rs (1485):
-src/bin/t1000e.rs (1360): feedback
-src/bin/t114.rs (1395):
+src/bin/solarnode.rs (1489):
+src/bin/t1000e.rs (1364): feedback
+src/bin/t114.rs (1399):
 src/ble/columba.rs (3168): ble info log name radio_store warn
 src/ble/mod.rs (1300): boot_trace iface_bytes info log media name radio_store transport_stats warn
 src/ble/notify.rs (238): ble log
@@ -26,7 +26,6 @@ src/boot_trace.rs (119): log
 src/button.rs (176): announce baseboard feedback log telemetry
 src/chtm.rs (71): log lora sx1262
 src/clock.rs (12):
-src/dispatch.rs (49): log
 src/display.rs (351): baseboard ble button log lora pn
 src/events.rs (261): announce log pn transport_stats
 src/feedback.rs (365): baseboard battery led log lora media
@@ -37,7 +36,7 @@ src/identity.rs (119): log_critical
 src/iface_bytes.rs (15):
 src/interface.rs (77): iface_bytes log
 src/led.rs (48): baseboard feedback log
-src/lib.rs (827): log log_critical
+src/lib.rs (826): log log_critical
 src/lora.rs (2708): announce baseboard chtm events feedback iface_bytes log media pn radio radio_store rng set_irq_priorities
 src/media.rs (320): ble log telemetry
 src/mgmt.rs (259): log name telemetry usb
@@ -59,9 +58,10 @@ src/transport_stats.rs (168): iface_bytes log lora
 src/usb.rs (1464): banner ble boards chtm heap_census identity log lora media mgmt name pn postmortem_query radio_store record_store reset_stack_watermark telemetry
 src/vext.rs (85): boards log
 firmware/src/boot_count.rs (203): fakes log seams
+firmware/src/dispatch.rs (49): log
 firmware/src/fakes.rs (197): seams
 firmware/src/iface_bytes.rs (125):
-firmware/src/lib.rs (34):
+firmware/src/lib.rs (35):
 firmware/src/log.rs (402):
 firmware/src/postmortem.rs (437): log
 firmware/src/record_store.rs (665): fakes log seams
