@@ -15,6 +15,9 @@ members = ["screen", "sd-policy", "gnss-time", "gnss-presence", "gnss-init", "te
 
 [dependencies]
 leviculum-core = { path = "../leviculum-core", default-features = false }
+# The orchestration stratum (#469): what moved out of `src/` into the crate
+# every chip family binds to. This crate implements its seams.
+leviculum-firmware = { path = "firmware" }
 # Board-independent status-screen painter (pure, host-testable golden
 # frames). Pulled by both display backends: the V2 SSD1306 path via
 # `display`, the T114 ST7789 path via `bsp-t114` directly.

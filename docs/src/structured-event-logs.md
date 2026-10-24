@@ -288,7 +288,7 @@ call site instead.
 ### Who writes `t=` on a firmware line
 
 Nobody at the call site.  Since #344 the firmware's log formatter
-(`leviculum-nrf/src/log.rs`, shape in `leviculum-log-line`) appends
+(`leviculum-nrf/firmware/src/log.rs`, shape in `leviculum-log-line`) appends
 ` t=<uptime-ms>` to **every** line it emits — event lines, plain
 `[LORA]`/`[INFO]` lines, boot banners, `tracing` records alike.  A
 call site that also writes its own `t=` renders the field twice;

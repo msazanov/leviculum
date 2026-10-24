@@ -988,7 +988,9 @@ dependencies = [
  "embassy-sync 0.7.2",
  "embassy-time",
  "embedded-storage-async",
+ "leviculum-boot-trace",
  "leviculum-core",
+ "leviculum-log-line",
  "rand_core 0.6.4",
 ]
 
@@ -1091,6 +1093,7 @@ dependencies = [
  "leviculum-core",
  "leviculum-drop-budget",
  "leviculum-feedback",
+ "leviculum-firmware",
  "leviculum-gnss-init",
  "leviculum-gnss-presence",
  "leviculum-gnss-time",

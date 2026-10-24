@@ -124,7 +124,7 @@ costs at most one banner period.
 > `[IDENTITY] t114_node=…`, `[IDENTITY] t114_probe=…` — went through
 > `log_fmt`, which is runtime-gated: with no reader attached yet it
 > counts the line and returns *before* the ring buffer and before the
-> reset-surviving tail (`leviculum-nrf/src/log.rs`, `log_fmt`). The gate
+> reset-surviving tail (`leviculum-nrf/firmware/src/log.rs`, `log_fmt`). The gate
 > opens on the first DTR-assert or after 30 s, both later than the lines
 > were written, so a reader saw only the gate's own summary,
 > `[LOG_GATE] opened, dropped N runtime lines pre-attach`, and nothing

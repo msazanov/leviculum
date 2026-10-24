@@ -285,10 +285,20 @@ fn the_firmware_still_emits_the_register_readback() {
 }
 
 fn nrf_source(rel: &str) -> String {
+    tree_source("leviculum-nrf/src", rel)
+}
+
+/// A source of the orchestration stratum, `leviculum-nrf/firmware/src`, where
+/// the chip-free modules move out of the bind crate (#469).
+fn firmware_source(rel: &str) -> String {
+    tree_source("leviculum-nrf/firmware/src", rel)
+}
+
+fn tree_source(tree: &str, rel: &str) -> String {
     let path: PathBuf = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("workspace root")
-        .join("leviculum-nrf/src")
+        .join(tree)
         .join(rel);
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
@@ -410,10 +420,10 @@ fn stamp_does_not_disturb_the_existing_parsers() {
 /// source, so both are pinned here.
 #[test]
 fn the_firmware_stamps_every_line_with_board_uptime() {
-    let log = nrf_source("log.rs");
+    let log = firmware_source("log.rs");
     assert!(
         log.contains("embassy_time::Instant::now().as_millis()"),
-        "leviculum-nrf/src/log.rs no longer reads board uptime for the t= stamp"
+        "leviculum-nrf/firmware/src/log.rs no longer reads board uptime for the t= stamp"
     );
     // Uniform: the one formatting path, `log_fmt*`, closes through the
     // shared shaper. A stamp on some lines and not others is a trap for
@@ -1234,7 +1244,7 @@ fn the_transmit_deferral_is_spent_once_per_externally_paced_event() {
 /// (Codeberg #234).
 ///
 /// `log_fmt` returns before it touches either the ring or the persistent tail
-/// while `RUNTIME_DRAIN_OPEN` is unset (`leviculum-nrf/src/log.rs`), and the
+/// while `RUNTIME_DRAIN_OPEN` is unset (`leviculum-nrf/firmware/src/log.rs`), and the
 /// gate opens on the first DTR-assert or after 30 s — both far later than the
 /// boot sequence that registers the destinations. A one-shot `[IDENTITY]`
 /// line written there is not late, it is gone: it never reaches the buffer
@@ -1858,15 +1868,22 @@ fn the_stamp_detector_tells_a_body_stamp_from_its_neighbours() {
 /// apart (890: `GNSS_POWER ... t=603034 t=603034`).
 #[test]
 fn no_firmware_log_body_carries_its_own_stamp() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+    // Both strata log: the bind crate's `src/`, and the orchestration crate's
+    // `firmware/src/`, whose files are named `firmware/<rel>` here.
+    let nrf = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("workspace root")
-        .join("leviculum-nrf/src");
+        .join("leviculum-nrf");
     let mut files = Vec::new();
-    nrf_sources(&root, "", &mut files);
+    nrf_sources(&nrf.join("src"), "", &mut files);
+    nrf_sources(&nrf.join("firmware/src"), "firmware", &mut files);
     assert!(
-        files.iter().any(|(rel, _)| rel == "log.rs"),
-        "the walk of leviculum-nrf/src found no log.rs; it is reading the wrong tree"
+        files.iter().any(|(rel, _)| rel == "firmware/log.rs"),
+        "the walk of leviculum-nrf/firmware/src found no log.rs; it is reading the wrong tree"
+    );
+    assert!(
+        files.iter().any(|(rel, _)| rel == "lora.rs"),
+        "the walk of leviculum-nrf/src found no lora.rs; it is reading the wrong tree"
     );
     let offending: Vec<String> = files
         .iter()
@@ -1876,7 +1893,7 @@ fn no_firmware_log_body_carries_its_own_stamp() {
     assert!(
         offending.is_empty(),
         "these log bodies append their own t=, which the renderer already \
-         stamps (leviculum-nrf/src/log.rs::fmt_into): {offending:?}"
+         stamps (leviculum-nrf/firmware/src/log.rs::fmt_into): {offending:?}"
     );
     for (allowed, reason) in BODY_STAMP_ALLOWED {
         let (_, src) = files

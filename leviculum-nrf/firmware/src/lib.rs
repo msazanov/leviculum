@@ -6,10 +6,10 @@
 //! host-tested member crates); stratum 3 above it is a bind crate with pins,
 //! backends and `main` (`leviculum-nrf` today).
 //!
-//! This is step 0, the skeleton: [`seams`] declares every seam of the page's
-//! section 3 and nothing moves into this crate yet. Every seam has a host
-//! fake in `fakes` (test builds only), so the modules that arrive from
-//! step 1 on are host-tested like the policy crates.
+//! [`seams`] declares every seam of the page's section 3. Every seam has a
+//! host fake in `fakes` (test builds only), so the modules that arrive are
+//! host-tested like the policy crates. Step 1 moves the leaf modules that
+//! need no backend but a seam: [`log`].
 //!
 //! What the crate may depend on is held by two guards rather than by this
 //! comment: `just firmware-no-hal` refuses a HAL or chip crate in its
@@ -20,6 +20,7 @@
 
 extern crate alloc;
 
+pub mod log;
 pub mod seams;
 
 #[cfg(test)]

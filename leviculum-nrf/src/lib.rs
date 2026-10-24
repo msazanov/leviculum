@@ -78,7 +78,11 @@ pub mod heap_census;
 pub mod identity;
 pub mod iface_bytes;
 pub mod interface;
-pub mod log;
+/// The debug log moved to the orchestration stratum (#469 step 1); the
+/// path stays, so every `crate::log::` call site and the three macros read
+/// as they did. The CDC writer that drains its ring stays in [`usb`].
+pub use leviculum_firmware::log;
+pub use leviculum_firmware::{info, log_critical, warn};
 pub mod lora;
 pub mod media;
 /// Remote management on the board (#235): the identity allow-list

@@ -593,7 +593,7 @@ validator short-circuits before the workblock when the cost is zero
 this way for delivery stamps until the role landed, with the LXMF
 dependency pulled without `pow`; the role brought `pow` in, because the
 board announces stamp cost 13 and has to validate what it accepts, through
-the streaming validator above (`leviculum-nrf/Cargo.toml:25-33`).
+the streaming validator above (`leviculum-nrf/Cargo.toml:28-36`).
 
 The expensive case is *peering out* to a Python node, which requires
 mining a key at that node's advertised peering cost, default 18, over a

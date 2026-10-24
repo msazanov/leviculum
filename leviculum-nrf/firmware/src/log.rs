@@ -364,3 +364,39 @@ pub fn open_runtime_drain() {
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_ring_hands_back_what_was_written_in_order() {
+        let ring = LogRing::new();
+        ring.write(b"one ");
+        ring.write(b"two");
+        let mut out = [0u8; 16];
+        let n = ring.read(&mut out);
+        assert_eq!(&out[..n], b"one two");
+        assert_eq!(ring.read(&mut out), 0);
+    }
+
+    #[test]
+    fn a_lapped_reader_resumes_at_the_oldest_byte_still_held() {
+        let ring = LogRing::new();
+        let first = [b'a'; LOG_RING_SIZE];
+        ring.write(&first);
+        ring.write(b"xyz");
+        let mut out = [0u8; LOG_RING_SIZE];
+        let n = ring.read(&mut out);
+        assert_eq!(n, LOG_RING_SIZE);
+        assert_eq!(&out[n - 3..n], b"xyz");
+        assert!(out[..n - 3].iter().all(|&b| b == b'a'));
+    }
+
+    #[test]
+    fn escape_ctrl_keeps_a_multi_line_message_on_one_line() {
+        let mut s = alloc::string::String::new();
+        core::fmt::write(&mut s, format_args!("{}", EscapeCtrl("a\nb\rc"))).unwrap();
+        assert_eq!(s, "a\\nb\\rc");
+    }
+}

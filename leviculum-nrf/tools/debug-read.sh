@@ -21,7 +21,7 @@
 # Boot lines and the 30-second window: the firmware's boot-critical output
 # goes into the 8 KiB LOG_RING whether or not a host is attached, and the ring
 # drains once DTR is asserted. Runtime output stays gated for up to 30 s after
-# boot (`RUNTIME_DRAIN_OPEN`, leviculum-nrf/src/log.rs) precisely so it cannot
+# boot (`RUNTIME_DRAIN_OPEN`, leviculum-nrf/firmware/src/log.rs) precisely so it cannot
 # lap the boot lines before somebody attaches. So: attach within ~30 s of the
 # board booting and the boot lines are still there. Later than that, press
 # reset with this already running.

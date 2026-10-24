@@ -14,7 +14,7 @@
 //! `LOG_RING.read`), so a host with the port open is not the bottleneck.
 //!
 //! The bound that binds is the **ring**: `LOG_RING_SIZE` is 8 KiB
-//! (`leviculum-nrf/src/log.rs:25`) and old data is overwritten when it fills.
+//! (`leviculum-nrf/firmware/src/log.rs:25`) and old data is overwritten when it fills.
 //! A drop storm therefore does not lose drop lines — it evicts the OTHER
 //! lines a capture was taken for. Since #421 put the 16-hex `ph=` correlator
 //! on the line, one `[DROP]` line is up to ~90 bytes (the worst case is
@@ -350,7 +350,7 @@ mod tests {
     #[test]
     fn the_ring_derivation_still_holds() {
         // The debug CDC ring the derivation is sized against
-        // (`leviculum-nrf/src/log.rs:25`, `LOG_RING_SIZE`).
+        // (`leviculum-nrf/firmware/src/log.rs:25`, `LOG_RING_SIZE`).
         const LOG_RING_SIZE: usize = 8 * 1024;
         // The periodic lines a capture is taken for, per 30 s window:
         // `[STACK]` every 2 s (~110 B), `[FW_BUILD]` every 5 s (~70 B), and
