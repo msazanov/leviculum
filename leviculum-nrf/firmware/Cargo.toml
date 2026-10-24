@@ -38,6 +38,10 @@ leviculum-pn-store = { path = "../pn-store" }
 # The board's interface table and its ingress-control flags, which the
 # byte counters' interface count is asserted against.
 leviculum-heap-budget = { path = "../heap-budget" }
+# The global allocator (961, `heap`): `alloc` is this stratum's, and the
+# heap facts are what the census and the propagation node read. An
+# allocator crate, not a HAL; the bind crate hands it its pool.
+embedded-alloc = "0.7"
 # The serial interface's queue depth and its drop and count decisions
 # (958: `interface` moved here, the USB writer that drains it did not).
 leviculum-usb-policy = { path = "../usb-policy" }

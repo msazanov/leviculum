@@ -51,7 +51,7 @@ pub const LORA_QUEUE_SLOTS: usize = 64;
 /// on this hardware for years.
 ///
 /// What it costs us: 6144 B is 6.25 % of the firmware's 96 KiB heap
-/// (`leviculum-nrf/src/lib.rs`, `HEAP_SIZE`), plus at most one dequeued
+/// (`leviculum-nrf/heap-budget`, `HEAP_SIZE`), plus at most one dequeued
 /// in-flight packet (500 B at MTU) that the transmitter owns, so 6.76 % worst
 /// case. The four-slot queue it replaces could hold 2000 B, 2.03 %.
 ///

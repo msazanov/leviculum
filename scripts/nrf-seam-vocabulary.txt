@@ -38,8 +38,6 @@ src/gnss.rs: vext doc x2
 src/gnss.rs: vext::wait_ready x1
 src/heap_census.rs: ble::defrag_held_bytes x1
 src/heap_census.rs: ble::session_census x1
-src/heap_census.rs: heap_stats x2
-src/heap_census.rs: heap_watermark_sample x1
 src/led.rs: feedback doc x1
 src/led.rs: feedback::Sink x1
 src/led.rs: feedback::spawn_led x1
@@ -61,7 +59,6 @@ src/media.rs: ble::note_media_changed x1
 src/mgmt.rs: usb doc x1
 src/name.rs: ble::columba doc x1
 src/pn.rs: feedback::notify x1 doc x1
-src/pn.rs: heap_stats x1
 src/pn.rs: record_store::PnOp x1
 src/pn.rs: record_store::mounted x3
 src/pn.rs: record_store::pn_execute x1 doc x1

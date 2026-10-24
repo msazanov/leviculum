@@ -161,9 +161,9 @@ this page singled out first, in the order it is cheap to move:
 
 **1. The `[TRANSPORT]` ticker.** The re-arm deliberately drops missed
 periods so a busy loop does not then emit a burst of catch-up lines
-(`poll`, `leviculum-nrf/src/transport_stats.rs:107`), and the line is
+(`poll`, `leviculum-nrf/src/transport_stats.rs:108`), and the line is
 byte-exact because capture consumers grep it (`log`,
-`leviculum-nrf/src/transport_stats.rs:115`). `leviculum-log-line` already
+`leviculum-nrf/src/transport_stats.rs:116`). `leviculum-log-line` already
 exists for the second half.
 
 See also: [Checks that are actually

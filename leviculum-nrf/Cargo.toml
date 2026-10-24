@@ -221,8 +221,8 @@ embedded-hal-async = "1"
 cortex-m = "0.7"
 cortex-m-rt = "0.7"
 
-# Heap allocator for alloc
-embedded-alloc = "0.7"
+# The heap allocator is the orchestration crate's (961,
+# `leviculum_firmware::heap`); this crate only hands it the pool.
 
 # Static initialization
 static_cell = "2"

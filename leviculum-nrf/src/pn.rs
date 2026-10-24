@@ -154,7 +154,7 @@
 //! The boot line `HEAP_BUDGET links=<max> ble_links=<m> per_link=<b>
 //! ble_session=<b> role=<b> reserve=<b> total=<b>` (emitted by
 //! [`crate::heap_census::log_budget_and_assert`], asserted against
-//! [`crate::HEAP_SIZE`]) sums the worst case every owner of the 96 KiB
+//! [`leviculum_heap_budget::HEAP_SIZE`]) sums the worst case every owner of the 96 KiB
 //! heap may reach at once:
 //!
 //! ```text
@@ -3215,7 +3215,7 @@ impl Engine {
     /// beside `margin=` are every input it was computed from, so the
     /// arithmetic can be re-run from a capture.
     fn read_serve_cap(&mut self) {
-        let (_, free) = crate::heap_stats();
+        let (_, free) = leviculum_firmware::heap::heap_stats();
         let largest = crate::heap_census::largest_free_block();
         let live_cap = crate::heap_census::live_serve_cap(self.serve_boot_cap, free, largest);
         self.role.set_serve_cap_bytes(Some(live_cap));

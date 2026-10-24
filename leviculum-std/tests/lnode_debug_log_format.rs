@@ -310,13 +310,14 @@ fn tree_source(tree: &str, rel: &str) -> String {
 #[test]
 fn the_firmware_still_emits_the_shapes_these_parsers_expect() {
     let lib = nrf_source("lib.rs");
+    let heap = firmware_source("heap.rs");
     assert!(
-        lib.contains(r#""[HEAP] ""#),
-        "leviculum-nrf/src/lib.rs no longer emits the `[HEAP] ` tag"
+        heap.contains(r#""[HEAP] ""#),
+        "leviculum-nrf/firmware/src/heap.rs no longer emits the `[HEAP] ` tag"
     );
     assert!(
-        lib.contains("used={used} free={free} watermark={watermark} size={HEAP_SIZE}"),
-        "the [HEAP] field order or spelling changed in leviculum-nrf/src/lib.rs"
+        heap.contains("used={used} free={free} watermark={watermark} size={HEAP_SIZE}"),
+        "the [HEAP] field order or spelling changed in leviculum-nrf/firmware/src/heap.rs"
     );
     // The banner format string lives in the shared helper (48f34f6 moved it
     // out of the BSP bins), and so does the whole boot-diagnostics block and

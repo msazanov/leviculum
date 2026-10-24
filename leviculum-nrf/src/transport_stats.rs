@@ -60,8 +60,9 @@ use rand_core::CryptoRngCore;
 
 /// How often the `[TRANSPORT]` line is emitted.
 ///
-/// 30 s, the same cadence as the `[HEAP]` line (`lib.rs:254`), so the two
-/// periodic counter lines interleave predictably in a capture. The events
+/// 30 s, the same cadence as the `[HEAP]` line
+/// ([`leviculum_firmware::heap::watermark_loop`]), so the two periodic
+/// counter lines interleave predictably in a capture. The events
 /// being diagnosed are minutes apart (a 15-minute management-announce
 /// heartbeat, a report every few minutes), so 30 s puts ~30 samples inside
 /// one heartbeat interval — enough to place a counter step within 30 s of the

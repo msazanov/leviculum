@@ -261,54 +261,19 @@ compile_error!(
 );
 
 use core::mem::MaybeUninit;
-use embedded_alloc::LlffHeap as Heap;
 
-#[global_allocator]
-static HEAP: Heap = Heap::empty();
+// The global allocator, `heap_stats` and the watermark live in the
+// orchestration stratum (961, `leviculum_firmware::heap`); what stays here
+// is the pool's memory ([`init_heap`]) and the executor task that runs the
+// `[HEAP]` loop. The pool size and the incoming-resource caps are terms of
+// the boot heap budget (#388), named from `leviculum_heap_budget`.
+use leviculum_heap_budget::HEAP_SIZE;
 
-// The heap pool and the incoming-resource cap are terms of the boot heap
-// budget (#388) and live with its arithmetic, where a host test reaches them.
-pub use leviculum_heap_budget::{
-    BOARD_INCOMING_RESOURCES_PER_LINK, HEAP_SIZE, MAX_INCOMING_RESOURCE_BYTES,
-};
-
-/// Return (used, free) heap bytes at this instant.
-pub fn heap_stats() -> (usize, usize) {
-    (HEAP.used(), HEAP.free())
-}
-
-/// High-watermark of heap usage since boot (bytes). Updated by
-/// [`heap_watermark_task`]; resets with every boot — the periodic
-/// `[HEAP]` log lines (which land in the persistent tail) carry the
-/// history across resets. Codeberg #65 instrumentation.
-static HEAP_WATERMARK: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
-
-/// Sample the heap, update the high-watermark, and return
-/// `(used, free, watermark)`.
-pub fn heap_watermark_sample() -> (usize, usize, usize) {
-    let (used, free) = heap_stats();
-    let watermark = HEAP_WATERMARK
-        .fetch_max(used, core::sync::atomic::Ordering::Relaxed)
-        .max(used);
-    (used, free, watermark)
-}
-
-/// Periodic heap telemetry (Codeberg #65): one `[HEAP]` line every 30 s
-/// into the normal log path, which feeds both the USB debug capture and
-/// the persistent tail in `.uninit` — so an OOM panic's post-mortem boot
-/// replays the heap trajectory leading up to it. Strictly additive: the
-/// cadence is coarse and the sampling is two atomic loads; the alloc
-/// path itself is untouched.
+/// Periodic heap telemetry (Codeberg #65): one `[HEAP]` line every 30 s,
+/// [`leviculum_firmware::heap::watermark_loop`] on this executor.
 #[embassy_executor::task]
 pub async fn heap_watermark_task() {
-    loop {
-        embassy_time::Timer::after(embassy_time::Duration::from_secs(30)).await;
-        let (used, free, watermark) = heap_watermark_sample();
-        crate::log::log_fmt(
-            "[HEAP] ",
-            format_args!("used={used} free={free} watermark={watermark} size={HEAP_SIZE}"),
-        );
-    }
+    leviculum_firmware::heap::watermark_loop().await
 }
 
 /// Sentinel word `paint_stack` fills the unused stack with. Distinct
@@ -540,11 +505,12 @@ pub async fn stack_watermark_task() {
 /// Typically called at the start of the firmware entry point.
 pub fn init_heap() {
     static mut HEAP_MEM: [MaybeUninit<u8>; HEAP_SIZE] = [MaybeUninit::uninit(); HEAP_SIZE];
-    // SAFETY: Called once at startup before any concurrent access.
+    // SAFETY: Called once at startup before any concurrent access, and
+    // HEAP_MEM is named nowhere else, so the allocator owns it for good.
     // Use addr_of! to avoid creating a reference to the static mut.
     unsafe {
         let heap_start = core::ptr::addr_of!(HEAP_MEM) as usize;
-        HEAP.init(heap_start, HEAP_SIZE);
+        leviculum_firmware::heap::init(heap_start, HEAP_SIZE);
     }
 }
 

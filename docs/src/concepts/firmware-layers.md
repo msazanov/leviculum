@@ -72,12 +72,12 @@ tree:
   half, 665 lines now, to `leviculum-nrf/firmware/src/record_store.rs`,
   `flash.rs` 79), the SX1262 driver (`sx1262.rs` 1704), entropy from the
   SoftDevice (`rng.rs` 214, whole: since 959 its fill is what stratum 2's
-  `Entropy` forwards to), the allocator and the panic post-mortem
-  (`lib.rs` 764: the allocator
-  at `leviculum-nrf/src/lib.rs:264-267`; the panic counter and the
-  post-mortem records moved in step 1 to
+  `Entropy` forwards to), the heap pool and the panic post-mortem
+  (`lib.rs` 730: the pool's memory at `leviculum-nrf/src/lib.rs:506`,
+  handed to the allocator, which moved to stratum 2 in 961; the panic
+  counter and the post-mortem records moved in step 1 to
   `leviculum-nrf/firmware/src/postmortem.rs`, the panic handler and
-  HardFault stay at `leviculum-nrf/src/lib.rs:621-764`),
+  HardFault stay at `leviculum-nrf/src/lib.rs:587-730`),
   `boot_count.rs` (writes through `embassy_nrf::nvmc::Nvmc`,
   `leviculum-nrf/src/boot_count.rs:45`), the board files (`boards/*.rs`
   1300, each with its interface-name table since 958).
@@ -171,7 +171,7 @@ are written against that file and not against this table.
 | Clock | trait | monotonic time, calendar sources and their rank | embassy time, GNSS time, host time; the source the board reports (`set_time_source`, in stratum 2's `clock` since 958) | the same plus SNTP (`TimeSource::Ntp`, the fork's `leviculum-fw/src/lib.rs` line 120) and the PCF8563 |
 | Entropy | `rand_core` | what core's crypto draws | `leviculum_firmware::entropy::Entropy` (959), a zero-sized `RngCore` over the fill the bind crate registers at boot (`set_source`); here that fill is `rng.rs`'s (`leviculum_nrf::rng::fill_entropy`, SoftDevice `sd_rand_application_bytes_available_get`, `leviculum-nrf/src/rng.rs:110`) | the ESP32 and RP2350 hardware RNGs |
 | Sensors | traits per sensor | GNSS UART, motion, battery, die temperature, later magnetometer | AG3335 (`gnss.rs`), QMA6100P (`motion.rs`), ADC divider (`battery.rs`), `nrf_softdevice::temperature_celsius` (`leviculum-nrf/src/telemetry.rs:946`); the sensor STATE (fix, presence, motion, battery watches) lives in stratum 2 since 959 (`leviculum_firmware::board_state`), the sensor TASKS that feed it stay below | AG3352 (same Airoha init), MAX17048 (`battery-scale`); the M9's QMI8658B IMU ([The ThinkNode M9](thinknode-m9.md)) has no driver in the fork yet |
-| Sinks | traits | LED, buzzer, display, keypad or button, the debug log (`log.rs` 366, to CDC today), the post-mortem store (`leviculum-nrf/firmware/src/postmortem.rs` since step 1, filled by the handlers at `leviculum-nrf/src/lib.rs:621-764`; the fork's `diag/postmortem.rs`, 398 lines) | `led.rs`, `feedback.rs`, SSD1306 and ST7789, `button.rs` | the M9's ST7789 and keypad (menus, [One button](one-button.md)) |
+| Sinks | traits | LED, buzzer, display, keypad or button, the debug log (`log.rs` 366, to CDC today), the post-mortem store (`leviculum-nrf/firmware/src/postmortem.rs` since step 1, filled by the handlers at `leviculum-nrf/src/lib.rs:587-730`; the fork's `diag/postmortem.rs`, 398 lines) | `led.rs`, `feedback.rs`, SSD1306 and ST7789, `button.rs` | the M9's ST7789 and keypad (menus, [One button](one-button.md)) |
 | Watchdog | trait | feed and timeout | none fed: the ten matches in `leviculum-nrf/src` are four comments about the outbound link watchdog in the board binaries and `qspi-selftest`'s read of the WDT's RUNSTATUS | per family |
 | Net (optional) | the fork's `leviculum-net` as a stratum-3 crate | TCP, UDP, NTP over `embassy-net` | none on nRF52840 | shared by esp and rp |
 

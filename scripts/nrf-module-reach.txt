@@ -29,15 +29,15 @@ src/events.rs (261): announce log pn transport_stats
 src/feedback.rs (365): battery led log lora media
 src/flash.rs (79):
 src/gnss.rs (587): boards log vext
-src/heap_census.rs (398): ble heap_stats heap_watermark_sample log pn
+src/heap_census.rs (398): ble log pn
 src/led.rs (48): feedback log
-src/lib.rs (764): log log_critical
+src/lib.rs (730): log log_critical
 src/lora.rs (2708): announce chtm events feedback log media pn radio radio_store set_irq_priorities
 src/media.rs (320): ble log telemetry
 src/mgmt.rs (259): log name telemetry usb
 src/motion.rs (177): log
 src/name.rs (259): ble log media telemetry
-src/pn.rs (3759): announce events feedback heap_census heap_stats log lora name record_store telemetry usb
+src/pn.rs (3759): announce events feedback heap_census log lora name record_store telemetry usb
 src/qspi.rs (1188): log
 src/radio.rs (208): boards log lora sx1262
 src/radio_store.rs (197): boards flash log telemetry
@@ -49,7 +49,7 @@ src/store_spike.rs (164): flash log record_store
 src/sx1262.rs (1704): chtm log lora
 src/telemetry.rs (2062): ble feedback flash log lora media name pn radio_store
 src/time_floor.rs (74): boot_count flash radio_store record_store
-src/transport_stats.rs (168): log lora
+src/transport_stats.rs (169): log lora
 src/usb.rs (1464): banner ble boards chtm heap_census log lora media mgmt name pn postmortem_query radio_store record_store reset_stack_watermark telemetry
 src/vext.rs (85): boards log
 firmware/src/board_state.rs (133):
@@ -59,10 +59,11 @@ firmware/src/clock.rs (104):
 firmware/src/dispatch.rs (49): log
 firmware/src/entropy.rs (148): iface_bytes seams
 firmware/src/fakes.rs (197): seams
+firmware/src/heap.rs (120): log
 firmware/src/identity.rs (119): log_critical
 firmware/src/iface_bytes.rs (177):
 firmware/src/interface.rs (77): iface_bytes log
-firmware/src/lib.rs (52):
+firmware/src/lib.rs (55):
 firmware/src/log.rs (402):
 firmware/src/postmortem.rs (437): boot_trace log
 firmware/src/record_store.rs (665): fakes log seams

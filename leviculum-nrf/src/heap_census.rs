@@ -222,7 +222,7 @@ const _: () =
 ///
 /// `node_box` is passed by the binary (`size_of_val` of its concrete
 /// boxed `NodeCore`) and is inside `total=`. Asserted: `total ≤`
-/// [`crate::HEAP_SIZE`] and `links ≥ ble_links` — a violation panics at
+/// [`leviculum_heap_budget::HEAP_SIZE`] and `links ≥ ble_links` — a violation panics at
 /// boot, lands in the post-mortem, and names the arithmetic instead of
 /// failing as a 340-byte allocation three days into a field run.
 pub fn log_budget_and_assert(node_box: usize) {
@@ -255,10 +255,10 @@ pub fn log_budget_and_assert(node_box: usize) {
         );
     }
     assert!(
-        total <= crate::HEAP_SIZE,
+        total <= leviculum_heap_budget::HEAP_SIZE,
         "HEAP_BUDGET total {total} exceeds the {} B heap: shrink a term \
          (node box, per-link, role, reserve) before shipping this configuration",
-        crate::HEAP_SIZE
+        leviculum_heap_budget::HEAP_SIZE
     );
     assert!(
         links >= ble_links,
@@ -274,7 +274,7 @@ pub fn log_budget_and_assert(node_box: usize) {
 /// other task on the executor.
 pub fn largest_free_block() -> usize {
     use alloc::alloc::{alloc, dealloc, Layout};
-    let (_, free) = crate::heap_stats();
+    let (_, free) = leviculum_firmware::heap::heap_stats();
     let mut lo = 0usize;
     let mut hi = free;
     while hi.saturating_sub(lo) > 64 {
@@ -303,12 +303,12 @@ where
     C: Clock,
     S: Storage,
 {
-    let (used, _free, _watermark) = crate::heap_watermark_sample();
+    let (used, _free, _watermark) = leviculum_firmware::heap::heap_watermark_sample();
     let largest = largest_free_block();
     // Re-read free after the probe: the probe cannot change it (every
     // claim is released), but the paired used/free of ONE instant is
     // what the line should carry.
-    let (used_now, free_now) = crate::heap_stats();
+    let (used_now, free_now) = leviculum_firmware::heap::heap_stats();
     let census = node.heap_census();
     let ble = crate::ble::defrag_held_bytes();
     // The BLE sessions' own holdings (#388 pass 2): the packets queued

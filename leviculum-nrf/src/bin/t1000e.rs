@@ -188,8 +188,8 @@ async fn main(spawner: Spawner) {
     let mut builder = NodeCoreBuilder::new()
         .enable_transport(true)
         .max_links(Some(MAX_ENDPOINT_LINKS))
-        .max_incoming_resource_size(leviculum_nrf::MAX_INCOMING_RESOURCE_BYTES)
-        .max_incoming_resources_per_link(leviculum_nrf::BOARD_INCOMING_RESOURCES_PER_LINK)
+        .max_incoming_resource_size(leviculum_heap_budget::MAX_INCOMING_RESOURCE_BYTES)
+        .max_incoming_resources_per_link(leviculum_heap_budget::BOARD_INCOMING_RESOURCES_PER_LINK)
         // #402: announces held back by the LoRa announce cap wait here, and
         // on a board the queue is a heap term, not a formality. One entry is
         // its raw announce (~183 B) plus its Vec header, destination, hops
@@ -258,7 +258,7 @@ async fn main(spawner: Spawner) {
     const _: () = assert!(
         leviculum_nrf::heap_census::budget_total(core::mem::size_of::<
             leviculum_core::node::NodeCore<Entropy, EmbassyClock, EmbeddedStorage>,
-        >()) <= leviculum_nrf::HEAP_SIZE,
+        >()) <= leviculum_heap_budget::HEAP_SIZE,
         "HEAP_BUDGET total exceeds the heap (#388): shrink a term"
     );
 
@@ -578,7 +578,7 @@ async fn main(spawner: Spawner) {
     );
     info!("motion task spawned");
 
-    let (hu, hf) = leviculum_nrf::heap_stats();
+    let (hu, hf) = leviculum_firmware::heap::heap_stats();
     info!("heap u={} f={}", hu, hf);
     leviculum_nrf::log_stack("post-init");
 
