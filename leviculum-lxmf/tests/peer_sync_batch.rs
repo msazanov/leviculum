@@ -20,7 +20,10 @@ use std::cell::Cell;
 
 use leviculum_core::resource::{ResourceSource, SourceError};
 use leviculum_lxmf::peering::{build_offer, offer_reply, sync_envelope_len, OFFER_BYTES_LIMIT};
-use leviculum_lxmf::propagation_store::{MemoryPropagationStore, PropagationStore};
+use leviculum_lxmf::propagation_store::{
+    MemoryPropagationStore, PropagationBodyStore, PropagationStore,
+};
+use leviculum_lxmf::storage::StorageError;
 use leviculum_lxmf::{
     plan_sync_batch, response_action, OfferPlan, OfferReply, OfferResponse, Peer, PeerRecord,
     PeerSyncEnvelope, ResponseAction, SyncSource, TransientId, WantedIds,
@@ -159,6 +162,88 @@ fn bodies(store: &MemoryPropagationStore, ids: &[TransientId]) -> Vec<Vec<u8>> {
         .collect()
 }
 
+fn prefetched(store: &MemoryPropagationStore, ids: &[TransientId]) -> Vec<(TransientId, Vec<u8>)> {
+    ids.iter()
+        .map(|id| (*id, store.read_body(id).unwrap().unwrap()))
+        .collect()
+}
+
+/// Inject read failures around a real store, without changing absence or
+/// the underlying directory and partial-body-read implementations.
+struct ReadFaults {
+    store: MemoryPropagationStore,
+    metadata_error: Cell<Option<TransientId>>,
+    body_error: Cell<Option<TransientId>>,
+    whole_reads: Cell<usize>,
+}
+
+impl PropagationStore for ReadFaults {
+    fn append(
+        &mut self,
+        id: &TransientId,
+        received_at: u64,
+        stamp_value: u8,
+        body: &[u8],
+    ) -> Result<(), StorageError> {
+        self.store.append(id, received_at, stamp_value, body)
+    }
+
+    fn for_each(
+        &self,
+        visit: &mut dyn FnMut(&leviculum_lxmf::StoredMessage),
+    ) -> Result<(), StorageError> {
+        self.store.for_each(visit)
+    }
+
+    fn purge(&mut self, id: &TransientId) -> Result<bool, StorageError> {
+        self.store.purge(id)
+    }
+
+    fn meta(
+        &self,
+        id: &TransientId,
+    ) -> Result<Option<leviculum_lxmf::StoredMessage>, StorageError> {
+        if self.metadata_error.get() == Some(*id) {
+            return Err(StorageError::Io);
+        }
+        self.store.meta(id)
+    }
+
+    fn free_space(&self) -> u64 {
+        self.store.free_space()
+    }
+
+    fn capacity(&self) -> u64 {
+        self.store.capacity()
+    }
+
+    fn contains(&self, id: &TransientId) -> Result<bool, StorageError> {
+        self.meta(id).map(|meta| meta.is_some())
+    }
+}
+
+impl PropagationBodyStore for ReadFaults {
+    fn read_body(&self, id: &TransientId) -> Result<Option<Vec<u8>>, StorageError> {
+        self.whole_reads.set(self.whole_reads.get() + 1);
+        if self.body_error.get() == Some(*id) {
+            return Err(StorageError::Io);
+        }
+        self.store.read_body(id)
+    }
+
+    fn read_body_at(
+        &self,
+        id: &TransientId,
+        offset: usize,
+        buf: &mut [u8],
+    ) -> Result<Option<usize>, StorageError> {
+        if self.body_error.get() == Some(*id) && offset > 0 {
+            return Err(StorageError::Io);
+        }
+        self.store.read_body_at(id, offset, buf)
+    }
+}
+
 /// A Python peer wants all ten 4 000 B bodies; the sender can afford two.
 /// It sends the first two in plan order, the cursor stops just below the
 /// third, and nothing above it is lost: the next round offers it again.
@@ -174,7 +259,7 @@ fn a_python_want_all_is_answered_with_the_prefix_that_fits() {
     };
     // Two bodies encode to 8 017 B, three to 12 020 B.
     let cap = 9_000;
-    let batch = plan_sync_batch(&store, &plan, &wanted, |_, len| len <= cap).unwrap();
+    let batch = plan_sync_batch(&store, &plan, &wanted, |_, len, _| len <= cap).unwrap();
     assert_eq!(batch.count, 2);
     assert_eq!(batch.withheld, 8);
     assert_eq!(batch.payload, 8_000);
@@ -184,7 +269,7 @@ fn a_python_want_all_is_answered_with_the_prefix_that_fits() {
 
     // The streamed envelope is the buffered one over the same two bodies,
     // and the receiver's decoder reads it back.
-    let mut source = SyncSource::new(&store, &plan, wanted, batch, 1_700_000_000.5);
+    let mut source = SyncSource::new(&store, &store, &plan, wanted, batch, 1_700_000_000.5);
     assert_eq!(source.total_len(), batch.encoded_len);
     let streamed = drain(&mut source).unwrap();
     let buffered = PeerSyncEnvelope {
@@ -210,13 +295,13 @@ fn a_python_want_list_is_answered_in_plan_order_and_declined_ids_do_not_hold_the
     let OfferReply::Send(wanted) = offer_reply(&response, &plan) else {
         panic!("a want list naming offered ids is a send");
     };
-    let batch = plan_sync_batch(&store, &plan, &wanted, |_, len| len <= 9_000).unwrap();
+    let batch = plan_sync_batch(&store, &plan, &wanted, |_, len, _| len <= 9_000).unwrap();
     assert_eq!(batch.count, 2, "ids[0] and ids[2]");
     assert_eq!(batch.withheld, 3, "ids[4], ids[6], ids[8]");
     assert_eq!(batch.end, 3, "the walk ends at ids[2]");
     assert_eq!(batch.cursor_target, sequence_of(&store, &ids[4]) - 1);
 
-    let mut source = SyncSource::new(&store, &plan, wanted, batch, 2.0);
+    let mut source = SyncSource::new(&store, &store, &plan, wanted, batch, 2.0);
     let streamed = drain(&mut source).unwrap();
     let expected = PeerSyncEnvelope {
         timestamp: 2.0,
@@ -236,10 +321,10 @@ fn a_want_that_fits_is_sent_whole() {
     let OfferReply::Send(wanted) = offer_reply(&response, &plan) else {
         panic!("send");
     };
-    let batch = plan_sync_batch(&store, &plan, &wanted, |_, _| true).unwrap();
+    let batch = plan_sync_batch(&store, &plan, &wanted, |_, _, _| true).unwrap();
     assert_eq!((batch.count, batch.withheld), (3, 0));
     assert_eq!(batch.cursor_target, plan.cursor_target);
-    let mut source = SyncSource::new(&store, &plan, wanted, batch, 3.0);
+    let mut source = SyncSource::new(&store, &store, &plan, wanted, batch, 3.0);
     let streamed = drain(&mut source).unwrap();
     assert_eq!(
         streamed,
@@ -266,9 +351,33 @@ fn a_first_body_that_does_not_fit_sends_nothing_and_keeps_the_cursor() {
     let OfferReply::Send(wanted) = offer_reply(&response, &plan) else {
         panic!("send");
     };
-    let batch = plan_sync_batch(&store, &plan, &wanted, |_, len| len < 4_000).unwrap();
+    let batch = plan_sync_batch(&store, &plan, &wanted, |_, len, _| len < 4_000).unwrap();
     assert_eq!((batch.count, batch.withheld), (0, 3));
     assert_eq!(batch.cursor_target, sequence_of(&store, &ids[0]) - 1);
+}
+
+#[test]
+fn the_prefetch_payload_budget_bounds_the_prefix_and_withheld_ids_reappear() {
+    let (store, ids) = store_of(&[300, 500, 60, 300]);
+    let plan = plan_for(&store);
+    let wanted = WantedIds::All;
+    let batch = plan_sync_batch(&store, &plan, &wanted, |_, len, payload| {
+        len <= 9_000 && payload <= 800
+    })
+    .unwrap();
+    assert_eq!((batch.count, batch.withheld, batch.payload), (2, 2, 800));
+    assert_eq!(batch.end, 2);
+    assert_eq!(batch.cursor_target, sequence_of(&store, &ids[2]) - 1);
+
+    // Later small bodies cannot leap over the first excluded one, and
+    // advancing to the successful batch's target offers both next round.
+    let mut peer = python_peer();
+    peer.cursor = batch.cursor_target;
+    let mut entries = Vec::new();
+    store.for_each(&mut |meta| entries.push(*meta)).unwrap();
+    entries.sort_unstable_by_key(|meta| meta.sequence);
+    let next = build_offer(&peer, &entries, OFFER_BYTES_LIMIT).unwrap();
+    assert_eq!(next.ids, ids[2..]);
 }
 
 /// Sixteen bodies cross the msgpack list header from one byte to three;
@@ -282,9 +391,9 @@ fn the_list_header_grows_at_sixteen_bodies() {
         panic!("send");
     };
     for take in [15usize, 16, 17] {
-        let batch = plan_sync_batch(&store, &plan, &wanted, |count, _| count <= take).unwrap();
+        let batch = plan_sync_batch(&store, &plan, &wanted, |count, _, _| count <= take).unwrap();
         assert_eq!(batch.count, take);
-        let mut source = SyncSource::new(&store, &plan, wanted, batch, 4.0);
+        let mut source = SyncSource::new(&store, &store, &plan, wanted, batch, 4.0);
         let streamed = drain(&mut source).unwrap();
         assert_eq!(streamed.len(), batch.encoded_len, "take={take}");
         assert_eq!(
@@ -310,11 +419,11 @@ fn a_purged_body_is_skipped_before_the_plan_and_fails_the_stream_after_it() {
     let OfferReply::Send(wanted) = offer_reply(&response, &plan) else {
         panic!("send");
     };
-    let batch = plan_sync_batch(&store, &plan, &wanted, |_, _| true).unwrap();
+    let batch = plan_sync_batch(&store, &plan, &wanted, |_, _, _| true).unwrap();
     assert_eq!(batch.count, 3);
     assert_eq!(batch.cursor_target, plan.cursor_target);
     {
-        let mut source = SyncSource::new(&store, &plan, wanted, batch, 5.0);
+        let mut source = SyncSource::new(&store, &store, &plan, wanted, batch, 5.0);
         let streamed = drain(&mut source).unwrap();
         assert_eq!(
             PeerSyncEnvelope::decode(&streamed).unwrap().messages,
@@ -323,8 +432,106 @@ fn a_purged_body_is_skipped_before_the_plan_and_fails_the_stream_after_it() {
     }
 
     store.purge(&ids[3]).unwrap();
-    let mut source = SyncSource::new(&store, &plan, wanted, batch, 5.0);
+    let mut source = SyncSource::new(&store, &store, &plan, wanted, batch, 5.0);
     assert_eq!(drain(&mut source).err(), Some(SourceError::LengthChanged));
+}
+
+#[test]
+fn separate_metadata_and_prefetched_bodies_stream_identical_bytes_after_rewind() {
+    let (store, ids) = store_of(&[600, 300, 256, 1_000]);
+    let plan = plan_for(&store);
+    let response = python_want_list(&[ids[3], ids[2], ids[0]]);
+    let OfferReply::Send(wanted) = offer_reply(&response, &plan) else {
+        panic!("send");
+    };
+    let metadata: &dyn PropagationStore = &store;
+    let batch = plan_sync_batch(metadata, &plan, &wanted, |_, _, payload| payload <= 856).unwrap();
+    assert_eq!((batch.count, batch.withheld, batch.payload), (2, 1, 856));
+    assert_eq!(batch.cursor_target, sequence_of(&store, &ids[3]) - 1);
+    // The prefetch provider is a real body-only slice, in a different
+    // order from both the plan and the borrowed response.
+    let retained = prefetched(&store, &[ids[2], ids[0]]);
+    let expected = PeerSyncEnvelope {
+        timestamp: 7.5,
+        messages: bodies(&store, &[ids[0], ids[2]]),
+    }
+    .encode();
+    let (mut source, constructed) =
+        measured_peak(|| SyncSource::new(metadata, retained.as_slice(), &plan, wanted, batch, 7.5));
+    assert_eq!(constructed, 0);
+    assert_eq!(drain(&mut source).unwrap(), expected);
+
+    let (read, held) = measured_peak(|| {
+        source.rewind().unwrap();
+        let mut scratch = [0; 17];
+        let mut offset = 0;
+        loop {
+            let copied = source.read(&mut scratch).unwrap();
+            if copied == 0 {
+                break;
+            }
+            assert_eq!(scratch[..copied], expected[offset..offset + copied]);
+            offset += copied;
+        }
+        offset
+    });
+    assert_eq!(read, expected.len());
+    assert_eq!(
+        held, 0,
+        "rewinding and partial reads borrow retained bodies"
+    );
+}
+
+#[test]
+fn an_absent_selected_prefetched_body_aborts_instead_of_shortening_the_envelope() {
+    let (store, ids) = store_of(&[500; 3]);
+    let plan = plan_for(&store);
+    let wanted = WantedIds::All;
+    let batch = plan_sync_batch(&store, &plan, &wanted, |_, _, _| true).unwrap();
+    let retained = prefetched(&store, &[ids[0], ids[2]]);
+    let mut source = SyncSource::new(&store, retained.as_slice(), &plan, wanted, batch, 8.0);
+    assert_eq!(source.total_len(), sync_envelope_len(3, 3 * (3 + 500)));
+    assert_eq!(drain(&mut source), Err(SourceError::Unavailable));
+    source.rewind().unwrap();
+    assert_eq!(drain(&mut source), Err(SourceError::Unavailable));
+}
+
+#[test]
+fn metadata_and_body_read_errors_abort_even_after_a_prefix_was_selected() {
+    let (store, ids) = store_of(&[500; 3]);
+    let plan = plan_for(&store);
+    let retained = prefetched(&store, &ids);
+    let faults = ReadFaults {
+        store,
+        metadata_error: Cell::new(Some(ids[2])),
+        body_error: Cell::new(None),
+        whole_reads: Cell::new(0),
+    };
+    let wanted = WantedIds::All;
+    // A failed metadata read is not an absent id, including while
+    // counting the tail after the fitting predicate withheld a body.
+    for fits in [false, true] {
+        assert_eq!(
+            plan_sync_batch(&faults, &plan, &wanted, |_, _, _| fits),
+            Err(StorageError::Io)
+        );
+    }
+    faults.metadata_error.set(None);
+    let batch = plan_sync_batch(&faults, &plan, &wanted, |_, _, _| true).unwrap();
+
+    faults.metadata_error.set(Some(ids[1]));
+    let mut source = SyncSource::new(&faults, retained.as_slice(), &plan, wanted, batch, 9.0);
+    assert_eq!(drain(&mut source), Err(SourceError::Unavailable));
+
+    faults.metadata_error.set(None);
+    faults.body_error.set(Some(ids[1]));
+    let metadata: &dyn PropagationStore = &faults.store;
+    let body_provider: &dyn PropagationBodyStore = &faults;
+    let mut source = SyncSource::new(metadata, body_provider, &plan, wanted, batch, 9.0);
+    // The injected body failure is after the first partial read: already
+    // emitted bytes do not turn a later I/O failure into a successful EOF.
+    assert_eq!(drain(&mut source), Err(SourceError::Unavailable));
+    assert_eq!(faults.whole_reads.get(), 0);
 }
 
 /// What one answer holds, before and after, for the field's shape: a
@@ -366,8 +573,8 @@ fn the_streamed_answer_holds_no_body_where_the_buffered_one_held_them_all() {
     };
     let mut scratch = vec![0u8; SDU];
     let (streamed, held) = measured_peak(|| {
-        let batch = plan_sync_batch(&store, &plan, &wanted, |_, _| true).unwrap();
-        let mut source = SyncSource::new(&store, &plan, wanted, batch, 6.0);
+        let batch = plan_sync_batch(&store, &plan, &wanted, |_, _, _| true).unwrap();
+        let mut source = SyncSource::new(&store, &store, &plan, wanted, batch, 6.0);
         let mut out = 0usize;
         loop {
             let n = source.read(&mut scratch).unwrap();

@@ -37,8 +37,8 @@ use leviculum_lxmf::sync_round::{
     round_deadline_ms, round_step, LinkView, RoundEvent, RoundStep, RoundView,
 };
 use leviculum_lxmf::{
-    CooperativeStamper, PropagationNode, PropagationNodeAnnounce, PropagationStore, StampCancel,
-    TransientId, UploadOutcome,
+    CooperativeStamper, PropagationBodyStore, PropagationNode, PropagationNodeAnnounce,
+    PropagationStore, StampCancel, TransientId, UploadOutcome,
 };
 
 use crate::engine::EngineEvent;
@@ -1615,7 +1615,7 @@ impl PeeringRuntime {
 
     /// The peer's `/offer` answer
     /// (`offer_response`, `reference/LXMF/LXMF/LXMPeer.py:400-490`).
-    pub(crate) fn on_response<S: PropagationStore>(
+    pub(crate) fn on_response<S: PropagationStore + PropagationBodyStore>(
         &mut self,
         core: &mut Core,
         node: &PropagationNode<S>,

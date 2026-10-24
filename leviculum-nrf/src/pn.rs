@@ -254,8 +254,8 @@ use leviculum_lxmf::constants::{
 };
 use leviculum_lxmf::node::APP_NAME;
 use leviculum_lxmf::peering::{
-    answer_offer, build_offer, offer_budget_for_mdu, offer_reply, peering_key_material,
-    plan_sync_batch, DeclineReason, DropReason, InboundGate, OfferPlan, OfferReply, OfferResponse,
+    answer_offer, offer_budget_for_mdu, offer_reply, peering_key_material, plan_sync_batch,
+    DeclineReason, DropReason, InboundGate, OfferBuilder, OfferPlan, OfferReply, OfferResponse,
     PeerChange, PeerOffer, PeerRecord, PeerStore, PeerSyncEnvelope, PeerTable, SyncPhase,
     SyncSource, WantedIds, OFFER_PROBE_BUDGET, OFFER_REQUEST_PATH, SYNC_INTERVAL_SECS,
 };
@@ -264,7 +264,7 @@ use leviculum_lxmf::propagation::{
 };
 use leviculum_lxmf::propagation_client::PROPAGATION_ASPECT;
 use leviculum_lxmf::propagation_node::{link_idle_past_bound, offer_remote, propagation_hash_of};
-use leviculum_lxmf::propagation_store::StoredMessage;
+use leviculum_lxmf::propagation_store::PropagationBodyStore;
 use leviculum_lxmf::sync_round::{
     round_deadline_ms, round_step, LinkView, RoundEvent, RoundStep, RoundView,
 };
@@ -1744,15 +1744,14 @@ impl Engine {
         let Some(cursor) = self.peers.get(&peer_hash).map(|peer| peer.cursor) else {
             return;
         };
-        let mut entries: Vec<StoredMessage> = Vec::new();
+        let Some(peer) = self.peers.get(&peer_hash) else {
+            return;
+        };
+        let mut offer_builder = OfferBuilder::new(peer, offer_budget_for_mdu(mdu));
         if self
             .role
             .store()
-            .for_each(&mut |meta| {
-                if meta.sequence > cursor {
-                    entries.push(*meta);
-                }
-            })
+            .for_each_ordered(&mut |meta| offer_builder.push(meta))
             .is_err()
         {
             if let RoundStep::End(end) =
@@ -1763,11 +1762,7 @@ impl Engine {
             }
             return;
         }
-        entries.sort_by_key(|meta| meta.sequence);
-        let Some(peer) = self.peers.get(&peer_hash) else {
-            return;
-        };
-        let planned = build_offer(peer, &entries, offer_budget_for_mdu(mdu));
+        let planned = offer_builder.finish();
         let plan = match planned {
             Some(plan) if !plan.ids.is_empty() => plan,
             // Everything above the cursor was drained or became
@@ -1779,7 +1774,8 @@ impl Engine {
                 return;
             }
         };
-        let tail_peak = leviculum_heap_budget::store_tail_peak(entries.len(), plan.ids.len());
+        let tail_peak = leviculum_heap_budget::store_tail_peak(0, plan.ids.len())
+            + self.role.store().ordered_traversal_heap_bound();
         self.peaks.store_tail = self.peaks.store_tail.max(tail_peak);
         let Some(sync) = self.outbound.as_mut() else {
             return;
@@ -1945,7 +1941,7 @@ impl Engine {
         let Some(plan) = self.outbound.as_ref().map(|sync| &sync.plan) else {
             return;
         };
-        let planned = plan_sync_batch(self.role.store(), plan, &wanted, |_, encoded_len| {
+        let planned = plan_sync_batch(self.role.store(), plan, &wanted, |_, encoded_len, _| {
             leviculum_heap_budget::offer_response_fits(
                 encoded_len,
                 offered,
@@ -1997,8 +1993,14 @@ impl Engine {
         let timestamp = node.emission_secs() as f64;
         let sent = match self.outbound.as_ref() {
             Some(sync) => {
-                let mut source =
-                    SyncSource::new(self.role.store(), &sync.plan, wanted, batch, timestamp);
+                let mut source = SyncSource::new(
+                    self.role.store(),
+                    self.role.store(),
+                    &sync.plan,
+                    wanted,
+                    batch,
+                    timestamp,
+                );
                 node.send_resource_from_source(link_id, &mut source)
             }
             None => return,
@@ -2991,16 +2993,11 @@ impl Engine {
             return;
         }
 
-        let mut entries: Vec<StoredMessage> = Vec::new();
-        let cursor = peer.cursor;
+        let mut offer_builder = OfferBuilder::new(peer, OFFER_PROBE_BUDGET);
         if self
             .role
             .store()
-            .for_each(&mut |meta| {
-                if meta.sequence > cursor {
-                    entries.push(*meta);
-                }
-            })
+            .for_each_ordered(&mut |meta| offer_builder.push(meta))
             .is_err()
         {
             // A store that cannot be walked now will most likely fail on
@@ -3020,14 +3017,13 @@ impl Engine {
             }
             return;
         }
-        entries.sort_by_key(|meta| meta.sequence);
         // A probe, not the offer: there is no link yet, so no MDU to size
         // against. One id is all this has to answer — "is anything above
         // the cursor offerable?". The offer itself is built in
         // `on_sync_link_up` against the link that will carry it. An empty
         // id list still carries the full skip scan, so dead entries are
         // stepped past here exactly as before.
-        let Some(plan) = build_offer(peer, &entries, OFFER_PROBE_BUDGET) else {
+        let Some(plan) = offer_builder.finish() else {
             return;
         };
         if plan.ids.is_empty() {
@@ -3697,7 +3693,7 @@ impl Engine {
     /// Drain both adapters' queued writes through the record-store task.
     /// Returns whether every op landed; a failed append un-remembers its
     /// id from the duplicate cache so the client's retry is stored.
-    async fn flush<R, C, S>(&mut self, _node: &mut NodeCore<R, C, S>) -> bool
+    async fn flush<R, C, S>(&mut self, node: &mut NodeCore<R, C, S>) -> bool
     where
         R: CryptoRngCore,
         C: Clock,
@@ -3707,6 +3703,11 @@ impl Engine {
         while let Some(op) = self.role.store().peek_op().cloned() {
             let ok = execute(&op).await.is_some();
             settle_message_op(&mut self.role, ok);
+            if ok {
+                if let FlushOp::ConfirmedPurge { key, .. } = &op {
+                    self.role.note_confirmed_deletion(key, node.emission_secs());
+                }
+            }
             all_ok &= ok;
         }
         while let Some(op) = self.peer_store.peek_op().cloned() {
@@ -3736,7 +3737,7 @@ async fn execute(op: &FlushOp) -> Option<u32> {
             tag: *tag,
             body: body.clone(),
         },
-        FlushOp::Purge { offset, key } => PnOp::Purge {
+        FlushOp::Purge { offset, key } | FlushOp::ConfirmedPurge { offset, key } => PnOp::Purge {
             offset: *offset,
             key: *key,
         },

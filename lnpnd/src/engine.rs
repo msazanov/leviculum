@@ -46,8 +46,9 @@ use leviculum_lxmf::propagation::{MessageListResponse, PeerError, PropagationUpl
 use leviculum_lxmf::propagation_client::PROPAGATION_ASPECT;
 use leviculum_lxmf::propagation_node::link_idle_past_bound;
 use leviculum_lxmf::{
-    Eviction, EvictionReason, FetchPlan, GetOutcome, Message, PropagationNode,
-    PropagationNodeConfig, PropagationStore, TransientId, UploadOutcome, MESSAGE_GET_PATH,
+    Eviction, EvictionReason, FetchPlan, GetOutcome, Message, PropagationBodyStore,
+    PropagationNode, PropagationNodeConfig, PropagationStore, TransientId, UploadOutcome,
+    MESSAGE_GET_PATH,
 };
 
 use crate::mailbox::{MailboxConfig, MailboxRuntime};
@@ -435,7 +436,7 @@ fn full_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-impl<S: PropagationStore> Engine<S> {
+impl<S: PropagationStore + PropagationBodyStore> Engine<S> {
     pub fn new(config: EngineConfig<S>) -> (Self, std::sync::mpsc::Receiver<EngineEvent>) {
         let (events, receiver) = std::sync::mpsc::channel();
         let announce_interval_secs = config.announce_interval_secs;
@@ -1470,7 +1471,9 @@ impl<S: PropagationStore> Engine<S> {
 /// The concrete core type the driver hands its processors.
 type StdNodeCoreRef<'a> = leviculum_std::driver::StdNodeCore;
 
-impl<S: PropagationStore + Send + 'static> leviculum_std::driver::CoreProcessor for Engine<S> {
+impl<S: PropagationStore + PropagationBodyStore + Send + 'static>
+    leviculum_std::driver::CoreProcessor for Engine<S>
+{
     fn on_event(
         &mut self,
         core: &mut leviculum_std::driver::StdNodeCore,
@@ -3855,7 +3858,8 @@ mod inbound_sync_slices {
     use leviculum_lxmf::propagation_store::StoredMessage;
     use leviculum_lxmf::storage::StorageError;
     use leviculum_lxmf::{
-        MemoryPeerStore, MemoryPropagationStore, PeerSyncEnvelope, PropagationStore, TransientId,
+        MemoryPeerStore, MemoryPropagationStore, PeerSyncEnvelope, PropagationBodyStore,
+        PropagationStore, TransientId,
     };
     use leviculum_std::driver::{CoreProcessor as _, StdClock, StdStorage, PROCESSOR_TICK_BUDGET};
 
@@ -3920,10 +3924,6 @@ mod inbound_sync_slices {
             self.inner.for_each(visit)
         }
 
-        fn read_body(&self, transient_id: &TransientId) -> Result<Option<Vec<u8>>, StorageError> {
-            self.inner.read_body(transient_id)
-        }
-
         fn purge(&mut self, transient_id: &TransientId) -> Result<bool, StorageError> {
             self.inner.purge(transient_id)
         }
@@ -3938,6 +3938,21 @@ mod inbound_sync_slices {
 
         fn contains(&self, transient_id: &TransientId) -> Result<bool, StorageError> {
             self.inner.contains(transient_id)
+        }
+    }
+
+    impl PropagationBodyStore for ModelledStore {
+        fn read_body(&self, transient_id: &TransientId) -> Result<Option<Vec<u8>>, StorageError> {
+            self.inner.read_body(transient_id)
+        }
+
+        fn read_body_at(
+            &self,
+            transient_id: &TransientId,
+            offset: usize,
+            buf: &mut [u8],
+        ) -> Result<Option<usize>, StorageError> {
+            self.inner.read_body_at(transient_id, offset, buf)
         }
     }
 

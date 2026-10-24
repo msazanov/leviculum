@@ -408,7 +408,7 @@ says 210 KiB of gap is what remains at 16. Widening the region upward is
 impossible, because `0xEA000` is the bootloader's `USER_FLASH_END`, and
 widening it downward moves every record, so a later resize is a
 reformat. That is the deliberate price of the smaller default, and
-`mount` (`leviculum-nrf/src/record_store.rs:675`) already treats a
+`mount` (`leviculum-nrf/src/record_store.rs:677`) already treats a
 region that is not ours as unformatted rather than as corrupt, so the
 reformat is a boot line and not an incident.
 

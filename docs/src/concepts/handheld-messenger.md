@@ -39,10 +39,10 @@ the core/frontend cut and for the map, and what is open.
 - **`lnomad`'s core/frontend boundary (#219).** It is the same
   requirement for the browser, and still a refactor to come: model,
   update and view share `lnomad/src/tui.rs`, which is about 12,000 lines.
-- **`leviculum-lxmf`, `no_std + alloc`** (`leviculum-lxmf/src/lib.rs:36`):
+- **`leviculum-lxmf`, `no_std + alloc`** (`leviculum-lxmf/src/lib.rs:38`):
   - delivery (`LxmfRouter`, `leviculum-lxmf/src/router.rs:462`);
   - propagation nodes, both the client and the node
-    (`PropagationNode`, `leviculum-lxmf/src/propagation_node.rs:819`);
+    (`PropagationNode`, `leviculum-lxmf/src/propagation_node.rs:889`);
   - stamps (`CooperativeStamper`, `leviculum-lxmf/src/stamp.rs:269`).
 - **Telemetry.** [Telemetry](telemetry.md) settles positions as LXMF
   fields (`FIELD_TELEMETRY`, `FIELD_TELEMETRY_STREAM`) and the

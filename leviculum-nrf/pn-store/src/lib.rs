@@ -84,12 +84,16 @@ extern crate alloc;
 
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
+use core::ops::ControlFlow;
 
 use leviculum_lxmf::constants::DESTINATION_LENGTH;
 use leviculum_lxmf::peering::{PeerRecord, PeerStore};
-use leviculum_lxmf::propagation_store::{copy_from, PropagationStore, StoredMessage, MIN_BODY_LEN};
+use leviculum_lxmf::propagation_store::{
+    copy_from, ConfirmedPurge, PropagationBodyStore, PropagationStore, StoredMessage, MIN_BODY_LEN,
+};
 use leviculum_lxmf::storage::StorageError;
 use leviculum_lxmf::PropagationNode;
+use leviculum_record_log::legacy::{LegacyCursor, PageOrder};
 use leviculum_record_log::{
     crc16_update, record_stride, FLAG_LIVE, FLAG_PURGED, HEADER_LEN, KEY_LEN, MIN_STRIDE,
     SECTOR_HEADER_LEN, SECTOR_PAYLOAD, SECTOR_SIZE,
@@ -273,6 +277,9 @@ pub enum FlushOp {
     /// re-validating that its key still matches (the page may have been
     /// reclaimed since the mark).
     Purge { offset: u32, key: [u8; KEY_LEN] },
+    /// An explicit haves deletion, retaining its confirmation identity and
+    /// exact physical target until commitment or uncertain-result reconciliation.
+    ConfirmedPurge { offset: u32, key: [u8; KEY_LEN] },
 }
 
 /// The record-store task answered the message store's front op: `ok` is
@@ -656,6 +663,48 @@ impl<R: Region> PnStore<R> {
         }
     }
 
+    /// Maximum temporary page-order allocation of the next ordered walk.
+    pub fn ordered_traversal_heap_bound(&self) -> usize {
+        self.pages as usize * core::mem::size_of::<(u32, u32)>()
+    }
+
+    /// Durable messages in append order, stopping at the visitor's first break.
+    ///
+    /// Collects only the page order once, then emits one stack-local message
+    /// per cursor step. Queued appends are absent and queued purges mask their
+    /// exact records.
+    pub fn for_each_ordered(
+        &self,
+        visit: &mut impl FnMut(&StoredMessage) -> ControlFlow<()>,
+    ) -> Result<(), StorageError> {
+        self.region.with_bytes(|bytes| {
+            let mut cursor = LegacyCursor::new(PageOrder::collect(bytes));
+            while let Some(record) = cursor.next(bytes) {
+                if !record.live
+                    || record.tag > MESSAGE_TAG_MAX
+                    || record.body.len() < MIN_BODY_LEN
+                    || self.is_purge_masked(record.offset)
+                {
+                    continue;
+                }
+                let mut destination_hash = [0; DESTINATION_LENGTH];
+                destination_hash.copy_from_slice(&record.body[..DESTINATION_LENGTH]);
+                let message = StoredMessage {
+                    transient_id: *record.key,
+                    destination_hash,
+                    size: record.body.len() as u32,
+                    received_at: u64::from(record.time),
+                    stamp_value: record.tag,
+                    sequence: sequence(record.page_seq, (record.offset % SECTOR_SIZE) as u16),
+                };
+                if visit(&message).is_break() {
+                    break;
+                }
+            }
+        });
+        Ok(())
+    }
+
     /// Writes waiting to be flushed.
     pub fn pending_ops(&self) -> usize {
         self.queue.len()
@@ -681,10 +730,25 @@ impl<R: Region> PnStore<R> {
         self.queue.pop_front()
     }
 
+    /// Whether the exact confirmed target is absent from durable mapped bytes.
+    ///
+    /// This deliberately ignores queued masks: a refused write cannot become
+    /// a confirmation merely because the running store temporarily hides it.
+    pub fn confirmed_target_deleted(&self, offset: u32, key: &[u8; KEY_LEN]) -> bool {
+        self.region.with_bytes(|bytes| {
+            let mut present = false;
+            scan(bytes, |record| {
+                present |= record.live && record.offset == offset && record.key == key;
+            });
+            !present
+        })
+    }
+
     fn is_purge_masked(&self, offset: u32) -> bool {
-        self.queue
-            .iter()
-            .any(|op| matches!(op, FlushOp::Purge { offset: o, .. } if *o == offset))
+        self.queue.iter().any(|op| {
+            matches!(op, FlushOp::Purge { offset: o, .. }
+                | FlushOp::ConfirmedPurge { offset: o, .. } if *o == offset)
+        })
     }
 
     fn pending_append_body(&self, key: &[u8; KEY_LEN]) -> Option<&[u8]> {
@@ -877,40 +941,6 @@ impl<R: Region> PropagationStore for PnStore<R> {
         Ok(())
     }
 
-    fn read_body(&self, transient_id: &[u8; 32]) -> Result<Option<Vec<u8>>, StorageError> {
-        if let Some(body) = self.pending_append_body(transient_id) {
-            return Ok(Some(body.to_vec()));
-        }
-        let mut found = None;
-        self.scan_messages(|record| {
-            if record.key == transient_id && found.is_none() {
-                found = Some(record.body.to_vec());
-            }
-        });
-        Ok(found)
-    }
-
-    /// A slice of one body copied straight out of mapped flash (or the
-    /// queued append), no allocation: the outbound peer sync streams its
-    /// envelope through this a part at a time (leviculum#388).
-    fn read_body_at(
-        &self,
-        transient_id: &[u8; 32],
-        offset: usize,
-        buf: &mut [u8],
-    ) -> Result<Option<usize>, StorageError> {
-        if let Some(body) = self.pending_append_body(transient_id) {
-            return Ok(Some(copy_from(body, offset, buf)));
-        }
-        let mut copied = None;
-        self.scan_messages(|record| {
-            if record.key == transient_id && copied.is_none() {
-                copied = Some(copy_from(record.body, offset, buf));
-            }
-        });
-        Ok(copied)
-    }
-
     /// Queue the purge (or drop a not-yet-flushed append outright).
     fn purge(&mut self, transient_id: &[u8; 32]) -> Result<bool, StorageError> {
         if let Some(at) = self
@@ -937,6 +967,32 @@ impl<R: Region> PropagationStore for PnStore<R> {
             }
             None => Ok(false),
         }
+    }
+
+    /// A queued confirmation keeps its exact target as
+    /// [`FlushOp::ConfirmedPurge`], so the engine can enter the id into
+    /// the duplicate cache once the deletion is durable
+    /// (`PropagationNode::note_confirmed_deletion`).
+    fn purge_confirmed(&mut self, transient_id: &[u8; 32]) -> Result<ConfirmedPurge, StorageError> {
+        let queued_before = self.queue.len();
+        if !self.purge(transient_id)? {
+            return Ok(ConfirmedPurge::Absent);
+        }
+        if self.queue.len() <= queued_before {
+            // A not-yet-flushed append was dropped outright: nothing
+            // durable held it, so the deletion is complete.
+            return Ok(ConfirmedPurge::Committed);
+        }
+        // `purge` queues only a durable deletion; any other op at the back
+        // is a contract break, refused rather than misfiled.
+        let Some(op) = self.queue.back_mut() else {
+            return Err(StorageError::Corrupt);
+        };
+        let FlushOp::Purge { offset, key } = *op else {
+            return Err(StorageError::Corrupt);
+        };
+        *op = FlushOp::ConfirmedPurge { offset, key };
+        Ok(ConfirmedPurge::Queued)
     }
 
     /// The trait's number: bytes a message body could still use across
@@ -991,7 +1047,7 @@ impl<R: Region> PropagationStore for PnStore<R> {
             .iter()
             .map(|op| match op {
                 FlushOp::Append { body, .. } => record_stride(body.len()) as u64,
-                FlushOp::Purge { .. } => 0,
+                FlushOp::Purge { .. } | FlushOp::ConfirmedPurge { .. } => 0,
             })
             .sum();
         self.capacity().saturating_sub(live).saturating_sub(queued)
@@ -1008,6 +1064,46 @@ impl<R: Region> PropagationStore for PnStore<R> {
         let mut found = false;
         self.scan_messages(|record| found |= record.key == transient_id);
         Ok(found)
+    }
+}
+
+impl<R: Region> PropagationBodyStore for PnStore<R> {
+    /// Queue visibility first, then the medium: a queued append's body is
+    /// readable before it is durable (duplicate detection must see it, and a
+    /// `/get` the role planned may name it), and a committed record's body is
+    /// one slice copy out of memory-mapped flash.
+    fn read_body(&self, transient_id: &[u8; 32]) -> Result<Option<Vec<u8>>, StorageError> {
+        if let Some(body) = self.pending_append_body(transient_id) {
+            return Ok(Some(body.to_vec()));
+        }
+        let mut found = None;
+        self.scan_messages(|record| {
+            if record.key == transient_id && found.is_none() {
+                found = Some(record.body.to_vec());
+            }
+        });
+        Ok(found)
+    }
+
+    /// A slice of one body copied straight out of mapped flash (or the
+    /// queued append), no allocation: the outbound peer sync streams its
+    /// envelope through this a part at a time (leviculum#388).
+    fn read_body_at(
+        &self,
+        transient_id: &[u8; 32],
+        offset: usize,
+        buf: &mut [u8],
+    ) -> Result<Option<usize>, StorageError> {
+        if let Some(body) = self.pending_append_body(transient_id) {
+            return Ok(Some(copy_from(body, offset, buf)));
+        }
+        let mut copied = None;
+        self.scan_messages(|record| {
+            if record.key == transient_id && copied.is_none() {
+                copied = Some(copy_from(record.body, offset, buf));
+            }
+        });
+        Ok(copied)
     }
 }
 

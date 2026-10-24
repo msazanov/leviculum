@@ -35,11 +35,13 @@ use crate::{
     msgpack,
     node::APP_NAME,
     propagation::{
-        MessageGetRequest, MessageGetResponse, MessageListResponse, PeerError, PropagationError,
+        MessageGetRequest, MessageGetResponse, PeerError, PropagationError,
         PropagationNodeAnnounce, PropagationSignal, PropagationUpload, TransferLimit, TransientId,
     },
     propagation_client::PROPAGATION_ASPECT,
-    propagation_store::{PropagationStore, StoredMessage},
+    propagation_store::{
+        ConfirmedPurge, PropagationBodyStore, PropagationStore, StoredMessage, MIN_BODY_LEN,
+    },
     storage::StorageError,
 };
 
@@ -98,12 +100,11 @@ pub const PART_BOOKKEEPING_BYTES: usize = 24 + 2 * RESOURCE_HASHMAP_LEN + 8;
 ///
 /// With `R = cap_bytes` and `F = R + RESPONSE_FRAME_BYTES`:
 ///
-/// 1. **one stored body, ≤ R** — the record the source is reading
-///    through. `PropagationStore::read_body` hands out a whole record and
-///    the serve holds exactly one at a time
-///    ([`FetchSource`]). Bounded by the cap because a message whose
-///    accounted size does not fit the cap is never planned, so every
-///    served body is `≤ R − 40`.
+/// 1. **body-read storage, ≤ R** — a synchronous store's default
+///    [`PropagationBodyStore::read_body_at`] may hold one whole record,
+///    while a card caller keeps the planned bodies it fetched. The
+///    accounted cap bounds either by R; mapped stores read directly into
+///    the part scratch and spend none of this conservative term.
 /// 2. **one part's scratch, `resource_sdu`** — the buffer the resource
 ///    builder reads the source into and encrypts out of
 ///    (`new_response_from_source`,
@@ -511,9 +512,9 @@ impl UploadOutcome {
 /// of the identity the link was identified with
 /// (`message_get_request`, `reference/LXMF/LXMF/LXMRouter.py:1487`). A link
 /// that never identified gets [`PeerError::NoIdentity`] (`:1483`), which
-/// the caller answers as a `MessageListResponse` error. The board's engine
-/// (`leviculum-nrf/src/pn.rs`, the `Work::Get` arm) calls this; no rig cell
-/// sends `/get` over an unidentified link (leviculum#413).
+/// the caller answers as a [`crate::propagation::MessageListResponse`] error.
+/// The board's engine (`leviculum-nrf/src/pn.rs`, the `Work::Get` arm)
+/// calls this; no rig cell sends `/get` over an unidentified link (leviculum#413).
 pub fn get_mailbox(remote: Option<&Identity>) -> Result<[u8; DESTINATION_LENGTH], PeerError> {
     let identity = remote.ok_or(PeerError::NoIdentity)?;
     let name_hash = Destination::compute_name_hash(APP_NAME, &["delivery"]);
@@ -611,17 +612,16 @@ impl core::error::Error for GetError {}
 /// exact length of the msgpack the caller will ship. Everything the
 /// protocol decides — who is served, in what order, what is purged — is
 /// decided here, under the cap, against one directory snapshot; the bytes
-/// are read from the store later, one record at a time, by
-/// [`PropagationNode::fetch_source`].
+/// are read later by [`PropagationNode::fetch_source`], or by an
+/// asynchronous card owner before [`PropagationNode::finish_get`].
 ///
-/// **Why the split matters and is not cosmetic.** A store write that lands
-/// between the plan and the stream cannot change what is served: the plan
-/// is the answer, and a record that vanished under it fails the build
-/// rather than shortening the response (a resource whose parts disagree
-/// with its advertisement is worse than no resource). And the plan is the
-/// bound: [`serve_peak_bytes`] prices a serve whose only whole copy is the
-/// transfer, which is only true because no step between the plan and the
-/// wire holds the response.
+/// **Why the split matters and is not cosmetic.** A write between planning
+/// and streaming cannot enlarge the funded answer or reorder its records.
+/// A card owner may omit unavailable records before finalizing the plan;
+/// once a stream starts, a disappeared or resized body fails the build
+/// rather than changing its advertised length. Neither path assembles a
+/// whole response, and [`serve_peak_bytes`] funds the body's read storage,
+/// the part scratch and the encrypted transfer together.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct FetchPlan {
     /// The served messages in wire order: transient id and the length of
@@ -646,6 +646,12 @@ impl FetchPlan {
     /// client confirms back as `haves`.
     pub fn served_ids(&self) -> Vec<TransientId> {
         self.served.iter().map(|(id, _)| *id).collect()
+    }
+
+    /// Messages in wire order, with their unstamped lengths. A card caller
+    /// reads only these records, never candidates excluded by the serve cap.
+    pub fn messages(&self) -> impl Iterator<Item = (&TransientId, u32)> {
+        self.served.iter().map(|(id, len)| (id, *len))
     }
 
     /// Servable bytes, stamps already stripped: the `bytes=` of the
@@ -680,82 +686,70 @@ pub enum GetOutcome {
     },
 }
 
-/// The fetch response as a byte stream read out of the store
-/// (Codeberg #384 B2).
+/// The fetch response as a byte stream read out of a synchronous body
+/// source (Codeberg #384 B2), including a card caller's prefetched bodies.
 ///
-/// It is the msgpack `[bin, …]` of [`MessageGetResponse::Messages`], byte
-/// for byte — `a_streamed_fetch_is_the_encoded_fetch` holds the two
-/// against each other — produced without the array ever existing: the
-/// array header, then per planned message its `bin` header and its body,
-/// read from the store when the part cutter asks for it and dropped when
-/// the next one is asked for.
-///
-/// One record is live at a time. That is the whole of what the streamed
-/// serve costs beyond the transfer itself, and it is term 1 of
-/// [`serve_peak_bytes`].
-pub struct FetchSource<'a, S> {
+/// The stream is byte-for-byte [`MessageGetResponse::Messages`]: an array
+/// header followed by each planned body's bin header and unstamped bytes.
+/// Headers live on the stack, and [`PropagationBodyStore::read_body_at`]
+/// copies straight into the resource builder's scratch. No response buffer
+/// or body copy belongs to this source.
+pub struct FetchSource<'a, S: ?Sized> {
     store: &'a S,
     plan: &'a FetchPlan,
-    /// The `[` of the array: `msgpack::array_header_len` bytes.
-    array_header: Vec<u8>,
+    array_header: [u8; 5],
+    array_len: usize,
     array_pos: usize,
     index: usize,
-    /// `bin` header of the record being streamed.
-    record_header: Vec<u8>,
+    record_header: [u8; 5],
+    record_len: usize,
     record_pos: usize,
-    /// The record being streamed, stamp already stripped. The one body
-    /// copy a streamed serve holds.
-    body: Option<Vec<u8>>,
     body_pos: usize,
 }
 
-impl<'a, S: PropagationStore> FetchSource<'a, S> {
-    fn new(store: &'a S, plan: &'a FetchPlan) -> Self {
-        let mut array_header = Vec::new();
-        msgpack::array(&mut array_header, plan.served.len());
+impl<'a, S: PropagationBodyStore + ?Sized> FetchSource<'a, S> {
+    /// Stream `plan` from `store`. For an asynchronously read card, `store`
+    /// can be a borrowed `[(TransientId, Vec<u8>)]` returned by its owner.
+    pub fn new(store: &'a S, plan: &'a FetchPlan) -> Self {
+        let (array_header, array_len) = msgpack::array_header_bytes(plan.count());
         Self {
             store,
             plan,
             array_header,
+            array_len,
             array_pos: 0,
             index: 0,
-            record_header: Vec::new(),
+            record_header: [0; 5],
+            record_len: 0,
             record_pos: 0,
-            body: None,
             body_pos: 0,
         }
     }
 
-    /// Pull the record at `index` out of the store and frame it.
-    ///
-    /// A record that is gone, or whose length is not the one the plan
-    /// measured, fails the whole build: the advertisement is computed from
-    /// the plan's total, so a short record would ship parts that do not
-    /// hash to what was advertised, and the receiver only finds out after
-    /// paying for every one of them.
+    /// Validate the stored length before emitting this body's framing.
+    /// Reading the expected stamp and one following byte distinguishes
+    /// exact length from a shorter or longer record without allocating.
     fn load(&mut self) -> Result<(), SourceError> {
         let (transient_id, servable) = self.plan.served[self.index];
-        let mut body = self
+        let mut tail = [0u8; STAMP_SIZE + 1];
+        let copied = self
             .store
-            .read_body(&transient_id)
+            .read_body_at(&transient_id, servable as usize, &mut tail)
             .map_err(|_| SourceError::Unavailable)?
             .ok_or(SourceError::Unavailable)?;
-        if body.len() != servable as usize + STAMP_SIZE {
+        if copied != STAMP_SIZE {
             return Err(SourceError::LengthChanged);
         }
-        // Strip the propagation stamp in place (`:1549` strips
-        // `STAMP_SIZE` from the tail) — a truncation, not a copy.
-        body.truncate(servable as usize);
-        self.record_header.clear();
-        msgpack::bin_header(&mut self.record_header, body.len());
+        let (header, len) = msgpack::bin_header_bytes(servable as usize);
+        self.record_header = header;
+        self.record_len = len;
         self.record_pos = 0;
         self.body_pos = 0;
-        self.body = Some(body);
         Ok(())
     }
 }
 
-impl<S: PropagationStore> ResourceSource for FetchSource<'_, S> {
+impl<S: PropagationBodyStore + ?Sized> ResourceSource for FetchSource<'_, S> {
     fn total_len(&self) -> usize {
         self.plan.encoded_len
     }
@@ -763,9 +757,8 @@ impl<S: PropagationStore> ResourceSource for FetchSource<'_, S> {
     fn rewind(&mut self) -> Result<(), SourceError> {
         self.array_pos = 0;
         self.index = 0;
-        self.record_header.clear();
+        self.record_len = 0;
         self.record_pos = 0;
-        self.body = None;
         self.body_pos = 0;
         Ok(())
     }
@@ -775,8 +768,8 @@ impl<S: PropagationStore> ResourceSource for FetchSource<'_, S> {
             return Ok(0);
         }
         loop {
-            if self.array_pos < self.array_header.len() {
-                let take = core::cmp::min(buf.len(), self.array_header.len() - self.array_pos);
+            if self.array_pos < self.array_len {
+                let take = core::cmp::min(buf.len(), self.array_len - self.array_pos);
                 buf[..take]
                     .copy_from_slice(&self.array_header[self.array_pos..self.array_pos + take]);
                 self.array_pos += take;
@@ -785,37 +778,114 @@ impl<S: PropagationStore> ResourceSource for FetchSource<'_, S> {
             if self.index >= self.plan.served.len() {
                 return Ok(0);
             }
-            if self.body.is_none() {
+            if self.record_len == 0 {
                 self.load()?;
             }
-            if self.record_pos < self.record_header.len() {
-                let take = core::cmp::min(buf.len(), self.record_header.len() - self.record_pos);
+            if self.record_pos < self.record_len {
+                let take = core::cmp::min(buf.len(), self.record_len - self.record_pos);
                 buf[..take]
                     .copy_from_slice(&self.record_header[self.record_pos..self.record_pos + take]);
                 self.record_pos += take;
                 return Ok(take);
             }
-            let finished = match &self.body {
-                Some(body) if self.body_pos < body.len() => {
-                    let take = core::cmp::min(buf.len(), body.len() - self.body_pos);
-                    buf[..take].copy_from_slice(&body[self.body_pos..self.body_pos + take]);
-                    self.body_pos += take;
-                    return Ok(take);
+            let (transient_id, servable) = self.plan.served[self.index];
+            if self.body_pos < servable as usize {
+                let want = core::cmp::min(buf.len(), servable as usize - self.body_pos);
+                let copied = self
+                    .store
+                    .read_body_at(&transient_id, self.body_pos, &mut buf[..want])
+                    .map_err(|_| SourceError::Unavailable)?
+                    .ok_or(SourceError::Unavailable)?;
+                if copied == 0 || copied > want {
+                    return Err(SourceError::LengthChanged);
                 }
-                _ => true,
-            };
-            if finished {
-                self.index += 1;
-                self.body = None;
-                self.body_pos = 0;
-                self.record_pos = 0;
-                self.record_header.clear();
+                self.body_pos += copied;
+                return Ok(copied);
             }
+            self.index += 1;
+            self.record_len = 0;
+            self.record_pos = 0;
+            self.body_pos = 0;
         }
     }
 }
 
-/// The propagation-node role over one [`PropagationStore`]./// The propagation-node role over one [`PropagationStore`].
+/// A metadata-only `/get` answer, or the bounded work needed to serve it
+/// from a medium whose bodies require asynchronous reads.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PreparedGet {
+    /// The list form is complete without reading bodies.
+    Ready(GetOutcome),
+    /// Flush the purges, read the planned bodies, then call
+    /// [`PropagationNode::finish_get`].
+    Fetch(PreparedFetch),
+}
+
+/// One `/get` directory snapshot, after its confirmations were purged.
+///
+/// The plan has already applied the client limit, board serve limit and
+/// live-heap cap. A card caller reads only [`FetchPlan::messages`], and
+/// retains those bodies for [`FetchSource`] after [`PropagationNode::finish_get`]
+/// removes records whose bytes were unavailable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedFetch {
+    pub plan: FetchPlan,
+    /// The confirmed IDs purged before this work was returned. A deferred
+    /// store must make these tombstones durable before sending the answer.
+    pub purged: Vec<TransientId>,
+}
+
+/// The structural overhead the reference counts against the transfer limit
+/// before the first message: a constant 24 bytes
+/// (`reference/LXMF/LXMF/LXMRouter.py:1532-1533`).
+const RESPONSE_BASE_OVERHEAD: f64 = 24.0;
+/// The same arithmetic's per-message cost: 16 bytes each (`:1532-1533`).
+const RESPONSE_PER_MESSAGE_OVERHEAD: f64 = 16.0;
+
+/// The reference's running transfer-limit arithmetic. It runs against the
+/// directory snapshot before synchronous streaming or asynchronous card
+/// prefetching, so neither caller can collect an unbounded response.
+struct TransferBudget {
+    cumulative_size: f64,
+    limit_bytes: f64,
+}
+
+impl TransferBudget {
+    fn new(limit_bytes: f64) -> Self {
+        Self {
+            cumulative_size: RESPONSE_BASE_OVERHEAD,
+            limit_bytes,
+        }
+    }
+
+    /// Whether a body of `lxm_size` bytes still fits, taking it into the
+    /// running total only when it does. A body that does not fit is passed
+    /// over while the scan continues, exactly as the reference passes over
+    /// an oversized message (`:1547`).
+    fn admit(&mut self, lxm_size: usize) -> bool {
+        let next_size = self.cumulative_size + lxm_size as f64 + RESPONSE_PER_MESSAGE_OVERHEAD;
+        if next_size > self.limit_bytes {
+            false
+        } else {
+            self.cumulative_size = next_size;
+            true
+        }
+    }
+
+    /// Whether any body at all could still fit: the running total only
+    /// grows, and no store can hand out a body shorter than
+    /// [`MIN_BODY_LEN`], so once that floor no longer fits, no later
+    /// candidate can be served either.
+    fn can_admit_any(&self) -> bool {
+        self.cumulative_size + MIN_BODY_LEN as f64 + RESPONSE_PER_MESSAGE_OVERHEAD
+            <= self.limit_bytes
+    }
+}
+
+/// The propagation-node role over a metadata store. Synchronous
+/// [`PropagationBodyStore`] implementations also support
+/// [`Self::encode_fetch`] and [`Self::fetch_source`]; a card caller uses
+/// [`Self::prepare_get`] and [`Self::finish_get`] around its owner reads.
 pub struct PropagationNode<S> {
     store: S,
     config: PropagationNodeConfig,
@@ -1100,7 +1170,12 @@ impl<S: PropagationStore> PropagationNode<S> {
             .store
             .append(&transient_id, now_secs, stamp_value, &body);
         if result == Err(StorageError::Full) {
-            evicted = self.make_room(body.len() as u64, now_secs);
+            // The bytes eviction must free are the ones the store charges
+            // this body, not its raw length: a block-backed store charges
+            // whole blocks plus its framing, and its free_space frees
+            // blocks, so a raw-byte target would never be reached.
+            let needed = self.store.space_required(body.len());
+            evicted = self.make_room(needed, now_secs);
             result = self
                 .store
                 .append(&transient_id, now_secs, stamp_value, &body);
@@ -1132,52 +1207,121 @@ impl<S: PropagationStore> PropagationNode<S> {
         self.processed.remove(transient_id);
     }
 
-    /// Answer one `/get` request for the client whose delivery destination
-    /// hash is `remote_delivery_hash` (derived by the caller from the
-    /// link-identified identity, as the reference derives it,
-    /// `message_get_request`, `reference/LXMF/LXMF/LXMRouter.py:1487`).
+    /// Number of transient IDs fitting the encoded list-response ceiling.
+    pub const fn list_capacity(response_bytes: usize) -> usize {
+        let id_bytes = 34; // MessagePack bin8 header plus the 32-byte ID.
+        let mut count = response_bytes / id_bytes;
+        while count != 0 && msgpack::array_header_len(count) + count * id_bytes > response_bytes {
+            count -= 1;
+        }
+        count
+    }
+
+    /// Requested allocation peak for a capped list: one exact metadata spine
+    /// and one exact wire response. No second ID list or sorting allocation.
+    pub const fn list_peak_bytes(response_bytes: usize) -> usize {
+        let count = Self::list_capacity(response_bytes);
+        if count == 0 {
+            return 2; // Named throttling response, not a falsely empty list.
+        }
+        count * core::mem::size_of::<(TransientId, u32)>()
+            + msgpack::array_header_len(count)
+            + count * 34
+    }
+
+    /// Plan one `/get` for the caller's link-identified delivery mailbox.
     ///
-    /// A decode error maps to the reference's behaviour of answering a
-    /// request it cannot parse with `None`
-    /// (`reference/LXMF/LXMF/LXMRouter.py:1558-1560`); the caller sends
-    /// msgpack nil.
-    pub fn handle_get(
+    /// Decoding, listing, confirmation purges and bounded body selection
+    /// use only the directory. Lengths and order belong to this snapshot;
+    /// no body read can enlarge the serve beyond its funded cap.
+    ///
+    /// A malformed request is answered with msgpack nil by the caller
+    /// (`reference/LXMF/LXMF/LXMRouter.py:1558-1560`).
+    ///
+    /// # Durability ordering
+    ///
+    /// `haves` are purged before this returns, as the reference deletes
+    /// before answering (`LXMRouter.py:1508-1519`, `:1544-1551`). A store
+    /// with a deferred write queue must flush the tombstones in
+    /// [`PreparedFetch::purged`] before sending any response bytes.
+    /// Committed confirmations enter the RAM duplicate cache immediately.
+    /// Deferred writers call [`Self::note_confirmed_deletion`] per receipt.
+    pub fn prepare_get(
         &mut self,
         request: &[u8],
         remote_delivery_hash: &[u8; DESTINATION_LENGTH],
         now_secs: u64,
-    ) -> Result<GetOutcome, GetError> {
+    ) -> Result<PreparedGet, GetError> {
         let request = MessageGetRequest::decode(request)?;
 
         // Both fields absent: the list form
         // (reference/LXMF/LXMF/LXMRouter.py:1489-1504).
         if request.wants.is_none() && request.haves.is_none() {
-            let mut available: Vec<(TransientId, u32)> = Vec::new();
+            let ceiling = self
+                .config
+                .serve_limit_bytes
+                .into_iter()
+                .chain(self.config.serve_cap_bytes)
+                .min();
+            let capacity = ceiling.map(Self::list_capacity);
+            if capacity == Some(0) {
+                let mut response = Vec::with_capacity(2);
+                msgpack::uint(&mut response, PeerError::Throttled.code() as u64);
+                return Ok(PreparedGet::Ready(GetOutcome::List { response, count: 0 }));
+            }
+            let mut available: Vec<(TransientId, u32)> = match capacity {
+                Some(count) => Vec::with_capacity(count),
+                None => Vec::new(),
+            };
             self.store.for_each(&mut |meta: &StoredMessage| {
-                if &meta.destination_hash == remote_delivery_hash {
+                if &meta.destination_hash != remote_delivery_hash {
+                    return;
+                }
+                if let Some(capacity) = capacity {
+                    if capacity == 0 {
+                        return;
+                    }
+                    let at = available.partition_point(|(_, size)| *size <= meta.size);
+                    if at == capacity {
+                        return;
+                    }
+                    if available.len() == capacity {
+                        available.pop();
+                    }
+                    available.insert(at, (meta.transient_id, meta.size));
+                } else {
                     available.push((meta.transient_id, meta.size));
                 }
             })?;
-            // Smallest first (:1500), so a limited later fetch drains the
-            // most messages.
-            available.sort_by_key(|(_, size)| *size);
-            let ids: Vec<TransientId> = available.into_iter().map(|(id, _)| id).collect();
-            let count = ids.len();
-            let response = MessageListResponse::TransientIds(ids).encode()?;
-            return Ok(GetOutcome::List { response, count });
+            if capacity.is_none() {
+                available.sort_by_key(|(_, size)| *size);
+            }
+            let count = available.len();
+            let mut response = Vec::with_capacity(msgpack::array_header_len(count) + count * 34);
+            msgpack::array(&mut response, count);
+            for (id, _) in &available {
+                msgpack::bin(&mut response, id);
+            }
+            return Ok(PreparedGet::Ready(GetOutcome::List { response, count }));
         }
 
-        // One directory pass for the whole request: ids AND stored
-        // lengths, so nothing below this line has to read a body to
-        // decide anything. Until B2 the serve read every candidate body
-        // just to measure it (#384).
+        // Keep metadata only for IDs carried by this request, not the entire
+        // store. A large card must not turn a small fetch into a full directory
+        // allocation. A zero size denotes a requested ID not owned by this
+        // delivery destination.
         let mut owned: alloc::collections::BTreeMap<TransientId, u32> =
             alloc::collections::BTreeMap::new();
+        for id in request.wants.iter().chain(request.haves.iter()).flatten() {
+            owned.insert(*id, 0);
+        }
         self.store.for_each(&mut |meta: &StoredMessage| {
             if &meta.destination_hash == remote_delivery_hash {
-                owned.insert(meta.transient_id, meta.size);
+                if let Some(size) = owned.get_mut(&meta.transient_id) {
+                    *size = meta.size;
+                }
             }
         })?;
+        owned.retain(|_, size| *size != 0);
 
         // Deletion happens here and only here: on the client's explicit
         // `haves` confirmation, which it sends only after taking local
@@ -1188,12 +1332,18 @@ impl<S: PropagationStore> PropagationNode<S> {
         let mut purged = Vec::new();
         if let Some(haves) = &request.haves {
             for transient_id in haves {
-                if owned.contains_key(transient_id)
-                    && self.store.purge(transient_id).unwrap_or(false)
-                {
-                    purged.push(*transient_id);
-                    owned.remove(transient_id);
+                if !owned.contains_key(transient_id) {
+                    continue;
                 }
+                match self.store.purge_confirmed(transient_id)? {
+                    ConfirmedPurge::Absent => continue,
+                    ConfirmedPurge::Committed => {
+                        self.note_confirmed_deletion(transient_id, now_secs);
+                    }
+                    ConfirmedPurge::Queued => {}
+                }
+                purged.push(*transient_id);
+                owned.remove(transient_id);
             }
         }
 
@@ -1229,15 +1379,16 @@ impl<S: PropagationStore> PropagationNode<S> {
         .flatten()
         .fold(f64::INFINITY, f64::min);
 
-        // Overheads exactly as the reference budgets them (:1532-1533).
-        let per_message_overhead = 16.0;
-        let mut cumulative_size = 24.0;
+        let mut budget = TransferBudget::new(limit);
 
         let mut served: Vec<(TransientId, u32)> = Vec::new();
         let mut served_bytes = 0u64;
         let mut payload_bytes = 0usize;
         if let Some(wants) = &request.wants {
             for transient_id in wants {
+                if !budget.can_admit_any() {
+                    break;
+                }
                 let Some(&stored_size) = owned.get(transient_id) else {
                     // Gone or never ours to give: skipped silently, the
                     // response is simply shorter (:1535 membership test; the
@@ -1245,78 +1396,100 @@ impl<S: PropagationStore> PropagationNode<S> {
                     continue;
                 };
                 let stored_size = stored_size as usize;
-                if stored_size < STAMP_SIZE {
+                if stored_size < MIN_BODY_LEN {
                     // Not a body this role wrote; nothing servable in it.
                     continue;
                 }
-                let next_size = cumulative_size + stored_size as f64 + per_message_overhead;
-                if next_size > limit {
-                    // Too big for this round; the reference keeps scanning
-                    // rather than stopping (:1547 `pass`).
+                if !budget.admit(stored_size) {
+                    // Too big for this round; keep scanning (:1547 `pass`).
                     continue;
                 }
-                cumulative_size = next_size;
-                // Serve the message without its propagation stamp
-                // (:1549 strips `STAMP_SIZE` from the tail).
                 let servable = stored_size - STAMP_SIZE;
                 served_bytes += servable as u64;
                 payload_bytes += msgpack::bin_header_len(servable) + servable;
                 served.push((*transient_id, servable as u32));
-                // Serving the same id twice would ship the body twice and
-                // break the plan's one-pass arithmetic; a `wants` list may
-                // legally repeat one.
+                // A wants list may repeat an ID, but a plan serves it once.
                 owned.remove(transient_id);
             }
         }
 
-        // Keep the duplicate guard alive for what was just confirmed
-        // drained, so a client retry of the original upload is not
-        // re-stored.
-        for transient_id in &purged {
-            self.processed.insert(*transient_id, now_secs);
-        }
-
         let encoded_len = msgpack::array_header_len(served.len()) + payload_bytes;
-        Ok(GetOutcome::Fetch {
+        Ok(PreparedGet::Fetch(PreparedFetch {
             plan: FetchPlan {
                 served,
                 encoded_len,
                 served_bytes,
             },
             purged,
-        })
+        }))
     }
 
-    /// The bytes [`FetchPlan`] describes, materialised.
+    /// Finish a card fetch without encoding or copying its prefetched bodies.
     ///
-    /// The single-packet path needs them — a response under the link MDU
-    /// is a few hundred bytes and one `Vec` is cheaper than a resource —
-    /// and so does every test that wants to read what was served. The
-    /// streamed path
-    /// ([`fetch_source`](Self::fetch_source)) never calls it; that is the
-    /// whole point of #384 B2.
-    pub fn encode_fetch(&self, plan: &FetchPlan) -> Result<Vec<u8>, GetError> {
-        let mut bodies = Vec::with_capacity(plan.served.len());
-        for (transient_id, servable) in &plan.served {
-            let mut body = self.store.read_body(transient_id)?.unwrap_or_default();
+    /// `bodies` may arrive in any order and omit unreadable planned IDs,
+    /// which are skipped before the stream's advertised length is fixed.
+    /// A changed length is a store error, not permission to recompute the
+    /// snapshot's transfer budget. Keep this slice alive and hand it to
+    /// [`FetchSource::new`] with the returned plan.
+    pub fn finish_get(
+        &mut self,
+        mut prepared: PreparedFetch,
+        bodies: &[(TransientId, Vec<u8>)],
+    ) -> Result<GetOutcome, GetError> {
+        let mut changed_length = false;
+        let mut served_bytes = 0u64;
+        let mut payload_bytes = 0usize;
+        prepared.plan.served.retain(|(id, servable)| {
+            let Some((_, body)) = bodies.iter().find(|(body_id, _)| body_id == id) else {
+                return false;
+            };
             if body.len() != *servable as usize + STAMP_SIZE {
-                return Err(GetError::Store(StorageError::NotFound));
+                changed_length = true;
+                return false;
             }
-            body.truncate(*servable as usize);
-            bodies.push(body);
+            served_bytes += u64::from(*servable);
+            payload_bytes += msgpack::bin_header_len(*servable as usize) + *servable as usize;
+            true
+        });
+        if changed_length {
+            return Err(GetError::Store(StorageError::Corrupt));
         }
-        Ok(MessageGetResponse::Messages(bodies).encode()?)
+        prepared.plan.served_bytes = served_bytes;
+        prepared.plan.encoded_len =
+            msgpack::array_header_len(prepared.plan.count()) + payload_bytes;
+        Ok(self.complete_get(prepared))
     }
 
-    /// The bytes [`FetchPlan`] describes, as a stream read out of the
-    /// store one record at a time — what a board hands to
-    /// `send_response_resource_from_source`
-    /// (`leviculum-core/src/node/mod.rs`).
-    pub fn fetch_source<'a>(&'a self, plan: &'a FetchPlan) -> FetchSource<'a, S> {
-        FetchSource::new(&self.store, plan)
+    /// Remember an explicit client confirmation only after its exact deletion
+    /// has committed, including an independently verified uncertain receipt.
+    pub fn note_confirmed_deletion(&mut self, transient_id: &TransientId, now_secs: u64) {
+        self.processed.insert(*transient_id, now_secs);
     }
 
-    /// Periodic maintenance: purge expired messages    /// Periodic maintenance: purge expired messages
+    fn complete_get(&mut self, prepared: PreparedFetch) -> GetOutcome {
+        GetOutcome::Fetch {
+            plan: prepared.plan,
+            purged: prepared.purged,
+        }
+    }
+
+    /// Answer a synchronous `/get` from one directory snapshot. Bodies are
+    /// not read until the caller encodes a packet or builds a resource from
+    /// [`Self::fetch_source`]. A card caller instead flushes purges and
+    /// awaits body reads between [`Self::prepare_get`] and [`Self::finish_get`].
+    pub fn handle_get(
+        &mut self,
+        request: &[u8],
+        remote_delivery_hash: &[u8; DESTINATION_LENGTH],
+        now_secs: u64,
+    ) -> Result<GetOutcome, GetError> {
+        match self.prepare_get(request, remote_delivery_hash, now_secs)? {
+            PreparedGet::Ready(outcome) => Ok(outcome),
+            PreparedGet::Fetch(prepared) => Ok(self.complete_get(prepared)),
+        }
+    }
+
+    /// Periodic maintenance: purge expired messages
     /// (`clean_message_store`, `reference/LXMF/LXMF/LXMRouter.py:1156-1160`)
     /// and prune the processed-ID cache
     /// (`clean_transient_id_caches`, `:1011`).
@@ -1367,6 +1540,11 @@ impl<S: PropagationStore> PropagationNode<S> {
     /// differs from the reference by necessity: it culls when a *configured*
     /// limit is exceeded on a periodic job (`:1183-1218`), our store has a
     /// hard capacity and culls when an append reports [`StorageError::Full`].
+    ///
+    /// `needed` is a [`PropagationStore::space_required`] figure, so the
+    /// loop compares like with like: `free_space` and it are the store's own
+    /// accounting unit. The *weight* is still the raw `age × size` the
+    /// reference computes over body bytes.
     fn make_room(&mut self, needed: u64, now_secs: u64) -> Vec<Eviction> {
         let mut weighted: Vec<(f64, Eviction)> = Vec::new();
         let _ = self.store.for_each(&mut |meta: &StoredMessage| {
@@ -1399,6 +1577,37 @@ impl<S: PropagationStore> PropagationNode<S> {
             }
         }
         evicted
+    }
+}
+
+impl<S: PropagationStore + PropagationBodyStore> PropagationNode<S> {
+    /// The bytes [`FetchPlan`] describes, materialised.
+    ///
+    /// The single-packet path needs them — a response under the link MDU
+    /// is a few hundred bytes and one `Vec` is cheaper than a resource —
+    /// and so does every test that wants to read what was served. The
+    /// streamed path
+    /// ([`fetch_source`](Self::fetch_source)) never calls it; that is the
+    /// whole point of #384 B2.
+    pub fn encode_fetch(&self, plan: &FetchPlan) -> Result<Vec<u8>, GetError> {
+        let mut bodies = Vec::with_capacity(plan.served.len());
+        for (transient_id, servable) in &plan.served {
+            let mut body = self.store.read_body(transient_id)?.unwrap_or_default();
+            if body.len() != *servable as usize + STAMP_SIZE {
+                return Err(GetError::Store(StorageError::NotFound));
+            }
+            body.truncate(*servable as usize);
+            bodies.push(body);
+        }
+        Ok(MessageGetResponse::Messages(bodies).encode()?)
+    }
+
+    /// The bytes [`FetchPlan`] describes, streamed directly from the body
+    /// store into the resource part scratch — what a board hands to
+    /// `send_response_resource_from_source`
+    /// (`leviculum-core/src/node/mod.rs`).
+    pub fn fetch_source<'a>(&'a self, plan: &'a FetchPlan) -> FetchSource<'a, S> {
+        FetchSource::new(&self.store, plan)
     }
 }
 

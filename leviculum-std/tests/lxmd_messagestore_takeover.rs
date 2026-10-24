@@ -25,7 +25,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use leviculum_lxmf::propagation_store::PropagationStore;
+use leviculum_lxmf::propagation_store::{PropagationBodyStore, PropagationStore};
 use leviculum_std::FilePropagationStore;
 
 /// One message the generator reported writing.

@@ -7,8 +7,11 @@
 //! with hand-built envelopes.
 
 use super::*;
-use crate::propagation_store::MemoryPropagationStore;
+use crate::propagation::MessageListResponse;
+use crate::propagation_store::{MemoryPropagationStore, MIN_BODY_LEN};
+use alloc::rc::Rc;
 use alloc::vec;
+use core::cell::RefCell;
 use leviculum_core::crypto::full_hash;
 
 const DAY: u64 = 24 * 60 * 60;
@@ -868,19 +871,6 @@ fn a_cap_below_one_message_serves_nothing_and_loses_nothing() {
         ),
         "the short answer must still be a valid MessageGetResponse"
     );
-    // And the list still offers all four, so the client knows they exist.
-    let list = MessageGetRequest {
-        wants: None,
-        haves: None,
-        transfer_limit_kb: None,
-    };
-    let GetOutcome::List { count, .. } = node
-        .handle_get(&list.encode().unwrap(), &[7; DESTINATION_LENGTH], 0)
-        .unwrap()
-    else {
-        panic!("an empty request is the list form");
-    };
-    assert_eq!(count, 4, "the node still offers what it cannot yet serve");
 }
 
 /// Ten 3.7 kB messages for one mailbox, fetched by a client whose own
@@ -1004,6 +994,289 @@ fn a_board_at_cost_zero_skips_the_stamp_value_until_a_peer_demands_one() {
     let outcome = node.handle_upload(&envelope(7, 2), 100, |_, _| Some(20));
     match outcome {
         UploadOutcome::Accepted { stamp_value, .. } => assert_eq!(stamp_value, 20),
+        other => panic!("{other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The split `/get` (part 5 of #384): plan, fetch bodies, finish.
+// ---------------------------------------------------------------------------
+
+/// A store with a card's block cost and a body source the test controls.
+///
+/// The directory answers every metadata verb — so `prepare_get` can plan —
+/// while `read_body` serves from a map the test can withdraw from. That
+/// split is the whole point of the phase boundary: a message can still be
+/// listed and located after its bytes are gone (a reclaimed segment, an
+/// evicted record). The asynchronous prefetch skips it before finalizing
+/// its response; a body disappearing after streaming starts is an error.
+/// `space_required` charges whole 512-byte blocks with descriptor and commit.
+struct FakeBodySource {
+    entries: alloc::collections::BTreeMap<TransientId, StoredMessage>,
+    bodies: alloc::collections::BTreeMap<TransientId, Vec<u8>>,
+    /// Every `read_body` call, in order: the fetch phase's own record.
+    reads: Rc<RefCell<Vec<TransientId>>>,
+    capacity: u64,
+    used: u64,
+    next_sequence: u64,
+    fail_purge: Option<TransientId>,
+}
+
+/// Bytes a block-backed store charges a body: `512 × (descriptor + payload
+/// blocks + commit)`.
+fn block_charge(body_len: usize) -> u64 {
+    512 * (2 + (body_len as u64).div_ceil(512))
+}
+
+impl FakeBodySource {
+    fn new(capacity: u64) -> (Self, Rc<RefCell<Vec<TransientId>>>) {
+        let reads = Rc::new(RefCell::new(Vec::new()));
+        (
+            Self {
+                entries: alloc::collections::BTreeMap::new(),
+                bodies: alloc::collections::BTreeMap::new(),
+                reads: reads.clone(),
+                capacity,
+                used: 0,
+                next_sequence: 0,
+                fail_purge: None,
+            },
+            reads,
+        )
+    }
+
+    fn seed(&mut self, transient_id: TransientId, received_at: u64, body: &[u8]) {
+        self.append(&transient_id, received_at, 0, body).unwrap();
+    }
+
+    /// The bytes are gone, the metadata is not.
+    fn withdraw(&mut self, transient_id: &TransientId) {
+        assert!(self.bodies.remove(transient_id).is_some());
+        assert!(self.entries.contains_key(transient_id));
+    }
+
+    fn next_sequence(&mut self) -> u64 {
+        self.next_sequence += 1;
+        self.next_sequence
+    }
+}
+
+impl PropagationStore for FakeBodySource {
+    fn append(
+        &mut self,
+        transient_id: &TransientId,
+        received_at: u64,
+        stamp_value: u8,
+        body: &[u8],
+    ) -> Result<(), StorageError> {
+        assert!(body.len() >= MIN_BODY_LEN);
+        let replaced = self
+            .entries
+            .get(transient_id)
+            .map_or(0, |meta| block_charge(meta.size as usize));
+        let next = self.used - replaced + block_charge(body.len());
+        if next > self.capacity {
+            return Err(StorageError::Full);
+        }
+        let mut destination_hash = [0u8; DESTINATION_LENGTH];
+        destination_hash.copy_from_slice(&body[..DESTINATION_LENGTH]);
+        let sequence = self.next_sequence();
+        self.entries.insert(
+            *transient_id,
+            StoredMessage {
+                transient_id: *transient_id,
+                destination_hash,
+                size: body.len() as u32,
+                received_at,
+                stamp_value,
+                sequence,
+            },
+        );
+        self.bodies.insert(*transient_id, body.to_vec());
+        self.used = next;
+        Ok(())
+    }
+
+    fn for_each(&self, visit: &mut dyn FnMut(&StoredMessage)) -> Result<(), StorageError> {
+        for meta in self.entries.values() {
+            visit(meta);
+        }
+        Ok(())
+    }
+
+    fn purge(&mut self, transient_id: &TransientId) -> Result<bool, StorageError> {
+        if self.fail_purge.as_ref() == Some(transient_id) {
+            return Err(StorageError::Corrupt);
+        }
+        let Some(meta) = self.entries.remove(transient_id) else {
+            return Ok(false);
+        };
+        self.used -= block_charge(meta.size as usize);
+        self.bodies.remove(transient_id);
+        Ok(true)
+    }
+
+    fn free_space(&self) -> u64 {
+        self.capacity - self.used
+    }
+
+    fn capacity(&self) -> u64 {
+        self.capacity
+    }
+
+    fn space_required(&self, body_len: usize) -> u64 {
+        block_charge(body_len)
+    }
+
+    fn contains(&self, transient_id: &TransientId) -> Result<bool, StorageError> {
+        Ok(self.entries.contains_key(transient_id))
+    }
+}
+
+impl PropagationBodyStore for FakeBodySource {
+    fn read_body(&self, transient_id: &TransientId) -> Result<Option<Vec<u8>>, StorageError> {
+        self.reads.borrow_mut().push(*transient_id);
+        Ok(self.bodies.get(transient_id).cloned())
+    }
+
+    fn read_body_at(
+        &self,
+        transient_id: &TransientId,
+        offset: usize,
+        buf: &mut [u8],
+    ) -> Result<Option<usize>, StorageError> {
+        Ok(self
+            .bodies
+            .get(transient_id)
+            .map(|body| crate::propagation_store::copy_from(body, offset, buf)))
+    }
+}
+
+/// The caller reads only the bounded plan, in wire order, retaining its
+/// readable bodies until the streamed resource has been built.
+fn fetch_bodies(
+    node: &PropagationNode<FakeBodySource>,
+    prepared: &PreparedFetch,
+) -> Vec<(TransientId, Vec<u8>)> {
+    let mut bodies = Vec::new();
+    for (transient_id, _) in prepared.plan.messages() {
+        if let Some(body) = node.store().read_body(transient_id).unwrap() {
+            bodies.push((*transient_id, body));
+        }
+    }
+    bodies
+}
+
+/// The body `envelope_sized(destination, seed, lxmf_len)` stores, with the
+/// transient ID that upload computes — so a test can re-upload it.
+fn seeded(destination: u8, seed: u8, lxmf_len: usize) -> (TransientId, Vec<u8>) {
+    let mut unstamped = vec![destination; DESTINATION_LENGTH];
+    unstamped.resize(lxmf_len, seed);
+    let transient_id = full_hash(&unstamped);
+    unstamped.extend_from_slice(&[0xEE; STAMP_SIZE]);
+    (transient_id, unstamped)
+}
+
+const SMALL: usize = 928;
+const OVER: usize = 929;
+
+#[test]
+fn a_split_fetch_reads_only_the_bounded_plan_and_the_wrapper_matches_it() {
+    // Two identical stores: one driven through the split, one through the
+    // synchronous wrapper. Both hold a body exactly at the transfer limit
+    // (24 + 960 + 16 = 1000), one one byte over it, and one whose bytes are
+    // gone.
+    let (fits_id, fits_body) = seeded(7, 1, SMALL);
+    let (over_id, over_body) = seeded(7, 2, OVER);
+    let (gone_id, gone_body) = seeded(7, 3, 300);
+    let (stranger_id, stranger_body) = seeded(9, 4, 120);
+    let stranger = [0x99; 32];
+    assert_ne!(stranger, stranger_id);
+
+    let build = || {
+        let (mut source, reads) = FakeBodySource::new(64 * 1024);
+        source.seed(fits_id, 10, &fits_body);
+        source.seed(over_id, 20, &over_body);
+        source.seed(gone_id, 30, &gone_body);
+        source.seed(stranger_id, 40, &stranger_body);
+        source.withdraw(&gone_id);
+        (PropagationNode::new(source, cost_free()), reads)
+    };
+    let (mut split, reads) = build();
+
+    // Oversized and foreign IDs are removed before a card read, and the
+    // exact-fit body exhausts the 1 kB budget. Repeating it cannot cause a
+    // second read or a second message in the response.
+    let fetch = MessageGetRequest {
+        wants: Some(vec![
+            over_id,
+            fits_id,
+            fits_id,
+            gone_id,
+            stranger_id,
+            stranger,
+        ]),
+        haves: None,
+        transfer_limit_kb: Some(TransferLimit::Integer(1)),
+    };
+    let request = fetch.encode().unwrap();
+    let PreparedGet::Fetch(plan) = split
+        .prepare_get(&request, &[7; DESTINATION_LENGTH], 0)
+        .unwrap()
+    else {
+        panic!("a fetch form must plan a fetch");
+    };
+    assert_eq!(plan.plan.served_ids(), vec![fits_id]);
+    assert!(plan.purged.is_empty());
+    assert_eq!(plan.plan.served_bytes(), SMALL as u64);
+    assert!(reads.borrow().is_empty(), "planning reads no body");
+
+    let bodies = fetch_bodies(&split, &plan);
+    assert_eq!(
+        *reads.borrow(),
+        vec![fits_id],
+        "only the planned body is read, once"
+    );
+    assert_eq!(bodies.len(), 1);
+
+    let split_outcome = split.finish_get(plan, &bodies).unwrap();
+    match &split_outcome {
+        GetOutcome::Fetch { plan, purged } => {
+            assert_eq!(
+                plan.served_ids(),
+                vec![fits_id],
+                "at the limit, not over it"
+            );
+            assert_eq!(plan.served_bytes(), SMALL as u64);
+            assert!(purged.is_empty());
+        }
+        other => panic!("{other:?}"),
+    }
+
+    // The synchronous wrapper returns the same plan without body reads.
+    let (mut one_shot, wrapper_reads) = build();
+    let wrapper_outcome = one_shot
+        .handle_get(&request, &[7; DESTINATION_LENGTH], 0)
+        .unwrap();
+    assert_eq!(split_outcome, wrapper_outcome);
+    assert!(wrapper_reads.borrow().is_empty(), "handle_get only plans");
+
+    // And the list form needs no fetch at all: `prepare_get` answers it.
+    let list = MessageGetRequest::list().encode().unwrap();
+    let prepared = split
+        .prepare_get(&list, &[7; DESTINATION_LENGTH], 0)
+        .unwrap();
+    let PreparedGet::Ready(list_outcome) = prepared else {
+        panic!("the list form has no body to fetch");
+    };
+    assert_eq!(
+        list_outcome,
+        one_shot
+            .handle_get(&list, &[7; DESTINATION_LENGTH], 0)
+            .unwrap()
+    );
+    match list_outcome {
+        GetOutcome::List { count, .. } => assert_eq!(count, 3),
         other => panic!("{other:?}"),
     }
 }
@@ -1161,4 +1434,423 @@ fn an_idle_inbound_link_is_let_go_strictly_above_the_reference_bound() {
         link_idle_past_bound(Some(725_000)),
         "the core's stale horizon"
     );
+}
+
+#[test]
+fn a_split_fetch_purges_before_it_fetches_and_keeps_the_duplicate_guard() {
+    let (keep_id, keep_body) = seeded(7, 1, 300);
+    let (ack_id, ack_body) = seeded(7, 2, 300);
+
+    let build = || {
+        let (mut source, reads) = FakeBodySource::new(64 * 1024);
+        source.seed(keep_id, 10, &keep_body);
+        source.seed(ack_id, 20, &ack_body);
+        (
+            PropagationNode::new(
+                source,
+                PropagationNodeConfig {
+                    // The SD board skips stamp values at cost 0 while no
+                    // peer demands them; no_validation asserts that policy.
+                    always_compute_stamp_value: false,
+                    ..cost_free()
+                },
+            ),
+            reads,
+        )
+    };
+    let (mut node, reads) = build();
+
+    let request = MessageGetRequest {
+        wants: Some(vec![keep_id, ack_id]),
+        haves: Some(vec![ack_id]),
+        transfer_limit_kb: Some(TransferLimit::Integer(1)),
+    }
+    .encode()
+    .unwrap();
+    let PreparedGet::Fetch(plan) = node
+        .prepare_get(&request, &[7; DESTINATION_LENGTH], 500)
+        .unwrap()
+    else {
+        panic!("a fetch form must plan a fetch");
+    };
+
+    // The purge is done and named before a single body is read: the caller
+    // can flush it to a deferred store before any response byte exists.
+    assert_eq!(plan.purged, vec![ack_id]);
+    assert!(!node.store().contains(&ack_id).unwrap());
+    assert_eq!(
+        plan.plan.served_ids(),
+        vec![keep_id],
+        "the purged id is not served"
+    );
+    assert!(reads.borrow().is_empty(), "no body read before the purge");
+
+    let bodies = fetch_bodies(&node, &plan);
+    let outcome = node.finish_get(plan, &bodies).unwrap();
+    match &outcome {
+        GetOutcome::Fetch { plan, purged } => {
+            assert_eq!(plan.served_ids(), vec![keep_id]);
+            assert_eq!(*purged, vec![ack_id]);
+        }
+        other => panic!("{other:?}"),
+    }
+
+    // The confirmation is remembered, so the client's retry of what it just
+    // took is a duplicate rather than a re-acceptance.
+    match node.handle_upload(&envelope_sized(7, 2, 300), 600, no_validation) {
+        UploadOutcome::Accepted { duplicate, .. } => assert!(duplicate),
+        other => panic!("{other:?}"),
+    }
+
+    // The wrapper agrees with the split path on the same input, purge and
+    // all.
+    let (mut one_shot, _) = build();
+    assert_eq!(
+        outcome,
+        one_shot
+            .handle_get(&request, &[7; DESTINATION_LENGTH], 500)
+            .unwrap()
+    );
+}
+
+/// Repeated wants cannot pin a body copy per ID occurrence: the metadata
+/// wrapper applies the transfer limit and deduplicates the plan before
+/// packet encoding or a card prefetch can read any bodies.
+#[test]
+fn the_wrapper_plans_no_more_bodies_than_the_budget_can_carry() {
+    use leviculum_core::resource::ResourceSource;
+
+    // A 4,032-byte body under a 1 kB limit: metadata excludes it before
+    // any read, including every repeat of the same oversized ID.
+    let (huge_id, huge_body) = seeded(7, 1, 4_000);
+    let (mut source, reads) = FakeBodySource::new(64 * 1024);
+    source.seed(huge_id, 10, &huge_body);
+    let mut node = PropagationNode::new(source, PropagationNodeConfig::default());
+
+    let request = MessageGetRequest {
+        wants: Some(vec![huge_id; 32]),
+        haves: None,
+        transfer_limit_kb: Some(TransferLimit::Integer(1)),
+    }
+    .encode()
+    .unwrap();
+    let outcome = node
+        .handle_get(&request, &[7; DESTINATION_LENGTH], 0)
+        .unwrap();
+    match &outcome {
+        GetOutcome::Fetch { plan, purged } => {
+            assert!(plan.is_empty(), "nothing fits the 1 kB budget");
+            assert_eq!(plan.served_bytes(), 0);
+            assert!(purged.is_empty());
+            let response = node.encode_fetch(plan).unwrap();
+            assert_eq!(response.len(), plan.encoded_len());
+            assert!(response.len() <= 1_000, "the reply stays within budget");
+            assert!(matches!(
+                MessageGetResponse::decode(&response),
+                Ok(MessageGetResponse::Messages(bodies)) if bodies.is_empty()
+            ));
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(
+        reads.borrow().is_empty(),
+        "an oversized ID and its repeats are never read"
+    );
+
+    // Under 2 kB, two distinct 960-byte stored bodies fit
+    // (24 + 2 * (960 + 16) = 1,976). Repeating the first ID serves it
+    // once, and the third distinct body is withheld when the remaining
+    // budget cannot carry even the smallest stored body.
+    let (fits_id, fits_body) = seeded(7, 2, SMALL);
+    let (second_id, second_body) = seeded(7, 3, SMALL);
+    let (third_id, third_body) = seeded(7, 4, SMALL);
+    let (mut source, reads) = FakeBodySource::new(64 * 1024);
+    source.seed(fits_id, 20, &fits_body);
+    source.seed(second_id, 30, &second_body);
+    source.seed(third_id, 40, &third_body);
+    let mut node = PropagationNode::new(source, PropagationNodeConfig::default());
+    let mut wants = vec![fits_id; 32];
+    wants.extend([second_id, third_id]);
+
+    let request = MessageGetRequest {
+        wants: Some(wants),
+        haves: None,
+        transfer_limit_kb: Some(TransferLimit::Integer(2)),
+    }
+    .encode()
+    .unwrap();
+    let outcome = node
+        .handle_get(&request, &[7; DESTINATION_LENGTH], 0)
+        .unwrap();
+    assert!(reads.borrow().is_empty(), "the wrapper only reads metadata");
+    match &outcome {
+        GetOutcome::Fetch { plan, purged } => {
+            assert_eq!(plan.served_ids(), vec![fits_id, second_id]);
+            assert_eq!(plan.count(), 2);
+            assert_eq!(plan.served_bytes(), 2 * SMALL as u64);
+            assert!(purged.is_empty());
+            let response = node.encode_fetch(plan).unwrap();
+            assert_eq!(response.len(), plan.encoded_len());
+            assert!(response.len() <= 2_000, "the reply stays within budget");
+            assert_eq!(
+                MessageGetResponse::decode(&response).unwrap(),
+                MessageGetResponse::Messages(vec![
+                    fits_body[..SMALL].to_vec(),
+                    second_body[..SMALL].to_vec(),
+                ])
+            );
+            let mut source = node.fetch_source(plan);
+            let mut streamed = Vec::with_capacity(plan.encoded_len());
+            let mut buf = [0u8; 64];
+            loop {
+                let copied = source.read(&mut buf).unwrap();
+                if copied == 0 {
+                    break;
+                }
+                streamed.extend_from_slice(&buf[..copied]);
+            }
+            assert_eq!(streamed, response);
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        *reads.borrow(),
+        vec![fits_id, second_id],
+        "encoding reads each planned body once; repeats and the withheld ID are not read"
+    );
+}
+
+/// Eviction must free what the store charges the incoming body, not its raw
+/// length: a block-backed store frees blocks, so a raw-byte target stops
+/// short and the retried append fails.
+#[test]
+fn eviction_frees_the_stores_block_cost_not_the_raw_body() {
+    // Capacity 5120: two 332-byte bodies charge 1536 each, leaving 2048.
+    let (mut source, _) = FakeBodySource::new(5120);
+    let (first_id, first_body) = seeded(7, 1, 300);
+    let (second_id, second_body) = seeded(7, 2, 300);
+    source.seed(first_id, 10, &first_body);
+    source.seed(second_id, 20, &second_body);
+    assert_eq!(source.free_space(), 2048);
+    let mut node = PropagationNode::new(source, cost_free());
+
+    // A 1532-byte body charges 2560 and does not fit. Its raw length (1532)
+    // is *under* the free space, so an eviction target measured in raw bytes
+    // would free nothing, the retried append would report Full, and the
+    // upload this node owed a proof for would be dropped.
+    let outcome = node.handle_upload(&envelope_sized(7, 3, 1500), 30, stamp_of_value_zero);
+    match &outcome {
+        UploadOutcome::Accepted {
+            evicted, duplicate, ..
+        } => {
+            assert!(!duplicate);
+            assert_eq!(evicted.len(), 1, "one record freed 1536, enough for 2560");
+            assert_eq!(evicted[0].size, 332);
+            assert_eq!(evicted[0].reason, EvictionReason::Displaced);
+        }
+        other => panic!("a fittable-after-eviction body must be accepted: {other:?}"),
+    }
+    assert!(node.store().contains(&accepted_id(&outcome)).unwrap());
+    assert_eq!(node.store().free_space(), 5120 - 1536 - 2560);
+}
+
+/// The asynchronous owner can discover a record was reclaimed after the
+/// directory snapshot. It is skipped before resource lengths are fixed,
+/// without re-filling the funded snapshot from unplanned IDs.
+#[test]
+fn a_split_fetch_skips_unavailable_bodies_before_streaming() {
+    let (gone_id, gone_body) = seeded(7, 1, 300);
+    let (keep_id, keep_body) = seeded(7, 2, 300);
+    let (unplanned_id, unplanned_body) = seeded(7, 3, 300);
+    let (mut store, reads) = FakeBodySource::new(64 * 1024);
+    store.seed(gone_id, 10, &gone_body);
+    store.seed(keep_id, 20, &keep_body);
+    store.seed(unplanned_id, 30, &unplanned_body);
+    let mut node = PropagationNode::new(store, cost_free());
+    let request = MessageGetRequest {
+        wants: Some(vec![gone_id, keep_id, unplanned_id]),
+        haves: None,
+        transfer_limit_kb: Some(TransferLimit::Integer(1)),
+    }
+    .encode()
+    .unwrap();
+    let PreparedGet::Fetch(prepared) = node
+        .prepare_get(&request, &[7; DESTINATION_LENGTH], 0)
+        .unwrap()
+    else {
+        panic!("a fetch form must plan a fetch");
+    };
+    assert_eq!(prepared.plan.served_ids(), vec![gone_id, keep_id]);
+    assert!(reads.borrow().is_empty());
+    node.store_mut().withdraw(&gone_id);
+    let bodies = fetch_bodies(&node, &prepared);
+    assert_eq!(*reads.borrow(), vec![gone_id, keep_id]);
+    assert_eq!(bodies.len(), 1);
+    let GetOutcome::Fetch { plan, purged } = node.finish_get(prepared, &bodies).unwrap() else {
+        panic!("a fetch must finish with a fetch outcome");
+    };
+    assert_eq!(plan.served_ids(), vec![keep_id]);
+    assert_eq!(plan.served_bytes(), 300);
+    assert!(purged.is_empty());
+    let expected = MessageGetResponse::Messages(vec![keep_body[..300].to_vec()])
+        .encode()
+        .unwrap();
+    assert_eq!(plan.encoded_len(), expected.len());
+    let mut source = FetchSource::new(bodies.as_slice(), &plan);
+    for _ in 0..2 {
+        source.rewind().unwrap();
+        let mut streamed = Vec::with_capacity(plan.encoded_len());
+        let mut buf = [0u8; 7];
+        loop {
+            let copied = source.read(&mut buf).unwrap();
+            if copied == 0 {
+                break;
+            }
+            streamed.extend_from_slice(&buf[..copied]);
+        }
+        assert_eq!(streamed, expected);
+    }
+}
+
+/// Prefetching cannot turn a record of a different size into permission to
+/// exceed the snapshot's serve budget, or advertise a truncated response.
+#[test]
+fn a_split_fetch_rejects_changed_body_lengths() {
+    let (id, body) = seeded(7, 1, SMALL);
+    let (mut store, reads) = FakeBodySource::new(64 * 1024);
+    store.seed(id, 10, &body);
+    let mut node = PropagationNode::new(store, cost_free());
+    let request = MessageGetRequest {
+        wants: Some(vec![id]),
+        haves: None,
+        transfer_limit_kb: Some(TransferLimit::Integer(1)),
+    }
+    .encode()
+    .unwrap();
+    let PreparedGet::Fetch(prepared) = node
+        .prepare_get(&request, &[7; DESTINATION_LENGTH], 0)
+        .unwrap()
+    else {
+        panic!("a fetch form must plan a fetch");
+    };
+    assert!(reads.borrow().is_empty());
+    for len in [body.len() - 1, body.len() + 1] {
+        let mut changed = body.clone();
+        changed.resize(len, 0xEE);
+        let bodies = vec![(id, changed)];
+        assert!(matches!(
+            node.finish_get(prepared.clone(), &bodies),
+            Err(GetError::Store(StorageError::Corrupt))
+        ));
+        let mut source = FetchSource::new(bodies.as_slice(), &prepared.plan);
+        let mut buf = [0u8; 64];
+        let error = loop {
+            match source.read(&mut buf) {
+                Ok(0) => panic!("a changed body must not reach the stream's end"),
+                Ok(_) => {}
+                Err(error) => break error,
+            }
+        };
+        assert_eq!(error, SourceError::LengthChanged);
+    }
+}
+
+#[test]
+fn committed_confirmation_survives_a_later_purge_failure() {
+    let (first, first_body) = seeded(7, 1, 300);
+    let (second, second_body) = seeded(7, 2, 300);
+    let (mut store, _) = FakeBodySource::new(64 * 1024);
+    store.seed(first, 10, &first_body);
+    store.seed(second, 20, &second_body);
+    store.fail_purge = Some(second);
+    let mut node = PropagationNode::new(
+        store,
+        PropagationNodeConfig {
+            always_compute_stamp_value: false,
+            ..cost_free()
+        },
+    );
+    let request = MessageGetRequest {
+        wants: Some(vec![]),
+        haves: Some(vec![first, second]),
+        transfer_limit_kb: None,
+    }
+    .encode()
+    .unwrap();
+    assert!(matches!(
+        node.prepare_get(&request, &[7; DESTINATION_LENGTH], 500),
+        Err(GetError::Store(StorageError::Corrupt))
+    ));
+    assert!(!node.store().contains(&first).unwrap());
+    assert!(node.store().contains(&second).unwrap());
+    match node.handle_upload(&envelope_sized(7, 1, 300), 600, no_validation) {
+        UploadOutcome::Accepted { duplicate, .. } => assert!(duplicate),
+        other => panic!("{other:?}"),
+    }
+    assert!(!node.store().contains(&first).unwrap());
+}
+
+#[test]
+fn funded_list_returns_the_smallest_owned_ids_within_the_wire_ceiling() {
+    let (small, small_body) = seeded(7, 1, 80);
+    let (middle, middle_body) = seeded(7, 2, 100);
+    let (large, large_body) = seeded(7, 3, 120);
+    let (other, other_body) = seeded(8, 4, 64);
+    let (mut store, _) = FakeBodySource::new(64 * 1024);
+    for (id, body) in [
+        (large, &large_body),
+        (other, &other_body),
+        (small, &small_body),
+        (middle, &middle_body),
+    ] {
+        store.seed(id, 10, body);
+    }
+    let mut node = PropagationNode::new(
+        store,
+        PropagationNodeConfig {
+            serve_limit_bytes: Some(71),
+            serve_cap_bytes: Some(200),
+            ..cost_free()
+        },
+    );
+    let request = MessageGetRequest::list().encode().unwrap();
+    let PreparedGet::Ready(GetOutcome::List { response, count }) = node
+        .prepare_get(&request, &[7; DESTINATION_LENGTH], 500)
+        .unwrap()
+    else {
+        panic!("the list request must return a list");
+    };
+    assert_eq!(count, 2);
+    assert!(response.len() <= 71);
+    assert_eq!(
+        MessageListResponse::decode(&response).unwrap(),
+        MessageListResponse::TransientIds(vec![small, middle])
+    );
+    assert!(node.store().contains(&large).unwrap());
+}
+
+#[test]
+fn list_pressure_reports_throttling_instead_of_hiding_stored_mail() {
+    let (id, body) = seeded(7, 1, 80);
+    let (mut store, _) = FakeBodySource::new(64 * 1024);
+    store.seed(id, 10, &body);
+    let mut node = PropagationNode::new(
+        store,
+        PropagationNodeConfig {
+            serve_cap_bytes: Some(34),
+            ..cost_free()
+        },
+    );
+    let request = MessageGetRequest::list().encode().unwrap();
+    let PreparedGet::Ready(GetOutcome::List { response, .. }) = node
+        .prepare_get(&request, &[7; DESTINATION_LENGTH], 500)
+        .unwrap()
+    else {
+        panic!("the list request must return its wire response");
+    };
+    assert_eq!(
+        MessageListResponse::decode(&response).unwrap(),
+        MessageListResponse::Error(PeerError::Throttled)
+    );
+    assert!(node.store().contains(&id).unwrap());
 }

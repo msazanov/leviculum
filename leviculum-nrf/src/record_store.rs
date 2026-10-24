@@ -610,7 +610,9 @@ async fn perform_all(
                 tag,
                 body,
             },
-            FlushOp::Purge { offset, key } => PnOp::Purge { offset, key },
+            FlushOp::Purge { offset, key } | FlushOp::ConfirmedPurge { offset, key } => {
+                PnOp::Purge { offset, key }
+            }
         };
         landed &= pn_perform(log, base, op).await.is_ok();
     }

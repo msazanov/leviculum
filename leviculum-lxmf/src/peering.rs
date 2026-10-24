@@ -34,6 +34,7 @@
 //! offer-list bytes, never message bodies.
 
 use alloc::{collections::BTreeMap, vec::Vec};
+use core::ops::ControlFlow;
 
 use leviculum_core::identity::Identity;
 use leviculum_core::resource::{ResourceSource, SourceError};
@@ -43,7 +44,7 @@ use crate::{
     constants::DESTINATION_LENGTH,
     msgpack,
     propagation::{PeerError, PropagationError, PropagationNodeAnnounce, TransientId},
-    propagation_store::StoredMessage,
+    propagation_store::{PropagationBodyStore, PropagationStore, StoredMessage},
     storage::StorageError,
 };
 
@@ -541,9 +542,8 @@ impl Peer {
 /// they survive a restart here too: an acceptance rate that started from
 /// zero on every start would make a restarted node rotate on nothing.
 ///
-/// Kept beside the table rather than in [`Peer`]: the host engine owns
-/// them, and the board's table, which does not rotate, does not carry
-/// them.
+/// Kept beside the table rather than in [`Peer`]: host and board engines
+/// own these counters and supply them when saving a [`PeerRecord`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PeerTraffic {
     /// Messages offered to this peer, counted when it answered the offer
@@ -571,8 +571,8 @@ pub struct PeerTraffic {
 /// append-a-new-record-then-purge-the-old under the same key (the
 /// destination hash, zero-padded to the log's 32-byte key), load is one
 /// tagged scan, and nothing is ever rewritten in place — no fixed page,
-/// which is the §2 endurance rule. At ~90 B of body a full table of 16 is
-/// a negligible tenant of the 64 KiB region.
+/// which is the §2 endurance rule. The shared board codec writes a
+/// 216-byte v2 body, retaining cursor and traffic statistics together.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PeerRecord {
     pub destination_hash: [u8; DESTINATION_LENGTH],
@@ -591,9 +591,9 @@ pub struct PeerRecord {
     pub last_heard: u64,
     pub cursor: u64,
     pub is_static: bool,
-    /// The peer's traffic statistics. [`Self::of`] starts them at zero; a
-    /// host that keeps them fills them in before saving. The board's record
-    /// log does not store them and restores zero.
+    /// The peer's engine-owned traffic statistics. [`Self::of`] starts
+    /// them at zero; the engine fills them before saving. Legacy board
+    /// records decode with zero traffic.
     pub traffic: PeerTraffic,
 }
 
@@ -1636,6 +1636,86 @@ pub struct OfferPlan {
     pub skipped_low_value: usize,
 }
 
+/// Build an offer directly from an append-ordered metadata walk, retaining
+/// only the bounded offered-id list and a copy of the peer's policy scalars.
+///
+/// Entries must arrive in ascending sequence order. Permanent low-value
+/// and oversize skips advance the cursor; the first sync-limit or encoded
+/// body-bound exclusion stops it before that entry. After [`push`](Self::push)
+/// returns `Break`, every subsequent push also returns `Break` without
+/// changing the plan. A caller whose traversal fails must discard this
+/// builder rather than conclude its partial cursor.
+pub struct OfferBuilder {
+    plan: OfferPlan,
+    initial_cursor: u64,
+    min_value: u8,
+    transfer_limit_bytes: u64,
+    sync_limit_bytes: u64,
+    offer_budget: usize,
+    cumulative: u64,
+    stopped: bool,
+}
+
+impl OfferBuilder {
+    pub fn new(peer: &Peer, offer_budget: usize) -> Self {
+        Self {
+            plan: OfferPlan {
+                ids: Vec::new(),
+                cursor_target: peer.cursor,
+                skipped_oversize: 0,
+                skipped_low_value: 0,
+            },
+            initial_cursor: peer.cursor,
+            min_value: peer.min_accepted_cost(),
+            transfer_limit_bytes: peer.transfer_limit_kb.saturating_mul(1000),
+            sync_limit_bytes: peer.sync_limit_kb.saturating_mul(1000),
+            offer_budget,
+            cumulative: OFFER_BASE_SIZE,
+            stopped: false,
+        }
+    }
+
+    pub fn push(&mut self, entry: &StoredMessage) -> ControlFlow<()> {
+        if self.stopped {
+            return ControlFlow::Break(());
+        }
+        if entry.sequence <= self.initial_cursor {
+            return ControlFlow::Continue(());
+        }
+        if entry.stamp_value < self.min_value {
+            self.plan.skipped_low_value += 1;
+            self.plan.cursor_target = entry.sequence;
+            return ControlFlow::Continue(());
+        }
+        let transfer_size = entry.size as u64 + OFFER_PER_MESSAGE_OVERHEAD;
+        if transfer_size > self.transfer_limit_bytes {
+            self.plan.skipped_oversize += 1;
+            self.plan.cursor_target = entry.sequence;
+            return ControlFlow::Continue(());
+        }
+        if self.cumulative + transfer_size >= self.sync_limit_bytes
+            || offer_encoded_len(self.plan.ids.len() + 1) > self.offer_budget
+        {
+            self.stopped = true;
+            return ControlFlow::Break(());
+        }
+        self.cumulative += transfer_size;
+        self.plan.ids.push(entry.transient_id);
+        self.plan.cursor_target = entry.sequence;
+        ControlFlow::Continue(())
+    }
+
+    /// No plan when nothing was offered or permanently skipped above the
+    /// initial cursor; a skip-only plan still concludes that cursor.
+    pub fn finish(self) -> Option<OfferPlan> {
+        if self.plan.ids.is_empty() && self.plan.cursor_target == self.initial_cursor {
+            None
+        } else {
+            Some(self.plan)
+        }
+    }
+}
+
 /// Build one offer from the store scan: every entry above the peer's
 /// cursor, in append order, filtered exactly as the offering reference
 /// filters (`sync`, `reference/LXMF/LXMF/LXMPeer.py:331-379`) and bounded
@@ -1666,46 +1746,13 @@ pub fn build_offer(
     entries: &[StoredMessage],
     offer_budget: usize,
 ) -> Option<OfferPlan> {
-    let mut plan = OfferPlan {
-        ids: Vec::new(),
-        cursor_target: peer.cursor,
-        skipped_oversize: 0,
-        skipped_low_value: 0,
-    };
-    let mut cumulative = OFFER_BASE_SIZE;
-    let min_value = peer.min_accepted_cost();
-
+    let mut builder = OfferBuilder::new(peer, offer_budget);
     for entry in entries {
-        if entry.sequence <= peer.cursor {
-            continue;
-        }
-        if entry.stamp_value < min_value {
-            plan.skipped_low_value += 1;
-            plan.cursor_target = entry.sequence;
-            continue;
-        }
-        let transfer_size = entry.size as u64 + OFFER_PER_MESSAGE_OVERHEAD;
-        if transfer_size > peer.transfer_limit_kb.saturating_mul(1000) {
-            plan.skipped_oversize += 1;
-            plan.cursor_target = entry.sequence;
-            continue;
-        }
-        if cumulative + transfer_size >= peer.sync_limit_kb.saturating_mul(1000) {
+        if builder.push(entry).is_break() {
             break;
         }
-        if offer_encoded_len(plan.ids.len() + 1) > offer_budget {
-            break;
-        }
-        cumulative += transfer_size;
-        plan.ids.push(entry.transient_id);
-        plan.cursor_target = entry.sequence;
     }
-
-    if plan.ids.is_empty() && plan.cursor_target == peer.cursor {
-        None
-    } else {
-        Some(plan)
-    }
+    builder.finish()
 }
 
 /// What the engine must do with an `/offer` response
@@ -1846,7 +1893,7 @@ pub struct SyncBatch {
 }
 
 /// Decide which wanted bodies one answer carries: the longest prefix, in
-/// plan order, for which `fits(count, encoded_len)` holds.
+/// plan order, for which `fits(count, encoded_len, payload_bytes)` holds.
 ///
 /// A prefix and not a best fit, because the cursor is a single sequence
 /// number: everything below it must be sent, declined or permanently
@@ -1857,13 +1904,15 @@ pub struct SyncBatch {
 /// record of what it asked for, `reference/LXMF/LXMF/LXMRouter.py:2318-2329`;
 /// the resource is ingested message by message, `:2381-2410`).
 ///
-/// A wanted id the store no longer holds is skipped, as the buffered
-/// path skipped it.
-pub fn plan_sync_batch<S: crate::propagation_store::PropagationStore + ?Sized>(
+/// `payload_bytes` is the running sum of body bytes in the candidate
+/// prefix, excluding framing. A wanted id the store no longer holds is
+/// skipped, as the buffered path skipped it; metadata I/O failures abort
+/// the plan, including while counting withheld ids.
+pub fn plan_sync_batch<S: PropagationStore + ?Sized>(
     store: &S,
     plan: &OfferPlan,
     wanted: &WantedIds<'_>,
-    fits: impl Fn(usize, usize) -> bool,
+    fits: impl Fn(usize, usize, usize) -> bool,
 ) -> Result<SyncBatch, StorageError> {
     let mut batch = SyncBatch {
         count: 0,
@@ -1888,14 +1937,15 @@ pub fn plan_sync_batch<S: crate::propagation_store::PropagationStore + ?Sized>(
         let size = meta.size as usize;
         let next_bins = bins + msgpack::bin_header_len(size) + size;
         let next_len = sync_envelope_len(batch.count + 1, next_bins);
-        if !fits(batch.count + 1, next_len) {
+        let next_payload = batch.payload + size;
+        if !fits(batch.count + 1, next_len, next_payload) {
             batch.withheld = 1;
             batch.cursor_target = meta.sequence.saturating_sub(1);
             continue;
         }
         bins = next_bins;
         batch.count += 1;
-        batch.payload += size;
+        batch.payload = next_payload;
         batch.encoded_len = next_len;
         batch.end = index + 1;
     }
@@ -1907,12 +1957,15 @@ pub fn plan_sync_batch<S: crate::propagation_store::PropagationStore + ?Sized>(
 /// store (leviculum#388): `msgpack([timestamp, [body, …]])`
 /// (`reference/LXMF/LXMF/LXMPeer.py:466`), byte for byte what
 /// [`PeerSyncEnvelope::encode`] builds over the same bodies, produced
-/// without the envelope or a whole body ever existing. Headers are framed
-/// on the stack and bodies are copied a buffer at a time with
-/// [`read_body_at`](crate::propagation_store::PropagationStore::read_body_at),
-/// so the source itself holds no heap at all.
-pub struct SyncSource<'a, S: ?Sized> {
-    store: &'a S,
+/// without allocating an envelope or copying a whole body. Metadata and
+/// bodies are borrowed separately, so mapped stores can supply both and
+/// card-backed metadata can use a bounded prefetched body slice. Headers
+/// are framed on the stack and bodies are copied a buffer at a time with
+/// [`read_body_at`](PropagationBodyStore::read_body_at); the source holds
+/// no heap at all.
+pub struct SyncSource<'a, M: PropagationStore + ?Sized, B: PropagationBodyStore + ?Sized> {
+    metadata: &'a M,
+    bodies: &'a B,
     plan: &'a OfferPlan,
     wanted: WantedIds<'a>,
     batch: SyncBatch,
@@ -1931,9 +1984,14 @@ pub struct SyncSource<'a, S: ?Sized> {
     body_pos: usize,
 }
 
-impl<'a, S: crate::propagation_store::PropagationStore + ?Sized> SyncSource<'a, S> {
+impl<'a, M, B> SyncSource<'a, M, B>
+where
+    M: PropagationStore + ?Sized,
+    B: PropagationBodyStore + ?Sized,
+{
     pub fn new(
-        store: &'a S,
+        metadata: &'a M,
+        bodies: &'a B,
         plan: &'a OfferPlan,
         wanted: WantedIds<'a>,
         batch: SyncBatch,
@@ -1946,7 +2004,8 @@ impl<'a, S: crate::propagation_store::PropagationStore + ?Sized> SyncSource<'a, 
         let (list, used) = msgpack::array_header_bytes(batch.count);
         head[10..10 + used].copy_from_slice(&list[..used]);
         Self {
-            store,
+            metadata,
+            bodies,
             plan,
             wanted,
             batch,
@@ -1974,7 +2033,11 @@ impl<'a, S: crate::propagation_store::PropagationStore + ?Sized> SyncSource<'a, 
             if !self.wanted.wants(&id) {
                 continue;
             }
-            let Some(meta) = self.store.meta(&id).map_err(|_| SourceError::Unavailable)? else {
+            let Some(meta) = self
+                .metadata
+                .meta(&id)
+                .map_err(|_| SourceError::Unavailable)?
+            else {
                 continue;
             };
             let size = meta.size as usize;
@@ -1993,7 +2056,11 @@ impl<'a, S: crate::propagation_store::PropagationStore + ?Sized> SyncSource<'a, 
     }
 }
 
-impl<S: crate::propagation_store::PropagationStore + ?Sized> ResourceSource for SyncSource<'_, S> {
+impl<M, B> ResourceSource for SyncSource<'_, M, B>
+where
+    M: PropagationStore + ?Sized,
+    B: PropagationBodyStore + ?Sized,
+{
     fn total_len(&self) -> usize {
         self.batch.encoded_len
     }
@@ -2036,7 +2103,7 @@ impl<S: crate::propagation_store::PropagationStore + ?Sized> ResourceSource for 
             if self.body_pos < size {
                 let want = core::cmp::min(buf.len(), size - self.body_pos);
                 let copied = self
-                    .store
+                    .bodies
                     .read_body_at(&id, self.body_pos, &mut buf[..want])
                     .map_err(|_| SourceError::Unavailable)?
                     .ok_or(SourceError::Unavailable)?;

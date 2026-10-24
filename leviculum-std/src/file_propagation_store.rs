@@ -48,13 +48,19 @@ use std::collections::BTreeMap;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-use leviculum_lxmf::propagation_store::{PropagationStore, StoredMessage, MIN_BODY_LEN};
+use leviculum_lxmf::propagation_store::{
+    PropagationBodyStore, PropagationStore, StoredMessage, MIN_BODY_LEN,
+};
 use leviculum_lxmf::storage::StorageError;
 use leviculum_lxmf::TransientId;
 
 use crate::storage::{hex_decode, hex_encode, note_unreadable_entry};
 
 /// A directory of propagation-store messages with a hard byte capacity.
+///
+/// The capacity counts the messages' own byte lengths, so
+/// [`PropagationStore::space_required`] keeps its default: a file costs what
+/// it holds, and an eviction pass frees exactly that.
 pub struct FilePropagationStore {
     dir: PathBuf,
     capacity: u64,
@@ -399,16 +405,6 @@ impl PropagationStore for FilePropagationStore {
         Ok(())
     }
 
-    fn read_body(&self, transient_id: &TransientId) -> Result<Option<Vec<u8>>, StorageError> {
-        let Some(entry) = self.index.get(transient_id) else {
-            return Ok(None);
-        };
-        match std::fs::read(&entry.path) {
-            Ok(body) => Ok(Some(body)),
-            Err(_) => Err(StorageError::Io),
-        }
-    }
-
     fn purge(&mut self, transient_id: &TransientId) -> Result<bool, StorageError> {
         let Some(entry) = self.index.remove(transient_id) else {
             return Ok(false);
@@ -432,6 +428,50 @@ impl PropagationStore for FilePropagationStore {
 
     fn contains(&self, transient_id: &TransientId) -> Result<bool, StorageError> {
         Ok(self.index.contains_key(transient_id))
+    }
+}
+
+impl PropagationBodyStore for FilePropagationStore {
+    /// One `open` + `read` of the message's file. The directory index already
+    /// holds the path, so the read costs no scan; a file that vanished under
+    /// the index (an operator deleted it) is `Io`, not absence — the index is
+    /// what this store believes, and it says the message is there.
+    fn read_body(&self, transient_id: &TransientId) -> Result<Option<Vec<u8>>, StorageError> {
+        let Some(entry) = self.index.get(transient_id) else {
+            return Ok(None);
+        };
+        match std::fs::read(&entry.path) {
+            Ok(body) => Ok(Some(body)),
+            Err(_) => Err(StorageError::Io),
+        }
+    }
+
+    /// Read only the requested range into the caller's buffer, without
+    /// allocating a whole message for each streamed resource chunk.
+    fn read_body_at(
+        &self,
+        transient_id: &TransientId,
+        offset: usize,
+        buf: &mut [u8],
+    ) -> Result<Option<usize>, StorageError> {
+        use std::io::{Read as _, Seek as _, SeekFrom};
+
+        let Some(entry) = self.index.get(transient_id) else {
+            return Ok(None);
+        };
+        let mut file = std::fs::File::open(&entry.path).map_err(|_| StorageError::Io)?;
+        let len = file.metadata().map_err(|_| StorageError::Io)?.len();
+        let offset = offset as u64;
+        if offset >= len || buf.is_empty() {
+            return Ok(Some(0));
+        }
+        file.seek(SeekFrom::Start(offset))
+            .map_err(|_| StorageError::Io)?;
+        let remaining = usize::try_from(len - offset).unwrap_or(usize::MAX);
+        let take = buf.len().min(remaining);
+        file.read_exact(&mut buf[..take])
+            .map_err(|_| StorageError::Io)?;
+        Ok(Some(take))
     }
 }
 
@@ -549,6 +589,50 @@ mod tests {
         assert_eq!(seen[1].destination_hash, [9; 16]);
         assert_eq!(store.read_body(&[1; 32]).unwrap(), Some(body_for(7, 100)));
         assert_eq!(store.free_space(), 4096 - 300);
+    }
+
+    #[test]
+    fn body_slices_read_only_the_requested_range_and_preserve_eof_semantics() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut store = FilePropagationStore::open(dir.path(), 4096).expect("open");
+        let body = body_for(7, 100);
+        store.append(&[1; 32], 1234, 0, &body).unwrap();
+
+        let mut buf = [0xA5; 32];
+        assert_eq!(
+            store.read_body_at(&[1; 32], 12, &mut buf).unwrap(),
+            Some(32)
+        );
+        assert_eq!(&buf, &body[12..44]);
+
+        buf.fill(0xA5);
+        assert_eq!(store.read_body_at(&[1; 32], 93, &mut buf).unwrap(), Some(7));
+        assert_eq!(&buf[..7], &body[93..]);
+        assert_eq!(&buf[7..], &[0xA5; 25]);
+        assert_eq!(store.read_body_at(&[1; 32], 5, &mut []).unwrap(), Some(0));
+        assert_eq!(
+            store.read_body_at(&[1; 32], 100, &mut buf).unwrap(),
+            Some(0)
+        );
+        assert_eq!(
+            store.read_body_at(&[1; 32], usize::MAX, &mut buf).unwrap(),
+            Some(0)
+        );
+        assert_eq!(store.read_body_at(&[2; 32], 0, &mut buf).unwrap(), None);
+    }
+
+    #[test]
+    fn body_slice_of_a_missing_indexed_file_reports_io() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut store = FilePropagationStore::open(dir.path(), 4096).expect("open");
+        store.append(&[1; 32], 1234, 0, &body_for(7, 100)).unwrap();
+        std::fs::remove_file(&store.index.get(&[1; 32]).unwrap().path).unwrap();
+
+        assert_eq!(store.read_body(&[1; 32]), Err(StorageError::Io));
+        assert_eq!(
+            store.read_body_at(&[1; 32], 0, &mut [0; 32]),
+            Err(StorageError::Io)
+        );
     }
 
     /// `lxmd`'s message-store indexer, restated: a file is indexed iff its

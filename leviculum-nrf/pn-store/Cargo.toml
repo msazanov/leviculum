@@ -9,7 +9,9 @@ description = "Propagation-node store adapters over the record log (host-testabl
 [dependencies]
 # The identity a `/get` client proved, for the auth list (audit 2026-10-12 D18).
 leviculum-core = { path = "../../leviculum-core", default-features = false }
-leviculum-record-log = { path = "../record-log" }
+# `mapped-read`: the ordered walk the streaming offer takes
+# (`PnStore::for_each_ordered`, the record log's `legacy` cursor).
+leviculum-record-log = { path = "../record-log", features = ["mapped-read"] }
 leviculum-lxmf = { path = "../../leviculum-lxmf", default-features = false }
 # The board's announced limits, which `board_role_config` hands the role.
 leviculum-heap-budget = { path = "../heap-budget" }

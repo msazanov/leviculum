@@ -34,29 +34,62 @@
 //!   `u32` on the board), `tag` = stamp value.
 //! * [`PropagationStore::for_each`] ↔ `RecordLog::for_each` (`lib.rs:541`).
 //!   The visitor sees directory data only, never a full body; the record log
-//!   yields `Record { key, time, tag, len }` and the adapter reads the first
-//!   16 body bytes for the destination hash with `read_body` — one `memcpy`
-//!   from memory-mapped flash per record (the concept page's §"Scan" is why
-//!   that is free of the radio).
-//! * [`PropagationStore::read_body`] ↔ `RecordLog::read_body` (`lib.rs:574`).
+//!   yields `Record { key, time, tag, len }` and the adapter fills
+//!   `destination_hash` from the record's own destination — its first 16
+//!   body bytes — with one `memcpy` from memory-mapped flash per record (the
+//!   concept page's §"Scan" is why that is free of the radio). That copy is
+//!   the adapter's own business, not a body read through this boundary; why
+//!   the read is a separate trait is the section below.
+//! * [`PropagationBodyStore::read_body`] ↔ `RecordLog::read_body`
+//!   (`lib.rs:574`).
 //! * [`PropagationStore::purge`] ↔ `RecordLog::purge` (`lib.rs:709`).
 //! * [`PropagationStore::free_space`] ↔ `RecordLog::free_bytes` (`lib.rs:683`)
 //!   and [`PropagationStore::capacity`] ↔ `sectors() × SECTOR_PAYLOAD`.
+//! * [`PropagationStore::space_required`] is the one verb with no record-log
+//!   counterpart: that adapter answers [`StorageError::Full`] only for a body
+//!   the log cannot hold at all, because the log's own round-robin reclaim is
+//!   the board's eviction, so the default (the body length) is never spent
+//!   there. A store whose eviction the role does drive overrides it, and the
+//!   eviction section below says why.
 //!
 //! The record log's verbs are `async` (every flash program waits on the
-//! SoftDevice's scheduler); this trait is synchronous because both host
+//! SoftDevice's scheduler); these traits are synchronous because the host
 //! implementations complete immediately and the role logic runs inside the
 //! driver's core lock, where an `await` point has nothing to yield to. The
 //! board adapter owns the async plumbing: each trait verb maps to exactly one
 //! record-log call, so wrapping it in the firmware's executor is part 3's
 //! adapter work, not a redesign of this boundary.
 //!
+//! # Why the body read is a separate trait
+//!
+//! Part 5 of #384 moves the RP2350's records onto a microSD card, and a card
+//! is not memory-mapped. One body read there is an asynchronous block fetch
+//! through the storage owner, and the role cannot block inside it, so `/get`
+//! hands the caller a work list instead of bytes
+//! ([`crate::propagation_node::PropagationNode::prepare_get`], then
+//! [`crate::propagation_node::PropagationNode::finish_get`]). That fetch is
+//! bounded from the directory before any body is read. Metadata verbs —
+//! duplicate detection, counts, cursors and free space — never need the
+//! card. A card caller retains the bodies it fetched and streams them
+//! through [`crate::propagation_node::FetchSource`] without assembling a
+//! response buffer; memory-mapped stores can stream directly from the
+//! medium. Both sources implement [`PropagationBodyStore`], separately
+//! from [`PropagationStore`]. Even the synchronous
+//! [`crate::propagation_node::PropagationNode::handle_get`] only plans;
+//! encoding or streaming its result is what needs the body trait.
+//!
 //! # Eviction, and where it deliberately is NOT
 //!
 //! The trait has no eviction verb. On the host the role evicts by the
 //! reference's weight — `age × size`, `clean_message_store`
 //! (`LXMRouter.py:1144`, weight at `:1056-1067`) — implemented in
-//! [`crate::propagation_node`] on top of `for_each` + `purge`. On the board
+//! [`crate::propagation_node`] on top of `for_each` + `purge`. The bytes it
+//! must free are the ones a store would charge the incoming body
+//! ([`PropagationStore::space_required`]), not `body.len()`: on a block-backed
+//! store one body costs whole blocks plus its descriptor and commit, and
+//! evicting by raw body bytes would loop forever against a
+//! [`PropagationStore::free_space`] that frees blocks. The weight itself stays
+//! `age × size`, the reference's own number. On the board
 //! the record log reclaims round-robin: when the active page cannot fit the
 //! next record, the oldest page is erased wholesale. That is a **deviation**
 //! from the reference's per-message weighted cull, and it stands under the
@@ -107,6 +140,16 @@ pub struct StoredMessage {
     pub sequence: u64,
 }
 
+/// Outcome of an explicit client confirmation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfirmedPurge {
+    Absent,
+    /// The deletion has completed at the store's durability boundary.
+    Committed,
+    /// A deferred writer owns the exact deletion and its confirmation ID.
+    Queued,
+}
+
 /// The store a propagation node keeps its accepted messages in.
 ///
 /// See the module documentation for the record's shape and the record-log
@@ -131,32 +174,22 @@ pub trait PropagationStore {
     /// Visit every stored message's directory entry, without reading bodies.
     fn for_each(&self, visit: &mut dyn FnMut(&StoredMessage)) -> Result<(), StorageError>;
 
-    /// Read one stored body (`lxmf_data || stamp`), or `None` if absent.
-    fn read_body(&self, transient_id: &TransientId) -> Result<Option<Vec<u8>>, StorageError>;
-
     /// Remove one message. Returns whether it was present.
     fn purge(&mut self, transient_id: &TransientId) -> Result<bool, StorageError>;
 
-    /// Copy one stored body from byte `offset` into the front of `buf`;
-    /// returns how many bytes were copied (0 at or past the body's end), or
-    /// `None` if the message is absent.
-    ///
-    /// What a source that streams bodies out of the store reads with
-    /// (the outbound peer sync, `SyncSource`, leviculum#388): it never
-    /// holds a whole body. The default reads the whole body and copies a
-    /// slice of it, which costs the allocation this exists to avoid; a
-    /// store whose bodies are addressable in place overrides it (the
-    /// board's mapped flash, `leviculum-nrf/pn-store`, and
-    /// [`MemoryPropagationStore`]).
-    fn read_body_at(
-        &self,
+    /// Delete an explicitly confirmed message, retaining its provenance when
+    /// an asynchronous writer must complete the operation.
+    fn purge_confirmed(
+        &mut self,
         transient_id: &TransientId,
-        offset: usize,
-        buf: &mut [u8],
-    ) -> Result<Option<usize>, StorageError> {
-        Ok(self
-            .read_body(transient_id)?
-            .map(|body| copy_from(&body, offset, buf)))
+    ) -> Result<ConfirmedPurge, StorageError> {
+        self.purge(transient_id).map(|present| {
+            if present {
+                ConfirmedPurge::Committed
+            } else {
+                ConfirmedPurge::Absent
+            }
+        })
     }
 
     /// One message's directory entry, or `None` if absent. One directory
@@ -177,11 +210,29 @@ pub trait PropagationStore {
     /// Total body capacity in bytes.
     fn capacity(&self) -> u64;
 
+    /// Bytes a body of this length consumes: the default is the body itself;
+    /// a block-backed store charges whole blocks plus its framing.
+    ///
+    /// The role asks this before evicting, so the number a store charges on
+    /// the way in is the number its [`Self::free_space`] gives back on the
+    /// way out (a block-backed store's `free_space` frees physical blocks,
+    /// so evicting by raw body bytes would never reach its target).
+    /// The role's `make_room` is the one caller; the weight that decides
+    /// *which* message goes stays the reference's `age × size` over
+    /// [`StoredMessage::size`].
+    fn space_required(&self, body_len: usize) -> u64 {
+        body_len as u64
+    }
+
     /// Whether a transient ID is stored. Duplicate detection
     /// (`lxmf_propagation`, `reference/LXMF/LXMF/LXMRouter.py:2496`).
-    fn contains(&self, transient_id: &TransientId) -> Result<bool, StorageError> {
-        Ok(self.read_body(transient_id)?.is_some())
-    }
+    ///
+    /// Required of every store: the answer comes from the store's own
+    /// directory, not from a body read — a store whose medium is not
+    /// memory-mapped ([`PropagationBodyStore`]) has no synchronous body
+    /// read to fall back on, and a directory pass is what the record log's
+    /// mount already pays for.
+    fn contains(&self, transient_id: &TransientId) -> Result<bool, StorageError>;
 
     /// Number of stored messages — one directory pass by default; the record
     /// log's mount already reports the same count
@@ -202,6 +253,68 @@ pub trait PropagationStore {
     }
 }
 
+/// Reading one stored body, separated from the metadata verbs so a store
+/// whose medium is not memory-mapped can serve a `/get` through an
+/// explicit asynchronous fetch phase.
+///
+/// The module docs' "Why the body read is a separate trait" section has the
+/// full argument. In one line: [`PropagationStore`] answers everything a
+/// `/get` *plans* with, this answers what it *serves*, and on a microSD card
+/// only the second needs the card.
+///
+/// Implementations return the stored bytes verbatim — `lxmf_data || stamp`,
+/// stamp included; the role strips it — and `Ok(None)` for a transient ID the
+/// store does not hold. A card fetch may skip an absent body before it
+/// finalizes its plan (`reference/LXMF/LXMF/LXMRouter.py:1535`); a body
+/// disappearing after a stream has begun instead fails the resource build,
+/// since its advertised length must not change.
+pub trait PropagationBodyStore {
+    fn read_body(&self, transient_id: &TransientId) -> Result<Option<Vec<u8>>, StorageError>;
+
+    /// Copy one stored body from byte `offset` into the front of `buf`;
+    /// returns how many bytes were copied (0 at or past the body's end), or
+    /// `None` if the message is absent.
+    ///
+    /// Streaming fetch and peer-sync sources never hold a whole body.
+    /// The default reads the whole body and copies a slice, so media
+    /// addressable in place override it (mapped flash, prefetched card
+    /// bodies and [`MemoryPropagationStore`]) to avoid that allocation.
+    fn read_body_at(
+        &self,
+        transient_id: &TransientId,
+        offset: usize,
+        buf: &mut [u8],
+    ) -> Result<Option<usize>, StorageError> {
+        Ok(self
+            .read_body(transient_id)?
+            .map(|body| copy_from(&body, offset, buf)))
+    }
+}
+
+/// A card owner's already-read bodies, borrowed by a [`FetchSource`](crate::FetchSource).
+/// Partial reads copy directly from the retained buffers; they never clone
+/// a body or assemble the complete response.
+impl PropagationBodyStore for [(TransientId, Vec<u8>)] {
+    fn read_body(&self, transient_id: &TransientId) -> Result<Option<Vec<u8>>, StorageError> {
+        Ok(self
+            .iter()
+            .find(|(id, _)| id == transient_id)
+            .map(|(_, body)| body.clone()))
+    }
+
+    fn read_body_at(
+        &self,
+        transient_id: &TransientId,
+        offset: usize,
+        buf: &mut [u8],
+    ) -> Result<Option<usize>, StorageError> {
+        Ok(self
+            .iter()
+            .find(|(id, _)| id == transient_id)
+            .map(|(_, body)| copy_from(body, offset, buf)))
+    }
+}
+
 /// The smallest body [`PropagationStore::append`] accepts: a destination hash
 /// and a stamp with nothing in between is already malformed one layer up
 /// (`PropagationUpload::decode` refuses anything not strictly longer than
@@ -210,7 +323,7 @@ pub trait PropagationStore {
 pub const MIN_BODY_LEN: usize = DESTINATION_LENGTH + STAMP_SIZE;
 
 /// Copy `body[offset..]` into the front of `buf`, as much as fits; the
-/// shape of [`PropagationStore::read_body_at`] over a body in memory.
+/// shape of [`PropagationBodyStore::read_body_at`] over a body in memory.
 pub fn copy_from(body: &[u8], offset: usize, buf: &mut [u8]) -> usize {
     let rest = body.get(offset..).unwrap_or(&[]);
     let take = core::cmp::min(rest.len(), buf.len());
@@ -308,25 +421,6 @@ impl PropagationStore for MemoryPropagationStore {
         Ok(())
     }
 
-    fn read_body(&self, transient_id: &TransientId) -> Result<Option<Vec<u8>>, StorageError> {
-        Ok(self
-            .entries
-            .get(transient_id)
-            .map(|entry| entry.body.clone()))
-    }
-
-    fn read_body_at(
-        &self,
-        transient_id: &TransientId,
-        offset: usize,
-        buf: &mut [u8],
-    ) -> Result<Option<usize>, StorageError> {
-        Ok(self
-            .entries
-            .get(transient_id)
-            .map(|entry| copy_from(&entry.body, offset, buf)))
-    }
-
     fn purge(&mut self, transient_id: &TransientId) -> Result<bool, StorageError> {
         match self.entries.remove(transient_id) {
             Some(entry) => {
@@ -347,6 +441,31 @@ impl PropagationStore for MemoryPropagationStore {
 
     fn contains(&self, transient_id: &TransientId) -> Result<bool, StorageError> {
         Ok(self.entries.contains_key(transient_id))
+    }
+}
+
+impl PropagationBodyStore for MemoryPropagationStore {
+    /// One `BTreeMap` lookup and one copy of the body; this store's medium is
+    /// the heap it already lives in, so the read is synchronous and
+    /// [`crate::propagation_node::PropagationNode::handle_get`] is available
+    /// to it.
+    fn read_body(&self, transient_id: &TransientId) -> Result<Option<Vec<u8>>, StorageError> {
+        Ok(self
+            .entries
+            .get(transient_id)
+            .map(|entry| entry.body.clone()))
+    }
+
+    fn read_body_at(
+        &self,
+        transient_id: &TransientId,
+        offset: usize,
+        buf: &mut [u8],
+    ) -> Result<Option<usize>, StorageError> {
+        Ok(self
+            .entries
+            .get(transient_id)
+            .map(|entry| copy_from(&entry.body, offset, buf)))
     }
 }
 
@@ -377,6 +496,9 @@ mod tests {
 
         assert_eq!(store.read_body(&[1; 32]).unwrap(), Some(body));
         assert!(store.contains(&[1; 32]).unwrap());
+        // The default charge is the body itself — the unit this store's
+        // free_space frees.
+        assert_eq!(store.space_required(100), 100);
         assert!(store.purge(&[1; 32]).unwrap());
         assert!(!store.purge(&[1; 32]).unwrap());
         assert_eq!(store.read_body(&[1; 32]).unwrap(), None);

@@ -38,9 +38,9 @@ most of the time, which is the actual deployment.
 Scope explicitly excluded: hosting a propagation node. The library side
 of hosting has since been written: `leviculum-lxmf` carries both ends of
 the *client to node* exchange and the node role that stores uploads and
-answers `/get` (`leviculum-lxmf/src/lib.rs:16-21`, leviculum#384 part 1),
+answers `/get` (`leviculum-lxmf/src/lib.rs:16-23`, leviculum#384 part 1),
 and the *node to node* direction, peer sync and the `/offer` path, in its
-`peering` module (`leviculum-lxmf/src/lib.rs:23-34`, leviculum#384 part 2).
+`peering` module (`leviculum-lxmf/src/lib.rs:25-36`, leviculum#384 part 2).
 The crate still performs no I/O, so a host owns links, resources and
 stamp-validation scheduling, and the two client modules lnmsg is built on
 keep hosting out in their own headers
