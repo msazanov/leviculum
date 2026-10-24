@@ -14,7 +14,7 @@
 //! This crate is the pure, host-testable half: record layout, magic
 //! handling, phase names, RESETREAS decode, and the byte-exact shape of
 //! the emitted line. The volatile `.uninit` I/O stays in
-//! `leviculum-nrf/src/boot_trace.rs`; the firmware crate cross-compiles
+//! `leviculum-nrf/firmware/src/boot_trace.rs`; the firmware crate cross-compiles
 //! and runs no host tests, so everything greppable is asserted here
 //! (same split as `leviculum-log-line`).
 //!

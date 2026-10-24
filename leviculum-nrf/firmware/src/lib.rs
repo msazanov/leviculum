@@ -11,7 +11,7 @@
 //! host-tested like the policy crates. Step 1 moves the leaf modules that
 //! need no backend but a seam: [`log`], [`boot_count`], [`postmortem`],
 //! [`time_floor`], and the policy half of [`record_store`]. The leaves that
-//! need not even a seam follow (957): [`iface_bytes`], [`dispatch`], [`clock`].
+//! need not even a seam follow (957): [`iface_bytes`], [`dispatch`], [`clock`], [`boot_trace`].
 //!
 //! What the crate may depend on is held by two guards rather than by this
 //! comment: `just firmware-no-hal` refuses a HAL or chip crate in its
@@ -23,6 +23,7 @@
 extern crate alloc;
 
 pub mod boot_count;
+pub mod boot_trace;
 pub mod clock;
 pub mod dispatch;
 pub mod iface_bytes;

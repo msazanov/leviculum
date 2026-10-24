@@ -14,7 +14,7 @@ src/bin/solarnode.rs (1489):
 src/bin/t1000e.rs (1364): feedback
 src/bin/t114.rs (1399):
 src/ble/columba.rs (3168): ble info log name radio_store warn
-src/ble/mod.rs (1300): boot_trace iface_bytes info log media name radio_store transport_stats warn
+src/ble/mod.rs (1300): iface_bytes info log media name radio_store transport_stats warn
 src/ble/notify.rs (238): ble log
 src/boards/mod.rs (90): lora qspi radio_store telemetry
 src/boards/rak4631.rs (206):
@@ -22,7 +22,7 @@ src/boards/solarnode.rs (409): lora qspi vext
 src/boards/t1000e.rs (368): button feedback radio
 src/boards/t114.rs (191):
 src/boot_count.rs (96): boot_trace radio_store record_store
-src/boot_trace.rs (119): log
+src/boot_trace.rs (27):
 src/button.rs (176): announce baseboard feedback log telemetry
 src/chtm.rs (71): log lora sx1262
 src/display.rs (351): baseboard ble button log lora pn
@@ -57,13 +57,14 @@ src/transport_stats.rs (168): iface_bytes log lora
 src/usb.rs (1464): banner ble boards chtm heap_census identity log lora media mgmt name pn postmortem_query radio_store record_store reset_stack_watermark telemetry
 src/vext.rs (85): boards log
 firmware/src/boot_count.rs (203): fakes log seams
+firmware/src/boot_trace.rs (120): log
 firmware/src/clock.rs (12):
 firmware/src/dispatch.rs (49): log
 firmware/src/fakes.rs (197): seams
 firmware/src/iface_bytes.rs (125):
-firmware/src/lib.rs (36):
+firmware/src/lib.rs (37):
 firmware/src/log.rs (402):
-firmware/src/postmortem.rs (437): log
+firmware/src/postmortem.rs (437): boot_trace log
 firmware/src/record_store.rs (665): fakes log seams
 firmware/src/seams.rs (129):
 firmware/src/time_floor.rs (209): log seams

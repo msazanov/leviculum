@@ -723,7 +723,7 @@ mod panic_handler {
 /// loss, #380), the IRQ priorities, the post-mortem block, and last
 /// boot's persistent tail as `[PERSISTENT_LOG]` lines.
 pub fn log_boot_diagnostics(
-    boot: &boot_trace::Captured,
+    boot: &leviculum_firmware::boot_trace::Captured,
     boot_count: &boot_count::Recorded,
     hardfault_pm: Option<&HardfaultPostMortem>,
     panic_pm: Option<&PanicPostMortem>,
@@ -731,7 +731,7 @@ pub fn log_boot_diagnostics(
 ) {
     log_stack("boot");
     log_panic_count();
-    boot_trace::log_prev(boot);
+    leviculum_firmware::boot_trace::log_prev(boot);
     log_reset_reason(boot.reset_reason);
     boot_count::log_banner(boot_count);
     log_irq_priorities();

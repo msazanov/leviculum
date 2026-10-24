@@ -5,8 +5,8 @@
 //! the panic message and the HardFault register snapshot. The section is
 //! the seam: a bind crate's linker script places it in RAM its reset leaves
 //! alone (on the nRF52840 `memory.x`'s `RETAINED`, below the stack and below
-//! every address the Adafruit bootloader touches, `boot_trace::BOOT_TRACE`
-//! in `leviculum-nrf` for the full story). The handlers themselves are the
+//! every address the Adafruit bootloader touches, [`crate::boot_trace`]'s
+//! `BOOT_TRACE` for the full story). The handlers themselves are the
 //! bind crate's, because catching a fault and resetting the core are an
 //! architecture's: they call [`bump_panic_count`] and then [`record_panic`]
 //! or [`record_hardfault`], and reset. Everything a boot or the debug-port

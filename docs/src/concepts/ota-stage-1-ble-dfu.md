@@ -159,7 +159,7 @@ stage 1 is:
 board into OTA mode, connect nothing, and watch the debug port. If the
 application comes back, `BOOT_TRACE` and `BOOT_COUNT` say so on the next
 boot and the elapsed time is the timeout
-(`leviculum-nrf/src/boot_count.rs:76`, Codeberg #380). Hold it for at
+(`record_at_boot`, `leviculum-nrf/src/boot_count.rs:76`, Codeberg #380). Hold it for at
 least an hour before concluding there is no timeout; a short watch that
 sees nothing has measured nothing. The bootloader's own source for the
 build on the board is the second reading, and the two together are the

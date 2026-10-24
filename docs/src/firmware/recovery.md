@@ -137,7 +137,7 @@ the only witness is in RAM: a breadcrumb record in the `RETAINED` region
 carries how far the last boot got, plus that boot's `POWER.RESETREAS`.
 It rides through a reset and dies with the power
 (`leviculum-nrf/memory.x`, the `RETAINED` comment; `capture`,
-`leviculum-nrf/src/boot_trace.rs:57`). So the order of the recovery
+`leviculum-nrf/firmware/src/boot_trace.rs:59`). So the order of the recovery
 steps decides whether a dark board is diagnosable or only a tally mark.
 Codeberg #359 has paid that price once already: the recurrence of
 2026-09-02 was recovered with a power cycle and answered

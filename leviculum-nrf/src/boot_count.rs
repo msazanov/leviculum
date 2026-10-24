@@ -73,7 +73,7 @@ pub fn page() -> u32 {
 /// `boot` is the capture [`crate::boot_trace::capture`] took as the first
 /// statement of `main` — this reads its already-cleared `RESETREAS` and
 /// whether the retained record survived, and writes to nothing of its.
-pub fn record_at_boot(nvmc: Nvmc<'_>, boot: &crate::boot_trace::Captured) -> Recorded {
+pub fn record_at_boot(nvmc: Nvmc<'_>, boot: &leviculum_firmware::boot_trace::Captured) -> Recorded {
     let retained = matches!(boot.prev, leviculum_boot_trace::PrevBoot::Present { .. });
     let page = page();
 

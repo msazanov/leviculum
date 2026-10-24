@@ -143,10 +143,10 @@ async fn main(spawner: Spawner) {
         embassy_nrf::nvmc::Nvmc::new(p.NVMC.reborrow()),
         &boot,
     );
-    leviculum_nrf::boot_trace::phase(leviculum_nrf::boot_trace::Phase::PersistRead);
+    leviculum_firmware::boot_trace::phase(leviculum_firmware::boot_trace::Phase::PersistRead);
     let vbus = leviculum_nrf::init_vbus();
     let serial = leviculum_nrf::usb::init(&spawner, p.USBD, vbus, &solarnode::CONFIG);
-    leviculum_nrf::boot_trace::phase(leviculum_nrf::boot_trace::Phase::UsbUp);
+    leviculum_firmware::boot_trace::phase(leviculum_firmware::boot_trace::Phase::UsbUp);
 
     log_critical!("leviculum SolarNode booting");
     log_critical!("[FW_BUILD] {}", leviculum_nrf::FW_BUILD_STAMP);
@@ -477,10 +477,10 @@ async fn main(spawner: Spawner) {
         // jitter and collide anyway (see `lora_task`).
         let channel_seed = leviculum_nrf::lora::channel_seed();
         leviculum_nrf::lora::spawn(&spawner, lora, radio_cfg, channel_seed);
-        leviculum_nrf::boot_trace::phase(leviculum_nrf::boot_trace::Phase::LoraTask);
+        leviculum_firmware::boot_trace::phase(leviculum_firmware::boot_trace::Phase::LoraTask);
     } else {
         leviculum_nrf::media::log_carrier_held_down("lora");
-        leviculum_nrf::boot_trace::phase(leviculum_nrf::boot_trace::Phase::LoraSkipped);
+        leviculum_firmware::boot_trace::phase(leviculum_firmware::boot_trace::Phase::LoraSkipped);
     }
 
     // BLE — full init restored. RAM ORIGIN bumped to 40K (memory.x) to give
@@ -795,7 +795,7 @@ async fn main(spawner: Spawner) {
     let mut announce_cap = leviculum_nrf::lora::AnnounceCap::new();
 
     log_critical!("[STG] main-loop");
-    leviculum_nrf::boot_trace::phase(leviculum_nrf::boot_trace::Phase::MainLoop);
+    leviculum_firmware::boot_trace::phase(leviculum_firmware::boot_trace::Phase::MainLoop);
 
     // One engine pass: digest a dispatch's events, run the async half
     // (validation, flash flushes, periodic jobs), and put whatever the

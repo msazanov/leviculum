@@ -124,10 +124,10 @@ async fn main(spawner: Spawner) {
         embassy_nrf::nvmc::Nvmc::new(p.NVMC.reborrow()),
         &boot,
     );
-    leviculum_nrf::boot_trace::phase(leviculum_nrf::boot_trace::Phase::PersistRead);
+    leviculum_firmware::boot_trace::phase(leviculum_firmware::boot_trace::Phase::PersistRead);
     let vbus = leviculum_nrf::init_vbus();
     let serial = leviculum_nrf::usb::init(&spawner, p.USBD, vbus, &rak4631::CONFIG);
-    leviculum_nrf::boot_trace::phase(leviculum_nrf::boot_trace::Phase::UsbUp);
+    leviculum_firmware::boot_trace::phase(leviculum_firmware::boot_trace::Phase::UsbUp);
 
     log_critical!("leviculum RAK4631 booting");
     log_critical!("[FW_BUILD] {}", leviculum_nrf::FW_BUILD_STAMP);
@@ -434,10 +434,10 @@ async fn main(spawner: Spawner) {
         // jitter and collide anyway (see `lora_task`).
         let channel_seed = leviculum_nrf::lora::channel_seed();
         leviculum_nrf::lora::spawn(&spawner, lora, radio_cfg, channel_seed);
-        leviculum_nrf::boot_trace::phase(leviculum_nrf::boot_trace::Phase::LoraTask);
+        leviculum_firmware::boot_trace::phase(leviculum_firmware::boot_trace::Phase::LoraTask);
     } else {
         leviculum_nrf::media::log_carrier_held_down("lora");
-        leviculum_nrf::boot_trace::phase(leviculum_nrf::boot_trace::Phase::LoraSkipped);
+        leviculum_firmware::boot_trace::phase(leviculum_firmware::boot_trace::Phase::LoraSkipped);
     }
 
     // BLE — same Columba v2.2 service the T114 exposes.
@@ -721,7 +721,7 @@ async fn main(spawner: Spawner) {
     // 8. Host fixed position (#238 control envelope)
     // 9. Telemetry evaluation tick (only while a target is configured)
     // 10. User button press that announces (#459; never on a board without one)
-    leviculum_nrf::boot_trace::phase(leviculum_nrf::boot_trace::Phase::MainLoop);
+    leviculum_firmware::boot_trace::phase(leviculum_firmware::boot_trace::Phase::MainLoop);
 
     // One engine pass: digest a dispatch's events, run the async half
     // (validation, flash flushes, periodic jobs), and put whatever the
