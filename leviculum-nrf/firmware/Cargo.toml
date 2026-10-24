@@ -1,0 +1,32 @@
+[package]
+name = "leviculum-firmware"
+version = "0.1.0"
+edition = "2021"
+authors = ["Lew Palm"]
+license = "AGPL-3.0-or-later"
+description = "The board firmware's orchestration stratum: the node loop and the seams every chip family implements. No HAL, no chip"
+
+# Stratum 2 of docs/src/concepts/firmware-layers.md (Codeberg #469). Step 0
+# is the skeleton: the seams as empty declarations and one host fake each;
+# no module has moved yet. What this crate may depend on is the point of it,
+# and two guards hold it: `just firmware-no-hal` (no HAL or chip crate in its
+# `cargo tree`) and `just firmware-no-chip-cfg` (no BSP `cfg` and no chip name
+# in `src/`). The embassy crates are at the workspace pins,
+# docs/src/firmware/embassy-pins.md.
+[dependencies]
+embassy-executor = "0.9"
+embassy-time = "0.5"
+embassy-sync = "0.7"
+leviculum-core = { path = "../../leviculum-core", default-features = false }
+# The two ecosystem traits two seams ARE, rather than declare: Flash is the
+# async multiwrite NOR trait (the same 0.4 leviculum-nrf and nrf-softdevice
+# pull), Entropy is rand_core's RngCore (the 0.6 leviculum-core draws from).
+embedded-storage-async = "0.4"
+rand_core = { version = "0.6", default-features = false }
+
+# The executor, time and sync crates and core are declared for what moves in
+# from step 1 on (the node loop spawns tasks, the message seams are channels,
+# the clock speaks in `embassy_time` instants); the skeleton names none
+# of them yet.
+[package.metadata.cargo-machete]
+ignored = ["embassy-executor", "embassy-time", "embassy-sync", "leviculum-core"]

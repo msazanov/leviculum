@@ -981,6 +981,18 @@ name = "leviculum-feedback"
 version = "0.1.0"
 
 [[package]]
+name = "leviculum-firmware"
+version = "0.1.0"
+dependencies = [
+ "embassy-executor",
+ "embassy-sync 0.7.2",
+ "embassy-time",
+ "embedded-storage-async",
+ "leviculum-core",
+ "rand_core 0.6.4",
+]
+
+[[package]]
 name = "leviculum-gnss-init"
 version = "0.1.0"
 

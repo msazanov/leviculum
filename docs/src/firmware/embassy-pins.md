@@ -14,15 +14,17 @@ Declared versions, read from the manifests; the resolved version is what
 
 | crate | declared | resolved | declared in |
 |---|---|---|---|
-| `embassy-executor` | 0.9 | 0.9.1 | `leviculum-nrf/Cargo.toml` |
-| `embassy-sync` | 0.7 | 0.7.2 | `leviculum-nrf/Cargo.toml`, `leviculum-nrf/ble-tx/Cargo.toml` |
-| `embassy-time` | 0.5 | 0.5.1 | `leviculum-nrf/Cargo.toml`, `leviculum-lr11xx/Cargo.toml` (dependency and dev-dependency) |
+| `embassy-executor` | 0.9 | 0.9.1 | `leviculum-nrf/Cargo.toml`, `leviculum-nrf/firmware/Cargo.toml` |
+| `embassy-sync` | 0.7 | 0.7.2 | `leviculum-nrf/Cargo.toml`, `leviculum-nrf/ble-tx/Cargo.toml`, `leviculum-nrf/firmware/Cargo.toml` |
+| `embassy-time` | 0.5 | 0.5.1 | `leviculum-nrf/Cargo.toml`, `leviculum-nrf/firmware/Cargo.toml`, `leviculum-lr11xx/Cargo.toml` (dependency and dev-dependency) |
 | `embassy-nrf` | 0.9 | 0.9.0 | `leviculum-nrf/Cargo.toml` |
 | `embassy-usb` | 0.5 | 0.5.1 | `leviculum-nrf/Cargo.toml` |
 | `embassy-futures` | 0.1 | 0.1.2 | `leviculum-nrf/Cargo.toml` |
 | `embassy-embedded-hal` | 0.5 | 0.5.0 | `leviculum-nrf/Cargo.toml` |
 
-The LR11xx driver is its own workspace, but the
+`leviculum-firmware` (`leviculum-nrf/firmware/`), the orchestration
+stratum, takes executor, sync and time at these pins and nothing else of
+embassy. The LR11xx driver is its own workspace, but the
 firmware pulls it by path, so its `embassy-time` resolves in this graph
 and the rule covers it.
 
