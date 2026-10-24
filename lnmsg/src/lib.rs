@@ -59,6 +59,7 @@ pub mod engine;
 pub mod events;
 pub mod fetch;
 pub mod identity;
+pub mod mailbox;
 pub mod outbox;
 pub mod seen;
 pub mod send;
