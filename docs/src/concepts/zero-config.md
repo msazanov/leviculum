@@ -64,9 +64,11 @@ transport off, a shared instance named `default`, log level 4,
   builds any (`leviculum-std/src/driver/mod.rs:2334`), and once
   `CONFIG source=file|default path=` (`leviculum-cli/src/lnsd.rs:195`).
 - `interface_stats` serves the origin as the `origin` key
-  (`leviculum-std/src/rpc/handlers.rs:675`), and `lnstatus` prints it as
-  an `Origin` line under `Status`; rnsd serves no such key, so against
-  rnsd the output stays rnstatus's. A row named after a section takes that
+  (`leviculum-std/src/rpc/handlers.rs:675`), and `lnstatus` prints it,
+  behind `--origin`, as an `Origin` line under `Status`. Without the flag
+  the render is rnstatus's, which the drop-in parity tests pin
+  (`leviculum-std/tests/rnsd_interop/status_parity_tests.rs`); rnsd serves
+  no such key, so against rnsd the flag adds nothing. A row named after a section takes that
   section's origin; a row no section names (the shared instance, an
   AutoInterface's peers) takes the origin all sections share
   (`origin_of`, `leviculum-std/src/interfaces/inventory.rs:252`).
@@ -115,7 +117,8 @@ because the others have nothing to start yet.
   bluetooth= serial=`, each medium `yes` or `no`. A marker or variable
   that turned the layer off also gets a plain line naming it.
   `interface_stats` serves the same fields after `state=` as the
-  top-level `auto_layer` key, and `lnstatus` prints them as its last line,
+  top-level `auto_layer` key, and `lnstatus` prints them, behind
+  `--origin` like the `Origin` lines, as its last line,
   `Auto layer   : on reason=default lan=yes servers=no bluetooth=no
   serial=no`.
 - **The marker** is installed by `scripts/install-ci.sh`, step 10b,
@@ -319,7 +322,7 @@ line today and gaining its `expect` when its step lands. Their lines on
 | step | what | cell | line today |
 |---|---|---|---|
 | 0 | the cells | all five, and the corpus guard | |
-| 1 (built) | default configuration in memory with AutoInterface (what rnsd writes to disk), a shared instance, transport off, `lnsd --writeconfig`, origin in `lnstatus` | `zero_config_lan_neighbour` | before: `shared_instance=no interfaces=0 neighbour=none neighbour_by=log`; since step 1: `shared_instance=yes interfaces=2 neighbour=found neighbour_by=path_request origin=default` (from `neighbour=` on asserted; `interfaces=` counts the two AutoInterface peers) |
+| 1 (built) | default configuration in memory with AutoInterface (what rnsd writes to disk), a shared instance, transport off, `lnsd --writeconfig`, origin in `lnstatus` behind `--origin` | `zero_config_lan_neighbour` | before: `shared_instance=no interfaces=0 neighbour=none neighbour_by=log`; since step 1: `shared_instance=yes interfaces=2 neighbour=found neighbour_by=path_request origin=default` (from `neighbour=` on asserted; `interfaces=` counts the two AutoInterface peers) |
 | 2 (built) | the `[auto]` section, the per-medium rule, the host marker and `LEVICULUM_NO_AUTO`, the `AUTO_LAYER` line | `config_present_means_only_config`; `periculum auto-layer` | `configured=1 running=1 extra=none serial_bytes=0` (asserted); `absent=115` |
 | 3 | the server list, choice persisted and logged, pinnable, fail-over, autoconnect ceiling | `zero_config_server_list` | `shared_instance=no connected=none discovered=0 failover=n/a` |
 | 4 | "find the instance or start one" in `leviculum-std`, then lnomad and the other tools | none yet | |

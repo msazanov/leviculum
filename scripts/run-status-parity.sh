@@ -45,7 +45,7 @@ cd "$(dirname "$0")/.."
 # against both daemons -- and 898723d4 added it without moving this pin, so
 # the gate has reported "expected 3 tests to run, 4 did" and failed
 # `just standard` (Justfile:1598) on every sha since.
-EXPECTED=4
+EXPECTED=5
 
 cargo build -p leviculum-cli --bin lnsd --bin lnstatus
 

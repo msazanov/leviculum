@@ -92,7 +92,12 @@
 # by name, `cargo test -p leviculum-std --test rnsd_interop
 # python_rncp_sender_fails_on_the_same_dropped_identify -- --ignored`, whenever
 # the identify-loss fix direction is revisited.
-23   -p leviculum-std --test rnsd_interop
+#
+# 23 -> 24 (2026-10-24): lnstatus_origin_flag_adds_only_the_origin_lines,
+# the acceptance for `lnstatus --origin` (952, #471). Observed group:
+# run-status-parity.sh runs it by name in `just standard` and the land
+# gate's status-parity step, its EXPECTED moved to 5 in the same commit.
+24   -p leviculum-std --test rnsd_interop
 
 # ble_link_gap_floor (2026-10-10, #379): the measurement grid behind
 # docs/measurements/2026-10-10-ble-link-gap-floor.md. It needs the patched

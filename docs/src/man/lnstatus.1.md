@@ -85,6 +85,17 @@ With **-R** it queries a remote transport instance over a link, the way `rnstatu
     printed instead. Not available with **-R**, **-d**/**-D**, **--tables**
     or **-m**. See **IDENTITY LISTING** below.
 
+**--origin**
+:   Under each interface's `Status` line, print an `Origin` line saying where
+    lnsd took the interface from: `configured` (a config file) or `default`
+    (the configuration it holds when there is none). After the trailer, print
+    one `Auto layer` line with lnsd's start decision for the automatic layer,
+    as its `AUTO_LAYER` log line states it. Leviculum extension, off by
+    default: lnsd serves both on every query, and without the flag the output
+    is byte-identical to `rnstatus`'s. Long form only, so no single letter
+    `rnstatus` may take later collides. Against a Python `rnsd`, which serves
+    neither, the flag prints nothing extra.
+
 **-m**, **--monitor**
 :   Continuously monitor status, clearing and redrawing on each interval.
 

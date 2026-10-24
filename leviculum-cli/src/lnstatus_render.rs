@@ -47,6 +47,10 @@ pub struct StatusOptions {
     pub reverse: bool,
     /// positional filter: only show interfaces whose name contains this.
     pub name_filter: Option<String>,
+    /// `--origin`: print each interface's `Origin` line and the `Auto layer`
+    /// trailer line (#471). Ours, off by default, so the default render
+    /// against lnsd stays byte-identical to rnstatus's.
+    pub origin: bool,
     /// How many of a shared instance's counted clients are the observing
     /// program itself — the footprint every Shared Instance figure has to be
     /// discounted by. Not a flag; a property of how the observer reached the
@@ -891,10 +895,13 @@ fn render_interface(out: &mut String, ifstat: &Value, opts: &StatusOptions) {
 
     // Origin (#471): where lnsd took the interface from, `configured` (a
     // file) or `default` (the configuration it holds when there is none).
-    // Ours; rnsd serves no such key, so against rnsd, or any stats dict
-    // without it, the output stays byte-identical to rnstatus.
-    if let Some(origin) = js(ifstat, "origin") {
-        pln(out, &format!("    Origin    : {origin}"));
+    // Ours, so only behind `--origin`: lnsd serves the key on every row, and
+    // the default render has to stay rnstatus's. rnsd serves no such key, so
+    // against rnsd the flag adds nothing.
+    if opts.origin {
+        if let Some(origin) = js(ifstat, "origin") {
+            pln(out, &format!("    Origin    : {origin}"));
+        }
     }
 
     if !(name.starts_with("Shared Instance[")
@@ -1408,9 +1415,12 @@ fn render_trailer(out: &mut String, stats: &Value, link_count: Option<i64>, opts
     }
 
     // The automatic layer (#471 step 2), as lnsd's `AUTO_LAYER` line states
-    // it. Ours; rnsd serves no such key, so the trailer stays rnstatus's.
-    if let Some(auto) = js(stats, "auto_layer") {
-        pln(out, &format!("\n Auto layer   : {auto}"));
+    // it. Ours, so only behind `--origin`, like the per-interface line; rnsd
+    // serves no such key, so against rnsd the trailer stays rnstatus's.
+    if opts.origin {
+        if let Some(auto) = js(stats, "auto_layer") {
+            pln(out, &format!("\n Auto layer   : {auto}"));
+        }
     }
 
     pln(out, "");
