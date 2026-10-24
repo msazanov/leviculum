@@ -38,7 +38,7 @@ Getting the evidence off the board
 
 Attaching after the reset is not enough on its own. The firmware emits its
 boot replay once into an 8 KiB log ring, and runtime output laps it before a
-late-attaching host can read it (leviculum-nrf/src/lib.rs, `postmortem_query`
+late-attaching host can read it (leviculum-nrf/firmware/src/postmortem.rs, `postmortem_query`
 says so in as many words). So this sends the firmware's post-mortem query — a
 single `p` byte on the debug CDC — which re-emits `[PANIC_COUNT]` and the
 stored post-mortem block bracketed by `[PM_QUERY] begin` / `[PM_QUERY] done`.

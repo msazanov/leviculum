@@ -317,53 +317,6 @@ pub async fn heap_watermark_task() {
     }
 }
 
-/// Persistent panic counter (Codeberg #65): lives in `.retained` next to
-/// the post-mortems and — unlike them — is NOT cleared by the boot-time
-/// read, so it accumulates across panic/HardFault soft-reset cycles
-/// until power loss. Cold boots start at 0 via the magic check.
-#[repr(C)]
-struct PanicCountRaw {
-    magic: u32,
-    count: u32,
-}
-
-const PANIC_COUNT_MAGIC: u32 = 0xC01D_FACE;
-
-#[link_section = ".retained"]
-static mut PANIC_COUNT: core::mem::MaybeUninit<PanicCountRaw> = core::mem::MaybeUninit::uninit();
-
-/// Increment the persistent panic counter and return the new value.
-/// Called on every panic and HardFault path before the soft-reset.
-/// Volatile raw-pointer access only — runs in fault context.
-fn bump_panic_count() -> u32 {
-    unsafe {
-        let p = core::ptr::addr_of_mut!(PANIC_COUNT).cast::<PanicCountRaw>();
-        let magic = core::ptr::read_volatile(core::ptr::addr_of!((*p).magic));
-        let prev = if magic == PANIC_COUNT_MAGIC {
-            core::ptr::read_volatile(core::ptr::addr_of!((*p).count))
-        } else {
-            0
-        };
-        let next = prev.wrapping_add(1);
-        core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).count), next);
-        core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).magic), PANIC_COUNT_MAGIC);
-        next
-    }
-}
-
-/// Read the persistent panic counter WITHOUT clearing it (boot banner,
-/// debug captures). 0 on cold boot or never-panicked.
-pub fn panic_count() -> u32 {
-    unsafe {
-        let p = core::ptr::addr_of!(PANIC_COUNT).cast::<PanicCountRaw>();
-        if core::ptr::read_volatile(core::ptr::addr_of!((*p).magic)) == PANIC_COUNT_MAGIC {
-            core::ptr::read_volatile(core::ptr::addr_of!((*p).count))
-        } else {
-            0
-        }
-    }
-}
-
 /// Sentinel word `paint_stack` fills the unused stack with. Distinct
 /// from both `.retained` post-mortem magics, so a stray match cannot be
 /// mistaken for a valid record.
@@ -602,7 +555,15 @@ pub fn init_heap() {
 }
 
 use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use leviculum_boot_trace::postmortem::{self, RecordMagic};
+use leviculum_boot_trace::postmortem;
+
+// The post-mortem store moved to the orchestration stratum (#469 step 1);
+// the handlers that fill it stay here, below, because catching a fault and
+// resetting the core are this architecture's.
+pub use leviculum_firmware::postmortem::{
+    log_panic_count, log_postmortems, postmortem_query, take_hardfault_postmortem,
+    take_panic_postmortem, HardfaultPostMortem, PanicPostMortem,
+};
 
 static PANIC_LED_ARMED: AtomicBool = AtomicBool::new(false);
 static PANIC_LED_PORT: AtomicU8 = AtomicU8::new(0);
@@ -719,154 +680,18 @@ pub fn set_hardfault_led(port: u8, pin: u8, active_low: bool) {
     HARDFAULT_LED_ARMED.store(true, Ordering::Relaxed);
 }
 
-/// Maximum bytes of panic message preserved across the post-mortem soft-reset.
-/// Bumped to 1024 (was 256) so the SoftDevice's "memory access violation"
-/// message — which encodes PC + PREGION at the END of the string — survives
-/// the buffer cap. The 256-char limit was cutting off precisely the
-/// diagnostic data we need to pinpoint the offending instruction. The value
-/// and the ring arithmetic around it are host-tested in
-/// `leviculum_boot_trace::postmortem`.
-pub const PANIC_MSG_MAX: usize = leviculum_boot_trace::postmortem::PANIC_MSG_MAX;
-
-/// Snapshot returned by `take_panic_postmortem()`.
-#[derive(Clone, Copy)]
-pub struct PanicPostMortem {
-    /// Bytes valid in `bytes` (== `total` unless the message overflowed
-    /// the buffer, in which case these are the LAST `PANIC_MSG_MAX`
-    /// bytes of it).
-    pub len: usize,
-    /// Total bytes the panic formatter produced. `total > len` means
-    /// the front of the message was dropped — never the tail, where SD
-    /// fault panics carry PC/PREGION.
-    pub total: usize,
-    pub bytes: [u8; PANIC_MSG_MAX],
-}
-
-#[repr(C)]
-struct PanicPmRaw {
-    magic: u32,
-    len: u32,
-    bytes: [u8; PANIC_MSG_MAX],
-}
-
-/// Record version, encoded in the magic. `.uninit` survives a reflash,
-/// so a record written by an older image is still there on the first
-/// boot of a new one. `len` used to mean "bytes stored, clamped"; it now
-/// means "total bytes produced", with `bytes` a ring keeping the last
-/// `PANIC_MSG_MAX` of them — the same word read the old way linearises
-/// an overlong message at the wrong offset. Bump this whenever the
-/// record's layout or the meaning of a field changes, so stale records
-/// are rejected instead of misparsed.
-///
-/// The fresh magic has a twin for a record already replayed once by a
-/// boot: `take_panic_postmortem` downgrades a fresh record to it instead of
-/// erasing it, so the debug-port query ([`postmortem_query`]) can still
-/// retrieve the evidence after the boot replay was lost to log-ring
-/// lapping. The next panic overwrites the record with a fresh magic; only
-/// power loss or a reflash wipes it. Both, and which read accepts which,
-/// are `leviculum_boot_trace::postmortem::PANIC_RECORD`.
-const PANIC_PM: RecordMagic = postmortem::PANIC_RECORD;
-
-#[link_section = ".retained"]
-static mut PANIC_PM_RECORD: core::mem::MaybeUninit<PanicPmRaw> = core::mem::MaybeUninit::uninit();
-
-/// Decode the ring-stored record at `p`. Caller has validated the magic.
-///
-/// The panic handler writes the buffer as a ring keeping the LAST
-/// `PANIC_MSG_MAX` bytes; `postmortem::ring_window` says where the oldest
-/// surviving byte sits. Linearise on the way out.
-unsafe fn read_panic_pm(p: *const PanicPmRaw) -> PanicPostMortem {
-    let total = core::ptr::read_volatile(core::ptr::addr_of!((*p).len)) as usize;
-    let (start, len) = postmortem::ring_window(total, PANIC_MSG_MAX);
-    let mut bytes = [0u8; PANIC_MSG_MAX];
-    let src = core::ptr::addr_of!((*p).bytes).cast::<u8>();
-    for (i, slot) in bytes.iter_mut().enumerate().take(len) {
-        *slot = core::ptr::read_volatile(src.add(postmortem::ring_slot(start + i, PANIC_MSG_MAX)));
-    }
-    PanicPostMortem { len, total, bytes }
-}
-
-/// Read the panic message captured before the last soft-reset and mark
-/// it seen. Returns `Some(_)` exactly once after a panic, `None`
-/// otherwise — but the record itself stays in `.uninit` (downgraded to
-/// its seen magic) so [`peek_panic_postmortem`] can re-read it.
-pub fn take_panic_postmortem() -> Option<PanicPostMortem> {
-    unsafe {
-        let p = core::ptr::addr_of_mut!(PANIC_PM_RECORD).cast::<PanicPmRaw>();
-        let magic = core::ptr::read_volatile(core::ptr::addr_of!((*p).magic));
-        let seen = PANIC_PM.take(magic)?;
-        let pm = read_panic_pm(p);
-        // Mark seen (not erased) so boots don't re-log but the query can.
-        core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).magic), seen);
-        Some(pm)
-    }
-}
-
-/// Read the stored panic post-mortem WITHOUT consuming it. Accepts both
-/// a fresh record and one already replayed at boot. Debug-port query
-/// path; safe to call any number of times.
-pub fn peek_panic_postmortem() -> Option<PanicPostMortem> {
-    unsafe {
-        let p = core::ptr::addr_of!(PANIC_PM_RECORD).cast::<PanicPmRaw>();
-        let magic = core::ptr::read_volatile(core::ptr::addr_of!((*p).magic));
-        if !PANIC_PM.peek(magic) {
-            return None;
-        }
-        Some(read_panic_pm(p))
-    }
-}
-
 #[cfg(not(test))]
 mod panic_handler {
     use core::panic::PanicInfo;
     use core::sync::atomic::Ordering;
 
-    /// Ring writer for `core::fmt::write` — keeps the LAST `buf.len()`
-    /// bytes of everything written (`pos` counts total bytes, storage
-    /// wraps). On overflow the front of the message is sacrificed, not
-    /// the tail: SD fault panics put PC/PREGION at the END, behind an
-    /// expendable source-path prefix. Used inside the panic handler
-    /// where allocation must not happen.
-    struct ByteWriter<'a> {
-        buf: &'a mut [u8],
-        pos: usize,
-    }
-    impl core::fmt::Write for ByteWriter<'_> {
-        fn write_str(&mut self, s: &str) -> core::fmt::Result {
-            let cap = self.buf.len();
-            for &b in s.as_bytes() {
-                if let Some(slot) = self
-                    .buf
-                    .get_mut(super::postmortem::ring_slot(self.pos, cap))
-                {
-                    *slot = b;
-                }
-                self.pos += 1;
-            }
-            Ok(())
-        }
-    }
-
     #[panic_handler]
     fn panic(info: &PanicInfo) -> ! {
         // Codeberg #65: count every panic across soft-reset cycles.
-        super::bump_panic_count();
-        // Capture the panic message into `.uninit` so the next boot can
-        // log it. LOG_CHANNEL is unusable here — the executor is dead
-        // and would never drain it.
-        unsafe {
-            let p = core::ptr::addr_of_mut!(super::PANIC_PM_RECORD).cast::<super::PanicPmRaw>();
-            let buf_ptr = core::ptr::addr_of_mut!((*p).bytes).cast::<u8>();
-            let buf_slice = core::slice::from_raw_parts_mut(buf_ptr, super::PANIC_MSG_MAX);
-            let mut writer = ByteWriter {
-                buf: buf_slice,
-                pos: 0,
-            };
-            let _ = core::fmt::write(&mut writer, format_args!("{}", info));
-            core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).len), writer.pos as u32);
-            // Magic last — partial write must not appear valid.
-            core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).magic), super::PANIC_PM.fresh);
-        }
+        leviculum_firmware::postmortem::bump_panic_count();
+        // Capture the panic message into `.retained` so the next boot can
+        // log it.
+        leviculum_firmware::postmortem::record_panic(info);
 
         // No LED configured: reset immediately so the next boot logs the
         // post-mortem. Else blink (~5 s of visual indication), then reset.
@@ -885,99 +710,6 @@ mod panic_handler {
         unsafe { super::blink_then_reset(led, cycles) }
     }
 }
-
-/// HardFault post-mortem snapshot saved into a `.uninit` static so it
-/// survives `sys_reset()`. The next boot reads it via
-/// `take_hardfault_postmortem()` to log the faulting PC and the
-/// register set, allowing post-hoc address-to-source resolution with
-/// `arm-none-eabi-addr2line`.
-#[repr(C)]
-pub struct HardfaultPostMortem {
-    /// `PM_MAGIC` when valid. Set on fault, cleared after one successful read.
-    magic: u32,
-    pub pc: u32,
-    pub lr: u32,
-    pub r0: u32,
-    pub r1: u32,
-    pub r2: u32,
-    pub r3: u32,
-    pub r12: u32,
-    pub xpsr: u32,
-}
-
-/// Distinct from `paint_stack`'s `0xDEADBEEF` canary so a stray canary
-/// word cannot masquerade as a valid PM. Versioned like [`PANIC_PM`]: bump
-/// it if this record's layout ever changes, so a record left in `.uninit`
-/// by an older image is rejected rather than misparsed. Its
-/// already-replayed twin mirrors the panic record's: the boot read
-/// downgrades to it instead of erasing, keeping the record retrievable via
-/// the debug-port query until the next fault or power loss.
-const HARDFAULT_PM: RecordMagic = postmortem::HARDFAULT_RECORD;
-
-/// Survives `sys_reset` because `.retained` (memory.x) is `NOLOAD` —
-/// values in RAM are not zeroed by the runtime startup — and sits below
-/// every RAM address the Adafruit bootloader touches. In `.uninit` this
-/// record occupied the top 36 bytes of RAM, dead centre of the
-/// bootloader's stack; it could not have survived a single reset (see
-/// `boot_trace::BOOT_TRACE` for the full story).
-#[link_section = ".retained"]
-static mut HARDFAULT_PM_RECORD: core::mem::MaybeUninit<HardfaultPostMortem> =
-    core::mem::MaybeUninit::uninit();
-
-/// Decode the record at `p`. Caller has validated the magic.
-unsafe fn read_hardfault_pm(p: *const HardfaultPostMortem) -> HardfaultPostMortem {
-    HardfaultPostMortem {
-        magic: 0,
-        pc: core::ptr::read_volatile(core::ptr::addr_of!((*p).pc)),
-        lr: core::ptr::read_volatile(core::ptr::addr_of!((*p).lr)),
-        r0: core::ptr::read_volatile(core::ptr::addr_of!((*p).r0)),
-        r1: core::ptr::read_volatile(core::ptr::addr_of!((*p).r1)),
-        r2: core::ptr::read_volatile(core::ptr::addr_of!((*p).r2)),
-        r3: core::ptr::read_volatile(core::ptr::addr_of!((*p).r3)),
-        r12: core::ptr::read_volatile(core::ptr::addr_of!((*p).r12)),
-        xpsr: core::ptr::read_volatile(core::ptr::addr_of!((*p).xpsr)),
-    }
-}
-
-/// Read the HardFault post-mortem captured before the last soft-reset
-/// and mark it seen. Returns `Some(_)` once after a HardFault, `None`
-/// otherwise — the record stays in `.uninit` for
-/// [`peek_hardfault_postmortem`].
-pub fn take_hardfault_postmortem() -> Option<HardfaultPostMortem> {
-    unsafe {
-        let p = core::ptr::addr_of_mut!(HARDFAULT_PM_RECORD).cast::<HardfaultPostMortem>();
-        let magic = core::ptr::read_volatile(core::ptr::addr_of!((*p).magic));
-        let seen = HARDFAULT_PM.take(magic)?;
-        let pm = read_hardfault_pm(p);
-        // Mark seen (not erased) so boots don't re-log but the query can.
-        core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).magic), seen);
-        Some(pm)
-    }
-}
-
-/// Read the stored HardFault post-mortem WITHOUT consuming it. Accepts
-/// both a fresh record and one already replayed at boot. Debug-port
-/// query path; safe to call any number of times.
-pub fn peek_hardfault_postmortem() -> Option<HardfaultPostMortem> {
-    unsafe {
-        let p = core::ptr::addr_of!(HARDFAULT_PM_RECORD).cast::<HardfaultPostMortem>();
-        let magic = core::ptr::read_volatile(core::ptr::addr_of!((*p).magic));
-        if !HARDFAULT_PM.peek(magic) {
-            return None;
-        }
-        Some(read_hardfault_pm(p))
-    }
-}
-
-/// Emit the `[PANIC_COUNT]` line. Shared by the boot banner of both
-/// BSPs and the debug-port query.
-pub fn log_panic_count() {
-    log::log_fmt_critical(
-        "[INFO!] ",
-        format_args!("[PANIC_COUNT] total={}", panic_count()),
-    );
-}
-
 /// The boot diagnostics every board binary logs once USB is up, in one
 /// place so the bins cannot drift apart again: the RAK4631 bin once logged
 /// neither the reset reason nor the stack trajectory the T114 did (review
@@ -1028,76 +760,6 @@ pub fn spawn_diagnostics_tasks(spawner: &embassy_executor::Spawner) {
     spawner.must_spawn(stack_watermark_task());
 }
 
-/// Emit the post-mortem block: `[HARDFAULT_PMRT]` and/or `[PANIC_PMRT]`
-/// plus `[PANIC_PMRT_TAIL]`. One formatter for the boot replay of both
-/// BSPs and the debug-port query — capture parsers key on these exact
-/// tags.
-pub fn log_postmortems(
-    hardfault_pm: Option<&HardfaultPostMortem>,
-    panic_pm: Option<&PanicPostMortem>,
-) {
-    if let Some(pm) = hardfault_pm {
-        log::log_fmt_critical(
-            "[INFO!] ",
-            format_args!(
-                "[HARDFAULT_PMRT] pc=0x{:08x} lr=0x{:08x} r0=0x{:08x} r1=0x{:08x} r2=0x{:08x} r3=0x{:08x} r12=0x{:08x} xpsr=0x{:08x}",
-                pm.pc, pm.lr, pm.r0, pm.r1, pm.r2, pm.r3, pm.r12, pm.xpsr
-            ),
-        );
-    }
-    if let Some(pm) = panic_pm {
-        let msg = core::str::from_utf8(&pm.bytes[..pm.len]).unwrap_or("<non-utf8 panic msg>");
-        // EscapeCtrl keeps this ONE line: the SD fault panic embeds a
-        // raw '\n' after the source location, which split the line and
-        // cost us the PC/PREGION tail in capture.
-        log::log_fmt_critical(
-            "[INFO!] ",
-            format_args!(
-                "[PANIC_PMRT] len={} total={} msg={}",
-                pm.len,
-                pm.total,
-                log::EscapeCtrl(msg)
-            ),
-        );
-        // Tail again on its own short line — PC/PREGION ride at the END
-        // of SD fault messages, and a short line survives any reader-
-        // side line-length cap.
-        let mut tail_start = msg.len().saturating_sub(96);
-        while !msg.is_char_boundary(tail_start) {
-            tail_start += 1;
-        }
-        log::log_fmt_critical(
-            "[INFO!] ",
-            format_args!("[PANIC_PMRT_TAIL] {}", log::EscapeCtrl(&msg[tail_start..])),
-        );
-    }
-}
-
-/// Debug-port query: replay the persistent panic evidence on demand.
-///
-/// Triggered by a `p` byte on the debug CDC port
-/// (`usb::debug_reader_task`). The boot-time replay is emitted exactly
-/// once into the 8 KiB log ring and is lapped by runtime output before
-/// a late-attaching host can read it; this query re-emits the same
-/// block whenever asked. `[PM_QUERY]` begin/done markers bracket the
-/// response so `scripts/lnode-panic-query.sh` knows when it is
-/// complete.
-pub fn postmortem_query() {
-    log::log_fmt_critical("[INFO!] ", format_args!("[PM_QUERY] begin"));
-    log_panic_count();
-    let hardfault_pm = peek_hardfault_postmortem();
-    let panic_pm = peek_panic_postmortem();
-    log_postmortems(hardfault_pm.as_ref(), panic_pm.as_ref());
-    log::log_fmt_critical(
-        "[INFO!] ",
-        format_args!(
-            "[PM_QUERY] done hardfault={} panic={}",
-            hardfault_pm.is_some() as u8,
-            panic_pm.is_some() as u8
-        ),
-    );
-}
-
 /// Cortex-M HardFault handler — overrides the cortex-m-rt default which
 /// would just `wfi` forever and leave us with no visual cue. If a board
 /// armed `set_hardfault_led`, blink that LED briefly so the operator
@@ -1108,21 +770,22 @@ pub fn postmortem_query() {
 #[cortex_m_rt::exception]
 unsafe fn HardFault(ef: &cortex_m_rt::ExceptionFrame) -> ! {
     // Codeberg #65: count every HardFault across soft-reset cycles.
-    bump_panic_count();
+    leviculum_firmware::postmortem::bump_panic_count();
     // Save register snapshot first — even if the LED arming is absent
     // (unlikely on a configured board), the post-mortem is the
     // diagnostic of record.
-    let p = core::ptr::addr_of_mut!(HARDFAULT_PM_RECORD).cast::<HardfaultPostMortem>();
-    core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).pc), ef.pc());
-    core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).lr), ef.lr());
-    core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).r0), ef.r0());
-    core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).r1), ef.r1());
-    core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).r2), ef.r2());
-    core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).r3), ef.r3());
-    core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).r12), ef.r12());
-    core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).xpsr), ef.xpsr());
-    // Magic last so a partial write can't masquerade as a valid PM.
-    core::ptr::write_volatile(core::ptr::addr_of_mut!((*p).magic), HARDFAULT_PM.fresh);
+    leviculum_firmware::postmortem::record_hardfault(
+        &leviculum_firmware::postmortem::HardfaultRegisters {
+            pc: ef.pc(),
+            lr: ef.lr(),
+            r0: ef.r0(),
+            r1: ef.r1(),
+            r2: ef.r2(),
+            r3: ef.r3(),
+            r12: ef.r12(),
+            xpsr: ef.xpsr(),
+        },
+    );
 
     // No LED configured: reset immediately so the next boot can log the
     // post-mortem. Else blink (~5 s of visual indication), then reset.

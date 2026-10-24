@@ -324,8 +324,8 @@ fn the_firmware_still_emits_the_shapes_these_parsers_expect() {
     // RAK4631 bin once logged no reset reason and spawned no `[STACK]`
     // watermark (review finding L-0031), so all three bins are checked.
     assert!(
-        lib.contains("[PANIC_COUNT] total="),
-        "leviculum-nrf/src/lib.rs no longer emits the [PANIC_COUNT] banner"
+        firmware_source("postmortem.rs").contains("[PANIC_COUNT] total="),
+        "leviculum-nrf/firmware/src/postmortem.rs no longer emits the [PANIC_COUNT] banner"
     );
     let boot_diag = fn_body(&lib, "pub fn log_boot_diagnostics(");
     for call in [
@@ -491,16 +491,53 @@ fn body_after<'a>(src: &'a str, file: &str, marker: &str, what: &str) -> &'a str
 #[test]
 fn the_fault_paths_still_capture_rather_than_log() {
     let lib = nrf_source("lib.rs");
-    for (marker, what) in [
-        ("#[panic_handler]", "the panic handler"),
-        ("unsafe fn HardFault(", "the HardFault handler"),
+    // The handlers stay in the bind crate; the captures they call moved to
+    // the orchestration crate's post-mortem store (#469), and run in the same
+    // dead-executor context, so they are held to the same rule.
+    let store = firmware_source("postmortem.rs");
+    for (src, file, marker, what) in [
+        (&lib, "lib.rs", "#[panic_handler]", "the panic handler"),
+        (
+            &lib,
+            "lib.rs",
+            "unsafe fn HardFault(",
+            "the HardFault handler",
+        ),
+        (
+            &store,
+            "../firmware/src/postmortem.rs",
+            "pub fn record_panic(",
+            "the panic capture",
+        ),
+        (
+            &store,
+            "../firmware/src/postmortem.rs",
+            "pub fn record_hardfault(",
+            "the HardFault capture",
+        ),
+        (
+            &store,
+            "../firmware/src/postmortem.rs",
+            "pub fn bump_panic_count(",
+            "the panic counter",
+        ),
     ] {
-        let body = body_after(&lib, "lib.rs", marker, what);
+        let body = body_after(src, file, marker, what);
         assert!(
             !body.contains("log_fmt") && !body.contains("log_critical!"),
             "{what} now logs; it runs with the executor dead, and whether its line \
              can carry a real t= stamp is a decision that has to be made explicitly \
              rather than inherited"
+        );
+    }
+    for capture in [
+        "record_panic(info)",
+        "record_hardfault(",
+        "bump_panic_count()",
+    ] {
+        assert!(
+            lib.contains(capture),
+            "the fault handlers in leviculum-nrf/src/lib.rs no longer call {capture}"
         );
     }
 }
