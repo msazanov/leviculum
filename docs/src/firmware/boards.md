@@ -26,7 +26,7 @@ runs an event-driven main loop that dispatches packets between them:
 | Interface | ID | Medium | HW MTU |
 |-----------|----|--------|--------|
 | `serial_usb` | 0 | USB CDC-ACM, HDLC framing to host | 564 |
-| `lora_sx1262` on the T114, RAK4631 and solar node, `lora_lr1110` on the T1000-E | 1 | the board's LoRa radio, named in its board file (`IFACE_NAMES`) | 255 |
+| `lora_sx1262` on the T114, RAK4631 and solar node, `lora_lr1110` on the T1000-E | 1 | the board's LoRa radio, named in its board file (`IFACE_NAMES`) | 508 (#390: two frames of at most 254 B, `leviculum-nrf/src/bin/t114.rs:289`) |
 | `ble` | 2 | BLE peripheral, Columba v2.2 | 564 |
 
 (Interface registration and MTUs:
