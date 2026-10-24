@@ -165,6 +165,7 @@ skip  leviculum-std   event_log_multiprocess     # spawns a second process to sh
 skip  leviculum-std   event_log_rotation         # spawns processes, sleeps, rotates real files
 skip  leviculum-std   event_log_subscriber       # long in-process subscriber suite; seconds, and needs --test-threads=1
 skip  leviculum-std   identity_listing_rpc       # tokio runtime with an RPC endpoint
+skip  leviculum-std   interface_counters_parity  # its subject is code: the firmware's counter arithmetic against core's, a series of in-process steps
 skip  leviculum-std   jl_filter                  # spawns the jl binary
 skip  leviculum-std   jl_jldiff_docs             # spawns the jl and jldiff binaries
 skip  leviculum-std   jl_jldiff_edge_cases       # spawns the jl and jldiff binaries
