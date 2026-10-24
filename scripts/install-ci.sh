@@ -539,6 +539,32 @@ if ! ls /dev/ttyACM* >/dev/null 2>&1; then
     echo "[install-ci] WARNING: no /dev/ttyACM* devices found — LoRa tests will skip in nightly."
 fi
 
+# 10a. ESP32-S3 flasher probe (warning only, #473). The ThinkNode M9 is an
+#     ESP32-S3 behind a CH340K and is written through the ROM's serial
+#     loader, which needs espflash (own stubs, step 6c) or an esptool whose
+#     package carries the S3 stub (step 6d's venv does; Debian's 4.7.0 does
+#     not and dies on stub_flasher_32s3.json without --no-stub). Steps 6c
+#     and 6d install both, so this only fires when one of them failed or
+#     was skipped; lnflash's esp transport searches the same places
+#     (lnflash/src/esp.rs, find_flasher).
+ESP_STUB_CHECK='import esptool, os, sys
+want = {"stub_flasher_32s3.json", "esp32s3.json"}
+root = os.path.join(os.path.dirname(esptool.__file__), "targets", "stub_flasher")
+sys.exit(0 if any(want & set(f) for _, _, f in os.walk(root)) else 1)'
+ESP_VENV="${LEVICULUM_RNODE_TOOLS:-$HOME/.rnode-tools/venv}"
+if ESPFLASH_BIN=$(command -v espflash || ls "$HOME/.cargo/bin/espflash" 2>/dev/null) \
+    && "$ESPFLASH_BIN" --version >/dev/null 2>&1; then
+    echo "[install-ci] ESP32-S3 flasher: $("$ESPFLASH_BIN" --version) ($ESPFLASH_BIN)"
+elif [[ -x "$ESP_VENV/bin/esptool" ]] && "$ESP_VENV/bin/python" -c "$ESP_STUB_CHECK" 2>/dev/null; then
+    echo "[install-ci] ESP32-S3 flasher: esptool with the S3 stub ($ESP_VENV/bin/esptool)"
+elif command -v esptool >/dev/null 2>&1 && python3 -c "$ESP_STUB_CHECK" 2>/dev/null; then
+    echo "[install-ci] ESP32-S3 flasher: esptool with the S3 stub ($(command -v esptool))"
+else
+    echo "[install-ci] WARNING: no ESP32-S3 flasher with a stub — install espflash (step 6c) or"
+    echo "[install-ci]   the pinned esptool (scripts/install-esptool.sh). Until then only a"
+    echo "[install-ci]   stub-less esptool with --no-stub reaches the ThinkNode M9, slowly."
+fi
+
 # 10b. The automatic-layer host marker (#471, docs/src/concepts/zero-config.md).
 #     A host this script sets up is a rig or coder host: it runs the suites
 #     and the periculum cells, with Bluetooth adapters and boards on USB in
