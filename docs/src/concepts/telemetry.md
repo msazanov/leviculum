@@ -19,6 +19,11 @@ that emits its own format is useful when someone writes a viewer for it.
 So the format is adopted first and the node conforms to it, not the
 reverse.
 
+Since 2026-10-25 a viewer of ours is a goal (the map, [A messenger whose
+core runs anywhere](handheld-messenger.md)); the wire format stays
+Sideband's regardless, and the collector (#239) is the viewer's data
+source.
+
 ## Where the format comes from, and how far it is settled
 
 Telemetry rides inside a normal LXMF message, in the `fields` dictionary
@@ -593,7 +598,10 @@ Two further consequences of "lose nothing", both tested in
   drops the sender and waits for that thread, so a report already handed
   over is written before the process returns.
 
-There is no query surface and no viewer. WAL mode is what makes the
+There is no query surface and no viewer. Since 2026-10-25 a viewer of
+ours is a goal (the map, [A messenger whose core runs
+anywhere](handheld-messenger.md)), and this database is its data source.
+WAL mode is what makes the
 operator's own `sqlite3` session safe against the daemon that is still
 writing.
 

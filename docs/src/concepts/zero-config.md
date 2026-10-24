@@ -368,6 +368,11 @@ daemon a controller without a configured BLE interface.
    default, which a configless daemon never joins.
 3. **The ceiling numbers.** Two `bootstrap_only` entries and two to three
    discovered are the starting values; a measurement moves them.
+4. **Zero-config against the mailbox's picker.** The messenger starts
+   without a settings dialog (2026-10-25, below), while [lnmsg: the
+   mailbox](lnmsg-mailbox.md) says a propagation node is never adopted
+   silently and asks for one keystroke (`lnmsg-mailbox.md:127`). Which one
+   gives way is Lew's decision and not made.
 
 ## Decision record
 
@@ -381,6 +386,12 @@ daemon a controller without a configured BLE interface.
 - 2026-10-23, Lew: BLE on by default in the shipped builds; the lab is
   protected by configuration and a host marker, not by a test build.
 - 2026-10-23, Lew: further server operators only with their consent.
+- 2026-10-25, Lew: zero-config is the rule for every device, not only
+  lnsd: switch on and it works for nine users in ten, radio and
+  networking preset on every medium; the tenth configures. A board ships
+  Mesh mode on the default PHY ([Operating modes](operating-modes.md),
+  [How far one firmware build reaches](board-support-scope.md)); the
+  messenger and the browser start without a settings dialog.
 
 ## See also
 

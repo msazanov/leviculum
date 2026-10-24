@@ -55,6 +55,10 @@ pick a side. The device settles it.
   from the schematic), which is what the MeshCore variant's 16 MB
   partition table configures. The "16 GB against 16 MB" question in
   #178 is therefore two different parts, not a contradiction.
+- 2026-10-25, on our unit: the flash is confirmed as the ZD25Q128
+  (see "What the unit on the rig confirmed"). The microSD card is not
+  reachable from outside, so the vendor firmware's SD update path is not
+  usable here.
 
 ### Display
 
@@ -148,6 +152,9 @@ schematic: see its section "Worked example: ThinkNode M9 (incomplete)"
 - A slide switch for on and off, a hidden RESET button, and BOOT on
   GPIO0 (the wiki). The slide switch is one more reason the one-button
   grammar does not apply (see "Decided").
+  Since 2026-10-25 stage one does apply the grammar, on one key (see
+  "Decided"); how its power-off row meets the slide switch is listed
+  under "Open".
 
 ### USB and the rest
 
@@ -157,6 +164,31 @@ schematic: see its section "Worked example: ThinkNode M9 (incomplete)"
   esptool-class tool. Both variants upload with `esptool`.
 - A buzzer behind a transistor, enabled on GPIO9 (the wiki; `PIN_BUZZER
   9` in both variants).
+- 2026-10-24, on our unit: the DTR/RTS auto-reset through the CH340K
+  works; esptool entered the ROM loader on the first try, three times,
+  with no button pressed.
+
+### What the unit on the rig confirmed
+
+Read on 2026-10-24 and 2026-10-25 on schneckenschreck, without writing a
+byte to the board (the reviewer's bench notes):
+
+- **The chip:** ESP32-S3 (QFN56), revision v0.2, 8 MB embedded PSRAM.
+  This confirms the device table.
+- **The flash:** manufacturer 0xba, device 0x4018, the Zetta ZD25Q128,
+  16 MB, read by `flash_id`. This confirms "Storage".
+- **The eFuses are open:** no secure boot, no flash encryption
+  (`SPI_BOOT_CRYPT_CNT` 0), download mode enabled. The whole flash reads
+  in plain text and writes back unchanged.
+- **The vendor firmware** is "Ripple UI / MeshOS" (meshcore.co.uk),
+  MeshOS 1.3.1 by its own strings, derived from MeshCore.
+- **The backup:** the full 16 MB image is
+  `thinknode-m9_e8f60ab888f4_meshos-vendor_2026-10-25.bin` under
+  `/home/lew/firmware-backups/` on schneckenschreck, with its partition
+  table, checksums and restore command in that directory's README. Step 2
+  of the bring-up plan is done.
+- **The board revision** (V1.0 or V1.1) is not among these facts. The
+  chip's revision is not the board's; that question stays under "Open".
 
 ## What changed since August
 
@@ -259,9 +291,20 @@ and `leviculum-esp/README.md` on that branch.
 - **A messenger**, described on [A messenger whose core runs
   anywhere](handheld-messenger.md). If the measurements on that page
   allow it, the M9 also gets **a vector map**.
-- **No one-button grammar.** [One button](one-button.md) is written for
-  boards with one button. With a keyboard, the mode switch, the status
-  and the position report are menu items, not press lengths.
+- **The one-button grammar in stage one, the menu grammar in stage
+  two.** [One button](one-button.md) applies in stage one, on one
+  designated key (2026-10-25, below). The menu grammar, in which the mode
+  switch, the status and the position report are menu items, is stage
+  two, with the keyboard UI. The position of 2026-10-21 was: "No
+  one-button grammar. One button is written for boards with one button.
+  With a keyboard, the mode switch, the status and the position report
+  are menu items, not press lengths."
+- **2026-10-25, Lew: stage one is a board like the others:** the same
+  status screen, one-button operation on one key, Mesh mode, propagation
+  node. Only when that is stable does the keyboard UI follow. The M9 also
+  carries the NomadNet browser, after the messenger. Concept work runs in
+  parallel: a messenger GUI concept for the desktop and for a 240x320
+  display.
 
 ## Bring-up plan
 
@@ -272,7 +315,7 @@ Nothing in this section is built yet.
    it (rule `feedback_schematic_is_the_hardware_reference`). The PA table
    and the DC-DC question above wait for it.
 2. **Save the factory firmware** before anything is written to the
-   flash.
+   flash. Done 2026-10-25 (see "What the unit on the rig confirmed").
 3. **Open a bring-up issue with a boot proof** before any radio work: the
    `[FW_BUILD]` banner the rig already reads from every board.
 4. **Give the rig an ESP32 side.** Nothing on the rig handles this chip
@@ -329,6 +372,8 @@ compared with the T1000-E's numbers.
   the public record" wait for it or for the device.
 - **Which revision the unit is**, read off the keyboard controller's
   I2C address at the first boot.
+- **Which key carries the one-button grammar in stage one**, and how its
+  8 s power-off row meets the slide switch (2026-10-25, "Decided").
 - **The GNSS receiver:** AG3352, ATGM336H or L76K, identified on the
   device. Resolved by the community port's bench (cedrivard/Leviculum, rp2350-m9-net, 2026-10) in favour of the AG3352 (see "What the
   community port measured").
@@ -353,7 +398,8 @@ runs.
 - [A messenger whose core runs anywhere](handheld-messenger.md), for
   what the M9 is for.
 - [Operating modes](operating-modes.md), for Mesh and Tracker.
-- [One button](one-button.md), the grammar the M9 does not use.
+- [One button](one-button.md), the grammar the M9 uses on one key in
+  stage one.
 - [How far one firmware build reaches](board-support-scope.md), for the
   ESP32 class and the LR11xx driver.
 - [Supported boards](../firmware/boards.md), for the T1000-E and the

@@ -61,6 +61,9 @@ not do on another.
 This grammar is for boards with one button. A board with a keyboard,
 such as the ThinkNode M9, makes the mode switch, the status and the
 position report menu items instead ([The ThinkNode M9](thinknode-m9.md)).
+That was the position of 2026-10-21. Since 2026-10-25 (Lew) the M9
+follows this grammar in its stage one, on one designated key; the
+keyboard grammar, with menu items, is its stage two.
 
 ## The feedback grammar
 

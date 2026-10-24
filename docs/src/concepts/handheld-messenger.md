@@ -20,6 +20,13 @@ the core/frontend cut and for the map, and what is open.
 - **Columba is the reference for scope and protocol behaviour**: what a
   messenger does and how it behaves on the wire. It is not a reference
   for how the code is designed.
+- **2026-10-25, Lew: a full-featured messenger.** It is of the class a
+  modern phone app sets, with mail-like features where LXMF carries them
+  (threads, replies, long-form, attachments). Columba remains the
+  reference for wire behaviour, not the ceiling for scope. One core, four
+  frontends: the terminal (`lnmsg`), a desktop GUI, the M9's display and
+  keyboard, later Android; the TUI and the GUI ship side by side on the
+  desktop.
 
 ## What exists today
 
@@ -77,12 +84,18 @@ It is `no_std + alloc` and tested on the host.
 **Frontends own only rendering and input:**
 
 - `lnmsg`'s terminal;
+- a desktop GUI (added 2026-10-25, see "Decided");
 - the M9's display and keyboard;
 - an Android app over the C surface.
 
 Nothing a frontend draws is decided inside it.
 
 ## The map
+
+2026-10-25, Lew: the map is a product of its own as well as a view
+inside the messenger: OpenStreetMap vector data, on the desktop and on
+the M9, showing received telemetry positions. The measurement below
+decides the embedded renderer, not whether the map exists.
 
 *The reviewer's proposal, not yet decided, with its open measurement.*
 
@@ -117,15 +130,39 @@ those numbers, not before.
 
 ## Order of work
 
-*The reviewer's proposal.*
+*Decided 2026-10-25 (Lew), with stage one inserted as step 3; until then
+the reviewer's proposal of 2026-10-21, steps 1, 2 and 4 to 7 below.*
 
 1. The community port is visible and reviewed.
 2. Bring-up and radio at the rig ([The ThinkNode M9](thinknode-m9.md),
    "Bring-up plan").
-3. The messenger core is taken out of `lnmsg` and tested on the host.
-4. The M9 frontend, with messages.
-5. Positions on a map.
-6. The map itself.
+3. Stage one: the M9 is a board like the others, with the same status
+   screen, one-button operation on one key, Mesh mode and a propagation
+   node ([The ThinkNode M9](thinknode-m9.md), "Decided"). The keyboard UI
+   follows only when that is stable. Concept work for the GUI, on the
+   desktop and on a 240x320 display, may run in parallel.
+4. The messenger core is taken out of `lnmsg` and tested on the host.
+5. The M9 frontend, with messages.
+6. Positions on a map.
+7. The map itself.
+
+## The browser
+
+2026-10-25, Lew: `lnomad` is the terminal frontend of a browser whose
+core (fetch, micron model, layout) also drives a desktop GUI and the
+M9's display. The `lxmf@` handoff (browser to messenger, [lnmsg:
+architecture](lnmsg-architecture.md)) becomes an in-process call once
+both share a shell. #219's core/frontend boundary ("What exists today")
+is the refactor this needs.
+
+## One interaction model
+
+2026-10-25, Lew: one interaction concept across the terminal, the
+desktop GUI and the M9: the same commands, the same names in the
+palette, the same delivery glyph table ([lnmsg: the user
+interface](lnmsg-ui.md), section 2); each frontend maps them to its
+input. Code is shared where it is the same problem (model, update,
+layout), not for its own sake (rendering, input).
 
 ## Open
 
@@ -134,12 +171,14 @@ those numbers, not before.
   third-party notices](licensing-and-notices.md)).
 - **How other nodes' positions age out of the map.**
 - **Whether the M9 frontend and the terminal share a text layout
-  engine.**
+  engine.** Since 2026-10-25 the rule for answering it is "One
+  interaction model" above: shared where it is the same problem.
 
 ## Not yet built
 
 All of it: the `no_std` core crate, a firmware frontend, LXMF on the C
-surface, the tile tool, the tile format, and the map view.
+surface, the tile tool, the tile format, and the map view. Since
+2026-10-25 also the desktop GUIs of the messenger and the browser.
 
 ## See also
 

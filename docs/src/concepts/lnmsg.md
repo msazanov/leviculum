@@ -2,6 +2,10 @@
 
 **Status: design record. All ten open questions are decided.**
 
+Since 2026-10-25 the terminal client is one frontend of the messenger
+described on [A messenger whose core runs anywhere](handheld-messenger.md);
+the record below is the terminal frontend's.
+
 This began as a draft for argument in which nothing was decided. Every
 significant decision was presented as options with trade-offs and a stated
 preference, and the preference was an opening position rather than a
