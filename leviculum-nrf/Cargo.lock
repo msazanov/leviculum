@@ -987,6 +987,7 @@ version = "0.1.0"
 dependencies = [
  "critical-section",
  "embassy-executor",
+ "embassy-futures",
  "embassy-sync 0.7.2",
  "embassy-time",
  "embedded-storage-async",
@@ -994,6 +995,8 @@ dependencies = [
  "leviculum-boot-trace",
  "leviculum-core",
  "leviculum-log-line",
+ "leviculum-pn-store",
+ "leviculum-record-log",
  "leviculum-time-floor",
  "rand_core 0.6.4",
 ]

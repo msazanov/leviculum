@@ -17,6 +17,7 @@ description = "The board firmware's orchestration stratum: the node loop and the
 embassy-executor = "0.9"
 embassy-time = "0.5"
 embassy-sync = "0.7"
+embassy-futures = "0.1"
 leviculum-core = { path = "../../leviculum-core", default-features = false }
 # The two ecosystem traits two seams ARE, rather than declare: Flash is the
 # async multiwrite NOR trait (the same 0.4 leviculum-nrf and nrf-softdevice
@@ -30,11 +31,15 @@ leviculum-log-line = { path = "../log-line" }
 leviculum-boot-trace = { path = "../boot-trace" }
 leviculum-boot-count = { path = "../boot-count" }
 leviculum-time-floor = { path = "../time-floor" }
+# The message store's policy half: the record log, and the propagation
+# store's tag map and operator-list operations it writes.
+leviculum-record-log = { path = "../record-log" }
+leviculum-pn-store = { path = "../pn-store" }
 
-# The executor and core are declared for what moves in later (the node loop
-# spawns tasks); nothing that has moved names them yet.
+# The executor is declared for what moves in later (the node loop spawns
+# tasks); nothing that has moved names it yet.
 [package.metadata.cargo-machete]
-ignored = ["embassy-executor", "leviculum-core"]
+ignored = ["embassy-executor"]
 
 # Host tests run the moved modules whole, log lines included: a log line
 # reads `embassy_time::Instant::now()` and signals the drain through a

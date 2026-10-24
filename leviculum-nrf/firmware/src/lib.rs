@@ -10,7 +10,7 @@
 //! host fake in `fakes` (test builds only), so the modules that arrive are
 //! host-tested like the policy crates. Step 1 moves the leaf modules that
 //! need no backend but a seam: [`log`], [`boot_count`], [`postmortem`],
-//! [`time_floor`].
+//! [`time_floor`], and the policy half of [`record_store`].
 //!
 //! What the crate may depend on is held by two guards rather than by this
 //! comment: `just firmware-no-hal` refuses a HAL or chip crate in its
@@ -24,6 +24,7 @@ extern crate alloc;
 pub mod boot_count;
 pub mod log;
 pub mod postmortem;
+pub mod record_store;
 pub mod seams;
 pub mod time_floor;
 
