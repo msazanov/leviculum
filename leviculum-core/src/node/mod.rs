@@ -44,6 +44,7 @@
 mod builder;
 mod event;
 mod link_management;
+pub mod remote_status;
 // Gated on `tracing`: the mvr captures structured tracing output to prove the
 // exact drop reason, so it needs the real `tracing`/`tracing-subscriber` crates
 // (absent under `--no-default-features`, e.g. the core-no-tracing CI gate).
