@@ -308,7 +308,7 @@ and `leviculum-esp/README.md` on that branch.
 
 ## Bring-up plan
 
-Nothing in this section is built yet.
+Nothing in this section is built yet, except where a dated note says otherwise.
 
 1. **The schematic first.** The hardware reference is Elecrow's schematic.
    Pinouts from other firmware and values probed on a bench do not replace
@@ -334,6 +334,43 @@ Nothing in this section is built yet.
    - The host toolchain pin stays at 1.97.1 until esp-rs ships a
      non-prerelease Xtensa toolchain of the same generation (decided
      2026-10-05, `scripts/install-ci.sh:378-382`, `rust-toolchain.toml:17`).
+   - **2026-10-25, how the rig should recognise an M9 (#473).** USB
+     cannot: the CH340K publishes `1a86:7522`, no manufacturer string and
+     no serial number, so it looks like every other CH340, and periculum's
+     board key (`ID_SERIAL_SHORT`) is empty. Three candidates were weighed.
+     The **by-id path** (`usb-1a86_USB_Serial-if00-port0`) names the
+     bridge model, not the unit: a second CH340 without a serial gets the
+     same link, and `by-path` holds only while the dock topology does. The
+     **chip MAC read through the ROM loader** (`espflash board-info`,
+     `esptool chip_id`) is the true identity and works under any firmware,
+     but every read pulls EN through the auto-program circuit, so every
+     discovery would reset the board and end whatever it was doing; it
+     would also reset any stranger's ESP32 modem that sits on a CH340, and
+     it cannot run while `lnflash --mux` holds the port. The **banner** is
+     what the rig reads from every other LNode: periculum already writes
+     `b` on the debug stream and waits for `[FW_BUILD]` (leviculum 911),
+     and opening the CH340 raises DTR and RTS together, which resets
+     nothing (measured 2026-10-24). **Recommended: the banner**, as a
+     confirm handshake on a profile keyed on `1a86:7522`, with the board's
+     key taken from the banner group rather than from USB. Its cost: the
+     M9 has to run our firmware, its banner group has to carry a unit
+     identity (the chip MAC on the `[BOARD]` line is the cheapest; the
+     community port prints `m9_version` there today), and a CH340 that
+     does not answer has to fall back to the RNode probe instead of being
+     dropped. The ROM-loader MAC stays the identity of the one path that
+     resets the board anyway: flashing.
+   - **2026-10-25, the flashing half (#473).** `lnflash/src/esp.rs` writes
+     an ESP32 through the ROM loader with `espflash` (preferred, it carries
+     its own stubs and takes the ELF) or `esptool`, with `--no-stub` when
+     the esptool package lacks the chip's stub. A catalogue entry states
+     the loader's facts as `[board.<name>.esp]`, `chip` and `baud`; the
+     M9's rate is 230400, because its CH340K lost bytes at 460800 and
+     921600. No M9 entry is in the catalogue yet: lnflash's control half
+     assumes the two-CDC composite (debug on if00, transport on if02), and
+     a control-only entry keyed on `1a86:7522` would point every control
+     session at every CH340 on the bus. The entry lands with the
+     single-port host link or with the first bundle that carries an M9
+     image.
 5. **Acceptance at the rig:**
    - the boot proof;
    - the display;

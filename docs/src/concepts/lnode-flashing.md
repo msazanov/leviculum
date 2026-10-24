@@ -625,7 +625,11 @@ physical double-tap, a DTR/RTS sequence on ESP32, BOOTSEL on RP2040.
 **Transport** — how do the bytes get in? The two above, and for
 `lnflash` today two of its own: `uf2-msc` copies a UF2 onto the
 bootloader's drive, `dfu-serial` sends Nordic's legacy serial DFU over the
-bootloader's CDC port (below, "The second transport: serial DFU").
+bootloader's CDC port (below, "The second transport: serial DFU"). A
+third, the ESP32 ROM's serial loader driven through `espflash` or
+`esptool`, is `lnflash/src/esp.rs` with its catalogue section
+`[board.<name>.esp]` (Codeberg #473); no board's flashing half uses it
+yet.
 
 **Verify** — did it take? Re-enumeration plus the `[FW_BUILD]` banner
 with a matching git SHA.
