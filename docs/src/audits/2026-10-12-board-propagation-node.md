@@ -506,7 +506,7 @@ Price to raise transfer to 8 KB: +8 000 B in `ROLE_BUDGET_BYTES`
 (two queued uploads) — three of the four endpoint links — plus a
 record format that spans pages (a design change, not a constant).
 Test: the derivation is pinned
-(`leviculum-nrf/heap-budget/tests/peaks.rs:784-788`).
+(`leviculum-nrf/heap-budget/tests/peaks.rs:810-814`).
 
 **D13 — the board announces every 5 minutes moving and hourly at
 rest; a stock node announces every 6 hours.** Board:

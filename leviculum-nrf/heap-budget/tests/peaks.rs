@@ -344,7 +344,7 @@ fn answer_of(bodies: &[usize], listed: usize, concurrent: usize) -> SyncBatch {
     let OfferReply::Send(wanted) = offer_reply(&response, &plan) else {
         panic!("a want is a send");
     };
-    plan_sync_batch(&store, &plan, &wanted, |_, encoded_len| {
+    plan_sync_batch(&store, &plan, &wanted, |_, encoded_len, _| {
         offer_response_fits(
             encoded_len,
             plan.ids.len(),
@@ -611,6 +611,32 @@ fn issue_388_the_smallest_inputs_that_leave_less_than_340_bytes() {
     );
 }
 
+/// The streamed offer walk (`PnStore::for_each_ordered` feeding an
+/// `OfferBuilder`, `Engine::on_sync_link_up` in `leviculum-nrf/src/pn.rs`)
+/// collects no `StoredMessage` list: what it holds is the offer's ids and
+/// the page order of the 64 KiB store region, 16 pages of `(u32, u32)`
+/// (`ordered_traversal_heap_bound`). So the planning step no longer grows
+/// with the store tail, and the 57-record tail that overdrew the collected
+/// walk leaves the same margin as an empty one.
+#[test]
+fn the_streamed_offer_walk_does_not_grow_with_the_store_tail() {
+    let two = 2 * ONE_UPLOAD;
+    let short = |margin: isize| margin < FIELD_FAILED_ALLOCATION_BYTES as isize;
+    const STORE_PAGES: usize = 0x10000 / 4096;
+    let page_order = STORE_PAGES * core::mem::size_of::<(u32, u32)>();
+    let streamed = store_tail_peak(0, 10) + page_order;
+    let collected = store_tail_peak(57, 10);
+    println!(
+        "ISSUE_388 op=store_tail path=streamed peak={streamed} margin={} \
+         collected_57_peak={collected} margin={}",
+        role_margin(streamed, two),
+        role_margin(collected, two)
+    );
+    assert_eq!(page_order, 128);
+    assert!(short(role_margin(collected, two)));
+    assert!(!short(role_margin(streamed, two)));
+}
+
 /// `too_large` is reserved at 8 and trimmed to 64 after the push, so it
 /// reaches 65 entries and doubles to 128: 4 KiB held for 2 KiB of ids, and
 /// 6 KiB at the growth.
@@ -702,8 +728,8 @@ fn the_streamed_answer_holds_only_what_the_model_counts() {
     };
     let mut scratch = vec![0u8; SERVE_RESOURCE_SDU];
     let (streamed, held) = measured_peak(|| {
-        let batch = plan_sync_batch(&store, &plan, &wanted, |_, _| true).unwrap();
-        let mut source = SyncSource::new(&store, &plan, wanted, batch, 1.0);
+        let batch = plan_sync_batch(&store, &plan, &wanted, |_, _, _| true).unwrap();
+        let mut source = SyncSource::new(&store, &store, &plan, wanted, batch, 1.0);
         let mut total = 0;
         loop {
             let n = source.read(&mut scratch).unwrap();
