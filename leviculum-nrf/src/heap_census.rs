@@ -391,7 +391,7 @@ const _: () = assert!(
     core::mem::size_of::<
         NodeCore<
             crate::rng::RawHwRng,
-            crate::clock::EmbassyClock,
+            leviculum_firmware::clock::EmbassyClock,
             leviculum_core::embedded_storage::EmbeddedStorage,
         >,
     >() == leviculum_heap_budget::NODE_BOX_BYTES

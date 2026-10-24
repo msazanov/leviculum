@@ -19,7 +19,7 @@ driver:
   clock; time is handed in. `now_ms()` is a timer, not a calendar —
   on the host it counts milliseconds since process start
   (`leviculum-std/src/clock.rs:45`), on the nRF52 it is the Embassy
-  timer (`leviculum-nrf/src/clock.rs:8`). Which wire fields need
+  timer (`leviculum-nrf/firmware/src/clock.rs:8`). Which wire fields need
   calendar time instead, and where a clockless node gets it, is the
   subject of [Time and Clocks](time-and-clocks.md).
 - **`Storage`** (`traits.rs:610`) — supplies persistence and lookup

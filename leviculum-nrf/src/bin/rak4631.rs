@@ -27,9 +27,9 @@ use leviculum_core::traits::Interface;
 use leviculum_core::transport::{dispatch_actions, Action};
 use leviculum_core::InterfaceId;
 
+use leviculum_firmware::clock::EmbassyClock;
 use leviculum_nrf::ble::{BleInterface, PeerEvent as BlePeerEvent};
 use leviculum_nrf::boards::rak4631;
-use leviculum_nrf::clock::EmbassyClock;
 use leviculum_nrf::interface::EmbeddedInterface;
 use leviculum_nrf::lora::LoRaInterface;
 use leviculum_nrf::{info, init_heap, log_critical};

@@ -180,7 +180,7 @@ Three traits decouple the core from your hardware. Their signatures are in the
 
 A monotonic millisecond clock. The whole trait is one required method. The
 nRF52 implementation wraps Embassy's timer
-(`leviculum-nrf/src/clock.rs`):
+(`leviculum-nrf/firmware/src/clock.rs`):
 
 ```rust
 use leviculum_core::traits::Clock;

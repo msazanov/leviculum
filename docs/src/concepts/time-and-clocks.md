@@ -413,7 +413,7 @@ also carries anchors *back*: see
 
 - **Cost:** none.
 - **Unavailable:** on MCUs without an RTC. The LNode's
-  `EmbassyClock` (`leviculum-nrf/src/clock.rs`) keeps the trait
+  `EmbassyClock` (`leviculum-nrf/firmware/src/clock.rs`) keeps the trait
   default of `None` — that is correct, not a gap: returning
   uptime-derived values from `wall_unix_secs` would be lying to the
   transport.
