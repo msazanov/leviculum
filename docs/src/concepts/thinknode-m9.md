@@ -290,7 +290,7 @@ Nothing in this section is built yet.
      step for either.
    - The host toolchain pin stays at 1.97.1 until esp-rs ships a
      non-prerelease Xtensa toolchain of the same generation (decided
-     2026-10-05, `scripts/install-ci.sh:376-380`, `rust-toolchain.toml:17`).
+     2026-10-05, `scripts/install-ci.sh:378-382`, `rust-toolchain.toml:17`).
 5. **Acceptance at the rig:**
    - the boot proof;
    - the display;

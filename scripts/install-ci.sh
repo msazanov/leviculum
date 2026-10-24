@@ -187,7 +187,9 @@ fi
 # btvirt reports it only at the scan-enable and advertise-enable instants, so
 # re-sightings measured the emulator's phase), then the local patch that
 # raises the controller ceiling to twenty-four (tag max-btdev-24, below),
-# builds emulator/btvirt,
+# then the local patch that keeps the event loop from freeing an fd its
+# current epoll batch still points at (tag deferred-fd-free: timer-fd churn
+# crashed btvirt), builds emulator/btvirt,
 # installs it, and writes the provenance sidecar the room prints as `origin=`. It is
 # idempotent and it warns rather than fails when a prerequisite (deb-src,
 # sudo, a compiler) is missing -- only the BLE bench needs any of this. A
