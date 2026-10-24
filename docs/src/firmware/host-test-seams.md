@@ -1023,10 +1023,10 @@ own issue, not a finding of this page.
 | 286 | `leviculum-nrf/src/remote_status.rs:61` | only RequestReceived events are considered | events | `lnode_remote_status` | 900 | 2/1 |  |
 | 287 | `leviculum-nrf/src/remote_status.rs:72` | answer only `/status` at our mgmt destination | path, mgmt dest | `lnode_remote_status` | 900 | 2/1 |  |
 | 288 | `leviculum-nrf/src/remote_status.rs:103` | LoRa bitrate only while the radio runs | running_config | `lnode_remote_status` | 900 | 2/1 |  |
-| 289 | `leviculum-nrf/src/remote_status.rs:120` | interface status is the core's online mirror | node | `lnode_remote_status` | 900 | 2/1 |  |
-| 290 | `leviculum-nrf/src/remote_status.rs:124` | clients reported for BLE only | iface id | `lnode_remote_status` | 900 | 2/1 |  |
-| 291 | `leviculum-nrf/src/remote_status.rs:140` | link count only with lstats, counted in place (`transport_link_count`) | include_lstats | `lnode_remote_status` | 900 | 2/1 |  |
-| 292 | `leviculum-nrf/src/remote_status.rs:158` | single-packet answer, PayloadTooLarge falls back to a resource, other errors drop | send result | `lnode_remote_status` | 900 | 2/1 |  |
+| 289 | `leviculum-nrf/src/remote_status.rs:119` | interface status is the core's online mirror | node | `lnode_remote_status` | 900 | 2/1 |  |
+| 290 | `leviculum-nrf/src/remote_status.rs:123` | clients reported for BLE only | iface id | `lnode_remote_status` | 900 | 2/1 |  |
+| 291 | `leviculum-nrf/src/remote_status.rs:139` | link count only with lstats, counted in place (`transport_link_count`) | include_lstats | `lnode_remote_status` | 900 | 2/1 |  |
+| 292 | `leviculum-nrf/src/remote_status.rs:157` | single-packet answer, PayloadTooLarge falls back to a resource, other errors drop | send result | `lnode_remote_status` | 900 | 2/1 |  |
 | 293 | `leviculum-nrf/src/mgmt.rs:205` | publish the new allow-list, then request the save | - | `lnode_remote_status` | 900 | 2/1 |  |
 | 294 | `leviculum-nrf/src/mgmt.rs:226` | revert the published list to the previous one | previous | none | - | - || no decision: the store that row 325's arm calls; when it is called (wired and Lost) is row 325 |
 | 295 | `leviculum-nrf/src/mgmt.rs:254` | no record reports None | STORED | `lnode_remote_status` | 900 | 2/1 |  |
@@ -1123,8 +1123,8 @@ own issue, not a finding of this page.
 | 379 | `leviculum-nrf/src/name.rs:170` | an undecodable boot name is empty | BOOT_GAP | none | - | - || no decision: glue, `NodeName::decode` falling back to the empty name, which `boot_gap_name` documents as "no BLE name on the air" |
 | 380 | `leviculum-nrf/src/name.rs:217` | runtime set or clear, then persist | name | none | - | - || no decision: glue, a store and a save request; the answer is `envelope::node_name_answer`, host-tested |
 | 381 | `leviculum-nrf/src/transport_stats.rs:114` | stats due: re-arm from now (no catch-up), close the speed windows, emit | next, now | `lnode_remote_status` | 900 | 2/1 |  |
-| 382 | `leviculum-nrf/src/iface_bytes.rs:171` | a window under 1 s keeps the previous speed | at_ms, now | `lnode_remote_status` | 900 | 2/1 |  |
-| 383 | `leviculum-nrf/src/iface_bytes.rs:197` | an out-of-range interface index is ignored (also :182) | iface | none | - | - || no decision: unreachable guard, every caller passes one of the three registered interface indices |
+| 382 | `leviculum-nrf/src/iface_bytes.rs:126` | a window under 1 s keeps the previous speed | at_ms, now | `lnode_remote_status` | 900 | 2/1 | `leviculum_core::interface_counters::tests::short_and_regressed_samples_preserve_window_and_live_reads` (the window is `InterfaceCounters::sample`, `leviculum-core/src/interface_counters.rs:59`, since 953) |
+| 383 | `leviculum-nrf/src/iface_bytes.rs:106` | an out-of-range interface index is ignored (also :99) | iface | none | - | - || no decision: unreachable guard, every caller passes one of the three registered interface indices |
 | 384 | `leviculum-nrf/src/identity.rs:117` | hashes not published yet answer None (REFUSE_BUSY) | HASHES | `lora_path_discovery_fast_mixed` | 90 | 2/1 |  |
 | 385 | `leviculum-nrf/src/identity.rs:62` | whether a PN hash exists (sizes the announce budget) | PN_HASH | `ble_pn_board_upload` | 1800 | 3/2 (>2) |  |
 | 386 | `leviculum-nrf/src/flash.rs:39` | an identity that does not encode returns Ok with nothing written | identity | none | - | - || no decision: unreachable, the board saves only an identity it generated or loaded with its private key, and `encode_identity` fails only without one |

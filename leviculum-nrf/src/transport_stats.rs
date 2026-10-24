@@ -119,7 +119,7 @@ impl Ticker {
         self.next = now + PERIOD;
         // One sampler, one cadence: the speed window a `/status` answer
         // reports is the window whose bytes were just printed.
-        crate::iface_bytes::sample_all(now.as_millis());
+        crate::iface_bytes::sample(now.as_millis());
         log(node);
     }
 }
@@ -159,13 +159,10 @@ where
         ),
     );
     for (id, name) in crate::iface_bytes::NAMES.iter().enumerate() {
-        let Some(counters) = crate::iface_bytes::counters(id) else {
-            continue;
-        };
-        let (rxb, txb) = counters.totals();
+        let traffic = crate::iface_bytes::snapshot(id);
         crate::log::log_fmt(
             "[TRANSPORT] ",
-            format_args!("iface={name} rxb={rxb} txb={txb}"),
+            format_args!("iface={name} rxb={} txb={}", traffic.rxb, traffic.txb),
         );
     }
 }

@@ -31,6 +31,13 @@
 //! `[TRANSPORT]` lines and the `/status` bundle, so the board's own
 //! instrument and its remote answer cannot disagree.
 //!
+//! # What lives here and what in core
+//!
+//! The arithmetic (saturating totals, the speed window and its floor) is
+//! [`leviculum_core::interface_counters`], shared with every carrier owner.
+//! This module keeps what is the board's: the interface table, the
+//! synchronisation, and the one sampler call per `[TRANSPORT]` emission.
+//!
 //! # Why a critical-section cell and not an atomic
 //!
 //! The counters are `u64` and are written from the medium tasks and read from
@@ -45,6 +52,7 @@ use core::cell::Cell;
 
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::blocking_mutex::Mutex;
+use leviculum_core::interface_counters::{InterfaceCounters, InterfaceTraffic};
 
 /// Interface index of the USB CDC serial interface (`InterfaceId(0)`).
 pub const SERIAL: usize = 0;
@@ -82,134 +90,41 @@ where
     }
 }
 
-/// Shortest window a speed may be derived from, in milliseconds.
-///
-/// A sample taken a few milliseconds after the last one divides a byte count
-/// by near-zero and reports a speed the medium never reached. Below this the
-/// previous window's figure stands, which is what Python's own decaying
-/// speed estimate does between updates.
-const MIN_WINDOW_MS: u64 = 1_000;
+static COUNTERS: [Mutex<CriticalSectionRawMutex, Cell<InterfaceCounters>>; IFACE_COUNT] =
+    [const { Mutex::new(Cell::new(InterfaceCounters::new())) }; IFACE_COUNT];
 
-/// Lifetime byte totals of one interface.
-#[derive(Clone, Copy)]
-struct Bytes {
-    rx: u64,
-    tx: u64,
-}
-
-/// The last speed window: where the totals stood when it opened, and the
-/// bytes/s it produced when it closed.
-#[derive(Clone, Copy)]
-struct Window {
-    rx: u64,
-    tx: u64,
-    at_ms: u64,
-    rxs: f64,
-    txs: f64,
-}
-
-/// One interface's counters.
-pub struct Counters {
-    live: Mutex<CriticalSectionRawMutex, Cell<Bytes>>,
-    window: Mutex<CriticalSectionRawMutex, Cell<Window>>,
-}
-
-impl Counters {
-    const fn new() -> Self {
-        Self {
-            live: Mutex::new(Cell::new(Bytes { rx: 0, tx: 0 })),
-            window: Mutex::new(Cell::new(Window {
-                rx: 0,
-                tx: 0,
-                at_ms: 0,
-                rxs: 0.0,
-                txs: 0.0,
-            })),
-        }
-    }
-
-    fn add_rx(&self, bytes: usize) {
-        self.live.lock(|c| {
-            let mut v = c.get();
-            v.rx = v.rx.saturating_add(bytes as u64);
-            c.set(v);
-        });
-    }
-
-    fn add_tx(&self, bytes: usize) {
-        self.live.lock(|c| {
-            let mut v = c.get();
-            v.tx = v.tx.saturating_add(bytes as u64);
-            c.set(v);
-        });
-    }
-
-    /// Lifetime `(rxb, txb)` since boot.
-    pub fn totals(&self) -> (u64, u64) {
-        self.live.lock(|c| {
-            let v = c.get();
-            (v.rx, v.tx)
+/// Read live totals and previous sampled speeds without changing the window.
+pub fn snapshot(iface: usize) -> InterfaceTraffic {
+    COUNTERS
+        .get(iface)
+        .map_or_else(InterfaceTraffic::default, |counter| {
+            counter.lock(|cell| cell.get().snapshot())
         })
-    }
+}
 
-    /// The last closed window's `(rxs, txs)` in bytes per second.
-    pub fn speeds(&self) -> (f64, f64) {
-        self.window.lock(|c| {
-            let w = c.get();
-            (w.rxs, w.txs)
-        })
-    }
-
-    /// Close the current speed window at `now_ms` and open the next one.
-    ///
-    /// Called from the one periodic emitter, so the window a `/status` answer
-    /// reports is the same window the `[TRANSPORT]` line printed.
-    fn sample(&self, now_ms: u64) {
-        let (rx, tx) = self.totals();
-        self.window.lock(|c| {
-            let prev = c.get();
-            let elapsed = now_ms.saturating_sub(prev.at_ms);
-            if elapsed < MIN_WINDOW_MS {
-                return;
-            }
-            let secs = elapsed as f64 / 1000.0;
-            c.set(Window {
-                rx,
-                tx,
-                at_ms: now_ms,
-                rxs: rx.saturating_sub(prev.rx) as f64 / secs,
-                txs: tx.saturating_sub(prev.tx) as f64 / secs,
-            });
+fn update(iface: usize, f: impl FnOnce(&mut InterfaceCounters)) {
+    if let Some(counter) = COUNTERS.get(iface) {
+        counter.lock(|cell| {
+            let mut value = cell.get();
+            f(&mut value);
+            cell.set(value);
         });
     }
 }
 
-static COUNTERS: [Counters; IFACE_COUNT] = [Counters::new(), Counters::new(), Counters::new()];
-
-/// The counters of one interface, or `None` for an index no binary registers.
-pub fn counters(iface: usize) -> Option<&'static Counters> {
-    COUNTERS.get(iface)
-}
-
-/// Count `bytes` received on `iface`. Out-of-range indices are ignored: a
-/// miscounted byte must not be able to panic a board.
+/// Count a completed receive ownership handoff.
 pub fn note_rx(iface: usize, bytes: usize) {
-    if let Some(c) = COUNTERS.get(iface) {
-        c.add_rx(bytes);
-    }
+    update(iface, |counter| counter.note_rx(bytes));
 }
 
-/// Count `bytes` accepted for transmission on `iface`.
+/// Count accepted unframed bytes, not framing, retries or media-off discards.
 pub fn note_tx(iface: usize, bytes: usize) {
-    if let Some(c) = COUNTERS.get(iface) {
-        c.add_tx(bytes);
-    }
+    update(iface, |counter| counter.note_tx(bytes));
 }
 
-/// Close every interface's speed window at `now_ms`. One call per
-/// `[TRANSPORT]` emission.
-pub fn sample_all(now_ms: u64) {
-    for c in &COUNTERS {
-        c.sample(now_ms);
+/// Sample once before the periodic transport log.
+pub fn sample(now_ms: u64) {
+    for iface in 0..IFACE_COUNT {
+        update(iface, |counter| counter.sample(now_ms));
     }
 }

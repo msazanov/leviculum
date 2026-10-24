@@ -109,8 +109,7 @@ where
     });
 
     let mut rows: [InterfaceStatus; IFACE_COUNT] = core::array::from_fn(|id| {
-        let (rxb, txb) = iface_bytes::counters(id).map_or((0, 0), |c| c.totals());
-        let (rxs, txs) = iface_bytes::counters(id).map_or((0.0, 0.0), |c| c.speeds());
+        let traffic = iface_bytes::snapshot(id);
         InterfaceStatus {
             name: NAMES[id],
             // The live mirror the main loop keeps (`set_interface_online`),
@@ -122,10 +121,10 @@ where
             // Only BLE has a notion of connected clients: the live link
             // count the main loop mirrors for path selection.
             clients: (id == iface_bytes::BLE).then(|| node.interface_peer_count(id) as u64),
-            rxb,
-            txb,
-            rxs,
-            txs,
+            rxb: traffic.rxb,
+            txb: traffic.txb,
+            rxs: traffic.rxs,
+            txs: traffic.txs,
             bitrate: None,
         }
     });
