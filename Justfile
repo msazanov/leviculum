@@ -2350,7 +2350,11 @@ firmware-no-chip-cfg:
 # the reach of every file in both trees is a checked-in census,
 # scripts/nrf-module-reach.txt, re-derived here and diffed. A move that does
 # not regenerate it goes red with the diff. The selftest first injects a false
-# reach into a copy and must see it refused. ~0.1 s.
+# reach into a copy and must see it refused. The second file (958),
+# scripts/nrf-seam-vocabulary.txt, is the same census one level finer: every
+# item a bind-crate file names below the bind line, code and doc comments
+# apart, so the seam steps are ordered against the calls they have to carry.
+# Same regeneration, same check, its own injected false line. ~0.1 s.
 [doc('Check the nRF module-reach census against the tree')]
 nrf-module-reach:
     @python3 scripts/nrf-module-reach.py --selftest
