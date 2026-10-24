@@ -24,12 +24,23 @@ leviculum-core = { path = "../../leviculum-core", default-features = false }
 embedded-storage-async = "0.4"
 rand_core = { version = "0.6", default-features = false }
 # Policy the moved modules call (stratum 1): the log line's shape, the
-# retained-RAM tail and post-mortem decisions, the boot record's page layout.
+# retained-RAM tail and post-mortem decisions, the boot record's page layout,
+# the calendar checkpoint ring.
 leviculum-log-line = { path = "../log-line" }
 leviculum-boot-trace = { path = "../boot-trace" }
 leviculum-boot-count = { path = "../boot-count" }
+leviculum-time-floor = { path = "../time-floor" }
 
 # The executor and core are declared for what moves in later (the node loop
 # spawns tasks); nothing that has moved names them yet.
 [package.metadata.cargo-machete]
 ignored = ["embassy-executor", "leviculum-core"]
+
+# Host tests run the moved modules whole, log lines included: a log line
+# reads `embassy_time::Instant::now()` and signals the drain through a
+# critical-section mutex, so the test build supplies the mock time driver
+# and the std critical section. Dev edges only, so no firmware image sees
+# either (the mock driver's 1 MHz tick would not agree with a board's).
+[dev-dependencies]
+embassy-time = { version = "0.5", features = ["mock-driver"] }
+critical-section = { version = "1", features = ["std"] }

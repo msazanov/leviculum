@@ -259,7 +259,7 @@ async fn main(spawner: Spawner) {
     // against it. Printed beside `[TIME_SOURCE]`, which says
     // `restored-floor` when the seam took it.
     let mut time_checkpoint =
-        leviculum_nrf::time_floor::Checkpoint::restore_at_boot(|v| node.restore_emission_floor(v));
+        leviculum_nrf::time_floor::restore_at_boot(|v| node.restore_emission_floor(v));
     if leviculum_nrf::set_time_source(node.time_source()) {
         log_critical!("[TIME_SOURCE] source={}", leviculum_nrf::time_source_str());
     }

@@ -547,6 +547,7 @@ dependencies = [
  "critical-section",
  "document-features",
  "embassy-time-driver",
+ "embassy-time-queue-utils",
  "embedded-hal 0.2.7",
  "embedded-hal 1.0.0",
  "embedded-hal-async",
@@ -984,6 +985,7 @@ version = "0.1.0"
 name = "leviculum-firmware"
 version = "0.1.0"
 dependencies = [
+ "critical-section",
  "embassy-executor",
  "embassy-sync 0.7.2",
  "embassy-time",
@@ -992,6 +994,7 @@ dependencies = [
  "leviculum-boot-trace",
  "leviculum-core",
  "leviculum-log-line",
+ "leviculum-time-floor",
  "rand_core 0.6.4",
 ]
 
