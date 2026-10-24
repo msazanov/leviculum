@@ -45,9 +45,9 @@ use leviculum_core::transport::dispatch_actions;
 use leviculum_core::InterfaceId;
 
 use leviculum_firmware::clock::{set_time_source, time_source_str, EmbassyClock};
+use leviculum_firmware::interface::EmbeddedInterface;
 use leviculum_nrf::ble::{BleInterface, PeerEvent as BlePeerEvent};
 use leviculum_nrf::boards::solarnode;
-use leviculum_nrf::interface::EmbeddedInterface;
 use leviculum_nrf::lora::LoRaInterface;
 use leviculum_nrf::{info, init_heap, log_critical};
 
@@ -95,6 +95,7 @@ async fn main(spawner: Spawner) {
     // the Pocket V2's (`bin/rak4631.rs`).
     leviculum_nrf::set_hardfault_led(0, 15, false);
     leviculum_nrf::set_irq_priorities();
+    leviculum_firmware::iface_bytes::set_names(&solarnode::IFACE_NAMES);
     // This binary wires a telemetry Reporter into its main loop; declared
     // before USB comes up so the serial task can never answer a telemetry
     // target ahead of the declaration (ack honesty, #236).
@@ -293,12 +294,12 @@ async fn main(spawner: Spawner) {
     }
 
     // Register all three interfaces
-    node.set_interface_name(0, alloc::string::String::from("serial_usb"));
+    node.set_interface_name(0, alloc::string::String::from(solarnode::IFACE_NAMES[0]));
     node.set_interface_hw_mtu(0, 564);
     // Codeberg #117: the client-facing serial interface must be Gateway so the
     // node discovers unknown paths on behalf of the host.
     node.set_interface_mode(0, leviculum_core::InterfaceMode::Gateway);
-    node.set_interface_name(1, alloc::string::String::from("lora_sx1262"));
+    node.set_interface_name(1, alloc::string::String::from(solarnode::IFACE_NAMES[1]));
     // Codeberg #390: 508, not 255. Three places already agree on 508 for a
     // LoRa carrier -- the reference (`RNS/Interfaces/RNodeInterface.py`,
     // `HW_MTU = 508`), our own RNode constant (`leviculum-core/src/rnode.rs`,
@@ -333,7 +334,7 @@ async fn main(spawner: Spawner) {
     // no airtime to the band the question came in on. Pinned in
     // `leviculum-core/src/node/mvr_board_radio_pathresolve.rs`.
     node.set_interface_mode(1, leviculum_core::InterfaceMode::Gateway);
-    node.set_interface_name(2, alloc::string::String::from("ble"));
+    node.set_interface_name(2, alloc::string::String::from(solarnode::IFACE_NAMES[2]));
     node.set_interface_hw_mtu(2, 564);
     node.set_interface_mode(2, leviculum_core::InterfaceMode::Gateway);
     // #854: the BLE interface serves every link but one

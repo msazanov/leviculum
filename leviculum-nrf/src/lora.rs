@@ -390,8 +390,8 @@ pub fn config_applied() -> &'static embassy_sync::signal::Signal<CriticalSection
     &CONFIG_APPLIED
 }
 
-/// Index of the LoRa carrier in the node's interface table — the one the
-/// binaries name [`crate::radio::IFACE_NAME`], and the one [`LoRaInterface::id`] answers
+/// Index of the LoRa carrier in the node's interface table — the entry of
+/// the board's `IFACE_NAMES` that names the radio, and the one [`LoRaInterface::id`] answers
 /// with. Spelled once so a caller that has to address this interface without
 /// holding it (the announce cap, #402) cannot address a different one.
 pub const IFACE_INDEX: usize = 1;
@@ -421,7 +421,7 @@ impl Interface for LoRaInterface {
         InterfaceId(IFACE_INDEX)
     }
     fn name(&self) -> &str {
-        crate::iface_bytes::NAMES[leviculum_firmware::iface_bytes::LORA]
+        leviculum_firmware::iface_bytes::names()[leviculum_firmware::iface_bytes::LORA]
     }
     fn mtu(&self) -> usize {
         500
@@ -875,7 +875,7 @@ impl AnnounceCap {
             "[ANNOUNCE_CAP] ",
             format_args!(
                 "iface={} bitrate_bps={} cap_pct={} holdoff_ms={} ref_bytes={} sf={} bw={} cr={} preamble={}",
-                crate::radio::IFACE_NAME,
+                leviculum_firmware::iface_bytes::names()[IFACE_INDEX],
                 bitrate_bps,
                 cap_pct,
                 holdoff_ms,

@@ -38,6 +38,9 @@ leviculum-pn-store = { path = "../pn-store" }
 # The board's interface table and its ingress-control flags, which the
 # byte counters' interface count is asserted against.
 leviculum-heap-budget = { path = "../heap-budget" }
+# The serial interface's queue depth and its drop and count decisions
+# (958: `interface` moved here, the USB writer that drains it did not).
+leviculum-usb-policy = { path = "../usb-policy" }
 
 # The executor is declared for what moves in later (the node loop spawns
 # tasks); nothing that has moved names it yet.

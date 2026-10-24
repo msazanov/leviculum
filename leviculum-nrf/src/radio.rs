@@ -54,7 +54,6 @@ pub type Spi = SpiDevice<'static, CriticalSectionRawMutex, Spim<'static>, Output
 
 pub use part::{
     bring_up, configure_lora, new, Error, FrontEnd, Radio, Ready, RxStatus, TxPowerProgram,
-    IFACE_NAME,
 };
 
 #[cfg(not(feature = "radio-lr11xx"))]
@@ -69,9 +68,6 @@ mod part {
 
     /// What `configure_lora` programmed for the transmit power.
     pub type TxPowerProgram = leviculum_core::sx126x::TxPowerProgram;
-
-    /// The interface name the board binaries register for this carrier.
-    pub const IFACE_NAME: &str = "lora_sx1262";
 
     /// What the SX1262 takes from the board beyond its bus and its three lines.
     pub struct FrontEnd {
@@ -142,9 +138,6 @@ mod part {
     /// The radio this build drives.
     pub type Radio =
         leviculum_lr11xx::Lr11xx<super::Spi, Output<'static>, Input<'static>, Input<'static>>;
-
-    /// The interface name the board binaries register for this carrier.
-    pub const IFACE_NAME: &str = "lora_lr11xx";
 
     /// The board's transceiver description: TCXO, RF switch, regulator, LF
     /// clock, PA table. Lives in the board file next to its `BoardConfig`

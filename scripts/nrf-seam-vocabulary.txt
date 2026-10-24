@@ -71,7 +71,6 @@ src/lora.rs: radio x1 doc x1
 src/lora.rs: radio::Error::Crc x1
 src/lora.rs: radio::Error::Timeout x1
 src/lora.rs: radio::FrontEnd x1
-src/lora.rs: radio::IFACE_NAME x1 doc x1
 src/lora.rs: radio::Radio x1
 src/lora.rs: radio::RxStatus x3
 src/lora.rs: radio::TxPowerProgram x1

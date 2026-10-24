@@ -361,6 +361,15 @@ pub const CONFIG: super::BoardConfig = super::BoardConfig {
     qspi_part: None,
 };
 
+/// The name each interface reports, indexed by interface id: what
+/// `/status` and `lnstatus` print per interface, what `[TRANSPORT]` lines
+/// and the node's interface table say. The LoRa entry names this board's
+/// radio, an LR1110, which is why the table is the board's and not the
+/// orchestration crate's. The binary hands it to
+/// `leviculum_firmware::iface_bytes::set_names` once at boot.
+pub const IFACE_NAMES: [&str; leviculum_firmware::iface_bytes::IFACE_COUNT] =
+    ["serial_usb", "lora_lr1110", "ble"];
+
 /// Panic-LED descriptor — port, pin, active-low flag — for `set_panic_led`.
 /// The one LED on P0.24, **active high**.
 pub const PANIC_LED_PORT: u8 = 0;

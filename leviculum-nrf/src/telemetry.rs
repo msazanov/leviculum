@@ -429,7 +429,7 @@ const PERSIST_CONFIRM_WITHIN: embassy_time::Duration = embassy_time::Duration::f
 /// explicit reconfiguration and the host that sent it is doing nothing
 /// but waiting for the answer; the same task already awaits the main loop
 /// on the incoming path; and the main loop pushes outbound serial frames
-/// with `try_send` (`crate::interface`), so the stall can cost a dropped
+/// with `try_send` (`leviculum_firmware::interface`), so the stall can cost a dropped
 /// frame on a full depth-8 channel but can never stall the node.
 pub async fn confirm(save: PendingSave) -> Persist {
     let deadline = embassy_time::Instant::now() + PERSIST_CONFIRM_WITHIN;

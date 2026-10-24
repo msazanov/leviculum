@@ -693,7 +693,7 @@ impl Interface for BleInterface {
         InterfaceId(2)
     }
     fn name(&self) -> &str {
-        crate::iface_bytes::NAMES[leviculum_firmware::iface_bytes::BLE]
+        leviculum_firmware::iface_bytes::names()[leviculum_firmware::iface_bytes::BLE]
     }
     fn mtu(&self) -> usize {
         INTERFACE_MTU

@@ -37,9 +37,11 @@
 //! [`leviculum_core::interface_counters`], shared with every carrier owner.
 //! This module keeps what is the board's: the interface table, the
 //! synchronisation, and the one sampler call per `[TRANSPORT]` emission.
-//! The names the interfaces report stay in the bind crate
-//! (`leviculum_nrf::iface_bytes::NAMES`), because the LoRa entry names the
-//! radio chip, and a chip name is a board decision this crate does not take.
+//! The names the interfaces report are read through [`names`], but each
+//! board file owns its table (`IFACE_NAMES` in `leviculum-nrf/src/boards/`)
+//! and the binary hands it over with [`set_names`] at boot: the LoRa entry
+//! names the radio, and a radio is a board decision this crate does not
+//! take (958).
 //!
 //! # Why a critical-section cell and not an atomic
 //!
@@ -85,6 +87,36 @@ where
     }
 }
 
+/// The table every reader sees before [`set_names`] ran. No reader runs
+/// that early (the binaries set the names before any task spawns); if one
+/// ever did, it would print this word rather than a plausible wrong name.
+const UNSET: [&str; IFACE_COUNT] = ["unset"; IFACE_COUNT];
+
+static NAMES: Mutex<CriticalSectionRawMutex, Cell<Option<&'static [&'static str; IFACE_COUNT]>>> =
+    Mutex::new(Cell::new(None));
+
+/// Set the name each interface reports, indexed by interface id: the
+/// board's `IFACE_NAMES`, once, at boot, before any task spawns.
+///
+/// A second call is a programming error: the names are what `/status`, the
+/// `[TRANSPORT]` lines and the node's interface table print, and a table
+/// replaced at run time would let them disagree. Debug builds assert it;
+/// a release build keeps the later table.
+pub fn set_names(names: &'static [&'static str; IFACE_COUNT]) {
+    let previous = NAMES.lock(|cell| cell.replace(Some(names)));
+    debug_assert!(previous.is_none(), "iface_bytes::set_names called twice");
+}
+
+/// The name each interface reports, indexed by interface id.
+///
+/// The one table: the `Interface::name()` impls read it, the `[TRANSPORT]`
+/// lines print it, and the `/status` bundle answers with it. A remote
+/// `rnstatus -R` and a debug capture therefore name the same carrier the same
+/// way, which is the whole point of feeding both from one set of counters.
+pub fn names() -> &'static [&'static str; IFACE_COUNT] {
+    NAMES.lock(|cell| cell.get()).unwrap_or(&UNSET)
+}
+
 static COUNTERS: [Mutex<CriticalSectionRawMutex, Cell<InterfaceCounters>>; IFACE_COUNT] =
     [const { Mutex::new(Cell::new(InterfaceCounters::new())) }; IFACE_COUNT];
 
@@ -121,5 +153,25 @@ pub fn note_tx(iface: usize, bytes: usize) {
 pub fn sample(now_ms: u64) {
     for iface in 0..IFACE_COUNT {
         update(iface, |counter| counter.sample(now_ms));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    extern crate std;
+
+    use super::*;
+
+    /// Unset reads as `unset`, a set table reads back as itself, and a second
+    /// set is refused in a debug build. One test, because the table is one
+    /// static.
+    #[test]
+    fn names_read_unset_then_the_board_table_and_a_second_set_is_refused() {
+        static BOARD: [&str; IFACE_COUNT] = ["serial_usb", "lora_board", "ble"];
+        assert_eq!(names(), &UNSET);
+        set_names(&BOARD);
+        assert_eq!(names()[LORA], "lora_board");
+        let again = std::panic::catch_unwind(|| set_names(&BOARD));
+        assert_eq!(again.is_err(), cfg!(debug_assertions));
     }
 }

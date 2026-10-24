@@ -158,7 +158,7 @@ where
             crate::lora::LORA_STALE_DROP_COUNT.load(core::sync::atomic::Ordering::Relaxed),
         ),
     );
-    for (id, name) in crate::iface_bytes::NAMES.iter().enumerate() {
+    for (id, name) in leviculum_firmware::iface_bytes::names().iter().enumerate() {
         let traffic = leviculum_firmware::iface_bytes::snapshot(id);
         crate::log::log_fmt(
             "[TRANSPORT] ",

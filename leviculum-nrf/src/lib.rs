@@ -73,8 +73,6 @@ pub mod flash;
 /// owners it walks, and every shipped build enables the SoftDevice.
 #[cfg(feature = "softdevice")]
 pub mod heap_census;
-pub mod iface_bytes;
-pub mod interface;
 /// The debug log moved to the orchestration stratum (#469 step 1); the
 /// path stays, so every `crate::log::` call site and the three macros read
 /// as they did. The CDC writer that drains its ring stays in [`usb`].

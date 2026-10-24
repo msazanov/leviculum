@@ -39,8 +39,7 @@ use leviculum_core::traits::{Clock, Storage};
 use leviculum_core::transport::TickOutput;
 use rand_core::CryptoRngCore;
 
-use crate::iface_bytes::NAMES;
-use leviculum_firmware::iface_bytes::{self, IFACE_COUNT};
+use leviculum_firmware::iface_bytes::{self, names, IFACE_COUNT};
 
 /// Answer every `/status` request in `events`, merging the sends into `out`.
 ///
@@ -109,7 +108,7 @@ where
     let mut rows: [InterfaceStatus; IFACE_COUNT] = core::array::from_fn(|id| {
         let traffic = iface_bytes::snapshot(id);
         InterfaceStatus {
-            name: NAMES[id],
+            name: names()[id],
             // The live mirror the main loop keeps (`set_interface_online`),
             // which is the same bool the core routes on: a status line that
             // said "Up" for a carrier the core refuses to route over would

@@ -21,10 +21,10 @@ today:
 - **The propagation node role** ([An LXMF propagation node on a
   board](propagation-node-on-a-board.md)). `pn.rs` is in every image: all
   four board binaries load its configuration at boot
-  (`leviculum-nrf/src/bin/t114.rs:635`,
-  `leviculum-nrf/src/bin/rak4631.rs:654`,
-  `leviculum-nrf/src/bin/solarnode.rs:721`,
-  `leviculum-nrf/src/bin/t1000e.rs:642`).
+  (`leviculum-nrf/src/bin/t114.rs:636`,
+  `leviculum-nrf/src/bin/rak4631.rs:655`,
+  `leviculum-nrf/src/bin/solarnode.rs:722`,
+  `leviculum-nrf/src/bin/t1000e.rs:640`).
 - **Telemetry at the announce cadence** ([Announce
   cadence](announce-cadence.md), [Telemetry](telemetry.md)).
 

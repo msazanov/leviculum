@@ -111,7 +111,7 @@ so both still send the announce to the whole interface.
 
 The firmware runs the same shape with fixed ids: serial 0, LoRa 1, BLE
 2, set once at startup (`set_interface_name`,
-`leviculum-nrf/src/bin/t114.rs:271`) and hardcoded in the interface
+`leviculum-nrf/src/bin/t114.rs:272`) and hardcoded in the interface
 itself (`BleInterface`, `leviculum-nrf/src/ble/mod.rs:662`), with the
 announce gate naming the same constant (`BLE_IFACE`,
 `leviculum-nrf/src/announce.rs:89`). The fan-out is a task that maps
@@ -122,11 +122,11 @@ the hint onto a per-link queue (`tx_fanout_task`,
 **The receive side is already peer-aware on both stacks.** The board
 reports which peer a packet came from and when a peer appears or
 disappears (`handle_packet_from_peer`,
-`leviculum-nrf/src/bin/t114.rs:1202`;
-`handle_interface_peer_lost`, `leviculum-nrf/src/bin/t114.rs:1230`;
-`handle_interface_peer_up`, `leviculum-nrf/src/bin/t114.rs:1242`; the
+`leviculum-nrf/src/bin/t114.rs:1203`;
+`handle_interface_peer_lost`, `leviculum-nrf/src/bin/t114.rs:1231`;
+`handle_interface_peer_up`, `leviculum-nrf/src/bin/t114.rs:1243`; the
 same three in `handle_packet_from_peer`,
-`leviculum-nrf/src/bin/rak4631.rs:1182`), the core stamps the peer onto
+`leviculum-nrf/src/bin/rak4631.rs:1183`), the core stamps the peer onto
 the path entry it installs, and a peer loss culls exactly the paths
 through it (`drop_paths_via_peer`,
 `leviculum-core/src/transport.rs:6079`). So the identity-shaped
