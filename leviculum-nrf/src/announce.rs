@@ -75,7 +75,7 @@ use alloc::vec::Vec;
 
 /// How many peer identities the rate limit remembers.
 ///
-/// `MAX_LINKS` is 4 on both boards (`crate::ble::MAX_LINKS`), so eight
+/// `MAX_LINKS` is 4 on both boards (`leviculum_heap_budget::MAX_LINKS`), so eight
 /// slots hold every currently linked peer plus four that have come and
 /// gone inside the fifteen-minute window. Overflowing it costs one extra
 /// announce on one link, never a wrongly withheld one — see

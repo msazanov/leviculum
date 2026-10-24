@@ -3,7 +3,7 @@
 # difference from the tree. One line per file under leviculum-nrf/src and
 # leviculum-nrf/firmware/src: path (lines): the `crate::<name>` names it
 # reaches, its own module excluded. See the script's header for the rules.
-src/announce.rs (587): baseboard ble button log lora pn telemetry
+src/announce.rs (587): baseboard button log lora pn telemetry
 src/banner.rs (56): log_critical media name
 src/baseboard.rs (133):
 src/battery.rs (441): baseboard log
@@ -40,7 +40,7 @@ src/media.rs (320): ble log telemetry
 src/mgmt.rs (259): log name telemetry usb
 src/motion.rs (177): baseboard log
 src/name.rs (259): ble log media telemetry
-src/pn.rs (3759): announce ble events feedback heap_census heap_stats log lora name record_store rng telemetry usb
+src/pn.rs (3759): announce events feedback heap_census heap_stats log lora name record_store rng telemetry usb
 src/qspi.rs (1188): log
 src/radio.rs (215): boards log lora sx1262
 src/radio_store.rs (197): boards flash log telemetry

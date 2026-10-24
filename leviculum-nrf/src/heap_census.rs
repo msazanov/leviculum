@@ -183,8 +183,8 @@ const _: () =
 ///
 /// * `links` — [`max_endpoint_links`], the ENFORCED cap on the
 ///   Reticulum link table (`NodeCoreBuilder::max_links`, #388 pass 3);
-/// * `ble_links` — [`crate::ble::MAX_LINKS`], every claimable BLE
-///   session, budgeted at [`crate::ble::SESSION_BUDGET_BYTES`]
+/// * `ble_links` — [`leviculum_heap_budget::MAX_LINKS`], every claimable BLE
+///   session, budgeted at [`leviculum_heap_budget::SESSION_BUDGET_BYTES`]
 ///   (`ble_session=`) each on top of the carrier-independent
 ///   `per_link=` (one boxed `Link` + the link table's node share);
 /// * `role` — [`crate::pn::ROLE_BUDGET_BYTES`], the `pn_*` worst case
@@ -227,9 +227,9 @@ const _: () =
 /// failing as a 340-byte allocation three days into a field run.
 pub fn log_budget_and_assert(node_box: usize) {
     let links = max_endpoint_links(node_box);
-    let ble_links = crate::ble::MAX_LINKS;
+    let ble_links = leviculum_heap_budget::MAX_LINKS;
     let per_link = budget_per_link();
-    let ble_session = crate::ble::SESSION_BUDGET_BYTES;
+    let ble_session = leviculum_heap_budget::SESSION_BUDGET_BYTES;
     let role = crate::pn::ROLE_BUDGET_BYTES;
     let reserve = budget_reserve();
     let total = budget_total(node_box);
@@ -320,7 +320,7 @@ where
     let (ble_slots, ble_chan) = crate::ble::session_census();
     let ble_sessions = ble_slots.iter().sum::<usize>() + ble_chan;
     // The per-slot keys below spell out exactly MAX_LINKS values.
-    const _: () = assert!(crate::ble::MAX_LINKS == 4);
+    const _: () = assert!(leviculum_heap_budget::MAX_LINKS == 4);
     let pn = engine
         .map(crate::pn::Engine::heap_census)
         .unwrap_or_default();

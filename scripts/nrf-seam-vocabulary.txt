@@ -10,7 +10,6 @@
 #   ble usb baseboard boards sx1262 radio qspi flash record_store radio_store rng led button feedback display st7789 battery gnss motion vext
 # See the script's header for the rules.
 src/announce.rs: baseboard::GNSS_FIX x1
-src/announce.rs: ble::MAX_LINKS doc x1
 src/announce.rs: button doc x1
 src/battery.rs: baseboard::BATTERY_STATE x1
 src/battery.rs: baseboard::BatteryState x1
@@ -54,8 +53,6 @@ src/gnss.rs: baseboard::MOTION_STATE x1 doc x1
 src/gnss.rs: boards::rak4631 doc x1
 src/gnss.rs: vext doc x2
 src/gnss.rs: vext::wait_ready x1
-src/heap_census.rs: ble::MAX_LINKS x2 doc x1
-src/heap_census.rs: ble::SESSION_BUDGET_BYTES x1 doc x1
 src/heap_census.rs: ble::defrag_held_bytes x1
 src/heap_census.rs: ble::session_census x1
 src/heap_census.rs: heap_stats x2
@@ -91,7 +88,6 @@ src/mgmt.rs: usb doc x1
 src/motion.rs: baseboard::MOTION_STATE x1 doc x1
 src/motion.rs: baseboard::Motion x1
 src/name.rs: ble::columba doc x1
-src/pn.rs: ble::MAX_LINKS x1
 src/pn.rs: feedback::notify x1 doc x1
 src/pn.rs: heap_stats x1
 src/pn.rs: record_store::PnOp x1

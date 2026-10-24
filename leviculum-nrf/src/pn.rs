@@ -999,7 +999,7 @@ impl Engine {
             sync_batch: None,
             outbound: None,
             validated_links: BTreeMap::new(),
-            inbound_transfers: Vec::with_capacity(crate::ble::MAX_LINKS),
+            inbound_transfers: Vec::with_capacity(leviculum_heap_budget::MAX_LINKS),
             advertised_hops: AdvertisedHops::default(),
             mining_peer: None,
             last_synced: None,
