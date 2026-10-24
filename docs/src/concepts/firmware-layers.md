@@ -239,13 +239,16 @@ non-test `expect` in the new crates.
 - `firmware-no-hal`: `cargo tree` of `leviculum-firmware` carries no
   `embassy-nrf`, `nrf-softdevice`, `esp-hal`, `embassy-rp`, `cyw43`,
   `trouble-host`; precedent `scripts/check-nrf-evt-max-size.sh:42`;
-  positive-controlled with an injected dependency.
+  positive-controlled with an injected dependency. Built in step 0:
+  `scripts/check-firmware-no-hal.sh`, in `just guards`.
 - `firmware-no-chip-cfg`: no `cfg(feature = "bsp-` and no chip name in
   stratum 2 sources. The existing source-invariant tests are
   root-workspace targets (`scripts/source-invariant-targets.txt`) and
   `leviculum-nrf` is excluded from the root (`Cargo.toml:59`); the new
   crate lives in the `leviculum-nrf` workspace, so this guard is a
-  script under `just guards`, not a root-workspace test.
+  script under `just guards`, not a root-workspace test. Built in step 0:
+  `scripts/check-firmware-no-chip.sh`; doc comments are exempt, so a
+  seam's doc can name its implementers.
 - The census unchanged, in both its forms: the compile-time size
   asserts in `lint-nrf` and `nrf-stack-frames` (no board), and the
   runtime `[HEAP_CENSUS]` line (a board). A step's commit message states
