@@ -52,8 +52,8 @@ tree:
   (`bin/sd-ram-probe.rs` 294, `bin/qspi-selftest.rs` 634).
 - **Orchestration modules** that know no chip but call each other
   freely: `announce.rs` 587, `mgmt.rs` 259, `media.rs` 320, `name.rs`
-  259, `events.rs` 261, `heap_census.rs` 395, `remote_status.rs` 171,
-  `transport_stats.rs` 171, `iface_bytes.rs` 215, `dispatch.rs` 49,
+  259, `events.rs` 261, `heap_census.rs` 395, `remote_status.rs` 138,
+  `transport_stats.rs` 168, `iface_bytes.rs` 130, `dispatch.rs` 49,
   `chtm.rs` 71, `identity.rs` 119, `clock.rs` 12, `banner.rs` 53,
   `boot_trace.rs` 119, `log.rs` 366, `telemetry.rs` 2062, `pn.rs` 3758,
   `lora.rs` 2705.
@@ -195,7 +195,7 @@ exists in `scripts/debug-witness.sh`; the masking is step 0's
 | 2 | the control-frame executor out of `usb.rs` into stratum 2 (the fork's `control.rs` as the template), `usb.rs` shrinks to the port | Control port | lnflash round trips over every control frame, the serial-mux host tests |
 | 3 | Transceiver as a message seam; `lora.rs` and `radio.rs` move; `sx1262.rs` and `leviculum-lr11xx` stay below | Transceiver | `t1000e_lora_pair`, `t1000e_rnode_pair` with the witness, the `#438` cells; `lora_pn_board_sync` only with its register standing stated (it is in periculum's `hardware/KNOWN-REDS.toml`, retired twice) |
 | 4 | BLE link as a message seam; the upward calls of `ble/mod.rs` and `columba.rs` become messages; `ble/` stays the SoftDevice backend | BLE link | the BLE room cells, `ble_pn_board_upload`, a two-phone session |
-| 5 | the pure modules move: `announce`, `mgmt`, `media`, `name`, `events`, `heap_census`, `remote_status`, `transport_stats`, `iface_bytes`, `dispatch`, `chtm`, `identity`, `banner`, `boot_trace`; `telemetry.rs` with the reporter moved into `leviculum-lxmf` behind a `reporter` feature, as the fork did | Sensors | the telemetry cells, 914's double press, `/status` round trips |
+| 5 | the pure modules move: `announce`, `mgmt`, `media`, `name`, `events`, `heap_census`, `remote_status`, `transport_stats`, `iface_bytes`, `dispatch`, `chtm`, `identity`, `banner`, `boot_trace`; `telemetry.rs` with the reporter moved into `leviculum-lxmf` behind a `reporter` feature, as the fork did. 953 took the fork's first two halves of this: the byte and speed arithmetic is `leviculum_core::interface_counters` and the `/status` matching and sending is `leviculum_core::node::remote_status`, so `iface_bytes` and `remote_status` keep only the board's table, locks and rows | Sensors | the telemetry cells, 914's double press, `/status` round trips |
 | 6 | `pn.rs` over Flash and the PN store | none new | `lora_pn_board_sync_t1000e`, the PN census, the stock-client cells |
 | 7 | **the node loop, once**: the four binaries' loops are diffed line by line; every difference is either a board fact (moves to the board file) or a behaviour decision (named in the report, decided before it is unified); the loop moves to stratum 2 and `bin/*.rs` become wiring | none new | every rig cell of the four boards, before and after; this is the riskiest step and gets its own order per binary |
 | 8 | the ESP32-S3 and RP2350 bind crates onto the extracted crate; `leviculum-fw` retires module by module, its backends adapted to the seams | none new | the fork's bench results re-run on the M9 and the RedBoard |
