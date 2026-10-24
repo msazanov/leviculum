@@ -261,7 +261,7 @@ pub fn movement_fix() -> Option<leviculum_telemetry_policy::Fix> {
 /// its first sentence.
 #[cfg(feature = "gnss")]
 fn gnss_reading() -> Option<leviculum_announce_policy::GnssReading> {
-    let fix = leviculum_firmware::baseboard::GNSS_FIX.try_get()?;
+    let fix = leviculum_firmware::board_state::GNSS_FIX.try_get()?;
     Some(leviculum_announce_policy::GnssReading {
         valid: fix.valid,
         latitude: fix.latitude,

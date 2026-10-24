@@ -1,4 +1,4 @@
-//! Shared state for RAK19026 baseboard peripherals (display + GNSS + battery).
+//! The board's sensor and UI state (display wake, GNSS, battery, motion).
 //!
 //! This module is the rendezvous point between the producer tasks (GNSS,
 //! battery) and the consumer task (display). It is compiled whenever any

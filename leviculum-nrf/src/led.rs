@@ -5,7 +5,7 @@
 //! - LED2 (blue,  P1.04)  — RX activity indicator
 //!
 //! Both are driven from `embassy_sync::signal::Signal`s in
-//! `leviculum_firmware::baseboard`. The LoRa task raises a signal at every successful
+//! `leviculum_firmware::board_state`. The LoRa task raises a signal at every successful
 //! TX-done / RX-frame-reassembly, and the LED's player converts each
 //! signal into an ~80 ms pulse with a forced 30 ms off period. The off
 //! window matters: a burst of completions inside one 80 ms span would
@@ -35,7 +35,7 @@ pub fn init(spawner: &Spawner, tx_led: Output<'static>, rx_led: Output<'static>)
         tx_led,
         true,
         Sink::Led,
-        Some(&leviculum_firmware::baseboard::LORA_TX_FLASH),
+        Some(&leviculum_firmware::board_state::LORA_TX_FLASH),
     );
     crate::log::log_fmt("[LED] ", format_args!("rx_blink_task alive"));
     spawn_led(
@@ -43,6 +43,6 @@ pub fn init(spawner: &Spawner, tx_led: Output<'static>, rx_led: Output<'static>)
         rx_led,
         true,
         Sink::Notify,
-        Some(&leviculum_firmware::baseboard::LORA_RX_FLASH),
+        Some(&leviculum_firmware::board_state::LORA_RX_FLASH),
     );
 }

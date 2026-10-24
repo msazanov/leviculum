@@ -71,7 +71,7 @@
 //! ([`crate::vext`]).
 //!
 //! **Sleep while still** (#457 step two). On a board that publishes a
-//! motion state ([`leviculum_firmware::baseboard::MOTION_STATE`], the T1000-E's
+//! motion state ([`leviculum_firmware::board_state::MOTION_STATE`], the T1000-E's
 //! accelerometer) and whose receiver has a power enable, the task selects
 //! between its UART read and the motion watch, and the pure
 //! [`leviculum_gnss_presence::PowerGate`] decides: `still` sleeps the
@@ -111,7 +111,7 @@ use embassy_time::{with_timeout, Duration, Instant, Timer};
 use leviculum_gnss_init::{AirohaInit, L76kInit, ModuleInit, UbxInit};
 use leviculum_gnss_presence::{Output, Power, PowerEdge, PowerGate, Presence, PresenceMachine};
 
-use leviculum_firmware::baseboard::{GnssFix, GnssPresenceState, GNSS_FIX, GNSS_PRESENCE};
+use leviculum_firmware::board_state::{GnssFix, GnssPresenceState, GNSS_FIX, GNSS_PRESENCE};
 
 /// Which receiver is on the other end of the UART, and therefore which
 /// command language the one-shot boot init speaks. The board knows; the
@@ -369,7 +369,7 @@ pub async fn gnss_task(wiring: GnssWiring) {
     // part did not answer) the watch never gets a value, the gate never
     // leaves `Awake`, and this task runs exactly as it did before.
     let mut motion_rx = if power_enable.is_some() {
-        leviculum_firmware::baseboard::MOTION_STATE.receiver()
+        leviculum_firmware::board_state::MOTION_STATE.receiver()
     } else {
         None
     };

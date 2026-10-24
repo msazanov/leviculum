@@ -18,7 +18,7 @@
 //! [`clock`], the interface names become a table the bind crate sets once
 //! at boot ([`iface_bytes::set_names`]), and the serial [`interface`]
 //! arrives over it. In 959 the board state the sensor tasks feed and the
-//! orchestration reads moves whole (`baseboard`, behind the capability
+//! orchestration reads moves whole (`board_state`, behind the capability
 //! features; the tasks stay below), and the orchestration draws its
 //! randomness through [`entropy::Entropy`], over the fill function the bind
 //! crate registers once at boot ([`entropy::set_source`]).
@@ -33,7 +33,7 @@
 extern crate alloc;
 
 #[cfg(any(feature = "display", feature = "gnss", feature = "battery"))]
-pub mod baseboard;
+pub mod board_state;
 pub mod boot_count;
 pub mod boot_trace;
 pub mod clock;

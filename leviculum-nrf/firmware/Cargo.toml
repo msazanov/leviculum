@@ -42,7 +42,7 @@ leviculum-heap-budget = { path = "../heap-budget" }
 # (958: `interface` moved here, the USB writer that drains it did not).
 leviculum-usb-policy = { path = "../usb-policy" }
 # The board state the sensor tasks feed and the orchestration reads (959,
-# `baseboard`): the GNSS fix and presence types it re-exports.
+# `board_state`): the GNSS fix and presence types it re-exports.
 leviculum-gnss-time = { path = "../gnss-time", optional = true }
 leviculum-gnss-presence = { path = "../gnss-presence", optional = true }
 

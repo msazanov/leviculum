@@ -118,7 +118,7 @@ fn raise(sink: Sink, pattern: Pattern) {
 /// the rig tells "quiet by rule" from "the hook did not fire".
 pub fn status() {
     #[cfg(feature = "battery")]
-    let pct = leviculum_firmware::baseboard::BATTERY_STATE
+    let pct = leviculum_firmware::board_state::BATTERY_STATE
         .try_get()
         .and_then(|state| state.percent);
     #[cfg(not(feature = "battery"))]

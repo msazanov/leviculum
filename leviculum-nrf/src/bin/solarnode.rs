@@ -761,7 +761,7 @@ async fn main(spawner: Spawner) {
     // for position only, never as a clock.
     #[cfg(feature = "gnss")]
     let mut gnss_rx = {
-        let rx = leviculum_firmware::baseboard::GNSS_FIX.receiver();
+        let rx = leviculum_firmware::board_state::GNSS_FIX.receiver();
         if rx.is_none() {
             log_critical!("[TIME_SEED_REFUSED] source=gnss reason=watch_capacity");
         }
@@ -1437,7 +1437,7 @@ where
     let has_fix = false;
     #[cfg(feature = "gnss")]
     let has_fix = {
-        use leviculum_firmware::baseboard::{GnssPresence, GNSS_FIX, GNSS_PRESENCE};
+        use leviculum_firmware::board_state::{GnssPresence, GNSS_FIX, GNSS_PRESENCE};
         if let Some(fix) = GNSS_FIX.try_get() {
             readings.latitude = fix.latitude;
             readings.longitude = fix.longitude;
@@ -1457,7 +1457,7 @@ where
         // Option since #380, and a pack whose voltage its classification
         // cannot explain sends no battery sensor at all rather than a
         // number a collector cannot check.
-        readings.battery_percent = leviculum_firmware::baseboard::BATTERY_STATE
+        readings.battery_percent = leviculum_firmware::board_state::BATTERY_STATE
             .try_get()
             .and_then(|b| b.percent);
     }

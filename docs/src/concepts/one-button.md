@@ -260,7 +260,7 @@ built:
   press (`DisplayWake`, `leviculum-nrf/screen/src/power.rs:33`). The
   display task owns the state and the minute
   (`leviculum-nrf/src/display.rs:202`); the button task only reports the
-  press (`leviculum-nrf/src/button.rs:149`, into `leviculum_firmware::baseboard::DISPLAY_WAKE`).
+  press (`leviculum-nrf/src/button.rs:149`, into `leviculum_firmware::board_state::DISPLAY_WAKE`).
 - **Announce moved to the double press.** Before, a short press that
   passed the rate limit announced. Now the double press does, under the
   same 30 s limit (`leviculum-nrf/announce-policy/src/button.rs:489`),

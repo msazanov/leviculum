@@ -503,7 +503,7 @@ board. Exactly one BSP feature must be enabled per build; a
 | `bsp-rak4631` | RAK4631 BSP (+ SoftDevice BLE) | `leviculum-nrf/Cargo.toml:378` |
 | `bsp-solarnode` | SenseCAP Solar Node P1-Pro BSP (+ SoftDevice BLE + battery + GNSS). No display | `leviculum-nrf/Cargo.toml:415` |
 | `bsp-t1000e` | SenseCAP T1000-E BSP (+ SoftDevice BLE, GNSS, battery, motion), on the LR11xx driver. No display | `leviculum-nrf/Cargo.toml:425` |
-| `display` | SSD1306 OLED, probed at run time; forwards to `leviculum-firmware/display`, which compiles the display's signals in `leviculum_firmware::baseboard` | `leviculum-nrf/Cargo.toml:438` |
+| `display` | SSD1306 OLED, probed at run time; forwards to `leviculum-firmware/display`, which compiles the display's signals in `leviculum_firmware::board_state` | `leviculum-nrf/Cargo.toml:438` |
 | `gnss` | NMEA0183 GNSS (ZOE-M8Q on the V2 baseboard, L76K on the T114 and the Solar Node, AG3335 on the T1000-E); forwards to `leviculum-firmware/gnss` for the fix, presence and motion watches | `leviculum-nrf/Cargo.toml:439` |
 | `battery` | pack-voltage monitor: the `BATTERY` log line, the panel's voltage and, on the V2, the T114 and the T1000-E, the telemetry field. Unconditional under `bsp-t114` (the divider is on every T114), under `bsp-solarnode` (it is on the XIAO module) and under `bsp-t1000e` (part of the product), opt-in on the V2 via `rak-baseboard`; forwards to `leviculum-firmware/battery` for the battery snapshot | `leviculum-nrf/Cargo.toml:446` |
 | `motion` | the QMA6100P accelerometer as a `MOTION` moving or still line (#457); T1000-E only, unconditional under `bsp-t1000e` | `leviculum-nrf/Cargo.toml:447` |

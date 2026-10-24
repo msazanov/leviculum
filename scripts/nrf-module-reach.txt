@@ -52,7 +52,7 @@ src/time_floor.rs (74): boot_count flash radio_store record_store
 src/transport_stats.rs (168): log lora
 src/usb.rs (1464): banner ble boards chtm heap_census log lora media mgmt name pn postmortem_query radio_store record_store reset_stack_watermark telemetry
 src/vext.rs (85): boards log
-firmware/src/baseboard.rs (133):
+firmware/src/board_state.rs (133):
 firmware/src/boot_count.rs (203): fakes log seams
 firmware/src/boot_trace.rs (120): log
 firmware/src/clock.rs (104):

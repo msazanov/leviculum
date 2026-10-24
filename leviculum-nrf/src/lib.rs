@@ -241,7 +241,7 @@ pub fn log_reset_reason(raw: u32) {
 
 // RAK19026 baseboard peripherals — each gated on its own feature so the
 // bare nRF52840 + SX1262 build (T114, RAK4631 module without baseboard)
-// stays unchanged. The state they share is `leviculum_firmware::baseboard`
+// stays unchanged. The state they share is `leviculum_firmware::board_state`
 // (959); these are the tasks that feed and read it.
 #[cfg(feature = "battery")]
 pub mod battery;
