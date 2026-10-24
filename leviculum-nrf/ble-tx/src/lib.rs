@@ -81,7 +81,8 @@ pub use gatt_bytes::{
 };
 pub use hold::TxHold;
 pub use link_down::{
-    disconnect_settle_ms, DisconnectReason, LinkDownLine, DISCONNECT_SETTLE_MARGIN_MS,
+    disconnect_settle_ms, forget_deadline_ms, DisconnectReason, LinkDownLine, LinkForgottenLine,
+    DISCONNECT_SETTLE_MARGIN_MS, MAX_SUPERVISION_TIMEOUT_MS,
 };
 pub use peer::{
     addr_value, parse_peer_advertisement, should_initiate, ConnectDecision, PeerAdvertisement,

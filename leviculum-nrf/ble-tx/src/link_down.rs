@@ -105,6 +105,38 @@ pub const fn disconnect_settle_ms(params: ConnParams) -> u64 {
     params.timeout_ms() as u64 + DISCONNECT_SETTLE_MARGIN_MS
 }
 
+/// The largest supervision timeout the Bluetooth spec allows, 3200
+/// units of 10 ms.
+pub const MAX_SUPERVISION_TIMEOUT_MS: u64 = 32_000;
+
+/// How long a teardown keeps the `Connection` after its first
+/// `disconnect()` before it gives the handle up without dropping it
+/// (#472).
+///
+/// Dropping a `Connection` while the SoftDevice is still disconnecting
+/// is what panicked the boards (upstream nrf-softdevice unwraps the
+/// drop's own `disconnect()`). The pinned fork swallows that error;
+/// this bound is the second line of defence: the teardown holds the
+/// handle until the disconnect event has landed, and when it never
+/// lands it leaks the handle instead of dropping it, a lost
+/// connection slot rather than a reset.
+///
+/// The longest supervision timeout plus [`DISCONNECT_SETTLE_MARGIN_MS`],
+/// so it covers every link whatever it negotiated; and never less than
+/// [`disconnect_settle_ms`] of the link at hand, so the `BLE_LINK_DOWN`
+/// line, written at the settle bound, always comes first, even for a
+/// parameter set read off a confused SoftDevice outside the legal range.
+#[must_use]
+pub const fn forget_deadline_ms(params: ConnParams) -> u64 {
+    let floor = MAX_SUPERVISION_TIMEOUT_MS + DISCONNECT_SETTLE_MARGIN_MS;
+    let settle = disconnect_settle_ms(params);
+    if settle > floor {
+        settle
+    } else {
+        floor
+    }
+}
+
 /// The `BLE_LINK_DOWN` line's body, byte-exact; the log layer appends
 /// the `t=` stamp.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,6 +163,35 @@ impl fmt::Display for LinkDownLine {
             None => f.write_str("none")?,
         }
         write!(f, " reason={}", self.reason)
+    }
+}
+
+/// The `BLE_LINK_FORGOTTEN` line's body, byte-exact; the log layer
+/// appends the `t=` stamp.
+///
+/// Written when a teardown gave a `Connection` up without dropping it,
+/// because no disconnect event arrived within [`forget_deadline_ms`]
+/// (#472). The connection slot it held is leaked for the rest of the
+/// boot; this line is the only way a capture can see that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LinkForgottenLine {
+    pub role: LinkRole,
+    /// The handle the link's `BLE_LINK_DOWN` line carried.
+    pub conn: u16,
+    /// Milliseconds from the teardown's first `disconnect()` to the
+    /// give-up.
+    pub waited_ms: u64,
+}
+
+impl fmt::Display for LinkForgottenLine {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "BLE_LINK_FORGOTTEN role={} conn={} waited_ms={}",
+            self.role.as_str(),
+            self.conn,
+            self.waited_ms
+        )
     }
 }
 
@@ -231,5 +292,67 @@ mod tests {
             timeout_units: 3200,
         };
         assert_eq!(disconnect_settle_ms(max), 33_000);
+    }
+
+    #[test]
+    fn forgotten_line() {
+        let line = LinkForgottenLine {
+            role: LinkRole::Central,
+            conn: 1,
+            waited_ms: 33_010,
+        };
+        assert_eq!(
+            line.to_string(),
+            "BLE_LINK_FORGOTTEN role=central conn=1 waited_ms=33010"
+        );
+    }
+
+    /// The handle outlives the `BLE_LINK_DOWN` line on every link: the
+    /// two fixtures above, every legal timeout, and the largest value
+    /// the field can hold.
+    #[test]
+    fn forget_deadline_is_never_before_the_settle_bound() {
+        let fixtures = [
+            ConnParams {
+                interval_units: 24,
+                latency: 0,
+                timeout_units: 500,
+            },
+            ConnParams {
+                interval_units: 3200,
+                latency: 0,
+                timeout_units: 3200,
+            },
+        ];
+        let sweep = (10..=3200u16)
+            .chain([u16::MAX])
+            .map(|timeout_units| ConnParams {
+                interval_units: 6,
+                latency: 0,
+                timeout_units,
+            });
+        for params in fixtures.into_iter().chain(sweep) {
+            assert!(
+                forget_deadline_ms(params) >= disconnect_settle_ms(params),
+                "{params:?}: forget {} < settle {}",
+                forget_deadline_ms(params),
+                disconnect_settle_ms(params)
+            );
+        }
+    }
+
+    /// One maximum supervision timeout plus the margin, whatever the
+    /// link negotiated: 33 s for the phone's 5 s link and for the 32 s
+    /// one.
+    #[test]
+    fn forget_deadline_is_the_longest_timeout_plus_margin() {
+        for timeout_units in [10, 500, 3200] {
+            let params = ConnParams {
+                interval_units: 24,
+                latency: 0,
+                timeout_units,
+            };
+            assert_eq!(forget_deadline_ms(params), 33_000, "{timeout_units}");
+        }
     }
 }
