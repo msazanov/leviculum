@@ -896,6 +896,10 @@ impl Storage for EmbeddedStorage {
             .collect()
     }
 
+    fn link_entry_count(&self) -> usize {
+        self.link_table.len()
+    }
+
     // Announce Table
     fn get_announce(&self, dest_hash: &[u8; TRUNCATED_HASHBYTES]) -> Option<&AnnounceEntry> {
         self.announce_table.get(dest_hash)

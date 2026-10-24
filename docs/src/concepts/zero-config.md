@@ -64,7 +64,7 @@ transport off, a shared instance named `default`, log level 4,
   builds any (`leviculum-std/src/driver/mod.rs:2334`), and once
   `CONFIG source=file|default path=` (`leviculum-cli/src/lnsd.rs:195`).
 - `interface_stats` serves the origin as the `origin` key
-  (`leviculum-std/src/rpc/handlers.rs:675`), and `lnstatus` prints it,
+  (`leviculum-std/src/rpc/handlers.rs:672`), and `lnstatus` prints it,
   behind `--origin`, as an `Origin` line under `Status`. Without the flag
   the render is rnstatus's, which the drop-in parity tests pin
   (`leviculum-std/tests/rnsd_interop/status_parity_tests.rs`); rnsd serves

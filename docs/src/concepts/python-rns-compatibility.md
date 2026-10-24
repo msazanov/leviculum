@@ -118,13 +118,13 @@ grounds: an application pinned it, it was used within
 `UNUSED_DESTINATION_LINGER` — 6 minutes
 (`reference/Reticulum/RNS/Identity.py:349-352`, the two timeouts at
 `Transport.py:91-92`). We implement the first two and not the third
-(`leviculum-core/src/memory_storage.rs:1374`): our announce cache stores
+(`leviculum-core/src/memory_storage.rs:1378`): our announce cache stores
 the raw announce, not the moment we heard it, so there is no age to
 compare against. The third arm only ever protects a destination nothing
 has asked about, so dropping it a few minutes early costs a path request
 rather than a fact, and clause 3 of the rule is satisfied by the smaller
 resident set. `EmbeddedStorage` goes one further and implements only the
-first (`leviculum-core/src/embedded_storage.rs:1109`), because a board
+first (`leviculum-core/src/embedded_storage.rs:1113`), because a board
 tracks no use-state at all.
 
 ### Pinned deviation: ingress-control default on dial-out links

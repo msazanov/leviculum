@@ -137,7 +137,7 @@ where
         transport_id: Some(&transport_id),
         transport_uptime: embassy_time::Instant::now().as_millis() as f64 / 1000.0,
     };
-    let link_count = include_lstats.then(|| node.transport_link_table_entries().len() as u64);
+    let link_count = include_lstats.then(|| node.transport_link_count() as u64);
     encode_status_response(&bundle, link_count)
 }
 

@@ -4031,6 +4031,11 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.transport.transport_link_table_entries()
     }
 
+    /// Count relayed links, not endpoint links, without allocating export rows.
+    pub fn transport_link_count(&self) -> usize {
+        self.transport.storage().link_entry_count()
+    }
+
     /// Return all announce-table entries (announces held for rebroadcast).
     pub fn announce_table_entries(&self) -> Vec<crate::transport::AnnounceTableExport> {
         self.transport.announce_table_entries()

@@ -1025,7 +1025,7 @@ own issue, not a finding of this page.
 | 288 | `leviculum-nrf/src/remote_status.rs:103` | LoRa bitrate only while the radio runs | running_config | `lnode_remote_status` | 900 | 2/1 |  |
 | 289 | `leviculum-nrf/src/remote_status.rs:120` | interface status is the core's online mirror | node | `lnode_remote_status` | 900 | 2/1 |  |
 | 290 | `leviculum-nrf/src/remote_status.rs:124` | clients reported for BLE only | iface id | `lnode_remote_status` | 900 | 2/1 |  |
-| 291 | `leviculum-nrf/src/remote_status.rs:140` | link count only with lstats | include_lstats | `lnode_remote_status` | 900 | 2/1 |  |
+| 291 | `leviculum-nrf/src/remote_status.rs:140` | link count only with lstats, counted in place (`transport_link_count`) | include_lstats | `lnode_remote_status` | 900 | 2/1 |  |
 | 292 | `leviculum-nrf/src/remote_status.rs:158` | single-packet answer, PayloadTooLarge falls back to a resource, other errors drop | send result | `lnode_remote_status` | 900 | 2/1 |  |
 | 293 | `leviculum-nrf/src/mgmt.rs:205` | publish the new allow-list, then request the save | - | `lnode_remote_status` | 900 | 2/1 |  |
 | 294 | `leviculum-nrf/src/mgmt.rs:226` | revert the published list to the previous one | previous | none | - | - || no decision: the store that row 325's arm calls; when it is called (wired and Lost) is row 325 |

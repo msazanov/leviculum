@@ -299,6 +299,14 @@ impl Storage {
         Ok(())
     }
 
+    /// Count validated relay entries without copying the relay table for RPC.
+    pub(crate) fn active_link_entry_count(&self) -> usize {
+        self.inner
+            .link_entry_values()
+            .filter(|entry| entry.validated)
+            .count()
+    }
+
     // Ratchet disk persistence
     // load_known_ratchets_from_disk and load_dest_ratchet_keys_from_disk
     // moved to FileRatchetStore. encode/decode_known_ratchet moved to
@@ -922,6 +930,9 @@ impl leviculum_core::traits::Storage for Storage {
         leviculum_core::storage_types::LinkEntry,
     )> {
         self.inner.link_entries()
+    }
+    fn link_entry_count(&self) -> usize {
+        self.inner.link_entry_count()
     }
     // Announce Table
     fn get_announce(

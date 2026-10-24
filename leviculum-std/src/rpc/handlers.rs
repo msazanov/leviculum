@@ -48,7 +48,7 @@ pub(super) fn handle_request(
         // this node TERMINATES, as we did until this batch, put a different
         // number under the same operator-visible line depending on which
         // daemon rnstatus was pointed at.
-        RpcRequest::GetLinkCount => pickle_int(core.transport_link_table_entries().len() as i64),
+        RpcRequest::GetLinkCount => pickle_int(core.transport_link_count() as i64),
         // Deliberate deviation, wire- and semantics-preserving: upstream's
         // `Transport.active_link_count` iterates the link table's KEYS and
         // indexes `entry[IDX_LT_VALIDATED]` on the 16-byte link id, so it
@@ -56,12 +56,9 @@ pub(super) fn handle_request(
         // rather than entries that validated (1.5.2, Transport.py:3215-3216).
         // We answer the documented meaning; mirroring the accident would make
         // the operator's "(M active)" a function of hash bytes.
-        RpcRequest::GetActiveLinkCount => pickle_int(
-            core.transport_link_table_entries()
-                .iter()
-                .filter(|e| e.validated)
-                .count() as i64,
-        ),
+        RpcRequest::GetActiveLinkCount => {
+            pickle_int(core.storage().active_link_entry_count() as i64)
+        }
         RpcRequest::GetLinkTable => build_link_table(core, &inventory.lock_recover()),
 
         // The timing pair every path-request client sizes its wait window
@@ -3916,7 +3913,7 @@ mod tests {
     // a peer/instance label that matches none of `interface_type`'s name
     // prefixes, so a LoRa radio is reported as the generic "Interface". That
     // is not only a wrong medium column in rnstatus: `itype` also picks the
-    // bitrate guess (handlers.rs:768-774), so the radio is advertised at 10 Mbps.
+    // bitrate guess (handlers.rs:765-771), so the radio is advertised at 10 Mbps.
     #[test]
     fn interface_type_comes_from_the_transport_not_the_name() {
         use crate::clock::SystemClock;

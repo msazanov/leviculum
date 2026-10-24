@@ -427,10 +427,10 @@ The flush now keeps to the shape in all three phases:
 
 | phase | lock | code |
 | --- | --- | --- |
-| `Storage::take_flush_snapshot` | brief: shares the table, copies the packet hashes | `leviculum-std/src/storage.rs:684` |
-| `Storage::collect_flush_slice` | brief, once per 1024 identities, 1 ms apart | `leviculum-std/src/storage.rs:730` |
-| `FlushSnapshot::write` | **none**: the fold, the announce parses, the copy, the file IO | `leviculum-std/src/storage.rs:553` |
-| `Storage::finish_flush` | brief: swaps the folded table in; `settle_flush` frees the old one on the blocking pool | `leviculum-std/src/storage.rs:767` |
+| `Storage::take_flush_snapshot` | brief: shares the table, copies the packet hashes | `leviculum-std/src/storage.rs:692` |
+| `Storage::collect_flush_slice` | brief, once per 1024 identities, 1 ms apart | `leviculum-std/src/storage.rs:738` |
+| `FlushSnapshot::write` | **none**: the fold, the announce parses, the copy, the file IO | `leviculum-std/src/storage.rs:561` |
+| `Storage::finish_flush` | brief: swaps the folded table in; `settle_flush` frees the old one on the blocking pool | `leviculum-std/src/storage.rs:775` |
 
 The capture is sliced rather than made a single cheap copy because a
 cheap copy of 50 000 identities and their announces does not exist; the
