@@ -602,63 +602,6 @@ pub const FW_BUILD_STAMP: &str = concat!(
     env!("LEVICULUM_GIT_DIRTY")
 );
 
-/// Current time source of the emission timebase (Codeberg #166 item 3),
-/// mirrored out of the main loop so the periodic banner task can state it
-/// beside `[FW_BUILD]` without owning the node. Encodes
-/// `leviculum_core::transport::TimeSource`; starts at the build floor, the
-/// birth state of every boot (#247).
-static TIME_SOURCE_STATE: AtomicU8 = AtomicU8::new(TIME_SOURCE_BUILD_FLOOR);
-
-const TIME_SOURCE_GNSS: u8 = 0;
-const TIME_SOURCE_HOST: u8 = 1;
-const TIME_SOURCE_OVERHEARD: u8 = 2;
-const TIME_SOURCE_BUILD_FLOOR: u8 = 3;
-const TIME_SOURCE_PLATFORM_CLOCK: u8 = 4;
-const TIME_SOURCE_RESTORED_FLOOR: u8 = 5;
-
-/// Record the time source for the status banner. Returns whether the
-/// recorded source CHANGED, so a caller that runs on every pass can log the
-/// transition once instead of on every pass.
-///
-/// Called at each seeding site, and — since Codeberg #398 — from the main
-/// loop as an unconditional mirror of `node.time_source()`. The seeding
-/// sites are not enough on their own: `Transport::learn_emission_timebase`
-/// seats an anchor of its own when an overheard announce carries a
-/// plausible emission stamp, and nothing at this layer is called when it
-/// does, so a board healed from traffic kept reporting the birth state and
-/// `[TIME_SOURCE]` said the same word for a board announcing on cadence as
-/// for one withholding its announce for want of a clock.
-pub fn set_time_source(source: leviculum_core::transport::TimeSource) -> bool {
-    use leviculum_core::transport::TimeSource;
-    let v = match source {
-        TimeSource::Gnss => TIME_SOURCE_GNSS,
-        TimeSource::Host => TIME_SOURCE_HOST,
-        TimeSource::Overheard => TIME_SOURCE_OVERHEARD,
-        TimeSource::BuildFloor => TIME_SOURCE_BUILD_FLOOR,
-        TimeSource::RestoredFloor => TIME_SOURCE_RESTORED_FLOOR,
-        // No nRF board offers a platform wall clock (EmbassyClock keeps the
-        // trait default of None), so this arm is unreachable here; it is
-        // spelled out rather than wildcarded so a board that grows an RTC
-        // fails to compile until it decides what to report.
-        TimeSource::PlatformClock => TIME_SOURCE_PLATFORM_CLOCK,
-    };
-    TIME_SOURCE_STATE.swap(v, Ordering::Relaxed) != v
-}
-
-/// The recorded time source as its stable event-log token
-/// (`TimeSource::as_str`).
-pub fn time_source_str() -> &'static str {
-    use leviculum_core::transport::TimeSource;
-    match TIME_SOURCE_STATE.load(Ordering::Relaxed) {
-        TIME_SOURCE_GNSS => TimeSource::Gnss.as_str(),
-        TIME_SOURCE_HOST => TimeSource::Host.as_str(),
-        TIME_SOURCE_OVERHEARD => TimeSource::Overheard.as_str(),
-        TIME_SOURCE_PLATFORM_CLOCK => TimeSource::PlatformClock.as_str(),
-        TIME_SOURCE_RESTORED_FLOOR => TimeSource::RestoredFloor.as_str(),
-        _ => TimeSource::BuildFloor.as_str(),
-    }
-}
-
 static HARDFAULT_LED_ARMED: AtomicBool = AtomicBool::new(false);
 static HARDFAULT_LED_PORT: AtomicU8 = AtomicU8::new(0);
 static HARDFAULT_LED_PIN: AtomicU8 = AtomicU8::new(0);

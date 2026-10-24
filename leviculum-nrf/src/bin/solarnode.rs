@@ -44,7 +44,7 @@ use leviculum_core::traits::Interface;
 use leviculum_core::transport::dispatch_actions;
 use leviculum_core::InterfaceId;
 
-use leviculum_firmware::clock::EmbassyClock;
+use leviculum_firmware::clock::{set_time_source, time_source_str, EmbassyClock};
 use leviculum_nrf::ble::{BleInterface, PeerEvent as BlePeerEvent};
 use leviculum_nrf::boards::solarnode;
 use leviculum_nrf::interface::EmbeddedInterface;
@@ -150,7 +150,7 @@ async fn main(spawner: Spawner) {
 
     log_critical!("leviculum SolarNode booting");
     log_critical!("[FW_BUILD] {}", leviculum_nrf::FW_BUILD_STAMP);
-    log_critical!("[TIME_SOURCE] source={}", leviculum_nrf::time_source_str());
+    log_critical!("[TIME_SOURCE] source={}", time_source_str());
     leviculum_nrf::log_boot_diagnostics(
         &boot,
         &boot_count,
@@ -257,8 +257,8 @@ async fn main(spawner: Spawner) {
     // `restored-floor` when the seam took it.
     let mut time_checkpoint =
         leviculum_nrf::time_floor::restore_at_boot(|v| node.restore_emission_floor(v));
-    if leviculum_nrf::set_time_source(node.time_source()) {
-        log_critical!("[TIME_SOURCE] source={}", leviculum_nrf::time_source_str());
+    if set_time_source(node.time_source()) {
+        log_critical!("[TIME_SOURCE] source={}", time_source_str());
     }
     const _: () = assert!(
         leviculum_nrf::heap_census::budget_total(core::mem::size_of::<
@@ -966,8 +966,8 @@ async fn main(spawner: Spawner) {
         // from traffic kept saying the birth state forever (Codeberg #398).
         // Reading the node is what keeps the banner honest without a
         // notification path per source.
-        if leviculum_nrf::set_time_source(node.time_source()) {
-            log_critical!("[TIME_SOURCE] source={}", leviculum_nrf::time_source_str());
+        if set_time_source(node.time_source()) {
+            log_critical!("[TIME_SOURCE] source={}", time_source_str());
         }
         // Write the calendar back at most hourly once a live source vouched
         // for it (#166 item 4); the store task does the flash work.
@@ -983,9 +983,9 @@ async fn main(spawner: Spawner) {
                     // A refusal leaves the gate open for the next fix:
                     // `leviculum_gnss_time::SeedGate::settle`.
                     if time_seed_gate.settle(node.set_wall_time_unix_secs(unix, TimeSource::Gnss)) {
-                        leviculum_nrf::set_time_source(TimeSource::Gnss);
+                        set_time_source(TimeSource::Gnss);
                         log_critical!("[TIME_SEED] source=gnss unix={}", unix);
-                        log_critical!("[TIME_SOURCE] source={}", leviculum_nrf::time_source_str());
+                        log_critical!("[TIME_SOURCE] source={}", time_source_str());
                     } else {
                         log_critical!("[TIME_SEED_REFUSED] source=gnss unix={}", unix);
                     }
@@ -1001,9 +1001,9 @@ async fn main(spawner: Spawner) {
                 use leviculum_core::envelope;
                 use leviculum_core::transport::TimeSource;
                 let answer = if node.set_wall_time_unix_secs(unix_secs, TimeSource::Host) {
-                    leviculum_nrf::set_time_source(TimeSource::Host);
+                    set_time_source(TimeSource::Host);
                     log_critical!("[TIME_SEED] source=host unix={}", unix_secs);
-                    log_critical!("[TIME_SOURCE] source={}", leviculum_nrf::time_source_str());
+                    log_critical!("[TIME_SOURCE] source={}", time_source_str());
                     envelope::encode_ack(envelope::TYPE_WALL_TIME)
                 } else {
                     log_critical!("[TIME_SEED_REFUSED] source=host unix={}", unix_secs);

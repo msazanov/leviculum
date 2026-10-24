@@ -1135,7 +1135,7 @@ impl Engine {
         // timestamp rather than uptime seconds (Codeberg #247).
         let before = node.emission_secs();
         if node.set_wall_time_unix_secs(unix_secs, TimeSource::Overheard) {
-            crate::set_time_source(TimeSource::Overheard);
+            leviculum_firmware::clock::set_time_source(TimeSource::Overheard);
             crate::log::log_fmt_critical(
                 "[INFO!] ",
                 format_args!("[TIME_SEED] source=overheard via={from} unix={unix_secs}"),

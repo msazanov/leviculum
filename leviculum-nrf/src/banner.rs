@@ -30,7 +30,10 @@ pub fn request() {
 /// Print the group once.
 pub fn emit(media_src: crate::media::Source) {
     crate::log_critical!("[FW_BUILD] {}", crate::FW_BUILD_STAMP);
-    crate::log_critical!("[TIME_SOURCE] source={}", crate::time_source_str());
+    crate::log_critical!(
+        "[TIME_SOURCE] source={}",
+        leviculum_firmware::clock::time_source_str()
+    );
     crate::media::log_banner(media_src);
     crate::name::log_banner();
     leviculum_firmware::identity::log_banner();

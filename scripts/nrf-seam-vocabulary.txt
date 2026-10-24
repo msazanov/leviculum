@@ -12,7 +12,6 @@
 src/announce.rs: baseboard::GNSS_FIX x1
 src/announce.rs: ble::MAX_LINKS doc x1
 src/announce.rs: button doc x1
-src/banner.rs: time_source_str x1
 src/battery.rs: baseboard::BATTERY_STATE x1
 src/battery.rs: baseboard::BatteryState x1
 src/ble/columba.rs: ble::set_gap_device_name doc x1
@@ -100,7 +99,6 @@ src/pn.rs: record_store::mounted x3
 src/pn.rs: record_store::pn_execute x1 doc x1
 src/pn.rs: record_store::region x1
 src/pn.rs: rng::RawHwRng::new x2
-src/pn.rs: set_time_source x1
 src/pn.rs: usb doc x1
 src/radio.rs: boards doc x1
 src/radio.rs: boards::BoardConfig::lora_tcxo_voltage_reg doc x1
@@ -138,7 +136,6 @@ src/telemetry.rs: feedback::report_delivered x1
 src/telemetry.rs: flash::SharedFlash x2
 src/telemetry.rs: flash::shared_flash doc x1
 src/telemetry.rs: radio_store doc x1
-src/telemetry.rs: time_source_str x1
 src/time_floor.rs: flash::SharedFlash x2 doc x1
 src/time_floor.rs: radio_store doc x1
 src/time_floor.rs: record_store doc x1

@@ -1600,14 +1600,15 @@ fn the_time_source_banner_mirrors_the_node_rather_than_the_seeding_sites() {
     // The mirror is only a mirror if the store reports whether anything
     // moved; without that the bin has to choose between a [TIME_SOURCE] line
     // on every loop pass and none at all on the healed transition.
-    let lib = nrf_source("lib.rs");
+    // The store moved to the orchestration stratum's clock (#469, 958).
+    let clock = firmware_source("clock.rs");
     assert!(
-        lib.contains(
+        clock.contains(
             "pub fn set_time_source(source: leviculum_core::transport::TimeSource) -> bool"
         ),
-        "leviculum-nrf/src/lib.rs::set_time_source no longer reports whether the \
-         recorded source changed, which is what lets the main-loop mirror log the \
-         transition once (Codeberg #398)"
+        "leviculum-nrf/firmware/src/clock.rs::set_time_source no longer reports \
+         whether the recorded source changed, which is what lets the main-loop \
+         mirror log the transition once (Codeberg #398)"
     );
 }
 

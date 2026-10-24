@@ -1907,7 +1907,7 @@ impl Reporter {
                 line.include_position as u8,
                 line.possrc.as_str(),
                 line.unix_secs,
-                crate::time_source_str()
+                leviculum_firmware::clock::time_source_str()
             ),
         );
     }

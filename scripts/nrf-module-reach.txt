@@ -4,7 +4,7 @@
 # leviculum-nrf/firmware/src: path (lines): the `crate::<name>` names it
 # reaches, its own module excluded. See the script's header for the rules.
 src/announce.rs (587): baseboard ble button log lora pn telemetry
-src/banner.rs (53): log_critical media name time_source_str
+src/banner.rs (56): log_critical media name
 src/baseboard.rs (133):
 src/battery.rs (441): baseboard log
 src/bin/qspi-selftest.rs (634):
@@ -34,13 +34,13 @@ src/heap_census.rs (398): ble heap_stats heap_watermark_sample log pn rng
 src/iface_bytes.rs (15):
 src/interface.rs (77): iface_bytes log
 src/led.rs (48): baseboard feedback log
-src/lib.rs (824): log log_critical
+src/lib.rs (767): log log_critical
 src/lora.rs (2708): announce baseboard chtm events feedback iface_bytes log media pn radio radio_store rng set_irq_priorities
 src/media.rs (320): ble log telemetry
 src/mgmt.rs (259): log name telemetry usb
 src/motion.rs (177): baseboard log
 src/name.rs (259): ble log media telemetry
-src/pn.rs (3759): announce ble events feedback heap_census heap_stats log lora name record_store rng set_time_source telemetry usb
+src/pn.rs (3759): announce ble events feedback heap_census heap_stats log lora name record_store rng telemetry usb
 src/qspi.rs (1188): log
 src/radio.rs (215): boards log lora sx1262
 src/radio_store.rs (197): boards flash log telemetry
@@ -50,19 +50,19 @@ src/rng.rs (205): log
 src/st7789.rs (436): baseboard ble boards log log_stack lora pn vext
 src/store_spike.rs (164): flash log record_store
 src/sx1262.rs (1704): chtm log lora
-src/telemetry.rs (2062): ble feedback flash interface log lora media name pn radio_store time_source_str
+src/telemetry.rs (2062): ble feedback flash interface log lora media name pn radio_store
 src/time_floor.rs (74): boot_count flash radio_store record_store
 src/transport_stats.rs (168): iface_bytes log lora
 src/usb.rs (1464): banner ble boards chtm heap_census log lora media mgmt name pn postmortem_query radio_store record_store reset_stack_watermark telemetry
 src/vext.rs (85): boards log
 firmware/src/boot_count.rs (203): fakes log seams
 firmware/src/boot_trace.rs (120): log
-firmware/src/clock.rs (12):
+firmware/src/clock.rs (104):
 firmware/src/dispatch.rs (49): log
 firmware/src/fakes.rs (197): seams
 firmware/src/identity.rs (119): log_critical
 firmware/src/iface_bytes.rs (125):
-firmware/src/lib.rs (40):
+firmware/src/lib.rs (42):
 firmware/src/log.rs (402):
 firmware/src/postmortem.rs (437): boot_trace log
 firmware/src/record_store.rs (665): fakes log seams

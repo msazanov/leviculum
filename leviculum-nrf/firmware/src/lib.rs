@@ -13,7 +13,9 @@
 //! [`time_floor`], and the policy half of [`record_store`]. The leaves that
 //! need not even a seam follow (957): [`iface_bytes`] (its counters; the
 //! names stay with the bind crate), [`dispatch`], [`clock`], [`boot_trace`]
-//! (all but the reset-cause register) and [`identity`].
+//! (all but the reset-cause register) and [`identity`]. Cuts that need no
+//! new seam follow (958): the calendar source the board reports joins
+//! [`clock`].
 //!
 //! What the crate may depend on is held by two guards rather than by this
 //! comment: `just firmware-no-hal` refuses a HAL or chip crate in its
