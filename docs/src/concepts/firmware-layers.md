@@ -37,7 +37,7 @@ and lnpnd takes announce-policy, one of the five
 telemetry-policy (`leviculum-core/Cargo.toml:55`). So "nRF" in their
 path is a misstatement of ownership, not a description.
 
-Above them, `leviculum-nrf/src` (34,948 lines with the binaries) glues
+Above them, `leviculum-nrf/src` (32,991 lines with the binaries at 957) glues
 the policy to the nRF52840, and the glue has three shapes mixed in one
 tree:
 
@@ -52,18 +52,21 @@ tree:
   (`bin/sd-ram-probe.rs` 294, `bin/qspi-selftest.rs` 634).
 - **Orchestration modules** that know no chip but call each other
   freely: `announce.rs` 587, `mgmt.rs` 259, `media.rs` 320, `name.rs`
-  259, `events.rs` 261, `heap_census.rs` 395, `remote_status.rs` 138,
-  `transport_stats.rs` 168, `iface_bytes.rs` 130, `dispatch.rs` 49,
-  `chtm.rs` 71, `identity.rs` 119, `clock.rs` 12, `banner.rs` 53,
-  `boot_trace.rs` 119, `log.rs` 366, `telemetry.rs` 2062, `pn.rs` 3758,
-  `lora.rs` 2705.
+  259, `events.rs` 261, `heap_census.rs` 398, `remote_status.rs` 139,
+  `transport_stats.rs` 168, `chtm.rs` 71, `banner.rs` 53,
+  `telemetry.rs` 2062, `pn.rs` 3759, `lora.rs` 2708. Moved out to
+  `leviculum-nrf/firmware/src` so far: `log.rs` in step 1 (954), and
+  in 957 `iface_bytes.rs` (125 lines there; its 15-line name table
+  stays, because the LoRa entry names the radio chip), `dispatch.rs`
+  49, `clock.rs` 12, `boot_trace.rs` (120 there; the 27-line
+  reset-cause register read stays) and `identity.rs` 119.
 - **Backends** that know the chip: the SoftDevice BLE host
-  (`ble/columba.rs` 3155, `ble/mod.rs` 1300, `ble/notify.rs` 238), USB
+  (`ble/columba.rs` 3168, `ble/mod.rs` 1300, `ble/notify.rs` 238), USB
   CDC (`usb.rs` 1464, which also holds the control-frame executor, see
   [the seams](#the-seams-and-their-shape)), QSPI and internal flash
   (`qspi.rs` 1188, `record_store.rs` 788, `flash.rs` 79), the SX1262
   driver (`sx1262.rs` 1704), entropy from the SoftDevice (`rng.rs` 194),
-  the allocator and the panic post-mortem (`lib.rs` 1160: the allocator
+  the allocator and the panic post-mortem (`lib.rs` 824: the allocator
   at `leviculum-nrf/src/lib.rs:267-270`; the panic counter and the
   post-mortem records moved in step 1 to
   `leviculum-nrf/firmware/src/postmortem.rs`, the panic handler and
@@ -172,11 +175,22 @@ backend; a fix to a chip never touches behaviour.
 ## The extraction, bottom-up
 
 The orchestration modules import the backends (`announce.rs` imports
-pn, telemetry, identity and baseboard; `mgmt.rs` telemetry; `media.rs`
-ble and telemetry; `name.rs` telemetry; `events.rs` announce and pn;
-`heap_census.rs` ble, pn, rng, clock and iface_bytes), so moving them
+pn, telemetry, ble, lora, button and baseboard; `mgmt.rs` telemetry,
+name and usb; `media.rs` ble and telemetry; `name.rs` ble, media and
+telemetry; `events.rs` announce, pn and transport_stats;
+`heap_census.rs` ble, pn and rng), so moving them
 first does not compile. The order is therefore bottom-up: the seams
 first, the modules that use them after, the node loop last.
+
+The graph this reads from is measured, not described:
+`scripts/nrf-module-reach.txt` lists every file of both trees with its
+line count and the `crate::` names it reaches, and `just
+nrf-module-reach` fails when the tree and the file disagree, so every
+move regenerates it and its history is the extraction's record. It
+re-placed step 2: `usb.rs`, which holds the control-frame executor,
+reaches `lora`, `telemetry`, `mgmt`, `media`, `name` and eight more
+siblings, and the fork's cut separates only the port from that
+executor, so step 2 runs after steps 5 and 6, keeping its number.
 
 Each step: cut the seam, let `leviculum-nrf` implement it, move the
 files that now depend only on seams, prove zero behaviour change by the
@@ -192,10 +206,10 @@ exists in `scripts/debug-witness.sh`; the masking is step 0's
 |---|---|---|---|
 | 0 | the embassy pin rule across the three families (ours: embassy-executor 0.9 / embassy-sync 0.7; the fork: 0.10 / 0.8 plus a `[patch.crates-io]` git rev in the fork's `leviculum-fw/Cargo.toml`, lines 146 to 154); the log-diff masking script; the crate skeleton in the `leviculum-nrf` workspace (excluded from the root, so the guards below live there) | none | builds; the guards below green on an empty crate |
 | 1 | Flash, Entropy, Clock, Watchdog, Sinks (debug log, post-mortem, LED, buzzer, display, button) as traits with host fakes; `boot_count.rs`, `rng.rs`, `log.rs`, `lib.rs`'s post-mortem, `time_floor.rs`, `record_store.rs`'s policy half move | 5 | census, the boot-count and time-floor host tests, one boot on each board (the rig's `boot-proof-both.sh`, which lives outside this tree) |
-| 2 | the control-frame executor out of `usb.rs` into stratum 2 (the fork's `control.rs` as the template), `usb.rs` shrinks to the port | Control port | lnflash round trips over every control frame, the serial-mux host tests |
+| 2 | runs after steps 5 and 6 (957, by the census above): the control-frame executor out of `usb.rs` into stratum 2 (the fork's `control.rs` as the template), `usb.rs` shrinks to the port; the `ControlPort` trait is declared when the executor moves, not before | Control port | lnflash round trips over every control frame, the serial-mux host tests |
 | 3 | Transceiver as a message seam; `lora.rs` and `radio.rs` move; `sx1262.rs` and `leviculum-lr11xx` stay below | Transceiver | `t1000e_lora_pair`, `t1000e_rnode_pair` with the witness, the `#438` cells; `lora_pn_board_sync` only with its register standing stated (it is in periculum's `hardware/KNOWN-REDS.toml`, retired twice) |
 | 4 | BLE link as a message seam; the upward calls of `ble/mod.rs` and `columba.rs` become messages; `ble/` stays the SoftDevice backend | BLE link | the BLE room cells, `ble_pn_board_upload`, a two-phone session |
-| 5 | the pure modules move: `announce`, `mgmt`, `media`, `name`, `events`, `heap_census`, `remote_status`, `transport_stats`, `iface_bytes`, `dispatch`, `chtm`, `identity`, `banner`, `boot_trace`; `telemetry.rs` with the reporter moved into `leviculum-lxmf` behind a `reporter` feature, as the fork did. 953 took the fork's first two halves of this: the byte and speed arithmetic is `leviculum_core::interface_counters` and the `/status` matching and sending is `leviculum_core::node::remote_status`, so `iface_bytes` and `remote_status` keep only the board's table, locks and rows | Sensors | the telemetry cells, 914's double press, `/status` round trips |
+| 5 | the orchestration cluster moves. In the census these modules are not pure: `announce`, `banner`, `button`, `chtm`, `events`, `feedback`, `heap_census`, `lora`, `media`, `mgmt`, `name`, `pn`, `telemetry` and `transport_stats` form one strongly connected set of 22 together with the backends that call back into them (`ble`, `usb`, `boards`, `radio`, `radio_store`, `record_store`, `sx1262`, `led`), and `display` and `remote_status` reach into it; so no member moves alone, and the cluster moves once those backend edges, the `lib.rs` helpers and the sinks are seams (steps 3, 4 and 1). Of the six leaves that reached none of it, five moved in 957: `iface_bytes` (its name table stays), `dispatch`, `clock`, `boot_trace` (its reset-cause register stays) and `identity`; `interface` did not, it reads the name table (`leviculum-nrf/src/interface.rs:39`). `telemetry.rs` with the reporter moved into `leviculum-lxmf` behind a `reporter` feature, as the fork did. 953 took the fork's first two halves of this: the byte and speed arithmetic is `leviculum_core::interface_counters` and the `/status` matching and sending is `leviculum_core::node::remote_status`, so `iface_bytes` and `remote_status` keep only the board's table, locks and rows | Sensors | the telemetry cells, 914's double press, `/status` round trips |
 | 6 | `pn.rs` over Flash and the PN store | none new | `lora_pn_board_sync_t1000e`, the PN census, the stock-client cells |
 | 7 | **the node loop, once**: the four binaries' loops are diffed line by line; every difference is either a board fact (moves to the board file) or a behaviour decision (named in the report, decided before it is unified); the loop moves to stratum 2 and `bin/*.rs` become wiring | none new | every rig cell of the four boards, before and after; this is the riskiest step and gets its own order per binary |
 | 8 | the ESP32-S3 and RP2350 bind crates onto the extracted crate; `leviculum-fw` retires module by module, its backends adapted to the seams | none new | the fork's bench results re-run on the M9 and the RedBoard |
@@ -296,9 +310,20 @@ non-test `expect` in the new crates.
   step 0.
 - 2026-10-23: this page is tracked by Codeberg #469 (firmware layers);
   the fork integration by Codeberg #470.
+- 2026-10-24, reviewer: step 2 re-placed after steps 5 and 6 by
+  measurement. The fork's `ControlPort` (its `control.rs`, lines 166 to
+  188) is the port only; its executor reaches fourteen sibling modules of
+  `leviculum-fw`, and ours (`retic_serial_task`, `usb.rs`) dispatches
+  `ControlAction` into `mgmt`, `media`, `name`, `telemetry`, `lora`,
+  `pn`, `ble`, `chtm`, `identity`, `iface_bytes` and `record_store`. An
+  executor in stratum 2 now would need a trait method per call, deleted
+  again as those modules arrive. The standing evidence is
+  `scripts/nrf-module-reach.txt`; five of the six free leaves moved
+  first (957), `interface` stays on the bind crate's name table.
 - Open: the order of steps 3 to 7 against the T1000-E and M9 work on
-  the main lane; the BLE link vocabulary; whether the policy crates'
-  path move comes before or after step 1.
+  the main lane, and what that order has to cut is the orchestration
+  cluster's outward calls (step 5's row); the BLE link vocabulary;
+  whether the policy crates' path move comes before or after step 1.
 
 ## See also
 
