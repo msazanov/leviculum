@@ -109,6 +109,10 @@ wiki describes V1.0 only.
   AG3352, that work may transfer, since it is the same family; if it is
   an ATGM336H or an L76K, it does not. The receiver has to be
   identified on the device before any GNSS code is written for it.
+- **Resolved by the bench, in favour of the Airoha family.** According
+  to the community port's bench (cedrivard/Leviculum, rp2350-m9-net, 2026-10), an AG3352 answered the Airoha `$PAIR` boot init on the bench
+  unit. The three-way contradiction above stays as the history of what
+  the public sources said; see "What the community port measured".
 
 ### Sensors
 
@@ -186,8 +190,64 @@ Heltec V4 and identifies itself, and nothing goes on the air
 (`leviculum-esp/src/lib.rs:9-12`, [Supported
 boards](../firmware/boards.md), "ESP32 class").
 
-**A community port of our firmware to the M9 is in preparation.** That
-is all this page says about it.
+**A community port of our firmware to the M9 exists.** The next section
+takes the facts its bench measured; everything else about it stays with
+the port.
+
+## What the community port measured
+
+The community port ran on one M9 unit. The facts below are what it
+measured, not what we measured, and each one names that source. Its
+board file and README are `leviculum-esp/src/boards/thinknode_m9.rs`
+and `leviculum-esp/README.md` on that branch.
+
+### Transmit power
+
+- According to the community port's bench (cedrivard/Leviculum, rp2350-m9-net, 2026-10), the M9's high-power PA delivers about 4 to 5 dB
+  less than the LR1110 shield's at the same setting.
+- According to the community port's bench (cedrivard/Leviculum, rp2350-m9-net, 2026-10), the usable ceiling is about +17 dBm, reached at
+  `power = 22`; MeshCore's "22 dBm" is that register value, not an
+  output power.
+- According to the community port's bench (cedrivard/Leviculum, rp2350-m9-net, 2026-10), the PA table that fits keeps the shield's LP rows
+  for -17 to +10 dBm and runs the HP PA with `power = dBm + 5` for +11
+  to +17 dBm.
+
+### The keypad
+
+- According to the community port's bench (cedrivard/Leviculum, rp2350-m9-net, 2026-10), INT (GPIO12) is a 15 ms pulse that the controller
+  does not raise for every key, so the port polls the controller while
+  the panel is lit.
+- According to the community port's bench (cedrivard/Leviculum, rp2350-m9-net, 2026-10), `KB_LED` (GPIO46) lights nothing at either level
+  on a version-2 board.
+
+### GNSS
+
+- According to the community port's bench (cedrivard/Leviculum, rp2350-m9-net, 2026-10), an AG3352 answered the Airoha `$PAIR` boot init on
+  the bench unit. That settles the three-way contradiction under "GNSS"
+  in favour of the Airoha family, so our AG3335 work transfers.
+
+### Executors
+
+- According to the community port's bench (cedrivard/Leviculum, rp2350-m9-net, 2026-10), running the LoRa task on an esp-rtos interrupt
+  executor crashed the board, with stack-guard panics and watchdog
+  resets within minutes.
+- According to the community port's bench (cedrivard/Leviculum, rp2350-m9-net, 2026-10), the port therefore keeps LoRa on core 0's thread
+  executor, at a cost in re-arm latency after a reception: p50 about
+  2 ms on the interrupt executor against 142 ms on the thread executor.
+
+### The host link
+
+- According to the community port's bench (cedrivard/Leviculum, rp2350-m9-net, 2026-10), the single CH340K UART carries both the debug text
+  and the HDLC transport, multiplexed on one line with XON/XOFF flow
+  control. The multiplexing rules live in `serial-mux`, a member crate
+  of ours since 943 (`leviculum-nrf/serial-mux`).
+
+### GPIO10
+
+- According to the community port's bench (cedrivard/Leviculum, rp2350-m9-net, 2026-10), the board file types GPIO10 as the GNSS idle
+  interrupt (an input), while the README says it is "held high" (an
+  output). This page keeps the question open until a schematic or a
+  probe decides it.
 
 ## Decided
 
@@ -270,7 +330,10 @@ compared with the T1000-E's numbers.
 - **Which revision the unit is**, read off the keyboard controller's
   I2C address at the first boot.
 - **The GNSS receiver:** AG3352, ATGM336H or L76K, identified on the
-  device.
+  device. Resolved by the community port's bench (cedrivard/Leviculum, rp2350-m9-net, 2026-10) in favour of the AG3352 (see "What the
+  community port measured").
+- **GPIO10's direction:** the GNSS idle interrupt (input) or a line held
+  high (output); in the community port's bench (cedrivard/Leviculum, rp2350-m9-net, 2026-10) the board file and the README disagree.
 - **SRAM after WiFi and BLE:** how much of the 512 KB is left once both
   stacks are up.
 - **WiFi as a TCP interface** without a host attached.
