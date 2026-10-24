@@ -276,7 +276,7 @@ power at every word boundary (`leviculum-nrf/src/boot_count.rs`).
 
 The golden image is the last one that came back healthy, kept on the same
 part. The trigger for restoring it is the boot counter that landed on
-2026-09-24 (`record_at_boot`, `leviculum-nrf/src/boot_count.rs:122`,
+2026-09-24 (`record_at_boot`, `leviculum-nrf/src/boot_count.rs:76`,
 Codeberg #380): one 16-byte record per boot with the raw `RESETREAS` and
 whether retained RAM survived, appended to the `BOOT` page, one erase per
 256 boots. It exists because a Pocket V2 restarted twice on a field walk

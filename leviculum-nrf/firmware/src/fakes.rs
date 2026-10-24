@@ -131,22 +131,22 @@ impl Sinks for FakeSinks {}
 pub struct FakeWatchdog;
 impl Watchdog for FakeWatchdog {}
 
+/// Run a future over the fakes to completion. The fakes never await
+/// anything, so one poll finishes it; a second would mean a module under
+/// test awaited something no fake answers.
+pub fn ready<F: core::future::Future>(f: F) -> F::Output {
+    use core::task::{Context, Poll, Waker};
+    let mut cx = Context::from_waker(Waker::noop());
+    match core::pin::pin!(f).poll(&mut cx) {
+        Poll::Ready(out) => out,
+        Poll::Pending => panic!("a fake future was not ready on its first poll"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::seams::Entropy;
-    use core::future::Future;
-    use core::pin::pin;
-    use core::task::{Context, Poll, Waker};
-
-    /// The fakes never await anything, so one poll finishes them.
-    fn ready<F: Future>(f: F) -> F::Output {
-        let mut cx = Context::from_waker(Waker::noop());
-        match pin!(f).poll(&mut cx) {
-            Poll::Ready(out) => out,
-            Poll::Pending => panic!("a fake future was not ready on its first poll"),
-        }
-    }
 
     fn is_transceiver<T: Transceiver>(_: &T) {}
     fn is_control_port<T: ControlPort>(_: &T) {}

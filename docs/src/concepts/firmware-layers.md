@@ -68,7 +68,7 @@ tree:
   `leviculum-nrf/src/lib.rs:319-367`, the post-mortem records, panic
   handler and HardFault at `leviculum-nrf/src/lib.rs:704-1164`),
   `boot_count.rs` (writes through `embassy_nrf::nvmc::Nvmc`,
-  `leviculum-nrf/src/boot_count.rs:81`), the board files (`boards/*.rs`
+  `leviculum-nrf/src/boot_count.rs:45`), the board files (`boards/*.rs`
   1264).
 
 Cedric Rivard's fork needed the same glue for the RP2350 and the

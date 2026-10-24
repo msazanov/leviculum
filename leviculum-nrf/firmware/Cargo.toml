@@ -23,10 +23,11 @@ leviculum-core = { path = "../../leviculum-core", default-features = false }
 # pull), Entropy is rand_core's RngCore (the 0.6 leviculum-core draws from).
 embedded-storage-async = "0.4"
 rand_core = { version = "0.6", default-features = false }
-# Policy the moved modules call (stratum 1): the log line's shape and the
-# retained-RAM tail and post-mortem decisions.
+# Policy the moved modules call (stratum 1): the log line's shape, the
+# retained-RAM tail and post-mortem decisions, the boot record's page layout.
 leviculum-log-line = { path = "../log-line" }
 leviculum-boot-trace = { path = "../boot-trace" }
+leviculum-boot-count = { path = "../boot-count" }
 
 # The executor and core are declared for what moves in later (the node loop
 # spawns tasks); nothing that has moved names them yet.
