@@ -1731,16 +1731,16 @@ pub async fn init(
 ///
 /// The hardware RNG is the source because it is the only per-board, per-boot
 /// entropy reachable here. It is reachable on both sides of BLE bring-up:
-/// [`crate::rng::RawHwRng`] goes through the SoftDevice syscall once the SD
-/// is enabled and falls back to direct register access while it is off, and
-/// the board binaries call this from `main` before `Softdevice::enable`.
+/// [`leviculum_firmware::entropy::Entropy`] ends in `rng.rs`'s fill, the
+/// SoftDevice syscall once the SD is enabled and direct register access
+/// while it is off, and the binaries call this before `Softdevice::enable`.
 ///
 /// A board's own sequence stays reproducible from its seed, so a host test
 /// drives the same decisions the firmware makes (see
 /// `leviculum_channel_access`); only the seed differs between boards.
 pub fn channel_seed() -> u32 {
     use rand_core::RngCore as _;
-    crate::rng::RawHwRng::new().next_u32()
+    leviculum_firmware::entropy::Entropy.next_u32()
 }
 
 /// Program a runtime config override into the radio and refresh every piece

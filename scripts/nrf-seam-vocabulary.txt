@@ -40,7 +40,6 @@ src/heap_census.rs: ble::defrag_held_bytes x1
 src/heap_census.rs: ble::session_census x1
 src/heap_census.rs: heap_stats x2
 src/heap_census.rs: heap_watermark_sample x1
-src/heap_census.rs: rng::RawHwRng x1
 src/led.rs: feedback doc x1
 src/led.rs: feedback::Sink x1
 src/led.rs: feedback::spawn_led x1
@@ -56,8 +55,6 @@ src/lora.rs: radio::bring_up x1
 src/lora.rs: radio::configure_lora x2
 src/lora.rs: radio::new x1
 src/lora.rs: radio_store::load doc x1
-src/lora.rs: rng::RawHwRng doc x1
-src/lora.rs: rng::RawHwRng::new x1
 src/lora.rs: set_irq_priorities doc x1
 src/media.rs: ble x1 doc x1
 src/media.rs: ble::note_media_changed x1
@@ -69,7 +66,6 @@ src/pn.rs: record_store::PnOp x1
 src/pn.rs: record_store::mounted x3
 src/pn.rs: record_store::pn_execute x1 doc x1
 src/pn.rs: record_store::region x1
-src/pn.rs: rng::RawHwRng::new x2
 src/pn.rs: usb doc x1
 src/radio.rs: boards doc x1
 src/radio.rs: boards::BoardConfig::lora_tcxo_voltage_reg doc x1

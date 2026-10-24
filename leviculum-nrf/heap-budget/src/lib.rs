@@ -795,7 +795,7 @@ const _: () =
 // The node box. Declared last, like the hold above, so the book's line
 // citations into this file stay where they are.
 
-/// Size of the boxed `NodeCore<RawHwRng, EmbassyClock, EmbeddedStorage>`
+/// Size of the boxed `NodeCore<Entropy, EmbassyClock, EmbeddedStorage>`
 /// on `thumbv7em-none-eabihf`: the `node_box` every term of the budget is
 /// computed against, and the same type, so the same size, on the T114, the
 /// RAK4631 and the solar node.

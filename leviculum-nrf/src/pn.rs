@@ -654,7 +654,7 @@ pub async fn miner_task() {
     loop {
         let job = MINE_REQ.receive().await;
         let started = embassy_time::Instant::now();
-        let mut stamper = CooperativeStamper::cooperative(crate::rng::RawHwRng::new());
+        let mut stamper = CooperativeStamper::cooperative(leviculum_firmware::entropy::Entropy);
         // No cancellation handle: the board mines one key per peer from its
         // own table and has no way to withdraw the intent while it runs
         // (Codeberg #185). The cost is capped at 18 here, so this grind is
@@ -3475,7 +3475,7 @@ impl Engine {
         let our_cost = self.peers.config().peering_cost;
         if our_cost > 0 {
             let material = peering_key_material(&self.identity_hash, &remote_identity_hash);
-            let mut stamper = CooperativeStamper::cooperative(crate::rng::RawHwRng::new());
+            let mut stamper = CooperativeStamper::cooperative(leviculum_firmware::entropy::Entropy);
             let valid = stamper
                 .validate_stamp(
                     &material,

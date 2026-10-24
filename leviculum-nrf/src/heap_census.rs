@@ -390,7 +390,7 @@ where
 const _: () = assert!(
     core::mem::size_of::<
         NodeCore<
-            crate::rng::RawHwRng,
+            leviculum_firmware::entropy::Entropy,
             leviculum_firmware::clock::EmbassyClock,
             leviculum_core::embedded_storage::EmbeddedStorage,
         >,

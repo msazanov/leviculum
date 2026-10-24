@@ -27,7 +27,7 @@ use leviculum_core::transport::dispatch_actions;
 use leviculum_core::InterfaceId;
 
 use leviculum_firmware::clock::{set_time_source, time_source_str, EmbassyClock};
-use leviculum_firmware::interface::EmbeddedInterface;
+use leviculum_firmware::{entropy::Entropy, interface::EmbeddedInterface};
 use leviculum_nrf::ble::{BleInterface, PeerEvent as BlePeerEvent};
 use leviculum_nrf::boards::t114;
 use leviculum_nrf::lora::LoRaInterface;
@@ -73,6 +73,7 @@ async fn main(spawner: Spawner) {
     );
     leviculum_nrf::set_irq_priorities();
     leviculum_firmware::iface_bytes::set_names(&t114::IFACE_NAMES);
+    leviculum_firmware::entropy::set_source(leviculum_nrf::rng::fill_entropy);
     // This binary wires a telemetry Reporter into its main loop; declared
     // before USB comes up so the serial task can never answer a telemetry
     // target ahead of the declaration (ack honesty, #236).
@@ -142,7 +143,7 @@ async fn main(spawner: Spawner) {
     leviculum_nrf::vext::raise(p.P0_21);
     let mut led = t114::led(p.P1_03);
 
-    let rng = leviculum_nrf::rng::RawHwRng::new();
+    let rng = Entropy;
 
     // Load or generate persistent identity from internal flash
     let mut id_store = leviculum_nrf::flash::NvmcIdentityStore::new(
@@ -155,11 +156,7 @@ async fn main(spawner: Spawner) {
     // core's link cap — the budget and the cap are the same constant.
     const MAX_ENDPOINT_LINKS: usize =
         leviculum_nrf::heap_census::max_endpoint_links(core::mem::size_of::<
-            leviculum_core::node::NodeCore<
-                leviculum_nrf::rng::RawHwRng,
-                EmbassyClock,
-                EmbeddedStorage,
-            >,
+            leviculum_core::node::NodeCore<Entropy, EmbassyClock, EmbeddedStorage>,
         >());
     const _: () = assert!(
         MAX_ENDPOINT_LINKS >= leviculum_nrf::ble::MAX_LINKS,
@@ -238,11 +235,7 @@ async fn main(spawner: Spawner) {
     }
     const _: () = assert!(
         leviculum_nrf::heap_census::budget_total(core::mem::size_of::<
-            leviculum_core::node::NodeCore<
-                leviculum_nrf::rng::RawHwRng,
-                EmbassyClock,
-                EmbeddedStorage,
-            >,
+            leviculum_core::node::NodeCore<Entropy, EmbassyClock, EmbeddedStorage>,
         >()) <= leviculum_nrf::HEAP_SIZE,
         "HEAP_BUDGET total exceeds the heap (#388): shrink a term"
     );

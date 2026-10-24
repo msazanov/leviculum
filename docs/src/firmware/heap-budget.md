@@ -14,8 +14,9 @@ says otherwise.
 
 ## How the node box is measured
 
-The node box is the one `Box<NodeCore<RawHwRng, EmbassyClock,
-EmbeddedStorage>>` the firmware allocates at boot. It is the same type
+The node box is the one `Box<NodeCore<Entropy, EmbassyClock,
+EmbeddedStorage>>` the firmware allocates at boot (`Entropy` since 959,
+`RawHwRng` before; both are zero-sized, so the box did not move). It is the same type
 on the T114, the RAK4631 and the solar node, and it measures the same
 on all three: **31 744 B** since 867 (31 736 B since 860, 31 712 B since #852, 31 704 B since #666, 31 696 B at 68429da6), read as `size_of` of that type
 in the release build of each binary (`cargo build --release --features

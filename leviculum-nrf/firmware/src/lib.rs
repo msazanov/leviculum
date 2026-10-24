@@ -19,7 +19,9 @@
 //! at boot ([`iface_bytes::set_names`]), and the serial [`interface`]
 //! arrives over it. In 959 the board state the sensor tasks feed and the
 //! orchestration reads moves whole (`baseboard`, behind the capability
-//! features; the tasks stay below).
+//! features; the tasks stay below), and the orchestration draws its
+//! randomness through [`entropy::Entropy`], over the fill function the bind
+//! crate registers once at boot ([`entropy::set_source`]).
 //!
 //! What the crate may depend on is held by two guards rather than by this
 //! comment: `just firmware-no-hal` refuses a HAL or chip crate in its
@@ -36,6 +38,7 @@ pub mod boot_count;
 pub mod boot_trace;
 pub mod clock;
 pub mod dispatch;
+pub mod entropy;
 pub mod identity;
 pub mod iface_bytes;
 pub mod interface;
