@@ -1345,7 +1345,7 @@ dependencies = [
 [[package]]
 name = "nrf-softdevice"
 version = "0.1.0"
-source = "git+https://github.com/embassy-rs/nrf-softdevice?rev=5949a5b#5949a5b1445cc907745c6449a35577e4544cd255"
+source = "git+https://github.com/reallew/nrf-softdevice?rev=1d813cb#1d813cb2a5cc4e479c6ff75dcfd9bf7e17c8d05c"
 dependencies = [
  "cortex-m",
  "critical-section",
@@ -1364,7 +1364,7 @@ dependencies = [
 [[package]]
 name = "nrf-softdevice-macro"
 version = "0.1.0"
-source = "git+https://github.com/embassy-rs/nrf-softdevice?rev=5949a5b#5949a5b1445cc907745c6449a35577e4544cd255"
+source = "git+https://github.com/reallew/nrf-softdevice?rev=1d813cb#1d813cb2a5cc4e479c6ff75dcfd9bf7e17c8d05c"
 dependencies = [
  "Inflector",
  "darling 0.13.4",
@@ -1377,7 +1377,7 @@ dependencies = [
 [[package]]
 name = "nrf-softdevice-s140"
 version = "0.1.2"
-source = "git+https://github.com/embassy-rs/nrf-softdevice?rev=5949a5b#5949a5b1445cc907745c6449a35577e4544cd255"
+source = "git+https://github.com/reallew/nrf-softdevice?rev=1d813cb#1d813cb2a5cc4e479c6ff75dcfd9bf7e17c8d05c"
 
 [[package]]
 name = "num-traits"

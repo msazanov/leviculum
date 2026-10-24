@@ -273,8 +273,20 @@ leviculum-motion = { path = "motion", optional = true }
 # (PR #296 "Support larger discovery characteristics"). The crates.io
 # 0.1.0 publish is stale (nrf-softdevice issue #304); we pin to git HEAD
 # for compatibility with current embassy-nrf.
-nrf-softdevice = { git = "https://github.com/embassy-rs/nrf-softdevice", rev = "5949a5b", optional = true }
-nrf-softdevice-s140 = { git = "https://github.com/embassy-rs/nrf-softdevice", rev = "5949a5b", optional = true }
+#
+# The source is our fork, not upstream (#472): `Drop for Connection`
+# upstream unwraps `state.disconnect()` (connection.rs:409 at b0ac850),
+# and a Connection whose last handle drops while the peer tears the link
+# down panics the board. 1d813cb2 is 5949a5b plus that one fix, seven
+# lines in connection.rs, submitted upstream as PR #315. It sits on the
+# fork's branch `leviculum-5949a5b-drop-fix`; cargo allows only one of
+# `branch` and `rev`, so the rev pins and this comment names the branch.
+# A pin bump rebases 1d813cb onto the new rev until #315 is merged
+# (docs/src/firmware/embassy-pins.md). s140 is a path dependency inside
+# the same repository, so both lines name the same source and resolve to
+# one copy.
+nrf-softdevice = { git = "https://github.com/reallew/nrf-softdevice", rev = "1d813cb", optional = true }
+nrf-softdevice-s140 = { git = "https://github.com/reallew/nrf-softdevice", rev = "1d813cb", optional = true }
 
 # cortex-m-rt supplies the startup runtime, panic handler, and vector
 # table that the linker needs for a no_std no_main firmware image, even
