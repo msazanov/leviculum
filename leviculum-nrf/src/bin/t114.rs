@@ -621,7 +621,7 @@ async fn main(spawner: Spawner) {
     // here on in the periodic banner and the identity query). This is
     // the only place they are written: a per-BSP copy on the gated path
     // was a line a late reader never saw (#234).
-    leviculum_nrf::identity::note_boot_identity(
+    leviculum_firmware::identity::note_boot_identity(
         *node.identity().hash(),
         node.probe_dest_hash().map(|h| *h.as_bytes()),
         delivery_hash.as_ref().map(|h| *h.as_bytes()),
@@ -635,7 +635,7 @@ async fn main(spawner: Spawner) {
     let pn_config = leviculum_nrf::pn::load_config_at_boot(t114::CONFIG.telemetry_flash_page);
     let mut pn_engine = leviculum_nrf::pn::Engine::new(&mut node, pn_config);
     if let Some(pn) = pn_engine.as_ref() {
-        leviculum_nrf::identity::note_propagation(*pn.destination_hash().as_bytes());
+        leviculum_firmware::identity::note_propagation(*pn.destination_hash().as_bytes());
         spawner.must_spawn(leviculum_nrf::pn::miner_task());
     } else {
         log_critical!("PN role=off reason=identity-underivable");

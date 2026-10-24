@@ -3752,7 +3752,7 @@ async fn execute(op: &FlushOp) -> Option<u32> {
 /// (`crate::telemetry::register_delivery_destination`); a copy already
 /// held (`dup=1`) is not news.
 fn notify_if_for_us(destination_hash: &[u8; 16], duplicate: bool) {
-    let own = crate::identity::report().and_then(|report| report.lxmf);
+    let own = leviculum_firmware::identity::report().and_then(|report| report.lxmf);
     if !duplicate && own.as_ref() == Some(destination_hash) {
         crate::feedback::notify();
     }

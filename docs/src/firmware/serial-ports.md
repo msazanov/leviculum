@@ -116,7 +116,7 @@ The hashes a prober needs are among them, on one line:
 destination this boot did not register reads `none` rather than a
 string of zeroes. The line is emitted once the boot has registered its
 destinations and then again in the 5 s banner
-(`leviculum-nrf/src/identity.rs`, `log_banner`), so attaching late
+(`leviculum-nrf/firmware/src/identity.rs`, `log_banner`), so attaching late
 costs at most one banner period.
 
 > **It has to be on the critical log path, and it is.** Until 2026-09-17

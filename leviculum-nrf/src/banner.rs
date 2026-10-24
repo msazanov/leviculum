@@ -33,7 +33,7 @@ pub fn emit(media_src: crate::media::Source) {
     crate::log_critical!("[TIME_SOURCE] source={}", crate::time_source_str());
     crate::media::log_banner(media_src);
     crate::name::log_banner();
-    crate::identity::log_banner();
+    leviculum_firmware::identity::log_banner();
 }
 
 /// The banner loop each board binary's `fw_build_banner` task runs: wait

@@ -1062,7 +1062,7 @@ async fn retic_serial_task(
                                     // hashes: REFUSE_BUSY, the host
                                     // retries — the node-name query's
                                     // readiness clause.
-                                    let report = crate::identity::report();
+                                    let report = leviculum_firmware::identity::report();
                                     let answer = envelope::identity_query_answer(report.as_ref());
                                     if !write_framed(&mut tx, &control, &answer, &mut frame_buf)
                                         .await

@@ -64,10 +64,10 @@ tree:
   (`qspi.rs` 1188, `record_store.rs` 788, `flash.rs` 79), the SX1262
   driver (`sx1262.rs` 1704), entropy from the SoftDevice (`rng.rs` 194),
   the allocator and the panic post-mortem (`lib.rs` 1160: the allocator
-  at `leviculum-nrf/src/lib.rs:268-271`; the panic counter and the
+  at `leviculum-nrf/src/lib.rs:267-270`; the panic counter and the
   post-mortem records moved in step 1 to
   `leviculum-nrf/firmware/src/postmortem.rs`, the panic handler and
-  HardFault stay at `leviculum-nrf/src/lib.rs:682-825`),
+  HardFault stay at `leviculum-nrf/src/lib.rs:681-824`),
   `boot_count.rs` (writes through `embassy_nrf::nvmc::Nvmc`,
   `leviculum-nrf/src/boot_count.rs:45`), the board files (`boards/*.rs`
   1264).
@@ -155,7 +155,7 @@ stratum 1 (precedents: the rx-arming fake radio harness, the fork's
 | Clock | trait | monotonic time, calendar sources and their rank | embassy time, GNSS time, host time | the same plus SNTP (`TimeSource::Ntp`, the fork's `leviculum-fw/src/lib.rs` line 120) and the PCF8563 |
 | Entropy | `rand_core` | what core's crypto draws | `rng.rs` (SoftDevice `sd_rand_application_bytes_available_get`, `leviculum-nrf/src/rng.rs:110`) | the ESP32 and RP2350 hardware RNGs |
 | Sensors | traits per sensor | GNSS UART, motion, battery, die temperature, later magnetometer | AG3335 (`gnss.rs`), QMA6100P (`motion.rs`), ADC divider (`battery.rs`), `nrf_softdevice::temperature_celsius` (`leviculum-nrf/src/telemetry.rs:946`) | AG3352 (same Airoha init), MAX17048 (`battery-scale`); the M9's QMI8658B IMU ([The ThinkNode M9](thinknode-m9.md)) has no driver in the fork yet |
-| Sinks | traits | LED, buzzer, display, keypad or button, the debug log (`log.rs` 366, to CDC today), the post-mortem store (`leviculum-nrf/firmware/src/postmortem.rs` since step 1, filled by the handlers at `leviculum-nrf/src/lib.rs:682-825`; the fork's `diag/postmortem.rs`, 398 lines) | `led.rs`, `feedback.rs`, SSD1306 and ST7789, `button.rs` | the M9's ST7789 and keypad (menus, [One button](one-button.md)) |
+| Sinks | traits | LED, buzzer, display, keypad or button, the debug log (`log.rs` 366, to CDC today), the post-mortem store (`leviculum-nrf/firmware/src/postmortem.rs` since step 1, filled by the handlers at `leviculum-nrf/src/lib.rs:681-824`; the fork's `diag/postmortem.rs`, 398 lines) | `led.rs`, `feedback.rs`, SSD1306 and ST7789, `button.rs` | the M9's ST7789 and keypad (menus, [One button](one-button.md)) |
 | Watchdog | trait | feed and timeout | none fed: the ten matches in `leviculum-nrf/src` are four comments about the outbound link watchdog in the board binaries and `qspi-selftest`'s read of the WDT's RUNSTATUS | per family |
 | Net (optional) | the fork's `leviculum-net` as a stratum-3 crate | TCP, UDP, NTP over `embassy-net` | none on nRF52840 | shared by esp and rp |
 

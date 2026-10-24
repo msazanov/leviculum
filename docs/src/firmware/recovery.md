@@ -126,8 +126,8 @@ the program region but leaves that page intact, so the node keeps its
 address. You can confirm the loaded identity on the debug port: the boot
 log prints `Identity loaded from flash`
 (`leviculum-nrf/src/bin/t114.rs:213`) and an `[IDENTITY]` line with the
-full hash (`leviculum-nrf/src/bin/t114.rs:624`, and again on the 5 s
-banner). Both are on the boot-critical log path, so attaching after the
+full hash (`note_boot_identity`, `leviculum-nrf/src/bin/t114.rs:624`,
+and again on the 5 s banner). Both are on the boot-critical log path, so attaching after the
 board has come up still shows them (Codeberg #234).
 
 ## When USB stays dark
@@ -180,7 +180,7 @@ If the board enumerates nothing on USB after a flash or a bad image:
    [Structured event logs](../structured-event-logs.md). The same port
    replays the previous boot's HardFault/panic post-mortem and the
    persistent log: look for `[HARDFAULT_PMRT]`, `[PANIC_PMRT]`, and
-   `[PERSISTENT_LOG]` (`leviculum-nrf/src/lib.rs:740-749`;
+   `[PERSISTENT_LOG]` (`leviculum-nrf/src/lib.rs:739-747`;
    `leviculum-nrf/README.md:59-60`).
 4. **Only now force the bootloader manually.** On a T114, double-tap
    RESET to get the UF2 drive regardless of the running image

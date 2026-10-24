@@ -1339,14 +1339,14 @@ fn the_identity_lines_are_not_dropped_by_the_runtime_gate() {
         );
     }
     assert!(
-        nrf_source("banner.rs").contains("crate::identity::log_banner()"),
+        nrf_source("banner.rs").contains("leviculum_firmware::identity::log_banner()"),
         "leviculum-nrf/src/banner.rs no longer repeats the [IDENTITY] banner, so a \
          late reader has only the boot window to catch it in"
     );
-    let identity = nrf_source("identity.rs");
+    let identity = firmware_source("identity.rs");
     assert!(
         identity.contains("crate::log_critical!"),
-        "leviculum-nrf/src/identity.rs no longer emits its banner on the \
+        "leviculum-nrf/firmware/src/identity.rs no longer emits its banner on the \
          boot-critical path"
     );
     // Every hash the banner publishes is on that one line, which is what

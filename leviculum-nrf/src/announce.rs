@@ -106,7 +106,7 @@ const NEIGHBOUR_SLOTS: usize = 32;
 /// objects with two lifetimes — [`AnnounceGate`] and
 /// [`crate::pn::Engine`], the second of which exists only on a boot that
 /// runs the propagation role — and the decision is one. Same locking
-/// shape as [`crate::identity`]'s statics, uncontended on the
+/// shape as [`leviculum_firmware::identity`]'s statics, uncontended on the
 /// single-core cooperative executor.
 static CADENCE: embassy_sync::blocking_mutex::Mutex<
     embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
@@ -150,7 +150,7 @@ pub fn with_cadence<T>(f: impl FnOnce(&mut AnnounceCadence) -> T) -> T {
 /// halves are decided together and a budget for one of them would be a
 /// budget for a cadence nobody runs.
 pub fn note_duty_budget(now_ms: u64, frame_airtime_ms: u64, lawful_duty_e4: u16) {
-    let frames_per_set = if crate::identity::propagation_hash().is_some() {
+    let frames_per_set = if leviculum_firmware::identity::propagation_hash().is_some() {
         2
     } else {
         1
