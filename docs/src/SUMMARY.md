@@ -72,6 +72,7 @@
 - [The USB control envelope](firmware/usb-control-envelope.md)
 - [Firmware decisions only the rig can test](firmware/host-test-seams.md)
 - [The board heap budget](firmware/heap-budget.md)
+- [The embassy pin rule](firmware/embassy-pins.md)
 - [Recovery and troubleshooting](firmware/recovery.md)
 - [Debugging with the Debug Probe (SWD)](firmware/probe-debugging.md)
 
