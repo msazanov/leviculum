@@ -35,6 +35,9 @@ leviculum-time-floor = { path = "../time-floor" }
 # store's tag map and operator-list operations it writes.
 leviculum-record-log = { path = "../record-log" }
 leviculum-pn-store = { path = "../pn-store" }
+# The board's interface table and its ingress-control flags, which the
+# byte counters' interface count is asserted against.
+leviculum-heap-budget = { path = "../heap-budget" }
 
 # The executor is declared for what moves in later (the node loop spawns
 # tasks); nothing that has moved names it yet.

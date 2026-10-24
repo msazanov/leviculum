@@ -49,7 +49,7 @@
 //! than six more fields on the totals line: the totals line is already at the
 //! width a serial capture wraps, and a per-interface line is what
 //! `grep 'iface=lora_sx1262'` turns into a single carrier's time series.
-//! They come from [`crate::iface_bytes`], which is also what the `/status`
+//! They come from [`leviculum_firmware::iface_bytes`], which is also what the `/status`
 //! bundle answers `rnstatus -R` with, so the instrument and the remote answer
 //! agree by construction rather than by review.
 
@@ -119,7 +119,7 @@ impl Ticker {
         self.next = now + PERIOD;
         // One sampler, one cadence: the speed window a `/status` answer
         // reports is the window whose bytes were just printed.
-        crate::iface_bytes::sample(now.as_millis());
+        leviculum_firmware::iface_bytes::sample(now.as_millis());
         log(node);
     }
 }
@@ -159,7 +159,7 @@ where
         ),
     );
     for (id, name) in crate::iface_bytes::NAMES.iter().enumerate() {
-        let traffic = crate::iface_bytes::snapshot(id);
+        let traffic = leviculum_firmware::iface_bytes::snapshot(id);
         crate::log::log_fmt(
             "[TRANSPORT] ",
             format_args!("iface={name} rxb={} txb={}", traffic.rxb, traffic.txb),

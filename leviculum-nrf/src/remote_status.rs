@@ -39,7 +39,8 @@ use leviculum_core::traits::{Clock, Storage};
 use leviculum_core::transport::TickOutput;
 use rand_core::CryptoRngCore;
 
-use crate::iface_bytes::{self, IFACE_COUNT, NAMES};
+use crate::iface_bytes::NAMES;
+use leviculum_firmware::iface_bytes::{self, IFACE_COUNT};
 
 /// Answer every `/status` request in `events`, merging the sends into `out`.
 ///

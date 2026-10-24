@@ -154,7 +154,7 @@ packet it accepts (`accepted_packets`, `leviculum-nrf/src/lora.rs:49`) and
 the task settles each one in that order, keyed or dropped
 (`settle_packet`, `leviculum-nrf/src/lora.rs:55`, called at the mute's
 drop, the stale drop and after a transmission,
-`leviculum-nrf/src/lora.rs:1826,2219,2464`). The button arm notes the
+`leviculum-nrf/src/lora.rs:1829,2222,2467`). The button arm notes the
 count before and after its dispatch
 (`leviculum-nrf/src/feedback.rs:191`, called from each binary, e.g.
 `leviculum-nrf/src/bin/t1000e.rs:1125`), and the press's last LoRa

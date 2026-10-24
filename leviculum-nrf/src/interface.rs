@@ -36,7 +36,7 @@ impl Interface for EmbeddedInterface<'_> {
     }
 
     fn name(&self) -> &str {
-        crate::iface_bytes::NAMES[crate::iface_bytes::SERIAL]
+        crate::iface_bytes::NAMES[leviculum_firmware::iface_bytes::SERIAL]
     }
 
     fn mtu(&self) -> usize {

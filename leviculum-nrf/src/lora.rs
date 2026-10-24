@@ -421,7 +421,7 @@ impl Interface for LoRaInterface {
         InterfaceId(IFACE_INDEX)
     }
     fn name(&self) -> &str {
-        crate::iface_bytes::NAMES[crate::iface_bytes::LORA]
+        crate::iface_bytes::NAMES[leviculum_firmware::iface_bytes::LORA]
     }
     fn mtu(&self) -> usize {
         500
@@ -510,7 +510,10 @@ impl Interface for LoRaInterface {
             // airtime a retry costs stay out of the number.
             .map(|()| {
                 LORA_ACCEPTED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                crate::iface_bytes::note_tx(crate::iface_bytes::LORA, bytes)
+                leviculum_firmware::iface_bytes::note_tx(
+                    leviculum_firmware::iface_bytes::LORA,
+                    bytes,
+                )
             })
             .map_err(|_| {
                 // Unreachable while the reservation and the channel agree — the
@@ -1397,7 +1400,7 @@ impl leviculum_rx_arming::FrameSink for CoreHandoff<'_> {
                     p8[0], p8[1], p8[2], p8[3], p8[4], p8[5], p8[6], p8[7], plen
                 ),
             );
-            crate::iface_bytes::note_rx(crate::iface_bytes::LORA, plen);
+            leviculum_firmware::iface_bytes::note_rx(leviculum_firmware::iface_bytes::LORA, plen);
             self.incoming_tx.send(data).await;
         } else if len >= 2 && (frame[0] & leviculum_core::rnode::FLAG_SPLIT) != 0 {
             crate::log::log_fmt(

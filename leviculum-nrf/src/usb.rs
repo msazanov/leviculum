@@ -767,8 +767,8 @@ async fn retic_serial_task(
                             match envelope::classify_control_frame(data, ACCEPTED_CONTROL_TYPES) {
                                 ControlAction::NotControl => {
                                     log_u32("SER: frame complete", data.len() as u32);
-                                    crate::iface_bytes::note_rx(
-                                        crate::iface_bytes::SERIAL,
+                                    leviculum_firmware::iface_bytes::note_rx(
+                                        leviculum_firmware::iface_bytes::SERIAL,
                                         data.len(),
                                     );
                                     incoming_tx.send(data.clone()).await;
@@ -1453,8 +1453,8 @@ async fn retic_serial_task(
                     }
                     // Counted once it reached the host, not when the queue
                     // took it (`leviculum_usb_policy::tx_counted`).
-                    crate::iface_bytes::note_tx(
-                        crate::iface_bytes::SERIAL,
+                    leviculum_firmware::iface_bytes::note_tx(
+                        leviculum_firmware::iface_bytes::SERIAL,
                         leviculum_usb_policy::tx_counted(write_ok, data.len()),
                     );
                 }

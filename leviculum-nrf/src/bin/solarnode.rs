@@ -343,7 +343,7 @@ async fn main(spawner: Spawner) {
     // #606: the USB serial interface runs no ingress burst limiter, LoRa
     // and BLE do. The table and its reasons are the heap budget's, which
     // sizes the held-announce cap for exactly the interfaces left on.
-    leviculum_nrf::iface_bytes::apply_board_ingress_control(&mut *node);
+    leviculum_firmware::iface_bytes::apply_board_ingress_control(&mut *node);
 
     // #234: boot-critical, because `log_fmt` DROPS a line while the
     // runtime-drain gate is shut — it returns before the ring buffer and

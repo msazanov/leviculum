@@ -994,6 +994,7 @@ dependencies = [
  "leviculum-boot-count",
  "leviculum-boot-trace",
  "leviculum-core",
+ "leviculum-heap-budget",
  "leviculum-log-line",
  "leviculum-pn-store",
  "leviculum-record-log",

@@ -693,7 +693,7 @@ impl Interface for BleInterface {
         InterfaceId(2)
     }
     fn name(&self) -> &str {
-        crate::iface_bytes::NAMES[crate::iface_bytes::BLE]
+        crate::iface_bytes::NAMES[leviculum_firmware::iface_bytes::BLE]
     }
     fn mtu(&self) -> usize {
         INTERFACE_MTU
@@ -766,7 +766,7 @@ impl BleInterface {
             && self.sender.try_send((aim, data.to_vec())).is_ok();
         if queued {
             OUTGOING_HELD.add(bytes);
-            crate::iface_bytes::note_tx(crate::iface_bytes::BLE, bytes);
+            leviculum_firmware::iface_bytes::note_tx(leviculum_firmware::iface_bytes::BLE, bytes);
             return Ok(());
         }
         // Codeberg #344: same silence as the other two. A phone that

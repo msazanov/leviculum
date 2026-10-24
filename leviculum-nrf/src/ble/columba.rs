@@ -1077,7 +1077,10 @@ async fn gatt_events(
                                 super::incoming_held_add(bytes);
                                 // #235: the packet, not the allocation —
                                 // the reference counts payload bytes.
-                                crate::iface_bytes::note_rx(crate::iface_bytes::BLE, len);
+                                leviculum_firmware::iface_bytes::note_rx(
+                                    leviculum_firmware::iface_bytes::BLE,
+                                    len,
+                                );
                             }
                         }
                         DefragResult::NeedMore | DefragResult::Error => {}
@@ -2905,7 +2908,10 @@ async fn run_central_session(
                 if offer_incoming(&incoming_tx, Some(peer_id), packet) {
                     // #388 census, as on the peripheral side.
                     super::incoming_held_add(bytes);
-                    crate::iface_bytes::note_rx(crate::iface_bytes::BLE, len);
+                    leviculum_firmware::iface_bytes::note_rx(
+                        leviculum_firmware::iface_bytes::BLE,
+                        len,
+                    );
                 }
             }
             DefragResult::NeedMore | DefragResult::Error => {}
