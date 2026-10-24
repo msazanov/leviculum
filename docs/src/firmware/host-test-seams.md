@@ -1152,6 +1152,41 @@ own issue, not a finding of this page.
 | 410 | `leviculum-nrf/src/vext.rs:79` | no rail, no warm-up wait | WARM_AT_MS | `boot_smoke_t114` | 300 | 1/1 |  |
 | 411 | `leviculum-nrf/src/store_spike.rs:109` | spike build: stop at the first failing step (record-log candidate) | flash results | none | - | - || rig-only by nature: the `store-spike` instrument build, in no shipping image |
 | 412 | `leviculum-nrf/src/store_spike.rs:144` | spike build: the same for sequential-storage | flash results | none | - | - || rig-only by nature: the `store-spike` instrument build, in no shipping image |
+## The log-diff masking
+
+Each step of [Firmware layers](../concepts/firmware-layers.md) moves code
+and must change no behaviour, and one of its proofs is a diff of one
+scripted scenario's debug capture before and after the move. Two captures
+of one scenario never agree byte for byte, so `scripts/log-diff-mask.py`
+writes a capture with the values a relocation may change replaced by
+`<*>`:
+
+- the stamps, `t=` and `host_ms=`;
+- the link figures, `rssi=` and `snr=`;
+- every duration, any key ending in `_ms`;
+- the counters, `packets=` and every `rx_*=` and `tx_*=`;
+- every number on a `[HEAP_CENSUS]` line.
+
+A key matches only as a whole word after a line start, a space or a `[`,
+so `len=` stays: a frame length is behaviour. Every word, every other
+value and the line order stay too, and those are what the diff is for.
+
+```text
+scripts/log-diff-mask.py before.log > before.masked
+scripts/log-diff-mask.py after.log > after.masked
+diff -u before.masked after.masked
+```
+
+`just log-diff-mask-selftest` (in `just guards`) runs
+`scripts/test-log-diff-mask.sh` over three scripted captures: one moved
+only in stamps, counters, link figures and census numbers diffs to
+nothing, and one with a single line moved two places diffs to that line
+and nothing else. A mask that forgets `t=` fails the first, one that
+swallows `len=` fails its third check.
+
+The capture itself is periculum's per-scenario `[debug-capture]` log, or
+`scripts/debug-witness.sh` across a reset.
+
 See also: [The firmware's host-test
 seam](../concepts/firmware-host-test-seam.md) for the rule and how it is
 gated.

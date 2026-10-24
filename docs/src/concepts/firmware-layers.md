@@ -184,8 +184,8 @@ read the ELF and need no board), the runtime `[HEAP_CENSUS]` line on a
 board, one rig cell per touched subsystem, and a debug-log diff over
 one scripted scenario with these keys masked: `t=`, `host_ms=`, `rssi=`,
 `snr=`, every counter and the `[HEAP_CENSUS]` numbers (the capture
-exists in `scripts/debug-witness.sh`; the masking does not and is step
-0's deliverable). One coder pass per step.
+exists in `scripts/debug-witness.sh`; the masking is step 0's
+[`scripts/log-diff-mask.py`](../firmware/host-test-seams.md#the-log-diff-masking)). One coder pass per step.
 
 | step | does | seams | pin |
 |---|---|---|---|
