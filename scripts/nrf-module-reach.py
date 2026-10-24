@@ -89,7 +89,7 @@ REACH_RE = re.compile(r"crate::([a-z_][a-z0-9_]*)")
 # the page, not a fact of the tree; when the page moves a module across the
 # line, this list moves with it.
 BIND_MODULES = (
-    "ble", "usb", "baseboard", "boards", "sx1262", "radio", "qspi", "flash",
+    "ble", "usb", "boards", "sx1262", "radio", "qspi", "flash",
     "record_store", "radio_store", "rng", "led", "button", "feedback",
     "display", "st7789", "battery", "gnss", "motion", "vext",
 )

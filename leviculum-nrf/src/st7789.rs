@@ -348,17 +348,17 @@ pub async fn display_task(wiring: TftWiring, identity_hash: [u8; 16]) {
         // value and must not compete for a receiver slot. `bsp-t114`
         // implies the `gnss` feature (Cargo.toml), so there is no
         // feature-off arm here.
-        let gnss = match crate::baseboard::GNSS_PRESENCE.try_get() {
-            Some(p) if p.state == crate::baseboard::GnssPresence::NoHardware => {
+        let gnss = match leviculum_firmware::baseboard::GNSS_PRESENCE.try_get() {
+            Some(p) if p.state == leviculum_firmware::baseboard::GnssPresence::NoHardware => {
                 GnssStatus::NoHardware
             }
             Some(p) => {
-                let f = crate::baseboard::GNSS_FIX
+                let f = leviculum_firmware::baseboard::GNSS_FIX
                     .try_get()
-                    .unwrap_or(crate::baseboard::GnssFix::empty());
+                    .unwrap_or(leviculum_firmware::baseboard::GnssFix::empty());
                 GnssStatus::Data {
                     sats: f.sat_in_use,
-                    valid: p.state == crate::baseboard::GnssPresence::Fix,
+                    valid: p.state == leviculum_firmware::baseboard::GnssPresence::Fix,
                     coords: f.latitude.zip(f.longitude),
                 }
             }
@@ -376,7 +376,7 @@ pub async fn display_task(wiring: TftWiring, identity_hash: [u8; 16]) {
             // above rather than a receiver, so the panel costs no watch
             // capacity. `bsp-t114` implies `battery`, so there is no
             // cfg here for the same reason `ble_peers` has none.
-            battery: match crate::baseboard::BATTERY_STATE.try_get() {
+            battery: match leviculum_firmware::baseboard::BATTERY_STATE.try_get() {
                 Some(b) if b.voltage_mv > 0 => BatteryStatus::Data {
                     percent: b.percent,
                     voltage_mv: b.voltage_mv,

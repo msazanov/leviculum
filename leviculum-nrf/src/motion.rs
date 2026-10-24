@@ -6,7 +6,7 @@
 //! `MOTION state=moving|still hold_ms=<n> src=qma6100p` on each change,
 //! and every [`leviculum_motion::STAT_INTERVAL_MS`] a `MOTION_STAT` line
 //! with the window's sample count, largest delta and over-threshold count.
-//! Each edge is also written to [`crate::baseboard::MOTION_STATE`], which
+//! Each edge is also written to [`leviculum_firmware::baseboard::MOTION_STATE`], which
 //! the GNSS task reads to sleep its receiver while the board is still
 //! (step two); the announce cadence and telemetry do not read it. The
 //! register map, the init order, the
@@ -159,7 +159,7 @@ async fn motion_task(wiring: MotionWiring) {
 /// first edge and never one it moves into.
 #[cfg(feature = "gnss")]
 fn publish(state: MotionState) {
-    use crate::baseboard::{Motion, MOTION_STATE};
+    use leviculum_firmware::baseboard::{Motion, MOTION_STATE};
     let motion = match state {
         MotionState::Moving => Motion::Moving,
         MotionState::Still => Motion::Still,

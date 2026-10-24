@@ -41,6 +41,18 @@ leviculum-heap-budget = { path = "../heap-budget" }
 # The serial interface's queue depth and its drop and count decisions
 # (958: `interface` moved here, the USB writer that drains it did not).
 leviculum-usb-policy = { path = "../usb-policy" }
+# The board state the sensor tasks feed and the orchestration reads (959,
+# `baseboard`): the GNSS fix and presence types it re-exports.
+leviculum-gnss-time = { path = "../gnss-time", optional = true }
+leviculum-gnss-presence = { path = "../gnss-presence", optional = true }
+
+# Capabilities, not chips: whether the board carries a GNSS receiver, a
+# battery gauge, a display. `leviculum-nrf`'s features of the same names
+# forward here, so every BSP selects the same set it selects there.
+[features]
+gnss = ["dep:leviculum-gnss-time", "dep:leviculum-gnss-presence"]
+battery = []
+display = []
 
 # The executor is declared for what moves in later (the node loop spawns
 # tasks); nothing that has moved names it yet.

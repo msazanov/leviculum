@@ -423,14 +423,15 @@ bsp-t1000e = ["softdevice", "radio-lr11xx", "gnss", "battery", "motion"]
 radio-sx1262 = []
 radio-lr11xx = ["dep:leviculum-lr11xx"]
 
-display = ["dep:ssd1306", "dep:embedded-graphics", "dep:leviculum-screen"]
+display = ["dep:ssd1306", "dep:embedded-graphics", "dep:leviculum-screen", "leviculum-firmware/display"]
 gnss = [
     "dep:nmea0183",
     "dep:leviculum-gnss-time",
     "dep:leviculum-gnss-presence",
     "dep:leviculum-gnss-init",
+    "leviculum-firmware/gnss",
 ]
-battery = []
+battery = ["leviculum-firmware/battery"]
 motion = ["dep:leviculum-motion"]
 rak-baseboard = ["display", "gnss", "battery"]
 # The `qspi-selftest` instrument's crate, and nothing else. Not a plain

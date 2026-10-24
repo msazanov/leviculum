@@ -1271,7 +1271,7 @@ async fn transmit_all_frames(
         crate::log::log_fmt("[LORA] ", format_args!("TX done"));
         LORA_TX_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         #[cfg(feature = "display")]
-        crate::baseboard::LORA_TX_FLASH.signal(());
+        leviculum_firmware::baseboard::LORA_TX_FLASH.signal(());
     }
     crate::log::log_fmt(
         "[T114_LORA_LOOP] ",
@@ -1387,7 +1387,7 @@ impl leviculum_rx_arming::FrameSink for CoreHandoff<'_> {
             }
             LORA_RX_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             #[cfg(feature = "display")]
-            crate::baseboard::LORA_RX_FLASH.signal(());
+            leviculum_firmware::baseboard::LORA_RX_FLASH.signal(());
             let plen = data.len();
             let d = data.as_slice();
             let m = d.len().min(8);

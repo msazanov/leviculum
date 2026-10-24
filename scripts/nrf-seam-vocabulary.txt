@@ -7,12 +7,9 @@
 # lib.rs defines. The bind-crate list is the backends row of
 # docs/src/concepts/firmware-layers.md, "The problem, measured", read into
 # the script's BIND_MODULES; it is a reading of the page and moves with it:
-#   ble usb baseboard boards sx1262 radio qspi flash record_store radio_store rng led button feedback display st7789 battery gnss motion vext
+#   ble usb boards sx1262 radio qspi flash record_store radio_store rng led button feedback display st7789 battery gnss motion vext
 # See the script's header for the rules.
-src/announce.rs: baseboard::GNSS_FIX x1
 src/announce.rs: button doc x1
-src/battery.rs: baseboard::BATTERY_STATE x1
-src/battery.rs: baseboard::BatteryState x1
 src/ble/columba.rs: ble::set_gap_device_name doc x1
 src/ble/columba.rs: radio_store doc x1
 src/ble/mod.rs: radio_store doc x1
@@ -28,28 +25,14 @@ src/boards/t1000e.rs: radio doc x1
 src/boot_count.rs: radio_store doc x1
 src/boot_count.rs: record_store doc x1
 src/boot_count.rs: record_store::region doc x1
-src/button.rs: baseboard::DISPLAY_WAKE x1
 src/button.rs: feedback doc x2
 src/button.rs: feedback::release_now x1
 src/button.rs: feedback::status x1
 src/chtm.rs: sx1262 doc x1
-src/display.rs: baseboard::BATTERY_STATE x1
-src/display.rs: baseboard::DISPLAY_WAKE x2
-src/display.rs: baseboard::GNSS_FIX x1
-src/display.rs: baseboard::GNSS_PRESENCE x1
-src/display.rs: baseboard::GnssFix::empty x1
-src/display.rs: baseboard::GnssPresence::Fix x1
-src/display.rs: baseboard::GnssPresence::NoHardware x1
 src/display.rs: ble::HVN_DRAIN x1
 src/display.rs: button x1
-src/feedback.rs: baseboard::BATTERY_STATE x1
 src/feedback.rs: battery doc x1
 src/feedback.rs: led doc x1
-src/gnss.rs: baseboard::GNSS_FIX x1
-src/gnss.rs: baseboard::GNSS_PRESENCE x1
-src/gnss.rs: baseboard::GnssFix x1
-src/gnss.rs: baseboard::GnssPresenceState x1
-src/gnss.rs: baseboard::MOTION_STATE x1 doc x1
 src/gnss.rs: boards::rak4631 doc x1
 src/gnss.rs: vext doc x2
 src/gnss.rs: vext::wait_ready x1
@@ -58,14 +41,9 @@ src/heap_census.rs: ble::session_census x1
 src/heap_census.rs: heap_stats x2
 src/heap_census.rs: heap_watermark_sample x1
 src/heap_census.rs: rng::RawHwRng x1
-src/led.rs: baseboard doc x1
-src/led.rs: baseboard::LORA_RX_FLASH x1
-src/led.rs: baseboard::LORA_TX_FLASH x1
 src/led.rs: feedback doc x1
 src/led.rs: feedback::Sink x1
 src/led.rs: feedback::spawn_led x1
-src/lora.rs: baseboard::LORA_RX_FLASH x1
-src/lora.rs: baseboard::LORA_TX_FLASH x1
 src/lora.rs: feedback::lora_packet_settled x1
 src/lora.rs: radio x1 doc x1
 src/lora.rs: radio::Error::Crc x1
@@ -84,8 +62,6 @@ src/lora.rs: set_irq_priorities doc x1
 src/media.rs: ble x1 doc x1
 src/media.rs: ble::note_media_changed x1
 src/mgmt.rs: usb doc x1
-src/motion.rs: baseboard::MOTION_STATE x1 doc x1
-src/motion.rs: baseboard::Motion x1
 src/name.rs: ble::columba doc x1
 src/pn.rs: feedback::notify x1 doc x1
 src/pn.rs: heap_stats x1
@@ -108,12 +84,6 @@ src/radio_store.rs: flash::shared_flash doc x1
 src/record_store.rs: ble doc x1
 src/record_store.rs: flash::SharedFlash x4 doc x1
 src/record_store.rs: usb doc x1
-src/st7789.rs: baseboard::BATTERY_STATE x1
-src/st7789.rs: baseboard::GNSS_FIX x1
-src/st7789.rs: baseboard::GNSS_PRESENCE x1
-src/st7789.rs: baseboard::GnssFix::empty x1
-src/st7789.rs: baseboard::GnssPresence::Fix x1
-src/st7789.rs: baseboard::GnssPresence::NoHardware x1
 src/st7789.rs: ble::HVN_DRAIN x1
 src/st7789.rs: boards::t114::TftBacklight x1
 src/st7789.rs: boards::t114::TftCs x1

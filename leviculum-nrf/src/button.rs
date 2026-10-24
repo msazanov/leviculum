@@ -146,7 +146,7 @@ pub async fn button_task(wiring: ButtonWiring) {
         // debounced glitch was never a press.
         #[cfg(feature = "display")]
         if press.action != PressAction::Debounced {
-            crate::baseboard::DISPLAY_WAKE.signal(());
+            leviculum_firmware::baseboard::DISPLAY_WAKE.signal(());
         }
 
         match press.action {

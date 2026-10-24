@@ -90,7 +90,7 @@ use leviculum_battery_scale::{
 /// constructor that matches how it states it.
 pub use leviculum_battery_scale::{BatteryScale, Divider};
 
-use crate::baseboard::{BatteryState, BATTERY_STATE};
+use leviculum_firmware::baseboard::{BatteryState, BATTERY_STATE};
 
 bind_interrupts!(pub struct BatteryIrqs {
     SAADC => saadc::InterruptHandler;

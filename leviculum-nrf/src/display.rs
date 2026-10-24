@@ -173,7 +173,7 @@ pub async fn display_task(
     // Receivers for shared baseboard state — held outside the loop so the
     // last value survives between producer updates.
     #[cfg(feature = "gnss")]
-    let mut gnss_rx = crate::baseboard::GNSS_FIX
+    let mut gnss_rx = leviculum_firmware::baseboard::GNSS_FIX
         .receiver()
         .expect("gnss watch capacity");
     // Presence consumer (#240). A `None` receiver means the capacity
@@ -181,7 +181,7 @@ pub async fn display_task(
     // "init" forever rather than panicking the display task.
     #[cfg(feature = "gnss")]
     let mut presence_rx = {
-        let rx = crate::baseboard::GNSS_PRESENCE.receiver();
+        let rx = leviculum_firmware::baseboard::GNSS_PRESENCE.receiver();
         if rx.is_none() {
             crate::log::log_fmt(
                 "[DISP] ",
@@ -191,7 +191,7 @@ pub async fn display_task(
         rx
     };
     #[cfg(feature = "battery")]
-    let mut bat_rx = crate::baseboard::BATTERY_STATE
+    let mut bat_rx = leviculum_firmware::baseboard::BATTERY_STATE
         .receiver()
         .expect("battery watch capacity");
 
@@ -219,7 +219,9 @@ pub async fn display_task(
         // one, a lit display goes dark once the minute is up. An unchanged
         // request is not sent and a failed one keeps the old state:
         // `leviculum_screen::power::apply_power`.
-        pressed |= crate::baseboard::DISPLAY_WAKE.try_take().is_some();
+        pressed |= leviculum_firmware::baseboard::DISPLAY_WAKE
+            .try_take()
+            .is_some();
         let now_ms = Instant::now().as_millis();
         let request = if core::mem::take(&mut pressed) {
             wake.press(now_ms, display_on)
@@ -248,7 +250,7 @@ pub async fn display_task(
         if !display_on {
             let woke = select(
                 Timer::after(Duration::from_secs(1)),
-                crate::baseboard::DISPLAY_WAKE.wait(),
+                leviculum_firmware::baseboard::DISPLAY_WAKE.wait(),
             )
             .await;
             pressed = matches!(woke, Either::Second(()));
@@ -278,16 +280,16 @@ pub async fn display_task(
         // line stays in the historical "init" state.
         #[cfg(feature = "gnss")]
         let gnss = match presence_rx.as_mut().and_then(|rx| rx.try_get()) {
-            Some(p) if p.state == crate::baseboard::GnssPresence::NoHardware => {
+            Some(p) if p.state == leviculum_firmware::baseboard::GnssPresence::NoHardware => {
                 GnssStatus::NoHardware
             }
             Some(p) => {
                 let f = gnss_rx
                     .try_get()
-                    .unwrap_or(crate::baseboard::GnssFix::empty());
+                    .unwrap_or(leviculum_firmware::baseboard::GnssFix::empty());
                 GnssStatus::Data {
                     sats: f.sat_in_use,
-                    valid: p.state == crate::baseboard::GnssPresence::Fix,
+                    valid: p.state == leviculum_firmware::baseboard::GnssPresence::Fix,
                     coords: f.latitude.zip(f.longitude),
                 }
             }
