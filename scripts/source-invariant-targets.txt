@@ -193,6 +193,7 @@ skip  lndecode        agrees_with_the_writer     # decoder/writer agreement; sub
 skip  lndecode        cli                        # spawns the lndecode binary
 skip  lnflash         cli                        # spawns the lnflash binary against temp dirs
 skip  lnflash         vendored_softdevice        # close to the line: reads the vendored image, but half its subject is the parser
+skip  lnmsg           mailbox_cli                # spawns lnmsg against in-process daemons over sockets
 skip  lnmsg           python_interop             # drives Python over sockets; Tier 1
 skip  lnmsg           send_cli                   # spawns the lnmsg binary
 skip  lnmsg           stamp_timing               # tokio runtime around the stamp solver

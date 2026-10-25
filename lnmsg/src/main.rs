@@ -17,7 +17,7 @@
 //! `--via propagated` return so a script can tell the two successes apart
 //! (`lnmsg/src/send.rs`, `EXIT_PROPAGATED`).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -27,7 +27,8 @@ use leviculum_std::config::Config;
 
 use lnmsg::engine::{attach, AttachConfig};
 use lnmsg::fetch::{run_fetch, FetchError, FetchOptions};
-use lnmsg::outbox::{SendRequest, Via};
+use lnmsg::mailbox_state::{self, MailboxRun, Route};
+use lnmsg::outbox::{MailboxInput, SendRequest, Via};
 use lnmsg::seen::SeenStore;
 use lnmsg::send::{
     fallback_reason, run_send, run_send_propagated, SendOptions, EXIT_FAILURE, EXIT_PROPAGATED,
@@ -105,9 +106,11 @@ struct SendArgs {
     #[arg(long, value_enum, default_value_t = ViaArg::Auto)]
     via: ViaArg,
 
-    /// The propagation node to use: 32 hex characters. Without it, the
-    /// `propagation_node` key in lnmsg's config decides; without either, the
-    /// most recently announced node heard this run.
+    /// The propagation node to use: 32 hex characters, remembered as your
+    /// choice. Without it, the `propagation_node` key in lnmsg's config
+    /// decides; without either, the mailbox lnmsg adopted on an earlier run,
+    /// or a newly adopted one: the most recently heard node that does not
+    /// run on this device.
     #[arg(long, value_name = "HASH")]
     pn: Option<String>,
 
@@ -187,8 +190,8 @@ fn instance_name(config_dir: &std::path::Path) -> String {
 }
 
 /// Resolve the propagation-node choice: the `--pn` flag, then lnmsg's own
-/// config. `None` with `"announced"` means "let the engine take the most
-/// recently announced node". The source word is what `LNMSG_PN` logs.
+/// config. `None` with `"mailbox"` means "let the mailbox rule decide"
+/// (`lnmsg::mailbox`). The source word is what `LNMSG_PN` logs.
 fn resolve_pn(
     flag: Option<&str>,
     home: &std::path::Path,
@@ -202,10 +205,48 @@ fn resolve_pn(
     match lnmsg::config::load(home) {
         Ok(config) => match config.propagation_node {
             Some(hash) => Ok((Some(hash), "config")),
-            None => Ok((None, "announced")),
+            None => Ok((None, "mailbox")),
         },
         Err(error) => Err(error.to_string()),
     }
+}
+
+/// How this run selects its mailbox. A run that names a node with `--pn` or
+/// the config needs no input; one that does not reads the daemon's path
+/// table once, here, because the engine runs under the core lock and may not
+/// make a round trip.
+async fn mailbox_run(
+    home: &Path,
+    config_dir: &Path,
+    instance: &str,
+    preferred: Option<[u8; 16]>,
+) -> MailboxRun {
+    let input = match preferred {
+        Some(_) => None,
+        None => Some(MailboxInput {
+            routes: read_routes(config_dir, instance).await,
+            previous: mailbox_state::load(home),
+        }),
+    };
+    MailboxRun {
+        home: Some(home.to_path_buf()),
+        input,
+    }
+}
+
+/// The daemon's path table over the shared-instance RPC, keyed the way
+/// `lnstatus` and `lnpath` key themselves (`leviculum_std::daemon_rpc`).
+async fn read_routes(config_dir: &Path, instance: &str) -> Result<Vec<Route>, String> {
+    let config_file = config_dir.join("config");
+    let config = config_file
+        .exists()
+        .then(|| Config::load(&config_file).ok())
+        .flatten();
+    let (authkey, _) = leviculum_std::daemon_rpc::resolve_authkey(config_dir, config.as_ref())?;
+    let table = leviculum_std::rpc_query(instance, &authkey, "path_table")
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(mailbox_state::routes_from_path_table(&table))
 }
 
 #[tokio::main]
@@ -299,7 +340,11 @@ async fn run(args: SendArgs) -> ExitCode {
         Err(error) => return failure(error, "no-daemon"),
     };
 
-    let options = SendOptions::new(instance, Duration::from_secs(args.timeout));
+    let mut options = SendOptions::new(instance.clone(), Duration::from_secs(args.timeout));
+    // `--via auto` reads the path table only if its direct leg fails.
+    if args.via == ViaArg::Propagated {
+        options.mailbox = mailbox_run(&home, &config_dir, &instance, preferred_pn).await;
+    }
     let request = |via: Via| SendRequest {
         destination,
         title: title.clone(),
@@ -379,6 +424,8 @@ async fn run(args: SendArgs) -> ExitCode {
                             }
                             _ => None,
                         };
+                        options.mailbox =
+                            mailbox_run(&home, &config_dir, &instance, preferred_pn).await;
                         let fallback = run_send_propagated(
                             &mut attached.outbox,
                             request(Via::Propagated),
@@ -455,7 +502,8 @@ async fn run_fetch_command(args: FetchArgs) -> ExitCode {
         Err(error) => return failure(error, "no-daemon"),
     };
 
-    let options = FetchOptions::new(instance, Duration::from_secs(args.timeout));
+    let mut options = FetchOptions::new(instance.clone(), Duration::from_secs(args.timeout));
+    options.mailbox = mailbox_run(&home, &config_dir, &instance, preferred_pn).await;
     // Deliberately NOT `stdout().lock()`: the engine's driver thread logs
     // through tracing, and with `RUST_LOG=debug` (how the conformance rig
     // runs every tool) the fmt subscriber writes to this same stdout. A lock

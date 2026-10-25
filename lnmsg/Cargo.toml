@@ -30,15 +30,16 @@ tokio.workspace = true
 # layer, so the emit sites are `tracing::debug!` calls with an `event` field.
 tracing.workspace = true
 rand_core = { version = "0.6", features = ["std", "getrandom"] }
+# The daemon's path table arrives as the JSON `leviculum_std::rpc_query`
+# decodes it into; the mailbox rule reads it to tell a node on this device
+# from one elsewhere.
+serde_json = "1"
 
 [dev-dependencies]
 tempfile = "3"
 # `test-util` for the paused runtime clock: the send loop's timeouts are
 # measured on tokio's clock precisely so they can be tested without waiting.
 tokio = { version = "1", features = ["full", "test-util"] }
-# The Python daemon's JSON-RPC command port speaks JSON; the interop test is
-# the only consumer.
-serde_json = "1"
 hex = "0.4"
 
 [lib]

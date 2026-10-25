@@ -24,6 +24,7 @@ use leviculum_lxmf::router::PropagationPathAttempts;
 use tokio::time::Instant;
 
 use crate::events;
+use crate::mailbox_state::MailboxRun;
 use crate::outbox::{Command, Outbox, OutboxEvent, OutboxGone};
 use crate::seen::SeenStore;
 
@@ -48,6 +49,8 @@ pub struct FetchOptions {
     pub budget: Duration,
     /// How long to sleep when the event queue is empty.
     pub poll: Duration,
+    /// How the mailbox is selected without `--pn`, and where it is kept.
+    pub mailbox: MailboxRun,
 }
 
 impl FetchOptions {
@@ -56,6 +59,7 @@ impl FetchOptions {
             instance: instance.into(),
             budget,
             poll: Duration::from_millis(20),
+            mailbox: MailboxRun::default(),
         }
     }
 }
@@ -183,6 +187,7 @@ pub async fn run_fetch<O: Outbox, W: Write>(
     let start = Instant::now();
     outbox.submit(Command::SelectPn {
         preferred: preferred_pn,
+        mailbox: options.mailbox.input.clone(),
     })?;
 
     let mut fetching = false;
@@ -201,6 +206,9 @@ pub async fn run_fetch<O: Outbox, W: Write>(
                 } => {
                     if !fetching {
                         events::pn(&destination, pn_source, stamp_cost);
+                        if pn_source == "flag" {
+                            options.mailbox.record_user_choice(destination);
+                        }
                         // What is left of the budget, so the drain asks for a
                         // path for as long as the user said the fetch may take
                         // (leviculum#719), not for a fixed window.
@@ -217,6 +225,7 @@ pub async fn run_fetch<O: Outbox, W: Write>(
                 OutboxEvent::PnUnavailable { detail } => {
                     return Err(FetchError::NoPropagationNode(detail));
                 }
+                OutboxEvent::Mailbox(decision) => options.mailbox.report(&decision),
                 OutboxEvent::Received {
                     message_id,
                     source,
@@ -304,6 +313,7 @@ mod tests {
             instance: "test".to_string(),
             budget: Duration::from_secs(5),
             poll: Duration::from_millis(1),
+            mailbox: MailboxRun::default(),
         }
     }
 
@@ -345,7 +355,7 @@ mod tests {
         let fetched = run_fetch(
             &mut outbox,
             None,
-            "announced",
+            "mailbox",
             &options(),
             &mut seen,
             &mut printed,
@@ -365,7 +375,13 @@ mod tests {
         assert!(text.contains("first body") && text.contains("second body"));
         let commands = outbox.commands.borrow();
         assert!(
-            matches!(commands[0], Command::SelectPn { preferred: None }),
+            matches!(
+                commands[0],
+                Command::SelectPn {
+                    preferred: None,
+                    ..
+                }
+            ),
             "selection first: {commands:?}"
         );
         // The path budget is the whole budget less the margin: the fake
@@ -405,7 +421,7 @@ mod tests {
         let fetched = run_fetch(
             &mut outbox,
             None,
-            "announced",
+            "mailbox",
             &options(),
             &mut seen,
             &mut printed,
@@ -431,7 +447,7 @@ mod tests {
         let error = run_fetch(
             &mut outbox,
             None,
-            "announced",
+            "mailbox",
             &options(),
             &mut seen,
             &mut printed,
@@ -464,7 +480,7 @@ mod tests {
         let error = run_fetch(
             &mut outbox,
             None,
-            "announced",
+            "mailbox",
             &options(),
             &mut seen,
             &mut printed,
@@ -502,7 +518,7 @@ mod tests {
         let error = run_fetch(
             &mut outbox,
             None,
-            "announced",
+            "mailbox",
             &options(),
             &mut seen,
             &mut printed,
@@ -531,7 +547,7 @@ mod tests {
         let error = run_fetch(
             &mut outbox,
             None,
-            "announced",
+            "mailbox",
             &options(),
             &mut seen,
             &mut printed,
@@ -569,7 +585,7 @@ mod tests {
         run_fetch(
             &mut outbox,
             None,
-            "announced",
+            "mailbox",
             &options(),
             &mut seen,
             &mut printed,

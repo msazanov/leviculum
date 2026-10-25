@@ -33,7 +33,7 @@ the core/frontend cut and for the map, and what is open.
 - **`lnmsg`, the terminal messenger.** It sends (direct, propagated, or
   `auto` with the fallback to a propagation node) and drains the
   mailbox. It has no TUI yet ([lnmsg](lnmsg.md)). Its frontend already
-  talks to the backend only through `Outbox` (`lnmsg/src/outbox.rs:170`),
+  talks to the backend only through `Outbox` (`lnmsg/src/outbox.rs:191`),
   but the crate is `std`. It depends on `leviculum-std` and tokio
   (`lnmsg/Cargo.toml:24-28`).
 - **#232's rule:** the messenger's core must be `std`-free, not merely

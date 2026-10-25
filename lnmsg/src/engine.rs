@@ -41,9 +41,8 @@ use std::time::Duration;
 use leviculum_core::identity::Identity;
 use leviculum_core::node::NodeEvent;
 use leviculum_core::transport::TickOutput;
-use leviculum_core::{Destination, DestinationHash, Storage as _};
-use leviculum_lxmf::propagation::PropagationNodeAnnounce;
-use leviculum_lxmf::propagation_client::{PropagationTransport, PROPAGATION_ASPECT};
+use leviculum_core::{DestinationHash, Storage as _};
+use leviculum_lxmf::propagation_client::PropagationTransport;
 use leviculum_lxmf::router::{
     LxmfRouter, MessageState, PropagationClientConfig, PropagationClientState,
     PropagationStampRequest, RouterConfig, RouterError, RouterEvent, RouterOutput,
@@ -56,7 +55,9 @@ use leviculum_lxmf::{
 use leviculum_std::driver::{CoreProcessor, ReticulumNodeBuilder, StdNodeCore};
 use leviculum_std::ReticulumNode;
 
-use crate::outbox::{Command, Outbox, OutboxEvent, OutboxGone, SendRequest, Via};
+use crate::mailbox::{self, Candidate, Previous, Selection};
+use crate::mailbox_state::{Decision, Route};
+use crate::outbox::{Command, MailboxInput, Outbox, OutboxEvent, OutboxGone, SendRequest, Via};
 
 /// How soon the engine asks the driver to come back.
 ///
@@ -66,6 +67,22 @@ use crate::outbox::{Command, Outbox, OutboxEvent, OutboxGone, SendRequest, Via};
 /// uses for the same job, and it bounds command pickup latency at a fifth of
 /// the driver's 1 s idle cadence.
 const POLL_INTERVAL_MS: u64 = 200;
+
+/// How many path-table entries a selection asks the daemon to replay.
+///
+/// A client hears only the announces made while it is attached, and a node
+/// announces every few hours, so on a first run the router knows no
+/// propagation node at all. Asking the daemon for a path it already holds is
+/// answered from its cache with the announce (`Transport.py:2943`, local
+/// clients are served without transport), and that announce is what tells
+/// the router which entries are propagation nodes. The fewest-hops entries
+/// first; a mailbox is a near thing, and a transport node's table can hold
+/// thousands.
+const DISCOVERY_LIMIT: usize = 32;
+
+/// How long a selection waits for those replays. They cross one local
+/// socket, so anything not back by then is not coming from the cache.
+const DISCOVERY_WINDOW_MS: u64 = 2_000;
 
 /// How many times one hook call will re-feed router output into the router.
 ///
@@ -150,6 +167,18 @@ struct Resolve {
     answered: bool,
 }
 
+/// A selection waiting for the daemon's announce replays.
+struct PendingSelection {
+    routes: Vec<Route>,
+    previous: Option<Previous>,
+    /// The entries whose replay is awaited, removed as the engine's own
+    /// event hook sees each announce. Not "the core knows the identity":
+    /// the core stores that before the hook runs, and a tick in between
+    /// would select before the router had heard the node.
+    asked: Vec<[u8; 16]>,
+    deadline_ms: u64,
+}
+
 /// The router, once it exists.
 struct Ready {
     router: LxmfRouter,
@@ -189,10 +218,9 @@ pub struct Engine {
     mining: BTreeMap<(StampKind, [u8; 32]), Arc<StampCancel>>,
     /// Whether our own delivery announce has gone out. See [`Engine::announce`].
     announced: bool,
-    /// The most recently announced propagation node this run has heard —
-    /// what [`Command::SelectPn`] falls back to when neither `--pn` nor the
-    /// config names one.
-    last_pn: Option<[u8; 16]>,
+    /// A [`Command::SelectPn`] without a preference, waiting for the
+    /// announces that tell it which path-table entries are propagation nodes.
+    pending_selection: Option<PendingSelection>,
 }
 
 impl Engine {
@@ -392,7 +420,9 @@ impl Engine {
                     answered: false,
                 }),
                 Ok(Command::Send(request)) => self.send(ready, core, *request, out),
-                Ok(Command::SelectPn { preferred }) => self.select_pn(ready, core, preferred, out),
+                Ok(Command::SelectPn { preferred, mailbox }) => {
+                    self.select_pn(ready, core, preferred, mailbox, out);
+                }
                 Ok(Command::Fetch { path_budget_ms }) => {
                     self.fetch(ready, core, path_budget_ms, out);
                 }
@@ -404,22 +434,142 @@ impl Engine {
         }
     }
 
-    /// Pick the propagation node for this run's uploads and drains.
+    /// Pick the propagation node for this run's uploads and drains: the
+    /// preferred one when there is one, else the mailbox rule's answer.
     fn select_pn(
         &mut self,
         ready: &mut Ready,
         core: &mut StdNodeCore,
         preferred: Option<[u8; 16]>,
+        mailbox: Option<MailboxInput>,
         out: &mut TickOutput,
     ) {
-        let Some(destination) = preferred.or(self.last_pn) else {
+        if let Some(destination) = preferred {
+            self.commit_pn(ready, core, destination, out);
+            return;
+        }
+        let Some(input) = mailbox else {
             self.emit(OutboxEvent::PnUnavailable {
-                detail: "no propagation node is known: none was given with --pn, none is \
-                         configured, and none has announced since this run attached"
+                detail: "no propagation node is known: none was given with --pn and none \
+                         is configured"
                     .to_string(),
             });
             return;
         };
+        let routes = match input.routes {
+            Ok(routes) => routes,
+            Err(why) => {
+                self.emit(OutboxEvent::PnUnavailable {
+                    detail: format!(
+                        "no mailbox chosen: the daemon's path table could not be read \
+                         ({why}), and without it a propagation node on this device cannot \
+                         be told from one elsewhere; name one with --pn"
+                    ),
+                });
+                return;
+            }
+        };
+        let previous = input.previous.map(|stored| stored.previous(&routes));
+        let selection = mailbox::select(&candidates(ready, &routes), previous);
+        if matches!(selection, Selection::Keep(_)) {
+            self.finish_selection(ready, core, selection, out);
+            return;
+        }
+        // Ask for the replays of what the router cannot classify yet.
+        let mut unknown: Vec<&Route> = routes
+            .iter()
+            .filter(|route| {
+                ready
+                    .router
+                    .known_propagation_node(&DestinationHash::new(route.node))
+                    .is_none()
+            })
+            .collect();
+        unknown.sort_by_key(|route| (route.hops, route.node));
+        unknown.truncate(DISCOVERY_LIMIT);
+        let asked: Vec<[u8; 16]> = unknown.iter().map(|route| route.node).collect();
+        if asked.is_empty() {
+            self.finish_selection(ready, core, selection, out);
+            return;
+        }
+        for node in &asked {
+            let output = core.request_path_unthrottled(&DestinationHash::new(*node));
+            self.absorb(
+                ready,
+                core,
+                RouterOutput {
+                    core: output,
+                    events: Vec::new(),
+                },
+                out,
+            );
+        }
+        self.pending_selection = Some(PendingSelection {
+            routes,
+            previous,
+            asked,
+            deadline_ms: core.now_ms().saturating_add(DISCOVERY_WINDOW_MS),
+        });
+    }
+
+    /// Finish a waiting selection once every replay is in or the window has
+    /// closed.
+    fn poll_pending_selection(
+        &mut self,
+        ready: &mut Ready,
+        core: &mut StdNodeCore,
+        now_ms: u64,
+        out: &mut TickOutput,
+    ) {
+        let Some(pending) = &self.pending_selection else {
+            return;
+        };
+        if !pending.asked.is_empty() && now_ms < pending.deadline_ms {
+            return;
+        }
+        let Some(pending) = self.pending_selection.take() else {
+            return;
+        };
+        let selection = mailbox::select(&candidates(ready, &pending.routes), pending.previous);
+        self.finish_selection(ready, core, selection, out);
+    }
+
+    /// Report the rule's answer and select what it named.
+    fn finish_selection(
+        &mut self,
+        ready: &mut Ready,
+        core: &mut StdNodeCore,
+        selection: Selection,
+        out: &mut TickOutput,
+    ) {
+        match selection {
+            Selection::Keep(node) => {
+                self.emit(OutboxEvent::Mailbox(Decision::Kept { node }));
+                self.commit_pn(ready, core, node, out);
+            }
+            Selection::Adopt(candidate, reason) => {
+                self.emit(OutboxEvent::Mailbox(Decision::Adopted {
+                    node: candidate.node,
+                    hops: candidate.hops,
+                    seen_ms: candidate.last_seen_ms,
+                    reason,
+                }));
+                self.commit_pn(ready, core, candidate.node, out);
+            }
+            Selection::None(reason) => self.emit(OutboxEvent::PnUnavailable {
+                detail: reason.as_str().to_string(),
+            }),
+        }
+    }
+
+    /// Make `destination` the router's propagation node.
+    fn commit_pn(
+        &mut self,
+        ready: &mut Ready,
+        core: &mut StdNodeCore,
+        destination: [u8; 16],
+        out: &mut TickOutput,
+    ) {
         let hash = DestinationHash::new(destination);
         // The announced cost is read before `absorb` takes `ready` mutably;
         // `None` means the node has not been heard yet this run, in which
@@ -707,6 +857,29 @@ impl Engine {
     }
 }
 
+/// The candidates the mailbox rule chooses among: every enabled propagation
+/// node the router has heard, placed by the daemon's path table. A node the
+/// table does not hold has no route, and is also one whose place nobody can
+/// vouch for, so it is never adopted.
+fn candidates(ready: &Ready, routes: &[Route]) -> Vec<Candidate> {
+    ready
+        .router
+        .known_propagation_nodes()
+        .filter(|known| known.announce.enabled)
+        .map(|known| {
+            let node = *known.destination.as_bytes();
+            let route = routes.iter().find(|route| route.node == node);
+            Candidate {
+                node,
+                hops: route.map_or(u8::MAX, |route| route.hops),
+                last_seen_ms: route.map_or(0, |route| route.seen_ms),
+                reachable: route.is_some(),
+                is_own_device: route.is_some_and(|route| route.own_device),
+            }
+        })
+        .collect()
+}
+
 /// Which LXMF delivery method a body of this size should use.
 ///
 /// Opportunistic delivery is one encrypted packet with no link setup, so for
@@ -794,25 +967,15 @@ fn register(core: &mut StdNodeCore, identity: Identity) -> Result<Ready, String>
 impl CoreProcessor for Engine {
     fn on_event(&mut self, core: &mut StdNodeCore, event: &NodeEvent) -> TickOutput {
         let mut out = TickOutput::empty();
-        // Recency, not ranking: `Command::SelectPn` without a preference
-        // takes the most recently announced node, so the order of arrival is
-        // tracked here — the router's transport keeps the set but not the
-        // order. A node announcing itself disabled is not a candidate.
-        if let NodeEvent::AnnounceReceived { announce, .. } = event {
-            if announce.name_hash()
-                == &Destination::compute_name_hash(
-                    leviculum_lxmf::node::APP_NAME,
-                    &[PROPAGATION_ASPECT],
-                )
-                && PropagationNodeAnnounce::decode(announce.app_data())
-                    .is_ok_and(|decoded| decoded.enabled)
-            {
-                self.last_pn = Some(*announce.destination_hash().as_bytes());
-            }
-        }
         let Some(mut ready) = self.take_ready(core) else {
             return out;
         };
+        if let (Some(pending), NodeEvent::AnnounceReceived { announce, .. }) =
+            (&mut self.pending_selection, event)
+        {
+            let heard = *announce.destination_hash().as_bytes();
+            pending.asked.retain(|node| *node != heard);
+        }
         match ready.router.handle_event(core, event) {
             Ok(output) => self.absorb(&mut ready, core, output, &mut out),
             Err(e) => self.emit(OutboxEvent::Broken {
@@ -825,6 +988,7 @@ impl CoreProcessor for Engine {
         // The driver's tick clock is the core's, so the event reads it there.
         let now_ms = core.now_ms();
         self.poll_resolves(&mut ready, core, now_ms, &mut out);
+        self.poll_pending_selection(&mut ready, core, now_ms, &mut out);
         self.report_departures(&ready);
         self.state = State::Ready(ready);
         out
@@ -840,6 +1004,7 @@ impl CoreProcessor for Engine {
         self.pump_commands(&mut ready, core, &mut out);
         self.pump_stamps(&mut ready, core, &mut out);
         self.poll_resolves(&mut ready, core, now_ms, &mut out);
+        self.poll_pending_selection(&mut ready, core, now_ms, &mut out);
         match ready.router.tick(core) {
             Ok(output) => self.absorb(&mut ready, core, output, &mut out),
             Err(e) => self.emit(OutboxEvent::Broken {
@@ -979,7 +1144,7 @@ pub async fn attach(config: AttachConfig) -> Result<Attached, AttachError> {
         tracked: BTreeMap::new(),
         mining: BTreeMap::new(),
         announced: false,
-        last_pn: None,
+        pending_selection: None,
     };
 
     let mut node = ReticulumNodeBuilder::new()
@@ -1127,7 +1292,7 @@ mod tests {
             tracked: BTreeMap::new(),
             mining: BTreeMap::new(),
             announced: false,
-            last_pn: None,
+            pending_selection: None,
         };
         (engine, events_rx, commands_tx)
     }
@@ -1193,7 +1358,7 @@ mod tests {
             tracked: BTreeMap::new(),
             mining: BTreeMap::new(),
             announced: false,
-            last_pn: None,
+            pending_selection: None,
         };
 
         let now_ms = core.now_ms();
@@ -1328,7 +1493,10 @@ mod tests {
         let (mut engine, events, commands) = engine();
 
         commands
-            .send(Command::SelectPn { preferred: None })
+            .send(Command::SelectPn {
+                preferred: None,
+                mailbox: None,
+            })
             .expect("queue the command");
         let now_ms = core.now_ms();
         let _ = engine.on_tick(&mut core, now_ms);
@@ -1361,6 +1529,7 @@ mod tests {
         commands
             .send(Command::SelectPn {
                 preferred: Some(node),
+                mailbox: None,
             })
             .expect("queue the command");
         let now_ms = core.now_ms();
@@ -1378,6 +1547,123 @@ mod tests {
             selected,
             Some((node, None)),
             "the preferred node is selected as given, with no cost known yet"
+        );
+    }
+
+    fn select_without_preference(input: MailboxInput) -> Vec<OutboxEvent> {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let (mut engine, events, commands) = engine();
+        commands
+            .send(Command::SelectPn {
+                preferred: None,
+                mailbox: Some(input),
+            })
+            .expect("queue the command");
+        let now_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, now_ms);
+        std::iter::from_fn(|| events.try_recv().ok()).collect()
+    }
+
+    /// A stored selection the path table still holds is kept without
+    /// asking the daemon for anything, and selected.
+    #[test]
+    fn a_stored_reachable_selection_is_kept_at_once() {
+        let node = [0x3c; 16];
+        let seen = select_without_preference(MailboxInput {
+            routes: Ok(vec![Route {
+                node,
+                hops: 2,
+                own_device: false,
+                seen_ms: 1,
+            }]),
+            previous: Some(crate::mailbox_state::Stored {
+                node,
+                chosen_by_user: false,
+            }),
+        });
+        assert!(
+            seen.contains(&OutboxEvent::Mailbox(Decision::Kept { node })),
+            "{seen:?}"
+        );
+        assert!(
+            seen.iter().any(|event| matches!(
+                event,
+                OutboxEvent::PnSelected { destination, .. } if *destination == node
+            )),
+            "{seen:?}"
+        );
+    }
+
+    /// Without the path table nothing is adopted, not even a stored node:
+    /// whether it is on this device is exactly what cannot be told.
+    #[test]
+    fn an_unreadable_path_table_selects_nothing() {
+        let seen = select_without_preference(MailboxInput {
+            routes: Err("no authkey".to_string()),
+            previous: Some(crate::mailbox_state::Stored {
+                node: [0x3c; 16],
+                chosen_by_user: false,
+            }),
+        });
+        assert!(
+            seen.iter().any(|event| matches!(
+                event,
+                OutboxEvent::PnUnavailable { detail } if detail.contains("path table could not be read")
+            )),
+            "{seen:?}"
+        );
+        assert!(
+            !seen
+                .iter()
+                .any(|event| matches!(event, OutboxEvent::PnSelected { .. })),
+            "{seen:?}"
+        );
+    }
+
+    /// A first run waits for the replays it asked for, and with none coming
+    /// back it says nothing was heard once the window closes.
+    #[test]
+    fn a_first_run_waits_for_the_replays_then_reports_none_heard() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let (mut engine, events, commands) = engine();
+        commands
+            .send(Command::SelectPn {
+                preferred: None,
+                mailbox: Some(MailboxInput {
+                    routes: Ok(vec![Route {
+                        node: [0x44; 16],
+                        hops: 1,
+                        own_device: false,
+                        seen_ms: 1,
+                    }]),
+                    previous: None,
+                }),
+            })
+            .expect("queue the command");
+        let now_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, now_ms);
+        let early: Vec<_> = std::iter::from_fn(|| events.try_recv().ok()).collect();
+        assert!(
+            !early
+                .iter()
+                .any(|event| matches!(event, OutboxEvent::PnUnavailable { .. })),
+            "the selection must wait for the replays: {early:?}"
+        );
+        // Read after the first tick: the deadline was taken from the core's
+        // clock inside it, so `now_ms` from before it can fall short of the
+        // window by however long that tick took.
+        let later_ms = core.now_ms() + DISCOVERY_WINDOW_MS;
+        let _ = engine.on_tick(&mut core, later_ms);
+        let late: Vec<_> = std::iter::from_fn(|| events.try_recv().ok()).collect();
+        assert!(
+            late.iter().any(|event| matches!(
+                event,
+                OutboxEvent::PnUnavailable { detail }
+                    if detail == mailbox::NoneReason::NoCandidates.as_str()
+            )),
+            "{late:?}"
         );
     }
 

@@ -23,6 +23,8 @@
 
 use leviculum_lxmf::router::{MessageState, PropagationPathAttempts};
 
+use crate::mailbox_state::{Decision, Route, Stored};
+
 /// How a message should reach its destination.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Via {
@@ -71,12 +73,15 @@ pub enum Command {
     Send(Box<SendRequest>),
     /// Select the propagation node every later [`Via::Propagated`] send and
     /// every [`Command::Fetch`] talks to. `preferred` is the `--pn` flag or
-    /// the configured default; `None` asks for the most recently announced
-    /// node this run has heard — the reference `LXMRouter` keeps no
-    /// autoselection of its own (its clients pick; NomadNet and Sideband
-    /// both do), so recency is lnmsg's own rule, recorded in
-    /// `docs/src/concepts/lnmsg-mailbox.md`.
-    SelectPn { preferred: Option<[u8; 16]> },
+    /// the configured default, and when it is set `mailbox` is not read.
+    /// Without it the mailbox rule ([`crate::mailbox::select`]) decides from
+    /// `mailbox` — the reference `LXMRouter` keeps no autoselection of its
+    /// own (its clients pick; NomadNet and Sideband both do), so the rule is
+    /// lnmsg's, recorded in `docs/src/concepts/lnmsg-mailbox.md`.
+    SelectPn {
+        preferred: Option<[u8; 16]>,
+        mailbox: Option<MailboxInput>,
+    },
     /// Drain the selected node's mailbox with the genuine list/fetch/confirm
     /// round (`message_get_request` semantics). `path_budget_ms` is how long
     /// the drain may keep asking for a path to the node: the path request
@@ -86,6 +91,19 @@ pub enum Command {
     /// direct copy before uploading the propagated one, so a peer that
     /// reappears mid-fallback cannot be handed the same message twice.
     Cancel { message_id: [u8; 32] },
+}
+
+/// What the mailbox rule is fed from, read by the frontend before it selects:
+/// the daemon's path table is an RPC round trip, which the engine, running
+/// under the core lock, may not make.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MailboxInput {
+    /// The daemon's path table, or why it could not be read. Without it no
+    /// node on this device can be told from one elsewhere, so nothing is
+    /// adopted.
+    pub routes: Result<Vec<Route>, String>,
+    /// What an earlier run selected (`${LNMSG_HOME}/mailbox`).
+    pub previous: Option<Stored>,
 }
 
 /// What the engine reports back.
@@ -124,6 +142,9 @@ pub enum OutboxEvent {
     },
     /// A [`Command::SelectPn`] could not name a node at all.
     PnUnavailable { detail: String },
+    /// The mailbox rule kept or adopted a node; [`OutboxEvent::PnSelected`]
+    /// for it follows. Only a selection without `preferred` reports this.
+    Mailbox(Decision),
     /// One inbound message reached our delivery destination — directly or
     /// out of a mailbox drain; the router has already de-duplicated within
     /// this run, and the frontend de-duplicates across runs by `message_id`.

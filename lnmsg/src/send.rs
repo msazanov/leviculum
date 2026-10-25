@@ -44,6 +44,7 @@ use tokio::time::Instant;
 use leviculum_lxmf::router::MessageState;
 
 use crate::events;
+use crate::mailbox_state::MailboxRun;
 use crate::outbox::{Command, Outbox, OutboxEvent, OutboxGone, SendRequest};
 
 /// How long a run may take once the daemon connection is up, and how often the
@@ -64,6 +65,8 @@ pub struct SendOptions {
     /// speaks; 20 ms keeps the added latency well under the cost of one
     /// packet on any medium this runs over.
     pub poll: Duration,
+    /// How the mailbox is selected without `--pn`, and where it is kept.
+    pub mailbox: MailboxRun,
 }
 
 impl SendOptions {
@@ -73,6 +76,7 @@ impl SendOptions {
             instance: instance.into(),
             budget,
             poll: Duration::from_millis(20),
+            mailbox: MailboxRun::default(),
         }
     }
 }
@@ -324,6 +328,7 @@ pub async fn run_send<O: Outbox>(
                 // node selection is the propagated runner's business.
                 OutboxEvent::PnSelected { .. }
                 | OutboxEvent::PnUnavailable { .. }
+                | OutboxEvent::Mailbox(_)
                 | OutboxEvent::Received { .. }
                 | OutboxEvent::SyncDone { .. }
                 | OutboxEvent::SyncFailed { .. } => {}
@@ -422,6 +427,7 @@ pub async fn run_send_propagated<O: Outbox>(
     }
     outbox.submit(Command::SelectPn {
         preferred: preferred_pn,
+        mailbox: options.mailbox.input.clone(),
     })?;
 
     let mut phase = PropagatedPhase::Selecting;
@@ -444,6 +450,9 @@ pub async fn run_send_propagated<O: Outbox>(
                 } => {
                     if phase == PropagatedPhase::Selecting {
                         events::pn(&node, pn_source, stamp_cost);
+                        if pn_source == "flag" {
+                            options.mailbox.record_user_choice(node);
+                        }
                         if let Some(request) = request.take() {
                             outbox.submit(Command::Send(Box::new(request)))?;
                         }
@@ -453,6 +462,7 @@ pub async fn run_send_propagated<O: Outbox>(
                 OutboxEvent::PnUnavailable { detail } => {
                     return Err(SendError::NoPropagationNode(detail));
                 }
+                OutboxEvent::Mailbox(decision) => options.mailbox.report(&decision),
                 OutboxEvent::Queued { message_id: id } => {
                     if phase == PropagatedPhase::Queued && message_id.is_none() {
                         message_id = Some(id);
@@ -551,6 +561,7 @@ mod tests {
             instance: "test".to_string(),
             budget: Duration::from_secs(5),
             poll: Duration::from_millis(1),
+            mailbox: MailboxRun::default(),
         }
     }
 
@@ -854,7 +865,7 @@ mod tests {
         assert_eq!(queued.state, MessageState::AwaitingCollection);
         let commands = outbox.commands.borrow();
         assert!(
-            matches!(commands[0], Command::SelectPn { preferred: Some(p) } if p == PN),
+            matches!(commands[0], Command::SelectPn { preferred: Some(p), .. } if p == PN),
             "selection first: {commands:?}"
         );
         assert!(matches!(commands[1], Command::Send(_)));
@@ -875,7 +886,7 @@ mod tests {
             &mut outbox,
             propagated_request(),
             None,
-            "announced",
+            "mailbox",
             None,
             &options(),
         )

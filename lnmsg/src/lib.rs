@@ -60,6 +60,7 @@ pub mod events;
 pub mod fetch;
 pub mod identity;
 pub mod mailbox;
+pub mod mailbox_state;
 pub mod outbox;
 pub mod seen;
 pub mod send;
