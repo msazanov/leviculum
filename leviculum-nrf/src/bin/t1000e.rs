@@ -44,9 +44,10 @@ use leviculum_core::traits::Interface;
 use leviculum_core::transport::dispatch_actions;
 use leviculum_core::InterfaceId;
 
+use leviculum_firmware::ble_link::BleInterface;
 use leviculum_firmware::clock::{set_time_source, time_source_str, EmbassyClock};
+use leviculum_firmware::seams::BleLinkEvent;
 use leviculum_firmware::{entropy::Entropy, interface::EmbeddedInterface};
-use leviculum_nrf::ble::{BleInterface, PeerEvent as BlePeerEvent};
 use leviculum_nrf::boards::t1000e;
 use leviculum_nrf::lora::LoRaInterface;
 use leviculum_nrf::{info, init_heap, log_critical};
@@ -421,7 +422,7 @@ async fn main(spawner: Spawner) {
         leviculum_nrf::lora::spawn(&spawner, lora, radio_cfg, channel_seed);
         leviculum_firmware::boot_trace::phase(leviculum_firmware::boot_trace::Phase::LoraTask);
     } else {
-        leviculum_nrf::media::log_carrier_held_down("lora");
+        leviculum_firmware::media::log_carrier_held_down("lora");
         leviculum_firmware::boot_trace::phase(leviculum_firmware::boot_trace::Phase::LoraSkipped);
     }
 
@@ -461,7 +462,7 @@ async fn main(spawner: Spawner) {
         p.PPI_CH29,
         p.RNG,
     );
-    let ble_channels = leviculum_nrf::ble::channels();
+    let ble_channels = leviculum_firmware::ble_link::channels();
     info!("BLE ready");
 
     // Both spawn decisions are made: say what actually came up, then
@@ -1172,7 +1173,16 @@ async fn main(spawner: Spawner) {
                 leviculum_firmware::dispatch::settle("lora-rx", &mut node, &dispatched);
                 pn_step!(&output.events);
             }
-            Either4::First(Either4::Third(Either::First((peer, data)))) => {
+            Either4::First(Either4::Third(Either::First(event))) => {
+                // `ble_link::deliver` routes peer transitions onto their
+                // own channel; only inbound packets ride this one.
+                let BleLinkEvent::Inbound {
+                    link: peer,
+                    packet: data,
+                } = event
+                else {
+                    continue;
+                };
                 // #388 census: this packet just left BLE_INCOMING
                 // custody (counted by the session that queued it).
                 leviculum_firmware::ble_link::incoming_held_sub(data.capacity());
@@ -1216,7 +1226,11 @@ async fn main(spawner: Spawner) {
                 // pull for a medium switched off mid-run dies in the
                 // interface's carrier-off drop like any other packet.
                 let (label, output) = match event {
-                    BlePeerEvent::Lost(peer) => {
+                    // `ble_link::deliver` routes inbound packets onto
+                    // their own channel; only peer transitions ride
+                    // this one.
+                    BleLinkEvent::Inbound { .. } => continue,
+                    BleLinkEvent::PeerLost { identity: peer, .. } => {
                         let output = node.handle_interface_peer_lost(InterfaceId(2), peer);
                         info!(
                             "BLE peer lost, {} paths culled",
@@ -1228,7 +1242,7 @@ async fn main(spawner: Spawner) {
                         );
                         ("ble-peer-lost", output)
                     }
-                    BlePeerEvent::Up(peer) => {
+                    BleLinkEvent::PeerUp { identity: peer, .. } => {
                         let mut output = node.handle_interface_peer_up(InterfaceId(2), peer);
                         info!("BLE peer up, {} pull actions", output.actions.len());
                         // #376: and announce OURSELVES to that peer, on

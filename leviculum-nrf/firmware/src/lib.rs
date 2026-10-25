@@ -36,8 +36,12 @@
 //! the BLE link's node side begins to move here ([`ble_link`], step 4's
 //! first slice): the carrier gate the media profile pushes, the pacing
 //! value, the link/drain table and the heap-census facts the backend
-//! publishes; the node-facing channels and the `Interface` implementation
-//! are still below.
+//! publishes. In 999 the message half follows (step 4's second slice):
+//! the node-facing channels, the peer events and inbound packets as
+//! [`seams::BleLinkEvent`], the BLE `Interface` implementation, and the
+//! `[MEDIA]` lines both carrier interfaces write ([`media`]); the
+//! identity-to-slot registry and the fan-out stay below until the
+//! registry split lands.
 //!
 //! What the crate may depend on is held by two guards rather than by this
 //! comment: `just firmware-no-hal` refuses a HAL or chip crate in its
@@ -67,6 +71,7 @@ pub mod identity;
 pub mod iface_bytes;
 pub mod interface;
 pub mod log;
+pub mod media;
 pub mod postmortem;
 pub mod record_store;
 pub mod seams;

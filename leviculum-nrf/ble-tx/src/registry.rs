@@ -176,6 +176,19 @@ pub enum Origin {
     Outgoing,
 }
 
+impl Origin {
+    /// OUR role on a link this origin opened — the spelling the peer
+    /// events carry (`BleLinkEvent`, step 4 of the firmware layers): a
+    /// connection we dialled is our central link, one the peer dialled
+    /// our peripheral one.
+    pub fn our_role(self) -> BleRole {
+        match self {
+            Origin::Incoming => BleRole::Peripheral,
+            Origin::Outgoing => BleRole::Central,
+        }
+    }
+}
+
 /// The role a node keeps when it holds both connections of a duplicate
 /// pair — [`preferred_ble_role`]'s answer, in the deciding node's own
 /// perspective.
@@ -777,18 +790,21 @@ impl<const N: usize> PeerRegistry<N> {
         }
     }
 
-    /// Clear a slot. `Some(identity)` iff that took the identity's LAST
-    /// live link — the caller reports a peer loss exactly then. An
-    /// unclaimed slot yields `None`: no link, no loss.
-    pub fn link_down(&mut self, slot: usize) -> Option<[u8; 16]> {
+    /// Clear a slot. `Some((identity, origin))` iff that took the
+    /// identity's LAST live link — the caller reports a peer loss
+    /// exactly then, and the origin says in which role the lost link
+    /// ran (the peer event's `role`). An unclaimed slot yields `None`:
+    /// no link, no loss.
+    pub fn link_down(&mut self, slot: usize) -> Option<([u8; 16], Origin)> {
         let identity = self.slots[slot].take()?;
+        let origin = self.origins[slot];
         self.last_data_ms[slot] = None;
         self.att_mtus[slot] = 0;
         self.slots
             .iter()
             .flatten()
             .all(|id| *id != identity)
-            .then_some(identity)
+            .then_some((identity, origin))
     }
 
     /// Whether the identity holds a live link — the central path's
@@ -1724,7 +1740,15 @@ mod tests {
     fn the_last_link_of_an_identity_is_a_loss() {
         let mut reg = PeerRegistry::<4>::new();
         reg.link_up(0, A, Origin::Incoming, 517, 0);
-        assert_eq!(reg.link_down(0), Some(A));
+        assert_eq!(reg.link_down(0), Some((A, Origin::Incoming)));
+    }
+
+    /// The role spelling the peer events carry: our central link is the
+    /// one we dialled, our peripheral one the peer's dial.
+    #[test]
+    fn a_links_role_is_its_origins_own_side() {
+        assert_eq!(Origin::Outgoing.our_role(), BleRole::Central);
+        assert_eq!(Origin::Incoming.our_role(), BleRole::Peripheral);
     }
 
     #[test]
@@ -1734,7 +1758,7 @@ mod tests {
         reg.link_up(1, A, Origin::Incoming, 517, LINK_TIMEOUT_MS);
         assert_eq!(reg.link_down(0), None);
         assert!(reg.is_linked(&A));
-        assert_eq!(reg.link_down(1), Some(A));
+        assert_eq!(reg.link_down(1), Some((A, Origin::Incoming)));
     }
 
     #[test]
@@ -1762,7 +1786,10 @@ mod tests {
         let mut reg = PeerRegistry::<4>::new();
         reg.link_up(0, A, Origin::Incoming, 517, 0);
         reg.link_up(2, B, Origin::Incoming, 517, 0);
-        let losses: Vec<[u8; 16]> = (0..4).filter_map(|slot| reg.link_down(slot)).collect();
+        let losses: Vec<[u8; 16]> = (0..4)
+            .filter_map(|slot| reg.link_down(slot))
+            .map(|(identity, _)| identity)
+            .collect();
         assert_eq!(losses, vec![A, B]);
         assert!(!reg.is_linked(&A));
         assert!(!reg.is_linked(&B));
@@ -1775,7 +1802,10 @@ mod tests {
         let mut reg = PeerRegistry::<4>::new();
         reg.link_up(0, A, Origin::Incoming, 517, 0);
         reg.link_up(1, A, Origin::Incoming, 517, LINK_TIMEOUT_MS);
-        let losses: Vec<[u8; 16]> = (0..4).filter_map(|slot| reg.link_down(slot)).collect();
+        let losses: Vec<[u8; 16]> = (0..4)
+            .filter_map(|slot| reg.link_down(slot))
+            .map(|(identity, _)| identity)
+            .collect();
         assert_eq!(losses, vec![A]);
     }
 
@@ -1796,7 +1826,11 @@ mod tests {
         }
         assert_eq!(reg.peer_count(), 4);
 
-        assert_eq!(reg.link_down(1), Some(B), "B's only link is a loss");
+        assert_eq!(
+            reg.link_down(1),
+            Some((B, Origin::Incoming)),
+            "B's only link is a loss"
+        );
         assert_eq!(reg.peer_count(), 3);
         for id in [A, C, D] {
             assert!(reg.is_linked(&id), "the others are untouched");
@@ -1825,7 +1859,7 @@ mod tests {
         assert!(reg.addr_linked(0xC0DE));
 
         // Teardown clears both facts independently.
-        assert_eq!(reg.link_down(1), Some(A));
+        assert_eq!(reg.link_down(1), Some((A, Origin::Incoming)));
         assert!(
             reg.addr_linked(0xC0DE),
             "identity gone, connection fact still set"
@@ -1882,7 +1916,7 @@ mod tests {
         assert!(!reg.hint_linked(Some(identity_hint(&other_prefix))));
 
         // The exclusion lasts exactly as long as the link does.
-        assert_eq!(reg.link_down(1), Some(BOARD));
+        assert_eq!(reg.link_down(1), Some((BOARD, Origin::Incoming)));
         assert!(
             !reg.hint_linked(Some(identity_hint(&BOARD))),
             "the peer is dialled again as soon as the link is gone"

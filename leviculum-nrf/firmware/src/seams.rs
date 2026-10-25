@@ -90,25 +90,67 @@ pub trait ControlPort {}
 #[derive(Debug)]
 pub enum BleLinkCommand {}
 
-/// Placeholder for what a BLE backend reports (a peer's first link up
-/// and last link down with its identity, inbound packets, the census
-/// facts). Today these ride `ble/`'s own channels and the published
-/// values in [`crate::ble_link`]; the variants arrive when those
-/// channels move here with step 4's remaining slices.
+/// What a BLE backend reports — the genuine message half of the seam
+/// (998's measurement; the census facts it also publishes are
+/// [`crate::ble_link`] values, not messages). The backend constructs
+/// these and hands them to [`crate::ble_link::deliver`], which routes
+/// each variant onto the channel the node loop reads it from: the two
+/// peer transitions ride one ordered channel (a flap's `Lost` must land
+/// before its `Up`'s pull decision), the inbound packets their own.
 #[derive(Debug)]
-pub enum BleLinkEvent {}
+pub enum BleLinkEvent {
+    /// The identity's FIRST link on this interface is up. The main loop
+    /// hands it to `NodeCore::handle_interface_peer_up`, which pulls the
+    /// peer's delivery path over the new link — Columba answers a path
+    /// request but announces on neither connect nor reconnect, so
+    /// without the pull a relay that lost its direct entry stays blind
+    /// until the peer's periodic announce.
+    PeerUp {
+        /// The 16 bytes the Columba handshake exchanged — the same
+        /// value inbound packets name as their ingress link.
+        identity: [u8; 16],
+        /// OUR role on the link that brought the peer up
+        /// ([`leviculum_ble_tx::Origin::our_role`]).
+        role: leviculum_ble_tx::BleRole,
+    },
+    /// The identity's LAST link on this interface died. The main loop
+    /// hands it to `NodeCore::handle_interface_peer_lost`, which culls
+    /// the path entries whose next hop is that peer — without it a
+    /// stale 1-hop BLE path keeps swallowing traffic after the peer
+    /// walked out of range.
+    PeerLost {
+        /// The identity whose last link died.
+        identity: [u8; 16],
+        /// OUR role on the link that died.
+        role: leviculum_ble_tx::BleRole,
+    },
+    /// One completed inbound Reticulum packet.
+    Inbound {
+        /// The identity the ingress link's peer presented in the
+        /// handshake, or `None` for bytes that arrived before the
+        /// handshake completed (Codeberg #365): path entries learned
+        /// over the link stay attributable when it dies, even when the
+        /// announce identity differs from the link identity (Columba).
+        link: Option<[u8; 16]>,
+        /// The reassembled packet.
+        packet: alloc::vec::Vec<u8>,
+    },
+}
 
 /// BLE link, a message seam above GATT: the Columba link as the
 /// orchestration sees it, [`BleLinkCommand`] in and [`BleLinkEvent`] out.
-/// The node side's first slice is [`crate::ble_link`] (998): the carrier
-/// gate, the pacing value, the drain/link table and the census facts the
+/// The node side is [`crate::ble_link`] (998, 999): the carrier gate,
+/// the pacing value, the drain/link table and the census facts the
 /// backend publishes — per-fragment work stays direct calls on those
-/// values (the per-packet decision of 998), only the packets and peer
-/// transitions are messages.
+/// values (the per-packet decision of 998) — plus, since 999, the
+/// node-facing channels the [`BleLinkEvent`]s ride and the `Interface`
+/// implementation. The backend's remaining upward calls all go through
+/// `leviculum_firmware`; what is still below of step 4 is the
+/// identity-to-slot registry and the fan-out, whose split fills this
+/// trait (send to identities, advertise, scan on/off) and its host fake.
 ///
 /// Today: the S140 SoftDevice backend in `ble/` (`ble/mod.rs`,
-/// `ble/columba.rs`), whose remaining upward calls into `media` (the
-/// TX-drop run lines) become these messages. The fork: TrouBLE over
+/// `ble/columba.rs`). The fork: TrouBLE over
 /// `bt_hci::Transport` (`leviculum-fw/src/ble/mod.rs`, lines 81 to 91) on
 /// the CYW43439 and the ESP32-S3 radio; its `HciTransport` stays inside its
 /// backend, because the SoftDevice is not an HCI controller.

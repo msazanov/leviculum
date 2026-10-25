@@ -18,13 +18,15 @@
 //!   central path that mirrors the peripheral one.
 //! - this module and [`notify`] — **protocol-neutral.** SoftDevice
 //!   bring-up and its RAM-floor guard, the `Irqs` binding, the SoC-event
-//!   task, the packet channels and the [`Interface`] implementation, the
-//!   per-connection HVN drain table (whose claim index doubles as the
-//!   link identity), the per-link outbound queues and the fan-out that
-//!   places each outbound packet on the link of the peer the core
+//!   task, the per-connection HVN drain table (whose claim index doubles
+//!   as the link identity), the per-link outbound queues and the fan-out
+//!   that places each outbound packet on the link of the peer the core
 //!   addressed it to — or, for a broadcast, on every live link (#376) —
 //!   and the fragment pump that walks [`leviculum_ble_tx::PacketTx`]
-//!   over a GATT notify handle.
+//!   over a GATT notify handle. The node-facing channels and the
+//!   `Interface` implementation live above the seam since 999
+//!   (`leviculum_firmware::ble_link`); this backend reports through
+//!   [`leviculum_firmware::seams::BleLinkEvent`].
 //!
 //! The acceptance test for the split is that a sibling `ble_leviculum`
 //! could be added without touching [`columba`]. What such a sibling
@@ -67,8 +69,6 @@
 //!   holds `conn_count` = `CONN_COUNT` structurally.
 //! - SoftDevice owns RADIO/TIMER0/RTC0/etc.; we don't bind those.
 //!   USB VBUS detect goes via `SoftwareVbusDetect` fed by SoC events.
-//!
-//! [`Interface`]: leviculum_core::traits::Interface
 
 extern crate alloc;
 
@@ -83,11 +83,9 @@ use embassy_nrf::peripherals;
 use embassy_nrf::usb::vbus_detect::SoftwareVbusDetect;
 use embassy_nrf::{bind_interrupts, Peri};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::channel::{Channel, Receiver, Sender};
-use leviculum_ble_tx::{Enqueue, Fill, TxAim, DEVICE_NAME_LEN};
+use embassy_sync::channel::Channel;
+use leviculum_ble_tx::{Enqueue, Fill, DEVICE_NAME_LEN};
 use leviculum_core::node_name::NodeName;
-use leviculum_core::traits::{Interface, InterfaceError};
-use leviculum_core::InterfaceId;
 use nrf_softdevice::{raw, SocEvent, Softdevice};
 
 pub use notify::{BLE_TX_DRAIN_UNROUTED, BLE_TX_DRAIN_WAITS, BLE_TX_DROPPED, BLE_TX_PACKETS};
@@ -135,110 +133,27 @@ const _: () = assert!(MAX_LINKS >= CONN_COUNT as usize);
 // The node side of the BLE link lives in `leviculum_firmware::ble_link`
 // since 998 (step 4's first slice): the carrier gate, the pacing value,
 // the drain/link table and the held-bytes census this backend publishes
-// into. Re-imported here so the backend's own modules keep their `super::`
-// paths; the orchestration and the binaries name `ble_link` directly.
+// into — and, since 999 (the second slice), the node-facing channels,
+// the peer events and inbound packets as `seams::BleLinkEvent`
+// (`deliver`), the registry's distinct-peer count this backend publishes
+// (`set_live_peer_count`) and the `Interface` implementation. Re-imported
+// here so the backend's own modules keep their `super::` paths; the
+// orchestration and the binaries name `ble_link` directly.
 pub use leviculum_firmware::ble_link::HVN_DRAIN;
 pub(crate) use leviculum_firmware::ble_link::{
-    carrier, carrier_off, carrier_on, defrag_held_set, incoming_held_add, session_held_moved,
-    session_held_reset, session_held_sub, tx_gap_ms, CarrierWaiter,
+    carrier, carrier_off, carrier_on, defrag_held_set, deliver, session_held_moved,
+    session_held_reset, session_held_sub, set_live_peer_count, tx_gap_ms, CarrierWaiter,
 };
+pub(crate) use leviculum_firmware::seams::BleLinkEvent;
 
 // The queue depth, the MTU and the two worst cases built from them are terms
 // of the boot heap budget (#388), defined with that arithmetic.
 use leviculum_heap_budget::QUEUE_DEPTH;
 pub use leviculum_heap_budget::{CHANNEL_BUDGET_BYTES, INTERFACE_MTU, SESSION_BUDGET_BYTES};
 
-/// One packet queue, as both the node-facing channels and the per-link
-/// queues use it.
+/// One packet queue, as the per-link queues use it (the node-facing
+/// channels are `leviculum_firmware::ble_link`'s since 999).
 type PacketQueue = Channel<CriticalSectionRawMutex, Vec<u8>, QUEUE_DEPTH>;
-
-/// An inbound packet with the peer link it arrived through (Codeberg
-/// #365): the identity hash the peer presented in the handshake — the
-/// same 16 bytes the peer events report — or `None` for bytes that
-/// arrived before the handshake completed. The main loop passes it to
-/// `NodeCore::handle_packet_from_peer` so path entries learned over
-/// this link are attributable when the link dies, even when the
-/// announce identity differs from the link identity (Columba).
-type InboundQueue = Channel<CriticalSectionRawMutex, (Option<[u8; 16]>, Vec<u8>), QUEUE_DEPTH>;
-
-/// An outbound packet with what the core said about its links: the
-/// peer these bytes are FOR (the #376 delivery hint), the peer that
-/// already HEARD them (the #422 ingress link of a broadcast), or
-/// neither. [`tx_fanout_task`] turns the statement into links; see
-/// [`leviculum_ble_tx::TxAim`].
-type OutboundQueue = Channel<CriticalSectionRawMutex, (TxAim, Vec<u8>), QUEUE_DEPTH>;
-
-// Channels between the BLE tasks and the binaries' main loop.
-static BLE_INCOMING: InboundQueue = Channel::new();
-static BLE_OUTGOING: OutboundQueue = Channel::new();
-
-/// A peer-link transition report toward the main loop (Codeberg #365).
-/// Only the interface knows a single peer inside its broadcast domain
-/// came or went while the interface itself stayed up; the identity hash
-/// is the value the Columba handshake exchanges.
-#[derive(Clone, Copy)]
-pub enum PeerEvent {
-    /// The identity's FIRST link on this interface is up. The main loop
-    /// hands it to `NodeCore::handle_interface_peer_up`, which pulls the
-    /// peer's delivery path over the new link — Columba answers a path
-    /// request but announces on neither connect nor reconnect, so
-    /// without the pull a relay that lost its direct entry stays blind
-    /// until the peer's periodic announce.
-    Up([u8; 16]),
-    /// The identity's LAST link on this interface died. The main loop
-    /// hands it to `NodeCore::handle_interface_peer_lost`, which culls
-    /// the path entries whose next hop is that peer — without it a
-    /// stale 1-hop BLE path keeps swallowing traffic after the peer
-    /// walked out of range.
-    Lost([u8; 16]),
-}
-
-/// Peer-event reports toward the main loop (Codeberg #365). Fed by
-/// [`columba`]'s link registry (both GATT roles); protocol-neutral, so
-/// a sibling carrier reports here too. `Up` and `Lost` share this ONE
-/// ordered channel on purpose: a link flap is a `Lost` followed by an
-/// `Up`, and the cull must land before the pull decision looks at the
-/// path table — on separate channels the `Up` could win the race, see
-/// the still-standing direct entry, skip the pull, and then have the
-/// `Lost` cull re-arm exactly the trap the pull exists to clear.
-/// Depth 8: a carrier-off teardown drops every live link at once, and
-/// with [`CONN_COUNT`] = 4 that is up to four `Lost` reports in one
-/// burst before the main loop runs — twice that leaves room for the
-/// relink `Up`s that follow (#372).
-static BLE_PEER_EVENTS: Channel<CriticalSectionRawMutex, PeerEvent, 8> = Channel::new();
-
-/// Report a peer transition (see [`BLE_PEER_EVENTS`]). Never blocks a
-/// connection task: with the 8-deep queue full the oldest pending report
-/// wins and this one is dropped
-/// ([`leviculum_ble_tx::peer_event_verdict`]) — the affected node then
-/// falls back to the pre-#365 behaviour (a dropped `Lost` ages the paths
-/// out via ordinary expiry, a dropped `Up` waits for the peer's periodic
-/// announce).
-pub(crate) fn report_peer_event(event: PeerEvent) {
-    let (kind, identity) = match event {
-        PeerEvent::Up(id) => (leviculum_ble_tx::PeerEventKind::Up, id),
-        PeerEvent::Lost(id) => (leviculum_ble_tx::PeerEventKind::Lost, id),
-    };
-    let fill = Fill::new(BLE_PEER_EVENTS.len(), BLE_PEER_EVENTS.capacity());
-    // A refused `try_send` after a `Queue` verdict cannot happen on the
-    // one thread-mode executor every producer runs on; were it to, it is
-    // the same drop.
-    let queued = leviculum_ble_tx::peer_event_verdict(fill, kind) == Enqueue::Queue
-        && BLE_PEER_EVENTS.try_send(event).is_ok();
-    if !queued {
-        let kind = match kind {
-            leviculum_ble_tx::PeerEventKind::Up => "up",
-            leviculum_ble_tx::PeerEventKind::Lost => "lost",
-        };
-        crate::log::log_fmt(
-            "[BLE ] ",
-            format_args!(
-                "BLE_PEER_EVENT_DROPPED kind={} peer={:02x}{:02x}{:02x}{:02x}",
-                kind, identity[0], identity[1], identity[2], identity[3]
-            ),
-        );
-    }
-}
 
 // The runtime half of the media profile's BLE switch — the carrier gate
 // each protocol task holds, `leviculum_firmware::ble_link` since 998 —
@@ -258,10 +173,11 @@ pub(crate) fn report_peer_event(event: PeerEvent) {
 /// A Reticulum interface is a broadcast domain: one BROADCAST `try_send`
 /// from the node core must reach **every** peer on the medium, exactly
 /// as one LoRa transmission reaches every listener. With two live links,
-/// two connection tasks receiving from the single [`BLE_OUTGOING`]
-/// channel would round-robin it instead — each announce reaching one
-/// peer and not the other — so [`tx_fanout_task`] is the only consumer
-/// of [`BLE_OUTGOING`]. Which links are live is read from
+/// two connection tasks receiving from the single outbound channel
+/// (`leviculum_firmware::ble_link`'s, since 999) would round-robin it
+/// instead — each announce reaching one peer and not the other — so
+/// [`tx_fanout_task`] is its only consumer
+/// (`ble_link::outgoing_receiver`). Which links are live is read from
 /// [`HVN_DRAIN`]'s claims: a connection claims its slot for its whole
 /// lifetime, so the drain table is also the link table, and a second
 /// registry that could disagree with it is never built.
@@ -278,8 +194,8 @@ static LINK_OUT: [PacketQueue; MAX_LINKS] = [const { Channel::new() }; MAX_LINKS
 ///
 /// Handed to a connection task along with its drain-slot index. Stale
 /// packets from a previous tenancy of the slot are the caller's to
-/// drain at claim time, exactly as [`BLE_OUTGOING`] was drained per
-/// connection before phase B.
+/// drain at claim time, exactly as the node-facing outbound channel was
+/// drained per connection before phase B.
 pub(crate) fn link_out(slot_index: usize) -> &'static PacketQueue {
     &LINK_OUT[slot_index]
 }
@@ -309,8 +225,9 @@ pub(crate) fn link_out(slot_index: usize) -> &'static PacketQueue {
 /// [`leviculum_ble_tx::TxFanout::NoLink`] for why.
 #[embassy_executor::task]
 async fn tx_fanout_task() -> ! {
+    let outgoing_rx = leviculum_firmware::ble_link::outgoing_receiver();
     loop {
-        let (aim, packet) = BLE_OUTGOING.receive().await;
+        let (aim, packet) = outgoing_rx.receive().await;
         leviculum_firmware::ble_link::outgoing_held_sub(packet.capacity());
         // The registry plans, the drain table says which links are
         // still claimed; `leviculum_ble_tx::resolve_fanout` decides.
@@ -426,152 +343,6 @@ fn log_route_miss(peer: &[u8; 16], len: usize) {
 /// (Codeberg #376), for the `BLE_COUNTERS` line.
 pub static BLE_TX_ROUTE_MISSES: core::sync::atomic::AtomicU32 =
     core::sync::atomic::AtomicU32::new(0);
-
-pub struct BleChannels {
-    pub incoming_rx: Receiver<'static, CriticalSectionRawMutex, (Option<[u8; 16]>, Vec<u8>), 4>,
-    /// The outbound side carries the core's link statement alongside
-    /// the bytes; see `OutboundQueue`.
-    pub outgoing_tx: Sender<'static, CriticalSectionRawMutex, (TxAim, Vec<u8>), 4>,
-    /// Peer transitions (Codeberg #365); the main loop feeds `Lost` to
-    /// `handle_interface_peer_lost` and `Up` to
-    /// `handle_interface_peer_up`. See `BLE_PEER_EVENTS` for why both
-    /// ride one ordered channel.
-    pub peer_event_rx: Receiver<'static, CriticalSectionRawMutex, PeerEvent, 8>,
-}
-
-pub fn channels() -> BleChannels {
-    BleChannels {
-        incoming_rx: BLE_INCOMING.receiver(),
-        outgoing_tx: BLE_OUTGOING.sender(),
-        peer_event_rx: BLE_PEER_EVENTS.receiver(),
-    }
-}
-
-pub struct BleInterface {
-    sender: Sender<'static, CriticalSectionRawMutex, (TxAim, Vec<u8>), 4>,
-    /// The carrier-off drop run — see the LoRa interface for why these
-    /// are counted rather than logged one line per packet.
-    drops: leviculum_media_state::DropRun,
-}
-
-impl BleInterface {
-    pub fn new(sender: Sender<'static, CriticalSectionRawMutex, (TxAim, Vec<u8>), 4>) -> Self {
-        Self {
-            sender,
-            drops: leviculum_media_state::DropRun::new(),
-        }
-    }
-
-    /// Distinct live peer identities behind this interface (Codeberg
-    /// #365), for the main loop's `set_interface_peer_count` mirror —
-    /// the sibling of the `is_online` mirror. Zero with the carrier
-    /// off: links torn down by a media switch cannot be asked anything,
-    /// whatever the registry still holds mid-teardown.
-    pub fn peer_count(&self) -> usize {
-        if carrier().is_on() {
-            columba::live_peer_count()
-        } else {
-            0
-        }
-    }
-}
-
-impl Interface for BleInterface {
-    fn id(&self) -> InterfaceId {
-        InterfaceId(2)
-    }
-    fn name(&self) -> &str {
-        leviculum_firmware::iface_bytes::names()[leviculum_firmware::iface_bytes::BLE]
-    }
-    fn mtu(&self) -> usize {
-        INTERFACE_MTU
-    }
-    fn is_online(&self) -> bool {
-        // Online means "a frame handed to this interface can reach a
-        // peer": the carrier must be on AND at least one link must be
-        // live — with no link the fan-out drops every packet silently
-        // (see `tx_fanout_task`). The main loop mirrors this into the
-        // core, where a path over an offline interface is no path
-        // (Codeberg #365).
-        carrier().is_on() && HVN_DRAIN.claimed() > 0
-    }
-    fn try_send(&mut self, data: &[u8]) -> Result<(), InterfaceError> {
-        self.queue(TxAim::Flood, data)
-    }
-    /// The #376 delivery hint, carried to `tx_fanout_task`: this
-    /// interface holds several point-to-point links, so a routed packet
-    /// belongs on the addressed peer's link alone. `None` keeps the
-    /// broadcast fan-out.
-    fn try_send_to_peer(
-        &mut self,
-        data: &[u8],
-        peer: Option<&[u8; 16]>,
-        _high_priority: bool,
-    ) -> Result<(), InterfaceError> {
-        self.queue(peer.map_or(TxAim::Flood, |peer| TxAim::Peer(*peer)), data)
-    }
-    /// The #422 ingress link: these bytes arrived on `peer`'s link, so
-    /// every OTHER link of this interface is a relay target. Excluding
-    /// the whole interface, which is what the core does for a
-    /// single-link medium, is what kept a path request from crossing
-    /// the board between the host's link and the neighbour board's.
-    fn try_send_excluding_peer(
-        &mut self,
-        data: &[u8],
-        peer: &[u8; 16],
-        _high_priority: bool,
-    ) -> Result<(), InterfaceError> {
-        self.queue(TxAim::FloodExcept(*peer), data)
-    }
-}
-
-impl BleInterface {
-    /// Hand one packet plus the core's link statement to
-    /// [`tx_fanout_task`].
-    fn queue(&mut self, aim: TxAim, data: &[u8]) -> Result<(), InterfaceError> {
-        // The media profile first, then the queue
-        // (`leviculum_ble_tx::outbound_verdict`): a switched-off carrier
-        // is `Ok` and not `BufferFull` however full the queue is — see
-        // the LoRa interface for why.
-        let fill = Fill::new(self.sender.len(), self.sender.capacity());
-        let verdict = leviculum_ble_tx::outbound_verdict(carrier(), fill);
-        if verdict == leviculum_ble_tx::Outbound::Swallow {
-            if let Some(run) = self.drops.dropped(data.len()) {
-                crate::media::log_tx_drop(self.name(), run);
-            }
-            return Ok(());
-        }
-        if let Some(run) = self.drops.resumed() {
-            crate::media::log_tx_resumed(self.name(), run);
-        }
-        // #388 census: the copied packet enters BLE_OUTGOING custody on
-        // success (the fan-out subtracts on receive); a refused send is
-        // not counted. A `Queue` verdict the channel still refuses cannot
-        // happen on the one executor the core and the fan-out share; were
-        // it to, it is the same `BufferFull`.
-        let bytes = data.len();
-        let queued = verdict == leviculum_ble_tx::Outbound::Queue
-            && self.sender.try_send((aim, data.to_vec())).is_ok();
-        if queued {
-            leviculum_firmware::ble_link::outgoing_held_add(bytes);
-            leviculum_firmware::iface_bytes::note_tx(leviculum_firmware::iface_bytes::BLE, bytes);
-            return Ok(());
-        }
-        // Codeberg #344: same silence as the other two. A phone that
-        // stops draining the notify path fills this queue, and the board
-        // could not tell that from a mesh with nothing to say.
-        crate::log::log_fmt(
-            "[IFACE_FULL] ",
-            format_args!(
-                "iface={} depth={} len={}",
-                self.name(),
-                self.sender.capacity(),
-                data.len()
-            ),
-        );
-        Err(InterfaceError::BufferFull)
-    }
-}
 
 #[embassy_executor::task]
 async fn softdevice_task(sd: &'static Softdevice, vbus: &'static SoftwareVbusDetect) -> ! {
@@ -942,6 +713,12 @@ fn set_gap_device_name(name: NodeName) {
 /// How often [`counters_task`] emits its line: the `[TRANSPORT]`
 /// cadence (`transport_stats::PERIOD`), so the periodic counter lines
 /// interleave predictably in a capture.
+///
+/// The counters and their task stay below the seam (999): every number
+/// on the line is a backend static — this module's and [`columba`]'s —
+/// plus the drain table's claim count, and the task reaches nothing
+/// upward but the log. Whether they become `ble_link`-style census
+/// publishes is part of the registry split, step 4's remaining slice.
 const COUNTERS_PERIOD_SECS: u64 = 30;
 
 /// Periodic `BLE_COUNTERS` line on the debug CDC — the
@@ -1076,7 +853,7 @@ pub fn init(
     let sd = if columba_enabled {
         columba::spawn(spawner, sd, identity_hash, gap_name)
     } else {
-        crate::media::log_carrier_held_down("ble");
+        leviculum_firmware::media::log_carrier_held_down("ble");
         sd
     };
     spawner.must_spawn(softdevice_task(sd, vbus));

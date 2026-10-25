@@ -1005,6 +1005,7 @@ dependencies = [
  "leviculum-gnss-time",
  "leviculum-heap-budget",
  "leviculum-log-line",
+ "leviculum-media-state",
  "leviculum-pn-store",
  "leviculum-record-log",
  "leviculum-screen",

@@ -466,13 +466,13 @@ impl Interface for LoRaInterface {
                 // most needs explaining (#255). Same rule as `dispatch::settle`
                 // and `Reporter::note_state`: the transition is the signal.
                 if let Some(run) = self.drops.dropped(data.len()) {
-                    crate::media::log_tx_drop(self.name(), run);
+                    leviculum_firmware::media::log_tx_drop(self.name(), run);
                 }
                 return Ok(());
             }
             Outbound::Refuse(bound) => {
                 if let Some(run) = self.drops.resumed() {
-                    crate::media::log_tx_resumed(self.name(), run);
+                    leviculum_firmware::media::log_tx_resumed(self.name(), run);
                 }
                 crate::log::log_fmt(
                     "[IFACE_FULL] ",
@@ -491,7 +491,7 @@ impl Interface for LoRaInterface {
             }
             Outbound::Queue => {
                 if let Some(run) = self.drops.resumed() {
-                    crate::media::log_tx_resumed(self.name(), run);
+                    leviculum_firmware::media::log_tx_resumed(self.name(), run);
                 }
             }
         }

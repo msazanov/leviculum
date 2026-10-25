@@ -42,6 +42,10 @@ leviculum-heap-budget = { path = "../heap-budget" }
 # default, the drain/link table and the held-bytes mirrors the node side
 # owns and the backend publishes into.
 leviculum-ble-tx = { path = "../ble-tx" }
+# The carrier-off drop run both carrier interfaces count (999, `media`
+# and the BLE `Interface` in `ble_link`): when a down carrier's swallowed
+# packets earn a line, host-tested there.
+leviculum-media-state = { path = "../media-state" }
 # The global allocator (961, `heap`): `alloc` is this stratum's, and the
 # heap facts are what the census and the propagation node read. An
 # allocator crate, not a HAL; the bind crate hands it its pool.

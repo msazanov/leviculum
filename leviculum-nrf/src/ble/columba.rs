@@ -25,14 +25,13 @@ use embassy_executor::Spawner;
 use embassy_futures::select::{select, select3, select4, Either, Either3, Either4};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::blocking_mutex::Mutex as BlockingMutex;
-use embassy_sync::channel::Sender;
 use embassy_sync::mutex::Mutex;
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Timer};
 use leviculum_ble_tx::{
     abort_disconnects, addr_value, admit, advertise_pass_pause_ms, connect_failure_condemns,
     dial_preference, dial_stage_failure, disconnect_settle_ms, drain_table_refusal,
-    forget_deadline_ms, fragment_mtu, identity_hint, incoming_verdict, judge_read_identity,
+    forget_deadline_ms, fragment_mtu, identity_hint, judge_read_identity,
     judge_supervision_timeout, link_queue_verdict, manufacturer_data_with_hint,
     parse_peer_advertisement, refused_dial, scan_pass_pause_ms, with_free_slots, AdvReport,
     AdvertisePass, CandidateTable, CarrierPath, CarrierStep, ChurnLedger, ChurnPolicy, ConnParams,
@@ -64,7 +63,7 @@ use static_cell::StaticCell;
 use leviculum_core::node_name::NodeName;
 
 use super::notify::{notify_fragments, BLE_TX_DRAIN_UNROUTED, BLE_TX_DROPPED, BLE_TX_PACKETS};
-use super::{CarrierWaiter, BLE_INCOMING, HVN_DRAIN, MAX_LINKS};
+use super::{BleLinkEvent, CarrierWaiter, HVN_DRAIN, MAX_LINKS};
 
 // Size the receive profile by the advertised packet bound, not this connection's
 // negotiated ATT width: peers may still send normal ATT23-sized fragments.
@@ -470,8 +469,6 @@ async fn peripheral_task(
     index: usize,
     hint: [u8; IDENTITY_HINT_LEN],
 ) {
-    let incoming_tx = BLE_INCOMING.sender();
-
     loop {
         // The runtime carrier gate: a profile switched to `ble=off`
         // holds the task here, so nothing is on the air — no
@@ -553,7 +550,7 @@ async fn peripheral_task(
                 let handle = conn.handle().unwrap_or(u16::MAX);
                 log_conn_params(&conn, handle, LinkRole::Peripheral, LinkPhase::Open);
                 ask_for_a_survivable_timeout(&conn, handle);
-                let peer = gatt_events(&conn, server, &incoming_tx).await;
+                let peer = gatt_events(&conn, server).await;
                 log_link_down(conn, handle, LinkRole::Peripheral, peer, |conn| {
                     log_peripheral_close(conn, handle)
                 })
@@ -812,26 +809,15 @@ fn ask_for_a_survivable_timeout(conn: &Connection, handle: u16) {
     );
 }
 
-/// Hand one completed inbound packet to the main loop, answering whether
-/// it was queued. Both roles' receive paths call this: a full
-/// `BLE_INCOMING` drops the packet ([`incoming_verdict`]) and counts it in
-/// [`BLE_RX_QUEUE_FULL`], which before leviculum#413's fourth wave was a
-/// silent drop on both roles. A `Queue` verdict the channel still refuses
-/// cannot happen on the one thread-mode executor; were it to, it is the
-/// same counted drop.
-fn offer_incoming(
-    incoming_tx: &Sender<
-        'static,
-        CriticalSectionRawMutex,
-        (Option<[u8; 16]>, alloc::vec::Vec<u8>),
-        4,
-    >,
-    peer: Option<[u8; 16]>,
-    packet: alloc::vec::Vec<u8>,
-) -> bool {
-    let fill = Fill::new(incoming_tx.len(), incoming_tx.capacity());
-    let queued =
-        incoming_verdict(fill) == Enqueue::Queue && incoming_tx.try_send((peer, packet)).is_ok();
+/// Hand one completed inbound packet to the main loop through the seam
+/// (`ble_link::deliver`, 999), answering whether it was queued. Both
+/// roles' receive paths call this: a full incoming channel drops the
+/// packet (`leviculum_ble_tx::incoming_verdict`, applied by `deliver`)
+/// and counts it in [`BLE_RX_QUEUE_FULL`], which before leviculum#413's
+/// fourth wave was a silent drop on both roles. A queued packet's census
+/// custody and byte count are `deliver`'s own bookkeeping.
+fn offer_incoming(link: Option<[u8; 16]>, packet: alloc::vec::Vec<u8>) -> bool {
+    let queued = super::deliver(BleLinkEvent::Inbound { link, packet });
     if !queued {
         BLE_RX_QUEUE_FULL.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     }
@@ -906,16 +892,7 @@ async fn serve_tx_gap(gap: &TxGap, conn_handle: u16) {
 /// Returns the identity the peer's handshake presented, refused or
 /// not, for the `BLE_LINK_DOWN` line the caller writes (912); `None`
 /// when the connection ended before it wrote one.
-async fn gatt_events(
-    conn: &Connection,
-    server: &NotifyAwareServer,
-    incoming_tx: &Sender<
-        'static,
-        CriticalSectionRawMutex,
-        (Option<[u8; 16]>, alloc::vec::Vec<u8>),
-        4,
-    >,
-) -> Option<[u8; 16]> {
+async fn gatt_events(conn: &Connection, server: &NotifyAwareServer) -> Option<[u8; 16]> {
     // This connection's drain edge. Claimed for the lifetime of the
     // connection and released below, so a reconnect (or a second link,
     // since phase B) never inherits another link's pending edge. The
@@ -1122,20 +1099,10 @@ async fn gatt_events(
                             );
                             // If the consumer is slow and the 4-deep channel
                             // is full, drop the packet rather than block here
-                            // (we're in a sync closure, can't await).
-                            let bytes = packet.capacity();
-                            let len = packet.len();
-                            if offer_incoming(incoming_tx, link_peer.get(), packet) {
-                                // #388 census: BLE_INCOMING custody; the
-                                // main loop subtracts on receive.
-                                super::incoming_held_add(bytes);
-                                // #235: the packet, not the allocation —
-                                // the reference counts payload bytes.
-                                leviculum_firmware::iface_bytes::note_rx(
-                                    leviculum_firmware::iface_bytes::BLE,
-                                    len,
-                                );
-                            }
+                            // (we're in a sync closure, can't await). The
+                            // census custody and byte count on success are
+                            // `ble_link::deliver`'s own bookkeeping (999).
+                            offer_incoming(link_peer.get(), packet);
                         }
                         DefragResult::NeedMore | DefragResult::Error => {}
                     }
@@ -1524,11 +1491,16 @@ fn peer_link_up(
 ) -> bool {
     let peer_value = peer.value;
     let now_ms = Instant::now().as_millis();
-    let up = LIVE_PEERS.lock(|peers| {
-        peers
-            .borrow_mut()
-            .link_up(slot_index, peer_id, origin, att_mtu, now_ms)
+    let (up, live_peers) = LIVE_PEERS.lock(|peers| {
+        let mut peers = peers.borrow_mut();
+        let up = peers.link_up(slot_index, peer_id, origin, att_mtu, now_ms);
+        (up, peers.peer_count())
     });
+    // The mirror `BleInterface::peer_count` reads (999): recomputed under
+    // the same lock that mutated the registry and published before any
+    // event, so the main loop never observes a transition ahead of the
+    // count that caused it. A refusal republishes the unchanged count.
+    super::set_live_peer_count(live_peers);
     match up {
         LinkUp::Refused {
             old_slot,
@@ -1591,7 +1563,10 @@ fn peer_link_up(
         }
         LinkUp::Accepted { first } => {
             if first {
-                super::report_peer_event(super::PeerEvent::Up(peer_id));
+                super::deliver(BleLinkEvent::PeerUp {
+                    identity: peer_id,
+                    role: origin.our_role(),
+                });
             }
             // A NEW neighbour's link in either role restarts the
             // fallback clock (#375, narrowed by #504): the strict rule
@@ -1743,9 +1718,20 @@ fn displace_old_link(displaced: DisplacedOld) {
 /// slot (the displacement hand-over window) means the peer is still
 /// reachable: registry churn, not a loss, so no report.
 fn peer_link_down(slot_index: usize) {
-    let lost = LIVE_PEERS.lock(|peers| peers.borrow_mut().link_down(slot_index));
-    if let Some(identity) = lost {
-        super::report_peer_event(super::PeerEvent::Lost(identity));
+    let (lost, live_peers) = LIVE_PEERS.lock(|peers| {
+        let mut peers = peers.borrow_mut();
+        let lost = peers.link_down(slot_index);
+        (lost, peers.peer_count())
+    });
+    // Published before the loss report, for the same reason as in
+    // [`peer_link_up`]: the count never lags an event the main loop
+    // already holds.
+    super::set_live_peer_count(live_peers);
+    if let Some((identity, origin)) = lost {
+        super::deliver(BleLinkEvent::PeerLost {
+            identity,
+            role: origin.our_role(),
+        });
     }
 }
 
@@ -1811,15 +1797,15 @@ fn meet_link(identity: &[u8; 16]) -> leviculum_ble_tx::Neighbour {
 //   durable is keyed on it; admission is still the 16-byte identity
 //   handshake.
 
-/// The number of distinct live peer identities on the BLE interface
-/// (Codeberg #365) — what the main loop mirrors into the core as the
-/// interface's peer count, next to the `is_online` mirror. Counted from
-/// the post-handshake registry, not the drain table: a link that has
-/// not presented an identity yet is not a peer the transport can ask
-/// anything of.
-pub(crate) fn live_peer_count() -> usize {
-    LIVE_PEERS.lock(|peers| peers.borrow().peer_count())
-}
+// The number of distinct live peer identities (Codeberg #365) — what
+// the main loop mirrors into the core as the interface's peer count —
+// is a `ble_link` value since 999: [`peer_link_up`] and
+// [`peer_link_down`] publish `PeerRegistry::peer_count` under the same
+// lock that mutated the registry (`set_live_peer_count`), and
+// `BleInterface::peer_count` reads it above the seam. Counted from the
+// post-handshake registry, not the drain table: a link that has not
+// presented an identity yet is not a peer the transport can ask
+// anything of.
 
 /// Map the core's link statement onto link slots — the fan-out's one
 /// question to the registry. The rules and their peer-gone decisions
@@ -2890,7 +2876,6 @@ async fn run_central_session(
         ),
     );
 
-    let incoming_tx = BLE_INCOMING.sender();
     let defrag: Cell<BleDefragmenter> = Cell::new(BleDefragmenter::new(REASSEMBLY_LIMITS));
     let last_keepalive: Cell<Instant> = Cell::new(Instant::now());
 
@@ -2957,16 +2942,9 @@ async fn run_central_session(
                     conn_handle,
                     frags
                 );
-                let bytes = packet.capacity();
-                let len = packet.len();
-                if offer_incoming(&incoming_tx, Some(peer_id), packet) {
-                    // #388 census, as on the peripheral side.
-                    super::incoming_held_add(bytes);
-                    leviculum_firmware::iface_bytes::note_rx(
-                        leviculum_firmware::iface_bytes::BLE,
-                        len,
-                    );
-                }
+                // Census custody and byte count as on the peripheral
+                // side: `ble_link::deliver`'s own bookkeeping (999).
+                offer_incoming(Some(peer_id), packet);
             }
             DefragResult::NeedMore | DefragResult::Error => {}
         }

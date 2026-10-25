@@ -300,7 +300,7 @@ the board again is quicker.
 
 The probe destination is the only addressed service the firmware
 offers. Remote management is not enabled on the standalone binary
-(`leviculum-nrf/src/bin/t114.rs:152` sets `respond_to_probes` and
+(`leviculum-nrf/src/bin/t114.rs:153` sets `respond_to_probes` and
 nothing else), so `rnstatus -R` and `rnpath -R` have no responder;
 `rncp`, `rnsh` and `rnx` have no counterpart either. What the board
 does beyond that — forwarding announces, answering path requests,
