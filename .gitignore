@@ -15,6 +15,8 @@
 /.deb-version-*
 leviculum-nrf/target/
 leviculum-esp/target/
+leviculum-mapfill/measure/target/
+leviculum-mapfill/m9/target/
 # leviculum-nrf/Cargo.lock is deliberately NOT ignored (Codeberg #288):
 # the firmware workspace is a binary artifact like the root workspace, so
 # its lock is tracked. While it was ignored every machine resolved the

@@ -1,0 +1,28 @@
+[package]
+name = "leviculum-mapfill"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Scanline polygon fill and wide lines on embedded-graphics, no_std and no float, for the vector map (#474)"
+# A library for the workspace's own programs, not published on its own.
+publish = false
+
+[lints.rust]
+unsafe_code = "deny"
+
+[features]
+# `std` adds only the fixture writer the host harness uses. The filler,
+# the fixture reader and the render pipeline are `no_std` without `alloc`.
+std = []
+
+[dependencies]
+# The version the nRF firmware already draws with (leviculum-nrf, feature
+# `display`). 0.8 has no polygon fill (#293), which is what this crate adds.
+embedded-graphics = "0.8"
+
+[dev-dependencies]
+# The integration tests build fixtures with the writer behind `std`.
+leviculum-mapfill = { path = ".", features = ["std"] }
