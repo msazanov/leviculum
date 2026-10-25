@@ -2276,15 +2276,21 @@ name = "lnmsg"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "crossterm",
+ "futures",
  "hex",
  "leviculum-core",
  "leviculum-lxmf",
  "leviculum-std",
+ "leviculum-ui",
+ "leviculum-ui-ratatui",
  "rand_core 0.6.4",
+ "ratatui",
  "serde_json",
  "tempfile",
  "tokio",
  "tracing",
+ "tui-input",
 ]
 
 [[package]]

@@ -35,14 +35,16 @@ the core/frontend cut and for the map, and what is open.
 
 - **`lnmsg`, the terminal messenger.** It sends (direct, propagated, or
   `auto` with the fallback to a propagation node) and drains the
-  mailbox. It has no TUI yet ([lnmsg](lnmsg.md)). Its frontend already
+  mailbox, and since 2026-10-25 (994) `lnmsg tui` is its terminal
+  frontend, slice one ([lnmsg: the user interface](lnmsg-ui.md), "Built
+  2026-10-25"): the first frontend on the shared widgets, over a screen
+  model that lives in the `no_std` core. Its frontend already
   talks to the backend only through `Outbox` (`lnmsg/src/outbox.rs:194`),
   but the crate is `std`. It depends on `leviculum-std` and tokio
-  (`lnmsg/Cargo.toml:41-45`), since 2026-10-25 behind its `std` feature,
-  and `just lnmsg-core-no-std` measures what the core still takes from
-  them (red; the list and the pass order are in [lnmsg:
-  architecture](lnmsg-architecture.md), "Plan: the lnmsg core without
-  std").
+  (`lnmsg/Cargo.toml:53`, `lnmsg/Cargo.toml:57`), since 2026-10-25 behind its `std` feature,
+  and `just lnmsg-core-no-std` holds the core to `no_std` (green since
+  993; the pass order is in [lnmsg: architecture](lnmsg-architecture.md),
+  "Plan: the lnmsg core without std").
 - **#232's rule:** the messenger's core must be `std`-free, not merely
   terminal-free, because the next frontend after the TUI is firmware. The
   shape #232 asks for is a `no_std + alloc` core crate, a store behind a
@@ -184,9 +186,10 @@ and mouse events with the text-editing table, the footer, help and toast
 models, the spinner frames, and the delivery glyph table), so a core can
 take it and stay terminal-free; `leviculum-ui-ratatui` is the ratatui half
 (the widgets, the terminal lifecycle, the event mapping, inline pictures).
-`lnomad` draws through them already; `lnmsg`'s TUI is built on them. The
-palette model is not there yet: `lnomad` has none to extract, so it lands
-with `lnmsg`'s TUI, in `leviculum-ui`, for both.
+`lnomad` draws through them already; `lnmsg`'s TUI is built on them
+(994). The palette's names landed with it, in `leviculum_ui::commands`,
+and `leviculum-ui` builds `no_std` without its `std` feature, so the
+messenger core holds the same types a board will.
 
 ## Open
 

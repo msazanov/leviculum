@@ -120,6 +120,50 @@ Everywhere else the rule is absolute: no key in a command pane transmits,
 syncing needs a chord or the palette, announcing needs a chord or the
 palette. Everything free is free.
 
+### Built 2026-10-25, slice one
+
+`lnmsg tui` (the `tui` cargo feature, off by default; 994, #232) is the
+first frontend on the shared widgets. The screen is a model in the
+messenger core, `lnmsg/src/ui.rs`, `no_std` like the rest of it (`just
+lnmsg-core-no-std` builds it): `UiModel` with the conversations, the
+selection, the compose field, the focus, the toasts and the palette;
+`update(model, UiEvent) -> Vec<UiEffect>`; and `view`, which hands the
+renderer each pane's lines. The terminal half is the binary's
+`lnmsg/src/tui.rs`. A send is the CLI's `--via auto` runner
+(`send::run_send_auto`, which `lnmsg send` runs too) and a fetch is
+`lnmsg fetch`'s, one at a time, each on a tap of the one engine
+(`lnmsg/src/fanout.rs`) while the screen reads the same events.
+
+In:
+
+- Three panes, focus follows the pane, `Tab`/`Shift-Tab` cycle.
+- Conversations and messages: `j`/`k`/arrows move, `g`/`G` and
+  `Home`/`End` jump, `Enter` opens the conversation or goes to compose,
+  `?` help, `q` quits, `:` opens the palette.
+- Compose: plain keys type through the `tui-input` table lnomad's fields
+  use; `Enter` sends, and on an empty line does nothing; `Esc` goes back
+  to the messages; `Ctrl-C` clears the line into the kill buffer
+  (`Ctrl-Y` brings it back) and does not quit.
+- Everywhere: `Ctrl-P` opens the palette, `Ctrl-Q` quits.
+- The palette fuzzy-matches the names in `leviculum_ui::commands`
+  (`send`, `fetch`, `quit`, `help`, `focus conversations|messages|compose`),
+  the one table the desktop GUI will share.
+- Delivery glyphs from the table in section 2, mapped from the router's
+  states as listed there; received messages, deduplicated by id, with an
+  unread count on a conversation that is not open.
+- `lnmsg tui --script <file>` runs a key script against the real engine and
+  writes the frames it asks for to a file; `lnmsg/tests/tui_snapshot.rs`
+  pins a session (open, type, send, `○` to `✓`, the reply) that way.
+
+Not in, and open: history (lnmsg keeps no message store yet, so the
+screen holds this session's messages and says so), trust states, the
+mouse, QR codes, the per-message detail view and its ledger, `Alt-Enter`
+for a newline and the `send_on_enter` switch, `f` hint mode, lnomad's full
+`SCROLL_KEYS` table (only the motions above), and display names (a
+conversation is its address; `--to` lists one from the start). The keymap
+is still a `match` in `ui.rs` beside the help text, not yet the one table
+the decision asks for.
+
 ## 2. Decision: what honesty about delivery looks like
 
 Most chat UIs lie by simplification: one check for sent, two for delivered,
@@ -229,6 +273,16 @@ above (green and `✓` only on proof, only the working states animate). The
 spinner rows draw the shared loading spinner of `leviculum-ui/src/spinner.rs`,
 the one `lnomad` shows, so its frames are the ones the table lists. The
 tones are resolved against the palette by the frontend.
+
+`lnmsg tui` draws it since 2026-10-25 (994), and maps the router's states
+onto the rows in `lnmsg::ui::delivery_of`: `Generating` and `Outbound` are
+queued `○`, `Sending` is in flight, `Sent` is `◇`, `AwaitingCollection` is
+`⌂`, `Delivered` is `✓`, `Rejected` is the red `✗`, `Failed` and
+`Cancelled` the dim one. The stamping row has no router state yet: the
+engine mines without saying so. While a send's runner is still working, a
+giving-up state of one of its legs is not drawn, because `--via auto`
+cancels a stranded direct leg and carries the same text to a mailbox; the
+`✗` appears when the runner reports it gave up.
 
 The timeline itself:
 

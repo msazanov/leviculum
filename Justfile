@@ -1650,7 +1650,7 @@ ci-gate:
 # scripts/standard-integ-elsewhere.txt is the list of what it leaves to these
 # lines. check-standard-integ (in `guards`) keeps that list honest.
 [doc('Tier 1 (~15 min): fast plus the integration suites')]
-standard: fast test-ffi verify-packaging
+standard: fast test-ffi verify-packaging lnmsg-tui
     {{manifest}} core-tests -- cargo test -p leviculum-core --tests
     # ~4 s: node_integ builds an in-process daemon + IPC + blog node, which
     # is too slow for the Tier 0 push gate but trivial here.
@@ -2426,3 +2426,16 @@ nrf-module-reach:
 lnmsg-core-no-std:
     rustup target add thumbv7em-none-eabihf
     cargo check -p lnmsg --lib --no-default-features --target thumbv7em-none-eabihf
+
+# 994, #232: lnmsg's `tui` feature is off by default, so `cargo test
+# --workspace` and the workspace clippy never compile `lnmsg tui` or run its
+# tests. This does: clippy over every lnmsg target with the feature, the
+# binary's renderer and script tests, and the scripted session against an
+# in-process daemon (`lnmsg/tests/tui_snapshot.rs`, 8 s, and 8 s again in
+# each of three runs under a 25 % CPU quota, 2026-10-25). In `standard`, not
+# `fast`: the session spawns lnmsg against a daemon over sockets. The screen
+# model's own tests are core and run in every lib run.
+[doc('Lint and test lnmsg with its tui feature (#232)')]
+lnmsg-tui:
+    cargo clippy -p lnmsg --features tui --all-targets -- -D warnings
+    {{manifest}} lnmsg-tui -- cargo test -p lnmsg --features tui --bins --test tui_snapshot

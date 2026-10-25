@@ -3,7 +3,9 @@
 //! This crate carries the non-interactive slices of the program described in
 //! `docs/src/concepts/lnmsg.md`: the send path — direct, propagated, or
 //! `auto` with the Columba-style fallback to a propagation node — and the
-//! mailbox drain (`lnmsg fetch`). No TUI.
+//! mailbox drain (`lnmsg fetch`) — and the model of `lnmsg tui`'s screen
+//! ([`ui`]), whose terminal frontend is the binary's, behind the `tui`
+//! feature.
 //!
 //! # The two structural constraints
 //!
@@ -64,6 +66,8 @@ pub mod display_name;
 pub mod effects;
 pub mod engine;
 pub mod events;
+#[cfg(feature = "std")]
+pub mod fanout;
 pub mod fetch;
 #[cfg(feature = "std")]
 pub mod identity;
@@ -72,3 +76,4 @@ pub mod mailbox_state;
 pub mod outbox;
 pub mod seen;
 pub mod send;
+pub mod ui;

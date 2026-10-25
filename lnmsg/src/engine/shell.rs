@@ -21,7 +21,7 @@ use leviculum_std::ReticulumNode;
 
 use super::{Engine, StampAnswer, StampJob};
 use crate::clock;
-use crate::effects::Terminal;
+use crate::effects::{Effects, Terminal};
 use crate::outbox::{Command, Outbox, OutboxEvent, OutboxGone};
 
 /// The engine as the driver sees it, with the frontend's and the miner's
@@ -99,8 +99,10 @@ impl Outbox for InProcessOutbox {
     }
 }
 
-/// What attaching to a shared instance needs to know.
-pub struct AttachConfig {
+/// What attaching to a shared instance needs to know. `N` is where the stamp
+/// worker's progress lines go: the CLI's [`Terminal`] writes them to stderr,
+/// a full-screen frontend has to catch them before they land on its screen.
+pub struct AttachConfig<N = Terminal> {
     /// The shared instance to join, i.e. which daemon.
     pub instance: String,
     /// Where this client keeps its node state (learned identities, paths).
@@ -120,7 +122,7 @@ pub struct AttachConfig {
     /// [`crate::display_name::from_process`], which never yields an empty one.
     pub display_name: Vec<u8>,
     /// Where the stamp worker's progress lines go.
-    pub notices: Terminal,
+    pub notices: N,
 }
 
 /// Why attaching failed.
@@ -169,7 +171,9 @@ impl Attached {
 }
 
 /// Attach to a running shared instance with an LXMF engine installed.
-pub async fn attach(config: AttachConfig) -> Result<Attached, AttachError> {
+pub async fn attach<N: Effects + Send + 'static>(
+    config: AttachConfig<N>,
+) -> Result<Attached, AttachError> {
     let (commands_tx, commands_rx) = std::sync::mpsc::channel::<Command>();
     let (events_tx, events_rx) = std::sync::mpsc::channel::<OutboxEvent>();
     let (stamps_tx, stamps_rx) = std::sync::mpsc::channel::<StampJob>();
@@ -226,7 +230,7 @@ pub async fn attach(config: AttachConfig) -> Result<Attached, AttachError> {
 fn run_stamp_worker(
     jobs: &Receiver<StampJob>,
     answers: &Sender<StampAnswer>,
-    mut notices: Terminal,
+    mut notices: impl Effects,
 ) {
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()

@@ -17,6 +17,9 @@
 //! `--via propagated` return so a script can tell the two successes apart
 //! (`lnmsg/src/send.rs`, `EXIT_PROPAGATED`).
 
+#[cfg(feature = "tui")]
+mod tui;
+
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
@@ -79,6 +82,58 @@ enum SubCommand {
     Fetch(FetchArgs),
     /// Print this machine's own LXMF address.
     Address,
+    /// The terminal messenger: conversations, messages and a compose line.
+    #[cfg(feature = "tui")]
+    Tui(TuiArgs),
+}
+
+#[cfg(feature = "tui")]
+#[derive(clap::Args, Debug)]
+struct TuiArgs {
+    /// A correspondent to list from the start: 32 hex characters, repeatable.
+    /// lnmsg keeps no history yet, so without one the screen lists only the
+    /// people who write to you during the session.
+    #[arg(long, value_name = "ADDRESS")]
+    to: Vec<String>,
+
+    /// The propagation node for the fallback and for fetch, as `send --pn`.
+    #[arg(long, value_name = "HASH")]
+    pn: Option<String>,
+
+    /// Shared-instance name to connect to (overrides the config file's).
+    #[arg(long)]
+    instance: Option<String>,
+
+    /// Reticulum config directory (default: the platform default).
+    #[arg(long)]
+    config: Option<PathBuf>,
+
+    /// Seconds each send's leg may take, as `send --timeout`; a fetch gets
+    /// twice this.
+    #[arg(long, default_value_t = DEFAULT_TIMEOUT_SECS)]
+    timeout: u64,
+
+    /// Draw the delivery marks in ASCII (`.` `*` `o` `^` `v` `x`).
+    #[arg(long)]
+    ascii: bool,
+
+    /// No colours.
+    #[arg(long)]
+    no_color: bool,
+
+    /// Run a key script instead of reading the keyboard, and write every
+    /// `frame` it asks for to --frames. For tests and demos.
+    #[arg(long, value_name = "FILE")]
+    script: Option<PathBuf>,
+
+    /// Where a script's frames go (default: the script's path with
+    /// `.frames`).
+    #[arg(long, value_name = "FILE", requires = "script")]
+    frames: Option<PathBuf>,
+
+    /// A script's screen size, columns x rows.
+    #[arg(long, value_name = "WxH", default_value = "80x24", requires = "script")]
+    size: String,
 }
 
 #[derive(clap::Args, Debug)]
@@ -267,13 +322,53 @@ async fn main() -> ExitCode {
     // so an `info`-level line on stderr would be the only thing a cron job
     // ever saw from a send that worked. Whoever wants the detail asks for the
     // event log, which is where the message id lives.
+    #[cfg(feature = "tui")]
+    if let SubCommand::Tui(tui) = args.command {
+        return run_tui(tui).await;
+    }
     leviculum_std::event_log::install_global_subscriber("warn");
 
     match args.command {
         SubCommand::Send(send) => run(send).await,
         SubCommand::Fetch(fetch) => run_fetch_command(fetch).await,
         SubCommand::Address => run_address(),
+        // Dispatched above, before the subscriber writes to stderr.
+        #[cfg(feature = "tui")]
+        SubCommand::Tui(_) => ExitCode::SUCCESS,
     }
+}
+
+/// `lnmsg tui`: parse what the shell needs, then hand over.
+#[cfg(feature = "tui")]
+async fn run_tui(args: TuiArgs) -> ExitCode {
+    let mut to = Vec::new();
+    for text in &args.to {
+        match address::parse(text) {
+            Ok(peer) => to.push(peer),
+            Err(error) => return usage(format!("--to {}: {error}", text.trim())),
+        }
+    }
+    let size = args
+        .size
+        .split_once('x')
+        .and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?)))
+        .filter(|&(w, h): &(u16, u16)| w >= 20 && h >= 8);
+    let Some(size) = size else {
+        return usage(format!("--size {}: want WxH, at least 20x8", args.size));
+    };
+    tui::run(tui::TuiOptions {
+        to,
+        pn: args.pn,
+        instance: args.instance,
+        config: args.config,
+        timeout: args.timeout,
+        ascii: args.ascii,
+        no_color: args.no_color,
+        script: args.script,
+        frames: args.frames,
+        size,
+    })
+    .await
 }
 
 /// `lnmsg address`: print our own LXMF address. No daemon involved — the

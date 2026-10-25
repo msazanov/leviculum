@@ -20,6 +20,13 @@ Toolchain: Rust 1.97.1
 
 ### Added
 
+- `lnmsg tui`, the interactive messenger, slice one (#232), behind lnmsg's
+  `tui` cargo feature: conversations, messages and a compose line, `Tab`
+  between them, a command palette on `Ctrl-P`. `Enter` sends the way
+  `lnmsg send --via auto` does, and each sent message shows its delivery
+  mark (`○` queued, `◇` sent, `⌂` in a mailbox, `✓` proven, `✗`). Messages
+  live for the session only; lnmsg keeps no history yet. `--script` drives
+  it from a key script and writes the frames to a file. lnmsg(1) is new.
 - lnsd reads an `[auto]` section, which rnsd ignores: `lan`, `servers`,
   `bluetooth`, `serial`, each yes or no, the media lnsd may start on its
   own (#471 step 2). A file without the section starts nothing automatic;

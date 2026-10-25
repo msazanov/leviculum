@@ -30,6 +30,18 @@ std = [
     "rand_core/getrandom",
     "serde_json/std",
 ]
+# `lnmsg tui`: the terminal frontend over the core's `ui` model, on the
+# shared widgets (leviculum-ui-ratatui). Off by default: the CLI is what a
+# script installs, and it carries no terminal crate.
+tui = [
+    "std",
+    "leviculum-ui/std",
+    "dep:leviculum-ui-ratatui",
+    "dep:ratatui",
+    "dep:crossterm",
+    "dep:futures",
+    "dep:tui-input",
+]
 
 [dependencies]
 # The LXMF router, node and message codec. Everything protocol-shaped lives
@@ -43,6 +55,18 @@ leviculum-std = { path = "../leviculum-std", optional = true }
 leviculum-core = { path = "../leviculum-core" }
 clap = { version = "4", features = ["derive"], optional = true }
 tokio = { workspace = true, optional = true }
+# The screen's model (`ui`): the delivery glyphs, the palette's names, the
+# key events, the styled lines. `no_std` without its `std` feature, so the
+# model stays core.
+leviculum-ui = { path = "../leviculum-ui", default-features = false }
+# The terminal frontend (`tui`), lnomad's crates at lnomad's versions.
+leviculum-ui-ratatui = { path = "../leviculum-ui-ratatui", optional = true }
+ratatui = { version = "0.30.2", optional = true }
+crossterm = { version = "0.29.0", features = ["event-stream"], optional = true }
+futures = { version = "0.3", optional = true }
+# Default features off: the default `ratatui-crossterm` feature pulls both
+# terminal crates in for a backend `leviculum_ui::input` restates.
+tui-input = { version = "0.15", default-features = false, optional = true }
 # The structured event log (docs/src/structured-event-logs.md) is a tracing
 # layer, so the emit sites are `tracing::debug!` calls with an `event` field.
 tracing.workspace = true
@@ -67,3 +91,7 @@ path = "src/lib.rs"
 name = "lnmsg"
 path = "src/main.rs"
 required-features = ["std"]
+
+[[test]]
+name = "tui_snapshot"
+required-features = ["tui"]

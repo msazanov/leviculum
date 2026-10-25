@@ -197,6 +197,7 @@ skip  lnmsg           mailbox_cli                # spawns lnmsg against in-proce
 skip  lnmsg           python_interop             # drives Python over sockets; Tier 1
 skip  lnmsg           send_cli                   # spawns the lnmsg binary
 skip  lnmsg           stamp_timing               # tokio runtime around the stamp solver
+skip  lnmsg           tui_snapshot               # spawns lnmsg tui against an in-process daemon over sockets
 skip  lnomad          fetch_integ                # tokio runtime fetching over a live link
 skip  lnomad          image_layout               # layout arithmetic; subject is the code
 skip  lnomad          render_golden              # reads fixtures, but the subject is the renderer
