@@ -28,66 +28,38 @@
 //!
 //! A sink a board does not have is never asked, so it writes no line.
 //!
-//! What raises a pattern: [`status`](crate::feedback::status) (a short
-//! press, after the display wake),
-//! [`release_now`](crate::feedback::release_now) (a held button reaching
-//! 2 s), [`notify`](crate::feedback::notify) (the propagation role
-//! storing a message for this board's own `lxmf.delivery` destination) and
-//! [`report_delivered`](crate::feedback::report_delivered) (the proof of
-//! the report a double press sent, order 914) and the air watch of a double
-//! press ([`announce_press_begin`](crate::feedback::announce_press_begin),
-//! order 930), which plays `announce-sent` when the LoRa task settles the
-//! press's last announce keyed (`crate::lora`'s `settle_packet`).
-//! The mode blink ([`leviculum_feedback::mode`]) has no caller until
-//! Tracker mode exists.
+//! Which event raises which pattern on which sink is
+//! `leviculum_firmware::feedback`'s since #469 973; this module is the
+//! other side of its `Sinks` seam:
+//! [`NrfSinks`](crate::feedback::NrfSinks), registered at boot with
+//! `leviculum_firmware::feedback::set_sinks`, hands a pattern to the
+//! player of its sink.
 
-use core::cell::Cell;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use embassy_executor::Spawner;
 use embassy_futures::select::{select, Either};
 use embassy_nrf::gpio::Output;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Timer};
-use leviculum_feedback::{AirWatch, Pattern, Phase, Playback};
+use leviculum_feedback::{Pattern, Phase, Playback};
+pub use leviculum_firmware::feedback::Sink;
+use leviculum_firmware::seams::Sinks;
 
-/// Where a pattern plays.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Sink {
-    /// The board's LED.
-    Led,
-    /// The notification LED (Pocket V2, Solar Node).
-    Notify,
-    /// The buzzer (T1000-E).
-    Buzzer,
+fn signal(sink: Sink) -> &'static Signal<CriticalSectionRawMutex, Pattern> {
+    match sink {
+        Sink::Led => &LED,
+        Sink::Notify => &NOTIFY,
+        Sink::Buzzer => &BUZZER,
+    }
 }
 
-impl Sink {
-    /// The `sink=` token of the `FEEDBACK` line.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Sink::Led => "led",
-            Sink::Notify => "notify",
-            Sink::Buzzer => "buzzer",
-        }
-    }
-
-    fn signal(self) -> &'static Signal<CriticalSectionRawMutex, Pattern> {
-        match self {
-            Sink::Led => &LED,
-            Sink::Notify => &NOTIFY,
-            Sink::Buzzer => &BUZZER,
-        }
-    }
-
-    fn present(self) -> &'static AtomicBool {
-        match self {
-            Sink::Led => &HAS_LED,
-            Sink::Notify => &HAS_NOTIFY,
-            Sink::Buzzer => &HAS_BUZZER,
-        }
+fn present(sink: Sink) -> &'static AtomicBool {
+    match sink {
+        Sink::Led => &HAS_LED,
+        Sink::Notify => &HAS_NOTIFY,
+        Sink::Buzzer => &HAS_BUZZER,
     }
 }
 
@@ -104,119 +76,26 @@ static HAS_LED: AtomicBool = AtomicBool::new(false);
 static HAS_NOTIFY: AtomicBool = AtomicBool::new(false);
 static HAS_BUZZER: AtomicBool = AtomicBool::new(false);
 
-fn raise(sink: Sink, pattern: Pattern) {
-    if sink.present().load(Ordering::Relaxed) {
-        sink.signal().signal(pattern);
+/// The board's [`Sinks`]: a sink is present once its player is spawned,
+/// and a pattern played on it is handed to that player's signal.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NrfSinks;
+
+impl Sinks for NrfSinks {
+    fn present(&self, sink: Sink) -> bool {
+        present(sink).load(Ordering::Relaxed)
     }
-}
 
-/// A short press: the battery in quarters on the LED and the buzzer. A
-/// board without a percentage (no `battery` feature, or a pack outside the
-/// band its cell count implies, `crate::battery`) plays nothing: a rig
-/// board on USB without a pack is not in error. It writes one
-/// `FEEDBACK pattern=none reason=no-percentage sink=led` line instead, so
-/// the rig tells "quiet by rule" from "the hook did not fire".
-pub fn status() {
-    #[cfg(feature = "battery")]
-    let pct = leviculum_firmware::board_state::BATTERY_STATE
-        .try_get()
-        .and_then(|state| state.percent);
-    #[cfg(not(feature = "battery"))]
-    let pct: Option<u8> = None;
-    match leviculum_feedback::status(pct) {
-        Some(pattern) => {
-            raise(Sink::Led, pattern);
-            raise(Sink::Buzzer, pattern);
-        }
-        None => crate::log::log_fmt(
-            "",
-            format_args!("FEEDBACK pattern=none reason=no-percentage sink=led"),
-        ),
+    fn play(&self, sink: Sink, pattern: Pattern) {
+        signal(sink).signal(pattern);
     }
-}
-
-/// A held button has reached the long press: one blip on the LED and the
-/// buzzer.
-pub fn release_now() {
-    let pattern = leviculum_feedback::release_now();
-    raise(Sink::Led, pattern);
-    raise(Sink::Buzzer, pattern);
-}
-
-/// A message for the user arrived: one short on the notification LED where
-/// the board has one, else on the LED, and one short buzz where there is a
-/// buzzer.
-pub fn notify() {
-    let pattern = leviculum_feedback::notify();
-    if HAS_NOTIFY.load(Ordering::Relaxed) {
-        raise(Sink::Notify, pattern);
-    } else {
-        raise(Sink::Led, pattern);
-    }
-    raise(Sink::Buzzer, pattern);
-}
-
-/// The report a double press sent was proven delivered (order 914): two
-/// short on the LED and the buzzer, the sinks the press's own status answer
-/// uses. A report whose proof never comes plays nothing.
-pub fn report_delivered() {
-    let pattern = leviculum_feedback::report_delivered();
-    raise(Sink::Led, pattern);
-    raise(Sink::Buzzer, pattern);
-}
-
-// The double press's watch on the air. The node loop opens and closes it,
-// the LoRa task, on its own executor above the node loop, settles packets
-// into it: a critical section, not a signal, because both sides read and
-// write the same state.
-static AIR_WATCH: Mutex<CriticalSectionRawMutex, Cell<AirWatch>> =
-    Mutex::new(Cell::new(AirWatch::new()));
-
-fn with_air_watch(f: impl FnOnce(&mut AirWatch) -> Option<Pattern>) {
-    let pattern = AIR_WATCH.lock(|cell| {
-        let mut watch = cell.get();
-        let pattern = f(&mut watch);
-        cell.set(watch);
-        pattern
-    });
-    if let Some(pattern) = pattern {
-        raise(Sink::Led, pattern);
-        raise(Sink::Buzzer, pattern);
-    }
-}
-
-/// A double press is about to dispatch its announces (order 930). Returns
-/// the LoRa accept count before the dispatch, for
-/// [`announce_press_end`].
-pub fn announce_press_begin() -> u32 {
-    with_air_watch(|watch| {
-        watch.open();
-        None
-    });
-    crate::lora::accepted_packets()
-}
-
-/// The double press's dispatch is done; `announced` is whether the press
-/// made any announce. `announce-sent` plays on the LED and the buzzer when
-/// the last LoRa packet the dispatch queued has been keyed, at once if it
-/// already was, and at once when LoRa is off and the announces went to the
-/// other carriers only (`leviculum_feedback::AirWatch::close`).
-pub fn announce_press_end(lora_before: u32, announced: bool) {
-    let after = crate::lora::accepted_packets();
-    let lora_active = crate::media::lora_active();
-    with_air_watch(|watch| watch.close(lora_before, after, announced, lora_active));
-}
-
-/// The LoRa task settled packet number `packet`, keyed or not.
-pub(crate) fn lora_packet_settled(packet: u32, keyed: bool) {
-    with_air_watch(|watch| watch.settled(packet, keyed));
 }
 
 /// Play `pattern` on `sink` through `drive` (`true` = on) until it ends,
 /// starting over with any pattern raised on the same sink meanwhile. One
 /// `FEEDBACK` line per pattern started. Returns with the sink off.
 async fn play(mut pattern: Pattern, sink: Sink, mut drive: impl FnMut(bool)) {
-    let signal = sink.signal();
+    let signal = signal(sink);
     loop {
         crate::log::log_fmt(
             "",
@@ -276,7 +155,7 @@ pub async fn led_task(
         }
     };
     set(false);
-    let signal = sink.signal();
+    let signal = signal(sink);
     loop {
         let pattern = match activity {
             Some(pulse) => match select(signal.wait(), pulse.wait()).await {
@@ -308,7 +187,7 @@ pub fn spawn_led(
     activity: Option<&'static Signal<CriticalSectionRawMutex, ()>>,
 ) {
     spawner.must_spawn(led_task(led, active_high, sink, activity));
-    sink.present().store(true, Ordering::Relaxed);
+    present(sink).store(true, Ordering::Relaxed);
 }
 
 /// The T1000-E buzzer's tone: B3, 247 Hz, the note Meshtastic's own beep

@@ -44,8 +44,8 @@ tree:
 - **The node loop is not a module. It is four copies.** Each board
   binary carries its own `main` with the loop inside it:
   `leviculum-nrf/src/bin/t1000e.rs:54-1282` is a 1,229-line `main` with a
-  518-line `loop { select ... dispatch ... settle }` at
-  `leviculum-nrf/src/bin/t1000e.rs:757-1274` and 117 references into
+  524-line `loop { select ... dispatch ... settle }` at
+  `leviculum-nrf/src/bin/t1000e.rs:758-1281` and 110 references into
   `leviculum_nrf::`; `bin/t114.rs`, `bin/rak4631.rs` and
   `bin/solarnode.rs` carry the same loop, and `t114` and `rak4631`
   differ by 500 lines. Beside the four board binaries sit two probes
@@ -165,7 +165,12 @@ before the orchestration runs, and never changes again. A seam the
 orchestration logic uses at run time is a trait or a message, never a
 set-once static: the heap (961) moved whole instead, because the
 allocator is stratum 2's, and the sinks, the transceiver and the BLE
-link are cut as traits and messages with host fakes.
+link are cut as traits and messages with host fakes. The feedback sink (973) is such a trait: the policy,
+`Feedback<S: Sinks>`, is host-tested over its own fake, and only the board's
+one instance reaches the bind crate's implementation through a set-once
+registration of its two methods (`feedback::set_sinks`), because the
+callers that raise a pattern cannot name a bind-crate type; it goes when the
+node loop (step 7) holds a `Feedback<S>` of its own.
 
 The `today` column below is a reading; the measured call list per seam is
 `scripts/nrf-seam-vocabulary.txt` (958), every item a bind-crate file
@@ -182,7 +187,7 @@ are written against that file and not against this table.
 | Clock | trait | monotonic time, calendar sources and their rank | embassy time, GNSS time, host time; the source the board reports (`set_time_source`, in stratum 2's `clock` since 958) | the same plus SNTP (`TimeSource::Ntp`, the fork's `leviculum-fw/src/lib.rs` line 120) and the PCF8563 |
 | Entropy | `rand_core` | what core's crypto draws | `leviculum_firmware::entropy::Entropy` (959), a zero-sized `RngCore` over the fill the bind crate registers at boot (`set_source`); here that fill is `rng.rs`'s (`leviculum_nrf::rng::fill_entropy`, SoftDevice `sd_rand_application_bytes_available_get`, `leviculum-nrf/src/rng.rs:110`) | the ESP32 and RP2350 hardware RNGs |
 | Sensors | traits per sensor | GNSS UART, motion, battery, die temperature, later magnetometer | AG3335 (`gnss.rs`), QMA6100P (`motion.rs`), ADC divider (`battery.rs`), `nrf_softdevice::temperature_celsius` (`leviculum-nrf/src/telemetry.rs:946`); the sensor STATE (fix, presence, motion, battery watches) lives in stratum 2 since 959 (`leviculum_firmware::board_state`), the sensor TASKS that feed it stay below | AG3352 (same Airoha init), MAX17048 (`battery-scale`); the M9's QMI8658B IMU ([The ThinkNode M9](thinknode-m9.md)) has no driver in the fork yet |
-| Sinks | traits | LED, buzzer, display, keypad or button, the debug log (`log.rs` 366, to CDC today), the post-mortem store (`leviculum-nrf/firmware/src/postmortem.rs` since step 1, filled by the handlers at `leviculum-nrf/src/lib.rs:587-730`; the fork's `diag/postmortem.rs`, 398 lines) | `led.rs`, `feedback.rs`, SSD1306 and ST7789, `button.rs` | the M9's ST7789 and keypad (menus, [One button](one-button.md)) |
+| Sinks | traits | LED, buzzer, display, keypad or button, the debug log (`log.rs` 366, to CDC today), the post-mortem store (`leviculum-nrf/firmware/src/postmortem.rs` since step 1, filled by the handlers at `leviculum-nrf/src/lib.rs:587-730`; the fork's `diag/postmortem.rs`, 398 lines) | `led.rs`, `feedback.rs`, SSD1306 and ST7789, `button.rs`; since 2026-10-25 (973) the feedback sinks are cut: `leviculum_firmware::seams::Sinks` (`present`, `play`) with the host fake `RecordingSinks`, the policy in `leviculum-nrf/firmware/src/feedback.rs`, the LED and buzzer players and their implementation `NrfSinks` in `leviculum-nrf/src/feedback.rs` | the M9's ST7789 and keypad (menus, [One button](one-button.md)) |
 | Watchdog | trait | feed and timeout | none fed: the ten matches in `leviculum-nrf/src` are four comments about the outbound link watchdog in the board binaries and `qspi-selftest`'s read of the WDT's RUNSTATUS | per family |
 | Net (optional) | the fork's `leviculum-net` as a stratum-3 crate | TCP, UDP, NTP over `embassy-net` | none on nRF52840 | shared by esp and rp |
 
@@ -232,7 +237,8 @@ orchestration modules form one strongly connected set, which cannot
 move one module at a time without temporary interfaces that would be
 deleted again. So: (1) the remaining small seams first, each landable
 alone: the allocator (961), then the sinks (LED, button, display,
-battery) as traits with host fakes; (2) the BLE
+battery) as traits with host fakes (the feedback sink, LED and
+buzzer, done in 973 on 2026-10-25); (2) the BLE
 link as a message seam (step 4, the largest); (3) the whole cluster in
 ONE move on a branch (a lane-2 clone), with the transceiver seam (step 3)
 and the PN store (step 6) as commits inside it and the control executor
@@ -249,7 +255,7 @@ where the step sits in that order.
 | step | does | seams | pin | target |
 |---|---|---|---|---|
 | 0 | the embassy pin rule across the three families (ours: embassy-executor 0.9 / embassy-sync 0.7; the fork: 0.10 / 0.8 plus a `[patch.crates-io]` git rev in the fork's `leviculum-fw/Cargo.toml`, lines 146 to 154); the log-diff masking script; the crate skeleton in the `leviculum-nrf` workspace (excluded from the root, so the guards below live there) | none | builds; the guards below green on an empty crate | - |
-| 1 | Flash, Entropy, Clock, Watchdog, Sinks (debug log, post-mortem, LED, buzzer, display, button) as traits with host fakes; `boot_count.rs`, `rng.rs`, `log.rs`, `lib.rs`'s post-mortem, `time_floor.rs`, `record_store.rs`'s policy half move Since 2026-10-24 order part (1): the sinks (LED, button, display, battery) are the small seams still to cut here, after 961's allocator. | 5 | census, the boot-count and time-floor host tests, one boot on each board (the rig's `boot-proof-both.sh`, which lives outside this tree) | - |
+| 1 | Flash, Entropy, Clock, Watchdog, Sinks (debug log, post-mortem, LED, buzzer, display, button) as traits with host fakes; `boot_count.rs`, `rng.rs`, `log.rs`, `lib.rs`'s post-mortem, `time_floor.rs`, `record_store.rs`'s policy half move Since 2026-10-24 order part (1): the sinks (LED, button, display, battery) are the small seams still to cut here, after 961's allocator. On 2026-10-25 973 cut the feedback sink (LED, notification LED, buzzer); the button, the display and the battery remain. | 5 | census, the boot-count and time-floor host tests, one boot on each board (the rig's `boot-proof-both.sh`, which lives outside this tree) | - |
 | 2 | runs after steps 5 and 6 (957, by the census above): the control-frame executor out of `usb.rs` into stratum 2 (the fork's `control.rs` as the template), `usb.rs` shrinks to the port; the `ControlPort` trait is declared when the executor moves, not before Since 2026-10-24 order part (3): the last commit inside the cluster branch. | Control port | lnflash round trips over every control frame, the serial-mux host tests | - |
 | 3 | Transceiver as a message seam; `lora.rs` and `radio.rs` move; `sx1262.rs` and `leviculum-lr11xx` stay below Since 2026-10-24 order part (3): a commit inside the cluster branch, not a move of its own. | Transceiver | `t1000e_lora_pair`, `t1000e_rnode_pair` with the witness, the `#438` cells; `lora_pn_board_sync` only with its register standing stated (it is in periculum's `hardware/KNOWN-REDS.toml`, retired twice) | - |
 | 4 | BLE link as a message seam; the upward calls of `ble/mod.rs` and `columba.rs` become messages; `ble/` stays the SoftDevice backend Since 2026-10-24 order part (2): the next large seam after the small ones, landing alone. | BLE link | the BLE room cells, `ble_pn_board_upload`, a two-phone session | - |

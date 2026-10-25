@@ -3747,13 +3747,13 @@ async fn execute(op: &FlushOp) -> Option<u32> {
 
 /// A message the role just stored is for this board's own `lxmf.delivery`
 /// destination: the feedback grammar's "a message for the user arrived"
-/// (order 892, `crate::feedback::notify`). The board has no inbox, so the
+/// (order 892, `leviculum_firmware::feedback::notify`). The board has no inbox, so the
 /// propagation store is the one place a message for its user is kept
 /// (`crate::telemetry::register_delivery_destination`); a copy already
 /// held (`dup=1`) is not news.
 fn notify_if_for_us(destination_hash: &[u8; 16], duplicate: bool) {
     let own = leviculum_firmware::identity::report().and_then(|report| report.lxmf);
     if !duplicate && own.as_ref() == Some(destination_hash) {
-        crate::feedback::notify();
+        leviculum_firmware::feedback::notify();
     }
 }

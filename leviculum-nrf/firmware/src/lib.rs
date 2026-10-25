@@ -23,7 +23,9 @@
 //! randomness through [`entropy::Entropy`], over the fill function the bind
 //! crate registers once at boot ([`entropy::set_source`]). In 961 the
 //! global allocator and the two heap facts the orchestration reads move
-//! here ([`heap`]); the pool's memory stays with the bind crate.
+//! here ([`heap`]); the pool's memory stays with the bind crate. In 973 the
+//! feedback policy moves here ([`feedback`]) over the [`seams::Sinks`]
+//! trait; the LED and buzzer players stay below.
 //!
 //! What the crate may depend on is held by two guards rather than by this
 //! comment: `just firmware-no-hal` refuses a HAL or chip crate in its
@@ -41,6 +43,7 @@ pub mod boot_trace;
 pub mod clock;
 pub mod dispatch;
 pub mod entropy;
+pub mod feedback;
 pub mod heap;
 pub mod identity;
 pub mod iface_bytes;

@@ -6,13 +6,13 @@
 //! task only times the edges, writes the `BTN_PRESS` and `BTN_HOLD` lines,
 //! raises [`ANNOUNCE_PRESS`](crate::button::ANNOUNCE_PRESS) for a double
 //! press, wakes the display where there is one and asks
-//! [`crate::feedback`] for the status and "release now" patterns. The announces
+//! [`leviculum_firmware::feedback`] for the status and "release now" patterns. The announces
 //! themselves go out from the node loop, which owns the node
 //! ([`crate::announce::on_button_press`]).
 //!
 //! | Gesture | `action=` | Does |
 //! |---|---|---|
-//! | short | `status` | wakes the display (Pocket V2), then the battery in quarters on the LED and the buzzer (`crate::feedback`) |
+//! | short | `status` | wakes the display (Pocket V2), then the battery in quarters on the LED and the buzzer (`leviculum_firmware::feedback`) |
 //! | double | `announce` / `rate-limited` | both announces, at most one set per 30 s, then one position report if a recipient is set (`crate::telemetry::on_button_press`) |
 //! | long, 2 s | `long` | nothing yet: the mode switch, once Tracker mode exists; the 2 s mark blips "release now" |
 //! | very long, 8 s | `hold8` | nothing yet: the power off, once the board can sleep |
@@ -127,7 +127,7 @@ pub async fn button_task(wiring: ButtonWiring) {
                     format_args!("BTN_HOLD board={} ms={}", board, ms),
                 );
                 if ms == LONG_PRESS_MIN_MS {
-                    crate::feedback::release_now();
+                    leviculum_firmware::feedback::release_now();
                 }
                 continue;
             }
@@ -155,7 +155,7 @@ pub async fn button_task(wiring: ButtonWiring) {
             // A short press is status: after the display wake above, the
             // battery in quarters on the LED and the buzzer (order 892).
             // The mode blink joins it once there is a mode.
-            PressAction::Status => crate::feedback::status(),
+            PressAction::Status => leviculum_firmware::feedback::status(),
             // Recognised and reported, nothing else: the long press becomes
             // the mode switch in the pass that builds Tracker mode, the very
             // long one the power off in the pass that builds the sleep.

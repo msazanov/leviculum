@@ -56,7 +56,7 @@ fn settle_packet(keyed: bool) {
     let packet = LORA_SETTLED
         .fetch_add(1, core::sync::atomic::Ordering::Relaxed)
         .wrapping_add(1);
-    crate::feedback::lora_packet_settled(packet, keyed);
+    leviculum_firmware::feedback::lora_packet_settled(packet, keyed);
 }
 
 /// Cumulative count of fully reassembled LoRa packets handed off to NodeCore

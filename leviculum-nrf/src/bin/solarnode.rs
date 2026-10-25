@@ -97,6 +97,7 @@ async fn main(spawner: Spawner) {
     leviculum_nrf::set_irq_priorities();
     leviculum_firmware::iface_bytes::set_names(&solarnode::IFACE_NAMES);
     leviculum_firmware::entropy::set_source(leviculum_nrf::rng::fill_entropy);
+    leviculum_firmware::feedback::set_sinks::<leviculum_nrf::feedback::NrfSinks>();
     // This binary wires a telemetry Reporter into its main loop; declared
     // before USB comes up so the serial task can never answer a telemetry
     // target ahead of the declaration (ack honesty, #236).
@@ -1202,7 +1203,8 @@ async fn main(spawner: Spawner) {
                 // board without a button never raises this. The air watch
                 // around the dispatch plays `announce-sent` once the last
                 // LoRa packet it queued is keyed (order 930).
-                let lora_before = leviculum_nrf::feedback::announce_press_begin();
+                leviculum_firmware::feedback::announce_press_begin();
+                let lora_before = leviculum_nrf::lora::accepted_packets();
                 let actions = leviculum_nrf::announce::on_button_press(
                     &mut node,
                     &mut announce_gate,
@@ -1216,7 +1218,12 @@ async fn main(spawner: Spawner) {
                     let dispatched = dispatch_actions(&mut ifaces, actions, &ifac_configs);
                     leviculum_firmware::dispatch::settle("announce-button", &mut node, &dispatched);
                 }
-                leviculum_nrf::feedback::announce_press_end(lora_before, announced);
+                leviculum_firmware::feedback::announce_press_end(
+                    lora_before,
+                    leviculum_nrf::lora::accepted_packets(),
+                    announced,
+                    leviculum_nrf::media::lora_active(),
+                );
                 // Then one immediate position report when a recipient is
                 // configured (order 914): armed here, sent by the next
                 // telemetry tick through the reporter's own path.

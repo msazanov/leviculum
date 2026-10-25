@@ -25,13 +25,9 @@ src/boards/t1000e.rs: radio doc x1
 src/boot_count.rs: radio_store doc x1
 src/boot_count.rs: record_store doc x1
 src/boot_count.rs: record_store::region doc x1
-src/button.rs: feedback doc x2
-src/button.rs: feedback::release_now x1
-src/button.rs: feedback::status x1
 src/chtm.rs: sx1262 doc x1
 src/display.rs: ble::HVN_DRAIN x1
 src/display.rs: button x1
-src/feedback.rs: battery doc x1
 src/feedback.rs: led doc x1
 src/gnss.rs: boards::rak4631 doc x1
 src/gnss.rs: vext doc x2
@@ -41,7 +37,6 @@ src/heap_census.rs: ble::session_census x1
 src/led.rs: feedback doc x1
 src/led.rs: feedback::Sink x1
 src/led.rs: feedback::spawn_led x1
-src/lora.rs: feedback::lora_packet_settled x1
 src/lora.rs: radio x1 doc x1
 src/lora.rs: radio::Error::Crc x1
 src/lora.rs: radio::Error::Timeout x1
@@ -58,7 +53,6 @@ src/media.rs: ble x1 doc x1
 src/media.rs: ble::note_media_changed x1
 src/mgmt.rs: usb doc x1
 src/name.rs: ble::columba doc x1
-src/pn.rs: feedback::notify x1 doc x1
 src/pn.rs: record_store::PnOp x1
 src/pn.rs: record_store::mounted x3
 src/pn.rs: record_store::pn_execute x1 doc x1
@@ -90,7 +84,6 @@ src/st7789.rs: vext::wait_ready x1 doc x1
 src/store_spike.rs: flash::SharedFlash x1
 src/store_spike.rs: record_store::region x1 doc x1
 src/telemetry.rs: ble::init doc x1
-src/telemetry.rs: feedback::report_delivered x1
 src/telemetry.rs: flash::SharedFlash x2
 src/telemetry.rs: flash::shared_flash doc x1
 src/telemetry.rs: radio_store doc x1

@@ -1733,7 +1733,7 @@ impl Reporter {
                         // told it arrived (order 914). Only them: a proof
                         // of a cadence report plays nothing.
                         if proven.trigger.plays_proof() {
-                            crate::feedback::report_delivered();
+                            leviculum_firmware::feedback::report_delivered();
                         }
                     }
                     continue;

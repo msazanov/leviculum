@@ -11,7 +11,8 @@
 //!
 //! Step 0 declares them empty. The methods, and for the message seams the
 //! message variants, arrive with the step that cuts each seam: Flash,
-//! Entropy, Clock, Watchdog and Sinks in step 1, the control port in step
+//! Entropy, Clock, Watchdog and Sinks in step 1 (Sinks has its methods
+//! since 973), the control port in step
 //! 2, the transceiver in step 3, the BLE link in step 4, the sensors in
 //! step 5. Rules for all of them: no `dyn`, no per-chip `cfg`, and a host
 //! fake for every seam.
@@ -112,14 +113,28 @@ pub trait Clock {}
 /// (`gnss-init`) and the MAX17048 (`battery-scale`).
 pub trait Sensors {}
 
-/// Sinks: LED, buzzer, display, keypad or button, the debug log and the
-/// post-mortem store. One trait per sink once step 1 cuts them.
+/// Sinks: the feedback players, the LED, the notification LED and the
+/// buzzer, as the feedback policy ([`crate::feedback`]) drives them. The
+/// display, the button, the debug log and the post-mortem store are sinks of
+/// their own, each its own trait once its cut comes.
 ///
-/// Today: `led.rs`, `feedback.rs`, the SSD1306 and ST7789 panels,
-/// `button.rs`, `log.rs` (to the debug CDC) and the post-mortem in
-/// `lib.rs`. The fork: the M9's ST7789 and keypad, and its
-/// `diag/postmortem.rs`.
-pub trait Sinks {}
+/// A player owns its pin and plays a [`leviculum_feedback::Pattern`] to its
+/// end, starting over with a newer one raised meanwhile, and writes the
+/// `FEEDBACK pattern=<name> sink=<sink>` line when it starts one: so all the
+/// policy hands down is which pattern, on which sink, and all it asks is
+/// whether the board has that sink.
+///
+/// Today (973): `leviculum_nrf::feedback::NrfSinks`, over the players
+/// `led_task` and `buzzer_task` in the bind crate's `feedback.rs`. The
+/// fork: the M9's LED and buzzer.
+pub trait Sinks {
+    /// Whether the board has `sink`; a sink it lacks is never asked to
+    /// play.
+    fn present(&self, sink: crate::feedback::Sink) -> bool;
+
+    /// Play `pattern` on `sink`, replacing whatever it is playing.
+    fn play(&self, sink: crate::feedback::Sink, pattern: leviculum_feedback::Pattern);
+}
 
 /// Watchdog: feed and timeout.
 ///

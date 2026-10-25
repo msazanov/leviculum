@@ -995,6 +995,7 @@ dependencies = [
  "leviculum-boot-count",
  "leviculum-boot-trace",
  "leviculum-core",
+ "leviculum-feedback",
  "leviculum-gnss-presence",
  "leviculum-gnss-time",
  "leviculum-heap-budget",

@@ -4,12 +4,17 @@
 //! the seam is implementable off the board. The two ecosystem seams already
 //! carry methods, and their fakes are working ones: a byte-array flash with
 //! NOR semantics (program clears bits, erase sets them) and a seeded
-//! xorshift entropy source. Each fake grows with its seam.
+//! xorshift entropy source. Each fake grows with its seam: the sinks'
+//! records what it was asked to play since 973.
 
 use alloc::vec;
 use alloc::vec::Vec;
+use core::cell::{Cell, RefCell};
 use core::convert::Infallible;
 use embedded_storage_async::nor_flash::{ErrorType, NorFlash, ReadNorFlash};
+use leviculum_feedback::Pattern;
+
+use crate::feedback::Sink;
 
 use crate::seams::{BleLink, Clock, ControlPort, Flash, Sensors, Sinks, Transceiver, Watchdog};
 
@@ -123,9 +128,47 @@ impl Clock for FakeClock {}
 pub struct FakeSensors;
 impl Sensors for FakeSensors {}
 
-/// Sinks that record what they were given, once step 1 cuts them.
-pub struct FakeSinks;
-impl Sinks for FakeSinks {}
+/// Sinks that record what they were given, each call with the time of a
+/// clock the test moves by hand ([`advance`](Self::advance)): the host
+/// fake of the feedback players.
+pub struct RecordingSinks {
+    present: Vec<Sink>,
+    now_ms: Cell<u64>,
+    calls: RefCell<Vec<(u64, Sink, &'static str)>>,
+}
+
+impl RecordingSinks {
+    /// A board with these sinks, its clock at 0.
+    pub fn new(present: &[Sink]) -> Self {
+        Self {
+            present: present.to_vec(),
+            now_ms: Cell::new(0),
+            calls: RefCell::new(Vec::new()),
+        }
+    }
+
+    /// Move the clock by `ms`.
+    pub fn advance(&self, ms: u64) {
+        self.now_ms.set(self.now_ms.get() + ms);
+    }
+
+    /// What was played: `(t_ms, sink, pattern name)`, in order.
+    pub fn calls(&self) -> Vec<(u64, Sink, &'static str)> {
+        self.calls.borrow().clone()
+    }
+}
+
+impl Sinks for RecordingSinks {
+    fn present(&self, sink: Sink) -> bool {
+        self.present.contains(&sink)
+    }
+
+    fn play(&self, sink: Sink, pattern: Pattern) {
+        self.calls
+            .borrow_mut()
+            .push((self.now_ms.get(), sink, pattern.name));
+    }
+}
 
 /// A watchdog that counts its feeds, once step 1 gives it one.
 pub struct FakeWatchdog;
@@ -167,7 +210,7 @@ mod tests {
         is_entropy(&FakeEntropy::new(1));
         is_clock(&FakeClock);
         is_sensors(&FakeSensors);
-        is_sinks(&FakeSinks);
+        is_sinks(&RecordingSinks::new(&[]));
         is_watchdog(&FakeWatchdog);
     }
 
