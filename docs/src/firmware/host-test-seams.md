@@ -1087,9 +1087,9 @@ own issue, not a finding of this page.
 | 343 | `leviculum-nrf/src/gnss.rs:353` | hold the standby pin high | wiring.standby | `boot_smoke_t114` | 300 | 1/1 |  |
 | 344 | `leviculum-nrf/src/gnss.rs:543` | rebuild the UART only for a different baud | pending_baud, configured_baud | `boot_smoke_t114` | 300 | 1/1 |  |
 | 345 | `leviculum-nrf/src/gnss.rs:555` | init frames after the baud decision, at most 4 staged per loop, extras dropped | locked, sentences_seen | `boot_smoke_t114` | 300 | 1/1 |  |
-| 346 | `leviculum-nrf/src/battery.rs:234` | power the divider only while sampling, 10 ms settle | divider_enable | `boot_smoke_t114` | 300 | 1/1 |  |
-| 347 | `leviculum-nrf/src/battery.rs:393` | publish BATTERY_STATE every 5th sample | samples | `boot_smoke_t114` | 300 | 1/1 |  |
-| 348 | `leviculum-nrf/src/battery.rs:396` | 30 s report, then reseed the window with the closing sample | samples | `boot_smoke_t114` | 300 | 1/1 |  |
+| 346 | `leviculum-nrf/src/battery.rs:236` | power the divider only while sampling, 10 ms settle | divider_enable | `boot_smoke_t114` | 300 | 1/1 |  |
+| 347 | `leviculum-nrf/firmware/src/battery.rs:231` | publish BATTERY_STATE every 5th sample | samples | `boot_smoke_t114` | 300 | 1/1 | `leviculum_firmware::battery::tests::the_first_publish_after_boot_comes_after_five_samples` |
+| 348 | `leviculum-nrf/firmware/src/battery.rs:234` | 30 s report, then reseed the window with the closing sample | samples | `boot_smoke_t114` | 300 | 1/1 | `leviculum_firmware::battery::tests::the_report_line_comes_after_thirty_samples` |
 | 349 | `leviculum-nrf/firmware/src/record_store.rs:206` | refuse a PN op while unmounted (the engine then forgets the id, no proof) | MOUNTED | none | - | - || no decision: early return; what the engine does with the refusal is `PnStore::op_done(false)`, host-tested in `leviculum-pn-store` |
 | 350 | `leviculum-nrf/firmware/src/record_store.rs:246` | refuse a storm: unmounted, running, 0 records, oversize, slot full | MOUNTED, STORM_RUNNING, args | none | - | - || `leviculum_record_log::board::tests::a_storm_is_refused_unmounted_running_empty_or_oversize` |
 | 351 | `leviculum-nrf/src/record_store.rs:115` | flash retry: 4 attempts at 50/100/200 ms, each failure counted | flash result | none | - | - || `leviculum_record_log::board::tests::a_refused_operation_is_tried_four_times_with_a_doubling_wait`<br>`leviculum_record_log::board::tests::an_erase_refused_three_times_lands_on_the_fourth`<br>`leviculum_record_log::board::tests::an_erase_refused_four_times_is_given_up_without_a_last_wait` |

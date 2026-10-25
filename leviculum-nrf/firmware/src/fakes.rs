@@ -6,10 +6,11 @@
 //! NOR semantics (program clears bits, erase sets them) and a seeded
 //! xorshift entropy source. Each fake grows with its seam: the sinks'
 //! records what it was asked to play since 973, the clock is moved by hand
-//! and the button follows a scripted edge sequence on it since 976, and the
+//! and the button follows a scripted edge sequence on it since 976, the
 //! panel keeps its frames and power writes since 980, when the driver that
 //! polls a module's loop over the clock ([`drive`]) moved here from the
-//! button's tests.
+//! button's tests, and the battery gauge reads a scripted sequence since
+//! 991.
 
 use alloc::collections::VecDeque;
 use alloc::vec;
@@ -223,6 +224,36 @@ impl ButtonInput for &FakeButtonInput<'_> {
 pub struct FakeSensors;
 impl Sensors for FakeSensors {}
 
+/// A battery gauge that reads a scripted millivolt sequence, one value a
+/// sample, and its last value from then on. The seam is implemented on
+/// `&Self`, like the button's.
+#[cfg(feature = "battery")]
+pub struct FakeBatteryGauge {
+    script: RefCell<VecDeque<u16>>,
+    last: Cell<u16>,
+}
+
+#[cfg(feature = "battery")]
+impl FakeBatteryGauge {
+    /// A gauge that will read `script`.
+    pub fn new(script: &[u16]) -> Self {
+        Self {
+            script: RefCell::new(script.iter().copied().collect()),
+            last: Cell::new(0),
+        }
+    }
+}
+
+#[cfg(feature = "battery")]
+impl crate::seams::BatteryGauge for &FakeBatteryGauge {
+    fn sample_mv(&mut self) -> impl core::future::Future<Output = u16> {
+        if let Some(mv) = self.script.borrow_mut().pop_front() {
+            self.last.set(mv);
+        }
+        core::future::ready(self.last.get())
+    }
+}
+
 /// Sinks that record what they were given, each call with the time of a
 /// clock the test moves by hand ([`advance`](Self::advance)): the host
 /// fake of the feedback players.
@@ -397,6 +428,8 @@ mod tests {
     fn is_watchdog<T: Watchdog>(_: &T) {}
     #[cfg(feature = "display")]
     fn is_panel<T: crate::seams::Panel>(_: &T) {}
+    #[cfg(feature = "battery")]
+    fn is_battery_gauge<T: crate::seams::BatteryGauge>(_: &T) {}
 
     #[test]
     fn every_seam_has_a_host_fake() {
@@ -413,6 +446,8 @@ mod tests {
         is_watchdog(&FakeWatchdog);
         #[cfg(feature = "display")]
         is_panel(&RecordingPanel::new(&clock, true));
+        #[cfg(feature = "battery")]
+        is_battery_gauge(&&FakeBatteryGauge::new(&[]));
     }
 
     #[test]

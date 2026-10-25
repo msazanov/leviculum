@@ -184,7 +184,16 @@ and its own wake signal. What the page shows that only the bind crate's
 backends know (the LoRa counters, the BLE links, the propagation store
 fill) comes up as a value, `StatusFacts`, from a fill function the bind
 crate hands to `run` and the page calls once per frame tick, so the
-orchestration names none of those backends.
+orchestration names none of those backends. The battery (991) closes the
+small seams the same way: the bind crate's task configures the SAADC and
+the divider's enable line, builds `SaadcGauge` over the board's
+`BatteryScale` (the gauge's construction argument, not policy) and hands it
+to `leviculum_firmware::battery::run` by value, with the two facts the
+`[BAT] init` line states about it (`GaugeFacts`: the full scale and the
+acquisition window) as a value beside it. The cadences, the classification
+at boot, the filter, the window, the lines and the publish to
+`BATTERY_STATE` are `monitor`, host-tested over `FakeBatteryGauge` and the
+fake clock with the events it hands to a function of the test's own.
 
 The `today` column below is a reading; the measured call list per seam is
 `scripts/nrf-seam-vocabulary.txt` (958), every item a bind-crate file
@@ -200,7 +209,7 @@ are written against that file and not against this table.
 | Flash | `MultiwriteNorFlash`, plus `pn-store::Region` (`leviculum-nrf/pn-store/src/lib.rs:160`) and `record-log` on top | the record log, the PN store, settings, identity, boot count, time floor (`time_floor.rs` writes through `crate::flash::SharedFlash`, `leviculum-nrf/src/time_floor.rs:61`, beside the regions of `boot_count` and `record_store`) | internal flash and QSPI (`record_store.rs`, `qspi.rs`, `flash.rs`), `boot_count.rs` over `Nvmc` | RP2350 flash with a PSRAM index, ESP32 flash, `leviculum-sd-store` on a card |
 | Clock | trait | monotonic time, calendar sources and their rank | embassy time, GNSS time, host time; the source the board reports (`set_time_source`, in stratum 2's `clock` since 958); the monotonic half, `now_ms` and `wait_until`, on `leviculum_firmware::seams::Clock` since 976, implemented by `clock::EmbassyClock` | the same plus SNTP (`TimeSource::Ntp`, the fork's `leviculum-fw/src/lib.rs` line 120) and the PCF8563 |
 | Entropy | `rand_core` | what core's crypto draws | `leviculum_firmware::entropy::Entropy` (959), a zero-sized `RngCore` over the fill the bind crate registers at boot (`set_source`); here that fill is `rng.rs`'s (`leviculum_nrf::rng::fill_entropy`, SoftDevice `sd_rand_application_bytes_available_get`, `leviculum-nrf/src/rng.rs:110`) | the ESP32 and RP2350 hardware RNGs |
-| Sensors | traits per sensor | GNSS UART, motion, battery, die temperature, later magnetometer | AG3335 (`gnss.rs`), QMA6100P (`motion.rs`), ADC divider (`battery.rs`), `nrf_softdevice::temperature_celsius` (`leviculum-nrf/src/telemetry.rs:946`); the sensor STATE (fix, presence, motion, battery watches) lives in stratum 2 since 959 (`leviculum_firmware::board_state`), the sensor TASKS that feed it stay below | AG3352 (same Airoha init), MAX17048 (`battery-scale`); the M9's QMI8658B IMU ([The ThinkNode M9](thinknode-m9.md)) has no driver in the fork yet |
+| Sensors | traits per sensor | GNSS UART, motion, battery, die temperature, later magnetometer | AG3335 (`gnss.rs`), QMA6100P (`motion.rs`), `nrf_softdevice::temperature_celsius` (`leviculum-nrf/src/telemetry.rs:946`); the sensor STATE (fix, presence, motion, battery watches) lives in stratum 2 since 959 (`leviculum_firmware::board_state`), the sensor TASKS that feed it stay below, except the battery's: since 2026-10-25 (991) the battery is cut, `leviculum_firmware::seams::BatteryGauge` (`sample_mv`) with the host fake `FakeBatteryGauge`, the sampling task, its 1 s, 5 and 30 cadences, the classification at boot and the `[BAT]` lines in `leviculum-nrf/firmware/src/battery.rs`, the SAADC, the divider's enable line and the implementation `SaadcGauge` in `leviculum-nrf/src/battery.rs` | AG3352 (same Airoha init), MAX17048 (`battery-scale`); the M9's QMI8658B IMU ([The ThinkNode M9](thinknode-m9.md)) has no driver in the fork yet |
 | Sinks | traits | LED, buzzer, display, keypad or button, the debug log (`log.rs` 366, to CDC today), the post-mortem store (`leviculum-nrf/firmware/src/postmortem.rs` since step 1, filled by the handlers at `leviculum-nrf/src/lib.rs:587-730`; the fork's `diag/postmortem.rs`, 398 lines) | `led.rs`, `feedback.rs`, SSD1306 and ST7789, `button.rs`; since 2026-10-25 (973) the feedback sinks are cut: `leviculum_firmware::seams::Sinks` (`present`, `play`) with the host fake `RecordingSinks`, the policy in `leviculum-nrf/firmware/src/feedback.rs`, the LED and buzzer players and their implementation `NrfSinks` in `leviculum-nrf/src/feedback.rs`; since 2026-10-25 (976) the button is an input rather than a sink: `leviculum_firmware::seams::ButtonInput` (`wait_for_edge`, `is_pressed`) with the host fake `FakeButtonInput` on the `FakeClock`, the press handling (the gate, the `BTN_PRESS` and `BTN_HOLD` lines, the display wake, the feedback, `ANNOUNCE_PRESS`) in `leviculum-nrf/firmware/src/button.rs`, the pin, its pull and the implementation `NrfButton` in `leviculum-nrf/src/button.rs`; since 2026-10-25 (980) the display is cut: `leviculum_firmware::seams::Panel` (`frame`, `flush`, `has_power_control`, `set_power`) with the host fake `RecordingPanel`, the page composition and the one-minute power policy in `leviculum-nrf/firmware/src/display.rs`, the I2C probe and `Ssd1306Panel` in `leviculum-nrf/src/display.rs`, the SPI driver and `St7789Panel` in `leviculum-nrf/src/st7789.rs`, the page facts only the backends know in `leviculum-nrf/src/panel_facts.rs` | the M9's ST7789 and keypad (menus, [One button](one-button.md)) |
 | Watchdog | trait | feed and timeout | none fed: the ten matches in `leviculum-nrf/src` are four comments about the outbound link watchdog in the board binaries and `qspi-selftest`'s read of the WDT's RUNSTATUS | per family |
 | Net (optional) | the fork's `leviculum-net` as a stratum-3 crate | TCP, UDP, NTP over `embassy-net` | none on nRF52840 | shared by esp and rp |
@@ -252,8 +261,9 @@ move one module at a time without temporary interfaces that would be
 deleted again. So: (1) the remaining small seams first, each landable
 alone: the allocator (961), then the sinks (LED, button, display,
 battery) as traits with host fakes (the feedback sink, LED and
-buzzer, done in 973 on 2026-10-25; the button, an input seam, in 976
-and the display in 980, the same day); (2) the BLE
+buzzer, done in 973 on 2026-10-25; the button, an input seam, in 976,
+the display in 980 and the battery in 991, the same day: part (1) is
+done); (2) the BLE
 link as a message seam (step 4, the largest); (3) the whole cluster in
 ONE move on a branch (a lane-2 clone), with the transceiver seam (step 3)
 and the PN store (step 6) as commits inside it and the control executor
@@ -270,7 +280,7 @@ where the step sits in that order.
 | step | does | seams | pin | target |
 |---|---|---|---|---|
 | 0 | the embassy pin rule across the three families (ours: embassy-executor 0.9 / embassy-sync 0.7; the fork: 0.10 / 0.8 plus a `[patch.crates-io]` git rev in the fork's `leviculum-fw/Cargo.toml`, lines 146 to 154); the log-diff masking script; the crate skeleton in the `leviculum-nrf` workspace (excluded from the root, so the guards below live there) | none | builds; the guards below green on an empty crate | - |
-| 1 | Flash, Entropy, Clock, Watchdog, Sinks (debug log, post-mortem, LED, buzzer, display, button) as traits with host fakes; `boot_count.rs`, `rng.rs`, `log.rs`, `lib.rs`'s post-mortem, `time_floor.rs`, `record_store.rs`'s policy half move Since 2026-10-24 order part (1): the sinks (LED, button, display, battery) are the small seams still to cut here, after 961's allocator. On 2026-10-25 973 cut the feedback sink (LED, notification LED, buzzer), 976 the button (the `ButtonInput` seam, the press handling in `leviculum_firmware::button`), and 980 the display (the `Panel` seam, the page and its power in `leviculum_firmware::display`, both panels at once); the battery remains. | 5 | census, the boot-count and time-floor host tests, one boot on each board (the rig's `boot-proof-both.sh`, which lives outside this tree) | - |
+| 1 | Flash, Entropy, Clock, Watchdog, Sinks (debug log, post-mortem, LED, buzzer, display, button) as traits with host fakes; `boot_count.rs`, `rng.rs`, `log.rs`, `lib.rs`'s post-mortem, `time_floor.rs`, `record_store.rs`'s policy half move Since 2026-10-24 order part (1): the sinks (LED, button, display, battery) are the small seams still to cut here, after 961's allocator. On 2026-10-25 973 cut the feedback sink (LED, notification LED, buzzer), 976 the button (the `ButtonInput` seam, the press handling in `leviculum_firmware::button`), and 980 the display (the `Panel` seam, the page and its power in `leviculum_firmware::display`, both panels at once), and 991 the battery (the `BatteryGauge` seam, the sampling task and its lines in `leviculum_firmware::battery`). All small seams cut: feedback 973, button 976, display 980, battery 991. | 5 | census, the boot-count and time-floor host tests, one boot on each board (the rig's `boot-proof-both.sh`, which lives outside this tree) | - |
 | 2 | runs after steps 5 and 6 (957, by the census above): the control-frame executor out of `usb.rs` into stratum 2 (the fork's `control.rs` as the template), `usb.rs` shrinks to the port; the `ControlPort` trait is declared when the executor moves, not before Since 2026-10-24 order part (3): the last commit inside the cluster branch. | Control port | lnflash round trips over every control frame, the serial-mux host tests | - |
 | 3 | Transceiver as a message seam; `lora.rs` and `radio.rs` move; `sx1262.rs` and `leviculum-lr11xx` stay below Since 2026-10-24 order part (3): a commit inside the cluster branch, not a move of its own. | Transceiver | `t1000e_lora_pair`, `t1000e_rnode_pair` with the witness, the `#438` cells; `lora_pn_board_sync` only with its register standing stated (it is in periculum's `hardware/KNOWN-REDS.toml`, retired twice) | - |
 | 4 | BLE link as a message seam; the upward calls of `ble/mod.rs` and `columba.rs` become messages; `ble/` stays the SoftDevice backend Since 2026-10-24 order part (2): the next large seam after the small ones, landing alone. | BLE link | the BLE room cells, `ble_pn_board_upload`, a two-phone session | - |
@@ -429,6 +439,12 @@ non-test `expect` in the new crates.
   capability now means "the board has a status panel", so `bsp-t114`
   forwards it too; the bind crate's own `display` feature stays the
   Pocket's SSD1306 driver.
+- 2026-10-25, coder (991): the battery monitor is stratum 2's
+  (`leviculum_firmware::battery`), over a `BatteryGauge` whose one method
+  is a pack reading in millivolts; the SAADC, the divider's enable and
+  settle and the board's `BatteryScale` stay with the implementation in
+  the bind crate, which also hands up the `[BAT] init` line's two gauge
+  facts. With it plan B part (1) is done: all small seams are cut.
 - Open: the BLE link vocabulary; whether the policy crates' path move
   comes before or after step 1. (The order of steps 3 to 7, open until
   2026-10-24, is closed by plan B above.)

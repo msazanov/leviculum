@@ -995,6 +995,7 @@ dependencies = [
  "embedded-storage-async",
  "heapless 0.9.3",
  "leviculum-announce-policy",
+ "leviculum-battery-scale",
  "leviculum-boot-count",
  "leviculum-boot-trace",
  "leviculum-core",

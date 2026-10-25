@@ -61,13 +61,16 @@ leviculum-gnss-presence = { path = "../gnss-presence", optional = true }
 leviculum-screen = { path = "../screen", optional = true }
 embedded-graphics = { version = "0.8", optional = true }
 heapless = { version = "0.9", default-features = false, optional = true }
+# The battery monitor's numbers (991, `battery`): the cell classification,
+# the filter, the window, the band guard and the two lines' bytes.
+leviculum-battery-scale = { path = "../battery-scale", optional = true }
 
 # Capabilities, not chips: whether the board carries a GNSS receiver, a
 # battery gauge, a display. `leviculum-nrf`'s features of the same names
 # forward here, so every BSP selects the same set it selects there.
 [features]
 gnss = ["dep:leviculum-gnss-time", "dep:leviculum-gnss-presence"]
-battery = []
+battery = ["dep:leviculum-battery-scale"]
 display = ["dep:leviculum-screen", "dep:embedded-graphics", "dep:heapless"]
 
 # The executor is declared for what moves in later (the node loop spawns

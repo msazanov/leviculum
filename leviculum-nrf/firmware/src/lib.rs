@@ -30,7 +30,9 @@
 //! and [`seams::Clock`] seams; the pin and its pull stay below. In 980 the
 //! status display's page and power move here (`display`, behind the
 //! `display` capability) over the `seams::Panel` sink; the SSD1306 and
-//! ST7789 drivers stay below.
+//! ST7789 drivers stay below. In 991 the battery monitor's cadences and
+//! lines move here (`battery`, behind the `battery` capability) over the
+//! `seams::BatteryGauge` seam; the SAADC and the divider stay below.
 //!
 //! What the crate may depend on is held by two guards rather than by this
 //! comment: `just firmware-no-hal` refuses a HAL or chip crate in its
@@ -41,6 +43,8 @@
 
 extern crate alloc;
 
+#[cfg(feature = "battery")]
+pub mod battery;
 #[cfg(any(feature = "display", feature = "gnss", feature = "battery"))]
 pub mod board_state;
 pub mod boot_count;

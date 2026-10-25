@@ -5,7 +5,7 @@
 # reaches, its own module excluded. See the script's header for the rules.
 src/announce.rs (587): log lora pn telemetry
 src/banner.rs (56): log_critical media name
-src/battery.rs (441): log
+src/battery.rs (324):
 src/bin/qspi-selftest.rs (634):
 src/bin/rak4631.rs (1454):
 src/bin/sd-ram-probe.rs (294):
@@ -53,6 +53,7 @@ src/time_floor.rs (74): boot_count flash radio_store record_store
 src/transport_stats.rs (169): log lora
 src/usb.rs (1464): banner ble boards chtm heap_census log lora media mgmt name pn postmortem_query radio_store record_store reset_stack_watermark telemetry
 src/vext.rs (85): boards log
+firmware/src/battery.rs (468): board_state fakes log seams
 firmware/src/board_state.rs (138): display
 firmware/src/boot_count.rs (203): fakes log seams
 firmware/src/boot_trace.rs (120): log
@@ -61,15 +62,15 @@ firmware/src/clock.rs (115): seams
 firmware/src/dispatch.rs (49): log
 firmware/src/display.rs (409): board_state button fakes log seams
 firmware/src/entropy.rs (148): iface_bytes seams
-firmware/src/fakes.rs (441): feedback seams
+firmware/src/fakes.rs (476): feedback seams
 firmware/src/feedback.rs (453): board_state button entropy fakes log seams
 firmware/src/heap.rs (120): log
 firmware/src/identity.rs (119): log_critical
 firmware/src/iface_bytes.rs (177):
 firmware/src/interface.rs (77): iface_bytes log
-firmware/src/lib.rs (66):
+firmware/src/lib.rs (70):
 firmware/src/log.rs (402):
 firmware/src/postmortem.rs (437): boot_trace log
 firmware/src/record_store.rs (665): fakes log seams
-firmware/src/seams.rs (225): button clock display feedback
+firmware/src/seams.rs (242): battery button clock display feedback
 firmware/src/time_floor.rs (209): log seams

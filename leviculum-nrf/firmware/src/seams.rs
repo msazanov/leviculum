@@ -13,7 +13,7 @@
 //! message variants, arrive with the step that cuts each seam: Flash,
 //! Entropy, Clock, Watchdog and Sinks in step 1 (Sinks has its methods
 //! since 973, Clock its monotonic half and ButtonInput its two since 976,
-//! Panel its four since 980),
+//! Panel its four since 980, BatteryGauge its one since 991),
 //! the control port in step
 //! 2, the transceiver in step 3, the BLE link in step 4, the sensors in
 //! step 5. Rules for all of them: no `dyn`, no per-chip `cfg`, and a host
@@ -121,14 +121,31 @@ pub trait Clock {
     fn wait_until(&self, at_ms: u64) -> impl core::future::Future<Output = ()>;
 }
 
-/// Sensors: GNSS UART, motion, battery, die temperature, later a
-/// magnetometer. One trait per sensor once step 5 cuts them.
+/// Sensors: GNSS UART, motion, die temperature, later a magnetometer.
+/// One trait per sensor once step 5 cuts them; the battery has its own
+/// since 991 (`BatteryGauge`, behind the `battery` capability).
 ///
-/// Today: the AG3335 (`gnss.rs`), the QMA6100P (`motion.rs`), the ADC
-/// divider (`battery.rs`), `nrf_softdevice::temperature_celsius`
-/// (`telemetry.rs`). The fork: the AG3352 on the same Airoha init
-/// (`gnss-init`) and the MAX17048 (`battery-scale`).
+/// Today: the AG3335 (`gnss.rs`), the QMA6100P (`motion.rs`),
+/// `nrf_softdevice::temperature_celsius` (`telemetry.rs`). The fork: the
+/// AG3352 on the same Airoha init (`gnss-init`).
 pub trait Sensors {}
+
+/// Battery gauge: one pack reading in millivolts at the battery terminal,
+/// as the battery monitor ([`crate::battery`]) samples it. How the reading
+/// is taken stays inside the implementation, the divider's enable and its
+/// settle included, and so does the board's divider and gain: they are the
+/// implementation's construction argument, not policy.
+///
+/// Today (991): `leviculum_nrf::battery::SaadcGauge`, the SAADC behind the
+/// board's divider with its `BatteryScale` (`leviculum-battery-scale`). The
+/// fork: the MAX17048 fuel gauge over I2C, whose cell-voltage register
+/// `leviculum-battery-scale` already converts; it implements the same
+/// method.
+#[cfg(feature = "battery")]
+pub trait BatteryGauge {
+    /// Take one reading, in millivolts at the battery terminal.
+    fn sample_mv(&mut self) -> impl core::future::Future<Output = u16>;
+}
 
 /// Button input: the board's one user button as the press handling
 /// ([`crate::button`]) reads it, a level and a wait for its next edge.
