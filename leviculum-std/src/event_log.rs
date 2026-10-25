@@ -2265,19 +2265,11 @@ fn field_value_problem(value: &str) -> Option<&'static str> {
 /// space would still be several tokens to all of them.  The mapping is the
 /// same one `sanitize_scalar` applies as the sink's last-resort rescue,
 /// so a value reads identically whichever produced it.
-pub struct Scalar<'a>(pub &'a str);
-
-impl std::fmt::Display for Scalar<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Character by character into the formatter rather than through
-        // `sanitize_scalar`'s `String`: the formatter is the event layer's
-        // reused buffer, so this costs nothing per event.
-        for c in self.0.chars() {
-            f.write_char(sanitized_char(c))?;
-        }
-        Ok(())
-    }
-}
+///
+/// The type itself lives in `leviculum-core` (`event_scalar`), so that a
+/// `no_std` emission site (the core, the `lnmsg` core) renders through the
+/// same definition; this is a re-export, not a second copy.
+pub use leviculum_core::event_scalar::Scalar;
 
 /// Coerce a field value into a whitespace-free scalar so the canonical
 /// line is ALWAYS tokenizable by the documented whitespace `key=val`

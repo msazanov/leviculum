@@ -21,6 +21,9 @@
 //! `docs/src/audits/2026-10-11-shared-instance-rpc.md`). The test needs no
 //! new surface and does not care which program the node is.
 
+use alloc::format;
+use alloc::string::String;
+use alloc::vec::Vec;
 use std::path::{Path, PathBuf};
 
 use crate::mailbox::{AdoptReason, Previous};

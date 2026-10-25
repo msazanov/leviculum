@@ -17,6 +17,8 @@
 //! a fresh process has a fresh router, and the message that arrived directly
 //! yesterday must not reappear because a mailbox still held a copy today.
 
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 use core::time::Duration;
 use std::io::Write;
 

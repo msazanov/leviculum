@@ -7,6 +7,8 @@
 //! precisely so the address can be pasted here, and refusing the form the
 //! browser produces would break it for the sake of strictness.
 
+use alloc::string::String;
+
 /// Length of an LXMF destination hash in bytes.
 pub const ADDRESS_BYTES: usize = 16;
 

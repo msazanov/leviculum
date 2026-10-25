@@ -13,7 +13,9 @@
 //! copy and the mailbox copy of one message share it by construction
 //! (`leviculum-lxmf/src/message.rs`, the id covers the signed content).
 
-use std::collections::HashSet;
+use alloc::collections::BTreeSet;
+use alloc::string::String;
+use alloc::vec::Vec;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -31,7 +33,7 @@ const KEEP_ON_COMPACT: usize = 32_768;
 /// The persisted set of already-delivered message ids.
 pub struct SeenStore {
     path: PathBuf,
-    seen: HashSet<[u8; 32]>,
+    seen: BTreeSet<[u8; 32]>,
     /// File order, for compaction. `seen` is the lookup, this is the age.
     order: Vec<[u8; 32]>,
 }
@@ -44,7 +46,7 @@ impl SeenStore {
         let path = home.join(SEEN_FILE);
         let mut store = Self {
             path,
-            seen: HashSet::new(),
+            seen: BTreeSet::new(),
             order: Vec::new(),
         };
         let text = match std::fs::read_to_string(&store.path) {

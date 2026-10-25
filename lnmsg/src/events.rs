@@ -13,6 +13,8 @@
 //! `leviculum_std::event_log::EVENT_CATALOG`, which is what makes a missing
 //! key a loud `EVENT_SCHEMA_VIOLATION` line rather than a quiet gap.
 
+use alloc::string::{String, ToString};
+
 use crate::address::to_hex;
 
 /// Make a value safe for the whitespace-tokenised parser the log format
@@ -24,12 +26,13 @@ use crate::address::to_hex;
 /// operator typed after `--from`. Substituting rather than dropping keeps the
 /// field present, which is what the schema check wants to see.
 ///
-/// The mapping itself lives in `leviculum_std::event_log::Scalar`, next to
-/// the sink that would otherwise have to rescue the value: one definition,
-/// so the two cannot drift into rendering the same name differently. The
+/// The mapping itself lives in `leviculum_core::event_scalar::Scalar`, which
+/// `leviculum_std::event_log` re-exports beside the sink that would otherwise
+/// have to rescue the value: one definition, so the two cannot drift into
+/// rendering the same name differently, and one that needs no `std`. The
 /// tests below stay here because they state what THIS crate needs from it.
 fn scalar(text: &str) -> String {
-    leviculum_std::event_log::Scalar(text).to_string()
+    leviculum_core::event_scalar::Scalar(text).to_string()
 }
 
 /// The name this run will announce itself under, and which resolution step

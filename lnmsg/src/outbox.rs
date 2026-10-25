@@ -21,6 +21,9 @@
 //! Nothing here mentions `LxmfRouter`, `ReticulumNode` or a channel type, so
 //! [`crate::send`] can be driven by a fake with no network anywhere.
 
+use alloc::boxed::Box;
+use alloc::string::String;
+use alloc::vec::Vec;
 use leviculum_lxmf::router::{MessageState, PropagationPathAttempts};
 
 use crate::mailbox_state::{Decision, Route, Stored};

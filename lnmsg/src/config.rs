@@ -20,6 +20,8 @@
 //! mailbox hash would otherwise turn into "my mail goes nowhere" with no
 //! trace.
 
+use alloc::borrow::ToOwned;
+use alloc::string::{String, ToString};
 use std::path::{Path, PathBuf};
 
 use crate::address;

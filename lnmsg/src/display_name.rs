@@ -37,6 +37,8 @@
 //!
 //! [`Engine::announce`]: crate::engine
 
+use alloc::string::{String, ToString};
+
 /// Environment override, for the cron case where there is no command line to
 /// edit. Loses to `--from`.
 pub const DISPLAY_NAME_ENV: &str = "LNMSG_DISPLAY_NAME";

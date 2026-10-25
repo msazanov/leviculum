@@ -33,6 +33,9 @@
 //! (`lnmsg-architecture.md` §2, trap 3), so no word this program prints is
 //! ever "delivered to" a person.
 
+use alloc::boxed::Box;
+use alloc::format;
+use alloc::string::{String, ToString};
 use core::time::Duration;
 
 // `tokio::time::Instant`, not `std::time::Instant`: the budget has to be

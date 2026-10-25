@@ -32,8 +32,12 @@
 //! the price of a write inside the core lock. The moment daemon mode or a
 //! resume path exists, this is where it goes.
 
+use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
+use alloc::format;
+use alloc::string::{String, ToString};
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 use core::time::Duration;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};

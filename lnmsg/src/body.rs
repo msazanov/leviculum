@@ -5,6 +5,8 @@
 //! is `echo "disk 91%" | lnmsg send <addr>`. So stdin is the default source,
 //! and a positional body is the convenience, not the other way round.
 
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 use std::io::Read;
 
 /// Why there is no body to send.
