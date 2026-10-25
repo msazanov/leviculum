@@ -326,6 +326,7 @@ rnode-chip-offsets:
 nrf-shellcheck:
     shellcheck -x leviculum-nrf/tools/*.sh scripts/flash-lnodes-from-head.sh \
         scripts/debug-witness.sh scripts/test-debug-witness.sh \
+        scripts/rig-cell.sh scripts/test-rig-cell.sh \
         scripts/device-watchdog.sh scripts/test-device-watchdog.sh \
         scripts/run-tier3-hw.sh scripts/tier3-hw-selftest.sh \
         scripts/run-tier2.sh scripts/run-tier3.sh \
@@ -379,9 +380,15 @@ nrf-shellcheck:
 # own per-scenario board reset — a real USB disconnect we ordered — was counted
 # as a device failure (Codeberg #65). Both are injected there as failures and
 # asserted not to fire.
+#
+# scripts/test-rig-cell.sh joins it for the single-cell bench runner, which
+# brings the same boards' readers back after its cell: a board whose link is
+# late must be waited for and one that never returns must be named, and the
+# runner it replaced skipped both silently.
 [doc('Drive the debug-port witness and device watchdog without a rig')]
 hw-witness:
     bash scripts/test-debug-witness.sh
+    bash scripts/test-rig-cell.sh
     bash scripts/test-device-watchdog.sh
     bash scripts/tier3-hw-selftest.sh
 
