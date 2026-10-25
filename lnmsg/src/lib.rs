@@ -32,8 +32,9 @@
 //!                        │  Command / OutboxEvent          <- the seam
 //!                        v
 //!   engine::InProcessOutbox ── channels ── engine::Engine   the backend
-//!                                            (a CoreProcessor holding an
-//!                                             LxmfRouter, under the core lock)
+//!                                            (its own queues, driven from a
+//!                                             CoreProcessor holding it, with
+//!                                             an LxmfRouter, under the core lock)
 //! ```
 //!
 //! [`send::run_send`] never names an `LxmfRouter`, a `ReticulumNode` or a

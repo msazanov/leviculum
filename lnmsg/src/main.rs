@@ -345,6 +345,7 @@ async fn run(args: SendArgs) -> ExitCode {
         storage_dir,
         identity,
         display_name: display_name.name.into_bytes(),
+        notices: Terminal::new(home.clone()),
     })
     .await
     {
@@ -518,6 +519,7 @@ async fn run_fetch_command(args: FetchArgs) -> ExitCode {
         storage_dir,
         identity,
         display_name: display_name.name.into_bytes(),
+        notices: Terminal::new(home.clone()),
     })
     .await
     {

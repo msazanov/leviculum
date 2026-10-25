@@ -83,6 +83,10 @@ pub(crate) mod fake {
     /// Each sleep advances the reading by exactly what was asked and returns
     /// at once, so a budget expires after budget/poll iterations and no
     /// runtime timer is involved.
+    ///
+    /// The step happens when the sleep is first polled, not when it is made:
+    /// a sleep raced against other work and never polled because the work
+    /// won is a timer that never fired, and must not move the clock.
     #[derive(Default)]
     pub struct Stepping {
         now: Cell<u64>,
@@ -95,9 +99,11 @@ pub(crate) mod fake {
         }
 
         fn sleep_ms(&self, ms: u64) -> impl Future<Output = ()> {
-            self.now.set(self.now.get().saturating_add(ms));
-            self.sleeps.set(self.sleeps.get() + 1);
-            core::future::ready(())
+            core::future::poll_fn(move |_| {
+                self.now.set(self.now.get().saturating_add(ms));
+                self.sleeps.set(self.sleeps.get() + 1);
+                core::task::Poll::Ready(())
+            })
         }
     }
 }

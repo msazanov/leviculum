@@ -1,5 +1,6 @@
 //! The in-process message engine: an [`LxmfRouter`] driven from inside the
-//! driver's tick, and the [`Outbox`] the frontend sees it through.
+//! driver's tick, and the [`Outbox`](crate::outbox::Outbox) the frontend
+//! sees it through.
 //!
 //! # Why the engine is a `CoreProcessor`
 //!
@@ -20,7 +21,16 @@
 //! reentrant**. So this type owns no `ReticulumNode` and no handle derived
 //! from one, and every side effect is a push onto an unbounded queue. Nothing
 //! here does I/O, and the one unbounded computation in LXMF — proof-of-work
-//! for a stamp — leaves through a channel and is mined on a thread of its own.
+//! for a stamp — leaves through a queue and is mined by the host, the
+//! terminal on a thread of its own ([`mine`] is what every host runs).
+//!
+//! # The core and the shell
+//!
+//! This file is the core, `no_std` plus `alloc`, and generic over the node
+//! core (`NodeCore<R, C, S>`). The `CoreProcessor` impl for the driver's
+//! `StdNodeCore`, the channels to the frontend ([`InProcessOutbox`]),
+//! [`attach`], the stamp worker thread, its tokio runtime and `OsRng` are
+//! the shell, in `engine/shell.rs` behind the `std` feature.
 //!
 //! # What it deliberately does not do
 //!
@@ -38,14 +48,14 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::time::Duration;
-use std::path::PathBuf;
-use std::sync::mpsc::{Receiver, Sender, TryRecvError};
+use core::future::Future;
+use core::pin::pin;
+use core::task::Poll;
 
 use leviculum_core::identity::Identity;
 use leviculum_core::node::NodeEvent;
 use leviculum_core::transport::TickOutput;
-use leviculum_core::{DestinationHash, Storage as _};
+use leviculum_core::{Clock as CoreClock, DestinationHash, NodeCore, Storage};
 use leviculum_lxmf::propagation_client::PropagationTransport;
 use leviculum_lxmf::router::{
     LxmfRouter, MessageState, PropagationClientConfig, PropagationClientState,
@@ -56,12 +66,18 @@ use leviculum_lxmf::{
     announce, CooperativeStamper, DeliveryMethod, DeliveryStampRequest, LxmfNode, LxmfNodeConfig,
     StampCancel, StampError, Verification,
 };
-use leviculum_std::driver::{CoreProcessor, ReticulumNodeBuilder, StdNodeCore};
-use leviculum_std::ReticulumNode;
+use rand_core::CryptoRngCore;
 
+use crate::clock::Clock;
+use crate::effects::Effects;
 use crate::mailbox::{self, Candidate, Previous, Selection};
 use crate::mailbox_state::{Decision, Route};
-use crate::outbox::{Command, MailboxInput, Outbox, OutboxEvent, OutboxGone, SendRequest, Via};
+use crate::outbox::{Command, MailboxInput, OutboxEvent, SendRequest, Via};
+
+#[cfg(feature = "std")]
+mod shell;
+#[cfg(feature = "std")]
+pub use shell::{attach, AttachConfig, AttachError, Attached, InProcessOutbox};
 
 /// How soon the engine asks the driver to come back.
 ///
@@ -102,13 +118,16 @@ const MAX_ABSORB_ROUNDS: usize = 8;
 /// hang, and default propagation nodes announce 13 now.
 const STAMP_PROGRESS_COST: u8 = 10;
 
-/// One proof-of-work job on its way to the mining thread.
+/// How often a narrated grind says it is still going.
+const STAMP_PROGRESS_EVERY_MS: u64 = 5_000;
+
+/// One proof-of-work job on its way to the miner.
 ///
-/// Each job carries the handle that calls it off. The mining thread is
-/// single-consumer, so an unfinishable grind does not only park its own
-/// message, it parks every stamp queued behind it (Codeberg #185) — the
-/// handle is what gets the thread back.
-enum StampJob {
+/// Each job carries the handle that calls it off. The terminal's miner is one
+/// thread and single-consumer, so an unfinishable grind does not only park
+/// its own message, it parks every stamp queued behind it (Codeberg #185) —
+/// the handle is what gets the miner back.
+pub enum StampJob {
     /// A recipient delivery stamp, at the cost the recipient announced.
     Delivery(DeliveryStampRequest, Arc<StampCancel>),
     /// The independent propagation-node stamp over the transient ID, at the
@@ -117,14 +136,16 @@ enum StampJob {
 }
 
 impl StampJob {
-    fn key(&self) -> (StampKind, [u8; 32]) {
+    /// Which stamp of which message this is.
+    pub fn key(&self) -> (StampKind, [u8; 32]) {
         match self {
             Self::Delivery(request, _) => (StampKind::Delivery, request.message_id),
             Self::Propagation(request, _) => (StampKind::Propagation, request.message_id),
         }
     }
 
-    fn cancel(&self) -> Arc<StampCancel> {
+    /// The handle [`Engine`] fires when the message is cancelled.
+    pub fn cancel(&self) -> Arc<StampCancel> {
         match self {
             Self::Delivery(_, cancel) | Self::Propagation(_, cancel) => Arc::clone(cancel),
         }
@@ -135,13 +156,13 @@ impl StampJob {
 /// message to a cost-announcing recipient legitimately mines both, one after
 /// the other, so the single-flight set is keyed by kind as well as id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-enum StampKind {
+pub enum StampKind {
     Delivery,
     Propagation,
 }
 
-/// A stamp the mining thread has finished with.
-enum StampAnswer {
+/// A stamp the miner has finished with.
+pub enum StampAnswer {
     Delivery {
         request: DeliveryStampRequest,
         result: Result<[u8; 32], StampError>,
@@ -199,13 +220,22 @@ enum State {
     Failed,
 }
 
-/// The LXMF engine, as the driver sees it.
+/// The LXMF engine: the router glue, driven from the node core's two hooks.
+///
+/// Generic over the node core the way the router it holds is, so the driver's
+/// `StdNodeCore` and a board's core run the same engine. It reaches its host
+/// through four queues of its own, each a `VecDeque`: commands in, events
+/// out, stamp jobs out, stamp answers in. Unbounded on purpose, as the
+/// `mpsc` channels they replace were: the hooks run under the core lock and
+/// must neither block nor drop, and a dropped event can be a received
+/// message. The host drains them around every hook, so what they hold is one
+/// hook's worth; a bounded ring would add a drop policy and buy nothing.
 pub struct Engine {
     display_name: Vec<u8>,
-    events: Sender<OutboxEvent>,
-    commands: Receiver<Command>,
-    stamps: Sender<StampJob>,
-    stamp_answers: Receiver<StampAnswer>,
+    events: VecDeque<OutboxEvent>,
+    commands: VecDeque<Command>,
+    stamps: VecDeque<StampJob>,
+    stamp_answers: VecDeque<StampAnswer>,
     state: State,
     resolves: Vec<Resolve>,
     /// Messages this run queued, and the last state seen for each. The router
@@ -228,18 +258,62 @@ pub struct Engine {
 }
 
 impl Engine {
-    fn emit(&self, event: OutboxEvent) {
-        // A dropped receiver means the frontend has already finished; the
-        // engine keeps running until the node stops, and has nothing to say
-        // about it.
-        let _ = self.events.send(event);
+    /// An engine that registers `identity`'s delivery destination on its
+    /// first hook and announces it under `display_name`.
+    pub fn new(identity: Identity, display_name: Vec<u8>) -> Self {
+        Self {
+            display_name,
+            events: VecDeque::new(),
+            commands: VecDeque::new(),
+            stamps: VecDeque::new(),
+            stamp_answers: VecDeque::new(),
+            state: State::Unregistered(Box::new(identity)),
+            resolves: Vec::new(),
+            tracked: BTreeMap::new(),
+            mining: BTreeMap::new(),
+            announced: false,
+            pending_selection: None,
+        }
+    }
+
+    /// Queue one frontend command for the next [`Engine::on_tick`].
+    pub fn submit(&mut self, command: Command) {
+        self.commands.push_back(command);
+    }
+
+    /// The oldest event the frontend has not been handed yet.
+    pub fn next_event(&mut self) -> Option<OutboxEvent> {
+        self.events.pop_front()
+    }
+
+    /// The oldest stamp job no miner has been handed yet.
+    pub fn next_stamp_job(&mut self) -> Option<StampJob> {
+        self.stamps.pop_front()
+    }
+
+    /// Hand back a finished stamp, for the next [`Engine::on_tick`].
+    pub fn stamp_answered(&mut self, answer: StampAnswer) {
+        self.stamp_answers.push_back(answer);
+    }
+
+    /// The miner is gone and `job` never reached it, so its answer will never
+    /// come: drop the marker, so a later re-offer is dispatched normally.
+    pub fn stamp_undelivered(&mut self, job: &StampJob) {
+        self.mining.remove(&job.key());
+    }
+
+    fn emit(&mut self, event: OutboxEvent) {
+        self.events.push_back(event);
     }
 
     /// Register the delivery destination on first use and announce readiness.
     ///
     /// Called from both hooks: the driver's timer branch normally fires first,
     /// but nothing in the seam promises that.
-    fn register_if_needed(&mut self, core: &mut StdNodeCore) {
+    fn register_if_needed<R: CryptoRngCore, C: CoreClock, S: Storage>(
+        &mut self,
+        core: &mut NodeCore<R, C, S>,
+    ) {
         let identity = match core::mem::replace(&mut self.state, State::Failed) {
             State::Unregistered(identity) => *identity,
             other => {
@@ -264,7 +338,10 @@ impl Engine {
     /// Register if needed, then move the router out of `self` for the duration
     /// of the hook, which is what lets the rest of the hook borrow the router
     /// and `self` at once.
-    fn take_ready(&mut self, core: &mut StdNodeCore) -> Option<Box<Ready>> {
+    fn take_ready<R: CryptoRngCore, C: CoreClock, S: Storage>(
+        &mut self,
+        core: &mut NodeCore<R, C, S>,
+    ) -> Option<Box<Ready>> {
         self.register_if_needed(core);
         match core::mem::replace(&mut self.state, State::Failed) {
             State::Ready(ready) => Some(ready),
@@ -277,10 +354,10 @@ impl Engine {
 
     /// Route one router output: report its events, collect its wire actions,
     /// and re-feed the core events it produced. See [`MAX_ABSORB_ROUNDS`].
-    fn absorb(
+    fn absorb<R: CryptoRngCore, C: CoreClock, S: Storage>(
         &mut self,
         ready: &mut Ready,
-        core: &mut StdNodeCore,
+        core: &mut NodeCore<R, C, S>,
         first: RouterOutput,
         out: &mut TickOutput,
     ) {
@@ -311,7 +388,12 @@ impl Engine {
     }
 
     /// Turn one router event into something the frontend can act on.
-    fn report(&mut self, ready: &Ready, core: &StdNodeCore, event: RouterEvent) {
+    fn report<R: CryptoRngCore, C: CoreClock, S: Storage>(
+        &mut self,
+        ready: &Ready,
+        core: &NodeCore<R, C, S>,
+        event: RouterEvent,
+    ) {
         match event {
             RouterEvent::MessageQueued(id) => {
                 self.tracked.insert(id, None);
@@ -364,7 +446,7 @@ impl Engine {
         }
     }
 
-    /// Hand one proof-of-work job to the mining thread.
+    /// Queue one proof-of-work job for the miner.
     ///
     /// Off the lock: mining is unbounded work at a cost the peer chooses, and
     /// the generator is async. Both are things a hook body may least afford.
@@ -377,13 +459,8 @@ impl Engine {
         if self.mining.contains_key(&key) {
             return;
         }
-        let cancel = job.cancel();
-        if self.stamps.send(job).is_err() {
-            // The worker is gone, so the answer will never come; leave no
-            // marker, so a later re-offer is dispatched normally.
-            return;
-        }
-        self.mining.insert(key, cancel);
+        self.mining.insert(key, job.cancel());
+        self.stamps.push_back(job);
     }
 
     /// Notice messages the router has forgotten. A terminal state removes the
@@ -415,35 +492,37 @@ impl Engine {
     }
 
     /// Drain the frontend's command queue. Non-blocking by construction.
-    fn pump_commands(&mut self, ready: &mut Ready, core: &mut StdNodeCore, out: &mut TickOutput) {
-        loop {
-            match self.commands.try_recv() {
-                Ok(Command::Resolve { destination }) => self.resolves.push(Resolve {
+    fn pump_commands<R: CryptoRngCore, C: CoreClock, S: Storage>(
+        &mut self,
+        ready: &mut Ready,
+        core: &mut NodeCore<R, C, S>,
+        out: &mut TickOutput,
+    ) {
+        while let Some(command) = self.commands.pop_front() {
+            match command {
+                Command::Resolve { destination } => self.resolves.push(Resolve {
                     destination,
                     next_path_request_ms: None,
                     answered: false,
                 }),
-                Ok(Command::Send(request)) => self.send(ready, core, *request, out),
-                Ok(Command::SelectPn { preferred, mailbox }) => {
+                Command::Send(request) => self.send(ready, core, *request, out),
+                Command::SelectPn { preferred, mailbox } => {
                     self.select_pn(ready, core, preferred, mailbox, out);
                 }
-                Ok(Command::Fetch { path_budget_ms }) => {
+                Command::Fetch { path_budget_ms } => {
                     self.fetch(ready, core, path_budget_ms, out);
                 }
-                Ok(Command::Cancel { message_id }) => self.cancel(ready, core, &message_id, out),
-                Err(TryRecvError::Empty) => return,
-                // The frontend is gone; the node is being torn down.
-                Err(TryRecvError::Disconnected) => return,
+                Command::Cancel { message_id } => self.cancel(ready, core, &message_id, out),
             }
         }
     }
 
     /// Pick the propagation node for this run's uploads and drains: the
     /// preferred one when there is one, else the mailbox rule's answer.
-    fn select_pn(
+    fn select_pn<R: CryptoRngCore, C: CoreClock, S: Storage>(
         &mut self,
         ready: &mut Ready,
-        core: &mut StdNodeCore,
+        core: &mut NodeCore<R, C, S>,
         preferred: Option<[u8; 16]>,
         mailbox: Option<MailboxInput>,
         out: &mut TickOutput,
@@ -529,10 +608,10 @@ impl Engine {
 
     /// Finish a waiting selection once every replay is in or the window has
     /// closed.
-    fn poll_pending_selection(
+    fn poll_pending_selection<R: CryptoRngCore, C: CoreClock, S: Storage>(
         &mut self,
         ready: &mut Ready,
-        core: &mut StdNodeCore,
+        core: &mut NodeCore<R, C, S>,
         now_ms: u64,
         out: &mut TickOutput,
     ) {
@@ -550,10 +629,10 @@ impl Engine {
     }
 
     /// Report the rule's answer and select what it named.
-    fn finish_selection(
+    fn finish_selection<R: CryptoRngCore, C: CoreClock, S: Storage>(
         &mut self,
         ready: &mut Ready,
-        core: &mut StdNodeCore,
+        core: &mut NodeCore<R, C, S>,
         selection: Selection,
         out: &mut TickOutput,
     ) {
@@ -578,10 +657,10 @@ impl Engine {
     }
 
     /// Make `destination` the router's propagation node.
-    fn commit_pn(
+    fn commit_pn<R: CryptoRngCore, C: CoreClock, S: Storage>(
         &mut self,
         ready: &mut Ready,
-        core: &mut StdNodeCore,
+        core: &mut NodeCore<R, C, S>,
         destination: [u8; 16],
         out: &mut TickOutput,
     ) {
@@ -613,10 +692,10 @@ impl Engine {
 
     /// Start one mailbox drain against the selected node, asking for its path
     /// for as long as `path_budget_ms` (leviculum#719).
-    fn fetch(
+    fn fetch<R: CryptoRngCore, C: CoreClock, S: Storage>(
         &mut self,
         ready: &mut Ready,
-        core: &mut StdNodeCore,
+        core: &mut NodeCore<R, C, S>,
         path_budget_ms: u64,
         out: &mut TickOutput,
     ) {
@@ -640,10 +719,10 @@ impl Engine {
     /// Drop a queued message. `NotFound` is not an error here: the message
     /// may have reached a terminal state between the frontend's decision and
     /// this tick, which is exactly the outcome a cancel wants.
-    fn cancel(
+    fn cancel<R: CryptoRngCore, C: CoreClock, S: Storage>(
         &mut self,
         ready: &mut Ready,
-        core: &mut StdNodeCore,
+        core: &mut NodeCore<R, C, S>,
         message_id: &[u8; 32],
         out: &mut TickOutput,
     ) {
@@ -669,10 +748,15 @@ impl Engine {
     }
 
     /// Drain finished proof-of-work.
-    fn pump_stamps(&mut self, ready: &mut Ready, core: &mut StdNodeCore, out: &mut TickOutput) {
-        loop {
-            match self.stamp_answers.try_recv() {
-                Ok(StampAnswer::Delivery { request, result }) => {
+    fn pump_stamps<R: CryptoRngCore, C: CoreClock, S: Storage>(
+        &mut self,
+        ready: &mut Ready,
+        core: &mut NodeCore<R, C, S>,
+        out: &mut TickOutput,
+    ) {
+        while let Some(answer) = self.stamp_answers.pop_front() {
+            match answer {
+                StampAnswer::Delivery { request, result } => {
                     self.mining
                         .remove(&(StampKind::Delivery, request.message_id));
                     match result {
@@ -698,7 +782,7 @@ impl Engine {
                         }),
                     }
                 }
-                Ok(StampAnswer::Propagation { request, result }) => {
+                StampAnswer::Propagation { request, result } => {
                     self.mining
                         .remove(&(StampKind::Propagation, request.message_id));
                     match result {
@@ -721,15 +805,14 @@ impl Engine {
                         }),
                     }
                 }
-                Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => return,
             }
         }
     }
 
-    fn send(
+    fn send<R: CryptoRngCore, C: CoreClock, S: Storage>(
         &mut self,
         ready: &mut Ready,
-        core: &mut StdNodeCore,
+        core: &mut NodeCore<R, C, S>,
         request: SendRequest,
         out: &mut TickOutput,
     ) {
@@ -790,7 +873,12 @@ impl Engine {
     /// staying repliable; rate-limiting it against a stored last-announced
     /// timestamp belongs with the sync policy of a later slice, not here,
     /// where it would be a guess with no reader to justify it.
-    fn announce(&mut self, ready: &mut Ready, core: &mut StdNodeCore, out: &mut TickOutput) {
+    fn announce<R: CryptoRngCore, C: CoreClock, S: Storage>(
+        &mut self,
+        ready: &mut Ready,
+        core: &mut NodeCore<R, C, S>,
+        out: &mut TickOutput,
+    ) {
         if self.announced {
             return;
         }
@@ -822,10 +910,10 @@ impl Engine {
     /// without waiting for the identity to turn up first — a path request is
     /// how an address nobody has announced near us becomes known at all, and a
     /// messenger's whole job is sending to an address a user was given.
-    fn poll_resolves(
+    fn poll_resolves<R: CryptoRngCore, C: CoreClock, S: Storage>(
         &mut self,
         ready: &mut Ready,
-        core: &mut StdNodeCore,
+        core: &mut NodeCore<R, C, S>,
         now_ms: u64,
         out: &mut TickOutput,
     ) {
@@ -945,7 +1033,10 @@ fn sync_failure(state: PropagationClientState) -> Option<&'static str> {
 }
 
 /// Mint the delivery destination and the router that drives it.
-fn register(core: &mut StdNodeCore, identity: Identity) -> Result<Ready, String> {
+fn register<R: CryptoRngCore, C: CoreClock, S: Storage>(
+    core: &mut NodeCore<R, C, S>,
+    identity: Identity,
+) -> Result<Ready, String> {
     let identity_hash = *identity.hash();
     // `delivery_destination` consumes the identity, so the private key is
     // copied out first: the destination is what holds it afterwards, and the
@@ -979,8 +1070,15 @@ fn register(core: &mut StdNodeCore, identity: Identity) -> Result<Ready, String>
     Ok(Ready { router, address })
 }
 
-impl CoreProcessor for Engine {
-    fn on_event(&mut self, core: &mut StdNodeCore, event: &NodeEvent) -> TickOutput {
+/// The two hooks, in the shape of the driver's `CoreProcessor` and with the
+/// same contract: both run with the core lock held, and neither blocks.
+impl Engine {
+    /// Consume one event the core produced.
+    pub fn on_event<R: CryptoRngCore, C: CoreClock, S: Storage>(
+        &mut self,
+        core: &mut NodeCore<R, C, S>,
+        event: &NodeEvent,
+    ) -> TickOutput {
         let mut out = TickOutput::empty();
         let Some(mut ready) = self.take_ready(core) else {
             return out;
@@ -1009,7 +1107,14 @@ impl CoreProcessor for Engine {
         out
     }
 
-    fn on_tick(&mut self, core: &mut StdNodeCore, now_ms: u64) -> TickOutput {
+    /// The periodic slot: commands, finished stamps, resolves and the
+    /// router's own timers. Always asks to be called again within
+    /// `POLL_INTERVAL_MS`, because nothing else pokes the command queue.
+    pub fn on_tick<R: CryptoRngCore, C: CoreClock, S: Storage>(
+        &mut self,
+        core: &mut NodeCore<R, C, S>,
+        now_ms: u64,
+    ) -> TickOutput {
         let mut out = TickOutput::empty();
         let Some(mut ready) = self.take_ready(core) else {
             return out;
@@ -1040,237 +1145,97 @@ impl CoreProcessor for Engine {
     }
 }
 
-/// The frontend's end of the in-process engine.
-pub struct InProcessOutbox {
-    commands: Sender<Command>,
-    events: Receiver<OutboxEvent>,
-}
-
-impl Outbox for InProcessOutbox {
-    fn submit(&self, command: Command) -> Result<(), OutboxGone> {
-        self.commands.send(command).map_err(|_| OutboxGone)
-    }
-
-    fn try_next_event(&mut self) -> Result<Option<OutboxEvent>, OutboxGone> {
-        match self.events.try_recv() {
-            Ok(event) => Ok(Some(event)),
-            Err(TryRecvError::Empty) => Ok(None),
-            Err(TryRecvError::Disconnected) => Err(OutboxGone),
+/// Mine one stamp job and say what came of it, the policy every host's miner
+/// shares: which generator, which RNG it draws from, and what the person
+/// waiting is told.
+///
+/// The executor is the cooperative one, so the future yields while it grinds
+/// and the progress timer below gets its turns on a single thread. `rng` is
+/// the host's (the terminal hands `OsRng`), `clock` measures the grind and
+/// paces the progress lines, and the lines are notices on `effects`.
+pub async fn mine<G, K, E>(job: StampJob, rng: G, clock: &K, effects: &mut E) -> StampAnswer
+where
+    G: CryptoRngCore + Send,
+    K: Clock,
+    E: Effects,
+{
+    match job {
+        StampJob::Delivery(request, cancel) => {
+            let cost = request.target_cost;
+            let result = mine_with_progress(clock, effects, cost, "delivery stamp", async {
+                let mut executor = CooperativeStamper::cooperative(rng);
+                request.generate_with(&mut executor, &cancel).await
+            })
+            .await;
+            StampAnswer::Delivery { request, result }
+        }
+        StampJob::Propagation(request, cancel) => {
+            let cost = request.target_cost;
+            let result = mine_with_progress(clock, effects, cost, "propagation stamp", async {
+                let mut executor = CooperativeStamper::cooperative(rng);
+                request.generate_with(&mut executor, &cancel).await
+            })
+            .await;
+            StampAnswer::Propagation { request, result }
         }
     }
 }
 
-/// What attaching to a shared instance needs to know.
-pub struct AttachConfig {
-    /// The shared instance to join, i.e. which daemon.
-    pub instance: String,
-    /// Where this client keeps its node state (learned identities, paths).
-    ///
-    /// Deliberately not the daemon's storage directory: `lncp` and `lnstatus`
-    /// share that safely because a client with `enable_transport(false)`
-    /// writes no paths, announces or packet hashes — this one registers a
-    /// destination and learns identities, so it gets its own. The caller
-    /// creates it: a directory is the shell's, and `main` names the path in
-    /// the error when it cannot.
-    pub storage_dir: PathBuf,
-    /// The persistent identity whose delivery destination is our address.
-    pub identity: Identity,
-    /// The name recipients see as the sender: it goes out in the delivery
-    /// announce `Engine::announce` sends, and a reference client shows it
-    /// next to every message from us. Resolved by
-    /// [`crate::display_name::from_process`], which never yields an empty one.
-    pub display_name: Vec<u8>,
-}
-
-/// Why attaching failed.
-#[derive(Debug)]
-pub enum AttachError {
-    /// No daemon answered. The message names the instance, because the usual
-    /// cause is the right daemon running under a different name.
-    ///
-    /// Both the build and the start of a shared-instance client fail this way,
-    /// and they are one error to a user: the IPC socket is the only thing
-    /// either step reaches for. Which of the two noticed is in `detail`.
-    NoDaemon { instance: String, detail: String },
-}
-
-impl core::fmt::Display for AttachError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::NoDaemon { instance, detail } => write!(
-                f,
-                "could not join the Reticulum shared instance named '{instance}'.\n  \
-                 lnmsg talks to a daemon that is already running; it does not start a \
-                 Reticulum stack of its own.\n  \
-                 Start one with `lnsd` (or Python's `rnsd`), or name another instance \
-                 with --instance / --config.\n  \
-                 The stack said: {detail}"
-            ),
-        }
-    }
-}
-
-impl core::error::Error for AttachError {}
-
-/// A running client node and the outbox that talks to its engine.
-pub struct Attached {
-    node: ReticulumNode,
-    /// The frontend's end of the seam.
-    pub outbox: InProcessOutbox,
-}
-
-impl Attached {
-    /// Stop the node. Best effort: the send outcome is already decided by the
-    /// time anything calls this.
-    pub async fn stop(mut self) {
-        let _ = self.node.stop().await;
-    }
-}
-
-/// Attach to a running shared instance with an LXMF engine installed.
-pub async fn attach(config: AttachConfig) -> Result<Attached, AttachError> {
-    let (commands_tx, commands_rx) = std::sync::mpsc::channel::<Command>();
-    let (events_tx, events_rx) = std::sync::mpsc::channel::<OutboxEvent>();
-    let (stamps_tx, stamps_rx) = std::sync::mpsc::channel::<StampJob>();
-    let (answers_tx, answers_rx) = std::sync::mpsc::channel::<StampAnswer>();
-
-    // Proof-of-work, off the core lock and off the runtime's workers: mining
-    // is pure CPU that can run for minutes at a cost the *peer* chooses. Its
-    // own thread with its own current-thread runtime, exactly as
-    // `leviculum-lxmf-node` does it (`leviculum-lxmf-node/src/main.rs:224-255`),
-    // because the generator is async. Dormant unless a peer advertises a stamp
-    // cost, which most do not.
-    std::thread::spawn(move || run_stamp_worker(&stamps_rx, &answers_tx));
-
-    let engine = Engine {
-        display_name: config.display_name,
-        events: events_tx,
-        commands: commands_rx,
-        stamps: stamps_tx,
-        stamp_answers: answers_rx,
-        state: State::Unregistered(Box::new(config.identity)),
-        resolves: Vec::new(),
-        tracked: BTreeMap::new(),
-        mining: BTreeMap::new(),
-        announced: false,
-        pending_selection: None,
-    };
-
-    let mut node = ReticulumNodeBuilder::new()
-        .enable_transport(false)
-        .connect_to_shared_instance(&config.instance)
-        .storage_path(config.storage_dir)
-        .core_processor(engine)
-        // The engine consumes events on the processor tap; nothing here ever
-        // takes the driver's application receiver, so enabling it would only
-        // fill a queue with no reader (Codeberg #419).
-        .without_events()
-        .build()
-        .await
-        .map_err(|e| AttachError::NoDaemon {
-            instance: config.instance.clone(),
-            detail: e.to_string(),
-        })?;
-    node.start().await.map_err(|e| AttachError::NoDaemon {
-        instance: config.instance.clone(),
-        detail: e.to_string(),
-    })?;
-
-    Ok(Attached {
-        node,
-        outbox: InProcessOutbox {
-            commands: commands_tx,
-            events: events_rx,
-        },
-    })
-}
-
-fn run_stamp_worker(jobs: &Receiver<StampJob>, answers: &Sender<StampAnswer>) {
-    let runtime = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(runtime) => runtime,
-        Err(_) => return,
-    };
-    while let Ok(job) = jobs.recv() {
-        let answer = match job {
-            StampJob::Delivery(request, cancel) => {
-                let cost = request.target_cost;
-                let result = mine_with_progress(&runtime, cost, "delivery stamp", async {
-                    let mut executor = CooperativeStamper::cooperative(rand_core::OsRng);
-                    request.generate_with(&mut executor, &cancel).await
-                });
-                StampAnswer::Delivery { request, result }
-            }
-            StampJob::Propagation(request, cancel) => {
-                let cost = request.target_cost;
-                let result = mine_with_progress(&runtime, cost, "propagation stamp", async {
-                    let mut executor = CooperativeStamper::cooperative(rand_core::OsRng);
-                    request.generate_with(&mut executor, &cancel).await
-                });
-                StampAnswer::Propagation { request, result }
-            }
-        };
-        if answers.send(answer).is_err() {
-            return;
-        }
-    }
-}
-
-/// Run one mining future to completion, narrating it on stderr when the cost
-/// is above [`STAMP_PROGRESS_COST`].
+/// Run one mining future to completion, narrating it when the cost is above
+/// [`STAMP_PROGRESS_COST`].
 ///
 /// The narration is elapsed time, not a percentage: proof-of-work has no
 /// knowable fraction-done, and inventing one would be the progress-bar lie.
-/// stderr rather than stdout, so a scripted send's "success prints nothing"
-/// contract on stdout is untouched.
-fn mine_with_progress<F>(
-    runtime: &tokio::runtime::Runtime,
+/// The terminal writes the notices to stderr, so a scripted send's "success
+/// prints nothing" contract on stdout is untouched.
+async fn mine_with_progress<K, E, F>(
+    clock: &K,
+    effects: &mut E,
     cost: u8,
     what: &str,
     future: F,
 ) -> Result<[u8; 32], StampError>
 where
-    F: core::future::Future<Output = Result<[u8; 32], StampError>>,
+    K: Clock,
+    E: Effects,
+    F: Future<Output = Result<[u8; 32], StampError>>,
 {
-    use core::sync::atomic::{AtomicBool, Ordering};
-
-    let started = std::time::Instant::now();
-    let ticker = if cost > STAMP_PROGRESS_COST {
-        eprintln!("lnmsg: mining {what} at cost {cost}...");
-        let done = Arc::new(AtomicBool::new(false));
-        let flag = Arc::clone(&done);
-        let what = what.to_string();
-        let handle = std::thread::spawn(move || {
-            let mut waited = 0u64;
-            while !flag.load(Ordering::Relaxed) {
-                std::thread::sleep(Duration::from_millis(500));
-                waited += 500;
-                if waited.is_multiple_of(5_000) && !flag.load(Ordering::Relaxed) {
-                    eprintln!("lnmsg: still mining {what} ({}s)...", waited / 1_000);
-                }
-            }
-        });
-        Some((done, handle))
-    } else {
-        None
-    };
-    let result = runtime.block_on(future);
-    if let Some((done, handle)) = ticker {
-        done.store(true, Ordering::Relaxed);
-        let _ = handle.join();
-        // A cancelled grind is a withdrawal, not an achievement: saying it
-        // was "mined" would be the one line an operator must not read here.
-        let outcome = match result {
-            Ok(_) => "mined",
-            Err(_) => "abandoned",
-        };
-        eprintln!(
-            "lnmsg: {what} {outcome} after {:.1}s",
-            started.elapsed().as_secs_f32()
-        );
+    if cost <= STAMP_PROGRESS_COST {
+        return future.await;
     }
+    let started_ms = clock.now_ms();
+    effects.notice(&format!("mining {what} at cost {cost}..."));
+    let mut mining = pin!(future);
+    let mut waited_ms = 0u64;
+    let result = loop {
+        // Whichever is ready first: the stamp, or the next progress line.
+        let mut tick = pin!(clock.sleep_ms(STAMP_PROGRESS_EVERY_MS));
+        let step = core::future::poll_fn(|cx| {
+            if let Poll::Ready(result) = mining.as_mut().poll(cx) {
+                return Poll::Ready(Some(result));
+            }
+            tick.as_mut().poll(cx).map(|()| None)
+        })
+        .await;
+        match step {
+            Some(result) => break result,
+            None => {
+                waited_ms += STAMP_PROGRESS_EVERY_MS;
+                effects.notice(&format!("still mining {what} ({}s)...", waited_ms / 1_000));
+            }
+        }
+    };
+    // A cancelled grind is a withdrawal, not an achievement: saying it was
+    // "mined" would be the one line an operator must not read here.
+    let outcome = match result {
+        Ok(_) => "mined",
+        Err(_) => "abandoned",
+    };
+    let elapsed_ms = clock.now_ms().saturating_sub(started_ms);
+    effects.notice(&format!(
+        "{what} {outcome} after {:.1}s",
+        elapsed_ms as f32 / 1_000.0
+    ));
     result
 }
 
@@ -1279,31 +1244,19 @@ mod tests {
     use super::*;
 
     use leviculum_core::node::NodeCoreBuilder;
-    use leviculum_std::driver::{StdClock, StdStorage};
+    use leviculum_std::driver::{StdClock, StdNodeCore, StdStorage};
 
-    fn engine() -> (Engine, Receiver<OutboxEvent>, Sender<Command>) {
+    fn engine() -> Engine {
         engine_named(b"lnmsg-test")
     }
 
-    fn engine_named(display_name: &[u8]) -> (Engine, Receiver<OutboxEvent>, Sender<Command>) {
-        let (commands_tx, commands_rx) = std::sync::mpsc::channel::<Command>();
-        let (events_tx, events_rx) = std::sync::mpsc::channel::<OutboxEvent>();
-        let (stamps_tx, _stamps_rx) = std::sync::mpsc::channel::<StampJob>();
-        let (_answers_tx, answers_rx) = std::sync::mpsc::channel::<StampAnswer>();
-        let engine = Engine {
-            display_name: display_name.to_vec(),
-            events: events_tx,
-            commands: commands_rx,
-            stamps: stamps_tx,
-            stamp_answers: answers_rx,
-            state: State::Unregistered(Box::new(leviculum_std::generate_identity())),
-            resolves: Vec::new(),
-            tracked: BTreeMap::new(),
-            mining: BTreeMap::new(),
-            announced: false,
-            pending_selection: None,
-        };
-        (engine, events_rx, commands_tx)
+    fn engine_named(display_name: &[u8]) -> Engine {
+        Engine::new(leviculum_std::generate_identity(), display_name.to_vec())
+    }
+
+    /// Every event the engine has queued for the frontend, oldest first.
+    fn drain(engine: &mut Engine) -> Vec<OutboxEvent> {
+        core::iter::from_fn(|| engine.next_event()).collect()
     }
 
     fn core(dir: &std::path::Path) -> StdNodeCore {
@@ -1320,13 +1273,13 @@ mod tests {
     fn the_first_tick_registers_and_reports_our_address() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut core = core(dir.path());
-        let (mut engine, events, _commands) = engine();
+        let mut engine = engine();
 
         let now_ms = core.now_ms();
         let out = engine.on_tick(&mut core, now_ms);
 
-        match events.try_recv() {
-            Ok(OutboxEvent::Ready { address }) => {
+        match engine.next_event() {
+            Some(OutboxEvent::Ready { address }) => {
                 assert_ne!(address, [0u8; 16], "the address must be a real hash")
             }
             other => panic!("the first tick must report readiness, got {other:?}"),
@@ -1346,29 +1299,13 @@ mod tests {
     /// on its own (`leviculum-lxmf/tests/stamp_cancellation.rs`), so the
     /// handle fired here is the only thing that gets the thread back.
     ///
-    /// The job is read back off the channel the worker reads, so this asserts
-    /// the handle the *worker* would mine under, not a copy kept here.
+    /// The job is read back off the queue the miner is fed from, so this
+    /// asserts the handle the *miner* would mine under, not a copy kept here.
     #[test]
     fn cancelling_a_message_calls_off_the_stamp_being_mined_for_it() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut core = core(dir.path());
-        let (commands_tx, commands_rx) = std::sync::mpsc::channel::<Command>();
-        let (events_tx, _events_rx) = std::sync::mpsc::channel::<OutboxEvent>();
-        let (stamps_tx, stamps_rx) = std::sync::mpsc::channel::<StampJob>();
-        let (_answers_tx, answers_rx) = std::sync::mpsc::channel::<StampAnswer>();
-        let mut engine = Engine {
-            display_name: b"lnmsg-test".to_vec(),
-            events: events_tx,
-            commands: commands_rx,
-            stamps: stamps_tx,
-            stamp_answers: answers_rx,
-            state: State::Unregistered(Box::new(leviculum_std::generate_identity())),
-            resolves: Vec::new(),
-            tracked: BTreeMap::new(),
-            mining: BTreeMap::new(),
-            announced: false,
-            pending_selection: None,
-        };
+        let mut engine = engine();
 
         let now_ms = core.now_ms();
         // The tick's actions go nowhere: this test never puts a packet on an
@@ -1384,15 +1321,15 @@ mod tests {
             },
             Arc::default(),
         ));
-        let job = stamps_rx.try_recv().expect("the worker is handed the job");
+        let job = engine
+            .next_stamp_job()
+            .expect("the miner is handed the job");
         assert!(
             !job.cancel().is_cancelled(),
             "a freshly dispatched job is not cancelled"
         );
 
-        commands_tx
-            .send(Command::Cancel { message_id })
-            .expect("the engine holds the command receiver");
+        engine.submit(Command::Cancel { message_id });
         let now_ms = core.now_ms();
         let _ = engine.on_tick(&mut core, now_ms);
 
@@ -1423,7 +1360,7 @@ mod tests {
 
         let dir = tempfile::tempdir().expect("tempdir");
         let mut core = core(dir.path());
-        let (mut engine, _events, _commands) = engine_named(b"an-operator");
+        let mut engine = engine_named(b"an-operator");
 
         let now_ms = core.now_ms();
         let out = engine.on_tick(&mut core, now_ms);
@@ -1466,20 +1403,19 @@ mod tests {
     fn a_propagated_send_without_a_selected_node_is_refused_at_the_seam() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut core = core(dir.path());
-        let (mut engine, events, commands) = engine();
+        let mut engine = engine();
 
-        commands
-            .send(Command::Send(Box::new(SendRequest {
-                destination: [0x11; 16],
-                title: Vec::new(),
-                body: b"body".to_vec(),
-                via: Via::Propagated,
-            })))
-            .expect("queue the command");
+        engine.submit(Command::Send(Box::new(SendRequest {
+            destination: [0x11; 16],
+            title: Vec::new(),
+            body: b"body".to_vec(),
+            via: Via::Propagated,
+        })));
         let now_ms = core.now_ms();
         let _ = engine.on_tick(&mut core, now_ms);
 
-        let refusals: Vec<_> = core::iter::from_fn(|| events.try_recv().ok())
+        let refusals: Vec<_> = drain(&mut engine)
+            .into_iter()
             .filter_map(|event| match event {
                 OutboxEvent::Refused { detail } => Some(detail),
                 _ => None,
@@ -1499,18 +1435,16 @@ mod tests {
     fn selecting_a_node_with_none_known_reports_unavailable() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut core = core(dir.path());
-        let (mut engine, events, commands) = engine();
+        let mut engine = engine();
 
-        commands
-            .send(Command::SelectPn {
-                preferred: None,
-                mailbox: None,
-            })
-            .expect("queue the command");
+        engine.submit(Command::SelectPn {
+            preferred: None,
+            mailbox: None,
+        });
         let now_ms = core.now_ms();
         let _ = engine.on_tick(&mut core, now_ms);
 
-        let seen: Vec<_> = core::iter::from_fn(|| events.try_recv().ok()).collect();
+        let seen: Vec<_> = drain(&mut engine);
         assert!(
             seen.iter()
                 .any(|event| matches!(event, OutboxEvent::PnUnavailable { .. })),
@@ -1532,20 +1466,19 @@ mod tests {
     fn selecting_a_preferred_node_works_before_its_announce_arrives() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut core = core(dir.path());
-        let (mut engine, events, commands) = engine();
+        let mut engine = engine();
 
         let node = [0x7e; 16];
-        commands
-            .send(Command::SelectPn {
-                preferred: Some(node),
-                mailbox: None,
-            })
-            .expect("queue the command");
+        engine.submit(Command::SelectPn {
+            preferred: Some(node),
+            mailbox: None,
+        });
         let now_ms = core.now_ms();
         let _ = engine.on_tick(&mut core, now_ms);
 
-        let selected =
-            core::iter::from_fn(|| events.try_recv().ok()).find_map(|event| match event {
+        let selected = drain(&mut engine)
+            .into_iter()
+            .find_map(|event| match event {
                 OutboxEvent::PnSelected {
                     destination,
                     stamp_cost,
@@ -1562,16 +1495,14 @@ mod tests {
     fn select_without_preference(input: MailboxInput) -> Vec<OutboxEvent> {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut core = core(dir.path());
-        let (mut engine, events, commands) = engine();
-        commands
-            .send(Command::SelectPn {
-                preferred: None,
-                mailbox: Some(input),
-            })
-            .expect("queue the command");
+        let mut engine = engine();
+        engine.submit(Command::SelectPn {
+            preferred: None,
+            mailbox: Some(input),
+        });
         let now_ms = core.now_ms();
         let _ = engine.on_tick(&mut core, now_ms);
-        core::iter::from_fn(|| events.try_recv().ok()).collect()
+        drain(&mut engine)
     }
 
     /// A stored selection the path table still holds is kept without
@@ -1667,24 +1598,22 @@ mod tests {
     fn a_first_run_waits_for_the_replays_then_reports_none_heard() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut core = core(dir.path());
-        let (mut engine, events, commands) = engine();
-        commands
-            .send(Command::SelectPn {
-                preferred: None,
-                mailbox: Some(MailboxInput {
-                    routes: Ok(vec![Route {
-                        node: [0x44; 16],
-                        hops: 1,
-                        own_device: false,
-                        seen_ms: 1,
-                    }]),
-                    previous: None,
-                }),
-            })
-            .expect("queue the command");
+        let mut engine = engine();
+        engine.submit(Command::SelectPn {
+            preferred: None,
+            mailbox: Some(MailboxInput {
+                routes: Ok(vec![Route {
+                    node: [0x44; 16],
+                    hops: 1,
+                    own_device: false,
+                    seen_ms: 1,
+                }]),
+                previous: None,
+            }),
+        });
         let now_ms = core.now_ms();
         let _ = engine.on_tick(&mut core, now_ms);
-        let early: Vec<_> = core::iter::from_fn(|| events.try_recv().ok()).collect();
+        let early: Vec<_> = drain(&mut engine);
         assert!(
             !early
                 .iter()
@@ -1696,7 +1625,7 @@ mod tests {
         // window by however long that tick took.
         let later_ms = core.now_ms() + DISCOVERY_WINDOW_MS;
         let _ = engine.on_tick(&mut core, later_ms);
-        let late: Vec<_> = core::iter::from_fn(|| events.try_recv().ok()).collect();
+        let late: Vec<_> = drain(&mut engine);
         assert!(
             late.iter().any(|event| matches!(
                 event,
@@ -1713,19 +1642,18 @@ mod tests {
     fn an_unknown_destination_is_not_reported_as_resolved() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut core = core(dir.path());
-        let (mut engine, events, commands) = engine();
+        let mut engine = engine();
 
-        commands
-            .send(Command::Resolve {
-                destination: [0x22; 16],
-            })
-            .expect("queue the command");
+        engine.submit(Command::Resolve {
+            destination: [0x22; 16],
+        });
         for _ in 0..3 {
             let now_ms = core.now_ms();
             let _ = engine.on_tick(&mut core, now_ms);
         }
 
-        let resolved = core::iter::from_fn(|| events.try_recv().ok())
+        let resolved = drain(&mut engine)
+            .into_iter()
             .any(|event| matches!(event, OutboxEvent::Resolved { .. }));
         assert!(
             !resolved,
@@ -1742,7 +1670,7 @@ mod tests {
     fn an_unanswered_resolve_asks_for_the_path_again() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut core = core(dir.path());
-        let (mut engine, _events, commands) = engine();
+        let mut engine = engine();
         let destination = [0x22; 16];
         // A path request carries the destination it asks for in its payload.
         let requests = |out: &TickOutput| {
@@ -1757,9 +1685,7 @@ mod tests {
                 .count()
         };
 
-        commands
-            .send(Command::Resolve { destination })
-            .expect("queue the command");
+        engine.submit(Command::Resolve { destination });
         let start = core.now_ms();
         let first = engine.on_tick(&mut core, start);
         assert_eq!(requests(&first), 1, "the resolve asks once at once");
@@ -1785,24 +1711,22 @@ mod tests {
     fn a_freshly_queued_message_is_not_reported_as_departed() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut core = core(dir.path());
-        let (mut engine, events, commands) = engine();
+        let mut engine = engine();
 
         // Register first: `create_message` needs our own delivery destination.
         let now_ms = core.now_ms();
         let _ = engine.on_tick(&mut core, now_ms);
 
-        commands
-            .send(Command::Send(Box::new(SendRequest {
-                destination: [0x33; 16],
-                title: b"t".to_vec(),
-                body: b"a short status line".to_vec(),
-                via: Via::Direct,
-            })))
-            .expect("queue the command");
+        engine.submit(Command::Send(Box::new(SendRequest {
+            destination: [0x33; 16],
+            title: b"t".to_vec(),
+            body: b"a short status line".to_vec(),
+            via: Via::Direct,
+        })));
         let now_ms = core.now_ms();
         let _ = engine.on_tick(&mut core, now_ms);
 
-        let seen: Vec<_> = core::iter::from_fn(|| events.try_recv().ok()).collect();
+        let seen: Vec<_> = drain(&mut engine);
         assert!(
             seen.iter()
                 .any(|event| matches!(event, OutboxEvent::Queued { .. })),
@@ -1822,5 +1746,142 @@ mod tests {
     fn short_bodies_go_by_packet_and_long_ones_by_link() {
         assert_eq!(delivery_method(8), DeliveryMethod::Opportunistic);
         assert_eq!(delivery_method(64_000), DeliveryMethod::Direct);
+    }
+
+    /// Mine `job` with the test clock and recorded effects, on a runtime
+    /// with no timer: the stepping clock never needs one.
+    fn mine_recorded(job: StampJob) -> (StampAnswer, Vec<String>) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("a current-thread runtime");
+        let clock = crate::clock::fake::Stepping::default();
+        let mut effects = crate::effects::fake::Recorded::default();
+        let answer = runtime.block_on(mine(job, rand_core::OsRng, &clock, &mut effects));
+        (answer, effects.notices)
+    }
+
+    /// A grind above the narration threshold is narrated through
+    /// `Effects::notice`, the same lines the stamp worker wrote to stderr
+    /// before the engine lost std, and a cancelled one says it was abandoned,
+    /// never mined. Cancelled up front, so the search returns at its first
+    /// check and the test costs nothing.
+    #[test]
+    fn a_costly_grind_is_narrated_through_the_effects() {
+        let cancel = Arc::new(StampCancel::new());
+        cancel.cancel();
+        let (answer, notices) = mine_recorded(StampJob::Delivery(
+            DeliveryStampRequest {
+                message_id: [0x5a; 32],
+                target_cost: 254,
+            },
+            cancel,
+        ));
+        assert!(matches!(
+            answer,
+            StampAnswer::Delivery {
+                result: Err(StampError::Cancelled),
+                ..
+            }
+        ));
+        assert_eq!(
+            notices,
+            [
+                "mining delivery stamp at cost 254...",
+                "delivery stamp abandoned after 0.0s",
+            ]
+        );
+    }
+
+    /// The progress lines come every five seconds of the given clock while
+    /// the grind runs, and the grind still ends when it is called off. The
+    /// effects here fire the cancel on the second line, the way a frontend's
+    /// cancel would; the search observes it at its first yield after the
+    /// workblock, so the lines go on until then. The stepping clock moves
+    /// only when the progress timer is polled, so every line is exact and
+    /// the closing time is five seconds per line.
+    #[test]
+    fn a_running_grind_says_it_is_still_going() {
+        struct CancelOnSecondLine {
+            recorded: crate::effects::fake::Recorded,
+            cancel: Arc<StampCancel>,
+        }
+        impl Effects for CancelOnSecondLine {
+            fn notice(&mut self, line: &str) {
+                if line.contains("(10s)") {
+                    self.cancel.cancel();
+                }
+                self.recorded.notice(line);
+            }
+            fn print(&mut self, rendered: &[u8]) -> Result<(), String> {
+                self.recorded.print(rendered)
+            }
+            fn save_mailbox(
+                &mut self,
+                stored: &crate::mailbox_state::Stored,
+            ) -> Result<(), String> {
+                self.recorded.save_mailbox(stored)
+            }
+            fn write_seen(&mut self, write: &crate::seen::SeenWrite) -> Result<(), String> {
+                self.recorded.write_seen(write)
+            }
+            fn unix_now_ms(&self) -> u64 {
+                self.recorded.unix_now_ms()
+            }
+        }
+
+        let cancel = Arc::new(StampCancel::new());
+        let mut effects = CancelOnSecondLine {
+            recorded: crate::effects::fake::Recorded::default(),
+            cancel: Arc::clone(&cancel),
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("a current-thread runtime");
+        let clock = crate::clock::fake::Stepping::default();
+        let job = StampJob::Delivery(
+            DeliveryStampRequest {
+                message_id: [0x5a; 32],
+                target_cost: 254,
+            },
+            cancel,
+        );
+        let answer = runtime.block_on(mine(job, rand_core::OsRng, &clock, &mut effects));
+        assert!(matches!(
+            answer,
+            StampAnswer::Delivery {
+                result: Err(StampError::Cancelled),
+                ..
+            }
+        ));
+        let notices = effects.recorded.notices;
+        let (last, still) = notices[1..].split_last().expect("more than one line");
+        assert_eq!(notices[0], "mining delivery stamp at cost 254...");
+        assert!(still.len() >= 2, "{notices:?}");
+        for (index, line) in still.iter().enumerate() {
+            assert_eq!(
+                *line,
+                format!("still mining delivery stamp ({}s)...", (index + 1) * 5)
+            );
+        }
+        assert_eq!(
+            *last,
+            format!("delivery stamp abandoned after {}.0s", still.len() * 5)
+        );
+    }
+
+    /// At or below the threshold a grind is silent.
+    #[test]
+    fn a_cheap_grind_says_nothing() {
+        let cancel = Arc::new(StampCancel::new());
+        cancel.cancel();
+        let (_, notices) = mine_recorded(StampJob::Propagation(
+            PropagationStampRequest {
+                message_id: [0x5a; 32],
+                transient_id: [0x11; 32],
+                target_cost: STAMP_PROGRESS_COST,
+            },
+            cancel,
+        ));
+        assert!(notices.is_empty(), "{notices:?}");
     }
 }
