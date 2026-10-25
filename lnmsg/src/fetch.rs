@@ -20,12 +20,12 @@
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use core::fmt::Write;
 use core::time::Duration;
-use std::io::Write;
 
 use leviculum_lxmf::router::PropagationPathAttempts;
-use tokio::time::Instant;
 
+use crate::clock::{self, Clock};
 use crate::effects::Effects;
 use crate::events;
 use crate::mailbox_state::{self, MailboxRun};
@@ -134,21 +134,26 @@ impl core::fmt::Display for FetchError {
 
 impl core::error::Error for FetchError {}
 
-/// Print one message the way `lnmsg fetch` shows mail: a single header line
+/// Render one message the way `lnmsg fetch` shows mail: a single header line
 /// a script can key on, the body verbatim, a blank separator. The header
 /// carries the message id (the seen-store key, so an operator can connect a
 /// suppressed duplicate to its first appearance) and names an unverifiable
 /// signature out loud, because a message from an unannounced sender is the
 /// one case where "from" is a claim rather than a fact.
-fn print_message(
-    out: &mut impl Write,
+///
+/// The header is text and is written through `core::fmt::Write`; the body is
+/// bytes, forwarded as the sender wrote them (`body::finish`), so the whole
+/// message comes back as bytes rather than as a `String` that would have to
+/// replace whatever is not UTF-8.
+fn render_message(
     message_id: &[u8; 32],
     source: &[u8; 16],
     title: &[u8],
     body: &[u8],
     verified: bool,
-) -> std::io::Result<()> {
+) -> Result<Vec<u8>, core::fmt::Error> {
     let title = String::from_utf8_lossy(title);
+    let mut out = String::new();
     write!(
         out,
         "message {} from {}",
@@ -169,28 +174,30 @@ fn print_message(
         write!(out, " title {flat}")?;
     }
     writeln!(out)?;
-    out.write_all(body)?;
-    writeln!(out)?;
-    writeln!(out)
+    let mut rendered = out.into_bytes();
+    rendered.extend_from_slice(body);
+    rendered.extend_from_slice(b"\n\n");
+    Ok(rendered)
 }
 
 /// Run one `lnmsg fetch`.
 ///
 /// `preferred_pn` and `pn_source` are as in
-/// [`crate::send::run_send_propagated`]. Messages go to `out` (stdout in the
-/// binary, a buffer in tests); the seen record is written through `effects`
-/// as each message is printed, not at the end, so an interrupted drain never
-/// re-prints. The mailbox decision is shown and kept through `effects` too.
-pub async fn run_fetch<O: Outbox, E: Effects, W: Write>(
+/// [`crate::send::run_send_propagated`]. Messages are printed through
+/// [`Effects::print`] (stdout in the binary, a buffer in tests); the seen
+/// record is written through `effects` as each message is printed, not at
+/// the end, so an interrupted drain never re-prints. The mailbox decision is
+/// shown and kept through `effects` too. The budget runs on `clock`.
+pub async fn run_fetch<O: Outbox, E: Effects>(
     outbox: &mut O,
     preferred_pn: Option<[u8; 16]>,
     pn_source: &str,
     options: &FetchOptions,
     effects: &mut E,
     seen: &mut SeenStore,
-    out: &mut W,
+    clock: &impl Clock,
 ) -> Result<Fetched, FetchError> {
-    let start = Instant::now();
+    let start = clock.now_ms();
     outbox.submit(Command::SelectPn {
         preferred: preferred_pn,
         mailbox: options.mailbox.input.clone(),
@@ -220,7 +227,7 @@ pub async fn run_fetch<O: Outbox, E: Effects, W: Write>(
                         // (leviculum#719), not for a fixed window.
                         let left = options
                             .budget
-                            .saturating_sub(start.elapsed())
+                            .saturating_sub(clock::since(clock, start))
                             .saturating_sub(PATH_BUDGET_MARGIN);
                         outbox.submit(Command::Fetch {
                             path_budget_ms: u64::try_from(left.as_millis()).unwrap_or(u64::MAX),
@@ -257,17 +264,15 @@ pub async fn run_fetch<O: Outbox, E: Effects, W: Write>(
                     events::fetched(&message_id, &source, body.len(), !first_sight);
                     if first_sight {
                         new += 1;
-                        // Rendered into one buffer and written in one call:
-                        // `out` is an unlocked stdout in the binary, shared
-                        // with the tracing subscriber's own lines, and a
-                        // message split across many small writes could have
-                        // a log line land in the middle of its body.
-                        let mut rendered = Vec::new();
-                        print_message(&mut rendered, &message_id, &source, &title, &body, verified)
-                            .map_err(|error| FetchError::SyncFailed(error.to_string()))?;
-                        out.write_all(&rendered)
-                            .and_then(|()| out.flush())
-                            .map_err(|error| FetchError::SyncFailed(error.to_string()))?;
+                        // Rendered into one buffer and printed in one call:
+                        // the binary's stdout is unlocked and shared with
+                        // the tracing subscriber's own lines, and a message
+                        // split across many small writes could have a log
+                        // line land in the middle of its body.
+                        let rendered =
+                            render_message(&message_id, &source, &title, &body, verified)
+                                .map_err(|error| FetchError::SyncFailed(error.to_string()))?;
+                        effects.print(&rendered).map_err(FetchError::SyncFailed)?;
                     }
                 }
                 OutboxEvent::SyncDone {
@@ -293,7 +298,7 @@ pub async fn run_fetch<O: Outbox, E: Effects, W: Write>(
             }
         }
 
-        if start.elapsed() >= options.budget {
+        if clock::since(clock, start) >= options.budget {
             return Err(if fetching {
                 FetchError::Timeout
             } else {
@@ -302,7 +307,7 @@ pub async fn run_fetch<O: Outbox, E: Effects, W: Write>(
                 )
             });
         }
-        tokio::time::sleep(options.poll).await;
+        clock::sleep(clock, options.poll).await;
     }
 }
 
@@ -310,6 +315,8 @@ pub async fn run_fetch<O: Outbox, E: Effects, W: Write>(
 mod tests {
     use super::*;
 
+    use crate::clock::fake::Stepping;
+    use crate::clock::Tokio;
     use crate::effects::fake::Recorded;
     use crate::outbox::fake::FakeOutbox;
     use crate::seen::SeenWrite;
@@ -360,16 +367,16 @@ mod tests {
             },
         ]);
         let mut seen = SeenStore::default();
-        let mut printed = Vec::new();
+        let mut effects = effects();
 
         let fetched = run_fetch(
             &mut outbox,
             None,
             "mailbox",
             &options(),
-            &mut effects(),
+            &mut effects,
             &mut seen,
-            &mut printed,
+            &Tokio::new(),
         )
         .await
         .expect("a clean drain succeeds");
@@ -382,7 +389,7 @@ mod tests {
                 new: 2
             }
         );
-        let text = String::from_utf8(printed).expect("utf8");
+        let text = String::from_utf8(effects.printed).expect("utf8");
         assert!(text.contains("first body") && text.contains("second body"));
         let commands = outbox.commands.borrow();
         assert!(
@@ -424,7 +431,6 @@ mod tests {
         // What an earlier run left on disk.
         let (mut seen, _) = SeenStore::from_text(&(crate::address::to_hex(&ID_A) + "\n"));
         let mut effects = effects();
-        let mut printed = Vec::new();
 
         let fetched = run_fetch(
             &mut outbox,
@@ -433,13 +439,13 @@ mod tests {
             &options(),
             &mut effects,
             &mut seen,
-            &mut printed,
+            &Tokio::new(),
         )
         .await
         .expect("dedup is not an error");
 
         assert_eq!(fetched.new, 1, "only the new message counts");
-        let text = String::from_utf8(printed).expect("utf8");
+        let text = String::from_utf8(effects.printed).expect("utf8");
         assert!(!text.contains("the copy a mailbox still held"));
         assert!(text.contains("genuinely new"));
         assert_eq!(
@@ -470,7 +476,6 @@ mod tests {
             seen_fails: Some("No space left on device"),
             ..Recorded::default()
         };
-        let mut printed = Vec::new();
 
         let fetched = run_fetch(
             &mut outbox,
@@ -479,13 +484,13 @@ mod tests {
             &options(),
             &mut effects,
             &mut seen,
-            &mut printed,
+            &Tokio::new(),
         )
         .await
         .expect("a failed record is not a failed fetch");
 
         assert_eq!(fetched.new, 1);
-        assert!(String::from_utf8(printed)
+        assert!(String::from_utf8(effects.printed)
             .expect("utf8")
             .contains("must not be lost"));
         assert_eq!(
@@ -503,16 +508,16 @@ mod tests {
             detail: "none announced".to_string(),
         }]);
         let mut seen = SeenStore::default();
-        let mut printed = Vec::new();
+        let mut effects = effects();
 
         let error = run_fetch(
             &mut outbox,
             None,
             "mailbox",
             &options(),
-            &mut effects(),
+            &mut effects,
             &mut seen,
-            &mut printed,
+            &Tokio::new(),
         )
         .await
         .expect_err("no node is a failure");
@@ -520,7 +525,7 @@ mod tests {
             matches!(error, FetchError::NoPropagationNode(_)),
             "{error:?}"
         );
-        assert!(printed.is_empty());
+        assert!(effects.printed.is_empty());
     }
 
     #[tokio::test(start_paused = true)]
@@ -536,16 +541,16 @@ mod tests {
             },
         ]);
         let mut seen = SeenStore::default();
-        let mut printed = Vec::new();
+        let mut effects = effects();
 
         let error = run_fetch(
             &mut outbox,
             None,
             "mailbox",
             &options(),
-            &mut effects(),
+            &mut effects,
             &mut seen,
-            &mut printed,
+            &Tokio::new(),
         )
         .await
         .expect_err("a failed sync is a failure");
@@ -574,16 +579,16 @@ mod tests {
             },
         ]);
         let mut seen = SeenStore::default();
-        let mut printed = Vec::new();
+        let mut effects = effects();
 
         let error = run_fetch(
             &mut outbox,
             None,
             "mailbox",
             &options(),
-            &mut effects(),
+            &mut effects,
             &mut seen,
-            &mut printed,
+            &Tokio::new(),
         )
         .await
         .expect_err("no path is a failure");
@@ -603,20 +608,93 @@ mod tests {
             stamp_cost: None,
         }]);
         let mut seen = SeenStore::default();
-        let mut printed = Vec::new();
+        let mut effects = effects();
 
         let error = run_fetch(
             &mut outbox,
             None,
             "mailbox",
             &options(),
-            &mut effects(),
+            &mut effects,
             &mut seen,
-            &mut printed,
+            &Tokio::new(),
         )
         .await
         .expect_err("no SyncDone inside the budget is a failure");
         assert_eq!(error, FetchError::Timeout);
+    }
+
+    /// The budget runs on the clock the fetch is given: on a stepping clock
+    /// the path budget handed to the drain is what is left after the sleeps
+    /// so far, and the 5 s budget at a 1 ms poll ends after 5 000 sleeps.
+    #[tokio::test]
+    async fn the_budget_is_measured_on_the_clock_it_is_given() {
+        let mut outbox = FakeOutbox::new(vec![OutboxEvent::PnSelected {
+            destination: PN,
+            stamp_cost: None,
+        }]);
+        let mut seen = SeenStore::default();
+        let mut effects = effects();
+        let clock = Stepping::default();
+
+        let error = run_fetch(
+            &mut outbox,
+            None,
+            "mailbox",
+            &options(),
+            &mut effects,
+            &mut seen,
+            &clock,
+        )
+        .await
+        .expect_err("no SyncDone inside the budget is a failure");
+        assert_eq!(error, FetchError::Timeout);
+        assert_eq!(clock.sleeps.get(), 5_000);
+        assert_eq!(
+            outbox.commands.borrow()[1],
+            Command::Fetch {
+                path_budget_ms: 4_000
+            }
+        );
+    }
+
+    /// A body is bytes and is printed as such: what is not UTF-8 reaches
+    /// stdout unchanged, not replaced.
+    #[tokio::test(start_paused = true)]
+    async fn a_body_that_is_not_utf8_is_printed_byte_for_byte() {
+        let mut outbox = FakeOutbox::new(vec![
+            OutboxEvent::PnSelected {
+                destination: PN,
+                stamp_cost: None,
+            },
+            received(ID_A, b"\xff\xfe raw"),
+            OutboxEvent::SyncDone {
+                received: 1,
+                duplicates: 0,
+            },
+        ]);
+        let mut seen = SeenStore::default();
+        let mut effects = effects();
+
+        run_fetch(
+            &mut outbox,
+            None,
+            "mailbox",
+            &options(),
+            &mut effects,
+            &mut seen,
+            &Tokio::new(),
+        )
+        .await
+        .expect("a binary body still arrives");
+        let header = format!(
+            "message {} from {} title t\n",
+            crate::address::to_hex(&ID_A),
+            crate::address::to_hex(&SRC)
+        );
+        let mut expected = header.into_bytes();
+        expected.extend_from_slice(b"\xff\xfe raw\n\n");
+        assert_eq!(effects.printed, expected);
     }
 
     /// An unverified signature is said out loud in the one line a reader
@@ -641,20 +719,20 @@ mod tests {
             },
         ]);
         let mut seen = SeenStore::default();
-        let mut printed = Vec::new();
+        let mut effects = effects();
 
         run_fetch(
             &mut outbox,
             None,
             "mailbox",
             &options(),
-            &mut effects(),
+            &mut effects,
             &mut seen,
-            &mut printed,
+            &Tokio::new(),
         )
         .await
         .expect("an unverified message still arrives");
-        let text = String::from_utf8(printed).expect("utf8");
+        let text = String::from_utf8(effects.printed).expect("utf8");
         assert!(text.contains("(unverified)"), "{text}");
     }
 }

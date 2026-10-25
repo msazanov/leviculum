@@ -38,14 +38,9 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use core::time::Duration;
 
-// `tokio::time::Instant`, not `std::time::Instant`: the budget has to be
-// measured on the same clock the sleep below uses, so a test can drive a
-// thirty-second budget through in milliseconds with a paused runtime clock and
-// still exercise the real expiry path.
-use tokio::time::Instant;
-
 use leviculum_lxmf::router::MessageState;
 
+use crate::clock::{self, Clock};
 use crate::effects::Effects;
 use crate::events;
 use crate::mailbox_state::{self, MailboxRun};
@@ -242,8 +237,9 @@ pub async fn run_send<O: Outbox>(
     outbox: &mut O,
     request: SendRequest,
     options: &SendOptions,
+    clock: &impl Clock,
 ) -> Result<Queued, SendError> {
-    let start = Instant::now();
+    let start = clock.now_ms();
     let destination = request.destination;
     let via = request.via;
     let body_len = request.body.len();
@@ -268,7 +264,10 @@ pub async fn run_send<O: Outbox>(
                 OutboxEvent::Broken { detail } => return Err(SendError::Broken(detail)),
                 OutboxEvent::Resolved { destination: which } if which == destination => {
                     if phase == Phase::Resolved {
-                        events::resolved(&destination, start.elapsed().as_millis() as u64);
+                        events::resolved(
+                            &destination,
+                            clock::since(clock, start).as_millis() as u64,
+                        );
                         // `request` is taken exactly once: the resolve answer
                         // can only arrive in this phase, and the phase moves on
                         // in the same breath.
@@ -339,12 +338,12 @@ pub async fn run_send<O: Outbox>(
             }
         }
 
-        if start.elapsed() >= options.budget {
+        if clock::since(clock, start) >= options.budget {
             return Err(match (phase, message_id) {
                 (Phase::Ready, _) => SendError::NeverReady,
                 (Phase::Resolved, _) => SendError::Unreachable {
                     destination,
-                    waited: start.elapsed(),
+                    waited: clock::since(clock, start),
                 },
                 (Phase::Queued, _) => SendError::NoAnswer {
                     message_id: [0u8; 32],
@@ -358,7 +357,7 @@ pub async fn run_send<O: Outbox>(
                 (Phase::HandedOn, None) => SendError::NeverReady,
             });
         }
-        tokio::time::sleep(options.poll).await;
+        clock::sleep(clock, options.poll).await;
     }
 }
 
@@ -413,6 +412,9 @@ enum PropagatedPhase {
 /// also called as the second leg of `--via auto`, where `Ready` was consumed
 /// by the direct leg. Commands queue until the engine is ready either way,
 /// so the sequencing is unchanged; only the events differ.
+// Eight: the run's inputs and its three host seams (outbox, effects, clock),
+// each passed separately so a host can bring any one of its own.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_send_propagated<O: Outbox>(
     outbox: &mut O,
     request: SendRequest,
@@ -421,8 +423,9 @@ pub async fn run_send_propagated<O: Outbox>(
     cancel: Option<[u8; 32]>,
     options: &SendOptions,
     effects: &mut impl Effects,
+    clock: &impl Clock,
 ) -> Result<Queued, SendError> {
-    let start = Instant::now();
+    let start = clock.now_ms();
     let destination = request.destination;
     let via = request.via;
     let body_len = request.body.len();
@@ -521,7 +524,7 @@ pub async fn run_send_propagated<O: Outbox>(
             }
         }
 
-        if start.elapsed() >= options.budget {
+        if clock::since(clock, start) >= options.budget {
             return Err(match (phase, message_id) {
                 (PropagatedPhase::Selecting, _) => SendError::NoPropagationNode(
                     "selecting a node did not finish inside the timeout".to_string(),
@@ -538,7 +541,7 @@ pub async fn run_send_propagated<O: Outbox>(
                 (PropagatedPhase::HandedOn, None) => SendError::NeverReady,
             });
         }
-        tokio::time::sleep(options.poll).await;
+        clock::sleep(clock, options.poll).await;
     }
 }
 
@@ -546,6 +549,8 @@ pub async fn run_send_propagated<O: Outbox>(
 mod tests {
     use super::*;
 
+    use crate::clock::fake::Stepping;
+    use crate::clock::Tokio;
     use crate::effects::fake::Recorded;
     use crate::outbox::fake::FakeOutbox;
     use crate::outbox::Via;
@@ -587,7 +592,7 @@ mod tests {
             },
         ]);
 
-        let queued = run_send(&mut outbox, request(), &options())
+        let queued = run_send(&mut outbox, request(), &options(), &Tokio::new())
             .await
             .expect("a handed-on message is a success");
 
@@ -616,7 +621,7 @@ mod tests {
                 state: MessageState::Delivered,
             },
         ]);
-        let queued = run_send(&mut outbox, request(), &options())
+        let queued = run_send(&mut outbox, request(), &options(), &Tokio::new())
             .await
             .expect("delivered is handed on");
         assert_eq!(queued.state, MessageState::Delivered);
@@ -628,7 +633,7 @@ mod tests {
     async fn an_unreachable_destination_fails_without_queueing_anything() {
         let mut outbox = FakeOutbox::new(vec![OutboxEvent::Ready { address: [1; 16] }]);
 
-        let error = run_send(&mut outbox, request(), &options())
+        let error = run_send(&mut outbox, request(), &options(), &Tokio::new())
             .await
             .expect_err("an unresolvable destination is a failure");
 
@@ -652,7 +657,7 @@ mod tests {
                 detail: "QueueFull".to_string(),
             },
         ]);
-        let error = run_send(&mut outbox, request(), &options())
+        let error = run_send(&mut outbox, request(), &options(), &Tokio::new())
             .await
             .expect_err("a refusal is a failure");
         assert!(matches!(error, SendError::Refused(_)), "{error:?}");
@@ -672,7 +677,7 @@ mod tests {
                 state: MessageState::Failed,
             },
         ]);
-        let error = run_send(&mut outbox, request(), &options())
+        let error = run_send(&mut outbox, request(), &options(), &Tokio::new())
             .await
             .expect_err("the router giving up is a failure");
         assert!(
@@ -704,7 +709,7 @@ mod tests {
                 state: MessageState::Outbound,
             },
         ]);
-        let error = run_send(&mut outbox, request(), &options())
+        let error = run_send(&mut outbox, request(), &options(), &Tokio::new())
             .await
             .expect_err("a stranded message is not a success");
         assert!(
@@ -719,12 +724,33 @@ mod tests {
         );
     }
 
+    /// The budget is the clock's, not tokio's: on a clock that moves only
+    /// when the runner sleeps, a 5 s budget polled every 1 ms ends after
+    /// exactly 5 000 sleeps, and the destination that never resolved says
+    /// how long it was waited for.
+    #[tokio::test]
+    async fn the_budget_is_measured_on_the_clock_it_is_given() {
+        let mut outbox = FakeOutbox::new(vec![OutboxEvent::Ready { address: [1; 16] }]);
+        let clock = Stepping::default();
+        let error = run_send(&mut outbox, request(), &options(), &clock)
+            .await
+            .expect_err("an unresolved destination is not a success");
+        assert_eq!(
+            error,
+            SendError::Unreachable {
+                destination: DST,
+                waited: Duration::from_secs(5),
+            }
+        );
+        assert_eq!(clock.sleeps.get(), 5_000);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn a_broken_engine_is_reported_verbatim() {
         let mut outbox = FakeOutbox::new(vec![OutboxEvent::Broken {
             detail: "register delivery destination".to_string(),
         }]);
-        let error = run_send(&mut outbox, request(), &options())
+        let error = run_send(&mut outbox, request(), &options(), &Tokio::new())
             .await
             .expect_err("a broken engine is a failure");
         assert!(matches!(error, SendError::Broken(_)), "{error:?}");
@@ -733,7 +759,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn an_engine_that_never_comes_up_fails_before_queueing_anything() {
         let mut outbox = FakeOutbox::new(Vec::new());
-        let error = run_send(&mut outbox, request(), &options())
+        let error = run_send(&mut outbox, request(), &options(), &Tokio::new())
             .await
             .expect_err("no readiness is a failure");
         assert_eq!(error, SendError::NeverReady);
@@ -744,7 +770,7 @@ mod tests {
     async fn a_dead_engine_is_reported_rather_than_waited_out() {
         let mut outbox = FakeOutbox::new(Vec::new());
         outbox.gone = true;
-        let error = run_send(&mut outbox, request(), &options())
+        let error = run_send(&mut outbox, request(), &options(), &Tokio::new())
             .await
             .expect_err("a dead engine is a failure");
         assert_eq!(error, SendError::Gone);
@@ -865,6 +891,7 @@ mod tests {
             None,
             &options(),
             &mut Recorded::default(),
+            &Tokio::new(),
         )
         .await
         .expect("an accepted upload is the success");
@@ -897,6 +924,7 @@ mod tests {
             None,
             &options(),
             &mut Recorded::default(),
+            &Tokio::new(),
         )
         .await
         .expect_err("no node is a failure");
@@ -950,6 +978,7 @@ mod tests {
             Some(DIRECT_ID),
             &options(),
             &mut Recorded::default(),
+            &Tokio::new(),
         )
         .await
         .expect("stale direct events must not derail the fallback");
@@ -989,6 +1018,7 @@ mod tests {
             None,
             &options(),
             &mut Recorded::default(),
+            &Tokio::new(),
         )
         .await
         .expect_err("an unfinished upload is not a success");

@@ -25,6 +25,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 use leviculum_std::config::Config;
 
+use lnmsg::clock::Tokio;
 use lnmsg::effects::Terminal;
 use lnmsg::engine::{attach, AttachConfig};
 use lnmsg::fetch::{run_fetch, FetchError, FetchOptions};
@@ -353,6 +354,7 @@ async fn run(args: SendArgs) -> ExitCode {
 
     let mut options = SendOptions::new(instance.clone(), Duration::from_secs(args.timeout));
     let mut effects = Terminal::new(home.clone());
+    let clock = Tokio::new();
     // `--via auto` reads the path table only if its direct leg fails.
     if args.via == ViaArg::Propagated {
         options.mailbox = mailbox_run(&home, &config_dir, &instance, preferred_pn).await;
@@ -366,7 +368,8 @@ async fn run(args: SendArgs) -> ExitCode {
 
     let code = match args.via {
         ViaArg::Direct => {
-            let outcome = run_send(&mut attached.outbox, request(Via::Direct), &options).await;
+            let outcome =
+                run_send(&mut attached.outbox, request(Via::Direct), &options, &clock).await;
             match outcome {
                 Ok(queued) => {
                     events::done(Some(&queued.message_id), "queued", 0);
@@ -388,6 +391,7 @@ async fn run(args: SendArgs) -> ExitCode {
                 None,
                 &options,
                 &mut effects,
+                &clock,
             )
             .await;
             match outcome {
@@ -408,7 +412,7 @@ async fn run(args: SendArgs) -> ExitCode {
             // link either comes up or it does not; an opportunistic packet
             // would count as handed on with the peer unreachable, and the
             // fallback would never fire.
-            let direct = run_send(&mut attached.outbox, request(Via::Link), &options).await;
+            let direct = run_send(&mut attached.outbox, request(Via::Link), &options, &clock).await;
             match direct {
                 Ok(queued) => {
                     events::via("direct", "link-delivery");
@@ -447,6 +451,7 @@ async fn run(args: SendArgs) -> ExitCode {
                             cancel,
                             &options,
                             &mut effects,
+                            &clock,
                         )
                         .await;
                         match fallback {
@@ -523,14 +528,14 @@ async fn run_fetch_command(args: FetchArgs) -> ExitCode {
     let mut options = FetchOptions::new(instance.clone(), Duration::from_secs(args.timeout));
     let mut effects = Terminal::new(home.clone());
     options.mailbox = mailbox_run(&home, &config_dir, &instance, preferred_pn).await;
-    // Deliberately NOT `stdout().lock()`: the engine's driver thread logs
-    // through tracing, and with `RUST_LOG=debug` (how the conformance rig
-    // runs every tool) the fmt subscriber writes to this same stdout. A lock
-    // held across the whole fetch deadlocked the first engine tick against
-    // it for the entire run. `run_fetch` renders each message into one
-    // buffer and hands it over as a single write, so output stays whole
-    // without anyone holding the stream.
-    let mut stdout = std::io::stdout();
+    // `Terminal::print` deliberately does NOT hold `stdout().lock()` across
+    // the run: the engine's driver thread logs through tracing, and with
+    // `RUST_LOG=debug` (how the conformance rig runs every tool) the fmt
+    // subscriber writes to this same stdout. A lock held across the whole
+    // fetch deadlocked the first engine tick against it for the entire run.
+    // `run_fetch` renders each message into one buffer and hands it over as
+    // a single write, so output stays whole without anyone holding the
+    // stream.
     let outcome = run_fetch(
         &mut attached.outbox,
         preferred_pn,
@@ -538,7 +543,7 @@ async fn run_fetch_command(args: FetchArgs) -> ExitCode {
         &options,
         &mut effects,
         &mut seen,
-        &mut stdout,
+        &Tokio::new(),
     )
     .await;
 

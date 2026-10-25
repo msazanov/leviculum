@@ -631,8 +631,8 @@ honest, that is the moment for the crate.
 | `config` | 154 | core `parse`; shell `load` (the file) |
 | `seen` | 186 | core the set, the order and the compaction rule; shell the file |
 | `mailbox_state` | 380 | core `Route`, `Stored`, `Decision`, `MailboxRun`, `routes_from_path_table`; shell `load`, `save`, `unix_now_ms` and the stderr lines |
-| `send` | 996 | core: the send and fallback loops over `Outbox`; their clock is tokio's today |
-| `fetch` | 598 | core: the mailbox drain over `Outbox`; tokio clock, `io::Write` output |
+| `send` | 996 | core: the send and fallback loops over `Outbox` and a `clock::Clock` |
+| `fetch` | 598 | core: the mailbox drain over `Outbox` and a `clock::Clock`; messages printed through `Effects::print` |
 | `engine` | 1828 | core `Engine` (the router glue: resolves, tracking, stamp bookkeeping, sync scheduling); shell `CoreProcessor` impl, `InProcessOutbox`'s channels, `attach`, the stamp worker thread and its runtime |
 | `identity` | 182 | shell: home directory, key file |
 | `main.rs` | 543 | shell: CLI, daemon RPC, process exit |
@@ -707,6 +707,18 @@ wall clock), and the terminal's implementation is `effects::Terminal`. Two
 `io::Write` output is pass 3's, and `AttachConfig::storage_dir` is a
 `PathBuf` because the driver builder takes one, so it moves with `attach`
 in pass 4.
+
+**Status, 2026-10-25 (992).** Pass 3 is in; the gate lists 19 errors, all
+in `engine` and all of pass 4 (`mpsc` 5, `eprintln!` 3, `thread` 3,
+`leviculum_std` 2, the stamp runtime's `tokio` 2, `OsRng` 2, `path` 1,
+`time` 1). `scripts/lnmsg-no-std-groups.py` turns the gate's log into that
+table. The runners take a `clock::Clock`: a millisecond reading and an
+async millisecond sleep, no `sleep_until`, because both loops sleep a fixed
+poll and re-read the clock. The terminal's is `clock::Tokio`, so the
+paused-clock tests still drive it. `fetch` renders each message to bytes,
+the header through `core::fmt::Write`, and prints it through
+`Effects::print`: a body is forwarded byte for byte, so a `fmt::Write`
+sink for the whole message would have had to replace what is not UTF-8.
 
 **What stays std-only, and what the core needs from it.** `leviculum-std`
 (the driver, the daemon RPC, the event-log subscriber, identity minting,
