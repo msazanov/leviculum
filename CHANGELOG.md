@@ -20,6 +20,12 @@ Toolchain: Rust 1.97.1
 
 ### Added
 
+- Every program ships as a nightly `.deb` (1000). New are `lnmsg`, built with
+  its `tui`, for amd64 and arm64, and `lnflash`, for amd64: the flasher in
+  `/usr/bin` and the firmware bundle under `/usr/share/lnflash`, where it
+  looks, so `sudo lnflash` works from any directory. `lnflash --version`,
+  `lnpnd --version` and the first line `lnflash` prints now name the build id
+  and, in parentheses, the commit, as lnsd and lnomad already did.
 - `lnmsg tui`, the interactive messenger, slice one (#232), behind lnmsg's
   `tui` cargo feature: conversations, messages and a compose line, `Tab`
   between them, a command palette on `Ctrl-P`. `Enter` sends the way

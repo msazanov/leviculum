@@ -5,7 +5,47 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 homepage.workspace = true
-description = "Self-contained flasher for LNode boards — identifies a board from its bootloader, checks preconditions, and writes our firmware over UF2 mass storage or serial DFU"
+description = "Self-contained flasher for LNode boards, over UF2 mass storage or serial DFU"
+
+# The `lnflash` package: the binary plus the bundle it flashes from, the
+# firmware images and the vendored SoftDevice with its licence, installed at
+# /usr/share/lnflash, the last place `manifest::locate` looks. Built by
+# scripts/build-lnflash-deb.sh from the stage directory scripts/lnflash-bundle.sh
+# leaves behind, so the package carries byte for byte the payload the tarball
+# does and its manifest checksums hold for both. No postinst: lnflash runs as
+# root (the bootloader drive is a root:disk block device, see `--help`), so
+# there is no group for the package to put anyone in and no udev rule to ship.
+[package.metadata.deb]
+name = "lnflash"
+maintainer = "Lew Palm <lp@lew-palm.de>"
+copyright = "2026, Lew Palm"
+license-file = ["../LICENSE", "0"]
+extended-description = """\
+Self-contained flasher for LNode boards. It finds the attached boards,
+brings each into its bootloader, confirms from the bootloader what the
+board is, checks the SoftDevice precondition, and writes the leviculum
+firmware this package carries under /usr/share/lnflash. Run it as root:
+sudo lnflash, or sudo lnflash --dry-run to see what it would do.
+
+The Nordic S140 SoftDevice shipped beside the images is Nordic's, under
+the licence agreement installed next to it.
+"""
+section = "utils"
+priority = "optional"
+assets = [
+    # Exactly "target/release/...", so cargo-deb substitutes the --target
+    # triple; see leviculum-cli/Cargo.toml.
+    ["target/release/lnflash", "usr/bin/", "755"],
+    # The bundle's firmware/ directory, copied here by build-lnflash-deb.sh.
+    ["../target/lnflash/deb-payload/**/*", "usr/share/lnflash/", "644"],
+    # Rendered from docs/src/man/ by scripts/md2man.py in build-lnflash-deb.sh.
+    ["../target/man/lnflash.1", "usr/share/man/man1/lnflash.1", "644"],
+    ["README.md", "usr/share/doc/lnflash/README.md", "644"],
+    ["../packaging/lintian/lnflash", "usr/share/lintian/overrides/lnflash", "644"],
+    # Codeberg #288: both halves, the host binary and the firmware images.
+    ["../THIRD-PARTY-NOTICES", "usr/share/doc/lnflash/THIRD-PARTY-NOTICES", "644"],
+]
+changelog = "../target/deb-changelog/lnflash"
 
 [dependencies]
 # The radio-configuration frame and its HDLC framing. There is one wire

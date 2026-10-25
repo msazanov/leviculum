@@ -31,6 +31,30 @@ sudo usermod -aG docker $USER
 sudo usermod -aG dialout $USER
 ```
 
+## Packages
+
+The nightly publishes six Debian packages, statically linked against musl,
+so they install on Debian 9 and Ubuntu 16.04 or newer regardless of the host
+glibc. Download them from <https://leviculum.network/releases/nightly/latest/>
+(mirror: the Codeberg release `nightly`), each beside its `.sha256`, and install
+with `sudo apt install ./<file>.deb`.
+
+| Package | Asset | Contains | On install |
+|---------|-------|----------|------------|
+| `leviculum` | `leviculum-nightly-{amd64,arm64}.deb` | `lnsd`, `lnstatus`, `lnstest`, `lncp`, `lnprobe`, `lnpath` | starts `lnsd` as a systemd service, sets up `/etc/reticulum` |
+| `lnpnd` | `lnpnd-nightly-{amd64,arm64}.deb` | `lnpnd`, the LXMF propagation node | enables its service but does not start it |
+| `lnmsg` | `lnmsg-nightly-{amd64,arm64}.deb` | `lnmsg`, the LXMF messenger, `lnmsg tui` included | nothing; no service |
+| `lnomad` | `lnomad-nightly-{amd64,arm64}.deb` | `lnomad`, the NomadNet browser | nothing; no service |
+| `lblogd` | `lblogd-nightly-{amd64,arm64}.deb` | `lblogd`, the blog server | starts its service on `127.0.0.1:8180` |
+| `lnflash` | `lnflash-nightly-amd64.deb` | `lnflash`, and the firmware bundle under `/usr/share/lnflash` | nothing; run it as root |
+
+Each package carries the manual pages of its programs. Every program but
+`lnsd`'s clients needs a running shared instance for its mesh side: `lnsd`
+from `leviculum`, or the Python `rnsd`. `lnflash` exists for amd64 only, like
+the `lnflash-nightly-amd64.tar.gz` bundle it is packaged from. Every binary
+names its build: `lnsd --version`, `lnmsg --version` and the others print the
+version and, in parentheses, the commit it was built from.
+
 ## Build from source
 
 ```sh

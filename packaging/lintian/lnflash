@@ -1,0 +1,5 @@
+# musl-static binary; see packaging/lintian/lblogd for the reasoning
+# behind all three overrides.
+lnflash: unstripped-binary-or-object [usr/bin/lnflash]
+lnflash: shared-library-lacks-prerequisites [usr/bin/lnflash]
+lnflash: statically-linked-binary [usr/bin/lnflash]

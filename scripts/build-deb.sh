@@ -65,11 +65,15 @@ arm64) TRIPLE=aarch64-unknown-linux-musl ;;
     ;;
 esac
 
-# Every crate that ships a Debian package, and every binary the three of
-# them install between them. Kept in the same order as deb-stamp.sh's
-# CRATES, which writes the version files read below.
-CRATES=(leviculum-cli lnomad lblogd lnpnd)
-BINS=(lnsd lnstest lncp lnstatus lnprobe lnpath lnomad lblogd lnpnd)
+# Every crate this script packages, and every binary they install between
+# them. Kept in the same order as deb-stamp.sh's CRATES, which writes the
+# version files read below; its last entry, lnflash, is packaged from the
+# firmware bundle by scripts/build-lnflash-deb.sh instead.
+CRATES=(leviculum-cli lnomad lblogd lnpnd lnmsg)
+BINS=(lnsd lnstest lncp lnstatus lnprobe lnpath lnomad lblogd lnpnd lnmsg)
+# lnmsg's terminal frontend is off by default (lnmsg/Cargo.toml); the package
+# is what a person installs, so it ships `lnmsg tui`.
+FEATURES=(--features lnmsg/tui)
 
 # The .deb is not always named after its crate: leviculum-cli ships as
 # "leviculum". Same mapping as deb-stamp.sh's pkg_name; it is spelled
@@ -141,7 +145,7 @@ bin_args=()
 for bin in "${BINS[@]}"; do
     bin_args+=(--bin "$bin")
 done
-"${build_cmd[@]}" --release --target "$TRIPLE" "${bin_args[@]}"
+"${build_cmd[@]}" --release --target "$TRIPLE" "${bin_args[@]}" "${FEATURES[@]}"
 
 # The allocator is read off the bytes, like the heap-accounting marker below:
 # an arm64 binary cannot be run here. lnsd logs `Allocator: mimalloc` at

@@ -21,6 +21,13 @@ Each file has a `.sha256` beside it. The second link is the same file on Codeber
 - [lnomad-nightly-amd64.deb](https://leviculum.network/releases/nightly/latest/lnomad-nightly-amd64.deb) ([sha256](https://leviculum.network/releases/nightly/latest/lnomad-nightly-amd64.deb.sha256)), mirror: [Codeberg](https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/lnomad-nightly-amd64.deb) ([sha256](https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/lnomad-nightly-amd64.deb.sha256))
 - [lnomad-nightly-arm64.deb](https://leviculum.network/releases/nightly/latest/lnomad-nightly-arm64.deb) ([sha256](https://leviculum.network/releases/nightly/latest/lnomad-nightly-arm64.deb.sha256)), mirror: [Codeberg](https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/lnomad-nightly-arm64.deb) ([sha256](https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/lnomad-nightly-arm64.deb.sha256))
 
+## Messenger: `lnmsg`
+
+`lnmsg send` for scripts, `lnmsg tui` for people.
+
+- [lnmsg-nightly-amd64.deb](https://leviculum.network/releases/nightly/latest/lnmsg-nightly-amd64.deb) ([sha256](https://leviculum.network/releases/nightly/latest/lnmsg-nightly-amd64.deb.sha256)), mirror: [Codeberg](https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/lnmsg-nightly-amd64.deb) ([sha256](https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/lnmsg-nightly-amd64.deb.sha256))
+- [lnmsg-nightly-arm64.deb](https://leviculum.network/releases/nightly/latest/lnmsg-nightly-arm64.deb) ([sha256](https://leviculum.network/releases/nightly/latest/lnmsg-nightly-arm64.deb.sha256)), mirror: [Codeberg](https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/lnmsg-nightly-arm64.deb) ([sha256](https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/lnmsg-nightly-arm64.deb.sha256))
+
 ## Blog server: `lblogd`
 
 - [lblogd-nightly-amd64.deb](https://leviculum.network/releases/nightly/latest/lblogd-nightly-amd64.deb) ([sha256](https://leviculum.network/releases/nightly/latest/lblogd-nightly-amd64.deb.sha256)), mirror: [Codeberg](https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/lblogd-nightly-amd64.deb) ([sha256](https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/lblogd-nightly-amd64.deb.sha256))
@@ -39,12 +46,20 @@ Static binaries, so any Debian from 9 or Ubuntu from 16.04 will do. A `.tar.gz` 
 `lnflash` carries the flasher and one image per supported [board](/boards), amd64 host only.
 
 - [lnflash-nightly-amd64.tar.gz](https://leviculum.network/releases/nightly/latest/lnflash-nightly-amd64.tar.gz) ([sha256](https://leviculum.network/releases/nightly/latest/lnflash-nightly-amd64.tar.gz.sha256)), mirror: [Codeberg](https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/lnflash-nightly-amd64.tar.gz) ([sha256](https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/lnflash-nightly-amd64.tar.gz.sha256))
+- [lnflash-nightly-amd64.deb](https://leviculum.network/releases/nightly/latest/lnflash-nightly-amd64.deb) ([sha256](https://leviculum.network/releases/nightly/latest/lnflash-nightly-amd64.deb.sha256)), mirror: [Codeberg](https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/lnflash-nightly-amd64.deb) ([sha256](https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/lnflash-nightly-amd64.deb.sha256))
 
 Flash:
 
 ```
 tar xzf lnflash-nightly-amd64.tar.gz && cd lnflash-*
 sudo ./lnflash
+```
+
+Or install the same bundle as a package, the flasher in `/usr/bin` and the images under `/usr/share/lnflash`:
+
+```
+sudo apt install ./lnflash-nightly-amd64.deb
+sudo lnflash
 ```
 
 Details: [Building and flashing](https://codeberg.org/Lew_Palm/leviculum/src/branch/master/docs/src/firmware/flashing.md).

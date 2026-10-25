@@ -6,12 +6,14 @@
 # runs.
 #
 # Expects, for both musl triples under target/<triple>/release/:
-#   lnsd, lnstest, lncp, lnstatus, lnprobe, lnpath, lnomad, lblogd, lnpnd
+#   lnsd, lnstest, lncp, lnstatus, lnprobe, lnpath, lnomad, lblogd, lnpnd, lnmsg
 # and one .deb per package and arch under target/debian/:
 #   leviculum_*_{amd64,arm64}.deb
 #   lnomad_*_{amd64,arm64}.deb
 #   lblogd_*_{amd64,arm64}.deb
 #   lnpnd_*_{amd64,arm64}.deb
+#   lnmsg_*_{amd64,arm64}.deb
+#   lnflash_*_amd64.deb (scripts/build-lnflash-deb.sh)
 #   leviculum-heapacct_*_arm64.deb
 # and the lnflash firmware bundle from scripts/lnflash-bundle.sh:
 #   target/lnflash/lnflash-<stamp>.tar.gz
@@ -30,8 +32,8 @@
 # no python3, no curl, no jq. `scripts/test-collect-nightly-debs.sh` holds
 # that list by running this script with a PATH that has nothing else on it.
 #
-# Produces, for each of leviculum, lnomad, lblogd and lnpnd, and each of amd64
-# and arm64:
+# Produces, for each of leviculum, lnomad, lblogd, lnpnd and lnmsg, and each of
+# amd64 and arm64:
 #   dist/<pkg>-nightly-<arch>.deb          + .sha256
 #   dist/<pkg>-nightly-<arch>.tar.gz       + .sha256   (just the binaries)
 # plus the instrumented leviculum package, arm64 only (Codeberg #437):
@@ -39,6 +41,7 @@
 # plus one source tarball, one lnflash bundle and the book:
 #   dist/leviculum-nightly-source.tar.gz   + .sha256
 #   dist/lnflash-nightly-amd64.tar.gz      + .sha256
+#   dist/lnflash-nightly-amd64.deb         + .sha256   (the same bundle, packaged)
 #   dist/leviculum-docs-nightly.tar.gz     + .sha256
 # The .deb version lives in the control metadata and the embedded
 # --version string, not in the filename. Binaries are pre-stripped
@@ -125,6 +128,12 @@ collect_deb lblogd amd64
 collect_deb lblogd arm64
 collect_deb lnpnd amd64
 collect_deb lnpnd arm64
+collect_deb lnmsg amd64
+collect_deb lnmsg arm64
+# amd64 only, like the bundle it is packaged from. The stable name is spelled
+# out because there is no arm64 one: `just check-firmware-images` reads a
+# two-argument line as a package staged for both architectures.
+collect_deb lnflash amd64 lnflash-nightly-amd64.deb
 # Codeberg #437: the heap-accounting build of the leviculum package, for
 # memory censuses on the arm64 soak node. Not for daily use, and published
 # for arm64 only because that is where the census is taken. The plain
@@ -136,7 +145,7 @@ collect_deb leviculum-heapacct arm64 leviculum-nightly-arm64-heapacct.deb
 # README/LICENSE and a VERSION pointer. Drop-in for users who want the
 # tools without root, system service, or .deb tooling.
 pack_bin_tarball() {
-    local pkg="$1"          # leviculum | lnomad | lblogd | lnpnd
+    local pkg="$1"          # leviculum | lnomad | lblogd | lnpnd | lnmsg
     local arch_dash="$2"    # amd64 | arm64
     local rust_triple="$3"  # x86_64-unknown-linux-musl | aarch64-unknown-linux-musl
     local readme_src="$4"   # per-package README, path relative to repo root
@@ -222,6 +231,8 @@ pack_bin_tarball lblogd amd64 x86_64-unknown-linux-musl lblogd/README.md lblogd
 pack_bin_tarball lblogd arm64 aarch64-unknown-linux-musl lblogd/README.md lblogd
 pack_bin_tarball lnpnd amd64 x86_64-unknown-linux-musl README.md lnpnd
 pack_bin_tarball lnpnd arm64 aarch64-unknown-linux-musl README.md lnpnd
+pack_bin_tarball lnmsg amd64 x86_64-unknown-linux-musl lnmsg/README.md lnmsg
+pack_bin_tarball lnmsg arm64 aarch64-unknown-linux-musl lnmsg/README.md lnmsg
 
 # The lnflash bundle is already a finished tarball — binary, firmware
 # UF2, SoftDevice, licences and a manifest of checksums over all of it —

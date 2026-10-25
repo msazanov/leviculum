@@ -33,9 +33,15 @@
 #   https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/lblogd-nightly-amd64.deb
 #   https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/lblogd-nightly-arm64.deb
 #
-# lnomad and lblogd carry their own version numbers, independent of the
-# leviculum stack's; scripts/deb-stamp.sh derives one Debian version per
-# package.
+# And the lnpnd propagation node daemon (enabled, not started on install),
+# and the lnmsg messenger with its terminal UI (no service):
+#
+#   https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/lnpnd-nightly-amd64.deb
+#   https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/lnmsg-nightly-amd64.deb
+#
+# and the arm64 builds beside them. lnomad, lblogd, lnpnd and lnmsg carry
+# their own version numbers, independent of the leviculum stack's;
+# scripts/deb-stamp.sh derives one Debian version per package.
 #
 # The book under docs/ ships as one more tarball, the rendered HTML under a
 # top directory docs/ (Codeberg #260). Its reader-facing home is
@@ -44,12 +50,15 @@
 #
 #   https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/leviculum-docs-nightly.tar.gz
 #
-# The lnflash firmware bundle is not a package at all — it is the
-# stranger-unpacks-it tarball (one binary, one UF2 per board in
-# scripts/lnflash-bundle.sh's BOARDS list, Nordic's S140 SoftDevice and
-# its licence), so it ships as a tarball only:
+# The lnflash firmware bundle is the stranger-unpacks-it tarball (one
+# binary, one UF2 per board in scripts/lnflash-bundle.sh's BOARDS list,
+# Nordic's S140 SoftDevice and its licence). The same bundle also ships as
+# the lnflash .deb (1000), the binary in /usr/bin and the firmware under
+# /usr/share/lnflash, built from the bundle's stage by
+# scripts/build-lnflash-deb.sh:
 #
 #   https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/lnflash-nightly-amd64.tar.gz
+#   https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/lnflash-nightly-amd64.deb
 #
 # It is also the ONLY published form of the embedded firmware, which makes
 # it the reader's path rather than a convenience. Codeberg #295: the README
@@ -111,6 +120,7 @@ when:
         - 'lnomad/Cargo.toml'
         - 'lblogd/Cargo.toml'
         - 'lnpnd/Cargo.toml'
+        - 'lnmsg/Cargo.toml'
         # Codeberg #288: every .deb, every userspace tarball and the
         # lnflash bundle install this file. It is generated (see
         # scripts/gen-notices.py) but tracked, so from this pipeline's
@@ -132,6 +142,7 @@ when:
         # pipeline is exactly what the paragraph above is avoiding. A
         # firmware compile break still turns the next nightly red.
         - 'scripts/lnflash-bundle.sh'
+        - 'scripts/build-lnflash-deb.sh'
         - 'lnflash/**'
         - 'leviculum-nrf/Cargo.toml'
         - 'leviculum-nrf/Cargo.lock'
@@ -273,15 +284,26 @@ steps:
       # scripts. git is already in the image and is needed both for the
       # nrf-softdevice git dependency and for the git_sha the manifest
       # records.
+      #   python3, cargo-deb    — scripts/build-lnflash-deb.sh renders the
+      #                          manual page and packages the bundle as the
+      #                          lnflash .deb, the way build-amd64 needs them.
+      - apt-get update && apt-get install -y python3
       - rustup target add thumbv7em-none-eabihf x86_64-unknown-linux-musl
       - rustup component add llvm-tools
       - cargo install --locked flip-link
+      - cargo install --locked cargo-deb
+      # build-amd64 stamped the build; reading it here gives `lnflash
+      # --version` the same build id the other binaries carry.
+      - export LEVICULUM_BUILD_ID="$(cat .build-id)"
       # No SKIP_FIRMWARE: a published bundle must carry a firmware image
       # built from the commit it claims, and the vendored Nordic S140
       # blob it ships beside it. The script ends by running the bundle's
       # own --check-bundle, so a mismatched checksum fails the step here
       # rather than on somebody's board.
       - bash scripts/lnflash-bundle.sh
+      # The same bundle as the lnflash .deb: binary in /usr/bin, firmware/
+      # under /usr/share/lnflash, checked there by the packaged binary.
+      - bash scripts/build-lnflash-deb.sh
 
   # PUBLISHER (Lew, 2026-10-14, leviculum 726): the forge publishes the forge
   # release, the tier-2 nightly host publishes the site. `package` and

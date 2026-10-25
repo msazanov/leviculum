@@ -355,6 +355,7 @@ nrf-shellcheck:
         packaging/site/lev-receive-nightly packaging/site/lev-unpack-docs scripts/test-site-unpack-docs.sh scripts/build-docs-tarball.sh \
         scripts/collect-nightly-debs.sh scripts/test-collect-nightly-debs.sh \
         scripts/deb-stamp.sh scripts/test-deb-stamp.sh scripts/build-deb.sh scripts/lnflash-bundle.sh \
+        scripts/build-lnflash-deb.sh \
         scripts/t1000e-dfu-package.sh \
         scripts/test-lnflash-bundle.sh \
         scripts/rnode-flash.sh scripts/check-rnode-chip-offsets.sh \
@@ -1908,8 +1909,9 @@ build-c-lnsd: build-ffi
 _deb-stamp:
     @bash scripts/deb-stamp.sh
 
-# amd64 musl-static .debs for all three packages: leviculum (the daemon
-# and its clients), lnomad (the browser), lblogd (the blog server).
+# amd64 musl-static .debs for every package but lnflash: leviculum (the
+# daemon and its clients), lnomad (the browser), lblogd (the blog server),
+# lnpnd (the propagation node) and lnmsg (the messenger, with its tui).
 # Binaries come from the workspace musl target, so they are fully static
 # and run on Debian >= 9 / Ubuntu >= 16.04 regardless of host glibc.
 #
@@ -1943,10 +1945,20 @@ build-deb-arm64: (_require-cargo-deb) _deb-stamp
 deb-heapacct arch="amd64": (_require-cargo-deb) _deb-stamp
     @bash scripts/build-deb.sh {{arch}}
 
-# Build every .deb in one go. _deb-stamp runs first (a dependency of each
-# child), so all six packages share one build-id and a consistent set of
+# The lnflash .deb (1000): the firmware bundle `just lnflash-bundle` builds,
+# packaged with the binary in /usr/bin and the images under /usr/share/lnflash,
+# where lnflash looks last. amd64 only, like the bundle. The script unpacks the
+# finished package and lets the packaged binary check the packaged bundle.
+[doc('Build the lnflash firmware bundle and package it as a .deb')]
+lnflash-deb: (_require-cargo-deb) _deb-stamp
+    @bash scripts/lnflash-bundle.sh
+    @bash scripts/build-lnflash-deb.sh
+
+# Build every .deb but lnflash's in one go (that one needs the firmware
+# toolchain: `just lnflash-deb`). _deb-stamp runs first (a dependency of each
+# child), so all the packages share one build-id and a consistent set of
 # per-package versions.
-[doc('Build every .deb, both architectures, on one shared build id')]
+[doc('Build the .debs, both architectures, on one shared build id')]
 build-deb: build-deb-amd64 build-deb-arm64
 
 # The nightly release, built and published from this tree (517). Runs on the

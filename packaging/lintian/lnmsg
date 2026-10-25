@@ -1,0 +1,5 @@
+# musl-static binary; see packaging/lintian/lblogd for the reasoning
+# behind all three overrides.
+lnmsg: unstripped-binary-or-object [usr/bin/lnmsg]
+lnmsg: shared-library-lacks-prerequisites [usr/bin/lnmsg]
+lnmsg: statically-linked-binary [usr/bin/lnmsg]

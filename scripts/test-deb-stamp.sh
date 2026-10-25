@@ -68,10 +68,10 @@ setup() { # <tag-mode: tagged | tagless> [tree name, default the tag mode]
     cat > "$TREE/Cargo.toml" <<'EOF'
 [workspace]
 resolver = "2"
-members = ["leviculum-cli", "lnomad", "lblogd", "lnpnd"]
+members = ["leviculum-cli", "lnomad", "lblogd", "lnpnd", "lnmsg", "lnflash"]
 EOF
     local crate version
-    for crate in leviculum-cli:0.10.0-dev lnomad:1.2.3 lblogd:0.4.0 lnpnd:0.2.0; do
+    for crate in leviculum-cli:0.10.0-dev lnomad:1.2.3 lblogd:0.4.0 lnpnd:0.2.0 lnmsg:0.3.0 lnflash:0.10.0-dev; do
         version="${crate##*:}"
         crate="${crate%%:*}"
         mkdir -p "$TREE/$crate/src"
@@ -135,6 +135,12 @@ eq ".deb-version-lnomad" \
 eq ".deb-version-lnpnd" \
     "$(cat "$TREE/.deb-version-lnpnd" 2>/dev/null)" \
     "0.2.0~nightly.${date_u}.${sha7}"
+eq ".deb-version-lnmsg" \
+    "$(cat "$TREE/.deb-version-lnmsg" 2>/dev/null)" \
+    "0.3.0~nightly.${date_u}.${sha7}"
+eq ".deb-version-lnflash" \
+    "$(cat "$TREE/.deb-version-lnflash" 2>/dev/null)" \
+    "0.10.0~dev~nightly.${date_u}.${sha7}"
 
 # The Debian changelog is stamped from the same string, under the BINARY
 # package name (leviculum-cli ships as "leviculum").

@@ -63,7 +63,9 @@ contains() {
 # or nothing when there is none.
 find_deb() {
     local pkg="$1"
-    ls -1t "$DEB_DIR/${pkg}"_*_"${ARCH}".deb 2>/dev/null | head -n1
+    # `|| true`: an unmatched glob makes ls exit 2, and under pipefail that
+    # status would end the run instead of reaching the SKIP its caller prints.
+    ls -1t "$DEB_DIR/${pkg}"_*_"${ARCH}".deb 2>/dev/null | head -n1 || true
 }
 
 # ---------------------------------------------------------------------
@@ -364,6 +366,52 @@ fi
 rm -rf "$CTRL_DIR"
 echo
 
+check_package lnmsg lnmsg lnmsg
+# Like lnomad, a client of a running shared instance: no unit, and the
+# terminal frontend built in (1000), which is what the package is for. The
+# subcommand's help line is read off the bytes, so an arm64 package is
+# checked from an amd64 host too.
+if printf '%s' "$CONTENTS" | grep -q 'systemd'; then
+    fail "lnmsg ships a systemd unit, which it must not"
+else
+    pass "ships no systemd unit"
+fi
+check_lnmsg_tui() {
+    local deb tmp
+    deb="$(find_deb lnmsg)"
+    [ -n "$deb" ] || return 0
+    tmp="$(mktemp -d)"
+    dpkg-deb -x "$deb" "$tmp"
+    if grep -qaF 'The terminal messenger: conversations, messages and a compose line' "$tmp/usr/bin/lnmsg"; then
+        pass "lnmsg is built with its tui"
+    else
+        fail "lnmsg is built without --features tui; \`lnmsg tui\` is missing"
+    fi
+    rm -rf "$tmp"
+}
+check_lnmsg_tui
+rm -rf "$CTRL_DIR"
+echo
+
+# amd64 only: packaged from the firmware bundle (scripts/build-lnflash-deb.sh).
+if [ "$ARCH" = amd64 ]; then
+    check_package lnflash lnflash lnflash
+    # The bundle sits where lnflash looks last (SYSTEM_BUNDLE), with its
+    # manifest at the top; build-lnflash-deb.sh has already let the packaged
+    # binary check every checksum in it at that path.
+    contains "$CONTENTS" " ./usr/share/lnflash/manifest.toml" \
+        "ships the bundle manifest at /usr/share/lnflash"
+    contains "$CONTENTS" "_license-agreement.txt" \
+        "ships the SoftDevice licence beside the blob"
+    if printf '%s' "$CONTENTS" | grep -q 'systemd'; then
+        fail "lnflash ships a systemd unit, which it must not"
+    else
+        pass "ships no systemd unit"
+    fi
+    rm -rf "$CTRL_DIR"
+    echo
+fi
+
 check_package lblogd lblogd lblogd
 contains "$CONFFILES" "/etc/lblogd/config.toml" "registers /etc/lblogd/config.toml as a conffile"
 contains "$CONTENTS" "/etc/lblogd/config.toml" "ships the default config"
@@ -489,8 +537,8 @@ echo "== unit identity across architectures"
 for pair in "leviculum:lnsd" "lblogd:lblogd" "lnpnd:lnpnd"; do
     pkg="${pair%%:*}"
     unit_name="${pair##*:}"
-    amd="$(ls -1t "$DEB_DIR/${pkg}"_*_amd64.deb 2>/dev/null | head -n1)"
-    arm="$(ls -1t "$DEB_DIR/${pkg}"_*_arm64.deb 2>/dev/null | head -n1)"
+    amd="$(ls -1t "$DEB_DIR/${pkg}"_*_amd64.deb 2>/dev/null | head -n1 || true)"
+    arm="$(ls -1t "$DEB_DIR/${pkg}"_*_arm64.deb 2>/dev/null | head -n1 || true)"
     if [ -z "$amd" ] || [ -z "$arm" ]; then
         skip "need both architectures' ${pkg} .debs to compare ${unit_name}.service"
         continue

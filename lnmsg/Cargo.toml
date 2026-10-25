@@ -9,10 +9,44 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "Terminal LXMF messenger for Reticulum — the non-interactive send path"
+description = "Terminal LXMF messenger for Reticulum: a send command and a terminal UI"
 
 [lints.rust]
 unsafe_code = "forbid"
+
+# The package ships the binary built with `--features tui` (scripts/build-deb.sh),
+# so `lnmsg tui` is in it; the CLI alone is what a script needs, the package is
+# what a person installs. No service: lnmsg is a client of a running shared
+# instance, like lnomad.
+[package.metadata.deb]
+name = "lnmsg"
+maintainer = "Lew Palm <lp@lew-palm.de>"
+copyright = "2026, Lew Palm"
+license-file = ["../LICENSE", "0"]
+extended-description = """\
+Terminal LXMF messenger for the Reticulum network. `lnmsg send` delivers
+one message from a script, `lnmsg tui` is the interactive messenger with
+conversations and a compose line. It attaches to a local shared RNS
+instance: leviculum's lnsd or the Python rnsd.
+"""
+section = "net"
+priority = "optional"
+# musl-static, and any RNS instance satisfies the runtime need, so leviculum
+# is a Recommends; `depends` stays unset for the reason lnomad's manifest
+# gives, and scripts/deb-finalize.sh strips the empty field cargo-deb emits.
+recommends = "leviculum"
+assets = [
+    # Exactly "target/release/...", so cargo-deb substitutes the --target
+    # triple; see leviculum-cli/Cargo.toml.
+    ["target/release/lnmsg", "usr/bin/", "755"],
+    # Rendered from docs/src/man/ by scripts/md2man.py in scripts/build-deb.sh.
+    ["../target/man/lnmsg.1", "usr/share/man/man1/lnmsg.1", "644"],
+    ["README.md", "usr/share/doc/lnmsg/README.md", "644"],
+    ["../packaging/lintian/lnmsg", "usr/share/lintian/overrides/lnmsg", "644"],
+    # Codeberg #288; see leviculum-cli/Cargo.toml.
+    ["../THIRD-PARTY-NOTICES", "usr/share/doc/lnmsg/THIRD-PARTY-NOTICES", "644"],
+]
+changelog = "../target/deb-changelog/lnmsg"
 
 [features]
 # The shell: the CLI, the daemon socket, the clock, files and the process.
