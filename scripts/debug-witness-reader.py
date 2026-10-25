@@ -59,6 +59,12 @@ Pure stdlib (termios/fcntl), no pyserial on the rig.
 Usage:
   debug-witness-reader.py --port <path> --out <file> [--label <text>]
                           [--poll <s>] [--capture <s>] [--acquire <s>]
+                          [--attach-now]
+
+--attach-now makes it a standing reader for the time BETWEEN runs: it
+attaches at once to a port that is there, and after that behaves as above,
+re-attaching across every reset. scripts/rig-cell.sh starts it that way after
+its cell, when periculum no longer owns the port.
 
 Runs until SIGTERM/SIGINT. Exits 0. Never exits because a port went away:
 that is the event, not an error.
@@ -245,6 +251,12 @@ class Witness:
         present = os.path.exists(self.args.port)
         if not present:
             self.note("port is not there yet; waiting for it to appear")
+        elif self.args.attach_now:
+            self.note("attaching now: nobody runs a scenario on this port")
+            self.capture()
+            present = os.path.exists(self.args.port)
+            if present:
+                self.note("re-armed")
         gone_at = None
         while RUNNING:
             now_present = os.path.exists(self.args.port)
@@ -281,6 +293,13 @@ def main(argv=None):
         type=float,
         default=20.0,
         help="how long to wait for another holder to let go, s",
+    )
+    parser.add_argument(
+        "--attach-now",
+        action="store_true",
+        help="attach at start if the port is there, not only after a vanish; "
+        "for a standing reader between runs (scripts/rig-cell.sh), never "
+        "during a scenario",
     )
     args = parser.parse_args(argv)
 
