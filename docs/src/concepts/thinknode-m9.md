@@ -93,7 +93,10 @@ The GNSS enable line has the opposite polarity on the two: **active low
 on V1.0, active high on V1.1**. The MeshCore variant knows only active
 low, which is V1.0. A port has to probe the address at boot, as the
 Meshtastic variant does, before it touches the GNSS enable line. The
-wiki describes V1.0 only.
+wiki describes V1.0 only. The unit on our bench is **V1.1**: the
+community port's probe build printed `[BOARD] m9_version=2` and found
+the keyboard controller at I2C 0x6D (2026-10-25 00:30 CET, build
+7a699446 of the community fork, the reviewer's bench notes).
 
 ### GNSS
 
@@ -154,7 +157,8 @@ schematic: see its section "Worked example: ThinkNode M9 (incomplete)"
   grammar does not apply (see "Decided").
   Since 2026-10-25 stage one does apply the grammar, on one key (see
   "Decided"); how its power-off row meets the slide switch is listed
-  under "Open".
+  under "Open". Proposal, Lew decides: on the M9 the 8 s gesture is deep
+  sleep, the slide switch is power.
 
 ### USB and the rest
 
@@ -187,8 +191,11 @@ byte to the board (the reviewer's bench notes):
   `/home/lew/firmware-backups/` on schneckenschreck, with its partition
   table, checksums and restore command in that directory's README. Step 2
   of the bring-up plan is done.
-- **The board revision** (V1.0 or V1.1) is not among these facts. The
-  chip's revision is not the board's; that question stays under "Open".
+- **The board revision is V1.1**, the one fact here that needed a write:
+  the chip's revision v0.2 is not the board's. The community port's probe
+  build, flashed after the backup, printed `[BOARD]
+  m9_version=2` and found the keyboard controller at I2C 0x6D
+  (2026-10-25 00:30 CET, build 7a699446 of the community fork).
 
 ## What changed since August
 
@@ -408,7 +415,9 @@ compared with the T1000-E's numbers.
   the DC-DC inductor, and every contradiction under "The hardware from
   the public record" wait for it or for the device.
 - **Which revision the unit is**, read off the keyboard controller's
-  I2C address at the first boot.
+  I2C address at the first boot. Closed 2026-10-25: V1.1, the probe build
+  printed `[BOARD] m9_version=2` and found the keyboard controller at
+  I2C 0x6D (build 7a699446 of the community fork, 00:30 CET).
 - **Which key carries the one-button grammar in stage one**, and how its
   8 s power-off row meets the slide switch (2026-10-25, "Decided").
 - **The GNSS receiver:** AG3352, ATGM336H or L76K, identified on the

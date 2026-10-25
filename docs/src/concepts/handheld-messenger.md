@@ -19,7 +19,10 @@ the core/frontend cut and for the map, and what is open.
   libraries. We do not write our own renderer.
 - **Columba is the reference for scope and protocol behaviour**: what a
   messenger does and how it behaves on the wire. It is not a reference
-  for how the code is designed.
+  for how the code is designed. (Superseded 2026-10-25, Lew: Columba is
+  the wire reference for BLE and LXMF behaviour, not the scope ceiling;
+  the scope is the full-featured messenger the product goals below
+  describe.)
 - **2026-10-25, Lew: a full-featured messenger.** It is of the class a
   modern phone app sets, with mail-like features where LXMF carries them
   (threads, replies, long-form, attachments). Columba remains the
