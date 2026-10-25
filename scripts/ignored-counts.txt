@@ -118,6 +118,17 @@
 # periculum's ble_room_departure cell covers the full three-node scenario.
 1    -p leviculum-std --test ble_returning_peer_resight
 
+# ble_stranger_identity (2026-10-25, 996): the minimal reproduction of a
+# stranger's 16-byte RX write becoming a mesh peer, and the positive control
+# that the Columba subscribe-then-handshake sequence still links. Needs the
+# patched btvirt, /dev/vhci, the system bluetoothd and a release lnsd
+# (host-global Bluetooth state, the ble_room lock class), so no tier can run
+# it. Run by name with
+# `cargo test -p leviculum-std --test ble_stranger_identity -- --ignored
+# --nocapture` beside any change to the identity exchange or the peripheral
+# write path.
+1    -p leviculum-std --test ble_stranger_identity
+
 # ble_adapter_return (2026-10-10, 600): the minimal reproduction of the deaf
 # interface after its adapter's D-Bus object vanished and returned (btvirt
 # stopped and restarted under two linked lnsd). Needs the patched btvirt,

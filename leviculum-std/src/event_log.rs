@@ -664,6 +664,17 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "BLE_LINK_SELF",
         required_keys: &["addr", "action"],
     },
+    // A 16-byte first write from a central that never subscribed to the
+    // TX characteristic (996): not a Columba identity exchange — every
+    // reference central subscribes before it handshakes
+    // (BLE_PROTOCOL_v2.2 §Handshake Flow) — so the bytes are discovery
+    // debris or probing, not an identity. Refused before the link
+    // table sees them: no link, no `BLE_PEER_UP`, no announces, the
+    // central disconnected.
+    EventSchema {
+        name: "BLE_LINK_REFUSED",
+        required_keys: &["iface", "addr", "reason"],
+    },
     EventSchema {
         name: "BLE_TX_FANOUT_DROP",
         required_keys: &["iface", "peer", "len", "depth"],
