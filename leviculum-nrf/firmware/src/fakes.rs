@@ -5,8 +5,10 @@
 //! carry methods, and their fakes are working ones: a byte-array flash with
 //! NOR semantics (program clears bits, erase sets them) and a seeded
 //! xorshift entropy source. Each fake grows with its seam: the sinks'
-//! records what it was asked to play since 973.
+//! records what it was asked to play since 973, the clock is moved by hand
+//! and the button follows a scripted edge sequence on it since 976.
 
+use alloc::collections::VecDeque;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
@@ -16,7 +18,9 @@ use leviculum_feedback::Pattern;
 
 use crate::feedback::Sink;
 
-use crate::seams::{BleLink, Clock, ControlPort, Flash, Sensors, Sinks, Transceiver, Watchdog};
+use crate::seams::{
+    BleLink, ButtonInput, Clock, ControlPort, Flash, Sensors, Sinks, Transceiver, Watchdog,
+};
 
 /// A transceiver backend. Grows a command log and a scripted event queue
 /// when step 3 gives the seam its messages.
@@ -120,9 +124,97 @@ impl rand_core::RngCore for FakeEntropy {
     }
 }
 
-/// A clock the test moves by hand, once step 1 gives the seam a reading.
-pub struct FakeClock;
-impl Clock for FakeClock {}
+/// A clock the test moves by hand ([`set`](Self::set)). A wait for a
+/// moment it has not reached is pending and remembers the moment
+/// ([`take_asked`](Self::take_asked)), so a driver knows where to move it.
+#[derive(Default)]
+pub struct FakeClock {
+    now_ms: Cell<u64>,
+    asked: Cell<Option<u64>>,
+}
+
+impl FakeClock {
+    /// A clock at 0.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Move the clock to `ms`.
+    pub fn set(&self, ms: u64) {
+        self.now_ms.set(ms);
+    }
+
+    /// The earliest moment a wait asked for since the last call, if one
+    /// is still ahead of the clock.
+    pub fn take_asked(&self) -> Option<u64> {
+        self.asked.take()
+    }
+}
+
+impl Clock for FakeClock {
+    fn now_ms(&self) -> u64 {
+        self.now_ms.get()
+    }
+
+    fn wait_until(&self, at_ms: u64) -> impl core::future::Future<Output = ()> {
+        core::future::poll_fn(move |_| {
+            if self.now_ms.get() >= at_ms {
+                return core::task::Poll::Ready(());
+            }
+            let earliest = self.asked.get().map_or(at_ms, |asked| asked.min(at_ms));
+            self.asked.set(Some(earliest));
+            core::task::Poll::Pending
+        })
+    }
+}
+
+/// A button that follows a script of edges, `(t_ms, pressed)` in time
+/// order, on a [`FakeClock`]: an edge whose moment the clock has reached
+/// ends a wait and sets the level. The seam is implemented on `&Self`, so
+/// the test reads [`next_edge_ms`](Self::next_edge_ms) while the handling
+/// holds the input.
+pub struct FakeButtonInput<'a> {
+    clock: &'a FakeClock,
+    script: RefCell<VecDeque<(u64, bool)>>,
+    pressed: Cell<bool>,
+}
+
+impl<'a> FakeButtonInput<'a> {
+    /// A released button that will see `edges`.
+    pub fn new(clock: &'a FakeClock, edges: &[(u64, bool)]) -> Self {
+        Self {
+            clock,
+            script: RefCell::new(edges.iter().copied().collect()),
+            pressed: Cell::new(false),
+        }
+    }
+
+    /// When the next scripted edge comes, `None` once the script is spent.
+    pub fn next_edge_ms(&self) -> Option<u64> {
+        self.script.borrow().front().map(|(at, _)| *at)
+    }
+}
+
+impl ButtonInput for &FakeButtonInput<'_> {
+    fn wait_for_edge(&mut self) -> impl core::future::Future<Output = ()> {
+        let input = *self;
+        core::future::poll_fn(move |_| {
+            let mut script = input.script.borrow_mut();
+            match script.front() {
+                Some(&(at, pressed)) if at <= input.clock.now_ms() => {
+                    script.pop_front();
+                    input.pressed.set(pressed);
+                    core::task::Poll::Ready(())
+                }
+                _ => core::task::Poll::Pending,
+            }
+        })
+    }
+
+    fn is_pressed(&self) -> bool {
+        self.pressed.get()
+    }
+}
 
 /// Sensors with fixed readings, once step 5 cuts them.
 pub struct FakeSensors;
@@ -197,6 +289,7 @@ mod tests {
     fn is_flash<T: Flash>(_: &T) {}
     fn is_entropy<T: Entropy>(_: &T) {}
     fn is_clock<T: Clock>(_: &T) {}
+    fn is_button_input<T: ButtonInput>(_: &T) {}
     fn is_sensors<T: Sensors>(_: &T) {}
     fn is_sinks<T: Sinks>(_: &T) {}
     fn is_watchdog<T: Watchdog>(_: &T) {}
@@ -208,7 +301,9 @@ mod tests {
         is_ble_link(&FakeBleLink);
         is_flash(&FakeFlash::new(1));
         is_entropy(&FakeEntropy::new(1));
-        is_clock(&FakeClock);
+        let clock = FakeClock::new();
+        is_clock(&clock);
+        is_button_input(&&FakeButtonInput::new(&clock, &[]));
         is_sensors(&FakeSensors);
         is_sinks(&RecordingSinks::new(&[]));
         is_watchdog(&FakeWatchdog);

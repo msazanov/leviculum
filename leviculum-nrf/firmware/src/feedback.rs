@@ -5,8 +5,10 @@
 //! `leviculum-feedback`'s; the players that drive the pins with them stay
 //! with the bind crate, behind [`Sinks`].
 //!
-//! What raises a pattern: [`status`] (a short press, after the display
-//! wake), [`release_now`] (a held button reaching 2 s), [`notify`] (the
+//! What raises a pattern: [`Feedback::status`] (a short press, after the
+//! display wake) and [`Feedback::release_now`] (a held button reaching
+//! 2 s), both from the button's press handling ([`crate::button`]), which
+//! holds the instance; [`notify`] (the
 //! propagation role storing a message for this board's own `lxmf.delivery`
 //! destination), [`report_delivered`] (the proof of the report a double
 //! press sent, order 914) and the air watch of a double press
@@ -22,10 +24,11 @@
 //! own air watch. The board's one instance is [`Feedback`] over
 //! [`Registered`], a zero-sized [`Sinks`] that forwards to the
 //! implementation the bind crate registers with [`set_sinks`] at boot: the
-//! callers that raise a pattern (the button, the LoRa task, the propagation
-//! role, the reporter) live in the bind crate today and in this crate after
-//! step 5, and name only the free functions below, so neither they nor this
-//! crate name a pin. The registration is the shape of
+//! callers that raise a pattern (the LoRa task, the propagation role, the
+//! reporter) live in the bind crate today and in this crate after step 5,
+//! and name only the free functions below, so neither they nor this crate
+//! name a pin. The button's press handling ([`crate::button::run`]) is in
+//! this crate since 976 and raises on the instance itself. The registration is the shape of
 //! [`crate::entropy::set_source`]: two function pointers rather than a
 //! `dyn`, which the seam rules exclude. A pattern raised before
 //! [`set_sinks`] goes nowhere, as one raised on a sink the board does not
@@ -236,25 +239,22 @@ impl Sinks for Registered {
     }
 }
 
-static FEEDBACK: Feedback<Registered> = Feedback::new(Registered);
+/// The board's one instance, which the free functions below and the
+/// button's press handling ([`crate::button::run`]) raise on.
+pub(crate) static FEEDBACK: Feedback<Registered> = Feedback::new(Registered);
 
-/// A short press ([`Feedback::status`]), with the battery percentage from
+/// The battery percentage a short press reports, from
 /// `board_state::BATTERY_STATE`. A board without the `battery`
 /// capability, or a pack outside the band its cell count implies, has
 /// none.
-pub fn status() {
+pub(crate) fn battery_percent() -> Option<u8> {
     #[cfg(feature = "battery")]
     let pct = crate::board_state::BATTERY_STATE
         .try_get()
         .and_then(|state| state.percent);
     #[cfg(not(feature = "battery"))]
     let pct: Option<u8> = None;
-    FEEDBACK.status(pct);
-}
-
-/// A held button has reached the long press ([`Feedback::release_now`]).
-pub fn release_now() {
-    FEEDBACK.release_now();
+    pct
 }
 
 /// A message for the user arrived ([`Feedback::notify`]).

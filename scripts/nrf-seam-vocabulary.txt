@@ -9,7 +9,6 @@
 # the script's BIND_MODULES; it is a reading of the page and moves with it:
 #   ble usb boards sx1262 radio qspi flash record_store radio_store rng led button feedback display st7789 battery gnss motion vext
 # See the script's header for the rules.
-src/announce.rs: button doc x1
 src/ble/columba.rs: ble::set_gap_device_name doc x1
 src/ble/columba.rs: radio_store doc x1
 src/ble/mod.rs: radio_store doc x1
@@ -27,7 +26,6 @@ src/boot_count.rs: record_store doc x1
 src/boot_count.rs: record_store::region doc x1
 src/chtm.rs: sx1262 doc x1
 src/display.rs: ble::HVN_DRAIN x1
-src/display.rs: button x1
 src/feedback.rs: led doc x1
 src/gnss.rs: boards::rak4631 doc x1
 src/gnss.rs: vext doc x2

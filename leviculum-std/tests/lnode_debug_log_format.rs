@@ -1478,7 +1478,7 @@ fn the_display_and_button_bring_up_is_not_dropped_by_the_runtime_gate() {
         (
             "button.rs",
             "pub async fn button_task(",
-            "loop {",
+            "leviculum_firmware::button::run(",
             &["init pin=P{}.{:02} pull={} active={} debounce={}ms"][..],
         ),
     ] {

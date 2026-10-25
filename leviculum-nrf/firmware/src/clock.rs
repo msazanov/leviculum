@@ -15,6 +15,17 @@ impl Clock for EmbassyClock {
     }
 }
 
+/// The Clock seam's monotonic half (976), the same reading as core's.
+impl crate::seams::Clock for EmbassyClock {
+    fn now_ms(&self) -> u64 {
+        embassy_time::Instant::now().as_millis()
+    }
+
+    fn wait_until(&self, at_ms: u64) -> impl core::future::Future<Output = ()> {
+        embassy_time::Timer::at(embassy_time::Instant::from_millis(at_ms))
+    }
+}
+
 /// Current time source of the emission timebase (Codeberg #166 item 3),
 /// mirrored out of the main loop so the periodic banner task can state it
 /// beside `[FW_BUILD]` without owning the node. Encodes

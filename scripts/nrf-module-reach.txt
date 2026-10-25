@@ -3,7 +3,7 @@
 # difference from the tree. One line per file under leviculum-nrf/src and
 # leviculum-nrf/firmware/src: path (lines): the `crate::<name>` names it
 # reaches, its own module excluded. See the script's header for the rules.
-src/announce.rs (587): button log lora pn telemetry
+src/announce.rs (587): log lora pn telemetry
 src/banner.rs (56): log_critical media name
 src/battery.rs (441): log
 src/bin/qspi-selftest.rs (634):
@@ -22,9 +22,9 @@ src/boards/t1000e.rs (377): button feedback radio
 src/boards/t114.rs (200):
 src/boot_count.rs (96): boot_trace radio_store record_store
 src/boot_trace.rs (27):
-src/button.rs (176): announce log telemetry
+src/button.rs (86):
 src/chtm.rs (71): log lora sx1262
-src/display.rs (353): ble button log lora pn
+src/display.rs (353): ble log lora pn
 src/events.rs (261): announce log pn transport_stats
 src/feedback.rs (244): led log
 src/flash.rs (79):
@@ -55,18 +55,19 @@ src/vext.rs (85): boards log
 firmware/src/board_state.rs (133):
 firmware/src/boot_count.rs (203): fakes log seams
 firmware/src/boot_trace.rs (120): log
-firmware/src/clock.rs (104):
+firmware/src/button.rs (399): board_state fakes feedback log seams
+firmware/src/clock.rs (115): seams
 firmware/src/dispatch.rs (49): log
 firmware/src/entropy.rs (148): iface_bytes seams
-firmware/src/fakes.rs (240): feedback seams
-firmware/src/feedback.rs (453): board_state entropy fakes log seams
+firmware/src/fakes.rs (335): feedback seams
+firmware/src/feedback.rs (453): board_state button entropy fakes log seams
 firmware/src/heap.rs (120): log
 firmware/src/identity.rs (119): log_critical
 firmware/src/iface_bytes.rs (177):
 firmware/src/interface.rs (77): iface_bytes log
-firmware/src/lib.rs (58):
+firmware/src/lib.rs (61):
 firmware/src/log.rs (402):
 firmware/src/postmortem.rs (437): boot_trace log
 firmware/src/record_store.rs (665): fakes log seams
-firmware/src/seams.rs (144): feedback
+firmware/src/seams.rs (179): button clock feedback
 firmware/src/time_floor.rs (209): log seams

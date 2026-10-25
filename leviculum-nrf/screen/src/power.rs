@@ -2,10 +2,10 @@
 //! the display task does with a request (leviculum#413, rows 369 and 374 of
 //! `docs/src/firmware/host-test-seams.md`).
 //!
-//! `leviculum-nrf/src/button.rs` times the press and `display.rs` drives the
-//! panel; what they decide is here, so the press rule, the one-minute
-//! timeout and the I2C error rule are host tests instead of a thumb on a
-//! board.
+//! `leviculum-nrf/firmware/src/button.rs` times the press, `display.rs`
+//! drives the panel; what they decide is here, so the press rule, the
+//! one-minute timeout and the I2C error rule are host tests instead of a
+//! thumb on a board.
 
 /// How long a press keeps the display lit (`docs/src/concepts/one-button.md`:
 /// the status press wakes it for one minute). Long enough to read the

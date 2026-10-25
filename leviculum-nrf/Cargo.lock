@@ -992,6 +992,7 @@ dependencies = [
  "embassy-time",
  "embedded-alloc",
  "embedded-storage-async",
+ "leviculum-announce-policy",
  "leviculum-boot-count",
  "leviculum-boot-trace",
  "leviculum-core",

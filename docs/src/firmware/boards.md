@@ -350,7 +350,7 @@ before its first fix or ten minutes after boot, as a gate in front of the
 (`P1.02`) is not used: the one reference that configures it maps the
 wrong bit, so the driver polls. Since #459 a double press of the button
 (`P0.06`, active high) announces, as on every board
-(`leviculum-nrf/src/button.rs`); the long press is also the product's
+(`leviculum-nrf/firmware/src/button.rs`); the long press is also the product's
 power button. The buzzer (`P0.25` on `PWM0`, enable `P1.05`) plays the
 feedback grammar of [One button](../concepts/one-button.md) at 247 Hz
 since 892; its enable is raised only while a pattern plays. The product

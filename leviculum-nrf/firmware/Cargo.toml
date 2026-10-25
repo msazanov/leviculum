@@ -48,6 +48,9 @@ leviculum-usb-policy = { path = "../usb-policy" }
 # The one-button feedback grammar's patterns and air watch, which the
 # feedback policy (973, `feedback`) raises on the Sinks seam.
 leviculum-feedback = { path = "../feedback" }
+# The button's gesture grammar (`ButtonGate`), which the press handling
+# (976, `button`) feeds with the edges of the ButtonInput seam.
+leviculum-announce-policy = { path = "../announce-policy" }
 # The board state the sensor tasks feed and the orchestration reads (959,
 # `board_state`): the GNSS fix and presence types it re-exports.
 leviculum-gnss-time = { path = "../gnss-time", optional = true }

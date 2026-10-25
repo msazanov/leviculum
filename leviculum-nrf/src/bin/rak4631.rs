@@ -844,7 +844,7 @@ async fn main(spawner: Spawner) {
             select3(
                 telemetry_tick,
                 announce_tick,
-                leviculum_nrf::button::announce_press(),
+                leviculum_firmware::button::announce_press(),
             ),
         )
         .await;

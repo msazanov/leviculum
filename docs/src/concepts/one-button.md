@@ -116,12 +116,12 @@ which pattern on which sink is the policy in
 `leviculum-nrf/firmware/src/feedback.rs` since 973, which reaches the
 players only through the `Sinks` seam. Five things play:
 
-- **A short press** (`leviculum-nrf/src/button.rs:158`, `status`) plays the
+- **A short press** (`leviculum-nrf/firmware/src/button.rs:225`, `status`) plays the
   battery in quarters on the LED and the buzzer, after the display wake.
   A board with no percentage (on USB without a pack, or a pack outside
   the band its cell count implies) plays nothing, since nothing is wrong
   with it, and writes `FEEDBACK pattern=none reason=no-percentage`.
-- **A held button reaching 2 s** (`leviculum-nrf/src/button.rs:130`, `release_now`)
+- **A held button reaching 2 s** (`leviculum-nrf/firmware/src/button.rs:202`, `release_now`)
   plays `release-now` on the LED and the buzzer.
 - **A message for this board's own `lxmf.delivery` destination stored by
   the propagation role** (`leviculum-nrf/src/pn.rs:3311,3591`, a client
@@ -266,7 +266,7 @@ built:
   press (`DisplayWake`, `leviculum-nrf/screen/src/power.rs:33`). The
   display task owns the state and the minute
   (`leviculum-nrf/src/display.rs:202`); the button task only reports the
-  press (`leviculum-nrf/src/button.rs:149`, into `leviculum_firmware::board_state::DISPLAY_WAKE`).
+  press (`leviculum-nrf/firmware/src/button.rs:216`, into `leviculum_firmware::board_state::DISPLAY_WAKE`).
 - **Announce moved to the double press.** Before, a short press that
   passed the rate limit announced. Now the double press does, under the
   same 30 s limit (`leviculum-nrf/announce-policy/src/button.rs:489`),

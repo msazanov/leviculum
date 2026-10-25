@@ -197,8 +197,8 @@ pub async fn display_task(
 
     // Display power state. The panel boots lit and goes dark on its own
     // `DISPLAY_WAKE_MS` after boot or after the last press; any press,
-    // raised by `crate::button` on `DISPLAY_WAKE`, lights it again
-    // (`leviculum_screen::power::DisplayWake`).
+    // raised by `leviculum_firmware::button` on `DISPLAY_WAKE`, lights it
+    // again (`leviculum_screen::power::DisplayWake`).
     let mut wake = leviculum_screen::power::DisplayWake::new(Instant::now().as_millis());
     let mut display_on = true;
     // A press the dark-display wait below took off the signal, handed to

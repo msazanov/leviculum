@@ -25,7 +25,9 @@
 //! global allocator and the two heap facts the orchestration reads move
 //! here ([`heap`]); the pool's memory stays with the bind crate. In 973 the
 //! feedback policy moves here ([`feedback`]) over the [`seams::Sinks`]
-//! trait; the LED and buzzer players stay below.
+//! trait; the LED and buzzer players stay below. In 976 the button's
+//! press handling moves here ([`button`]) over the [`seams::ButtonInput`]
+//! and [`seams::Clock`] seams; the pin and its pull stay below.
 //!
 //! What the crate may depend on is held by two guards rather than by this
 //! comment: `just firmware-no-hal` refuses a HAL or chip crate in its
@@ -40,6 +42,7 @@ extern crate alloc;
 pub mod board_state;
 pub mod boot_count;
 pub mod boot_trace;
+pub mod button;
 pub mod clock;
 pub mod dispatch;
 pub mod entropy;

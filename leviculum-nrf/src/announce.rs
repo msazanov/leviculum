@@ -472,7 +472,7 @@ impl AnnounceGate {
 }
 
 /// A double press of the user button got past its debouncer and its rate
-/// limit (`crate::button`): both announces, booked in the one cadence.
+/// limit (`leviculum_firmware::button`): both announces, booked in the one cadence.
 ///
 /// The cadence decides first ([`AnnounceCadence::manual`]) so that the
 /// press is paid for in the carrier's duty budget like every other

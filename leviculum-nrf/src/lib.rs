@@ -59,8 +59,8 @@ pub mod ble;
 pub mod boards;
 pub mod boot_count;
 pub mod boot_trace;
-/// The user button (#459): every board's gestures, a double press
-/// announces; the Pocket V2's display wakes on any press.
+/// The user button (#459), the GPIO half: the pin and its pull. The
+/// gestures and what they do are `leviculum_firmware::button`'s (976).
 pub mod button;
 pub mod chtm;
 pub mod events;

@@ -12,7 +12,8 @@
 //! Step 0 declares them empty. The methods, and for the message seams the
 //! message variants, arrive with the step that cuts each seam: Flash,
 //! Entropy, Clock, Watchdog and Sinks in step 1 (Sinks has its methods
-//! since 973), the control port in step
+//! since 973, Clock its monotonic half and ButtonInput its two since 976),
+//! the control port in step
 //! 2, the transceiver in step 3, the BLE link in step 4, the sensors in
 //! step 5. Rules for all of them: no `dyn`, no per-chip `cfg`, and a host
 //! fake for every seam.
@@ -102,7 +103,22 @@ pub trait BleLink {}
 /// Today: embassy time, GNSS time (`gnss-time`), host time over the control
 /// port. The fork: the same, plus SNTP (`TimeSource::Ntp`) and the PCF8563
 /// (`rtc-pcf8563`).
-pub trait Clock {}
+///
+/// The monotonic half has its methods since 976, for the button: a reading
+/// and a wait for a moment. Both futures here and in [`ButtonInput`] are
+/// spelled `impl Future` rather than `async fn`, which a public trait may
+/// not use without a warning about its `Send` bound. The implementation in
+/// this tree is [`crate::clock::EmbassyClock`], over embassy time on every
+/// family; the calendar sources are still the `clock` module's free
+/// functions.
+pub trait Clock {
+    /// Milliseconds since boot.
+    fn now_ms(&self) -> u64;
+
+    /// Wait until [`now_ms`](Self::now_ms) has reached `at_ms`; at once if
+    /// it already has.
+    fn wait_until(&self, at_ms: u64) -> impl core::future::Future<Output = ()>;
+}
 
 /// Sensors: GNSS UART, motion, battery, die temperature, later a
 /// magnetometer. One trait per sensor once step 5 cuts them.
@@ -113,10 +129,29 @@ pub trait Clock {}
 /// (`gnss-init`) and the MAX17048 (`battery-scale`).
 pub trait Sensors {}
 
+/// Button input: the board's one user button as the press handling
+/// ([`crate::button`]) reads it, a level and a wait for its next edge.
+/// Nothing about pins, pulls or which level a press drives: the
+/// implementation folds the wiring into [`is_pressed`](Self::is_pressed).
+///
+/// Today (976): `leviculum_nrf::button::NrfButton`, over
+/// `embassy_nrf::gpio::Input` and the board's `active_high`. The fork: the
+/// M9's keypad, once its keys are inputs of their own.
+pub trait ButtonInput {
+    /// Wait for the next edge, either way. A wait that arms after the
+    /// level changed may only wake on the way back, so the caller reads
+    /// [`is_pressed`](Self::is_pressed) right before it.
+    fn wait_for_edge(&mut self) -> impl core::future::Future<Output = ()>;
+
+    /// Whether the button is down now.
+    fn is_pressed(&self) -> bool;
+}
+
 /// Sinks: the feedback players, the LED, the notification LED and the
 /// buzzer, as the feedback policy ([`crate::feedback`]) drives them. The
-/// display, the button, the debug log and the post-mortem store are sinks of
-/// their own, each its own trait once its cut comes.
+/// display, the debug log and the post-mortem store are sinks of their own,
+/// each its own trait once its cut comes; the button is an input
+/// ([`ButtonInput`]) since 976.
 ///
 /// A player owns its pin and plays a [`leviculum_feedback::Pattern`] to its
 /// end, starting over with a newer one raised meanwhile, and writes the
