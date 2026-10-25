@@ -51,6 +51,10 @@
 //! them is a history, not a result, and `lnmsg status` / `--wait` are the
 //! (not-yet-built) answers to that question.
 
+#![cfg_attr(not(feature = "std"), no_std)]
+
+extern crate alloc;
+
 pub mod address;
 pub mod body;
 pub mod config;
@@ -58,6 +62,7 @@ pub mod display_name;
 pub mod engine;
 pub mod events;
 pub mod fetch;
+#[cfg(feature = "std")]
 pub mod identity;
 pub mod mailbox;
 pub mod mailbox_state;

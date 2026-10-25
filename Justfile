@@ -2394,3 +2394,15 @@ firmware-no-chip-cfg:
 nrf-module-reach:
     @python3 scripts/nrf-module-reach.py --selftest
     @python3 scripts/nrf-module-reach.py
+
+# Codeberg #232: the lnmsg core is `no_std` plus `alloc`, so the M9 and a GUI
+# run the same messenger core the terminal does (docs/src/concepts/
+# lnmsg-architecture.md, "the core must not know it has a terminal"). The
+# shell is lnmsg's `std` feature; without it the library is the core, checked
+# for the firmware triple. RED on purpose until the std uses have moved behind
+# effects: its error list is the measured work list, grouped and planned on
+# that page. It joins `guards` in the pass that makes it green, not before.
+[doc('Check the lnmsg core builds no_std for the firmware triple (#232)')]
+lnmsg-core-no-std:
+    rustup target add thumbv7em-none-eabihf
+    cargo check -p lnmsg --lib --no-default-features --target thumbv7em-none-eabihf

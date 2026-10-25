@@ -32,11 +32,11 @@
 //! the price of a write inside the core lock. The moment daemon mode or a
 //! resume path exists, this is where it goes.
 
-use std::collections::{BTreeMap, VecDeque};
+use alloc::collections::{BTreeMap, VecDeque};
+use alloc::sync::Arc;
+use core::time::Duration;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
-use std::sync::Arc;
-use std::time::Duration;
 
 use leviculum_core::identity::Identity;
 use leviculum_core::node::NodeEvent;
@@ -236,7 +236,7 @@ impl Engine {
     /// Called from both hooks: the driver's timer branch normally fires first,
     /// but nothing in the seam promises that.
     fn register_if_needed(&mut self, core: &mut StdNodeCore) {
-        let identity = match std::mem::replace(&mut self.state, State::Failed) {
+        let identity = match core::mem::replace(&mut self.state, State::Failed) {
             State::Unregistered(identity) => *identity,
             other => {
                 self.state = other;
@@ -262,7 +262,7 @@ impl Engine {
     /// and `self` at once.
     fn take_ready(&mut self, core: &mut StdNodeCore) -> Option<Box<Ready>> {
         self.register_if_needed(core);
-        match std::mem::replace(&mut self.state, State::Failed) {
+        match core::mem::replace(&mut self.state, State::Failed) {
             State::Ready(ready) => Some(ready),
             other => {
                 self.state = other;
@@ -287,7 +287,7 @@ impl Engine {
                 self.report(ready, core, event);
             }
             let mut core_output = router_output.core;
-            let events = std::mem::take(&mut core_output.events);
+            let events = core::mem::take(&mut core_output.events);
             out.merge(core_output);
 
             rounds += 1;
@@ -1092,8 +1092,8 @@ pub enum AttachError {
     },
 }
 
-impl std::fmt::Display for AttachError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for AttachError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Storage(path, error) => write!(f, "{}: {error}", path.display()),
             Self::NoDaemon { instance, detail } => write!(
@@ -1109,7 +1109,7 @@ impl std::fmt::Display for AttachError {
     }
 }
 
-impl std::error::Error for AttachError {}
+impl core::error::Error for AttachError {}
 
 /// A running client node and the outbox that talks to its engine.
 pub struct Attached {
@@ -1234,9 +1234,9 @@ fn mine_with_progress<F>(
     future: F,
 ) -> Result<[u8; 32], StampError>
 where
-    F: std::future::Future<Output = Result<[u8; 32], StampError>>,
+    F: core::future::Future<Output = Result<[u8; 32], StampError>>,
 {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use core::sync::atomic::{AtomicBool, Ordering};
 
     let started = std::time::Instant::now();
     let ticker = if cost > STAMP_PROGRESS_COST {
@@ -1481,7 +1481,7 @@ mod tests {
         let now_ms = core.now_ms();
         let _ = engine.on_tick(&mut core, now_ms);
 
-        let refusals: Vec<_> = std::iter::from_fn(|| events.try_recv().ok())
+        let refusals: Vec<_> = core::iter::from_fn(|| events.try_recv().ok())
             .filter_map(|event| match event {
                 OutboxEvent::Refused { detail } => Some(detail),
                 _ => None,
@@ -1512,7 +1512,7 @@ mod tests {
         let now_ms = core.now_ms();
         let _ = engine.on_tick(&mut core, now_ms);
 
-        let seen: Vec<_> = std::iter::from_fn(|| events.try_recv().ok()).collect();
+        let seen: Vec<_> = core::iter::from_fn(|| events.try_recv().ok()).collect();
         assert!(
             seen.iter()
                 .any(|event| matches!(event, OutboxEvent::PnUnavailable { .. })),
@@ -1547,7 +1547,7 @@ mod tests {
         let _ = engine.on_tick(&mut core, now_ms);
 
         let selected =
-            std::iter::from_fn(|| events.try_recv().ok()).find_map(|event| match event {
+            core::iter::from_fn(|| events.try_recv().ok()).find_map(|event| match event {
                 OutboxEvent::PnSelected {
                     destination,
                     stamp_cost,
@@ -1573,7 +1573,7 @@ mod tests {
             .expect("queue the command");
         let now_ms = core.now_ms();
         let _ = engine.on_tick(&mut core, now_ms);
-        std::iter::from_fn(|| events.try_recv().ok()).collect()
+        core::iter::from_fn(|| events.try_recv().ok()).collect()
     }
 
     /// A stored selection the path table still holds is kept without
@@ -1686,7 +1686,7 @@ mod tests {
             .expect("queue the command");
         let now_ms = core.now_ms();
         let _ = engine.on_tick(&mut core, now_ms);
-        let early: Vec<_> = std::iter::from_fn(|| events.try_recv().ok()).collect();
+        let early: Vec<_> = core::iter::from_fn(|| events.try_recv().ok()).collect();
         assert!(
             !early
                 .iter()
@@ -1698,7 +1698,7 @@ mod tests {
         // window by however long that tick took.
         let later_ms = core.now_ms() + DISCOVERY_WINDOW_MS;
         let _ = engine.on_tick(&mut core, later_ms);
-        let late: Vec<_> = std::iter::from_fn(|| events.try_recv().ok()).collect();
+        let late: Vec<_> = core::iter::from_fn(|| events.try_recv().ok()).collect();
         assert!(
             late.iter().any(|event| matches!(
                 event,
@@ -1727,7 +1727,7 @@ mod tests {
             let _ = engine.on_tick(&mut core, now_ms);
         }
 
-        let resolved = std::iter::from_fn(|| events.try_recv().ok())
+        let resolved = core::iter::from_fn(|| events.try_recv().ok())
             .any(|event| matches!(event, OutboxEvent::Resolved { .. }));
         assert!(
             !resolved,
@@ -1804,7 +1804,7 @@ mod tests {
         let now_ms = core.now_ms();
         let _ = engine.on_tick(&mut core, now_ms);
 
-        let seen: Vec<_> = std::iter::from_fn(|| events.try_recv().ok()).collect();
+        let seen: Vec<_> = core::iter::from_fn(|| events.try_recv().ok()).collect();
         assert!(
             seen.iter()
                 .any(|event| matches!(event, OutboxEvent::Queued { .. })),

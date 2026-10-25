@@ -33,7 +33,7 @@
 //! (`lnmsg-architecture.md` §2, trap 3), so no word this program prints is
 //! ever "delivered to" a person.
 
-use std::time::Duration;
+use core::time::Duration;
 
 // `tokio::time::Instant`, not `std::time::Instant`: the budget has to be
 // measured on the same clock the sleep below uses, so a test can drive a
@@ -149,8 +149,8 @@ impl From<OutboxGone> for SendError {
     }
 }
 
-impl std::fmt::Display for SendError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for SendError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Gone => write!(f, "the message engine stopped answering"),
             Self::Broken(detail) => write!(f, "the message engine could not start: {detail}"),
@@ -200,7 +200,7 @@ impl std::fmt::Display for SendError {
     }
 }
 
-impl std::error::Error for SendError {}
+impl core::error::Error for SendError {}
 
 /// A state that means the bytes left this process.
 fn handed_on(state: MessageState) -> bool {

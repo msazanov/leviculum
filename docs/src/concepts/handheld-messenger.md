@@ -38,7 +38,11 @@ the core/frontend cut and for the map, and what is open.
   mailbox. It has no TUI yet ([lnmsg](lnmsg.md)). Its frontend already
   talks to the backend only through `Outbox` (`lnmsg/src/outbox.rs:191`),
   but the crate is `std`. It depends on `leviculum-std` and tokio
-  (`lnmsg/Cargo.toml:24-28`).
+  (`lnmsg/Cargo.toml:42-46`), since 2026-10-25 behind its `std` feature,
+  and `just lnmsg-core-no-std` measures what the core still takes from
+  them (red; the list and the pass order are in [lnmsg:
+  architecture](lnmsg-architecture.md), "Plan: the lnmsg core without
+  std").
 - **#232's rule:** the messenger's core must be `std`-free, not merely
   terminal-free, because the next frontend after the TUI is firmware. The
   shape #232 asks for is a `no_std + alloc` core crate, a store behind a

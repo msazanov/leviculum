@@ -16,8 +16,8 @@ pub enum BodyError {
     Unreadable(String),
 }
 
-impl std::fmt::Display for BodyError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for BodyError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Empty => write!(
                 f,
@@ -28,7 +28,7 @@ impl std::fmt::Display for BodyError {
     }
 }
 
-impl std::error::Error for BodyError {}
+impl core::error::Error for BodyError {}
 
 /// Resolve the body from the positional argument or from `stdin`.
 ///

@@ -173,13 +173,13 @@ pub enum OutboxEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutboxGone;
 
-impl std::fmt::Display for OutboxGone {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for OutboxGone {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "the message engine stopped answering")
     }
 }
 
-impl std::error::Error for OutboxGone {}
+impl core::error::Error for OutboxGone {}
 
 /// The engine, as a frontend sees it.
 ///
@@ -200,8 +200,8 @@ pub trait Outbox {
 pub(crate) mod fake {
     //! A scripted [`Outbox`] for the frontend's own tests.
 
-    use std::cell::RefCell;
-    use std::collections::VecDeque;
+    use alloc::collections::VecDeque;
+    use core::cell::RefCell;
 
     use super::*;
 

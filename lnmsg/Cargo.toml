@@ -14,26 +14,44 @@ description = "Terminal LXMF messenger for Reticulum — the non-interactive sen
 [lints.rust]
 unsafe_code = "forbid"
 
+[features]
+# The shell: the CLI, the daemon socket, the clock, files and the process.
+# Without it the crate is the messenger core, `no_std` plus `alloc`, and
+# `just lnmsg-core-no-std` checks it for the firmware target
+# (docs/src/concepts/lnmsg-architecture.md, "the core must not know it has a
+# terminal"). Red until the std uses have moved behind effects; the plan and
+# the measured list are on that page.
+default = ["std"]
+std = [
+    "dep:leviculum-std",
+    "dep:clap",
+    "dep:tokio",
+    "leviculum-lxmf/compression",
+    "rand_core/std",
+    "rand_core/getrandom",
+    "serde_json/std",
+]
+
 [dependencies]
 # The LXMF router, node and message codec. Everything protocol-shaped lives
 # there; this crate is wiring, a CLI and a bounded run loop.
-leviculum-lxmf = { path = "../leviculum-lxmf" }
+leviculum-lxmf = { path = "../leviculum-lxmf", default-features = false, features = ["pow"] }
 # The driver seam. `CoreProcessor` is the only feed that does not drop the
 # event types LXMF needs (docs/src/concepts/lnmsg-architecture.md §3), so the
 # router runs inside the driver's tick and this dependency is not optional.
-leviculum-std = { path = "../leviculum-std" }
+leviculum-std = { path = "../leviculum-std", optional = true }
 # Identity minting and the on-disk identity record shared with lnomad.
 leviculum-core = { path = "../leviculum-core" }
-clap = { version = "4", features = ["derive"] }
-tokio.workspace = true
+clap = { version = "4", features = ["derive"], optional = true }
+tokio = { workspace = true, optional = true }
 # The structured event log (docs/src/structured-event-logs.md) is a tracing
 # layer, so the emit sites are `tracing::debug!` calls with an `event` field.
 tracing.workspace = true
-rand_core = { version = "0.6", features = ["std", "getrandom"] }
+rand_core.workspace = true
 # The daemon's path table arrives as the JSON `leviculum_std::rpc_query`
 # decodes it into; the mailbox rule reads it to tell a node on this device
 # from one elsewhere.
-serde_json = "1"
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
 
 [dev-dependencies]
 tempfile = "3"
@@ -49,3 +67,4 @@ path = "src/lib.rs"
 [[bin]]
 name = "lnmsg"
 path = "src/main.rs"
+required-features = ["std"]

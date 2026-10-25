@@ -59,8 +59,8 @@ pub struct EmptyDisplayName {
     pub source: &'static str,
 }
 
-impl std::fmt::Display for EmptyDisplayName {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for EmptyDisplayName {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(
             f,
             "{} is empty: an empty display name is indistinguishable from sending none at all.\n  \
@@ -70,7 +70,7 @@ impl std::fmt::Display for EmptyDisplayName {
     }
 }
 
-impl std::error::Error for EmptyDisplayName {}
+impl core::error::Error for EmptyDisplayName {}
 
 /// Everything a resolution may read, as values rather than as lookups.
 ///

@@ -588,6 +588,103 @@ cell-addressed mouse ones. The 251 tests stay in `lnomad/src/tui.rs`, where
 the view tests need ratatui; the headless suite that runs without the
 feature is the next step.
 
+### Plan: the lnmsg core without std (Codeberg #232)
+
+Decided 2026-10-25, Lew: std-free now; step one measured. The messenger
+core is cut `no_std` plus `alloc`, so the M9, a GUI and the terminal run the
+same core. The route is a feature, not a crate split: `lnmsg`'s `std`
+feature (on by default) is the shell, and the library without it is the
+core, under `#![cfg_attr(not(feature = "std"), no_std)]`. A split into an
+`lnmsg-core` crate is not forced yet: the shell-only modules are few
+(`identity`, and the binary, which requires the feature), and the mixed
+ones split item by item. If a pass finds an item the feature cannot keep
+honest, that is the moment for the crate.
+
+**The module map** (lines including tests, measured 2026-10-25):
+
+| module | lines | side |
+|---|---:|---|
+| `address` | 156 | core |
+| `mailbox` | 273 | core: the selection rule |
+| `outbox` | 256 | core: the `Outbox` seam, commands and events |
+| `events` | 187 | core: the structured event emitters (tracing is `no_std`) |
+| `display_name` | 343 | core `resolve`; shell `from_process` (environment, passwd) |
+| `body` | 142 | core trimming and the empty rule; shell the stdin read |
+| `config` | 154 | core `parse`; shell `load` (the file) |
+| `seen` | 186 | core the set, the order and the compaction rule; shell the file |
+| `mailbox_state` | 380 | core `Route`, `Stored`, `Decision`, `MailboxRun`, `routes_from_path_table`; shell `load`, `save`, `unix_now_ms` and the stderr lines |
+| `send` | 996 | core: the send and fallback loops over `Outbox`; their clock is tokio's today |
+| `fetch` | 598 | core: the mailbox drain over `Outbox`; tokio clock, `io::Write` output |
+| `engine` | 1828 | core `Engine` (the router glue: resolves, tracking, stamp bookkeeping, sync scheduling); shell `CoreProcessor` impl, `InProcessOutbox`'s channels, `attach`, the stamp worker thread and its runtime |
+| `identity` | 182 | shell: home directory, key file |
+| `main.rs` | 543 | shell: CLI, daemon RPC, process exit |
+
+**The gate.** `just lnmsg-core-no-std` checks the library without the
+feature for `thumbv7em-none-eabihf`. Every dependency of the core already
+checks there (`leviculum-core`, `leviculum-lxmf` with `pow`, `tracing`,
+`serde_json` with `alloc`); the red is lnmsg's own code. Its first run,
+after swapping the exact `std` re-exports (`fmt`, `error::Error`, `mem`,
+`iter`, `cell`, `future`, `time::Duration`, `sync::Arc`, `sync::atomic`,
+`collections::{BTreeMap, VecDeque}`) for their `core`/`alloc` paths, holds
+164 name-resolution errors:
+
+| cause | errors | where |
+|---|---:|---|
+| `alloc` prelude (`String`, `Vec`, `Box`, `format!`) | 104 | every core module |
+| `std::io` | 12 | `seen`, `config`, `fetch`, `body`, `mailbox_state`, `engine` |
+| `std::fs` | 9 | `seen`, `mailbox_state`, `config`, `engine` |
+| `tokio` (`time::Instant`, `sleep`, the runtime) | 7 | `send`, `fetch`, `engine` |
+| `eprintln!` | 7 | `mailbox_state`, `engine`, `fetch` |
+| `std::sync::mpsc` | 5 | `engine` |
+| `std::path` | 4 | `seen`, `config`, `mailbox_state`, `engine` |
+| `leviculum_std` | 4 | `engine` (driver), `display_name` (passwd), `events` (`Scalar`) |
+| `std::env` | 3 | `display_name` |
+| `std::thread` | 3 | `engine` |
+| `std::time` (`Instant`, `SystemTime`) | 3 | `engine`, `mailbox_state` |
+| `rand_core::OsRng` | 2 | `engine` |
+| `std::collections::HashSet` | 1 | `seen` |
+
+These are the name-resolution layer only; type checking runs once they are
+gone, and is expected to add the trait imports a `no_std` module needs for
+`to_string`/`to_owned` (21 call sites outside tests) and nothing structural.
+
+**The passes, in order.** Each leaves the workspace green and the gate's
+list shorter; behaviour and the CLI tests do not change.
+
+1. *Mechanical* (~40 lines): the `alloc` imports in each core module, the
+   `ToString`/`ToOwned` imports, `HashSet` to `BTreeSet` in `seen`, and
+   `Scalar` (pure formatting) moved from `leviculum-std::event_log` into a
+   `no_std` home both crates use, with `leviculum-std` re-exporting it.
+2. *Files and the environment* (~150 lines): the shell items of `config`,
+   `seen`, `mailbox_state`, `body` and `display_name` move into a
+   `std`-gated shell module; the core keeps the pure functions and returns
+   what to write (the seen store as a set that answers "append this line"
+   or "rewrite with these", the mailbox record as its text). Error enums
+   lose `io::Error` and `PathBuf`: the core error says what was wrong, the
+   shell adds where. The `eprintln!` lines in `mailbox_state` and `fetch`
+   become returned notices the shell prints.
+3. *The clock* (~80 lines): `send` and `fetch` take a `Clock` beside the
+   `Outbox` (now in milliseconds, an async sleep). The host implementation
+   wraps tokio's, so the paused-clock tests keep their meaning; `fetch`
+   writes through `core::fmt::Write` or a returned message instead of
+   `io::Write`.
+4. *The engine* (~250 lines moved, ~60 changed): `Engine` becomes generic
+   over `NodeCore<R, C, S>` (the router, the LXMF node and the propagation
+   client already are) and talks to the frontend and the stamp miner
+   through queues of its own instead of `mpsc`. The `CoreProcessor` impl
+   for `StdNodeCore`, `InProcessOutbox`, `attach`, the stamp worker thread,
+   its tokio runtime, `OsRng` and the mining progress lines move to the
+   shell. The miner on a board is a different executor over the same jobs.
+5. *Green*: the gate passes and joins `guards`, with a positive control (a
+   `std::` path injected into a core module is refused).
+
+**What stays std-only, and what the core needs from it.** `leviculum-std`
+(the driver, the daemon RPC, the event-log subscriber, identity minting,
+the passwd lookup): the core needs `Scalar` (pass 1) and the
+`CoreProcessor` hooks' argument type, which becomes the generic `NodeCore`
+(pass 4). `tokio`: the core needs a clock and a sleep (pass 3). `clap`:
+the binary only. `rand_core`'s `OsRng`: the shell hands the core an RNG.
+
 ## 5. Decision: the event loop and the TEA split
 
 `lnomad`'s split survives contact with a messenger with one change.

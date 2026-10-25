@@ -17,8 +17,8 @@
 //! a fresh process has a fresh router, and the message that arrived directly
 //! yesterday must not reappear because a mailbox still held a copy today.
 
+use core::time::Duration;
 use std::io::Write;
-use std::time::Duration;
 
 use leviculum_lxmf::router::PropagationPathAttempts;
 use tokio::time::Instant;
@@ -100,8 +100,8 @@ impl From<OutboxGone> for FetchError {
     }
 }
 
-impl std::fmt::Display for FetchError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for FetchError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Gone => write!(f, "the message engine stopped answering"),
             Self::Broken(detail) => write!(f, "the message engine could not start: {detail}"),
@@ -128,7 +128,7 @@ impl std::fmt::Display for FetchError {
     }
 }
 
-impl std::error::Error for FetchError {}
+impl core::error::Error for FetchError {}
 
 /// Print one message the way `lnmsg fetch` shows mail: a single header line
 /// a script can key on, the body verbatim, a blank separator. The header

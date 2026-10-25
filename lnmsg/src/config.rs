@@ -40,8 +40,8 @@ pub enum ConfigError {
     },
 }
 
-impl std::fmt::Display for ConfigError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Io(path, error) => write!(f, "{}: {error}", path.display()),
             Self::BadValue {
@@ -54,7 +54,7 @@ impl std::fmt::Display for ConfigError {
     }
 }
 
-impl std::error::Error for ConfigError {}
+impl core::error::Error for ConfigError {}
 
 /// What the config file contributes to a run.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

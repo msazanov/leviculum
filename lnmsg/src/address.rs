@@ -24,8 +24,8 @@ pub enum AddressError {
     NotHex { position: usize, character: char },
 }
 
-impl std::fmt::Display for AddressError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for AddressError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Empty => write!(f, "an LXMF address is required"),
             Self::WrongLength { got } => write!(
@@ -45,7 +45,7 @@ impl std::fmt::Display for AddressError {
     }
 }
 
-impl std::error::Error for AddressError {}
+impl core::error::Error for AddressError {}
 
 /// Parse `text` into a destination hash.
 ///
