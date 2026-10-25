@@ -37,6 +37,7 @@
 - [The ThinkNode M9](concepts/thinknode-m9.md)
 - [Firmware layers: one orchestration, many boards](concepts/firmware-layers.md)
 - [A messenger whose core runs anywhere](concepts/handheld-messenger.md)
+  - [A GUI toolkit for the desktop and the M9](concepts/gui-toolkit.md)
 - [An LXMF propagation node on a board](concepts/propagation-node-on-a-board.md)
 - [Evidence and honesty in testing](concepts/evidence-and-honesty.md)
 - [Checks that are actually checks](concepts/checks-and-citations.md)

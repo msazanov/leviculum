@@ -193,3 +193,5 @@ surface, the tile tool, the tile format, and the map view. Since
 - [lnmsg: a terminal LXMF messenger](lnmsg.md) and [lnmsg:
   architecture](lnmsg-architecture.md).
 - [Telemetry](telemetry.md), for the positions on the map.
+- [A GUI toolkit for the desktop and the M9](gui-toolkit.md), the
+  toolkit candidates measured and a proposal.
