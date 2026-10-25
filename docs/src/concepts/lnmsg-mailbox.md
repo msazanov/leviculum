@@ -104,8 +104,10 @@ with their own rule (NomadNet by hops among trusted, columba by hops).
 Nothing is auto-adopted silently in the TUI sense: a cron job's
 operator wrote `--pn` or the config key, and the announced fallback is
 for the interactive shell where the operator reads the `LNMSG_PN`
-line. What is persisted where: the identity at `${LNMSG_HOME}/identity`,
-the node default in `${LNMSG_HOME}/config`, the cross-run seen-message
+line (since order 967 that line's source word is `mailbox`, and a run
+whose path table cannot be read keeps a stored mailbox but adopts no new
+one, as below). What is persisted where: the identity at
+`${LNMSG_HOME}/identity`, the node default in `${LNMSG_HOME}/config`, the cross-run seen-message
 ids in `${LNMSG_HOME}/seen`; the selection itself is per-run and never
 written back. (Superseded 2026-10-25: without `--pn` or the config
 key the adoption rule below decides, and its choice is written to
@@ -165,7 +167,36 @@ is announced while it is attached, so a first run asks the daemon to
 replay the announces of its nearest path-table entries and selects once
 they are in (`DISCOVERY_LIMIT`, `lnmsg/src/engine.rs`). A daemon whose
 path table lnmsg cannot read (another user's `transport_identity`) gets
-no adoption at all, since nothing then tells the own node from another.
+no new adoption, since nothing then tells the own node from another; a
+stored node, `adopted` or `user`, is kept and used, because it was vetted
+against the table when it was written or chosen by the user, and an
+identity does not move onto this device by itself. The run then prints
+`mailbox: <8 hex> kept (path table unreadable)`.
+
+The replay is lnsd answering from its cache: a path request from a local
+client for a destination the path table holds is answered with the cached
+announce, sent to the requesting interface alone, and the handler returns
+without forwarding the request (`handle_path_request`,
+`leviculum-core/src/transport.rs:11978`, the local-client arm at
+`:12157-12202`, the send at `:12195`; pinned by
+`test_path_request_from_local_client_returns_cached_announce`, `:30745`,
+which asserts no send to the network interface and no
+broadcast). A table entry whose cached announce was evicted falls through
+and is forwarded (`:12211-12218`), so such an entry costs one request on
+the network.
+
+Limits, measured and reasoned:
+
+- A transport node with a large table: a propagation node beyond the 32
+  nearest entries (`DISCOVERY_LIMIT`) is not seen on a first run. The
+  picker covers it.
+- The replay costs up to 2 s of `--timeout` (`DISCOVERY_WINDOW_MS`) when
+  entries do not answer.
+- A client attached over a non-loopback shared-instance TCP port counts as
+  this device, because the daemon names it `LocalInterface[...]` too
+  (`leviculum-std/src/interfaces/inventory.rs:102-107`). This is rare: the
+  reference binds the shared-instance port to loopback
+  (`LocalInterface.py:408`).
 
 Note that NomadNet's trust propagation makes this worse: trusting a person
 auto-trusts their node (its `Directory.py`, lines 198-202), which makes it
