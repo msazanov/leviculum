@@ -114,7 +114,7 @@ dials for the data channel (`spawn_local_server`,
 (`leviculum-std/src/interfaces/ipc.rs:174`). A node takes the
 transport from the config it is built from; our client tools take it from
 the config they read (`dial_as_configured`,
-`leviculum-cli/src/daemon_rpc.rs:39`). In that mode the server and its
+`leviculum-std/src/daemon_rpc.rs:41`). In that mode the server and its
 clients carry the reference's TCP names, `Shared Instance[<port>]` and
 `LocalInterface[<peer port>]` (`LocalInterface.py:497-498`, `:374`). Pinned
 by `test_rnstatus_over_tcp_shared_instance_against_rust_daemon`: the

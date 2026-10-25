@@ -18,6 +18,9 @@ pub(crate) mod autoconnect;
 pub(crate) mod clock;
 pub mod config;
 pub(crate) mod counter64;
+/// Reaching a running daemon's shared-instance RPC from a client tool: the
+/// instance name and authkey a config directory implies.
+pub mod daemon_rpc;
 pub(crate) mod discovery;
 pub mod driver;
 pub mod error;
