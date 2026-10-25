@@ -5,6 +5,10 @@
 //! drawing and the overlay's sizing derive from [`lines`], so they can never
 //! disagree and no padding is hand-counted.
 
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+
 use unicode_width::UnicodeWidthStr;
 
 /// One keybinding shown in the help overlay: the keys and their description. The

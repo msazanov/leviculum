@@ -13,6 +13,15 @@ publish = false
 [lints.rust]
 unsafe_code = "forbid"
 
+[features]
+# Without `std` the crate is `no_std` plus `alloc`, so a messenger core built
+# for a board (lnmsg's `ui` model, `just lnmsg-core-no-std`) takes the same
+# types. `std` adds what needs the standard library: the key-to-edit table
+# over `tui-input` (a std-only crate) and the spinner's colour, whose float
+# rounding core does not carry.
+default = ["std"]
+std = ["dep:tui-input"]
+
 # No terminal crate, ever: `just ui-no-terminal` refuses one in this crate's
 # graph or source. The terminal widgets over this model are
 # leviculum-ui-ratatui.
@@ -21,4 +30,4 @@ unicode-width = "0.2.2"
 # Default features off: the default `crossterm` and `ratatui` features pull
 # both terminal crates in. The key-to-edit table those carry is restated in
 # `input`.
-tui-input = { version = "0.15", default-features = false }
+tui-input = { version = "0.15", default-features = false, optional = true }

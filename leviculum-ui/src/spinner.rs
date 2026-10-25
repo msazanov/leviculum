@@ -20,7 +20,9 @@ pub const HUE_STEP: f32 = 9.0;
 /// Convert an HSV colour to 8-bit RGB. Pure function. `h_deg` is the hue in
 /// degrees (wrapped into `[0, 360)`), `s` and `v` are the saturation and value in
 /// `[0, 1]`. Uses the standard sextant formulation; the spinner calls it with
-/// `s = v = 1.0` for maximally vivid, full-brightness colours.
+/// `s = v = 1.0` for maximally vivid, full-brightness colours. With `std`
+/// only: core carries no float rounding.
+#[cfg(feature = "std")]
 pub fn hsv_to_rgb(h_deg: f32, s: f32, v: f32) -> (u8, u8, u8) {
     let h = h_deg.rem_euclid(360.0);
     let s = s.clamp(0.0, 1.0);
@@ -49,6 +51,7 @@ pub fn glyph(spin: usize) -> &'static str {
 /// The colour for animation step `spin`, fully saturated and at full
 /// brightness: the hue advances [`HUE_STEP`] degrees a step, so the colour
 /// glides much more slowly than the dot circles.
+#[cfg(feature = "std")]
 pub fn color(spin: usize) -> (u8, u8, u8) {
     let hue = (spin as f32 * HUE_STEP).rem_euclid(360.0);
     hsv_to_rgb(hue, 1.0, 1.0)

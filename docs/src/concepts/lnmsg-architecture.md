@@ -129,7 +129,7 @@ magnitude" (`lnomad/src/image_cache.rs:11-14`).
 (`lnomad/src/render.rs:192-217`) produces `Vec<RLine>` where `RLine`, the
 shared styled text model of `leviculum-ui` since 984, is a vector of
 `StyledChar { ch, st, link, field }`
-(`leviculum-ui/src/style.rs:67-88`): already wrapped, aligned and indented,
+(`leviculum-ui/src/style.rs:71-92`): already wrapped, aligned and indented,
 one `RLine` per output row, every cell carrying its resolved style and its
 owning link index. That IR feeds either `to_ratatui_text`
 (`leviculum-ui-ratatui/src/style.rs:91-110`) for the TUI or `emit_ansi`
@@ -801,7 +801,7 @@ Three specific things `lnomad` does that must change:
 Things to carry over unchanged: the generation counter for stale-result
 rejection (`spawn_fetch`, `lnomad/src/tui.rs:861-902`), the tick-counted
 toast whose expiry is a pure function and therefore unit-testable without
-real time passing (`Toast`, `leviculum-ui/src/toast.rs:21-31`, test at
+real time passing (`Toast`, `leviculum-ui/src/toast.rs:23-33`, test at
 `lnomad/src/tui.rs:2763`),
 the `TerminalGuard` RAII plus panic hook that restores the terminal before
 the backtrace prints (`leviculum-ui-ratatui/src/terminal.rs:56-98`), and OSC 52 for the

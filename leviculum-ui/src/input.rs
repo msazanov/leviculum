@@ -10,13 +10,17 @@
 //! in (see [`crate::geometry`]). The crossterm translation lives in
 //! `leviculum-ui-ratatui`.
 //!
-//! No keymap or command-palette model lives here yet: lnomad has none to
-//! extract (its bindings are a `match` in its core, with one scroll table).
-//! lnmsg's TUI adds it here, shared by both, when it lands
-//! (`docs/src/concepts/lnmsg-ui.md`, section 1).
+//! A text field a core holds is an [`InputBuffer`]: the trait is here and
+//! `no_std`, its implementation over `tui_input::Input` comes with `std`, so
+//! a messenger core built for a board names the field without the std-only
+//! editor and a board brings its own. The command palette's names are
+//! [`crate::commands`].
 
-use std::ops::{BitOr, BitOrAssign};
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::ops::{BitOr, BitOrAssign};
 
+#[cfg(feature = "std")]
 use tui_input::InputRequest;
 
 /// A key, as the programs understand it.
@@ -119,8 +123,8 @@ impl BitOrAssign for KeyModifiers {
     }
 }
 
-impl std::fmt::Debug for KeyModifiers {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Debug for KeyModifiers {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         const NAMES: [(KeyModifiers, &str); 6] = [
             (KeyModifiers::SHIFT, "SHIFT"),
             (KeyModifiers::CONTROL, "CONTROL"),
@@ -223,12 +227,54 @@ pub struct MouseEvent {
     pub modifiers: KeyModifiers,
 }
 
+/// A one-line text field as a core holds it: what a key does to it, and what
+/// it holds. lnmsg's compose line is one.
+pub trait InputBuffer {
+    /// The text.
+    fn value(&self) -> &str;
+    /// The cursor, in characters from the start.
+    fn cursor(&self) -> usize;
+    /// Apply what `key` asks of the text. `false` when the key is not an
+    /// edit at all, so the caller may bind it to something else.
+    fn edit(&mut self, key: &KeyEvent) -> bool;
+    /// Empty the field and hand back what it held.
+    fn take(&mut self) -> String;
+}
+
+/// The terminal's field: `tui-input`, edited through [`input_request`], the
+/// same table lnomad's address bar and form fields edit with.
+#[cfg(feature = "std")]
+impl InputBuffer for tui_input::Input {
+    fn value(&self) -> &str {
+        tui_input::Input::value(self)
+    }
+
+    fn cursor(&self) -> usize {
+        tui_input::Input::cursor(self)
+    }
+
+    fn edit(&mut self, key: &KeyEvent) -> bool {
+        match input_request(key) {
+            Some(request) => {
+                self.handle(request);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn take(&mut self) -> String {
+        self.value_and_reset()
+    }
+}
+
 /// The text-editing request a key makes of a [`tui_input::Input`], if any.
 ///
 /// The same table `tui-input`'s crossterm backend applies (its
 /// `to_input_request`, version 0.15), restated over this module's types so the
 /// address bar, the search bar and the form fields edit exactly as they did
 /// when the core called that backend directly. Releases edit nothing.
+#[cfg(feature = "std")]
 pub fn input_request(key: &KeyEvent) -> Option<InputRequest> {
     use InputRequest::*;
     use KeyCode::*;

@@ -2,6 +2,8 @@
 //! the program's (counted in its own ticks); its drawing is
 //! `leviculum-ui-ratatui`'s.
 
+use alloc::string::String;
+
 /// Whether a transient toast carries an error or a neutral/success note. Drives
 /// the toast's accent colour and glyph.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

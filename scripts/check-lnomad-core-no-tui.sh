@@ -162,8 +162,14 @@ selftest_ui() {
         printf '%s\n' "$out"
         rc=1
     fi
-    sed -i -E 's/^tui-input = \{ version = "0.15", default-features = false \}$/tui-input = "0.15"/' \
+    # The dependency is optional since 994 (leviculum-ui's `std` feature),
+    # and `--all-features` below turns it on.
+    sed -i -E 's/^tui-input = \{ version = "0.15", default-features = false, optional = true \}$/tui-input = { version = "0.15", optional = true }/' \
         "$tmp/leviculum-ui/Cargo.toml"
+    if ! grep -qx 'tui-input = { version = "0.15", optional = true }' "$tmp/leviculum-ui/Cargo.toml"; then
+        echo "$TAG SELFTEST FAIL: could not inject tui-input's default features into leviculum-ui's manifest copy; the pattern above no longer matches its tui-input line"
+        rc=1
+    fi
     rc2=0
     out="$(check_graph "$tmp" --offline leviculum-ui --all-features)" || rc2=$?
     if [ "$rc2" -ne 1 ] || ! printf '%s\n' "$out" | grep -qF "carries ratatui"; then

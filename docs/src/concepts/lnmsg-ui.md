@@ -305,7 +305,7 @@ text across wrapped lines and across message boundaries works and copies
 via OSC 52 (`lnomad/src/app/event.rs:1348-1380`, which works over SSH). Plus a
 `--no-mouse` flag and a runtime toggle for people who want the terminal's
 own selection back. The `StyledChar` IR already carries per-cell ownership
-(`leviculum-ui/src/style.rs:67-80`), so the hit-testing is a small extension
+(`leviculum-ui/src/style.rs:71-84`), so the hit-testing is a small extension
 of `visible_links` rather than new machinery.
 
 ### Terminal QR for paper messages and for your own address

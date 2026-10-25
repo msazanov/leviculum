@@ -6,6 +6,8 @@
 //! group); this module lays them out, and `leviculum-ui-ratatui` draws the
 //! result. Click hit-testing and hover run over the same slots.
 
+use alloc::vec::Vec;
+
 use unicode_width::UnicodeWidthStr;
 
 use crate::geometry::Rect;

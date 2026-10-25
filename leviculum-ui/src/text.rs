@@ -1,6 +1,8 @@
 //! Fitting text into a cell budget: the width a terminal paints, and
 //! truncation with an ellipsis that never spills over a border.
 
+use alloc::string::{String, ToString};
+
 use unicode_width::UnicodeWidthChar;
 
 /// The column width a terminal actually PAINTS for `s`, used to fit text into a

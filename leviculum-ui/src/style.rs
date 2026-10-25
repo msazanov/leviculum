@@ -6,6 +6,10 @@
 //! ratatui bridge in `leviculum-ui-ratatui` turns it into ratatui text; a GUI
 //! frontend would read the same cells.
 
+use alloc::format;
+use alloc::string::String;
+use alloc::vec::Vec;
+
 use crate::color::{rgb_to_ansi256, ColorDepth};
 
 /// A resolved terminal style: colours already reduced to RGB, attributes as

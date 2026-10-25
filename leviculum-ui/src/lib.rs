@@ -14,8 +14,17 @@
 //! What is NOT here: a program's own labels and actions (lnomad's footer
 //! buttons and help text stay in lnomad), its layout of the screen, and its
 //! state.
+//!
+//! Without the default `std` feature the crate is `no_std` plus `alloc`: a
+//! messenger core built for a board takes these types too (lnmsg's `ui`
+//! model, checked by `just lnmsg-core-no-std`).
+
+#![cfg_attr(not(feature = "std"), no_std)]
+
+extern crate alloc;
 
 pub mod color;
+pub mod commands;
 pub mod delivery;
 pub mod footer;
 pub mod geometry;
