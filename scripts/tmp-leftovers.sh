@@ -39,6 +39,26 @@ list_tmp() {
     find /tmp -mindepth 1 -maxdepth 1 -user "$(id -u)" -printf '%f\n' 2>/dev/null | sort
 }
 
+# The compiler cache's server must not be born inside $scratch (987). sccache
+# runs as RUSTC_WRAPPER on the coder host, and its client starts the server on
+# first use when none is running, as a child that inherits the client's
+# environment. The server makes a temp dir per compile under temp_dir(), so a
+# server started by this suite would live in $scratch, and once the trap below
+# removes it every compile on the host fails with "sccache: Failed to create
+# temp dir ... /tmp/tl.XXXXXX/sccache..." (exit 254) until the server idles out.
+# 985 hit exactly that with a hand-rolled `TMPDIR=$(mktemp -d) cargo test`.
+# sccache 0.10 has no variable that places the server's temp dir (SCCACHE_DIR
+# is the cache, not the scratch), so the server is started here, before TMPDIR
+# changes, under the host's own environment. A server already running answers
+# "Address in use" and is kept, which is the case this wants. If it idles out
+# mid-suite (SCCACHE_IDLE_TIMEOUT, 600 s by default) a later compile could still
+# restart it in $scratch; cargo compiles every target before running any, so
+# that would take a test that itself spawns a build after ten idle minutes.
+wrapper=${RUSTC_WRAPPER:-${CARGO_BUILD_RUSTC_WRAPPER:-}}
+if [ "$(basename -- "${wrapper:-none}")" = sccache ]; then
+    "$wrapper" --start-server >/dev/null 2>&1 || true
+fi
+
 before=$(list_tmp)
 
 status=0
