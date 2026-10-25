@@ -36,13 +36,10 @@ use tokio::signal::unix::{signal, SignalKind};
 static ALLOC: leviculum_std::heap_accounting::CountingAllocator =
     leviculum_std::heap_accounting::CountingAllocator;
 
-/// `--version`, with `+heapacct` in an instrumented build: the soak node's
-/// journal and `dpkg -l` must not be the only places that tell the two
-/// apart, which is lnsd's rule (`leviculum-cli/build.rs`) too.
-#[cfg(feature = "heap-accounting")]
-const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "+heapacct");
-#[cfg(not(feature = "heap-accounting"))]
-const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// `--version`: the crate version, the build id, `+heapacct` in an
+/// instrumented build and the commit in parentheses, composed by build.rs the
+/// way `leviculum-cli/build.rs` composes lnsd's.
+const VERSION: &str = env!("LEVICULUM_VERSION");
 
 #[derive(Parser, Debug)]
 #[command(
