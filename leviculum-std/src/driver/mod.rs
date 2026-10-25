@@ -5231,6 +5231,9 @@ async fn run_event_loop(
             // re-announce all local destinations (daemon-owned get fresh announces,
             // client-cached get rebroadcast) so the remote peer re-learns paths.
             Some(iface_id) = reconnect_rx.recv() => {
+                if retired_interface_event(&inner, iface_id, "reconnect") {
+                    continue;
+                }
                 tracing::info!("Interface {} reconnected, re-announcing destinations", iface_id);
                 // Re-apply IFAC config to core (E29: handle_interface_down removed it)
                 if let Some(cfg) = ifac_configs.get(&iface_id.0) {
@@ -5278,6 +5281,9 @@ async fn run_event_loop(
             // pull decision. The interface itself stays up — other peers
             // keep their links and paths.
             Some((iface_id, event)) = peer_event_rx.recv() => {
+                if retired_interface_event(&inner, iface_id, "peer") {
+                    continue;
+                }
                 // Keep the driver's live-peer count and its core mirror
                 // in step with the transition before handling it
                 // (Codeberg #365; see `live_peer_counts`).
@@ -5820,6 +5826,36 @@ fn merged_next_deadline(core_ms: Option<u64>, processor_ms: Option<u64>) -> Opti
         (Some(a), Some(b)) => Some(a.min(b)),
         (a, b) => a.or(b),
     }
+}
+
+/// Whether an interface event names an index the core already tore down
+/// (989), and if so, say so once.
+///
+/// A reconnect notification (`interfaces/tcp.rs`, `notify.try_send`) or a
+/// peer transition (`peer_event_rx`) is sent by the interface task and can
+/// sit in its channel while the loop retires the interface — an
+/// auto-connect client detached past `DETACH_THRESHOLD_SECS` in the same
+/// second it reconnected. Acting on it would hand the core configuration
+/// and peer state for an index nothing will ever clean up again: Branch 6
+/// re-applies the IFAC config (one `IfacConfig` leaked per occurrence) and
+/// Branch 6c sets a peer count and pulls paths toward a peer on it. The
+/// core's own refusal (`IFACE_UP_STALE`, 981) covers only the re-announce.
+///
+/// The core's tombstone is the discriminator rather than the registry:
+/// an index not yet registered is absent from the registry too, and its
+/// events can lead its registration across the loop's unbiased `select!`
+/// (`pending_removals` exists for the same crossing), while a tombstoned
+/// index is one that was registered and has since gone.
+fn retired_interface_event(
+    inner: &Arc<Mutex<StdNodeCore>>,
+    iface_id: InterfaceId,
+    kind: &'static str,
+) -> bool {
+    let retired = inner.lock_recover().interface_torn_down(iface_id.0);
+    if retired {
+        tracing::debug!(event = "IFACE_EVENT_STALE", idx = iface_id.0, kind = kind);
+    }
+    retired
 }
 
 /// Bring `next_poll` forward when a processor asked to be woken sooner.
@@ -10256,7 +10292,8 @@ mod tests {
         out_rx: mpsc::Receiver<crate::interfaces::OutgoingPacket>,
         _in_tx: mpsc::Sender<IncomingPacket>,
         _new_iface_tx: mpsc::Sender<InterfaceHandle>,
-        _reconnect_tx: mpsc::Sender<InterfaceId>,
+        reconnect_tx: mpsc::Sender<InterfaceId>,
+        peer_event_tx: mpsc::Sender<(InterfaceId, crate::interfaces::PeerEvent)>,
         _tunnel_tx: mpsc::Sender<InterfaceId>,
         _remove_tx: mpsc::Sender<InterfaceId>,
     }
@@ -10301,7 +10338,7 @@ mod tests {
         let (_shared_down_tx, shared_instance_down_rx) = mpsc::channel(1);
         let (tunnel_tx, tunnel_rx) = mpsc::channel(1);
         let (remove_tx, remove_rx) = mpsc::channel(1);
-        let (_peer_event_tx, peer_event_rx) = mpsc::channel(1);
+        let (peer_event_tx, peer_event_rx) = mpsc::channel(1);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
         let loop_handle = tokio::spawn(run_event_loop(
@@ -10347,7 +10384,8 @@ mod tests {
             out_rx,
             _in_tx: in_tx,
             _new_iface_tx: new_iface_tx,
-            _reconnect_tx: reconnect_tx,
+            reconnect_tx,
+            peer_event_tx,
             _tunnel_tx: tunnel_tx,
             _remove_tx: remove_tx,
         }
@@ -10536,6 +10574,88 @@ mod tests {
             .try_recv()
             .expect("the reserved output went out");
         assert_eq!(frame.data, vec![0xC3; 32].into());
+    }
+
+    /// Yield until the loop has taken every message off `tx`. The branch a
+    /// message lands in has no await point, so on the current-thread runtime
+    /// a returned permit means its handler has run to the end.
+    async fn drained<T>(tx: &mpsc::Sender<T>) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while tx.capacity() < tx.max_capacity() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the loop takes the message");
+    }
+
+    /// 989: a reconnect notification and a peer transition that crossed
+    /// the teardown of their interface in a driver channel touch nothing in
+    /// the core. Without the driver's check the reconnect re-applies the
+    /// IFAC config the teardown removed (left behind for good, since nothing
+    /// tears that index down again) and the peer-up sets a peer count on
+    /// it; the core's own `IFACE_UP_STALE` refusal (981) covers neither.
+    #[tokio::test(flavor = "current_thread")]
+    async fn events_for_a_retired_index_reach_no_core_state() {
+        const GONE: usize = 7;
+        let (seen, subscriber) = processor_event_probe();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let (core, _td) = shared_test_core();
+        let ifac =
+            leviculum_core::ifac::IfacConfig::new(Some("989-net"), None, 16).expect("ifac config");
+        core.lock_recover().set_ifac_config(GONE, ifac);
+        let harness = spawn_flush_loop(Arc::clone(&core), 3600);
+
+        // The loop snapshots the IFAC configs on entry, as it holds the
+        // configured ones in production; one round trip proves it entered.
+        harness
+            .action_tx
+            .send(TickOutput::empty())
+            .await
+            .expect("loop is live");
+        drained(&harness.action_tx).await;
+
+        // The detach poll retires the index (Branch 8).
+        let _ = core
+            .lock_recover()
+            .handle_interface_teardown(InterfaceId(GONE), Teardown::Final);
+        assert!(!core.lock_recover().clone_ifac_configs().contains_key(&GONE));
+
+        harness
+            .reconnect_tx
+            .send(InterfaceId(GONE))
+            .await
+            .expect("loop is live");
+        drained(&harness.reconnect_tx).await;
+        assert!(
+            !core.lock_recover().clone_ifac_configs().contains_key(&GONE),
+            "the stale reconnect re-applied IFAC config for a retired index"
+        );
+
+        harness
+            .peer_event_tx
+            .send((
+                InterfaceId(GONE),
+                crate::interfaces::PeerEvent::Up([0x42; 16]),
+            ))
+            .await
+            .expect("loop is live");
+        drained(&harness.peer_event_tx).await;
+        assert_eq!(
+            core.lock_recover().interface_peer_count(GONE),
+            0,
+            "the stale peer-up set a peer count on a retired index"
+        );
+
+        let stale = seen
+            .lock_recover()
+            .iter()
+            .filter(|e| *e == "IFACE_EVENT_STALE")
+            .count();
+        assert_eq!(stale, 2, "one stale line per dropped event");
+
+        harness.shutdown_tx.send(true).expect("loop is live");
+        harness.loop_handle.await.expect("loop exits cleanly");
     }
 
     /// The hourly deaf window this lane removes: a SendPacket pushed while

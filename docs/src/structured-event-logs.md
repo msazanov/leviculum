@@ -103,6 +103,12 @@ to stitch one packet's path across nodes:
   idx=`; the next registration under that index
   (`set_interface_name`) clears the tombstone
   (`leviculum-core/src/node/mvr_interface_up_after_teardown.rs`).
+  The driver drops such a reconnect, and a per-peer transition for
+  the same index, before it touches the core at all, with
+  `IFACE_EVENT_STALE idx= kind=reconnect|peer` (989): the core's
+  refusal covers the re-announce, not the IFAC config the reconnect
+  branch re-applies or the peer count and path pulls a peer event
+  sets.
 - A relay whose outbound path points back out of the arrival interface
   forwards there — same-interface relay on a shared medium is a normal
   hop, not a drop (see

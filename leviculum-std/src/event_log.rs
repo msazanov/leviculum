@@ -987,6 +987,15 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "IFACE_UP_STALE",
         required_keys: &["idx"],
     },
+    // A reconnect notification (`kind=reconnect`) or a per-peer transition
+    // (`kind=peer`) named an index the core tore down and nothing registered
+    // again (`driver/mod.rs::retired_interface_event`, 989): it crossed the
+    // teardown in a driver channel and is dropped before the driver re-applies
+    // IFAC config or a peer count for the gone index.
+    EventSchema {
+        name: "IFACE_EVENT_STALE",
+        required_keys: &["idx", "kind"],
+    },
     // The management destination's own announce (`node/mod.rs`); `iface` is
     // the literal `all`, since it goes out on every interface at once.
     EventSchema {

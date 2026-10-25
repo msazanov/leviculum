@@ -3084,6 +3084,14 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.transport.interface_peer_count(iface)
     }
 
+    /// Whether `iface` was torn down and not registered again (981); see
+    /// [`Transport::interface_torn_down`](crate::transport::Transport::interface_torn_down).
+    /// The driver asks before it acts on an interface event that may have
+    /// crossed the teardown in one of its channels (989).
+    pub fn interface_torn_down(&self, iface: usize) -> bool {
+        self.transport.interface_torn_down(iface)
+    }
+
     /// Notify core that an interface has gone offline (sans-I/O)
     ///
     /// The driver should call this when it detects that an interface is no
