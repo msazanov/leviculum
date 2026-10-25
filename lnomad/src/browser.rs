@@ -84,7 +84,7 @@ pub struct BrowserOptions {
 /// decoded as UTF-8 lossily so a page with stray bytes still renders.
 ///
 /// Public so the TUI shell (`main`) can fetch a page once and lay it out into a
-/// [`crate::tui::Model`], sharing the exact fetch/parse path the print sink uses.
+/// [`crate::app::Model`], sharing the exact fetch/parse path the print sink uses.
 pub async fn fetch_document(
     session: &mut Session,
     target: &Target,

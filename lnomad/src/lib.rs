@@ -24,6 +24,7 @@
 //! and the one-shot print and download sinks the `lnomad` binary drives when it
 //! is not running the interactive [`tui`].
 
+pub mod app;
 pub mod bookmarks;
 pub mod browser;
 pub mod cli;
@@ -41,6 +42,7 @@ pub mod theme;
 pub mod tui;
 pub mod url;
 
+pub use app::{update, AppEvent, Effect, Model};
 pub use bookmarks::{Bookmark, Bookmarks};
 pub use browser::{resolve_link, BrowserOptions};
 pub use cli::{resolve_args, Mode};
@@ -56,7 +58,5 @@ pub use render::{
     layout, render_with_options, RLine, RStyle, RenderedLink, RenderedPage, StyledChar,
 };
 pub use theme::{resolve_theme, Bg, Theme, ThemeFlag};
-pub use tui::{
-    run_tui, to_ratatui_text, update, view, AppEvent, Model, TerminalGuard, TerminalOps,
-};
+pub use tui::{run_tui, to_ratatui_text, view, TerminalGuard, TerminalOps};
 pub use url::{classify_link, parse_url, LinkKind, Target, UrlError};

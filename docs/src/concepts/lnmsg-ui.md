@@ -59,7 +59,7 @@ Concretely:
   (right, lower). `Tab` and `Shift-Tab` cycle; a click focuses.
 - **In the conversation and message panes**, `lnomad`'s keymap applies
   unchanged: the `SCROLL_KEYS` table verbatim
-  (`lnomad/src/tui.rs:3159-3291`), so `j`/`k`, `Ctrl-n`/`Ctrl-p`, arrows,
+  (`lnomad/src/app/event.rs:1983-2115`), so `j`/`k`, `Ctrl-n`/`Ctrl-p`, arrows,
   `Ctrl-f`/`Ctrl-b`, `Ctrl-v`/`Alt-v`, `Ctrl-d`/`Ctrl-u`, `g`/`G`,
   `Home`/`End` and the wheel all work, in all four idioms, for free.
 - **In the compose pane**, plain keys type. Only `Ctrl-` and `Alt-` chords
@@ -84,14 +84,14 @@ Concretely:
   all, and each entry shows its key if it has one. NomadNet's static
   shortcut bar is the failure mode to avoid.
 - **`f` hint mode from `lnomad`** (`hints`,
-  `lnomad/src/tui.rs:1155-1195`), extended to conversations. Its best
+  `lnomad/src/app/model.rs:1042-1079`), extended to conversations. Its best
   property is that it matches either the hint label *or* a substring of the
-  target's text (`hint_matches`, `lnomad/src/tui.rs:1182-1195`), so `f`
+  target's text (`hint_matches`, `lnomad/src/app/model.rs:1069-1079`), so `f`
   then typing part of a contact's name jumps to that conversation. That is
   a better contact switcher than anything in either prior-art program.
 
 **What must not be copied**: `lnomad` quits on `Ctrl-C` from any mode,
-before the mode dispatch (`lnomad/src/tui.rs:1575-1578`). In a messenger
+before the mode dispatch (`lnomad/src/app/event.rs:398-401`). In a messenger
 that is a half-written message thrown away by a reflex. `Ctrl-C` in the
 compose pane clears the buffer to a recoverable draft; quitting needs
 `Ctrl-Q` or the palette.
@@ -99,7 +99,7 @@ compose pane clears the buffer to a recoverable draft; quitting needs
 **The keymap must be one table.** `lnomad` applied single-source-of-truth
 discipline to scrolling and nowhere else, and its help overlay's other
 groups are hand-typed strings that can drift
-(`lnomad/src/tui.rs:4687-4788`). Every binding here is one table read by
+(`lnomad/src/app/chrome.rs:604-705`). Every binding here is one table read by
 the key handler, the help overlay, the palette and the footer hints. That
 table is also the natural place to hang user configuration later, which
 `lnomad` has none of.
@@ -112,7 +112,7 @@ count how often focus is in the compose pane.
 
 **The quiet keyboard, with its one exception** (decided 2026-08-08). The
 `lnomad` rule that single letters are reserved for cheap local actions
-(`lnomad/src/tui.rs:1930-1933`) generalises here to: **no single keystroke
+(`lnomad/src/app/event.rs:759-762`) generalises here to: **no single keystroke
 may put bytes on the air — except `Enter` in the compose pane.** The
 exception is principled, not a leak: the deliberate act was typing the
 message into a deliberately focused pane, and `Enter` completes that act.
@@ -287,14 +287,14 @@ concrete moves:
 ### The mouse as a first-class citizen
 
 `lnomad` enables mouse capture unconditionally with no toggle
-(`lnomad/src/tui.rs:5215-5218`) and handles neither drag nor selection
-(`lnomad/src/tui.rs:1374`). In a browser that costs you the terminal's own
+(`lnomad/src/tui.rs:1272-1275`) and handles neither drag nor selection
+(`lnomad/src/app/event.rs:201`). In a browser that costs you the terminal's own
 copy-paste; in a messenger, where copying message text is a constant, it is
 worse.
 
 Proposal: handle drag selection ourselves over the message IR, so selecting
 text across wrapped lines and across message boundaries works and copies
-via OSC 52 (`lnomad/src/tui.rs:2519-2551`, which works over SSH). Plus a
+via OSC 52 (`lnomad/src/app/event.rs:1348-1380`, which works over SSH). Plus a
 `--no-mouse` flag and a runtime toggle for people who want the terminal's
 own selection back. The `StyledChar` IR already carries per-cell ownership
 (`lnomad/src/render.rs:340-354`), so the hit-testing is a small extension
