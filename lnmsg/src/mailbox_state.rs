@@ -131,6 +131,10 @@ pub fn save(home: &Path, stored: &Stored) -> std::io::Result<()> {
 pub enum Decision {
     /// The stored selection stands.
     Kept { node: [u8; 16] },
+    /// The stored selection stands although the daemon's path table could
+    /// not be read: it was vetted when it was written, or the user chose it,
+    /// and an identity does not move onto this device by itself.
+    KeptWithoutTable { node: [u8; 16] },
     /// A node was adopted; it is written back as `adopted`.
     Adopted {
         node: [u8; 16],
@@ -145,6 +149,9 @@ impl Decision {
     pub fn line(&self, now_ms: u64) -> String {
         match self {
             Self::Kept { node } => format!("mailbox: {} kept", short(node)),
+            Self::KeptWithoutTable { node } => {
+                format!("mailbox: {} kept (path table unreadable)", short(node))
+            }
             Self::Adopted {
                 node,
                 hops,
@@ -163,7 +170,7 @@ impl Decision {
     /// What goes into the file, if anything changed.
     pub fn to_store(&self) -> Option<Stored> {
         match self {
-            Self::Kept { .. } => None,
+            Self::Kept { .. } | Self::KeptWithoutTable { .. } => None,
             Self::Adopted { node, .. } => Some(Stored {
                 node: *node,
                 chosen_by_user: false,
@@ -355,7 +362,7 @@ mod tests {
         assert_eq!(
             adopted.line(181_000),
             "mailbox: abababab (2 hops, seen 3 min ago) adopted: no mailbox was selected; \
-             it is the most recently heard node"
+             it is the most recently heard eligible node"
         );
         assert_eq!(
             Decision::Kept { node: [0xab; 16] }.line(0),
@@ -363,5 +370,11 @@ mod tests {
         );
         assert_eq!(adopted.to_store().map(|s| s.chosen_by_user), Some(false));
         assert_eq!(Decision::Kept { node: [0xab; 16] }.to_store(), None);
+        let unreadable = Decision::KeptWithoutTable { node: [0xab; 16] };
+        assert_eq!(
+            unreadable.line(0),
+            "mailbox: abababab kept (path table unreadable)"
+        );
+        assert_eq!(unreadable.to_store(), None);
     }
 }

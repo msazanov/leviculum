@@ -99,8 +99,8 @@ pub enum Command {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MailboxInput {
     /// The daemon's path table, or why it could not be read. Without it no
-    /// node on this device can be told from one elsewhere, so nothing is
-    /// adopted.
+    /// node on this device can be told from one elsewhere, so nothing new is
+    /// adopted; a stored node is kept.
     pub routes: Result<Vec<Route>, String>,
     /// What an earlier run selected (`${LNMSG_HOME}/mailbox`).
     pub previous: Option<Stored>,

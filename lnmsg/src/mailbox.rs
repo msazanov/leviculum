@@ -59,9 +59,11 @@ impl AdoptReason {
     /// The words the `mailbox:` line shows after "adopted because".
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::NoneSelected => "no mailbox was selected; it is the most recently heard node",
+            Self::NoneSelected => {
+                "no mailbox was selected; it is the most recently heard eligible node"
+            }
             Self::SelectedUnreachable => {
-                "the selected mailbox is unreachable; it is the most recently heard node"
+                "the selected mailbox is unreachable; it is the most recently heard eligible node"
             }
             Self::SelectedOnThisDevice => {
                 "the selected mailbox runs on this device and holds nothing while it is off"

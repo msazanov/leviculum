@@ -456,9 +456,20 @@ impl Engine {
             });
             return;
         };
-        let routes = match input.routes {
-            Ok(routes) => routes,
-            Err(why) => {
+        let routes = match (input.routes, input.previous) {
+            (Ok(routes), _) => routes,
+            // A stored node stays without the table: it was vetted against
+            // the table when it was adopted, or the user chose it, and an
+            // identity does not move onto this device by itself. Only a new
+            // adoption needs the table.
+            (Err(_), Some(stored)) => {
+                self.emit(OutboxEvent::Mailbox(Decision::KeptWithoutTable {
+                    node: stored.node,
+                }));
+                self.commit_pn(ready, core, stored.node, out);
+                return;
+            }
+            (Err(why), None) => {
                 self.emit(OutboxEvent::PnUnavailable {
                     detail: format!(
                         "no mailbox chosen: the daemon's path table could not be read \
@@ -1595,16 +1606,13 @@ mod tests {
         );
     }
 
-    /// Without the path table nothing is adopted, not even a stored node:
-    /// whether it is on this device is exactly what cannot be told.
+    /// Without the path table nothing new is adopted: whether a node is on
+    /// this device is exactly what cannot be told.
     #[test]
     fn an_unreadable_path_table_selects_nothing() {
         let seen = select_without_preference(MailboxInput {
             routes: Err("no authkey".to_string()),
-            previous: Some(crate::mailbox_state::Stored {
-                node: [0x3c; 16],
-                chosen_by_user: false,
-            }),
+            previous: None,
         });
         assert!(
             seen.iter().any(|event| matches!(
@@ -1619,6 +1627,40 @@ mod tests {
                 .any(|event| matches!(event, OutboxEvent::PnSelected { .. })),
             "{seen:?}"
         );
+    }
+
+    /// Without the path table a stored node is kept and selected, adopted or
+    /// chosen alike: it was vetted when it was written, and an identity does
+    /// not move onto this device by itself.
+    #[test]
+    fn an_unreadable_path_table_keeps_a_stored_node() {
+        for chosen_by_user in [false, true] {
+            let node = [0x3c; 16];
+            let seen = select_without_preference(MailboxInput {
+                routes: Err("no authkey".to_string()),
+                previous: Some(crate::mailbox_state::Stored {
+                    node,
+                    chosen_by_user,
+                }),
+            });
+            assert!(
+                seen.contains(&OutboxEvent::Mailbox(Decision::KeptWithoutTable { node })),
+                "{seen:?}"
+            );
+            assert!(
+                seen.iter().any(|event| matches!(
+                    event,
+                    OutboxEvent::PnSelected { destination, .. } if *destination == node
+                )),
+                "{seen:?}"
+            );
+            assert!(
+                !seen
+                    .iter()
+                    .any(|event| matches!(event, OutboxEvent::PnUnavailable { .. })),
+                "{seen:?}"
+            );
+        }
     }
 
     /// A first run waits for the replays it asked for, and with none coming

@@ -225,9 +225,9 @@ async fn first_run_adopts_the_node_elsewhere_and_the_second_keeps_it() {
     let adopted = format!("lnmsg: mailbox: {} (1 hop, seen ", &hex(&remote)[..8]);
     assert!(
         first.stderr.contains(&adopted)
-            && first
-                .stderr
-                .contains("adopted: no mailbox was selected; it is the most recently heard node"),
+            && first.stderr.contains(
+                "adopted: no mailbox was selected; it is the most recently heard eligible node"
+            ),
         "the first run must adopt the node elsewhere and say so: {}",
         first.stderr
     );
@@ -312,6 +312,43 @@ async fn a_node_on_this_device_alone_is_not_adopted() {
     assert_eq!(mailbox_file(home), None);
 }
 
+/// One `lnmsg fetch` against `daemon` under a `--config` directory with no
+/// identity in it: no authkey, so the path table cannot be read over RPC.
+async fn fetch_without_the_table(daemon: &Daemon, home: &Path) -> Run {
+    let config = tempfile::tempdir().expect("an empty config dir");
+    let args = vec![
+        "fetch".to_string(),
+        "--instance".into(),
+        daemon.instance.clone(),
+        "--config".into(),
+        config.path().display().to_string(),
+        "--timeout".into(),
+        "4".into(),
+    ];
+    let home = home.to_path_buf();
+    let run = tokio::task::spawn_blocking(move || {
+        let mut command = Command::new(LNMSG);
+        command
+            .args(&args)
+            .env("LNMSG_HOME", &home)
+            .env_remove("LEVICULUM_EVENT_LOG")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = leviculum_std::process::spawn_supervised(command).expect("spawn lnmsg");
+        let _ = child.stdin.take().map(|mut stdin| stdin.flush());
+        let output = child.wait_with_output().expect("wait for lnmsg");
+        Run {
+            code: output.status.code(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        }
+    })
+    .await
+    .expect("the lnmsg child thread");
+    drop(config);
+    run
+}
+
 /// A path table that cannot be read adopts nothing: lnmsg cannot tell a node
 /// on this device from one elsewhere without it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -323,37 +360,54 @@ async fn without_the_path_table_nothing_is_adopted() {
 
     let home_dir = home();
     let home = home_dir.path();
-    let mut args = vec![
-        "fetch".to_string(),
-        "--instance".into(),
-        here.instance.clone(),
-        // A config directory with no identity in it: no authkey, no RPC.
-        "--config".into(),
-        home.display().to_string(),
-        "--timeout".into(),
-        "4".into(),
-    ];
-    let home_for_child = home.to_path_buf();
-    let run = tokio::task::spawn_blocking(move || {
-        let mut command = Command::new(LNMSG);
-        command
-            .args(args.drain(..))
-            .env("LNMSG_HOME", &home_for_child)
-            .env_remove("LEVICULUM_EVENT_LOG")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let mut child = leviculum_std::process::spawn_supervised(command).expect("spawn lnmsg");
-        let _ = child.stdin.take().map(|mut stdin| stdin.flush());
-        child.wait_with_output().expect("wait for lnmsg")
-    })
-    .await
-    .expect("the lnmsg child thread");
-    let stderr = String::from_utf8_lossy(&run.stderr);
-    assert_eq!(run.status.code(), Some(1), "stderr: {stderr}");
+    let run = fetch_without_the_table(&here, home).await;
+    assert_eq!(run.code, Some(1), "stderr: {}", run.stderr);
     assert!(
-        stderr.contains("the daemon's path table could not be read"),
-        "{stderr}"
+        run.stderr
+            .contains("the daemon's path table could not be read"),
+        "{}",
+        run.stderr
     );
     assert_eq!(mailbox_file(home), None);
+}
+
+/// Without the path table a stored node is kept: it was vetted against the
+/// table when it was written, and an identity does not move onto this device
+/// by itself. The run says so and leaves the file as it was.
+async fn a_stored_node_is_kept_without_the_table(kind: &str) {
+    let (here, elsewhere) = two_daemons().await;
+    let remote_node = propagation_node(&elsewhere).await;
+    let remote = remote_node.hash;
+    wait_for_path(&here, &remote, 1).await;
+
+    let home_dir = home();
+    let home = home_dir.path();
+    let stored = format!("{} {kind}\n", hex(&remote));
+    std::fs::write(home.join("mailbox"), &stored).expect("write the stored mailbox");
+    let run = fetch_without_the_table(&here, home).await;
+    assert!(
+        run.stderr.contains(&format!(
+            "lnmsg: mailbox: {} kept (path table unreadable)",
+            &hex(&remote)[..8]
+        )),
+        "the stored {kind} node must be kept: {}",
+        run.stderr
+    );
+    assert!(
+        !run.stderr.contains("no mailbox chosen"),
+        "a kept node is a chosen one: {}",
+        run.stderr
+    );
+    assert_eq!(mailbox_file(home), Some(stored));
+    drop((remote_node, here.node, elsewhere.node));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn without_the_path_table_a_stored_adopted_node_is_kept() {
+    a_stored_node_is_kept_without_the_table("adopted").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn without_the_path_table_a_stored_user_node_is_kept() {
+    a_stored_node_is_kept_without_the_table("user").await;
 }
