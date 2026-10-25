@@ -110,9 +110,13 @@ rig_reader_alive() {
 rig_reader_start() {
     local board="$1" serial="$2" link="$3"
     # 7>&- : the bench lock is on fd 7, and a reader inheriting it would hold
-    # the bench for as long as it runs.
+    # the bench for as long as it runs. --capture is a year: the reader's
+    # default window is 90 s, sized for one post-mortem, and a standing reader
+    # that went deaf 90 s after the cell would record nothing until the next
+    # reset.
     setsid python3 "$LEV_RIG_READER" --port "$link" \
-        --out "$RIG_READERS_DIR/$board.log" --label "$board/$serial" --attach-now \
+        --out "$RIG_READERS_DIR/$board.log" --label "$board/$serial" \
+        --attach-now --capture 31536000 \
         </dev/null >>"$RIG_READERS_DIR/$board.err" 2>&1 7>&- &
     printf '%s\n' "$!" >"$(rig_reader_pidfile "$board")"
 }

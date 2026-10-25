@@ -92,7 +92,7 @@ late_link_case() {
     done
     grep -qE 'reader board-late back after [2-4] s' "$dir/runner.log" || return 1
     grep -qF -- "--port $link" "$dir/calls" 2>/dev/null || return 1
-    grep -qF -- "--attach-now" "$dir/calls" || return 1
+    grep -qF -- "--attach-now --capture 31536000" "$dir/calls" || return 1
     return 0
 }
 
