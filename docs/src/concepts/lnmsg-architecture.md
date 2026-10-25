@@ -696,6 +696,18 @@ list shorter; behaviour and the CLI tests do not change.
 5. *Green*: the gate passes and joins `guards`, with a positive control (a
    `std::` path injected into a core module is refused).
 
+**Status, 2026-10-25 (990).** Passes 1 and 2 are in; the gate lists 26
+errors, all of passes 3 and 4. `Scalar` lives in `leviculum-core`'s
+`event_scalar`, and `leviculum-std` re-exports it. The shell items stayed
+in their modules behind `cfg(feature = "std")`, which kept the callers'
+paths; the send and fetch runners reach the host through
+`effects::Effects` (the notices, the mailbox record, the seen record, the
+wall clock), and the terminal's implementation is `effects::Terminal`. Two
+`std` uses outside the five modules remain on purpose: `fetch`'s
+`io::Write` output is pass 3's, and `AttachConfig::storage_dir` is a
+`PathBuf` because the driver builder takes one, so it moves with `attach`
+in pass 4.
+
 **What stays std-only, and what the core needs from it.** `leviculum-std`
 (the driver, the daemon RPC, the event-log subscriber, identity minting,
 the passwd lookup): the core needs `Scalar` (pass 1) and the

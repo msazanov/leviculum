@@ -17,6 +17,7 @@
 //! a fresh process has a fresh router, and the message that arrived directly
 //! yesterday must not reappear because a mailbox still held a copy today.
 
+use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::time::Duration;
@@ -25,8 +26,9 @@ use std::io::Write;
 use leviculum_lxmf::router::PropagationPathAttempts;
 use tokio::time::Instant;
 
+use crate::effects::Effects;
 use crate::events;
-use crate::mailbox_state::MailboxRun;
+use crate::mailbox_state::{self, MailboxRun};
 use crate::outbox::{Command, Outbox, OutboxEvent, OutboxGone};
 use crate::seen::SeenStore;
 
@@ -176,13 +178,15 @@ fn print_message(
 ///
 /// `preferred_pn` and `pn_source` are as in
 /// [`crate::send::run_send_propagated`]. Messages go to `out` (stdout in the
-/// binary, a buffer in tests); the seen store is updated as each message is
-/// printed, not at the end, so an interrupted drain never re-prints.
-pub async fn run_fetch<O: Outbox, W: Write>(
+/// binary, a buffer in tests); the seen record is written through `effects`
+/// as each message is printed, not at the end, so an interrupted drain never
+/// re-prints. The mailbox decision is shown and kept through `effects` too.
+pub async fn run_fetch<O: Outbox, E: Effects, W: Write>(
     outbox: &mut O,
     preferred_pn: Option<[u8; 16]>,
     pn_source: &str,
     options: &FetchOptions,
+    effects: &mut E,
     seen: &mut SeenStore,
     out: &mut W,
 ) -> Result<Fetched, FetchError> {
@@ -209,7 +213,7 @@ pub async fn run_fetch<O: Outbox, W: Write>(
                     if !fetching {
                         events::pn(&destination, pn_source, stamp_cost);
                         if pn_source == "flag" {
-                            options.mailbox.record_user_choice(destination);
+                            mailbox_state::record_user_choice(destination, effects);
                         }
                         // What is left of the budget, so the drain asks for a
                         // path for as long as the user said the fetch may take
@@ -227,7 +231,7 @@ pub async fn run_fetch<O: Outbox, W: Write>(
                 OutboxEvent::PnUnavailable { detail } => {
                     return Err(FetchError::NoPropagationNode(detail));
                 }
-                OutboxEvent::Mailbox(decision) => options.mailbox.report(&decision),
+                OutboxEvent::Mailbox(decision) => mailbox_state::report(&decision, effects),
                 OutboxEvent::Received {
                     message_id,
                     source,
@@ -235,17 +239,20 @@ pub async fn run_fetch<O: Outbox, W: Write>(
                     body,
                     verified,
                 } => {
-                    // An unwritable seen store must not cost mail: the worst
-                    // a failed record can do is a duplicate print next run,
+                    // An unwritable seen record must not cost mail: the worst
+                    // a failed write can do is a duplicate print next run,
                     // and that beats a message nobody saw.
                     let first_sight = match seen.record(message_id) {
-                        Ok(first_sight) => first_sight,
-                        Err(error) => {
-                            eprintln!("lnmsg: could not record {} as seen: {error}", {
-                                crate::address::to_hex(&message_id)
-                            });
-                            !seen.contains(&message_id)
+                        Some(write) => {
+                            if let Err(error) = effects.write_seen(&write) {
+                                effects.notice(&format!(
+                                    "could not record {} as seen: {error}",
+                                    crate::address::to_hex(&message_id)
+                                ));
+                            }
+                            true
                         }
+                        None => false,
                     };
                     events::fetched(&message_id, &source, body.len(), !first_sight);
                     if first_sight {
@@ -303,7 +310,9 @@ pub async fn run_fetch<O: Outbox, W: Write>(
 mod tests {
     use super::*;
 
+    use crate::effects::fake::Recorded;
     use crate::outbox::fake::FakeOutbox;
+    use crate::seen::SeenWrite;
 
     const PN: [u8; 16] = [0x11; 16];
     const SRC: [u8; 16] = [0x22; 16];
@@ -329,15 +338,14 @@ mod tests {
         }
     }
 
-    fn store(dir: &std::path::Path) -> SeenStore {
-        SeenStore::load(dir).expect("seen store")
+    fn effects() -> Recorded {
+        Recorded::default()
     }
 
     /// The genuine round: select, fetch, print, done — and the drain's
     /// counts come back to the caller.
     #[tokio::test(start_paused = true)]
     async fn a_drain_prints_new_messages_and_reports_the_counts() {
-        let dir = tempfile::tempdir().expect("tempdir");
         let mut outbox = FakeOutbox::new(vec![
             OutboxEvent::Ready { address: [1; 16] },
             OutboxEvent::PnSelected {
@@ -351,7 +359,7 @@ mod tests {
                 duplicates: 0,
             },
         ]);
-        let mut seen = store(dir.path());
+        let mut seen = SeenStore::default();
         let mut printed = Vec::new();
 
         let fetched = run_fetch(
@@ -359,6 +367,7 @@ mod tests {
             None,
             "mailbox",
             &options(),
+            &mut effects(),
             &mut seen,
             &mut printed,
         )
@@ -400,11 +409,6 @@ mod tests {
     /// already delivered is recorded but not printed again.
     #[tokio::test(start_paused = true)]
     async fn an_already_seen_message_is_not_printed_again() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        {
-            let mut earlier = store(dir.path());
-            earlier.record(ID_A).expect("record in the earlier run");
-        }
         let mut outbox = FakeOutbox::new(vec![
             OutboxEvent::PnSelected {
                 destination: PN,
@@ -417,7 +421,9 @@ mod tests {
                 duplicates: 0,
             },
         ]);
-        let mut seen = store(dir.path());
+        // What an earlier run left on disk.
+        let (mut seen, _) = SeenStore::from_text(&(crate::address::to_hex(&ID_A) + "\n"));
+        let mut effects = effects();
         let mut printed = Vec::new();
 
         let fetched = run_fetch(
@@ -425,6 +431,7 @@ mod tests {
             None,
             "mailbox",
             &options(),
+            &mut effects,
             &mut seen,
             &mut printed,
         )
@@ -435,15 +442,67 @@ mod tests {
         let text = String::from_utf8(printed).expect("utf8");
         assert!(!text.contains("the copy a mailbox still held"));
         assert!(text.contains("genuinely new"));
+        assert_eq!(
+            effects.seen,
+            vec![SeenWrite::Append(crate::address::to_hex(&ID_B) + "\n")],
+            "only the new id is appended to the record"
+        );
+    }
+
+    /// The comment in `run_fetch` made true: a seen record that cannot be
+    /// written costs a notice and, next run, a duplicate, never this run's
+    /// print.
+    #[tokio::test(start_paused = true)]
+    async fn an_unwritable_seen_record_still_prints_and_says_so() {
+        let mut outbox = FakeOutbox::new(vec![
+            OutboxEvent::PnSelected {
+                destination: PN,
+                stamp_cost: None,
+            },
+            received(ID_A, b"must not be lost"),
+            OutboxEvent::SyncDone {
+                received: 1,
+                duplicates: 0,
+            },
+        ]);
+        let mut seen = SeenStore::default();
+        let mut effects = Recorded {
+            seen_fails: Some("No space left on device"),
+            ..Recorded::default()
+        };
+        let mut printed = Vec::new();
+
+        let fetched = run_fetch(
+            &mut outbox,
+            None,
+            "mailbox",
+            &options(),
+            &mut effects,
+            &mut seen,
+            &mut printed,
+        )
+        .await
+        .expect("a failed record is not a failed fetch");
+
+        assert_eq!(fetched.new, 1);
+        assert!(String::from_utf8(printed)
+            .expect("utf8")
+            .contains("must not be lost"));
+        assert_eq!(
+            effects.notices,
+            vec![format!(
+                "could not record {} as seen: No space left on device",
+                crate::address::to_hex(&ID_A)
+            )]
+        );
     }
 
     #[tokio::test(start_paused = true)]
     async fn no_selectable_node_is_its_own_failure() {
-        let dir = tempfile::tempdir().expect("tempdir");
         let mut outbox = FakeOutbox::new(vec![OutboxEvent::PnUnavailable {
             detail: "none announced".to_string(),
         }]);
-        let mut seen = store(dir.path());
+        let mut seen = SeenStore::default();
         let mut printed = Vec::new();
 
         let error = run_fetch(
@@ -451,6 +510,7 @@ mod tests {
             None,
             "mailbox",
             &options(),
+            &mut effects(),
             &mut seen,
             &mut printed,
         )
@@ -465,7 +525,6 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_failed_sync_reports_the_state_word() {
-        let dir = tempfile::tempdir().expect("tempdir");
         let mut outbox = FakeOutbox::new(vec![
             OutboxEvent::PnSelected {
                 destination: PN,
@@ -476,7 +535,7 @@ mod tests {
                 path: None,
             },
         ]);
-        let mut seen = store(dir.path());
+        let mut seen = SeenStore::default();
         let mut printed = Vec::new();
 
         let error = run_fetch(
@@ -484,6 +543,7 @@ mod tests {
             None,
             "mailbox",
             &options(),
+            &mut effects(),
             &mut seen,
             &mut printed,
         )
@@ -499,7 +559,6 @@ mod tests {
     /// and over how long, so a red cell does not need its `PKT_TX` counted.
     #[tokio::test(start_paused = true)]
     async fn a_missing_path_names_its_requests() {
-        let dir = tempfile::tempdir().expect("tempdir");
         let attempts = PropagationPathAttempts {
             requests: 9,
             waited_ms: 59_000,
@@ -514,7 +573,7 @@ mod tests {
                 path: Some(attempts),
             },
         ]);
-        let mut seen = store(dir.path());
+        let mut seen = SeenStore::default();
         let mut printed = Vec::new();
 
         let error = run_fetch(
@@ -522,6 +581,7 @@ mod tests {
             None,
             "mailbox",
             &options(),
+            &mut effects(),
             &mut seen,
             &mut printed,
         )
@@ -538,12 +598,11 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_drain_that_never_finishes_times_out() {
-        let dir = tempfile::tempdir().expect("tempdir");
         let mut outbox = FakeOutbox::new(vec![OutboxEvent::PnSelected {
             destination: PN,
             stamp_cost: None,
         }]);
-        let mut seen = store(dir.path());
+        let mut seen = SeenStore::default();
         let mut printed = Vec::new();
 
         let error = run_fetch(
@@ -551,6 +610,7 @@ mod tests {
             None,
             "mailbox",
             &options(),
+            &mut effects(),
             &mut seen,
             &mut printed,
         )
@@ -563,7 +623,6 @@ mod tests {
     /// certainly sees.
     #[tokio::test(start_paused = true)]
     async fn an_unverified_sender_is_named_in_the_header() {
-        let dir = tempfile::tempdir().expect("tempdir");
         let mut outbox = FakeOutbox::new(vec![
             OutboxEvent::PnSelected {
                 destination: PN,
@@ -581,7 +640,7 @@ mod tests {
                 duplicates: 0,
             },
         ]);
-        let mut seen = store(dir.path());
+        let mut seen = SeenStore::default();
         let mut printed = Vec::new();
 
         run_fetch(
@@ -589,6 +648,7 @@ mod tests {
             None,
             "mailbox",
             &options(),
+            &mut effects(),
             &mut seen,
             &mut printed,
         )

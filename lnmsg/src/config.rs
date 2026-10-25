@@ -20,22 +20,19 @@
 //! mailbox hash would otherwise turn into "my mail goes nowhere" with no
 //! trace.
 
-use alloc::borrow::ToOwned;
 use alloc::string::{String, ToString};
-use std::path::{Path, PathBuf};
 
 use crate::address;
 
 /// The config file's name under the lnmsg home directory.
 pub const CONFIG_FILE: &str = "config";
 
-/// Why the config could not be used.
-#[derive(Debug)]
+/// Why the config text could not be used. It names the line; the file it came
+/// from is the shell's to add ([`LoadError`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigError {
-    Io(PathBuf, std::io::Error),
     /// A line that should carry a value does not parse. 1-based line number.
     BadValue {
-        path: PathBuf,
         line: usize,
         key: &'static str,
         detail: String,
@@ -45,13 +42,7 @@ pub enum ConfigError {
 impl core::fmt::Display for ConfigError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::Io(path, error) => write!(f, "{}: {error}", path.display()),
-            Self::BadValue {
-                path,
-                line,
-                key,
-                detail,
-            } => write!(f, "{}:{line}: {key}: {detail}", path.display()),
+            Self::BadValue { line, key, detail } => write!(f, "line {line}: {key}: {detail}"),
         }
     }
 }
@@ -65,20 +56,8 @@ pub struct Config {
     pub propagation_node: Option<[u8; 16]>,
 }
 
-/// Load `home/config`. A missing file is an empty config, not an error.
-pub fn load(home: &Path) -> Result<Config, ConfigError> {
-    let path = home.join(CONFIG_FILE);
-    let text = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(Config::default());
-        }
-        Err(error) => return Err(ConfigError::Io(path, error)),
-    };
-    parse(&text, &path)
-}
-
-fn parse(text: &str, path: &Path) -> Result<Config, ConfigError> {
+/// Read the config file's text.
+pub fn parse(text: &str) -> Result<Config, ConfigError> {
     let mut config = Config::default();
     for (index, raw) in text.lines().enumerate() {
         let line = raw.split('#').next().unwrap_or("").trim();
@@ -96,7 +75,6 @@ fn parse(text: &str, path: &Path) -> Result<Config, ConfigError> {
                 Ok(hash) => config.propagation_node = Some(hash),
                 Err(error) => {
                     return Err(ConfigError::BadValue {
-                        path: path.to_owned(),
                         line: index + 1,
                         key: "propagation_node",
                         detail: error.to_string(),
@@ -108,12 +86,49 @@ fn parse(text: &str, path: &Path) -> Result<Config, ConfigError> {
     Ok(config)
 }
 
+/// Why `home/config` could not be used, with the file named.
+#[cfg(feature = "std")]
+#[derive(Debug)]
+pub enum LoadError {
+    Io(std::path::PathBuf, std::io::Error),
+    Bad(std::path::PathBuf, ConfigError),
+}
+
+#[cfg(feature = "std")]
+impl core::fmt::Display for LoadError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Io(path, error) => write!(f, "{}: {error}", path.display()),
+            Self::Bad(path, ConfigError::BadValue { line, key, detail }) => {
+                write!(f, "{}:{line}: {key}: {detail}", path.display())
+            }
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+impl core::error::Error for LoadError {}
+
+/// Load `home/config`. A missing file is an empty config, not an error.
+#[cfg(feature = "std")]
+pub fn load(home: &std::path::Path) -> Result<Config, LoadError> {
+    let path = home.join(CONFIG_FILE);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Config::default());
+        }
+        Err(error) => return Err(LoadError::Io(path, error)),
+    };
+    parse(&text).map_err(|error| LoadError::Bad(path, error))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn parse_str(text: &str) -> Result<Config, ConfigError> {
-        parse(text, Path::new("/test/config"))
+        parse(text)
     }
 
     #[test]
@@ -141,9 +156,31 @@ mod tests {
     fn a_malformed_node_hash_is_an_error_naming_the_line() {
         let error = parse_str("\npropagation_node = not-a-hash\n")
             .expect_err("a bad hash must not be ignored");
-        let text = error.to_string();
         assert!(
-            text.contains(":2:") && text.contains("propagation_node"),
+            matches!(
+                error,
+                ConfigError::BadValue {
+                    line: 2,
+                    key: "propagation_node",
+                    ..
+                }
+            ),
+            "the error must name line and key: {error:?}"
+        );
+    }
+
+    /// The file half of the same rule: the shell adds the path, in the
+    /// `file:line:` shape an editor jumps to.
+    #[test]
+    fn a_malformed_file_is_an_error_naming_file_line_and_key() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(CONFIG_FILE);
+        std::fs::write(&path, "\npropagation_node = not-a-hash\n").expect("write");
+        let text = load(dir.path())
+            .expect_err("a bad hash must not be ignored")
+            .to_string();
+        assert!(
+            text.starts_with(&format!("{}:2: propagation_node: ", path.display())),
             "the error must name file, line and key: {text}"
         );
     }

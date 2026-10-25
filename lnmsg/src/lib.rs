@@ -59,6 +59,7 @@ pub mod address;
 pub mod body;
 pub mod config;
 pub mod display_name;
+pub mod effects;
 pub mod engine;
 pub mod events;
 pub mod fetch;

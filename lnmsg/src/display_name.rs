@@ -187,6 +187,9 @@ pub fn resolve(sources: Sources<'_>) -> Result<Resolved, EmptyDisplayName> {
 }
 
 /// Resolve against this process: the password database, then the environment.
+/// The shell's half; a host without either passes its [`Sources`] to
+/// [`resolve`].
+#[cfg(feature = "std")]
 pub fn from_process(flag: Option<&str>) -> Result<Resolved, EmptyDisplayName> {
     let env_override = std::env::var(DISPLAY_NAME_ENV).ok();
     let passwd = leviculum_std::user::passwd_name();

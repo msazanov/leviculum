@@ -12,12 +12,14 @@
 //! the one identity a message keeps across its delivery methods: the direct
 //! copy and the mailbox copy of one message share it by construction
 //! (`leviculum-lxmf/src/message.rs`, the id covers the signed content).
+//!
+//! The set, the line format and the compaction rule are core and say what to
+//! write ([`SeenWrite`]); the file is the shell's ([`SeenStore::load`] and
+//! [`apply`], behind the `std` feature).
 
 use alloc::collections::BTreeSet;
 use alloc::string::String;
 use alloc::vec::Vec;
-use std::io::Write as _;
-use std::path::{Path, PathBuf};
 
 /// The store's file name under the lnmsg home directory.
 pub const SEEN_FILE: &str = "seen";
@@ -30,30 +32,35 @@ const COMPACT_AT: usize = 65_536;
 /// How many newest entries a compaction keeps.
 const KEEP_ON_COMPACT: usize = 32_768;
 
-/// The persisted set of already-delivered message ids.
+/// One change to the persisted record, for the host to apply
+/// ([`crate::effects::Effects::write_seen`]; the terminal's is [`apply`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SeenWrite {
+    /// Append this line, newline included.
+    Append(String),
+    /// Replace the whole record with this text. The terminal writes it
+    /// beside the file and renames it over, so a crash mid-compaction leaves
+    /// the old file rather than half of one.
+    Rewrite(String),
+}
+
+/// The set of already-delivered message ids, and the rules that keep its
+/// record: the line format, the damaged-line rule and the compaction.
+#[derive(Debug, Default)]
 pub struct SeenStore {
-    path: PathBuf,
     seen: BTreeSet<[u8; 32]>,
     /// File order, for compaction. `seen` is the lookup, this is the age.
     order: Vec<[u8; 32]>,
 }
 
 impl SeenStore {
-    /// Load `home/seen`. A missing file is an empty store; an unreadable
-    /// line is skipped rather than fatal, because refusing to fetch over a
-    /// damaged dedup record would trade duplicate mail for no mail.
-    pub fn load(home: &Path) -> std::io::Result<Self> {
-        let path = home.join(SEEN_FILE);
-        let mut store = Self {
-            path,
-            seen: BTreeSet::new(),
-            order: Vec::new(),
-        };
-        let text = match std::fs::read_to_string(&store.path) {
-            Ok(text) => text,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(store),
-            Err(error) => return Err(error),
-        };
+    /// Read a record's text. An unreadable line is skipped rather than fatal,
+    /// because refusing to fetch over a damaged dedup record would trade
+    /// duplicate mail for no mail. A record that has grown to the compaction
+    /// threshold (65 536 ids) comes back compacted, with the rewrite that
+    /// makes the record match.
+    pub fn from_text(text: &str) -> (Self, Option<SeenWrite>) {
+        let mut store = Self::default();
         for line in text.lines() {
             if let Some(id) = parse_id(line.trim()) {
                 if store.seen.insert(id) {
@@ -61,10 +68,8 @@ impl SeenStore {
                 }
             }
         }
-        if store.order.len() >= COMPACT_AT {
-            store.compact()?;
-        }
-        Ok(store)
+        let compaction = (store.order.len() >= COMPACT_AT).then(|| store.compact());
+        (store, compaction)
     }
 
     /// Whether this id has been delivered by an earlier run (or earlier in
@@ -73,24 +78,21 @@ impl SeenStore {
         self.seen.contains(id)
     }
 
-    /// Record one delivered id. Returns `true` when it was new; a new id is
-    /// appended to the file immediately, so a fetch that dies mid-run does
-    /// not re-print what it already printed.
-    pub fn record(&mut self, id: [u8; 32]) -> std::io::Result<bool> {
+    /// Record one delivered id. A new id comes back as the line to append,
+    /// which the caller applies immediately, so a fetch that dies mid-run
+    /// does not re-print what it already printed; a known one as `None`.
+    pub fn record(&mut self, id: [u8; 32]) -> Option<SeenWrite> {
         if !self.seen.insert(id) {
-            return Ok(false);
+            return None;
         }
         self.order.push(id);
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)?;
-        writeln!(file, "{}", crate::address::to_hex(&id))?;
-        Ok(true)
+        let mut line = crate::address::to_hex(&id);
+        line.push('\n');
+        Some(SeenWrite::Append(line))
     }
 
-    /// Rewrite the file to the newest [`KEEP_ON_COMPACT`] entries.
-    fn compact(&mut self) -> std::io::Result<()> {
+    /// Keep the newest `KEEP_ON_COMPACT` entries; the record's new text.
+    fn compact(&mut self) -> SeenWrite {
         let keep_from = self.order.len().saturating_sub(KEEP_ON_COMPACT);
         let kept: Vec<[u8; 32]> = self.order.split_off(keep_from);
         self.order = kept;
@@ -100,11 +102,47 @@ impl SeenStore {
             text.push_str(&crate::address::to_hex(id));
             text.push('\n');
         }
-        // Write-then-rename, so a crash mid-compaction leaves the old file
-        // rather than half of one.
-        let tmp = self.path.with_extension("tmp");
-        std::fs::write(&tmp, text)?;
-        std::fs::rename(&tmp, &self.path)
+        SeenWrite::Rewrite(text)
+    }
+}
+
+#[cfg(feature = "std")]
+impl SeenStore {
+    /// Load `home/seen`. A missing file is an empty store; one that has grown
+    /// to the threshold is compacted on disk before it is used.
+    pub fn load(home: &std::path::Path) -> std::io::Result<Self> {
+        let text = match std::fs::read_to_string(home.join(SEEN_FILE)) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self::default())
+            }
+            Err(error) => return Err(error),
+        };
+        let (store, compaction) = Self::from_text(&text);
+        if let Some(write) = compaction {
+            apply(home, &write)?;
+        }
+        Ok(store)
+    }
+}
+
+/// Apply one [`SeenWrite`] to `home/seen`.
+#[cfg(feature = "std")]
+pub fn apply(home: &std::path::Path, write: &SeenWrite) -> std::io::Result<()> {
+    use std::io::Write as _;
+
+    let path = home.join(SEEN_FILE);
+    match write {
+        SeenWrite::Append(line) => std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)?
+            .write_all(line.as_bytes()),
+        SeenWrite::Rewrite(text) => {
+            let tmp = path.with_extension("tmp");
+            std::fs::write(&tmp, text)?;
+            std::fs::rename(&tmp, &path)
+        }
     }
 }
 
@@ -129,14 +167,73 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_new_id_is_one_line_to_append_and_a_known_one_is_nothing() {
+        let mut store = SeenStore::default();
+        let id = [0xab; 32];
+        assert!(!store.contains(&id));
+        assert_eq!(
+            store.record(id),
+            Some(SeenWrite::Append("ab".repeat(32) + "\n")),
+            "first sight is new"
+        );
+        assert!(store.contains(&id));
+        assert_eq!(store.record(id), None, "second sight is not");
+    }
+
+    #[test]
+    fn a_damaged_line_is_skipped_not_fatal() {
+        let (store, compaction) =
+            SeenStore::from_text(&("not hex at all\n".to_string() + &"cd".repeat(32) + "\n"));
+        assert!(store.contains(&[0xcd; 32]), "the intact line still counts");
+        assert_eq!(compaction, None);
+    }
+
+    fn numbered(n: u32) -> [u8; 32] {
+        let mut id = [0u8; 32];
+        id[..4].copy_from_slice(&n.to_be_bytes());
+        id
+    }
+
+    fn record_of(count: u32) -> String {
+        let mut text = String::new();
+        // `count` distinct ids, oldest first.
+        for n in 0..count {
+            text.push_str(&crate::address::to_hex(&numbered(n)));
+            text.push('\n');
+        }
+        text
+    }
+
+    #[test]
+    fn compaction_keeps_the_newest_entries() {
+        let (store, compaction) = SeenStore::from_text(&record_of(COMPACT_AT as u32));
+        assert!(
+            !store.contains(&numbered(0)),
+            "the oldest entries are dropped"
+        );
+        assert!(
+            store.contains(&numbered(COMPACT_AT as u32 - 1)),
+            "the newest entries are kept"
+        );
+        let Some(SeenWrite::Rewrite(text)) = compaction else {
+            panic!("a full record is rewritten, not just the in-memory view: {compaction:?}");
+        };
+        assert_eq!(text.lines().count(), KEEP_ON_COMPACT);
+        assert_eq!(
+            SeenStore::from_text(&record_of(COMPACT_AT as u32 - 1)).1,
+            None,
+            "below the threshold nothing is rewritten"
+        );
+    }
+
+    #[test]
     fn a_recorded_id_survives_a_reload() {
         let dir = tempfile::tempdir().expect("tempdir");
         let id = [0xab; 32];
 
         let mut store = SeenStore::load(dir.path()).expect("empty load");
-        assert!(!store.contains(&id));
-        assert!(store.record(id).expect("record"), "first sight is new");
-        assert!(!store.record(id).expect("record"), "second sight is not");
+        let write = store.record(id).expect("first sight is new");
+        apply(dir.path(), &write).expect("append");
 
         let reloaded = SeenStore::load(dir.path()).expect("reload");
         assert!(
@@ -146,37 +243,12 @@ mod tests {
     }
 
     #[test]
-    fn a_damaged_line_is_skipped_not_fatal() {
+    fn loading_a_full_file_compacts_it_on_disk() {
         let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(
-            dir.path().join(SEEN_FILE),
-            "not hex at all\n".to_string() + &"cd".repeat(32) + "\n",
-        )
-        .expect("write");
-        let store = SeenStore::load(dir.path()).expect("damage is not fatal");
-        assert!(store.contains(&[0xcd; 32]), "the intact line still counts");
-    }
-
-    #[test]
-    fn compaction_keeps_the_newest_entries() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let mut text = String::new();
-        // COMPACT_AT distinct ids, oldest first.
-        for n in 0..COMPACT_AT as u32 {
-            let mut id = [0u8; 32];
-            id[..4].copy_from_slice(&n.to_be_bytes());
-            text.push_str(&crate::address::to_hex(&id));
-            text.push('\n');
-        }
-        std::fs::write(dir.path().join(SEEN_FILE), text).expect("write");
+        std::fs::write(dir.path().join(SEEN_FILE), record_of(COMPACT_AT as u32)).expect("write");
 
         let store = SeenStore::load(dir.path()).expect("load compacts");
-        let mut oldest = [0u8; 32];
-        oldest[..4].copy_from_slice(&0u32.to_be_bytes());
-        let mut newest = [0u8; 32];
-        newest[..4].copy_from_slice(&(COMPACT_AT as u32 - 1).to_be_bytes());
-        assert!(!store.contains(&oldest), "the oldest entries are dropped");
-        assert!(store.contains(&newest), "the newest entries are kept");
+        assert!(store.contains(&numbered(COMPACT_AT as u32 - 1)));
 
         let on_disk = std::fs::read_to_string(dir.path().join(SEEN_FILE)).expect("read back");
         assert_eq!(

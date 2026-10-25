@@ -5,9 +5,8 @@
 //! is `echo "disk 91%" | lnmsg send <addr>`. So stdin is the default source,
 //! and a positional body is the convenience, not the other way round.
 
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec::Vec;
-use std::io::Read;
 
 /// Why there is no body to send.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,16 +33,15 @@ impl core::error::Error for BodyError {}
 
 /// Resolve the body from the positional argument or from `stdin`.
 ///
-/// `None` and `Some("-")` both mean stdin, which is the documented form. A
-/// body is bytes, not text: whatever arrives is forwarded byte for byte, so a
-/// non-UTF-8 payload is not mangled on its way to a peer that can read it.
-///
-/// One trailing newline is removed (with a preceding carriage return, if any).
-/// Every line-oriented producer appends one — `echo`, `printf '%s\n'`, a
-/// here-string — and carrying it into the message would put a blank line at
-/// the end of every status line a cron job ever sends. Exactly one is removed,
-/// so a body that deliberately ends in a blank line can still say so with two.
-pub fn resolve(positional: Option<&str>, stdin: &mut impl Read) -> Result<Vec<u8>, BodyError> {
+/// `None` and `Some("-")` both mean stdin, which is the documented form. The
+/// rule for what is read is [`finish`].
+#[cfg(feature = "std")]
+pub fn resolve(
+    positional: Option<&str>,
+    stdin: &mut impl std::io::Read,
+) -> Result<Vec<u8>, BodyError> {
+    use alloc::string::ToString;
+
     let raw = match positional {
         None | Some("-") => {
             let mut buffer = Vec::new();
@@ -54,6 +52,20 @@ pub fn resolve(positional: Option<&str>, stdin: &mut impl Read) -> Result<Vec<u8
         }
         Some(text) => text.as_bytes().to_vec(),
     };
+    finish(raw)
+}
+
+/// Turn what was given into the body that is sent.
+///
+/// A body is bytes, not text: whatever arrives is forwarded byte for byte, so
+/// a non-UTF-8 payload is not mangled on its way to a peer that can read it.
+///
+/// One trailing newline is removed (with a preceding carriage return, if any).
+/// Every line-oriented producer appends one — `echo`, `printf '%s\n'`, a
+/// here-string — and carrying it into the message would put a blank line at
+/// the end of every status line a cron job ever sends. Exactly one is removed,
+/// so a body that deliberately ends in a blank line can still say so with two.
+pub fn finish(raw: Vec<u8>) -> Result<Vec<u8>, BodyError> {
     let trimmed = strip_one_trailing_newline(raw);
     if trimmed.iter().all(|byte| byte.is_ascii_whitespace()) {
         return Err(BodyError::Empty);
@@ -128,10 +140,20 @@ mod tests {
         );
     }
 
+    /// The rule without a reader, as a host with no stdin applies it.
+    #[test]
+    fn finish_applies_the_same_rule_to_given_bytes() {
+        assert_eq!(
+            finish(b"from a form\n".to_vec()),
+            Ok(b"from a form".to_vec())
+        );
+        assert_eq!(finish(b" \r\n".to_vec()), Err(BodyError::Empty));
+    }
+
     #[test]
     fn a_read_error_is_reported_rather_than_treated_as_empty() {
         struct Broken;
-        impl Read for Broken {
+        impl std::io::Read for Broken {
             fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
                 Err(std::io::Error::other("no stdin here"))
             }

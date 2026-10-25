@@ -21,13 +21,12 @@
 //! `docs/src/audits/2026-10-11-shared-instance-rpc.md`). The test needs no
 //! new surface and does not care which program the node is.
 
+use crate::effects::Effects;
+use crate::mailbox::{AdoptReason, Previous};
+use crate::outbox::MailboxInput;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use std::path::{Path, PathBuf};
-
-use crate::mailbox::{AdoptReason, Previous};
-use crate::outbox::MailboxInput;
 
 /// The file the selection is persisted in, beside `seen`.
 pub const MAILBOX_FILE: &str = "mailbox";
@@ -95,37 +94,48 @@ impl Stored {
     }
 }
 
-/// Load `home/mailbox`. A missing or unreadable file is no selection: the
-/// rule adopts again, which is the right answer for a selection nobody can
-/// read.
-pub fn load(home: &Path) -> Option<Stored> {
-    let text = std::fs::read_to_string(home.join(MAILBOX_FILE)).ok()?;
-    let mut words = text.split_whitespace();
-    let node = crate::address::parse(words.next()?).ok()?;
-    let chosen_by_user = match words.next()? {
-        "user" => true,
-        "adopted" => false,
-        _ => return None,
-    };
-    Some(Stored {
-        node,
-        chosen_by_user,
-    })
+impl Stored {
+    /// The record's text: the node's hex and how it was chosen, one line.
+    pub fn to_text(&self) -> String {
+        let how = if self.chosen_by_user {
+            "user"
+        } else {
+            "adopted"
+        };
+        format!("{} {how}\n", crate::address::to_hex(&self.node))
+    }
+
+    /// Read a record's text. Anything else than what [`Self::to_text`]
+    /// writes is no selection: the rule adopts again, which is the right
+    /// answer for a selection nobody can read.
+    pub fn from_text(text: &str) -> Option<Self> {
+        let mut words = text.split_whitespace();
+        let node = crate::address::parse(words.next()?).ok()?;
+        let chosen_by_user = match words.next()? {
+            "user" => true,
+            "adopted" => false,
+            _ => return None,
+        };
+        Some(Self {
+            node,
+            chosen_by_user,
+        })
+    }
+}
+
+/// Load `home/mailbox`. A missing or unreadable file is no selection, like a
+/// damaged one ([`Stored::from_text`]).
+#[cfg(feature = "std")]
+pub fn load(home: &std::path::Path) -> Option<Stored> {
+    Stored::from_text(&std::fs::read_to_string(home.join(MAILBOX_FILE)).ok()?)
 }
 
 /// Write `home/mailbox`, through a rename so a crash leaves the old file.
-pub fn save(home: &Path, stored: &Stored) -> std::io::Result<()> {
+#[cfg(feature = "std")]
+pub fn save(home: &std::path::Path, stored: &Stored) -> std::io::Result<()> {
     let path = home.join(MAILBOX_FILE);
     let tmp = path.with_extension("tmp");
-    let how = if stored.chosen_by_user {
-        "user"
-    } else {
-        "adopted"
-    };
-    std::fs::write(
-        &tmp,
-        format!("{} {how}\n", crate::address::to_hex(&stored.node)),
-    )?;
+    std::fs::write(&tmp, stored.to_text())?;
     std::fs::rename(&tmp, &path)
 }
 
@@ -183,45 +193,43 @@ impl Decision {
 }
 
 /// How one run selects its mailbox, as `main` hands it to the send and
-/// fetch runners.
+/// fetch runners. Where the selection is kept is the runners' [`Effects`].
 #[derive(Debug, Clone, Default)]
 pub struct MailboxRun {
-    /// `${LNMSG_HOME}`, where the selection is persisted. `None` persists
-    /// nothing, which is what the runners' unit tests want.
-    pub home: Option<PathBuf>,
     /// The rule's input, for a run with neither `--pn` nor a configured node.
     pub input: Option<MailboxInput>,
 }
 
-impl MailboxRun {
-    /// Show the decision on stderr and persist it. A file that cannot be
-    /// written costs the next run a re-adoption, not this run its mailbox,
-    /// so it is reported and not fatal.
-    pub fn report(&self, decision: &Decision) {
-        eprintln!("lnmsg: {}", decision.line(unix_now_ms()));
-        if let (Some(home), Some(stored)) = (&self.home, decision.to_store()) {
-            if let Err(error) = save(home, &stored) {
-                eprintln!("lnmsg: could not record the mailbox: {error}");
-            }
-        }
+/// Show the decision and keep it. A selection that cannot be kept costs the
+/// next run a re-adoption, not this run its mailbox, so it is reported and
+/// not fatal.
+pub fn report(decision: &Decision, effects: &mut impl Effects) {
+    let line = decision.line(effects.unix_now_ms());
+    effects.notice(&line);
+    if let Some(stored) = decision.to_store() {
+        keep(&stored, effects);
     }
+}
 
-    /// Persist a node the user named with `--pn`, once it is selected.
-    pub fn record_user_choice(&self, node: [u8; 16]) {
-        let Some(home) = &self.home else {
-            return;
-        };
-        let stored = Stored {
+/// Keep a node the user named with `--pn`, once it is selected.
+pub fn record_user_choice(node: [u8; 16], effects: &mut impl Effects) {
+    keep(
+        &Stored {
             node,
             chosen_by_user: true,
-        };
-        if let Err(error) = save(home, &stored) {
-            eprintln!("lnmsg: could not record the mailbox: {error}");
-        }
+        },
+        effects,
+    );
+}
+
+fn keep(stored: &Stored, effects: &mut impl Effects) {
+    if let Err(error) = effects.save_mailbox(stored) {
+        effects.notice(&format!("could not record the mailbox: {error}"));
     }
 }
 
 /// The wall clock in Unix milliseconds, the path table's timescale.
+#[cfg(feature = "std")]
 pub fn unix_now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -330,6 +338,52 @@ mod tests {
         }
         std::fs::write(dir.path().join(MAILBOX_FILE), "5a5a nonsense\n").expect("write");
         assert_eq!(load(dir.path()), None);
+    }
+
+    #[test]
+    fn the_record_text_is_one_line_naming_node_and_choice() {
+        let stored = Stored {
+            node: [0x5a; 16],
+            chosen_by_user: true,
+        };
+        assert_eq!(stored.to_text(), "5a".repeat(16) + " user\n");
+        assert_eq!(Stored::from_text(&stored.to_text()), Some(stored));
+        assert_eq!(Stored::from_text(&("5a".repeat(16) + " maybe\n")), None);
+        assert_eq!(Stored::from_text(""), None);
+    }
+
+    /// What `lnmsg` prints and keeps for a decision, as the effects see it:
+    /// an adoption is shown and kept, a kept selection only shown.
+    #[test]
+    fn a_report_shows_every_decision_and_keeps_only_an_adoption() {
+        let mut effects = crate::effects::fake::Recorded {
+            now_ms: 181_000,
+            ..Default::default()
+        };
+        let adopted = Decision::Adopted {
+            node: [0xab; 16],
+            hops: 2,
+            seen_ms: 1_000,
+            reason: AdoptReason::NoneSelected,
+        };
+        report(&adopted, &mut effects);
+        report(&Decision::Kept { node: [0xab; 16] }, &mut effects);
+        assert_eq!(
+            effects.notices,
+            vec![adopted.line(181_000), "mailbox: abababab kept".to_string()]
+        );
+        assert_eq!(
+            effects.mailboxes,
+            vec![Stored {
+                node: [0xab; 16],
+                chosen_by_user: false
+            }]
+        );
+        record_user_choice([0xcd; 16], &mut effects);
+        assert_eq!(
+            effects.mailboxes.last().map(|s| s.chosen_by_user),
+            Some(true)
+        );
     }
 
     #[test]

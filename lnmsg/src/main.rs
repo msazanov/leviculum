@@ -25,6 +25,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 use leviculum_std::config::Config;
 
+use lnmsg::effects::Terminal;
 use lnmsg::engine::{attach, AttachConfig};
 use lnmsg::fetch::{run_fetch, FetchError, FetchOptions};
 use lnmsg::mailbox_state::{self, MailboxRun, Route};
@@ -228,10 +229,16 @@ async fn mailbox_run(
             previous: mailbox_state::load(home),
         }),
     };
-    MailboxRun {
-        home: Some(home.to_path_buf()),
-        input,
-    }
+    MailboxRun { input }
+}
+
+/// The client node's storage directory under `home`, created. One that
+/// cannot be made fails the run with the outcome a missing daemon has, as it
+/// did while `attach` made it.
+fn storage_dir(home: &Path) -> Result<PathBuf, String> {
+    let dir = home.join("storage");
+    std::fs::create_dir_all(&dir).map_err(|error| format!("{}: {error}", dir.display()))?;
+    Ok(dir)
 }
 
 /// The daemon's path table over the shared-instance RPC, keyed the way
@@ -328,9 +335,13 @@ async fn run(args: SendArgs) -> ExitCode {
     let config_dir = args.config.unwrap_or_else(Config::default_config_dir);
     let instance = args.instance.unwrap_or_else(|| instance_name(&config_dir));
 
+    let storage_dir = match storage_dir(&home) {
+        Ok(dir) => dir,
+        Err(error) => return failure(error, "no-daemon"),
+    };
     let mut attached = match attach(AttachConfig {
         instance: instance.clone(),
-        storage_dir: home.join("storage"),
+        storage_dir,
         identity,
         display_name: display_name.name.into_bytes(),
     })
@@ -341,6 +352,7 @@ async fn run(args: SendArgs) -> ExitCode {
     };
 
     let mut options = SendOptions::new(instance.clone(), Duration::from_secs(args.timeout));
+    let mut effects = Terminal::new(home.clone());
     // `--via auto` reads the path table only if its direct leg fails.
     if args.via == ViaArg::Propagated {
         options.mailbox = mailbox_run(&home, &config_dir, &instance, preferred_pn).await;
@@ -375,6 +387,7 @@ async fn run(args: SendArgs) -> ExitCode {
                 pn_source,
                 None,
                 &options,
+                &mut effects,
             )
             .await;
             match outcome {
@@ -433,6 +446,7 @@ async fn run(args: SendArgs) -> ExitCode {
                             pn_source,
                             cancel,
                             &options,
+                            &mut effects,
                         )
                         .await;
                         match fallback {
@@ -490,9 +504,13 @@ async fn run_fetch_command(args: FetchArgs) -> ExitCode {
         Err(error) => return usage(error),
     };
 
+    let storage_dir = match storage_dir(&home) {
+        Ok(dir) => dir,
+        Err(error) => return failure(error, "no-daemon"),
+    };
     let mut attached = match attach(AttachConfig {
         instance: instance.clone(),
-        storage_dir: home.join("storage"),
+        storage_dir,
         identity,
         display_name: display_name.name.into_bytes(),
     })
@@ -503,6 +521,7 @@ async fn run_fetch_command(args: FetchArgs) -> ExitCode {
     };
 
     let mut options = FetchOptions::new(instance.clone(), Duration::from_secs(args.timeout));
+    let mut effects = Terminal::new(home.clone());
     options.mailbox = mailbox_run(&home, &config_dir, &instance, preferred_pn).await;
     // Deliberately NOT `stdout().lock()`: the engine's driver thread logs
     // through tracing, and with `RUST_LOG=debug` (how the conformance rig
@@ -517,6 +536,7 @@ async fn run_fetch_command(args: FetchArgs) -> ExitCode {
         preferred_pn,
         pn_source,
         &options,
+        &mut effects,
         &mut seen,
         &mut stdout,
     )

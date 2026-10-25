@@ -46,8 +46,9 @@ use tokio::time::Instant;
 
 use leviculum_lxmf::router::MessageState;
 
+use crate::effects::Effects;
 use crate::events;
-use crate::mailbox_state::MailboxRun;
+use crate::mailbox_state::{self, MailboxRun};
 use crate::outbox::{Command, Outbox, OutboxEvent, OutboxGone, SendRequest};
 
 /// How long a run may take once the daemon connection is up, and how often the
@@ -419,6 +420,7 @@ pub async fn run_send_propagated<O: Outbox>(
     pn_source: &str,
     cancel: Option<[u8; 32]>,
     options: &SendOptions,
+    effects: &mut impl Effects,
 ) -> Result<Queued, SendError> {
     let start = Instant::now();
     let destination = request.destination;
@@ -454,7 +456,7 @@ pub async fn run_send_propagated<O: Outbox>(
                     if phase == PropagatedPhase::Selecting {
                         events::pn(&node, pn_source, stamp_cost);
                         if pn_source == "flag" {
-                            options.mailbox.record_user_choice(node);
+                            mailbox_state::record_user_choice(node, effects);
                         }
                         if let Some(request) = request.take() {
                             outbox.submit(Command::Send(Box::new(request)))?;
@@ -465,7 +467,7 @@ pub async fn run_send_propagated<O: Outbox>(
                 OutboxEvent::PnUnavailable { detail } => {
                     return Err(SendError::NoPropagationNode(detail));
                 }
-                OutboxEvent::Mailbox(decision) => options.mailbox.report(&decision),
+                OutboxEvent::Mailbox(decision) => mailbox_state::report(&decision, effects),
                 OutboxEvent::Queued { message_id: id } => {
                     if phase == PropagatedPhase::Queued && message_id.is_none() {
                         message_id = Some(id);
@@ -544,6 +546,7 @@ pub async fn run_send_propagated<O: Outbox>(
 mod tests {
     use super::*;
 
+    use crate::effects::fake::Recorded;
     use crate::outbox::fake::FakeOutbox;
     use crate::outbox::Via;
 
@@ -861,6 +864,7 @@ mod tests {
             "flag",
             None,
             &options(),
+            &mut Recorded::default(),
         )
         .await
         .expect("an accepted upload is the success");
@@ -892,6 +896,7 @@ mod tests {
             "mailbox",
             None,
             &options(),
+            &mut Recorded::default(),
         )
         .await
         .expect_err("no node is a failure");
@@ -944,6 +949,7 @@ mod tests {
             "flag",
             Some(DIRECT_ID),
             &options(),
+            &mut Recorded::default(),
         )
         .await
         .expect("stale direct events must not derail the fallback");
@@ -982,6 +988,7 @@ mod tests {
             "flag",
             None,
             &options(),
+            &mut Recorded::default(),
         )
         .await
         .expect_err("an unfinished upload is not a success");

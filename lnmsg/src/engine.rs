@@ -1069,7 +1069,9 @@ pub struct AttachConfig {
     /// Deliberately not the daemon's storage directory: `lncp` and `lnstatus`
     /// share that safely because a client with `enable_transport(false)`
     /// writes no paths, announces or packet hashes — this one registers a
-    /// destination and learns identities, so it gets its own.
+    /// destination and learns identities, so it gets its own. The caller
+    /// creates it: a directory is the shell's, and `main` names the path in
+    /// the error when it cannot.
     pub storage_dir: PathBuf,
     /// The persistent identity whose delivery destination is our address.
     pub identity: Identity,
@@ -1083,23 +1085,18 @@ pub struct AttachConfig {
 /// Why attaching failed.
 #[derive(Debug)]
 pub enum AttachError {
-    Storage(PathBuf, std::io::Error),
     /// No daemon answered. The message names the instance, because the usual
     /// cause is the right daemon running under a different name.
     ///
     /// Both the build and the start of a shared-instance client fail this way,
     /// and they are one error to a user: the IPC socket is the only thing
     /// either step reaches for. Which of the two noticed is in `detail`.
-    NoDaemon {
-        instance: String,
-        detail: String,
-    },
+    NoDaemon { instance: String, detail: String },
 }
 
 impl core::fmt::Display for AttachError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::Storage(path, error) => write!(f, "{}: {error}", path.display()),
             Self::NoDaemon { instance, detail } => write!(
                 f,
                 "could not join the Reticulum shared instance named '{instance}'.\n  \
@@ -1132,9 +1129,6 @@ impl Attached {
 
 /// Attach to a running shared instance with an LXMF engine installed.
 pub async fn attach(config: AttachConfig) -> Result<Attached, AttachError> {
-    std::fs::create_dir_all(&config.storage_dir)
-        .map_err(|e| AttachError::Storage(config.storage_dir.clone(), e))?;
-
     let (commands_tx, commands_rx) = std::sync::mpsc::channel::<Command>();
     let (events_tx, events_rx) = std::sync::mpsc::channel::<OutboxEvent>();
     let (stamps_tx, stamps_rx) = std::sync::mpsc::channel::<StampJob>();
