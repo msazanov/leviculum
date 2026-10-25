@@ -265,7 +265,7 @@ built:
   `leviculum-nrf/screen/src/power.rs:16`) after boot or after the last
   press (`DisplayWake`, `leviculum-nrf/screen/src/power.rs:33`). The
   display task owns the state and the minute
-  (`leviculum-nrf/src/display.rs:202`); the button task only reports the
+  (`leviculum-nrf/firmware/src/display.rs:174`); the button task only reports the
   press (`leviculum-nrf/firmware/src/button.rs:216`, into `leviculum_firmware::board_state::DISPLAY_WAKE`).
 - **Announce moved to the double press.** Before, a short press that
   passed the rate limit announced. Now the double press does, under the
@@ -300,7 +300,8 @@ no mode yet. The 2 s mode switch and the 8 s power off (both are
 recognised and logged, `action=long` and `action=hold8`, and do
 nothing; the 8 s mark has no signal of its own), the boot-time factory
 reset, and the T114's display wake: its ST7789 has no power control yet
-and stays lit (`leviculum-nrf/src/st7789.rs:33-34`).
+and stays lit (`leviculum-nrf/src/st7789.rs:33-34`; its panel says so,
+`leviculum-nrf/src/st7789.rs:395`).
 
 ## See also
 

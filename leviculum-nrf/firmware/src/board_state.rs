@@ -9,7 +9,7 @@
 
 #[cfg(any(feature = "display", feature = "gnss", feature = "battery"))]
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-#[cfg(any(feature = "display", feature = "gnss", feature = "battery"))]
+#[cfg(any(feature = "gnss", feature = "battery"))]
 use embassy_sync::watch::Watch;
 
 /// Compact GNSS fix snapshot, updated by `gnss::gnss_task` when an RMC or
@@ -19,8 +19,9 @@ use embassy_sync::watch::Watch;
 pub use leviculum_gnss_time::GnssFix;
 
 /// Latest GNSS fix snapshot. Capacity-3 watch: one slot for the producer,
-/// one for the display consumer, one for the main loop's calendar
-/// seeding (#166).
+/// one for the main loop's calendar seeding (#166), and the one the
+/// display held until 980, spare since the page reads the watch's own
+/// `try_get` (`crate::display::sensor_lines`).
 #[cfg(feature = "gnss")]
 pub static GNSS_FIX: Watch<CriticalSectionRawMutex, GnssFix, 3> = Watch::new();
 
@@ -46,7 +47,8 @@ pub struct GnssPresenceState {
 }
 
 /// Latest presence snapshot. Capacity-3 watch, same shape as
-/// `GNSS_FIX`: display consumer, the #236 position tracker, one spare.
+/// `GNSS_FIX`: the #236 position tracker and two spare, one of them the
+/// display's until 980 (the page reads `try_get`).
 #[cfg(feature = "gnss")]
 pub static GNSS_PRESENCE: Watch<CriticalSectionRawMutex, GnssPresenceState, 3> = Watch::new();
 
@@ -69,7 +71,8 @@ pub use leviculum_gnss_presence::Motion;
 #[cfg(feature = "gnss")]
 pub static MOTION_STATE: Watch<CriticalSectionRawMutex, Motion, 1> = Watch::new();
 
-/// Battery snapshot published by the SAADC task and consumed by the display.
+/// Battery snapshot published by the SAADC task and read by the display's
+/// page.
 ///
 /// `voltage_mv` is the pack voltage in millivolts at the battery terminal
 /// (already through the board's own divider multiplier — 1.73 on the
@@ -104,13 +107,15 @@ impl BatteryState {
     }
 }
 
-/// Latest battery snapshot. Same capacity-2 watch shape as `GNSS_FIX`.
+/// Latest battery snapshot. Capacity 2; the display's page reads it
+/// through `try_get` and holds no slot (980).
 #[cfg(feature = "battery")]
 pub static BATTERY_STATE: Watch<CriticalSectionRawMutex, BatteryState, 2> = Watch::new();
 
 /// Raised by the user-button task on every press (a debounced glitch is
-/// not one) and taken by the display task, which owns the display's power
-/// state and its one-minute timeout (`leviculum_screen::power::DisplayWake`).
+/// not one) and taken by the display task (`crate::display`), which owns the
+/// display's power state and its one-minute timeout
+/// (`leviculum_screen::power::DisplayWake`).
 /// A `Signal` rather than a watch because a press carries no value: two
 /// presses the display task has not seen yet ask for the same thing as one.
 #[cfg(feature = "display")]

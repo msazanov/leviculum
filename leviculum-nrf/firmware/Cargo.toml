@@ -55,6 +55,12 @@ leviculum-announce-policy = { path = "../announce-policy" }
 # `board_state`): the GNSS fix and presence types it re-exports.
 leviculum-gnss-time = { path = "../gnss-time", optional = true }
 leviculum-gnss-presence = { path = "../gnss-presence", optional = true }
+# The status page the display task composes (980, `display`): the painter,
+# the frame key and the wake policy (`leviculum-screen`, stratum 1), and the
+# draw-target trait the Panel seam hands over (`embedded-graphics`, no HAL).
+leviculum-screen = { path = "../screen", optional = true }
+embedded-graphics = { version = "0.8", optional = true }
+heapless = { version = "0.9", default-features = false, optional = true }
 
 # Capabilities, not chips: whether the board carries a GNSS receiver, a
 # battery gauge, a display. `leviculum-nrf`'s features of the same names
@@ -62,7 +68,7 @@ leviculum-gnss-presence = { path = "../gnss-presence", optional = true }
 [features]
 gnss = ["dep:leviculum-gnss-time", "dep:leviculum-gnss-presence"]
 battery = []
-display = []
+display = ["dep:leviculum-screen", "dep:embedded-graphics", "dep:heapless"]
 
 # The executor is declared for what moves in later (the node loop spawns
 # tasks); nothing that has moved names it yet.

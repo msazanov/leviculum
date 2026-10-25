@@ -38,9 +38,9 @@ announces itself or costs nothing when absent. That is a design
 constraint on peripheral handling, not a hope:
 
 - **Probe where the bus allows it.** The RAK baseboard display is found
-  by an I2C address probe (`ack_probe`, `leviculum-nrf/src/display.rs:56`);
+  by an I2C address probe (`ack_probe`, `leviculum-nrf/src/display.rs:54`);
   when nothing answers, the task logs and exits
-  (`DetectedKind::None`, `leviculum-nrf/src/display.rs:162-168`).
+  (`DetectedKind::None`, `leviculum-nrf/src/display.rs:160-166`).
 - **Fail into the harmless state.** The user button is pulled to its
   released level (`leviculum-nrf/src/button.rs:46`), so an absent button
   reads as not pressed rather than as noise.

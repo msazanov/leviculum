@@ -247,10 +247,14 @@ pub fn log_reset_reason(raw: u32) {
 pub mod battery;
 #[cfg(feature = "display")]
 pub mod display;
+// The page facts both status panels hand up: the Pocket's SSD1306
+// (`display`) and the T114's ST7789, which rides with its BSP.
 #[cfg(feature = "gnss")]
 pub mod gnss;
 #[cfg(feature = "display")]
 pub mod led;
+#[cfg(any(feature = "display", feature = "bsp-t114"))]
+pub mod panel_facts;
 // The T1000-E's accelerometer (#457). Its own feature, not part of the
 // baseboard set above: the only board carrying the part is not a RAK one.
 #[cfg(feature = "motion")]

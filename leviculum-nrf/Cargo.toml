@@ -249,6 +249,8 @@ sequential-storage = { version = "8.0.1", optional = true }
 # If the WisMesh Pocket V2's OLED probes as SH1106, the display task will
 # log a warning and stay idle — adding SH1106 support is a separate task.
 ssd1306 = { version = "0.10", default-features = false, features = ["graphics"], optional = true }
+# The SSD1306's error type, named by its `Panel` seam (`display.rs`, 980).
+display-interface = { version = "0.5", optional = true }
 embedded-graphics = { version = "0.8", optional = true }
 nmea0183 = { version = "0.6", default-features = false, optional = true }
 # Pure NMEA-UTC→unix conversion + seed-once policy, host-unit-tested next
@@ -381,6 +383,9 @@ bsp-rak4631 = ["softdevice", "radio-sx1262"]
 # impossible, and both references (Meshtastic, RNode firmware) drive it
 # blind. One t114 UF2 therefore serves panel-equipped and panel-less
 # boards alike; on the latter the SPI writes go nowhere, harmlessly.
+# The page on it is composed by the orchestration crate (980), so the
+# board forwards that crate's `display` capability; this crate's own
+# `display` feature is the Pocket's SSD1306 driver and stays off.
 #
 # It also pulls `gnss` unconditionally, for the same universal-build
 # reason: the Quectel L76K is soldered to every T114, not an optional
@@ -391,7 +396,7 @@ bsp-rak4631 = ["softdevice", "radio-sx1262"]
 # panel and the L76K: the 100/490 divider and its enable pin are on every
 # T114, not on an optional baseboard, so one UF2 serves every board and a
 # board whose reading is implausible says so at runtime (#380).
-bsp-t114 = ["softdevice", "radio-sx1262", "dep:leviculum-screen", "gnss", "battery"]
+bsp-t114 = ["softdevice", "radio-sx1262", "dep:leviculum-screen", "leviculum-firmware/display", "gnss", "battery"]
 # SenseCAP Solar Node P1-Pro (#233): XIAO nRF52840 Plus + Wio-SX1262 +
 # XIAO L76K on a carrier board. No display, so no `leviculum-screen`.
 #
@@ -435,7 +440,7 @@ bsp-t1000e = ["softdevice", "radio-lr11xx", "gnss", "battery", "motion"]
 radio-sx1262 = []
 radio-lr11xx = ["dep:leviculum-lr11xx"]
 
-display = ["dep:ssd1306", "dep:embedded-graphics", "dep:leviculum-screen", "leviculum-firmware/display"]
+display = ["dep:ssd1306", "dep:display-interface", "dep:embedded-graphics", "dep:leviculum-screen", "leviculum-firmware/display"]
 gnss = [
     "dep:nmea0183",
     "dep:leviculum-gnss-time",

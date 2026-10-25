@@ -1460,7 +1460,7 @@ fn the_display_and_button_bring_up_is_not_dropped_by_the_runtime_gate() {
         (
             "display.rs",
             "pub async fn display_task(",
-            "let id_short",
+            "leviculum_firmware::display::run(",
             &[
                 "OLED probe: {:?} at 0x{:02X}",
                 "init failed: {:?}",
@@ -1472,7 +1472,7 @@ fn the_display_and_button_bring_up_is_not_dropped_by_the_runtime_gate() {
         (
             "st7789.rs",
             "pub async fn display_task(",
-            "let id_short",
+            "leviculum_firmware::display::run(",
             &["ST7789 blind init start", "ST7789 init complete"][..],
         ),
         (

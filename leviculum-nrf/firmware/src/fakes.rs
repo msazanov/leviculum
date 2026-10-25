@@ -6,7 +6,10 @@
 //! NOR semantics (program clears bits, erase sets them) and a seeded
 //! xorshift entropy source. Each fake grows with its seam: the sinks'
 //! records what it was asked to play since 973, the clock is moved by hand
-//! and the button follows a scripted edge sequence on it since 976.
+//! and the button follows a scripted edge sequence on it since 976, and the
+//! panel keeps its frames and power writes since 980, when the driver that
+//! polls a module's loop over the clock ([`drive`]) moved here from the
+//! button's tests.
 
 use alloc::collections::VecDeque;
 use alloc::vec;
@@ -262,6 +265,74 @@ impl Sinks for RecordingSinks {
     }
 }
 
+/// The frame a [`RecordingPanel`] lends: the Pocket V2's 128x64, one bit
+/// a pixel.
+#[cfg(feature = "display")]
+pub type RecordingPanelFb = leviculum_screen::MonoFb<128, 64, 1024>;
+
+/// A panel that keeps every frame pushed and every power write, each with
+/// the time of a [`FakeClock`]: the host fake of the display drivers.
+#[cfg(feature = "display")]
+pub struct RecordingPanel<'a> {
+    clock: &'a FakeClock,
+    power_control: bool,
+    frame: RecordingPanelFb,
+    pushes: Vec<(u64, RecordingPanelFb)>,
+    power: Vec<(u64, bool)>,
+}
+
+#[cfg(feature = "display")]
+impl<'a> RecordingPanel<'a> {
+    /// A blank panel, with power control (the SSD1306) or without (the
+    /// ST7789).
+    pub fn new(clock: &'a FakeClock, power_control: bool) -> Self {
+        Self {
+            clock,
+            power_control,
+            frame: RecordingPanelFb::new(),
+            pushes: Vec::new(),
+            power: Vec::new(),
+        }
+    }
+
+    /// What was pushed: `(t_ms, frame)`, in order.
+    pub fn pushes(&self) -> &[(u64, RecordingPanelFb)] {
+        &self.pushes
+    }
+
+    /// The power writes: `(t_ms, on)`, in order.
+    pub fn power(&self) -> Vec<(u64, bool)> {
+        self.power.clone()
+    }
+}
+
+#[cfg(feature = "display")]
+impl crate::seams::Panel for RecordingPanel<'_> {
+    type Target = RecordingPanelFb;
+    type Error = Infallible;
+    const WIDTH: u32 = 128;
+
+    fn frame(&mut self) -> &mut RecordingPanelFb {
+        &mut self.frame
+    }
+
+    fn flush(&mut self) -> impl core::future::Future<Output = Result<(), Infallible>> {
+        let mut shown = RecordingPanelFb::new();
+        shown.copy_from(&self.frame);
+        self.pushes.push((self.clock.now_ms(), shown));
+        core::future::ready(Ok(()))
+    }
+
+    fn has_power_control(&self) -> bool {
+        self.power_control
+    }
+
+    fn set_power(&mut self, on: bool) -> Result<(), Infallible> {
+        self.power.push((self.clock.now_ms(), on));
+        Ok(())
+    }
+}
+
 /// A watchdog that counts its feeds, once step 1 gives it one.
 pub struct FakeWatchdog;
 impl Watchdog for FakeWatchdog {}
@@ -276,6 +347,37 @@ pub fn ready<F: core::future::Future>(f: F) -> F::Output {
         Poll::Ready(out) => out,
         Poll::Pending => panic!("a fake future was not ready on its first poll"),
     }
+}
+
+/// Poll `run`, a module's loop that never returns, over a [`FakeClock`]
+/// until nothing is due by `until_ms`. The fakes never wake a waker, so
+/// the driver polls, then moves the clock to the earlier of the moment
+/// the loop waits for and the next moment of the test's own script, and
+/// polls again. `step` is called with the clock's time before every poll
+/// and once after the last: it raises what the script has due by then,
+/// takes what the last poll raised, and answers the script's next moment.
+pub fn drive<F: core::future::Future>(
+    run: F,
+    clock: &FakeClock,
+    until_ms: u64,
+    mut step: impl FnMut(u64) -> Option<u64>,
+) {
+    use core::task::{Context, Waker};
+    let mut run = core::pin::pin!(run);
+    let mut cx = Context::from_waker(Waker::noop());
+    loop {
+        let scripted = step(clock.now_ms());
+        assert!(
+            run.as_mut().poll(&mut cx).is_pending(),
+            "the loop never returns"
+        );
+        let next = [scripted, clock.take_asked()].into_iter().flatten().min();
+        match next {
+            Some(at) if at <= until_ms => clock.set(at.max(clock.now_ms())),
+            _ => break,
+        }
+    }
+    step(clock.now_ms());
 }
 
 #[cfg(test)]
@@ -293,6 +395,8 @@ mod tests {
     fn is_sensors<T: Sensors>(_: &T) {}
     fn is_sinks<T: Sinks>(_: &T) {}
     fn is_watchdog<T: Watchdog>(_: &T) {}
+    #[cfg(feature = "display")]
+    fn is_panel<T: crate::seams::Panel>(_: &T) {}
 
     #[test]
     fn every_seam_has_a_host_fake() {
@@ -307,6 +411,8 @@ mod tests {
         is_sensors(&FakeSensors);
         is_sinks(&RecordingSinks::new(&[]));
         is_watchdog(&FakeWatchdog);
+        #[cfg(feature = "display")]
+        is_panel(&RecordingPanel::new(&clock, true));
     }
 
     #[test]

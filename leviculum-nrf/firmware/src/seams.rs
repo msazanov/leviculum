@@ -12,7 +12,8 @@
 //! Step 0 declares them empty. The methods, and for the message seams the
 //! message variants, arrive with the step that cuts each seam: Flash,
 //! Entropy, Clock, Watchdog and Sinks in step 1 (Sinks has its methods
-//! since 973, Clock its monotonic half and ButtonInput its two since 976),
+//! since 973, Clock its monotonic half and ButtonInput its two since 976,
+//! Panel its four since 980),
 //! the control port in step
 //! 2, the transceiver in step 3, the BLE link in step 4, the sensors in
 //! step 5. Rules for all of them: no `dyn`, no per-chip `cfg`, and a host
@@ -149,9 +150,9 @@ pub trait ButtonInput {
 
 /// Sinks: the feedback players, the LED, the notification LED and the
 /// buzzer, as the feedback policy ([`crate::feedback`]) drives them. The
-/// display, the debug log and the post-mortem store are sinks of their own,
-/// each its own trait once its cut comes; the button is an input
-/// ([`ButtonInput`]) since 976.
+/// display (`Panel` since 980), the debug log and the post-mortem store
+/// are sinks of their own, each its own trait once its cut comes; the
+/// button is an input ([`ButtonInput`]) since 976.
 ///
 /// A player owns its pin and plays a [`leviculum_feedback::Pattern`] to its
 /// end, starting over with a newer one raised meanwhile, and writes the
@@ -169,6 +170,51 @@ pub trait Sinks {
 
     /// Play `pattern` on `sink`, replacing whatever it is playing.
     fn play(&self, sink: crate::feedback::Sink, pattern: leviculum_feedback::Pattern);
+}
+
+/// Panel: the status display as the page composition ([`crate::display`])
+/// drives it, a frame to draw into, its push, and power.
+///
+/// The handoff is the drawn buffer: the panel lends its
+/// [`DrawTarget`](embedded_graphics::draw_target::DrawTarget)
+/// ([`frame`](Self::frame)), the composition paints the page into it, and
+/// [`flush`](Self::flush) pushes what was drawn. Not a draw closure, because
+/// both drivers already own a one-bit buffer of their own geometry and
+/// differ only in how they push it: the SSD1306's buffered mode is itself
+/// the target and sends its changed bytes over I2C, the ST7789 diffs a mono
+/// framebuffer against the shown one and sends the changed rectangle scaled
+/// 2x over SPI. A closure would add an indirection both would call at once;
+/// a buffer owned up here would have to know their geometry.
+///
+/// Today (980): `leviculum_nrf::display::Ssd1306Panel` (Pocket V2, I2C,
+/// with power control) and `leviculum_nrf::st7789::St7789Panel` (T114,
+/// SPI, blind and write-only, without). The fork: the M9's panel.
+#[cfg(feature = "display")]
+pub trait Panel {
+    /// What the page is painted into.
+    type Target: embedded_graphics::draw_target::DrawTarget<
+        Color = embedded_graphics::pixelcolor::BinaryColor,
+    >;
+
+    /// What a push or a power write can fail with, for the `[DISP]` line.
+    type Error: core::fmt::Debug;
+
+    /// The drawable width in pixels: the painter puts the heartbeat dot
+    /// three pixels in from it.
+    const WIDTH: u32;
+
+    /// The buffer the next frame is painted into.
+    fn frame(&mut self) -> &mut Self::Target;
+
+    /// Push what was painted since the last push.
+    fn flush(&mut self) -> impl core::future::Future<Output = Result<(), Self::Error>>;
+
+    /// Whether the panel can be switched dark. One that cannot is never
+    /// asked to ([`set_power`](Self::set_power)) and stays lit.
+    fn has_power_control(&self) -> bool;
+
+    /// Switch the panel on or off; it keeps its memory while off.
+    fn set_power(&mut self, on: bool) -> Result<(), Self::Error>;
 }
 
 /// Watchdog: feed and timeout.

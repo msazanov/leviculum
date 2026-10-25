@@ -27,7 +27,10 @@
 //! feedback policy moves here ([`feedback`]) over the [`seams::Sinks`]
 //! trait; the LED and buzzer players stay below. In 976 the button's
 //! press handling moves here ([`button`]) over the [`seams::ButtonInput`]
-//! and [`seams::Clock`] seams; the pin and its pull stay below.
+//! and [`seams::Clock`] seams; the pin and its pull stay below. In 980 the
+//! status display's page and power move here (`display`, behind the
+//! `display` capability) over the `seams::Panel` sink; the SSD1306 and
+//! ST7789 drivers stay below.
 //!
 //! What the crate may depend on is held by two guards rather than by this
 //! comment: `just firmware-no-hal` refuses a HAL or chip crate in its
@@ -45,6 +48,8 @@ pub mod boot_trace;
 pub mod button;
 pub mod clock;
 pub mod dispatch;
+#[cfg(feature = "display")]
+pub mod display;
 pub mod entropy;
 pub mod feedback;
 pub mod heap;

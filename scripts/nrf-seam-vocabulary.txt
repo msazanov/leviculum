@@ -25,7 +25,6 @@ src/boot_count.rs: radio_store doc x1
 src/boot_count.rs: record_store doc x1
 src/boot_count.rs: record_store::region doc x1
 src/chtm.rs: sx1262 doc x1
-src/display.rs: ble::HVN_DRAIN x1
 src/feedback.rs: led doc x1
 src/gnss.rs: boards::rak4631 doc x1
 src/gnss.rs: vext doc x2
@@ -51,6 +50,7 @@ src/media.rs: ble x1 doc x1
 src/media.rs: ble::note_media_changed x1
 src/mgmt.rs: usb doc x1
 src/name.rs: ble::columba doc x1
+src/panel_facts.rs: ble::HVN_DRAIN x1
 src/pn.rs: record_store::PnOp x1
 src/pn.rs: record_store::mounted x3
 src/pn.rs: record_store::pn_execute x1 doc x1
@@ -69,7 +69,6 @@ src/radio_store.rs: flash::shared_flash doc x1
 src/record_store.rs: ble doc x1
 src/record_store.rs: flash::SharedFlash x4 doc x1
 src/record_store.rs: usb doc x1
-src/st7789.rs: ble::HVN_DRAIN x1
 src/st7789.rs: boards::t114::TftBacklight x1
 src/st7789.rs: boards::t114::TftCs x1
 src/st7789.rs: boards::t114::TftDc x1

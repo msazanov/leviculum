@@ -380,7 +380,10 @@ Nothing in this section is built yet, except where a dated note says otherwise.
      image.
 5. **Acceptance at the rig:**
    - the boot proof;
-   - the display;
+   - the display. Since 2026-10-25 (980) the status page and its
+     one-minute power policy are `leviculum_firmware::display` over the
+     `Panel` seam (`leviculum-nrf/firmware/src/seams.rs`), so the M9's
+     ST7789 needs a `Panel` of its own, not a page of its own;
    - LoRa against the T1000-E (the same driver family);
    - LoRa against an RNode, with 915's T1000-E/RNode loss measurement as
      the comparison.

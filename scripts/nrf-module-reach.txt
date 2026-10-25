@@ -24,19 +24,20 @@ src/boot_count.rs (96): boot_trace radio_store record_store
 src/boot_trace.rs (27):
 src/button.rs (86):
 src/chtm.rs (71): log lora sx1262
-src/display.rs (353): ble log lora pn
+src/display.rs (222): log panel_facts
 src/events.rs (261): announce log pn transport_stats
 src/feedback.rs (244): led log
 src/flash.rs (79):
 src/gnss.rs (587): boards log vext
 src/heap_census.rs (398): ble log pn
 src/led.rs (48): feedback log
-src/lib.rs (730): log log_critical
+src/lib.rs (734): log log_critical
 src/lora.rs (2708): announce chtm events log media pn radio radio_store set_irq_priorities
 src/media.rs (320): ble log telemetry
 src/mgmt.rs (259): log name telemetry usb
 src/motion.rs (177): log
 src/name.rs (259): ble log media telemetry
+src/panel_facts.rs (26): ble lora pn
 src/pn.rs (3759): announce events heap_census log lora name record_store telemetry usb
 src/qspi.rs (1188): log
 src/radio.rs (208): boards log lora sx1262
@@ -44,7 +45,7 @@ src/radio_store.rs (197): boards flash log telemetry
 src/record_store.rs (216): ble flash pn usb
 src/remote_status.rs (138): log lora
 src/rng.rs (214): log
-src/st7789.rs (436): ble boards log log_stack lora pn vext
+src/st7789.rs (407): boards log log_stack panel_facts vext
 src/store_spike.rs (164): flash log record_store
 src/sx1262.rs (1704): chtm log lora
 src/telemetry.rs (2062): ble flash log lora media name pn radio_store
@@ -52,22 +53,23 @@ src/time_floor.rs (74): boot_count flash radio_store record_store
 src/transport_stats.rs (169): log lora
 src/usb.rs (1464): banner ble boards chtm heap_census log lora media mgmt name pn postmortem_query radio_store record_store reset_stack_watermark telemetry
 src/vext.rs (85): boards log
-firmware/src/board_state.rs (133):
+firmware/src/board_state.rs (138): display
 firmware/src/boot_count.rs (203): fakes log seams
 firmware/src/boot_trace.rs (120): log
-firmware/src/button.rs (399): board_state fakes feedback log seams
+firmware/src/button.rs (380): board_state display fakes feedback log seams
 firmware/src/clock.rs (115): seams
 firmware/src/dispatch.rs (49): log
+firmware/src/display.rs (409): board_state button fakes log seams
 firmware/src/entropy.rs (148): iface_bytes seams
-firmware/src/fakes.rs (335): feedback seams
+firmware/src/fakes.rs (441): feedback seams
 firmware/src/feedback.rs (453): board_state button entropy fakes log seams
 firmware/src/heap.rs (120): log
 firmware/src/identity.rs (119): log_critical
 firmware/src/iface_bytes.rs (177):
 firmware/src/interface.rs (77): iface_bytes log
-firmware/src/lib.rs (61):
+firmware/src/lib.rs (66):
 firmware/src/log.rs (402):
 firmware/src/postmortem.rs (437): boot_trace log
 firmware/src/record_store.rs (665): fakes log seams
-firmware/src/seams.rs (179): button clock feedback
+firmware/src/seams.rs (225): button clock display feedback
 firmware/src/time_floor.rs (209): log seams

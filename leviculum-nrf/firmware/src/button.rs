@@ -24,8 +24,8 @@
 //! Any press lights a dark display, and the display goes dark on its own
 //! a minute after the last press; no press turns it off
 //! (`leviculum_screen::power::DisplayWake`). The press handling raises
-//! `board_state::DISPLAY_WAKE` on every press; the bind crate's display
-//! task owns the state and the timeout. The T114's ST7789 has no power
+//! `board_state::DISPLAY_WAKE` on every press; `crate::display` owns the
+//! state and the timeout. The T114's ST7789 has no power
 //! control yet and stays lit, as before.
 //!
 //! # One registered instance
@@ -235,13 +235,11 @@ impl<'a, S: Sinks> Button<'a, S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fakes::{FakeButtonInput, FakeClock, RecordingSinks};
+    use crate::fakes::{drive, FakeButtonInput, FakeClock, RecordingSinks};
     use crate::feedback::Sink;
     use alloc::string::String;
     use alloc::vec;
     use alloc::vec::Vec;
-    use core::future::Future;
-    use core::task::{Context, Waker};
 
     const LED_AND_BUZZER: &[Sink] = &[Sink::Led, Sink::Buzzer];
 
@@ -254,11 +252,9 @@ mod tests {
     }
 
     /// Run the press handling over `edges` (`(t_ms, pressed)`) until the
-    /// script is spent and no deadline is pending, or `until_ms`. The fakes
-    /// never wake a waker, so the driver polls, then moves the clock to
-    /// the earlier of the next edge and the deadline the handling waits
-    /// for, and polls again. After every poll it takes the two signals, so
-    /// a count of two is two raises, not one raise seen twice.
+    /// script is spent and no deadline is pending, or `until_ms`
+    /// (`fakes::drive`). Before every poll the two signals are taken, so a
+    /// count of two is two raises, not one raise seen twice.
     fn press(edges: &[(u64, bool)], until_ms: u64) -> Outcome {
         let feedback = Feedback::new(RecordingSinks::new(LED_AND_BUZZER));
         let announce = Signal::new();
@@ -267,27 +263,12 @@ mod tests {
         let input = FakeButtonInput::new(&clock, edges);
         let mut button = Button::new("test", &feedback, || Some(60), &announce, Some(&wake));
         let (mut announces, mut wakes) = (0, 0);
-        {
-            let mut handle = &input;
-            let mut run = core::pin::pin!(button.run(&mut handle, &clock));
-            let mut cx = Context::from_waker(Waker::noop());
-            loop {
-                assert!(
-                    run.as_mut().poll(&mut cx).is_pending(),
-                    "the handling never returns"
-                );
-                announces += usize::from(announce.try_take().is_some());
-                wakes += usize::from(wake.try_take().is_some());
-                let next = [input.next_edge_ms(), clock.take_asked()]
-                    .into_iter()
-                    .flatten()
-                    .min();
-                match next {
-                    Some(at) if at <= until_ms => clock.set(at.max(clock.now_ms())),
-                    _ => break,
-                }
-            }
-        }
+        let mut handle = &input;
+        drive(button.run(&mut handle, &clock), &clock, until_ms, |_| {
+            announces += usize::from(announce.try_take().is_some());
+            wakes += usize::from(wake.try_take().is_some());
+            input.next_edge_ms()
+        });
         Outcome {
             lines: button.written.clone(),
             played: feedback
