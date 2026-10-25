@@ -9,7 +9,6 @@
 # the script's BIND_MODULES; it is a reading of the page and moves with it:
 #   ble usb boards sx1262 radio qspi flash record_store radio_store rng led button feedback display st7789 battery gnss motion vext
 # See the script's header for the rules.
-src/ble/columba.rs: ble::set_gap_device_name doc x1
 src/ble/columba.rs: radio_store doc x1
 src/ble/mod.rs: radio_store doc x1
 src/ble/notify.rs: ble::HVN_DRAIN doc x2
@@ -29,8 +28,6 @@ src/feedback.rs: led doc x1
 src/gnss.rs: boards::rak4631 doc x1
 src/gnss.rs: vext doc x2
 src/gnss.rs: vext::wait_ready x1
-src/heap_census.rs: ble::defrag_held_bytes x1
-src/heap_census.rs: ble::session_census x1
 src/led.rs: feedback doc x1
 src/led.rs: feedback::Sink x1
 src/led.rs: feedback::spawn_led x1
@@ -46,11 +43,8 @@ src/lora.rs: radio::configure_lora x2
 src/lora.rs: radio::new x1
 src/lora.rs: radio_store::load doc x1
 src/lora.rs: set_irq_priorities doc x1
-src/media.rs: ble x1 doc x1
-src/media.rs: ble::note_media_changed x1
 src/mgmt.rs: usb doc x1
 src/name.rs: ble::columba doc x1
-src/panel_facts.rs: ble::HVN_DRAIN x1
 src/pn.rs: record_store::PnOp x1
 src/pn.rs: record_store::mounted x3
 src/pn.rs: record_store::pn_execute x1 doc x1
@@ -87,9 +81,7 @@ src/telemetry.rs: radio_store doc x1
 src/time_floor.rs: flash::SharedFlash x2 doc x1
 src/time_floor.rs: radio_store doc x1
 src/time_floor.rs: record_store doc x1
-src/usb.rs: ble::HVN_DRAIN x1
 src/usb.rs: ble::Irqs x1
-src/usb.rs: ble::set_tx_gap_ms x1
 src/usb.rs: boards::BoardConfig x1
 src/usb.rs: radio_store::request_save x1
 src/usb.rs: radio_store::request_save_confirmed x1

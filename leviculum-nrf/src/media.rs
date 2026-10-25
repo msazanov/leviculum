@@ -62,7 +62,8 @@
 //! frame is answered.
 //!
 //! For **BLE** the runtime off also takes the carrier off the air:
-//! [`apply`] wakes the BLE protocol tasks (`crate::ble`), which
+//! [`apply`] wakes the BLE protocol tasks (through the carrier gate in
+//! `leviculum_firmware::ble_link`), which
 //! disconnect every live link — central and peripheral role — and drop
 //! their advertise and scan futures. Each disconnect unwinds through
 //! the same per-link teardown a peer walking out of range takes, so the
@@ -153,7 +154,17 @@ pub fn load_at_boot(page: u32) -> (MediaProfileWire, Source) {
     // next reset". Observed on the rig, run 4 of the BLE acceptance
     // (#255). `note_boot_state` narrows the seed to what really started.
     STATE.declare(carriers(profile));
+    push_ble_carrier();
     (profile, source)
+}
+
+/// Push the BLE verdict to the carrier gate the BLE tasks hold
+/// (`leviculum_firmware::ble_link`, 998). Called after every mutation of
+/// [`STATE`], so the gate's value is always what [`ble_active`] reads;
+/// the push also wakes the tasks, and a wake against an unchanged state
+/// is the documented no-op.
+fn push_ble_carrier() {
+    leviculum_firmware::ble_link::set_active(STATE.ble_active());
 }
 
 /// Record what this boot actually brought up. Call once, after both
@@ -166,6 +177,7 @@ pub fn note_boot_state(lora_started: bool, ble_started: bool) {
         lora: lora_started,
         ble: ble_started,
     });
+    push_ble_carrier();
 }
 
 /// Whether [`load_at_boot`] was called — the capability the serial task's
@@ -221,14 +233,14 @@ pub fn configured() -> MediaProfileWire {
 /// it was a claim about a reboot that the reboot disproved.
 pub fn apply(profile: MediaProfileWire) -> crate::telemetry::PendingSave {
     STATE.set_configured(carriers(profile));
-    // After the stores, never before: the woken BLE tasks re-read
-    // `ble_active`, and waking them against the old state would let a
+    // After the stores, never before: the woken BLE tasks re-read the
+    // pushed carrier, and waking them against the old state would let a
     // just-switched-off carrier advertise on. On an on→off edge the
     // tasks disconnect every live link and stop advertising and
     // scanning; each dropped link reports `PeerEvent::Lost` through the
     // same teardown as range loss, so the core's cull is identical (see
-    // the module docs and `crate::ble`).
-    crate::ble::note_media_changed();
+    // the module docs and the BLE backend).
+    push_ble_carrier();
     crate::telemetry::request_save_media_profile(profile)
 }
 

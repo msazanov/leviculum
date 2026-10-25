@@ -84,11 +84,8 @@ use embassy_nrf::usb::vbus_detect::SoftwareVbusDetect;
 use embassy_nrf::{bind_interrupts, Peri};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::{Channel, Receiver, Sender};
-use embassy_sync::signal::Signal;
-use leviculum_ble_tx::{
-    CarrierPath, CarrierState, CarrierStep, DrainRouter, Enqueue, Fill, StandDown, TxAim,
-    DEVICE_NAME_LEN,
-};
+use leviculum_ble_tx::{Enqueue, Fill, TxAim, DEVICE_NAME_LEN};
+use leviculum_core::node_name::NodeName;
 use leviculum_core::traits::{Interface, InterfaceError};
 use leviculum_core::InterfaceId;
 use nrf_softdevice::{raw, SocEvent, Softdevice};
@@ -135,99 +132,16 @@ pub use leviculum_heap_budget::MAX_LINKS;
 // legitimate connection's claim — quietly, on a board.
 const _: () = assert!(MAX_LINKS >= CONN_COUNT as usize);
 
-/// Where `BLE_GATTS_EVT_HVN_TX_COMPLETE` goes.
-///
-/// The HVN queue is per connection, so its drain edge is too. Routing it
-/// by connection handle is what keeps link A's drain out of link B's
-/// fragment pump; see [`leviculum_ble_tx::drain`] for the failure mode
-/// and its host tests.
-pub static HVN_DRAIN: DrainRouter<MAX_LINKS> = DrainRouter::new();
-
-/// Last-observed heap bytes held by each link's defragmenter (#388
-/// census). Written by [`columba`]'s two inbound paths after every
-/// fragment (the defragmenter itself lives in the session task's local
-/// state, out of the census walker's reach), zeroed when the session's
-/// slot is torn down. Indexed by the drain-slot, the per-link identity
-/// both roles already use.
-static DEFRAG_HELD: [core::sync::atomic::AtomicUsize; MAX_LINKS] =
-    [const { core::sync::atomic::AtomicUsize::new(0) }; MAX_LINKS];
-
-/// Sum of the per-link defragmenter holdings, for the heap census.
-pub fn defrag_held_bytes() -> usize {
-    DEFRAG_HELD
-        .iter()
-        .map(|slot| slot.load(core::sync::atomic::Ordering::Relaxed))
-        .sum()
-}
-
-/// Publish one link's current defragmenter holding (0 on teardown).
-pub(crate) fn defrag_held_set(slot_index: usize, bytes: usize) {
-    if let Some(slot) = DEFRAG_HELD.get(slot_index) {
-        slot.store(bytes, core::sync::atomic::Ordering::Relaxed);
-    }
-}
-
-/// Heap bytes each link's session currently holds (#388 census): the
-/// packets queued on its private [`LINK_OUT`] queue plus the packet its
-/// pump is fragmenting right now. Written by [`queue_on_link`] (add)
-/// and the two pumps (subtract, when a packet has left or died); reset
-/// at claim (after the stale-tenancy drain) and at teardown, so a
-/// decrement lost to a cancelled pump future cannot linger. The
-/// mechanics and their host tests live in
-/// [`leviculum_ble_tx::session_census`].
-static SESSION_HELD: leviculum_ble_tx::SessionHeld<MAX_LINKS> =
-    leviculum_ble_tx::SessionHeld::new();
-
-/// Heap bytes of packets sitting in [`BLE_OUTGOING`] — handed over by
-/// the core, not yet picked up by the fan-out (#388 census).
-static OUTGOING_HELD: leviculum_ble_tx::HeldBytes = leviculum_ble_tx::HeldBytes::new();
-
-/// Heap bytes of packets sitting in [`BLE_INCOMING`] — reassembled by a
-/// session, not yet consumed by the main loop, which subtracts on
-/// receive via [`incoming_held_sub`] (#388 census).
-static INCOMING_HELD: leviculum_ble_tx::HeldBytes = leviculum_ble_tx::HeldBytes::new();
-
-/// The BLE sessions' census slice (#388): per-drain-slot held bytes and
-/// the two node-facing channels' holdings. The census line prints the
-/// per-slot values as `ble_s0..ble_s3` and their sum plus the channels
-/// as `ble_sessions=`.
-pub fn session_census() -> ([usize; MAX_LINKS], usize) {
-    let mut slots = [0usize; MAX_LINKS];
-    for (index, value) in slots.iter_mut().enumerate() {
-        *value = SESSION_HELD.get(index);
-    }
-    (slots, OUTGOING_HELD.get() + INCOMING_HELD.get())
-}
-
-/// A session pump finished with (or abandoned) a packet of `bytes`.
-pub(crate) fn session_held_sub(slot_index: usize, bytes: usize) {
-    SESSION_HELD.sub(slot_index, bytes);
-}
-
-/// The slot's queue custody is known empty: claim (post-drain) and
-/// teardown.
-pub(crate) fn session_held_reset(slot_index: usize) {
-    SESSION_HELD.reset(slot_index);
-}
-
-/// A displacement moved one queued packet from `old_slot` to `new_slot`
-/// (#376): move its bytes with it.
-pub(crate) fn session_held_moved(old_slot: usize, new_slot: usize, bytes: usize) {
-    SESSION_HELD.sub(old_slot, bytes);
-    SESSION_HELD.add(new_slot, bytes);
-}
-
-/// A session queued one reassembled packet of `bytes` on
-/// [`BLE_INCOMING`].
-pub(crate) fn incoming_held_add(bytes: usize) {
-    INCOMING_HELD.add(bytes);
-}
-
-/// The main loop consumed one inbound packet of `bytes` — the receive
-/// side of `incoming_held_add`, called by the binaries.
-pub fn incoming_held_sub(bytes: usize) {
-    INCOMING_HELD.sub(bytes);
-}
+// The node side of the BLE link lives in `leviculum_firmware::ble_link`
+// since 998 (step 4's first slice): the carrier gate, the pacing value,
+// the drain/link table and the held-bytes census this backend publishes
+// into. Re-imported here so the backend's own modules keep their `super::`
+// paths; the orchestration and the binaries name `ble_link` directly.
+pub use leviculum_firmware::ble_link::HVN_DRAIN;
+pub(crate) use leviculum_firmware::ble_link::{
+    carrier, carrier_off, carrier_on, defrag_held_set, incoming_held_add, session_held_moved,
+    session_held_reset, session_held_sub, tx_gap_ms, CarrierWaiter,
+};
 
 // The queue depth, the MTU and the two worst cases built from them are terms
 // of the boot heap budget (#388), defined with that arithmetic.
@@ -326,144 +240,18 @@ pub(crate) fn report_peer_event(event: PeerEvent) {
     }
 }
 
-/// The runtime half of the media profile's BLE switch — the boot half
-/// is [`init`]'s `columba_enabled`, which decides whether the protocol
-/// tasks exist at all.
-///
-/// A runtime `ble=off` used to be a mute: [`BleInterface::try_send`]
-/// dropped outbound packets and the binaries' RX arms dropped inbound
-/// ones, but the SoftDevice links stayed connected and the
-/// advertisement kept going — a phone still showed the board as
-/// connected, and no `PeerEvent::Lost` ever fired, so the #365 cull
-/// never ran. Off now means off on the air: each protocol task holds
-/// one of these latches, [`note_media_changed`] pokes them all, and the
-/// woken task re-reads [`crate::media::ble_active`] — a live session
-/// disconnects its link (through the same teardown a peer walking out
-/// of range takes, so the `Lost` report and the cull are identical),
-/// and the advertise/scan futures are dropped and not re-entered until
-/// the carrier reads on again.
-///
-/// One latch per waiter, not one shared: `Signal::wait` consumes the
-/// latch, so a shared one would wake whichever task polled first and
-/// starve the others. Within a waiter only one of [`carrier_on`] /
-/// [`carrier_off`] is ever awaited at a time, and both re-check the
-/// media state after every wake, so a stale latched wake (a LoRa-only
-/// profile change, a flip-and-back while the task was busy) is a no-op.
-///
-/// The waiters, one latch each: the [`PERIPH_LINKS`] peripheral
-/// advertise/accept tasks, the central scan task, and one per drain
-/// slot for the live sessions (a session's waiter is keyed by its
-/// unique slot, so peripheral and central sessions cannot collide).
-static CARRIER_WAKES: [Signal<CriticalSectionRawMutex, ()>; PERIPH_LINKS + 1 + MAX_LINKS] =
-    [const { Signal::new() }; PERIPH_LINKS + 1 + MAX_LINKS];
-
-/// A protocol task's handle on its carrier-wake latch (see
-/// [`CARRIER_WAKES`]).
-#[derive(Clone, Copy)]
-pub(crate) enum CarrierWaiter {
-    /// Peripheral advertise/accept task `i` (`0..PERIPH_LINKS`).
-    Peripheral(usize),
-    /// The central scan/initiate task.
-    Central,
-    /// A live session, keyed by its drain-table slot.
-    Session(usize),
-}
-
-impl CarrierWaiter {
-    /// The path this waiter's [`carrier_off`] stands down.
-    fn path(self) -> CarrierPath {
-        match self {
-            CarrierWaiter::Peripheral(_) => CarrierPath::Advertising,
-            CarrierWaiter::Central => CarrierPath::Scanning,
-            CarrierWaiter::Session(_) => CarrierPath::Session,
-        }
-    }
-
-    fn index(self) -> usize {
-        match self {
-            CarrierWaiter::Peripheral(i) => i,
-            CarrierWaiter::Central => PERIPH_LINKS,
-            CarrierWaiter::Session(slot) => PERIPH_LINKS + 1 + slot,
-        }
-    }
-}
-
-/// Wake every BLE protocol task to re-read the media profile. Called by
-/// [`crate::media::apply`] after the new profile is already in force,
-/// so a woken task cannot read the old state. Before the tasks exist —
-/// or on a boot that never spawned them — this just latches the wakes,
-/// which is the required no-op: with `ble=off` at boot no link, no
-/// advertisement and no scan exist to stop.
-pub fn note_media_changed() {
-    for wake in &CARRIER_WAKES {
-        wake.signal(());
-    }
-}
-
-/// The operator's inter-packet-gap override (#376, `TYPE_BLE_TX_GAP`),
-/// in milliseconds. With no override — the boot state, and what every
-/// reset restores — the pumps serve the compiled
-/// [`leviculum_ble_tx::DEFAULT_TX_GAP_MS`] (100 ms, the measured desk
-/// value; the justification lives on that constant). The knob stays a
-/// measurement instrument: any set value overrides the default, `0`
-/// disables the gap entirely, and nothing is persisted, exactly like
-/// the LoRa transmit spacing (#345): a bench must not be able to leave
-/// a board silently mispaced after the session that paced it.
-///
-/// `u16::MAX` is the no-override sentinel; the control envelope refuses
-/// anything above `BLE_TX_GAP_MAX_MS`, so no operator value can collide
-/// with it (asserted below).
-const TX_GAP_OVERRIDE_NONE: u16 = u16::MAX;
-const _: () = assert!(leviculum_core::envelope::BLE_TX_GAP_MAX_MS < TX_GAP_OVERRIDE_NONE);
-static TX_GAP_OVERRIDE_MS: core::sync::atomic::AtomicU16 =
-    core::sync::atomic::AtomicU16::new(TX_GAP_OVERRIDE_NONE);
-
-/// Set the inter-packet gap override. Called from the serial control
-/// task; the per-connection pumps read it at each packet, so it takes
-/// effect from the next packet on every live link without touching the
-/// links.
-pub fn set_tx_gap_ms(gap_ms: u16) {
-    TX_GAP_OVERRIDE_MS.store(gap_ms, core::sync::atomic::Ordering::Relaxed);
-    crate::log::log_fmt("[BLE ] ", format_args!("tx_gap_ms={}", gap_ms));
-}
-
-/// The gap the pumps serve right now: the override if one was set this
-/// boot, [`leviculum_ble_tx::DEFAULT_TX_GAP_MS`] otherwise.
-pub(crate) fn tx_gap_ms() -> u16 {
-    let raw = TX_GAP_OVERRIDE_MS.load(core::sync::atomic::Ordering::Relaxed);
-    leviculum_ble_tx::effective_tx_gap_ms((raw != TX_GAP_OVERRIDE_NONE).then_some(raw))
-}
-
-/// The BLE carrier as the media profile states it now. Every path that
-/// reads the carrier asks this for its verdict
-/// ([`leviculum_ble_tx::CarrierState::step`]), so all of them agree when
-/// the operator switches it off.
-pub(crate) fn carrier() -> CarrierState {
-    CarrierState::from_active(crate::media::ble_active())
-}
-
-/// Resolve when the BLE carrier reads off, with how the waiter's path
-/// stands down. Selected against a live session or an advertise/scan
-/// future; never resolves while the carrier stays on.
-pub(crate) async fn carrier_off(waiter: CarrierWaiter) -> StandDown {
-    let wake = &CARRIER_WAKES[waiter.index()];
-    loop {
-        if let CarrierStep::StandDown(down) = carrier().step(waiter.path()) {
-            return down;
-        }
-        wake.wait().await;
-    }
-}
-
-/// Resolve when the BLE carrier reads on — the gate at the top of each
-/// protocol task's loop, so a switched-off carrier neither advertises
-/// nor scans nor accepts.
-pub(crate) async fn carrier_on(waiter: CarrierWaiter) {
-    let wake = &CARRIER_WAKES[waiter.index()];
-    while !carrier().is_on() {
-        wake.wait().await;
-    }
-}
+// The runtime half of the media profile's BLE switch — the carrier gate
+// each protocol task holds, `leviculum_firmware::ble_link` since 998 —
+// is re-imported above; the boot half is [`init`]'s `columba_enabled`,
+// which decides whether the protocol tasks exist at all. The media
+// profile pushes its verdict with `ble_link::set_active`, and the woken
+// task re-reads `carrier()` — a live session disconnects its link
+// (through the same teardown a peer walking out of range takes, so the
+// `Lost` report and the cull are identical), and the advertise/scan
+// futures are dropped and not re-entered until the carrier reads on
+// again. The waiter layout bound lives with [`CONN_COUNT`]'s assert:
+// `CarrierWaiter::Peripheral(i)` must stay below the central scanner's
+// latch, which `MAX_LINKS >= CONN_COUNT` guarantees.
 
 /// Per-link outbound queues, indexed by the link's [`HVN_DRAIN`] slot.
 ///
@@ -523,7 +311,7 @@ pub(crate) fn link_out(slot_index: usize) -> &'static PacketQueue {
 async fn tx_fanout_task() -> ! {
     loop {
         let (aim, packet) = BLE_OUTGOING.receive().await;
-        OUTGOING_HELD.sub(packet.capacity());
+        leviculum_firmware::ble_link::outgoing_held_sub(packet.capacity());
         // The registry plans, the drain table says which links are
         // still claimed; `leviculum_ble_tx::resolve_fanout` decides.
         match leviculum_ble_tx::resolve_fanout(&HVN_DRAIN, columba::plan_fanout(aim)) {
@@ -618,7 +406,7 @@ fn queue_on_link(slot: usize, packet: Vec<u8>) {
     } else {
         // #388 census: the packet is now in this link's custody, until
         // its pump subtracts it after the last fragment (or its death).
-        SESSION_HELD.add(slot, bytes);
+        leviculum_firmware::ble_link::session_held_add(slot, bytes);
     }
 }
 
@@ -765,7 +553,7 @@ impl BleInterface {
         let queued = verdict == leviculum_ble_tx::Outbound::Queue
             && self.sender.try_send((aim, data.to_vec())).is_ok();
         if queued {
-            OUTGOING_HELD.add(bytes);
+            leviculum_firmware::ble_link::outgoing_held_add(bytes);
             leviculum_firmware::iface_bytes::note_tx(leviculum_firmware::iface_bytes::BLE, bytes);
             return Ok(());
         }
@@ -1105,13 +893,12 @@ fn assert_sd_fits_below_retained(wanted: u32) {
 /// table: the operator's name (#235) if one is set, `LN-<hex8>` of the
 /// identity hash otherwise (#255).
 ///
-/// The name comes from [`crate::name::boot_gap_name`], which
-/// [`crate::name::note_boot_name`] filled in just before
-/// [`init`] — the same value the advertisement's Complete Local Name is
-/// built from in [`columba::spawn`], so the two BLE surfaces cannot show
-/// different names. A name longer than [`DEVICE_NAME_LEN`] arrives here
-/// already shortened on a codepoint boundary
-/// (`leviculum_ble_tx::gap_name`).
+/// The name is [`init`]'s argument since 998: the binaries pass the boot
+/// name their name module recorded just before `init`, and `init` hands
+/// the same value to [`columba::spawn`] for the advertisement's Complete
+/// Local Name, so the two BLE surfaces cannot show different names. A
+/// name longer than [`DEVICE_NAME_LEN`] arrives here already shortened
+/// on a codepoint boundary (`leviculum_ble_tx::gap_name`).
 ///
 /// This is the runtime half of [`gap_device_name_cfg`]: the config
 /// reserves `DEVICE_NAME_LEN` bytes with a NULL `p_value` — the only
@@ -1133,10 +920,9 @@ fn assert_sd_fits_below_retained(wanted: u32) {
 /// stops it is [`columba::spawn`]'s scan response, which cannot be
 /// rebuilt under a live stack: updating only the attribute would leave
 /// the board advertising one name and answering with another. Both wait
-/// for the reset together, and the control frame's report says so
-/// (`crate::name`).
-fn set_gap_device_name() {
-    let name = crate::name::boot_gap_name();
+/// for the reset together, and the control frame's report says so (the
+/// name module).
+fn set_gap_device_name(name: NodeName) {
     // No write access: the name is ours to publish, a peer has no
     // business changing it. Same permission the config carries.
     let write_perm: raw::ble_gap_conn_sec_mode_t = unsafe { mem::zeroed() };
@@ -1228,6 +1014,11 @@ async fn counters_task() -> ! {
 /// syscall after this point has to hold — the flash writes in
 /// [`crate::radio_store`] are the current caller.
 ///
+/// `gap_name` is the boot name both BLE surfaces come up under (998):
+/// `set_gap_device_name` writes it into the GAP attribute and
+/// [`columba::spawn`] builds the scan response's Complete Local Name
+/// from it, so neither surface can disagree with the other.
+///
 /// # `columba_enabled`
 ///
 /// The media profile ([`crate::media`]) decides whether this node meshes
@@ -1249,6 +1040,7 @@ pub fn init(
     spawner: &Spawner,
     columba_enabled: bool,
     identity_hash: [u8; 16],
+    gap_name: NodeName,
     vbus: &'static SoftwareVbusDetect,
     _rtc0: Peri<'static, peripherals::RTC0>,
     _timer0: Peri<'static, peripherals::TIMER0>,
@@ -1279,10 +1071,10 @@ pub fn init(
 
     let sd = Softdevice::enable(&sd_config());
     leviculum_firmware::boot_trace::phase(leviculum_firmware::boot_trace::Phase::SdEnabled);
-    set_gap_device_name();
+    set_gap_device_name(gap_name);
 
     let sd = if columba_enabled {
-        columba::spawn(spawner, sd, identity_hash)
+        columba::spawn(spawner, sd, identity_hash, gap_name)
     } else {
         crate::media::log_carrier_held_down("ble");
         sd

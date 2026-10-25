@@ -33,7 +33,7 @@ runs an event-driven main loop that dispatches packets between them:
 `set_interface_name` (`leviculum-nrf/src/bin/t114.rs:270-287`) and
 `leviculum-nrf/src/bin/rak4631.rs:294-335`. The main loop selecting over
 the three RX sources plus a timer deadline begins at
-`leviculum-nrf/src/bin/t114.rs:597`.)
+`leviculum-nrf/src/bin/t114.rs:598`.)
 
 Transport routing is enabled in the node builder, so an LNode forwards
 packets and serves paths for other peers, exactly like a

@@ -38,6 +38,10 @@ leviculum-pn-store = { path = "../pn-store" }
 # The board's interface table and its ingress-control flags, which the
 # byte counters' interface count is asserted against.
 leviculum-heap-budget = { path = "../heap-budget" }
+# The BLE link's policy (998, `ble_link`): the carrier verdicts, the pacing
+# default, the drain/link table and the held-bytes mirrors the node side
+# owns and the backend publishes into.
+leviculum-ble-tx = { path = "../ble-tx" }
 # The global allocator (961, `heap`): `alloc` is this stratum's, and the
 # heap facts are what the census and the propagation node read. An
 # allocator crate, not a HAL; the bind crate hands it its pool.

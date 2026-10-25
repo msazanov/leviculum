@@ -409,7 +409,9 @@ async fn commanded_reset(
     let commanded = embassy_time::Instant::now();
     let facts = ResetFacts {
         softdevice_enabled: softdevice_enabled(),
-        ble_links: crate::ble::HVN_DRAIN.claimed().min(u8::MAX as usize) as u8,
+        ble_links: leviculum_firmware::ble_link::HVN_DRAIN
+            .claimed()
+            .min(u8::MAX as usize) as u8,
         host_present: tx.dtr(),
         since_command_ms: commanded.elapsed().as_millis(),
     };
@@ -1103,7 +1105,7 @@ async fn retic_serial_task(
                                     // of it. One atomic store, already
                                     // bounded by the classifier — nothing
                                     // here can fail.
-                                    crate::ble::set_tx_gap_ms(gap_ms);
+                                    leviculum_firmware::ble_link::set_tx_gap_ms(gap_ms);
                                     let answer = envelope::encode_ack(envelope::TYPE_BLE_TX_GAP);
                                     if !write_framed(&mut tx, &control, &answer, &mut frame_buf)
                                         .await

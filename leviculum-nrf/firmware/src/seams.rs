@@ -78,22 +78,37 @@ pub trait Transceiver {}
 /// the M9's single UART and over RP2350 USB CDC. The fork's cut is adopted.
 pub trait ControlPort {}
 
-/// Placeholder for what the orchestration asks of a BLE backend (outbound
-/// notifies, advertising on and off). Variants arrive in step 4.
+/// What the orchestration asks of a BLE backend. Step 4's measurement
+/// (998) found no command that wants a channel: the three asks — carrier
+/// on/off, the inter-packet gap, the name to advertise — are idempotent
+/// latest-value states, pushed as [`crate::ble_link`] values
+/// (`set_active`, `set_tx_gap_ms`) or passed at registration (the name),
+/// and the backend reads them at its own cadence. The outbound packets
+/// themselves already ride the node-facing channel that moves here with
+/// the remaining slices; whether its `TxAim` envelope becomes this type
+/// is decided then.
 #[derive(Debug)]
 pub enum BleLinkCommand {}
 
-/// Placeholder for what a BLE backend reports (connection up and down with
-/// MTU and parameters, inbound writes). Variants arrive in step 4.
+/// Placeholder for what a BLE backend reports (a peer's first link up
+/// and last link down with its identity, inbound packets, the census
+/// facts). Today these ride `ble/`'s own channels and the published
+/// values in [`crate::ble_link`]; the variants arrive when those
+/// channels move here with step 4's remaining slices.
 #[derive(Debug)]
 pub enum BleLinkEvent {}
 
 /// BLE link, a message seam above GATT: the Columba link as the
 /// orchestration sees it, [`BleLinkCommand`] in and [`BleLinkEvent`] out.
+/// The node side's first slice is [`crate::ble_link`] (998): the carrier
+/// gate, the pacing value, the drain/link table and the census facts the
+/// backend publishes — per-fragment work stays direct calls on those
+/// values (the per-packet decision of 998), only the packets and peer
+/// transitions are messages.
 ///
 /// Today: the S140 SoftDevice backend in `ble/` (`ble/mod.rs`,
-/// `ble/columba.rs`), whose upward calls into `media`, `boot_trace`, `name`
-/// and `iface_bytes` become these messages. The fork: TrouBLE over
+/// `ble/columba.rs`), whose remaining upward calls into `media` (the
+/// TX-drop run lines) become these messages. The fork: TrouBLE over
 /// `bt_hci::Transport` (`leviculum-fw/src/ble/mod.rs`, lines 81 to 91) on
 /// the CYW43439 and the ESP32-S3 radio; its `HciTransport` stays inside its
 /// backend, because the SoftDevice is not an HCI controller.

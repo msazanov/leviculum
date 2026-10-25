@@ -32,7 +32,12 @@
 //! `display` capability) over the `seams::Panel` sink; the SSD1306 and
 //! ST7789 drivers stay below. In 991 the battery monitor's cadences and
 //! lines move here (`battery`, behind the `battery` capability) over the
-//! `seams::BatteryGauge` seam; the SAADC and the divider stay below.
+//! `seams::BatteryGauge` seam; the SAADC and the divider stay below. In 998
+//! the BLE link's node side begins to move here ([`ble_link`], step 4's
+//! first slice): the carrier gate the media profile pushes, the pacing
+//! value, the link/drain table and the heap-census facts the backend
+//! publishes; the node-facing channels and the `Interface` implementation
+//! are still below.
 //!
 //! What the crate may depend on is held by two guards rather than by this
 //! comment: `just firmware-no-hal` refuses a HAL or chip crate in its
@@ -45,6 +50,7 @@ extern crate alloc;
 
 #[cfg(feature = "battery")]
 pub mod battery;
+pub mod ble_link;
 #[cfg(any(feature = "display", feature = "gnss", feature = "battery"))]
 pub mod board_state;
 pub mod boot_count;

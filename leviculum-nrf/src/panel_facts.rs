@@ -20,7 +20,11 @@ pub fn status_facts() -> StatusFacts {
         // without BLE; the painter's `None` arm exists for a board that
         // one day has none. `MAX_LINKS` is 4, so the saturation never
         // bites.
-        ble_peers: Some(crate::ble::HVN_DRAIN.claimed().min(u8::MAX as usize) as u8),
+        ble_peers: Some(
+            leviculum_firmware::ble_link::HVN_DRAIN
+                .claimed()
+                .min(u8::MAX as usize) as u8,
+        ),
         pn_fill: crate::pn::fill_indicator(),
     }
 }

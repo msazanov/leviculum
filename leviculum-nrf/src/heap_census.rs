@@ -310,14 +310,14 @@ where
     // what the line should carry.
     let (used_now, free_now) = leviculum_firmware::heap::heap_stats();
     let census = node.heap_census();
-    let ble = crate::ble::defrag_held_bytes();
+    let ble = leviculum_firmware::ble_link::defrag_held_bytes();
     // The BLE sessions' own holdings (#388 pass 2): the packets queued
     // on the per-link queues plus what sits in the two node-facing
     // channels. `links=`/`n_links=` above walk the RETICULUM link
     // table, which is empty while a BLE peer merely holds a GATT
     // connection — this owner is the one that grows with a second
     // phone, and before it that growth hid in `other=`.
-    let (ble_slots, ble_chan) = crate::ble::session_census();
+    let (ble_slots, ble_chan) = leviculum_firmware::ble_link::session_census();
     let ble_sessions = ble_slots.iter().sum::<usize>() + ble_chan;
     // The per-slot keys below spell out exactly MAX_LINKS values.
     const _: () = assert!(leviculum_heap_budget::MAX_LINKS == 4);

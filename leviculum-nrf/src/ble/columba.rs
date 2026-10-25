@@ -61,6 +61,8 @@ use nrf_softdevice::ble::{
 use nrf_softdevice::Softdevice;
 use static_cell::StaticCell;
 
+use leviculum_core::node_name::NodeName;
+
 use super::notify::{notify_fragments, BLE_TX_DRAIN_UNROUTED, BLE_TX_DROPPED, BLE_TX_PACKETS};
 use super::{CarrierWaiter, BLE_INCOMING, HVN_DRAIN, MAX_LINKS};
 
@@ -346,12 +348,12 @@ const _: () = assert!(ADV_BYTES_USED == LEGACY_AD_CAPACITY);
 ///
 /// The advertising and scan-response payloads are built here, once, for
 /// all peripheral tasks: nrf-softdevice's `advertise_connectable` wants
-/// `&'static` slices, and the name in the scan response is the boot
-/// name — the operator's (#235) if one is set, `LN-<hex8>` from the
-/// identity hash otherwise (#255), the same value
-/// `crate::ble::set_gap_device_name` writes into the GAP attribute so
-/// the two BLE surfaces cannot disagree, truncated visibly on a
-/// codepoint boundary to `DEVICE_NAME_LEN`. It rides in the SCAN
+/// `&'static` slices, and the name in the scan response is `gap_name`,
+/// the boot name the caller passes — the operator's (#235) if one is
+/// set, `LN-<hex8>` from the identity hash otherwise (#255), the same
+/// value `super::init` hands `set_gap_device_name` for the GAP
+/// attribute so the two BLE surfaces cannot disagree, truncated visibly
+/// on a codepoint boundary to `DEVICE_NAME_LEN`. It rides in the SCAN
 /// RESPONSE, a second 31-byte PDU, so it does not compete with the
 /// advertisement's budget. Built once into `StaticCell`s the SoftDevice
 /// holds `&'static`s to for the life of the advertising loops: that is
@@ -361,6 +363,7 @@ pub fn spawn(
     spawner: &Spawner,
     sd: &'static mut Softdevice,
     identity_hash: [u8; 16],
+    gap_name: NodeName,
 ) -> &'static Softdevice {
     // A GATT table the SoftDevice refuses to register is a boot-time
     // condition, not a crash: log the SoftDevice's error code and come up
@@ -405,10 +408,9 @@ pub fn spawn(
     // same hash the Identity characteristic above publishes.
     let hint = identity_hint(&identity_hash);
     let adv = advertisement_now(hint);
-    let name = crate::name::boot_gap_name();
     let scan: &'static LegacyAdvertisementPayload = SCAN_DATA.init(
         LegacyAdvertisementBuilder::new()
-            .full_name(name.as_str())
+            .full_name(gap_name.as_str())
             .build(),
     );
 

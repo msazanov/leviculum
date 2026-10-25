@@ -447,6 +447,7 @@ async fn main(spawner: Spawner) {
         &spawner,
         media.ble_enabled,
         identity_hash,
+        leviculum_nrf::name::boot_gap_name(),
         vbus,
         p.RTC0,
         p.TIMER0,
@@ -1166,7 +1167,7 @@ async fn main(spawner: Spawner) {
             Either4::First(Either4::Third(Either::First((peer, data)))) => {
                 // #388 census: this packet just left BLE_INCOMING
                 // custody (counted by the session that queued it).
-                leviculum_nrf::ble::incoming_held_sub(data.capacity());
+                leviculum_firmware::ble_link::incoming_held_sub(data.capacity());
                 // The reception itself is already on the log: columba's
                 // `BLE: RX <n>B conn=<h> frags=<k>` line names the link
                 // and the peer's fragmentation (#376), so a second
