@@ -1,0 +1,23 @@
+[package]
+name = "leviculum-mapfill-measure"
+version = "0.1.0"
+edition = "2021"
+authors = ["Lew Palm"]
+license = "AGPL-3.0-or-later"
+description = "Host harness of the map measurement (#474): vector tiles to the flat fixture, and the fixture drawn by leviculum-mapfill into PNGs"
+publish = false
+
+# Its own workspace, excluded from the root one, so the protobuf decoder
+# the harness needs to read MVT tiles stays out of the shipping graph and
+# its notices. Nothing ships from here; it writes `fixtures/` and PNGs.
+[workspace]
+
+[dependencies]
+leviculum-mapfill = { path = "..", features = ["std"] }
+embedded-graphics = "0.8"
+# The prost-generated MVT types and the geometry decoder the first
+# measurement used (docs/drafts/map-measurement-2026-10.md, "Crates").
+tinymvt = "0.3"
+prost = "0.14"
+flate2 = "1"
+png = "0.18"
