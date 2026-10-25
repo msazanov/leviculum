@@ -977,6 +977,16 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
             "targeted",
         ],
     },
+    // An interface-up notification named an index the core tore down and
+    // nothing registered again (`node/mod.rs::handle_interface_up`, 981): it
+    // was sent before the teardown and crossed it in a driver channel, so
+    // the re-announce it asked for is refused — before the refusal, each
+    // local destination's fresh announce died at dispatch as a
+    // `PKT_DROP reason=no-such-interface` naming `idx` as `iface_out`.
+    EventSchema {
+        name: "IFACE_UP_STALE",
+        required_keys: &["idx"],
+    },
     // The management destination's own announce (`node/mod.rs`); `iface` is
     // the literal `all`, since it goes out on every interface at once.
     EventSchema {

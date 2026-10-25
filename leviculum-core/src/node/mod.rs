@@ -121,6 +121,8 @@ mod mvr_interface_gone_dispatch;
 #[cfg(all(test, feature = "tracing"))]
 mod mvr_interface_gone_final_teardown;
 #[cfg(all(test, feature = "tracing"))]
+mod mvr_interface_up_after_teardown;
+#[cfg(all(test, feature = "tracing"))]
 mod mvr_link_cap;
 #[cfg(all(test, feature = "tracing"))]
 mod mvr_link_data_echo_storm;
@@ -3217,6 +3219,11 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         // life refusing announces for a hold its predecessor reported.
         self.transport.set_interface_duty_hold(iface_idx, false);
         self.transport.remove_interface_name(iface_idx);
+        // Tombstone the index (981): a buffered interface-up notification
+        // sent before this teardown must not re-announce to it. Cleared by
+        // the next `set_interface_name`, which every registration path calls
+        // before reporting the interface up.
+        self.transport.mark_interface_torn_down(iface_idx);
         self.transport.remove_interface_mode(iface_idx);
         self.transport.remove_interface_kind(iface_idx);
         self.transport.remove_interface_hw_mtu(iface_idx);
@@ -3448,7 +3455,18 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     /// have a stale entry. Cached bytes are sufficient for client
     /// destinations because the peer on the recovered interface has never
     /// seen them (Block D).
+    ///
+    /// A notification for an index the core tore down and nothing registered
+    /// again announces nothing (981): it was sent before the teardown and
+    /// crossed it in a driver channel (the miauhaus soak's retired
+    /// auto-connect client, whose reconnect raced the 12 s detach poll), and
+    /// every announce it triggered was dropped at dispatch as
+    /// `no-such-interface` — one per local destination, same millisecond.
     pub fn handle_interface_up(&mut self, interface_index: usize) -> crate::transport::TickOutput {
+        if self.transport.interface_torn_down(interface_index) {
+            crate::tracing::debug!(event = "IFACE_UP_STALE", idx = interface_index,);
+            return self.process_events_and_actions();
+        }
         self.announce_local_destinations(interface_index, None);
         self.process_events_and_actions()
     }

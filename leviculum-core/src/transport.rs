@@ -3234,6 +3234,22 @@ pub struct Transport<C: Clock, S: Storage> {
     /// Populated by the driver at registration time, removed on interface down.
     interface_names: BTreeMap<usize, String>,
 
+    /// Indexes torn down and not registered again (981). An interface-up
+    /// notification is driver state that crosses a channel, so it can land
+    /// after the teardown of the interface it names (the miauhaus soak's
+    /// retired auto-connect client, whose reconnect raced the retire);
+    /// honouring it would announce to an index the driver no longer has.
+    /// Inserted by [`Self::mark_interface_torn_down`], cleared by
+    /// [`Self::set_interface_name`] — every registration path names the
+    /// interface before it reports it up. Boxed and allocated with the
+    /// first teardown, dropped when the last tombstone clears, for the
+    /// reason [`Self::loop_refusals`] is: the boards never tear an
+    /// interface down, and a set inline would cost every node box 24 B
+    /// for a table that is empty there always. The box is exactly that
+    /// 24-B-to-8-B trade, not an extra indirection worth removing.
+    #[allow(clippy::box_collection)]
+    torn_down_interfaces: Option<Box<BTreeSet<usize>>>,
+
     /// Interfaces whose driver currently reports `is_online() == false`
     /// (Codeberg #365). A missing entry means online — the default, so a
     /// driver that never mirrors its interface state keeps today's
@@ -3622,6 +3638,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             // announce_rate_table: migrated to Storage
             interface_announce_caps: BTreeMap::new(),
             interface_names: BTreeMap::new(),
+            torn_down_interfaces: None,
             offline_interfaces: BTreeSet::new(),
             duty_hold_ifaces: BTreeSet::new(),
             interface_peer_counts: BTreeMap::new(),
@@ -5509,6 +5526,9 @@ impl<C: Clock, S: Storage> Transport<C, S> {
         }
         bytes += hc::btree_set_bytes(&self.local_destinations)
             + hc::btree_map_bytes(&self.interface_names)
+            + self.torn_down_interfaces.as_ref().map_or(0, |torn| {
+                core::mem::size_of::<BTreeSet<usize>>() + hc::btree_set_bytes(torn)
+            })
             + self
                 .interface_names
                 .values()
@@ -6278,7 +6298,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// recall source is the cached announce for the destination
     /// (`get_announce_cache`, keyed by destination hash, holding the raw announce
     /// whose payload starts with the 64-byte public key), the same source the
-    /// link-request path uses at transport.rs:4438. A destination with no cached
+    /// link-request path uses at transport.rs:4455. A destination with no cached
     /// announce cannot be associated with an identity, so it is left untouched,
     /// exactly as Python keeps a path whose `Identity.recall` returns `None`.
     ///
@@ -9999,8 +10019,16 @@ impl<C: Clock, S: Storage> Transport<C, S> {
 
     // Public: Interface Name API
     /// Register a human-readable name for an interface (called by driver at registration).
+    /// Also clears the torn-down tombstone (981): a named index is a
+    /// registered one, so a later interface-up for it is current again.
     pub fn set_interface_name(&mut self, id: usize, name: String) {
         self.interface_names.insert(id, name);
+        if let Some(torn) = self.torn_down_interfaces.as_mut() {
+            torn.remove(&id);
+            if torn.is_empty() {
+                self.torn_down_interfaces = None;
+            }
+        }
         // Codeberg #87: stamp the interface creation time so the ingress-limit
         // new-interface window (Python Interface.age() vs IC_NEW_TIME) is
         // measured from registration.
@@ -10013,6 +10041,28 @@ impl<C: Clock, S: Storage> Transport<C, S> {
     /// Remove interface name (called during handle_interface_down cleanup).
     pub fn remove_interface_name(&mut self, id: usize) {
         self.interface_names.remove(&id);
+    }
+
+    /// Tombstone an index the teardown just removed (981); see
+    /// [`Self::interface_torn_down`]. Called by
+    /// `NodeCore::handle_interface_teardown` beside the name removal.
+    pub fn mark_interface_torn_down(&mut self, id: usize) {
+        self.torn_down_interfaces
+            .get_or_insert_with(Box::default)
+            .insert(id);
+    }
+
+    /// Whether `id` was torn down and not registered again (981). An
+    /// interface-up notification for such an index is stale — it was sent
+    /// before the teardown and crossed it in a driver channel — and
+    /// announcing on it could only end as a `no-such-interface` drop at
+    /// dispatch. Cleared by [`Self::set_interface_name`], which every
+    /// registration path calls first, so a re-registered index (a bootstrap
+    /// re-attach returns under its original index) answers `false` again.
+    pub fn interface_torn_down(&self, id: usize) -> bool {
+        self.torn_down_interfaces
+            .as_ref()
+            .is_some_and(|torn| torn.contains(&id))
     }
 
     // Public: Interface online mirror (Codeberg #365)
@@ -18625,7 +18675,7 @@ mod tests {
             // stored timebase, must be rejected. Acceptance is observed via
             // the PathFound event, which fires only when the table updates.
             // (The rejected blob is still RECORDED for replay detection —
-            // `random_blobs` (transport.rs:7839), a deliberate anti-replay
+            // `random_blobs` (transport.rs:7859), a deliberate anti-replay
             // extension — so the blob count is not a rejection indicator.)
             transport
                 .clock

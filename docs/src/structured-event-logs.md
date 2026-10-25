@@ -93,6 +93,16 @@ to stitch one packet's path across nodes:
   costs a link that lingers to its stale timeout, a wrong `final` closes
   one that would have carried on.  The peer sees the same either way:
   silence, then its own stale timeout.
+- The interface-up half (981): a reconnect notification crosses the
+  teardown of the interface it names in a driver channel (a retired
+  auto-connect client whose reconnect raced the detach poll), and
+  honouring it would re-announce every local destination to the gone
+  index — one `no-such-interface` drop per destination, same
+  millisecond.  The core tombstones every index it tears down and
+  refuses a later `handle_interface_up` for it with `IFACE_UP_STALE
+  idx=`; the next registration under that index
+  (`set_interface_name`) clears the tombstone
+  (`leviculum-core/src/node/mvr_interface_up_after_teardown.rs`).
 - A relay whose outbound path points back out of the arrival interface
   forwards there — same-interface relay on a shared medium is a normal
   hop, not a drop (see

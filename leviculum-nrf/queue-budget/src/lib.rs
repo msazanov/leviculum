@@ -230,7 +230,7 @@ impl QueueBudget {
 /// **The value — the shortest relay entry, 18 s.** A forwarded link request is
 /// routable only until the relay's link-table entry expires:
 /// `proof_timeout_ms = now + (hops + path_hops + 2) * DEFAULT_PER_HOP_TIMEOUT`,
-/// 6 s per hop (`leviculum-core/src/transport.rs:6791-6794`,
+/// 6 s per hop (`leviculum-core/src/transport.rs:6811-6814`,
 /// `leviculum-core/src/constants.rs:113`), starting at forward time — i.e.
 /// when the frame is enqueued here. A request a relay heard over the air has
 /// `hops >= 1`, so the shortest entry any relay grants is the one-hop request

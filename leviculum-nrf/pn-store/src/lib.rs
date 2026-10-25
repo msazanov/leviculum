@@ -537,7 +537,7 @@ impl core::fmt::Display for OversizeRefusal {
 ///
 /// The late one is `accept_resource`'s `incoming_full`: the link filled up
 /// while the role decided, the node sends the RCL itself and returns
-/// `TransferInProgress` (`leviculum-core/src/node/mod.rs:2334-2337`). Until
+/// `TransferInProgress` (`leviculum-core/src/node/mod.rs:2336-2339`). Until
 /// 878 the board kept only the `Ok` arm of the verdict, so the sender got
 /// its RCL and the capture said nothing. `accept` tells a refused accept
 /// from a reject that failed.

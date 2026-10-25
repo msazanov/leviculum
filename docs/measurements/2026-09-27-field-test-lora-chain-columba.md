@@ -101,7 +101,7 @@ back on the wire (commits `453ba908`, `c06112af`; Codeberg **#433**):
 > field day's unanswered link requests, a scheduling property of a saturated
 > 10 % duty hop, not a lossy air.
 
-Citations for that chain: deadline at `transport.rs:6504-6507` with the 6 s
+Citations for that chain: deadline at `transport.rs:6524-6527` with the 6 s
 per-hop constant at `constants.rs:113`; reaping at
 `memory_storage.rs:1179-1183`; the silent drop, now counted as
 `lrproof_no_link`, at `link_management.rs:1081-1099`.

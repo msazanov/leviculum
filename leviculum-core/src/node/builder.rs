@@ -378,7 +378,7 @@ impl NodeCoreBuilder {
     /// full-size temporary plus the return slot.
     ///
     /// That matters on embedded, where `S` is an inline-storage type: with
-    /// `EmbeddedStorage` a `NodeCore` is 31 744 B on the boards
+    /// `EmbeddedStorage` a `NodeCore` is 31 752 B on the boards
     /// (`leviculum_heap_budget::NODE_BOX_BYTES`), and `Box::new(build(..))`
     /// put two of those on the T114's stack (a 94 KB `main` frame, leaving
     /// ~13 KB of margin and corrupting SoftDevice RAM on the deeper paths).
