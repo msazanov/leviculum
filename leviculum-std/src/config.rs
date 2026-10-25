@@ -26,6 +26,11 @@ pub struct Config {
     /// code, which has no automatic layer. Not a config key.
     #[serde(skip)]
     pub auto_layer: Option<crate::auto_layer::AutoLayer>,
+    /// Where the configuration itself came from: [`InterfaceOrigin::Default`]
+    /// for [`Config::rnsd_default`], else configured. The origin of the rows
+    /// no section names when no section is left (#471). Not a config key.
+    #[serde(skip)]
+    pub origin: InterfaceOrigin,
 }
 
 /// `path_choice` as a config value (Codeberg #230): the serde face of
@@ -1452,7 +1457,8 @@ impl Config {
     /// The configuration lnsd runs when its config directory holds no file:
     /// [`LNSD_DEFAULT_CONFIG`], rnsd's first-start file and the shipped
     /// `[auto]` section, parsed by the same INI reader a file goes through,
-    /// with every interface marked [`InterfaceOrigin::Default`].
+    /// with every interface and the configuration itself marked
+    /// [`InterfaceOrigin::Default`].
     pub fn rnsd_default() -> Result<Self> {
         let mut config = crate::ini_config::parse_ini(LNSD_DEFAULT_CONFIG).map_err(|e| {
             Error::Config(format!("Failed to parse the built-in default config: {e}"))
@@ -1460,6 +1466,7 @@ impl Config {
         for iface in config.interfaces.values_mut() {
             iface.origin = InterfaceOrigin::Default;
         }
+        config.origin = InterfaceOrigin::Default;
         Ok(config)
     }
 
@@ -1591,6 +1598,7 @@ mod tests {
         assert_eq!(auto.interface_type, "AutoInterface");
         assert!(auto.enabled);
         assert_eq!(auto.origin, InterfaceOrigin::Default);
+        assert_eq!(config.origin, InterfaceOrigin::Default);
         // The default group: no group_id, so a fresh lnsd meets a fresh rnsd.
         assert_eq!(auto.group_id, None);
 
@@ -1683,6 +1691,7 @@ mod tests {
         assert_eq!(source, ConfigSource::File);
         let auto = config.interfaces.get("Default Interface").expect("section");
         assert_eq!(auto.origin, InterfaceOrigin::Configured);
+        assert_eq!(config.origin, InterfaceOrigin::Configured);
         // rnsd's file has no `[auto]`: a file without the section starts
         // nothing automatic.
         assert_eq!(config.auto, crate::auto_layer::AutoMedia::NONE);

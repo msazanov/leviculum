@@ -186,6 +186,10 @@ pub(crate) struct InterfaceInventory {
     /// The automatic layer's decision at start (#471 step 2), served as the
     /// top-level `auto_layer` key; `None` for a node built in code.
     auto_layer: Option<AutoLayer>,
+    /// Where the configuration came from, a file or the default lnsd holds
+    /// without one (#471): the origin of a row no section names when no
+    /// section is left. Configured for a node built in code.
+    config_origin: InterfaceOrigin,
 }
 
 /// Shared handle: the accept loops write, the stats builder reads.
@@ -237,6 +241,11 @@ impl InterfaceInventory {
         self.auto_layer = layer;
     }
 
+    /// Record where the configuration came from, once, before the node runs.
+    pub(crate) fn set_config_origin(&mut self, origin: InterfaceOrigin) {
+        self.config_origin = origin;
+    }
+
     /// The automatic layer's decision, if this node took one.
     pub(crate) fn auto_layer(&self) -> Option<AutoLayer> {
         self.auto_layer
@@ -247,8 +256,10 @@ impl InterfaceInventory {
     /// origin. Every other row (the shared instance, its local clients, an
     /// AutoInterface's peers, whose names carry no section) comes from the
     /// `[reticulum]` and `[interfaces]` of the same configuration, so it
-    /// takes the origin all sections share; with no sections, or sections of
-    /// both origins, it was configured.
+    /// takes the origin all sections share; with sections of both origins it
+    /// was configured, and with no section left (lnsd without a file, its
+    /// AutoInterface removed by the automatic layer) it takes the
+    /// configuration's own origin.
     pub(crate) fn origin_of(&self, short_name: &str, parent: Option<usize>) -> InterfaceOrigin {
         let parent_section = parent
             .and_then(|p| self.listeners.get(&p))
@@ -262,8 +273,9 @@ impl InterfaceInventory {
         }
         let mut origins = self.section_origins.values();
         match origins.next() {
+            None => self.config_origin,
             Some(&first) if origins.all(|&o| o == first) => first,
-            _ => InterfaceOrigin::Configured,
+            Some(_) => InterfaceOrigin::Configured,
         }
     }
 
@@ -339,7 +351,7 @@ mod tests {
     #[test]
     fn rows_take_the_origin_of_their_section() {
         let mut inv = InterfaceInventory::default();
-        // No section at all: an empty file, configured.
+        // No section at all, and a node built in code: configured.
         assert_eq!(
             inv.origin_of("Shared Instance", None),
             InterfaceOrigin::Configured
@@ -387,6 +399,27 @@ mod tests {
             inv.origin_of("rns/default", None),
             InterfaceOrigin::Configured
         );
+    }
+
+    /// With no section left, a row takes the configuration's origin: lnsd
+    /// without a file and with `LEVICULUM_NO_AUTO=1` holds the default
+    /// configuration minus its AutoInterface, and its shared instance came
+    /// from that default, not from a file (977).
+    #[test]
+    fn rows_without_sections_take_the_configuration_origin() {
+        let mut inv = InterfaceInventory::default();
+        inv.set_config_origin(InterfaceOrigin::Default);
+        assert_eq!(inv.origin_of("rns/default", None), InterfaceOrigin::Default);
+
+        inv.set_config_origin(InterfaceOrigin::Configured);
+        assert_eq!(
+            inv.origin_of("rns/default", None),
+            InterfaceOrigin::Configured
+        );
+
+        // A section still decides over the configuration's origin.
+        inv.set_section_origin("Default Interface", InterfaceOrigin::Default);
+        assert_eq!(inv.origin_of("rns/default", None), InterfaceOrigin::Default);
     }
 
     /// A departing child's bytes stay on its parent listener.

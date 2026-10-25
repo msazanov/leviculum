@@ -359,6 +359,7 @@ pub(crate) fn parse_ini(content: &str) -> Result<Config, String> {
         interfaces: supported,
         auto,
         auto_layer: None,
+        origin: crate::config::InterfaceOrigin::Configured,
     })
 }
 
