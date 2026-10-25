@@ -576,6 +576,18 @@ in one 11,873-line file with crossterm types reachable throughout. When
 `lnomad` next gets substantial work, the same core/frontend boundary is
 carved there. Tracked as its own issue, not as part of this program.
 
+Done for `lnomad` on 2026-10-25 (#219), as a module boundary inside the
+crate: the core is `lnomad/src/app/` (model, `update`, effects, the cell
+geometry and the chrome layout, and the browser's own key and mouse types),
+the terminal crates sit behind the `tui` feature, and `just
+lnomad-core-no-tui` builds the crate without them and fails if any reaches
+the core. What still carries the terminal's shape is the unit: the core
+hit-tests clicks against a character-cell layout, so a pixel frontend will
+add semantic events (follow this link, press this control) beside the
+cell-addressed mouse ones. The 251 tests stay in `lnomad/src/tui.rs`, where
+the view tests need ratatui; the headless suite that runs without the
+feature is the next step.
+
 ## 5. Decision: the event loop and the TEA split
 
 `lnomad`'s split survives contact with a messenger with one change.

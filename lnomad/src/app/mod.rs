@@ -6,7 +6,9 @@
 //! imports `crossterm`, `ratatui` or any other terminal crate. Events come in
 //! as [`AppEvent`], effects go out as [`Effect`], and a frontend is a
 //! translator and a renderer over that pair. The terminal frontend is
-//! [`crate::tui`]; a GUI is a second one, with no change here.
+//! [`crate::tui`]; a GUI is a second one, with no change here. `just
+//! lnomad-core-no-tui` builds this module without the terminal dependency tree
+//! and fails if any of it creeps back in.
 //!
 //! The one thing still shaped by the terminal is the unit: positions and
 //! rectangles are character cells, and the click and hover hit-tests run here

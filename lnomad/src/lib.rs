@@ -39,6 +39,7 @@ pub mod image_cache;
 pub mod page_cache;
 pub mod render;
 pub mod theme;
+#[cfg(feature = "tui")]
 pub mod tui;
 pub mod url;
 
@@ -58,5 +59,6 @@ pub use render::{
     layout, render_with_options, RLine, RStyle, RenderedLink, RenderedPage, StyledChar,
 };
 pub use theme::{resolve_theme, Bg, Theme, ThemeFlag};
+#[cfg(feature = "tui")]
 pub use tui::{run_tui, to_ratatui_text, view, TerminalGuard, TerminalOps};
 pub use url::{classify_link, parse_url, LinkKind, Target, UrlError};

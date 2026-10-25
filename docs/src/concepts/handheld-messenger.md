@@ -44,8 +44,14 @@ the core/frontend cut and for the map, and what is open.
   architecture](lnmsg-architecture.md), section 4, has the terminal-free
   requirement it extends.
 - **`lnomad`'s core/frontend boundary (#219).** It is the same
-  requirement for the browser, and still a refactor to come: model,
-  update and view share `lnomad/src/tui.rs`, which is about 12,000 lines.
+  requirement for the browser, cut on 2026-10-25: model, `update` and the
+  effects live in `lnomad/src/app/` and import no terminal crate, the
+  ratatui frontend in `lnomad/src/tui.rs` behind the `tui` feature, and
+  `just lnomad-core-no-tui` holds the line. That is enough for a desktop
+  GUI as a second frontend. It is not yet enough for the M9: the core is
+  a `std` module of the `lnomad` crate, and the crate without the feature
+  still carries the fetch layer (`leviculum-std`, tokio), so a firmware
+  frontend still needs the core as a `no_std` crate of its own.
 - **`leviculum-lxmf`, `no_std + alloc`** (`leviculum-lxmf/src/lib.rs:38`):
   - delivery (`LxmfRouter`, `leviculum-lxmf/src/router.rs:462`);
   - propagation nodes, both the client and the node
@@ -153,7 +159,8 @@ core (fetch, micron model, layout) also drives a desktop GUI and the
 M9's display. The `lxmf@` handoff (browser to messenger, [lnmsg:
 architecture](lnmsg-architecture.md)) becomes an in-process call once
 both share a shell. #219's core/frontend boundary ("What exists today")
-is the refactor this needs.
+is the refactor this needs; its first step, the module boundary, landed
+on 2026-10-25.
 
 ## One interaction model
 

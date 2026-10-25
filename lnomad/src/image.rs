@@ -13,9 +13,12 @@
 //! and the drawing live in [`crate::tui`]; what this module owns is the
 //! arithmetic and the decisions, so they can be tested without a terminal.
 
+#[cfg(feature = "tui")]
 use ratatui_image::picker::ProtocolType;
+#[cfg(feature = "tui")]
 use ratatui_image::FontSize;
 
+#[cfg(feature = "tui")]
 use crate::color::ColorDepth;
 
 /// The file extensions treated as inline images, lowercase.
@@ -52,6 +55,7 @@ pub const HALFBLOCK_VIEWPORT_MULTIPLE: usize = 2;
 /// How the terminal will be asked to draw pictures.
 ///
 /// Not `Eq`: `ProtocolType` is only `PartialEq` upstream.
+#[cfg(feature = "tui")]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Backend {
     /// A real graphics protocol: Kitty, iTerm2 or Sixel.
@@ -64,6 +68,7 @@ pub enum Backend {
     Text,
 }
 
+#[cfg(feature = "tui")]
 impl Backend {
     /// How many image pixels one character cell carries, which is what
     /// "natural size" has to be measured in.
@@ -115,6 +120,7 @@ impl Backend {
 /// overrides everything — a reader who asked for no colour did not ask for a
 /// picture painted out of coloured blocks either, and the graphics protocols
 /// are excluded with it so `--no-color` output stays plain.
+#[cfg(feature = "tui")]
 pub fn choose_backend(detected: ProtocolType, depth: ColorDepth, no_color: bool) -> Backend {
     if no_color {
         return Backend::Text;
@@ -357,7 +363,9 @@ fn describe_inner(name: &str, probe: Option<&Probe>) -> String {
     }
 }
 
-#[cfg(test)]
+// The tests lean on `Backend` throughout for cell geometry, and the build
+// without the terminal frontend is only ever checked, never tested.
+#[cfg(all(test, feature = "tui"))]
 mod tests {
     use super::*;
 
