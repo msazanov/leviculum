@@ -16,7 +16,8 @@ the core/frontend cut and for the map, and what is open.
   and the positions of other nodes on a map, taken from their telemetry.
 - **One core, several frontends:** the M9, the desktop, later Android.
 - **The map** is built from OpenStreetMap material with existing
-  libraries. We do not write our own renderer.
+  libraries. We do not write our own renderer. (Narrowed 2026-10-25,
+  Lew: one piece of our own, a polygon filler; see "The map".)
 - **Columba is the reference for scope and protocol behaviour**: what a
   messenger does and how it behaves on the wire. It is not a reference
   for how the code is designed. (Superseded 2026-10-25, Lew: Columba is
@@ -111,6 +112,13 @@ Nothing a frontend draws is decided inside it.
 inside the messenger: OpenStreetMap vector data, on the desktop and on
 the M9, showing received telemetry positions. The measurement below
 decides the embedded renderer, not whether the map exists.
+
+2026-10-25, Lew: the embedded map is vector, drawn with a minimal
+polygon filler of our own on `embedded-graphics` and measured on the
+device before any product code, with PNG raster tiles as the documented
+fallback only (the filler is `leviculum-mapfill`, the measurement
+`docs/drafts/map-measurement-2026-10.md`, "Device measurement, prepared
+2026-10-25").
 
 *The reviewer's proposal, not yet decided, with its open measurement.*
 

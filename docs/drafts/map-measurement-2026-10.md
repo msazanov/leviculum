@@ -236,6 +236,122 @@ the device:
    outlines only. Pre-tiled rasters avoid both questions. They are the
    comparison still owed.
 
+## Device measurement, prepared 2026-10-25
+
+Lew decided on 2026-10-25 (20:45): the vector map gets a minimal filler
+of our own on `embedded-graphics`, measured on the device before any
+product code; PNG tiles are the documented fallback only. This section
+is the preparation of that measurement: the filler, the host harness and
+the M9 binary are built, the host numbers are below, and the device rows
+are empty until the reviewer has flashed the binary.
+
+### What was built
+
+- **`leviculum-mapfill`**, a workspace crate, `no_std`, no `alloc`, no
+  float. A scanline polygon filler with integer edges (16.16 fixed point,
+  sub-pixel input of 1/16 pixel) and per-row buckets, holes, even-odd and
+  nonzero, pixel-centre sampling, spans into any `DrawTarget` through
+  `fill_solid`; wide lines as quads through the filler under nonzero; a
+  flat i16 fixture format read in place; one render pipeline (clear,
+  project and cull, fill, stroke) timed per phase by a caller's clock, so
+  host and device run the same code. The reference read first is the
+  112-line `fill.rs` of dfyz/osm-renderer (MIT, 02bd330a), not copied: it
+  marks every pixel an edge touches and fills even-odd only, ours samples
+  centres and carries the winding.
+- **The host harness**, `leviculum-mapfill/measure/` (its own workspace,
+  so prost stays out of the shipping graph). `extract` decodes the four
+  z15 tiles of the Duomo view with `tinymvt` and writes
+  `leviculum-mapfill/fixtures/firenze-z15.lmf`; re-running it on the same
+  tiles gives a byte-identical file. `render` draws the fixture under both
+  profiles into an Rgb565 frame and writes one PNG per profile.
+- **The M9 binary**, `leviculum-mapfill/m9/` (its own workspace on the
+  esp-rs toolchain; esp-hal 1.2.1, the community port's pin), described
+  in `leviculum-mapfill/README.md` with its flash command and the UART
+  lines to expect.
+
+The fixture: 6,600 features (areas and lines; the 10,528 point features
+are left out), 55,183 vertices, 278,236 bytes. The vertex count is the
+first measurement's "Vertices decoded" for z15, so the fixture holds the
+same geometry the outline pipeline drew. Draw order is by class: earth,
+urban landuse, parks, pedestrian areas, sand, water, buildings, then
+waterways, paths, minor roads, major roads, rail. Two flat colour tables,
+one for areas and one for lines, with line widths of 1 to 4 pixels.
+`stripped` drops buildings, the only one of the draft's three stripped
+layers left once points are out.
+
+The pictures are `view-full.png` and `view-stripped.png`, outside the
+repository (under the bridge, `mapfill-997/`). The stripped view shows
+the street grid over the urban landuse, the Arno in the south-west
+corner and no tile seams: shared edges neither overlap nor leave a gap,
+which `tests/fill.rs` checks pixel by pixel.
+
+### Host numbers
+
+Same host as Table 4 (Ryzen 9 7950X VM, single thread), release build.
+"Fill" and "stroke" are what the filler handed the frame: edges kept
+after the clip, spans and pixels written. A pixel painted twice counts
+twice, so fill pixels exceed the 76,800 of the view where areas overlap.
+
+| Profile | Features drawn of included | Vertices projected | Fill edges / spans / pixels | Stroke edges / spans / pixels |
+|---|---|---|---|---|
+| full | 2,749 of 6,600 | 55,183 | 13,747 / 16,778 / 232,728 | 5,919 / 10,922 / 21,422 |
+| stripped | 518 of 1,280 | 13,470 | 831 / 2,581 / 174,195 | 5,919 / 10,922 / 21,422 |
+
+No feature overflowed the device's capacities (4,096 edges, 4,096
+vertices, 1,024 rings per feature; the largest feature has 1,051
+vertices). `tests/fixture.rs` pins every number in this table.
+
+| Profile | Total, median of 50 | clear | project+clip | fill | stroke |
+|---|---|---|---|---|---|
+| full | 1.246 ms | 0.046 ms | 0.325 ms | 0.712 ms | 0.395 ms |
+| stripped | 0.511 ms | 0.002 ms | 0.145 ms | 0.071 ms | 0.430 ms |
+
+The phase columns are one run timed per feature with `Instant`, three
+clock reads per feature, so they add up to more than the untimed median
+(1.478 and 0.647 ms). Against the outline pipeline of Table 3 this is no
+decode: the fixture is already geometry. Scaled by Table 4's CoreMark
+factor of 68.6, the full view would be about 85 ms and the stripped one
+about 35 ms. That is an estimate with the same blind spots as Table 4
+(PSRAM, the fixture read from flash through the cache), and the device
+rows below replace it.
+
+### The device binary
+
+Built 2026-10-25 for `xtensa-esp32s3-none-elf` with esp-hal 1.2.1,
+`lto = true`, `codegen-units = 1`. Section sizes from
+`xtensa-esp32s3-elf-size -A`, in bytes:
+
+| Build | `.text` | `.rodata` | `.rwtext` | `.data` | `.bss` | image (`espflash save-image`) |
+|---|---|---|---|---|---|---|
+| `opt-level = 3` (`--release`) | 63,301 | 291,916 | 8,992 | 7,284 | 271,268 | 391,056 |
+| `opt-level = "s"` (`--profile release-s`) | 46,161 | 292,468 | 9,108 | 7,400 | 271,280 | 373,920 |
+
+`.rodata` is mostly the fixture (278,236). `.bss` holds the SRAM frame
+(153,600), the edge slots (65,536), the projected vertices (32,768) and
+the active list, bucket heads and ring ends; the band-buffer fallback
+was not needed, the whole frame fits in internal SRAM. The linker leaves
+about 52 KiB for the stack.
+
+### Device rows, for the reviewer
+
+Cycles are `CCOUNT` at 240 MHz, the median of the three repetitions of
+a cycle. Flush is CASET, RASET and RAMWR plus 153,600 bytes over SPI2 at
+40 MHz with DMA.
+
+| Build | Profile | Frame | clear | project+clip | fill | stroke | total | flush |
+|---|---|---|---|---|---|---|---|---|
+| opt 3 | full | SRAM | | | | | | |
+| opt 3 | full | PSRAM | | | | | | |
+| opt 3 | stripped | SRAM | | | | | | |
+| opt 3 | stripped | PSRAM | | | | | | |
+| opt s | full | SRAM | | | | | | |
+| opt s | full | PSRAM | | | | | | |
+| opt s | stripped | SRAM | | | | | | |
+| opt s | stripped | PSRAM | | | | | | |
+
+The `phase=counts` lines from the device must equal the host table
+above; if they do not, the device ran other code.
+
 ## Exact commands
 
 ```sh
