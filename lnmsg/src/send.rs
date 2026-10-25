@@ -44,7 +44,7 @@ use crate::clock::{self, Clock};
 use crate::effects::Effects;
 use crate::events;
 use crate::mailbox_state::{self, MailboxRun};
-use crate::outbox::{Command, Outbox, OutboxEvent, OutboxGone, SendRequest};
+use crate::outbox::{Command, Outbox, OutboxEvent, OutboxGone, SendRequest, Via};
 
 /// How long a run may take once the daemon connection is up, and how often the
 /// event queue is looked at.
@@ -545,6 +545,102 @@ pub async fn run_send_propagated<O: Outbox>(
     }
 }
 
+/// How a `--via auto` send ended well.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AutoSent {
+    /// The direct delivery link carried it: exit 0.
+    Direct(Queued),
+    /// A propagation node holds it: [`EXIT_PROPAGATED`].
+    Propagated(Queued),
+}
+
+/// How a `--via auto` send failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AutoError {
+    /// The direct leg failed in a way a mailbox cannot help with
+    /// ([`fallback_reason`] said `None`); no fallback ran.
+    Direct(SendError),
+    /// Both legs failed.
+    Both {
+        direct: SendError,
+        fallback: SendError,
+    },
+}
+
+/// Run one `--via auto` send: the direct delivery link first, a propagation
+/// node when none comes up. The same orchestration for every frontend, the
+/// CLI's `send` and the TUI's compose line.
+///
+/// `request.via` is ignored: leg one is [`Via::Link`], forced, because the
+/// link either comes up or it does not, and an opportunistic packet would
+/// count as handed on with the peer unreachable, so the fallback would never
+/// fire. `mailbox` is asked for the mailbox input only when the fallback
+/// runs: it reads the daemon's path table, a round trip a direct success
+/// should not pay for. A stranded direct copy is cancelled before the
+/// upload, so the peer cannot receive the message twice if it reappears
+/// while the upload runs.
+// The propagated runner's eight, plus the lazy mailbox input.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_send_auto<O, F, Fut>(
+    outbox: &mut O,
+    request: SendRequest,
+    preferred_pn: Option<[u8; 16]>,
+    pn_source: &str,
+    options: &mut SendOptions,
+    mailbox: F,
+    effects: &mut impl Effects,
+    clock: &impl Clock,
+) -> Result<AutoSent, AutoError>
+where
+    O: Outbox,
+    F: FnOnce() -> Fut,
+    Fut: core::future::Future<Output = MailboxRun>,
+{
+    let destination = request.destination;
+    let leg = |via: Via| SendRequest {
+        via,
+        ..request.clone()
+    };
+    let direct_error = match run_send(outbox, leg(Via::Link), options, clock).await {
+        Ok(queued) => {
+            events::via("direct", "link-delivery");
+            return Ok(AutoSent::Direct(queued));
+        }
+        Err(error) => error,
+    };
+    let Some(reason) = fallback_reason(&direct_error) else {
+        return Err(AutoError::Direct(direct_error));
+    };
+    events::via("propagated", reason);
+    effects.notice(&format!(
+        "no direct delivery to {} ({reason}); trying a propagation node",
+        crate::address::to_hex(&destination)
+    ));
+    let cancel = match &direct_error {
+        SendError::Stranded { message_id, .. } => Some(*message_id),
+        _ => None,
+    };
+    options.mailbox = mailbox().await;
+    match run_send_propagated(
+        outbox,
+        leg(Via::Propagated),
+        preferred_pn,
+        pn_source,
+        cancel,
+        options,
+        effects,
+        clock,
+    )
+    .await
+    {
+        Ok(queued) => Ok(AutoSent::Propagated(queued)),
+        Err(fallback) => Err(AutoError::Both {
+            direct: direct_error,
+            fallback,
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -553,7 +649,6 @@ mod tests {
     use crate::clock::Tokio;
     use crate::effects::fake::Recorded;
     use crate::outbox::fake::FakeOutbox;
-    use crate::outbox::Via;
 
     const DST: [u8; 16] = [0xab; 16];
     const ID: [u8; 32] = [0x5a; 32];

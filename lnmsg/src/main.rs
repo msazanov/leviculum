@@ -33,8 +33,8 @@ use lnmsg::mailbox_state::{self, MailboxRun, Route};
 use lnmsg::outbox::{MailboxInput, SendRequest, Via};
 use lnmsg::seen::SeenStore;
 use lnmsg::send::{
-    fallback_reason, run_send, run_send_propagated, SendOptions, EXIT_FAILURE, EXIT_PROPAGATED,
-    EXIT_USAGE,
+    run_send, run_send_auto, run_send_propagated, AutoError, AutoSent, SendOptions, EXIT_FAILURE,
+    EXIT_PROPAGATED, EXIT_USAGE,
 };
 use lnmsg::{address, body, display_name, events, identity};
 
@@ -409,72 +409,36 @@ async fn run(args: SendArgs) -> ExitCode {
             }
         }
         ViaArg::Auto => {
-            // Leg one: the direct delivery link, forced (`Via::Link`). The
-            // link either comes up or it does not; an opportunistic packet
-            // would count as handed on with the peer unreachable, and the
-            // fallback would never fire.
-            let direct = run_send(&mut attached.outbox, request(Via::Link), &options, &clock).await;
-            match direct {
-                Ok(queued) => {
-                    events::via("direct", "link-delivery");
+            let outcome = run_send_auto(
+                &mut attached.outbox,
+                request(Via::Link),
+                preferred_pn,
+                pn_source,
+                &mut options,
+                || mailbox_run(&home, &config_dir, &instance, preferred_pn),
+                &mut effects,
+                &clock,
+            )
+            .await;
+            match outcome {
+                Ok(AutoSent::Direct(queued)) => {
                     events::done(Some(&queued.message_id), "queued", 0);
                     ExitCode::SUCCESS
                 }
-                Err(direct_error) => match fallback_reason(&direct_error) {
-                    None => {
-                        eprintln!("lnmsg: {direct_error}");
-                        events::done(None, "failed", EXIT_FAILURE);
-                        ExitCode::from(EXIT_FAILURE)
-                    }
-                    Some(reason) => {
-                        events::via("propagated", reason);
-                        eprintln!(
-                            "lnmsg: no direct delivery to {} ({reason}); \
-                             trying a propagation node",
-                            address::to_hex(&destination)
-                        );
-                        // A stranded direct copy is cancelled so the peer
-                        // cannot receive the message twice if it reappears
-                        // while the upload runs.
-                        let cancel = match &direct_error {
-                            lnmsg::send::SendError::Stranded { message_id, .. } => {
-                                Some(*message_id)
-                            }
-                            _ => None,
-                        };
-                        options.mailbox =
-                            mailbox_run(&home, &config_dir, &instance, preferred_pn).await;
-                        let fallback = run_send_propagated(
-                            &mut attached.outbox,
-                            request(Via::Propagated),
-                            preferred_pn,
-                            pn_source,
-                            cancel,
-                            &options,
-                            &mut effects,
-                            &clock,
-                        )
-                        .await;
-                        match fallback {
-                            Ok(queued) => {
-                                events::done(
-                                    Some(&queued.message_id),
-                                    "propagated",
-                                    EXIT_PROPAGATED,
-                                );
-                                ExitCode::from(EXIT_PROPAGATED)
-                            }
-                            Err(fallback_error) => {
-                                eprintln!(
-                                    "lnmsg: direct: {direct_error}\nlnmsg: propagated: \
-                                     {fallback_error}"
-                                );
-                                events::done(None, "failed", EXIT_FAILURE);
-                                ExitCode::from(EXIT_FAILURE)
-                            }
-                        }
-                    }
-                },
+                Ok(AutoSent::Propagated(queued)) => {
+                    events::done(Some(&queued.message_id), "propagated", EXIT_PROPAGATED);
+                    ExitCode::from(EXIT_PROPAGATED)
+                }
+                Err(AutoError::Direct(direct_error)) => {
+                    eprintln!("lnmsg: {direct_error}");
+                    events::done(None, "failed", EXIT_FAILURE);
+                    ExitCode::from(EXIT_FAILURE)
+                }
+                Err(AutoError::Both { direct, fallback }) => {
+                    eprintln!("lnmsg: direct: {direct}\nlnmsg: propagated: {fallback}");
+                    events::done(None, "failed", EXIT_FAILURE);
+                    ExitCode::from(EXIT_FAILURE)
+                }
             }
         }
     };
