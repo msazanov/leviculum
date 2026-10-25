@@ -50,6 +50,9 @@ pub const CTX_LINK_IDENTIFY: u8 = 0xFB;
 pub const CTX_RESOURCE_ADV: u8 = 0x02;
 /// `PacketContext::ResourceRcl` (`packet.rs:166`) — the receiver's rejection.
 pub const CTX_RESOURCE_RCL: u8 = 0x07;
+/// `PacketContext::Lrrtt` (`packet.rs:177`) — the initiator's RTT packet, the
+/// frame that takes a responder's link out of its handshake.
+pub const CTX_LRRTT: u8 = 0xFE;
 
 /// True when `python3` can import the vendored `RNS` package. Same skip
 /// condition the rest of the suite uses.
@@ -340,6 +343,10 @@ pub struct ProxyLog {
     /// sender waits for an answer it can act on.
     pub first_adv_to_upstream: Option<Instant>,
     pub first_rcl_to_downstream: Option<Instant>,
+    /// When the first advertisement behind the LRRTT reached the upstream:
+    /// the first one a listener is able to answer, see
+    /// [`Self::answerable_advs_to_upstream`].
+    pub first_answerable_adv_to_upstream: Option<Instant>,
 }
 
 impl ProxyLog {
@@ -359,10 +366,32 @@ impl ProxyLog {
         self.to_downstream.iter().filter(|c| **c == ctx).count()
     }
 
-    /// How long the downstream sender waited between its advertisement and the
-    /// upstream's rejection, when both were seen.
+    /// Advertisements the upstream received after the initiator's LRRTT.
+    ///
+    /// Python's `rncp` sender can put its advertisement on the wire before its
+    /// own RTT packet: its main thread polls `link.status`
+    /// (`rncp.py:689`), which the receive thread sets to ACTIVE
+    /// (`Link.py:429`) before it sends the LRRTT (`Link.py:441`), and then
+    /// identifies and advertises at once. A listener cannot answer an
+    /// advertisement that arrives before the RTT: ours still holds the link in
+    /// its handshake and drops it as link-not-active, and a Python `rncp -l`
+    /// still has the link at `ACCEPT_NONE` (`Link.py:242`), which ignores it
+    /// (`Link.py:1089`), because `rncp` arms `ACCEPT_APP` only in the
+    /// established callback (`rncp.py:237`) that the RTT runs
+    /// (`Link.py:550`). Only these advertisements are owed an answer.
+    pub fn answerable_advs_to_upstream(&self) -> usize {
+        self.to_upstream
+            .iter()
+            .skip_while(|c| **c != CTX_LRRTT)
+            .filter(|c| **c == CTX_RESOURCE_ADV)
+            .count()
+    }
+
+    /// How long the downstream sender waited between the first advertisement
+    /// a listener can answer (see [`Self::answerable_advs_to_upstream`]) and
+    /// the upstream's rejection, when both were seen.
     pub fn adv_to_rcl(&self) -> Option<std::time::Duration> {
-        let adv = self.first_adv_to_upstream?;
+        let adv = self.first_answerable_adv_to_upstream?;
         let rcl = self.first_rcl_to_downstream?;
         rcl.checked_duration_since(adv)
     }
@@ -395,11 +424,14 @@ async fn pump(
     mut dst: tokio::net::tcp::OwnedWriteHalf,
     to_upstream: bool,
     identify_drop_budget: usize,
+    hold_rtt_behind_adv: bool,
     log: Arc<Mutex<ProxyLog>>,
 ) {
     let mut deframer = Deframer::new();
     let mut buf = vec![0u8; 8192];
     let mut framed = Vec::new();
+    let mut adv_forwarded = false;
+    let mut held_rtt: Option<Vec<u8>> = None;
     loop {
         let n = match src.read(&mut buf).await {
             Ok(0) | Err(_) => break,
@@ -410,6 +442,14 @@ async fn pump(
                 continue;
             };
             let ctx = peek_wire_class(&packet).map(|w| w.context);
+            // The forced form of the sender race `answerable_advs_to_upstream`
+            // describes: the RTT waits here until an advertisement has gone
+            // past it, and is logged when it is forwarded, so the logged order
+            // is the order the upstream received.
+            if hold_rtt_behind_adv && to_upstream && ctx == Some(CTX_LRRTT) && !adv_forwarded {
+                held_rtt = Some(packet);
+                continue;
+            }
             let mut swallow = false;
             {
                 let mut log = log.lock().expect("proxy log");
@@ -418,6 +458,12 @@ async fn pump(
                         log.to_upstream.push(ctx);
                         if ctx == CTX_RESOURCE_ADV && log.first_adv_to_upstream.is_none() {
                             log.first_adv_to_upstream = Some(Instant::now());
+                        }
+                        if ctx == CTX_RESOURCE_ADV
+                            && log.first_answerable_adv_to_upstream.is_none()
+                            && log.to_upstream.contains(&CTX_LRRTT)
+                        {
+                            log.first_answerable_adv_to_upstream = Some(Instant::now());
                         }
                     } else {
                         log.to_downstream.push(ctx);
@@ -441,6 +487,16 @@ async fn pump(
             if dst.write_all(&framed).await.is_err() {
                 return;
             }
+            if ctx == Some(CTX_RESOURCE_ADV) {
+                adv_forwarded = true;
+                if let Some(rtt) = held_rtt.take() {
+                    log.lock().expect("proxy log").to_upstream.push(CTX_LRRTT);
+                    frame(&rtt, &mut framed);
+                    if dst.write_all(&framed).await.is_err() {
+                        return;
+                    }
+                }
+            }
         }
     }
 }
@@ -456,6 +512,20 @@ async fn pump(
 pub async fn spawn_identify_dropping_proxy(
     upstream_port: u16,
     identify_drop_budget: usize,
+    log: Arc<Mutex<ProxyLog>>,
+) -> u16 {
+    spawn_proxy(upstream_port, identify_drop_budget, false, log).await
+}
+
+/// [`spawn_identify_dropping_proxy`], and with `hold_rtt_behind_adv` the
+/// LRRTT travelling towards the upstream is held back until the first
+/// advertisement has gone past it: Python rncp's sender race
+/// ([`ProxyLog::answerable_advs_to_upstream`]) on every run instead of on
+/// some.
+pub async fn spawn_proxy(
+    upstream_port: u16,
+    identify_drop_budget: usize,
+    hold_rtt_behind_adv: bool,
     log: Arc<Mutex<ProxyLog>>,
 ) -> u16 {
     let listener = TcpListener::bind(crate::ports::LOOPBACK_ANY_PORT)
@@ -483,9 +553,10 @@ pub async fn spawn_identify_dropping_proxy(
                 up_tx,
                 true,
                 identify_drop_budget,
+                hold_rtt_behind_adv,
                 Arc::clone(&log),
             ));
-            tokio::spawn(pump(up_rx, down_tx, false, 0, Arc::clone(&log)));
+            tokio::spawn(pump(up_rx, down_tx, false, 0, false, Arc::clone(&log)));
         }
     });
     port
