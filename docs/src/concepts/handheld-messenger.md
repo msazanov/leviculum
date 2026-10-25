@@ -38,7 +38,7 @@ the core/frontend cut and for the map, and what is open.
   mailbox. It has no TUI yet ([lnmsg](lnmsg.md)). Its frontend already
   talks to the backend only through `Outbox` (`lnmsg/src/outbox.rs:194`),
   but the crate is `std`. It depends on `leviculum-std` and tokio
-  (`lnmsg/Cargo.toml:42-46`), since 2026-10-25 behind its `std` feature,
+  (`lnmsg/Cargo.toml:41-45`), since 2026-10-25 behind its `std` feature,
   and `just lnmsg-core-no-std` measures what the core still takes from
   them (red; the list and the pass order are in [lnmsg:
   architecture](lnmsg-architecture.md), "Plan: the lnmsg core without

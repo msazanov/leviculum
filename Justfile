@@ -1372,7 +1372,10 @@ tree-clean-selftest:
 # free-rides: the worst are `nrf-shellcheck` 5.6 s, `check-supervised-spawns`
 # 3.1 s, `nrf-fw-readback` 2.4 s. `check-fuzz-lock` (#442) came later: 0.11 s,
 # `cargo metadata --locked` over the two fuzz crates, the lock half of
-# `fuzz-regress` (110 s, below).
+# `fuzz-regress` (110 s, below). `lnmsg-core-no-std` (#232) is in on the
+# same ground as `m0-build-gate`: one crate checked for the firmware triple,
+# 0.76 s standing alone after `touch leviculum-core/src/lib.rs`, 0.15 s warm
+# (measured 2026-10-25).
 #
 # NOT a tier. Tiers nest (`standard` contains `fast`); `guards` is a strict
 # subset of `fast` and adds nothing to it, so a green `guards` is a cheap
@@ -1485,7 +1488,7 @@ tree-clean-selftest:
 #   run all still ahead of it. The `~3.5 min` in the recipe's own doc
 #   string is older than half the dependency list.
 [doc('The coder-pass gate: every guard in `fast` that costs under 10 s')]
-guards: tree-snapshot tree-clean-selftest check-submodules check-third-party check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest site-unpack-docs-selftest deb-stamp-selftest lock-contention-selftest toolchain-status-selftest sweep-selftest tmp-leftovers-selftest btvirt-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-test-ports check-ignored-source check-just-docs check-guards-subset check-standard-integ check-config-table-citations prepush-guard nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck embassy-pins log-diff-mask-selftest firmware-no-hal firmware-no-chip-cfg nrf-module-reach check-fuzz-lock changelog-links m0-build-gate lxmf-embedded-gate lnomad-core-no-tui-static ui-no-terminal-static check-source-invariant-census
+guards: tree-snapshot tree-clean-selftest check-submodules check-third-party check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest site-unpack-docs-selftest deb-stamp-selftest lock-contention-selftest toolchain-status-selftest sweep-selftest tmp-leftovers-selftest btvirt-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-test-ports check-ignored-source check-just-docs check-guards-subset check-standard-integ check-config-table-citations prepush-guard nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck embassy-pins log-diff-mask-selftest firmware-no-hal firmware-no-chip-cfg nrf-module-reach check-fuzz-lock changelog-links m0-build-gate lxmf-embedded-gate lnmsg-core-no-std lnomad-core-no-tui-static ui-no-terminal-static check-source-invariant-census
 
 # Tier 0 (~3.5 min, runs on every git push): submodule pins + commit-message
 # trailers + the single-integ-bin-list guard (#310)
@@ -1517,7 +1520,7 @@ guards: tree-snapshot tree-clean-selftest check-submodules check-third-party che
 # `check-all-targets` dependency compiles those targets but does not lint
 # them, which is exactly the gap.
 [doc('Tier 0 (~3.5 min): the gate every git push runs')]
-fast: tree-snapshot tree-clean-selftest check-submodules check-third-party check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest site-unpack-docs-selftest deb-stamp-selftest lock-contention-selftest toolchain-status-selftest sweep-selftest tmp-leftovers-selftest btvirt-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-test-ports check-ignored-source check-just-docs check-guards-subset check-standard-integ check-config-table-citations prepush-guard check-processor-seam mvr supervised-spawn lint-nrf lint-lr11xx nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck embassy-pins log-diff-mask-selftest firmware-no-hal firmware-no-chip-cfg nrf-module-reach hw-witness check-fuzz-lock fuzz-selftest fuzz-regress notices-guard doc-touched doc-gate changelog-links core-no-tracing lnsd-minimal event-catalog m0-build-gate lxmf-embedded-gate lnomad-core-no-tui ui-no-terminal i686-usize-gate no-atomic64-gate check-all-targets citation-guard source-invariant-tests tmp-leftovers
+fast: tree-snapshot tree-clean-selftest check-submodules check-third-party check-trailers check-integ-bin-list check-ci-pipeline check-ci-secrets publish-selftest nightly-green-selftest check-publish-nightly-gate package-selftest site-publish-selftest site-unpack-docs-selftest deb-stamp-selftest lock-contention-selftest toolchain-status-selftest sweep-selftest tmp-leftovers-selftest btvirt-selftest check-firmware-images check-plain-clone check-supervised-spawns check-core-lock-census check-env-knobs check-test-ports check-ignored-source check-just-docs check-guards-subset check-standard-integ check-config-table-citations prepush-guard check-processor-seam mvr supervised-spawn lint-nrf lint-lr11xx nrf-stack-frames nrf-store-gap nrf-evt-max-size nrf-gap-device-name nrf-board-pins nrf-sd-guard nrf-uf2-volumes nrf-fw-readback rnode-chip-offsets nrf-shellcheck embassy-pins log-diff-mask-selftest firmware-no-hal firmware-no-chip-cfg nrf-module-reach hw-witness check-fuzz-lock fuzz-selftest fuzz-regress notices-guard doc-touched doc-gate changelog-links core-no-tracing lnsd-minimal event-catalog m0-build-gate lxmf-embedded-gate lnmsg-core-no-std lnomad-core-no-tui ui-no-terminal i686-usize-gate no-atomic64-gate check-all-targets citation-guard source-invariant-tests tmp-leftovers
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     {{manifest}} workspace-lib -- cargo test --workspace --lib
@@ -2415,9 +2418,10 @@ nrf-module-reach:
 # run the same messenger core the terminal does (docs/src/concepts/
 # lnmsg-architecture.md, "the core must not know it has a terminal"). The
 # shell is lnmsg's `std` feature; without it the library is the core, checked
-# for the firmware triple. RED on purpose until the std uses have moved behind
-# effects: its error list is the measured work list, grouped and planned on
-# that page. It joins `guards` in the pass that makes it green, not before.
+# for the firmware triple, so a `std::` path, `eprintln!`, tokio or
+# leviculum-std reaching a core module is refused. Green since 993 and in
+# `guards`; while it was red, `scripts/lnmsg-no-std-groups.py` grouped its
+# error list into the plan's work list on that page.
 [doc('Check the lnmsg core builds no_std for the firmware triple (#232)')]
 lnmsg-core-no-std:
     rustup target add thumbv7em-none-eabihf

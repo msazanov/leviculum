@@ -19,8 +19,7 @@ unsafe_code = "forbid"
 # Without it the crate is the messenger core, `no_std` plus `alloc`, and
 # `just lnmsg-core-no-std` checks it for the firmware target
 # (docs/src/concepts/lnmsg-architecture.md, "the core must not know it has a
-# terminal"). Red until the std uses have moved behind effects; the plan and
-# the measured list are on that page.
+# terminal"). Green since 993, and in `just guards`.
 default = ["std"]
 std = [
     "dep:leviculum-std",

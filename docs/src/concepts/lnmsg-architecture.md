@@ -579,6 +579,11 @@ boundary is mechanical and should exist from day one: the core compiles
 without the TUI dependency tree (feature gate or crate split), and the
 headless test suite drives complete user stories through `AppEvent`s alone.
 
+For `lnmsg` the core is the library without its `std` feature, `no_std`
+plus `alloc`, and `just lnmsg-core-no-std` checks it for the firmware triple
+on every `just guards` (Codeberg #232, since 2026-10-25, 993; the plan is
+below under "Plan: the lnmsg core without std").
+
 For `lnomad` the same requirement holds as a future refactor: its TEA split
 already keeps the model headless-testable, but model, update and view live
 in one 11,873-line file with crossterm types reachable throughout. When
@@ -633,7 +638,7 @@ honest, that is the moment for the crate.
 | `mailbox_state` | 380 | core `Route`, `Stored`, `Decision`, `MailboxRun`, `routes_from_path_table`; shell `load`, `save`, `unix_now_ms` and the stderr lines |
 | `send` | 996 | core: the send and fallback loops over `Outbox` and a `clock::Clock` |
 | `fetch` | 598 | core: the mailbox drain over `Outbox` and a `clock::Clock`; messages printed through `Effects::print` |
-| `engine` | 1828 | core `Engine` (the router glue: resolves, tracking, stamp bookkeeping, sync scheduling); shell `CoreProcessor` impl, `InProcessOutbox`'s channels, `attach`, the stamp worker thread and its runtime |
+| `engine` | 1828 | core `Engine` (the router glue: resolves, tracking, stamp bookkeeping, sync scheduling) and `mine`; shell `engine/shell.rs`: the `CoreProcessor` impl, `InProcessOutbox`'s channels, `attach`, the stamp worker thread and its runtime |
 | `identity` | 182 | shell: home directory, key file |
 | `main.rs` | 543 | shell: CLI, daemon RPC, process exit |
 
@@ -673,6 +678,7 @@ list shorter; behaviour and the CLI tests do not change.
    `ToString`/`ToOwned` imports, `HashSet` to `BTreeSet` in `seen`, and
    `Scalar` (pure formatting) moved from `leviculum-std::event_log` into a
    `no_std` home both crates use, with `leviculum-std` re-exporting it.
+   Done 2026-10-25 (990).
 2. *Files and the environment* (~150 lines): the shell items of `config`,
    `seen`, `mailbox_state`, `body` and `display_name` move into a
    `std`-gated shell module; the core keeps the pure functions and returns
@@ -680,12 +686,12 @@ list shorter; behaviour and the CLI tests do not change.
    or "rewrite with these", the mailbox record as its text). Error enums
    lose `io::Error` and `PathBuf`: the core error says what was wrong, the
    shell adds where. The `eprintln!` lines in `mailbox_state` and `fetch`
-   become returned notices the shell prints.
+   become returned notices the shell prints. Done 2026-10-25 (990).
 3. *The clock* (~80 lines): `send` and `fetch` take a `Clock` beside the
    `Outbox` (now in milliseconds, an async sleep). The host implementation
    wraps tokio's, so the paused-clock tests keep their meaning; `fetch`
    writes through `core::fmt::Write` or a returned message instead of
-   `io::Write`.
+   `io::Write`. Done 2026-10-25 (992).
 4. *The engine* (~250 lines moved, ~60 changed): `Engine` becomes generic
    over `NodeCore<R, C, S>` (the router, the LXMF node and the propagation
    client already are) and talks to the frontend and the stamp miner
@@ -693,8 +699,10 @@ list shorter; behaviour and the CLI tests do not change.
    for `StdNodeCore`, `InProcessOutbox`, `attach`, the stamp worker thread,
    its tokio runtime, `OsRng` and the mining progress lines move to the
    shell. The miner on a board is a different executor over the same jobs.
+   Done 2026-10-25 (993).
 5. *Green*: the gate passes and joins `guards`, with a positive control (a
-   `std::` path injected into a core module is refused).
+   `std::` path injected into a core module is refused). Done 2026-10-25
+   (993).
 
 **Status, 2026-10-25 (990).** Passes 1 and 2 are in; the gate lists 26
 errors, all of passes 3 and 4. `Scalar` lives in `leviculum-core`'s
@@ -719,6 +727,22 @@ paused-clock tests still drive it. `fetch` renders each message to bytes,
 the header through `core::fmt::Write`, and prints it through
 `Effects::print`: a body is forwarded byte for byte, so a `fmt::Write`
 sink for the whole message would have had to replace what is not UTF-8.
+
+**Status, 2026-10-25 (993).** Passes 4 and 5 are in, and the gate is green
+and in `guards` (0.76 s standing alone after a `leviculum-core` touch). The
+`Engine` holds no `NodeCore` type of its own: its two hooks are inherent
+methods generic over `R: CryptoRngCore, C: Clock, S: Storage`, the bounds
+the router, the LXMF node and the propagation transport take. It talks to
+its host through four `VecDeque`s (commands in, events out, stamp jobs out,
+stamp answers in), unbounded like the channels they replace, because a
+hook under the core lock may neither block nor drop and a dropped event can
+be a received message; the host drains them around every hook. `mine` is
+the core's stamp policy: the cooperative executor, the host's RNG, and the
+progress lines as `Effects::notice` on the host's `Clock`. The shell is
+`engine/shell.rs`: the `CoreProcessor` for `StdNodeCore` that moves the
+queues onto `mpsc`, `InProcessOutbox`, `attach` with `storage_dir`, and the
+stamp worker thread with its tokio runtime and `OsRng`. The positive control
+(a `std::fs::read` in `mailbox.rs`) turns the gate red with one error.
 
 **What stays std-only, and what the core needs from it.** `leviculum-std`
 (the driver, the daemon RPC, the event-log subscriber, identity minting,
