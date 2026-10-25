@@ -147,6 +147,9 @@ skip  leviculum-lxmf-node stamped_upload_loopback # tokio runtime, two nodes, sl
 skip  leviculum-lxmf-node telemetry_loopback     # tokio runtime, two nodes over TCP loopback, sleeps
 skip  leviculum-lxmf-node tracing_reaches_stderr # runs the shipped lxmf-node executable as a process, plus a shared-instance daemon
 skip  leviculum-lxmf-node two_node_loopback      # tokio runtime, two nodes, sleeps
+skip  leviculum-mapfill fill                   # pixel-exact reference images; subject is the filler
+skip  leviculum-mapfill fixture                # reads the committed fixture, but the subject is the render pipeline (a golden count)
+skip  leviculum-mapfill frame                  # in-process framebuffer; subject is the code
 skip  leviculum-micron parser_tests              # reads README.mu for snippets, but the subject is the parser
 skip  leviculum-proxy log_backpressure           # spawns the proxy binary
 skip  leviculum-proxy proxy_control              # binds sockets under a tokio runtime
