@@ -84,9 +84,9 @@ Concretely:
   all, and each entry shows its key if it has one. NomadNet's static
   shortcut bar is the failure mode to avoid.
 - **`f` hint mode from `lnomad`** (`hints`,
-  `lnomad/src/app/model.rs:1042-1079`), extended to conversations. Its best
+  `lnomad/src/app/model.rs:969-1006`), extended to conversations. Its best
   property is that it matches either the hint label *or* a substring of the
-  target's text (`hint_matches`, `lnomad/src/app/model.rs:1069-1079`), so `f`
+  target's text (`hint_matches`, `lnomad/src/app/model.rs:996-1006`), so `f`
   then typing part of a contact's name jumps to that conversation. That is
   a better contact switcher than anything in either prior-art program.
 
@@ -99,7 +99,7 @@ compose pane clears the buffer to a recoverable draft; quitting needs
 **The keymap must be one table.** `lnomad` applied single-source-of-truth
 discipline to scrolling and nowhere else, and its help overlay's other
 groups are hand-typed strings that can drift
-(`lnomad/src/app/chrome.rs:604-705`). Every binding here is one table read by
+(`lnomad/src/app/chrome.rs:426-527`). Every binding here is one table read by
 the key handler, the help overlay, the palette and the footer hints. That
 table is also the natural place to hang user configuration later, which
 `lnomad` has none of.
@@ -204,7 +204,7 @@ shapes are learned:
 | state | glyph | colour | motion |
 |---|---|---|---|
 | queued, nothing transmitted | `○` | dim gray | static |
-| computing proof-of-work | braille spinner `⠋⠙⠸⠴⠦⠇` | dim yellow | animated on the tick |
+| computing proof-of-work | braille spinner `⠋⠙⠹⠸⠼⠴` | dim yellow | animated on the tick |
 | in flight (link building, bytes out) | braille spinner | yellow | animated on the tick |
 | handed to the network, unproven (opportunistic `Sent`) | `◇` | amber | static |
 | left in a mailbox (propagated `Sent`) | `⌂` | blue | static |
@@ -221,6 +221,14 @@ right now" and nothing else, driven by the
 [event-loop tick](lnmsg-architecture.md) so it freezes honestly if the
 program hangs. An ASCII fallback set (`. * o ^ v x`) ships behind the same
 table for terminals that mangle the glyphs.
+
+The table's code home is `DELIVERY_GLYPHS` in `leviculum-ui`
+(`leviculum-ui/src/delivery.rs`, since 2026-10-25, 984), one row per state
+with its glyph, tone, dimming and ASCII fallback; its tests hold the rules
+above (green and `✓` only on proof, only the working states animate). The
+spinner rows draw the shared loading spinner of `leviculum-ui/src/spinner.rs`,
+the one `lnomad` shows, so its frames are the ones the table lists. The
+tones are resolved against the palette by the frontend.
 
 The timeline itself:
 
@@ -287,7 +295,7 @@ concrete moves:
 ### The mouse as a first-class citizen
 
 `lnomad` enables mouse capture unconditionally with no toggle
-(`lnomad/src/tui.rs:1272-1275`) and handles neither drag nor selection
+(`leviculum-ui-ratatui/src/terminal.rs:42-45`) and handles neither drag nor selection
 (`lnomad/src/app/event.rs:201`). In a browser that costs you the terminal's own
 copy-paste; in a messenger, where copying message text is a constant, it is
 worse.
@@ -297,7 +305,7 @@ text across wrapped lines and across message boundaries works and copies
 via OSC 52 (`lnomad/src/app/event.rs:1348-1380`, which works over SSH). Plus a
 `--no-mouse` flag and a runtime toggle for people who want the terminal's
 own selection back. The `StyledChar` IR already carries per-cell ownership
-(`lnomad/src/render.rs:340-354`), so the hit-testing is a small extension
+(`leviculum-ui/src/style.rs:67-80`), so the hit-testing is a small extension
 of `visible_links` rather than new machinery.
 
 ### Terminal QR for paper messages and for your own address

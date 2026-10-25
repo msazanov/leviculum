@@ -1,0 +1,24 @@
+[package]
+name = "leviculum-ui"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Terminal-free UI model shared by the Leviculum programs: styled text, palette, input events, chrome and delivery glyphs"
+# A library for the workspace's own programs, not published on its own.
+publish = false
+
+[lints.rust]
+unsafe_code = "forbid"
+
+# No terminal crate, ever: `just ui-no-terminal` refuses one in this crate's
+# graph or source. The terminal widgets over this model are
+# leviculum-ui-ratatui.
+[dependencies]
+unicode-width = "0.2.2"
+# Default features off: the default `crossterm` and `ratatui` features pull
+# both terminal crates in. The key-to-edit table those carry is restated in
+# `input`.
+tui-input = { version = "0.15", default-features = false }

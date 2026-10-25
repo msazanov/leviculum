@@ -38,111 +38,54 @@
 //! shows in the status bar. Links no longer carry a visible `[N]` marker.
 
 use std::collections::HashMap;
-use std::io::{self, Stdout};
+use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream};
-use crossterm::execute;
-use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
-};
+use crossterm::event::{Event, EventStream};
 use futures::StreamExt;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Margin, Rect, Size};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::layout::{Margin, Rect};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line as RtLine, Span as RtSpan, Text};
 use ratatui::widgets::{
-    Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
+    Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
 };
 use ratatui::{Frame, Terminal};
-use ratatui_image::picker::{Picker, ProtocolType};
-use ratatui_image::sliced::{SignedPosition, SlicedImage, SlicedProtocol};
-use ratatui_image::{FilterType, Resize};
 use tokio::sync::{mpsc, Mutex};
 use unicode_width::UnicodeWidthStr;
 
 use leviculum_micron::MicronDocument;
+use leviculum_ui_ratatui::background::detect_background;
+use leviculum_ui_ratatui::event::{key_event, mouse_event, step_event, EventStep};
+use leviculum_ui_ratatui::geometry::{from_ratatui, to_ratatui};
+use leviculum_ui_ratatui::images::{self as pictures, Pictures, SlicedProtocol};
+use leviculum_ui_ratatui::spinner::spinner_span;
+use leviculum_ui_ratatui::style::{
+    chrome_muted_style, chrome_style, chrome_text_style, downgrade_buffer, rgb,
+};
+use leviculum_ui_ratatui::terminal::install_panic_hook;
+use leviculum_ui_ratatui::{chip, footer, help, toast};
+pub use leviculum_ui_ratatui::{to_ratatui_text, CrosstermTerminal, TerminalGuard, TerminalOps};
 
 use crate::bookmarks::Bookmarks;
 use crate::browser::{self, BrowserOptions};
-use crate::color::{rgb_to_ansi256, ColorDepth};
+use crate::color::ColorDepth;
 use crate::discovery::DiscoveredNode;
 use crate::fetch::Session;
 use crate::image::{Backend, Probe, SlotState};
 use crate::image_cache::ImageCache;
-use crate::render::{RLine, RStyle};
-use crate::theme::{resolve_theme, Bg, Theme, ThemeFlag};
+use crate::theme::{resolve_theme, ThemeFlag};
 use crate::url::Target;
 use leviculum_micron::FieldKind;
 
 use crate::app::*;
 
-/// A core cell rectangle as the ratatui `Rect` covering the same cells.
-impl From<crate::app::Rect> for Rect {
-    fn from(r: crate::app::Rect) -> Self {
-        Rect::new(r.x, r.y, r.width, r.height)
-    }
-}
-
-/// A ratatui `Rect` as the core cell rectangle covering the same cells.
-impl From<Rect> for crate::app::Rect {
-    fn from(r: Rect) -> Self {
-        crate::app::Rect::new(r.x, r.y, r.width, r.height)
-    }
-}
-
 /// [`crate::app::geometry::regions`] over ratatui rectangles, for the drawing
 /// code.
 fn regions(area: Rect) -> [Rect; 3] {
-    crate::app::geometry::regions(area.into()).map(Rect::from)
-}
-
-/// A ratatui [`Color`] from a theme RGB triple.
-fn rgb(c: (u8, u8, u8)) -> Color {
-    Color::Rgb(c.0, c.1, c.2)
-}
-
-/// The style the fixed top-bar and status bar are filled with, full width, so
-/// they stand out from the content. With colour, the theme's chrome background
-/// and foreground (a muted slate on dark, a light bar on light); under
-/// `no_color`, the REVERSE modifier so the bars still delineate without any
-/// colour. Shared by both bars for a consistent look.
-fn chrome_style(no_color: bool, theme: Theme) -> Style {
-    if no_color {
-        Style::default().add_modifier(Modifier::REVERSED)
-    } else {
-        Style::default()
-            .fg(rgb(theme.chrome_fg()))
-            .bg(rgb(theme.chrome_bg()))
-    }
-}
-
-/// The foreground for the bright chrome text drawn over the bars: the status-bar
-/// key-hints and the AVAILABLE top-bar controls. Uses the theme's bright chrome
-/// foreground (~4.5:1 on the chrome background) instead of `Modifier::DIM`,
-/// which halved the foreground and read as too low contrast. Under `no_color`
-/// it returns the plain style so the reverse-video chrome fill shows through.
-fn chrome_text_style(no_color: bool, theme: Theme) -> Style {
-    if no_color {
-        Style::default()
-    } else {
-        Style::default().fg(rgb(theme.chrome_fg()))
-    }
-}
-
-/// The foreground for UNAVAILABLE top-bar controls: the theme's muted chrome
-/// foreground, a distinct-but-readable grey (~3:1 on the chrome background) that
-/// reads as "disabled" without the illegibility of `Modifier::DIM`. Under
-/// `no_color` it returns the plain style so the reverse-video fill shows
-/// through (no DIM under reverse).
-fn chrome_muted_style(no_color: bool, theme: Theme) -> Style {
-    if no_color {
-        Style::default()
-    } else {
-        Style::default().fg(rgb(theme.chrome_muted_fg()))
-    }
+    crate::app::geometry::regions(from_ratatui(area)).map(to_ratatui)
 }
 
 /// The places panel's placeholder under "Discovered nodes" while the registry
@@ -184,37 +127,7 @@ pub fn view(model: &Model, images: &ImageStore, frame: &mut Frame) {
     // 24-bit RGB colour in the finished buffer to its nearest xterm-256 index in
     // one sweep. A single chokepoint over the rendered buffer keeps every colour
     // site (content, chrome, spinner, toast, highlights) media-agnostic.
-    downgrade_buffer(model, frame);
-}
-
-/// Downgrade the rendered buffer's 24-bit colours to the xterm-256 palette when
-/// the resolved [`ColorDepth`] is [`ColorDepth::Ansi256`]. A no-op under
-/// [`ColorDepth::Truecolor`] and under `no_color` (where `NO_COLOR` already wins
-/// and the buffer carries the reverse-video chrome instead of colour), so both
-/// leave the buffer byte-identical to before this feature.
-fn downgrade_buffer(model: &Model, frame: &mut Frame) {
-    if model.no_color || model.depth == ColorDepth::Truecolor {
-        return;
-    }
-    let area = frame.area();
-    let buf = frame.buffer_mut();
-    for y in area.top()..area.bottom() {
-        for x in area.left()..area.right() {
-            if let Some(cell) = buf.cell_mut((x, y)) {
-                cell.fg = downgrade_color(cell.fg);
-                cell.bg = downgrade_color(cell.bg);
-            }
-        }
-    }
-}
-
-/// Map a single 24-bit [`Color::Rgb`] to its nearest xterm-256 [`Color::Indexed`];
-/// every other colour (already-indexed, named, reset) passes through unchanged.
-fn downgrade_color(color: Color) -> Color {
-    match color {
-        Color::Rgb(r, g, b) => Color::Indexed(rgb_to_ansi256(r, g, b)),
-        other => other,
-    }
+    downgrade_buffer(frame, model.depth, model.no_color);
 }
 
 /// Draw the form-field input boxes over the laid-out page: every field's cells
@@ -424,7 +337,7 @@ fn render_content(model: &Model, frame: &mut Frame, area: Rect) {
 /// Draw the current page's inline images into the rows the layout reserved
 /// for them, and a status line for every slot that is not a picture.
 ///
-/// A picture is drawn with [`SlicedImage`], which crops it to the area: an
+/// A picture is drawn with [`pictures::render`], which crops it to the area: an
 /// image half-scrolled off the top is drawn from its middle rather than
 /// jumping or spilling over the top bar. The position is signed for exactly
 /// that reason.
@@ -451,9 +364,8 @@ fn render_images(model: &Model, images: &ImageStore, frame: &mut Frame, area: Re
                 if y + cells.1 as i64 <= 0 || y >= body.height as i64 {
                     continue;
                 }
-                let position =
-                    SignedPosition::from((x, y.clamp(i16::MIN as i64, i16::MAX as i64) as i16));
-                frame.render_widget(SlicedImage::new(protocol, position), body);
+                let y = y.clamp(i16::MIN as i64, i16::MAX as i64) as i16;
+                pictures::render(frame, body, protocol, x, y);
             }
             // Everything else is one line of text: queued, loading, failed, or
             // a terminal that cannot draw pictures at all.
@@ -492,7 +404,7 @@ fn render_topbar(model: &Model, frame: &mut Frame, area: Rect) {
         Block::default().style(chrome_style(model.no_color, model.theme)),
         area,
     );
-    let tb = topbar_layout(model, area.into());
+    let tb = topbar_layout(model, from_ratatui(area));
 
     // Title in bold bright chrome fg.
     if !tb.title.is_empty() {
@@ -524,13 +436,13 @@ fn render_topbar(model: &Model, frame: &mut Frame, area: Rect) {
     // The address slot: the live editor in address mode, else the address text
     // with an input-field look (underlined) so it reads as editable.
     if model.mode == Mode::Address {
-        render_address_editor(model, frame, tb.address_rect.into());
+        render_address_editor(model, frame, to_ratatui(tb.address_rect));
     } else if !tb.address.is_empty() {
         let style =
             chrome_text_style(model.no_color, model.theme).add_modifier(Modifier::UNDERLINED);
         frame.render_widget(
             Paragraph::new(RtSpan::styled(tb.address.clone(), style)),
-            Rect::from(tb.address_rect),
+            to_ratatui(tb.address_rect),
         );
     }
 
@@ -541,7 +453,7 @@ fn render_topbar(model: &Model, frame: &mut Frame, area: Rect) {
     if let Some((glyph, rect)) = tb.star {
         frame.render_widget(
             Paragraph::new(RtSpan::styled(glyph, bright)),
-            Rect::from(rect),
+            to_ratatui(rect),
         );
     }
     // The identity marker reads in the bright chrome fg: it is security-relevant
@@ -612,59 +524,6 @@ fn render_address_editor(model: &Model, frame: &mut Frame, area: Rect) {
     frame.set_cursor_position((cx.min(inner.right().saturating_sub(1)), inner.y));
 }
 
-/// The six braille glyphs of the loading spinner: a single dot circling once per
-/// full cycle. `spin % 6` picks the current frame.
-const SPIN_FRAMES: [&str; 6] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴"];
-
-/// Degrees of hue the spinner colour advances per animation tick. The colour
-/// glides continuously through the HSV wheel rather than snapping between a few
-/// fixed rainbow stops. At the [`SPINNER_TICK_MS`] (120 ms) redraw cadence a full
-/// 360 degree rainbow takes `360 / HUE_STEP` ticks = 40 ticks = 4.8 s, and each
-/// tick shifts the hue by only 9 degrees, so the change reads as a smooth glide
-/// with no flicker.
-const HUE_STEP: f32 = 9.0;
-
-/// Convert an HSV colour to 8-bit RGB. Pure function. `h_deg` is the hue in
-/// degrees (wrapped into `[0, 360)`), `s` and `v` are the saturation and value in
-/// `[0, 1]`. Uses the standard sextant formulation; the spinner calls it with
-/// `s = v = 1.0` for maximally vivid, full-brightness colours.
-fn hsv_to_rgb(h_deg: f32, s: f32, v: f32) -> (u8, u8, u8) {
-    let h = h_deg.rem_euclid(360.0);
-    let s = s.clamp(0.0, 1.0);
-    let v = v.clamp(0.0, 1.0);
-    let c = v * s;
-    let sextant = h / 60.0;
-    let x = c * (1.0 - (sextant.rem_euclid(2.0) - 1.0).abs());
-    let m = v - c;
-    let (r1, g1, b1) = match sextant as u32 {
-        0 => (c, x, 0.0),
-        1 => (x, c, 0.0),
-        2 => (0.0, c, x),
-        3 => (0.0, x, c),
-        4 => (x, 0.0, c),
-        _ => (c, 0.0, x),
-    };
-    let to_u8 = |f: f32| ((f + m) * 255.0).round().clamp(0.0, 255.0) as u8;
-    (to_u8(r1), to_u8(g1), to_u8(b1))
-}
-
-/// Render one frame of the loading spinner: the current braille glyph as a bold,
-/// full-brightness span whose colour rotates slowly and continuously through the
-/// HSV hue wheel. The glyph advances one step per `spin` (the dot circles) while
-/// the hue advances a small [`HUE_STEP`] per tick, so the colour glides smoothly
-/// and much more slowly than the dot position.
-fn spinner_span(spin: usize) -> RtSpan<'static> {
-    let glyph = SPIN_FRAMES[spin % SPIN_FRAMES.len()];
-    let hue = (spin as f32 * HUE_STEP).rem_euclid(360.0);
-    let (r, g, b) = hsv_to_rgb(hue, 1.0, 1.0);
-    RtSpan::styled(
-        glyph,
-        Style::default()
-            .fg(Color::Rgb(r, g, b))
-            .add_modifier(Modifier::BOLD),
-    )
-}
-
 // --- the footer: a unified strip of clickable button / keybinding hints -----
 
 /// Draw the status bar: always the unified footer button strip, so the reader's
@@ -702,10 +561,7 @@ fn render_status_chip(model: &Model, frame: &mut Frame, area: Rect) {
     if content.width == 0 || content.height == 0 {
         return;
     }
-    // One column of padding each side; the body is truncated to whatever inner
-    // width is left so the field never overflows the content width.
-    let pad = 1u16;
-    let inner_budget = content.width.saturating_sub(2 * pad) as usize;
+    let inner_budget = chip::budget(content);
     if inner_budget == 0 {
         return;
     }
@@ -739,133 +595,20 @@ fn render_status_chip(model: &Model, frame: &mut Frame, area: Rect) {
     } else {
         return;
     };
-    let field_w = (inner_w + 2 * pad).min(content.width);
-    let field_y = content.bottom().saturating_sub(1);
-    let chip_bg = chrome_style(model.no_color, model.theme);
-    // A thin top edge one row above the field sets the card off from the page and
-    // from the footer beneath it, without a full border box. Theme-aware; under
-    // `no_color` the reverse-video chrome fill plus an underline reads as an edge.
-    if content.height >= 2 {
-        let edge = Rect {
-            x: content.x,
-            y: field_y.saturating_sub(1),
-            width: field_w,
-            height: 1,
-        };
-        let edge_style = if model.no_color {
-            chip_bg.add_modifier(Modifier::UNDERLINED)
-        } else {
-            chip_bg.patch(Style::default().fg(rgb(model.theme.chrome_muted_fg())))
-        };
-        frame.render_widget(Clear, edge);
-        frame.render_widget(
-            Paragraph::new(RtSpan::styled("▔".repeat(field_w as usize), edge_style)),
-            edge,
-        );
-    }
-    // The one-line field itself: chrome background, one-column left padding, the
-    // spinner / target painted on top (same Clear-then-paint technique as the toast).
-    let field = Rect {
-        x: content.x,
-        y: field_y,
-        width: field_w,
-        height: 1,
-    };
-    frame.render_widget(Clear, field);
-    frame.render_widget(Block::default().style(chip_bg), field);
-    let inner = Rect {
-        x: field.x.saturating_add(pad),
-        y: field.y,
-        width: field.width.saturating_sub(2 * pad),
-        height: 1,
-    };
-    frame.render_widget(Paragraph::new(RtLine::from(spans)), inner);
+    chip::render(frame, content, spans, inner_w, model.no_color, model.theme);
 }
 
-/// Draw the footer button strip: each button's key in the bright chrome fg and
-/// bold, its label in the muted chrome fg, a `│` divider between buttons (a
-/// brighter one at the nav/mode boundary), and a bold + underline highlight over
-/// the hovered button so it reads as clickable.
+/// Draw lnomad's footer button strip ([`footer::render`] over its layout).
 fn render_footer_strip(model: &Model, frame: &mut Frame, area: Rect) {
-    let key_style = chrome_text_style(model.no_color, model.theme).add_modifier(Modifier::BOLD);
-    let label_style = chrome_muted_style(model.no_color, model.theme);
-    let dim_div = chrome_muted_style(model.no_color, model.theme);
-    let strong_div = chrome_text_style(model.no_color, model.theme);
-
-    let slots = footer_layout(model, area.into());
-    for slot in &slots {
-        // The divider before this button (none before the first).
-        let dw = slot.div_before;
-        if dw > 0 {
-            let (glyph, style) = if slot.strong_divider {
-                ("│", strong_div)
-            } else {
-                ("│", dim_div)
-            };
-            // Centre the │ in its 1-or-3-column gap.
-            let gx = slot.rect.x.saturating_sub(dw).saturating_add(dw / 2);
-            frame.render_widget(
-                Paragraph::new(RtSpan::styled(glyph, style)),
-                Rect {
-                    x: gx,
-                    y: area.y,
-                    width: 1,
-                    height: 1,
-                },
-            );
-        }
-
-        // The button itself: key bright + bold, label muted; an unavailable nav
-        // button reads wholly muted.
-        let (kstyle, lstyle) = if slot.item.available {
-            (key_style, label_style)
-        } else {
-            (label_style, label_style)
-        };
-        let mut spans: Vec<RtSpan<'static>> = Vec::new();
-        let key = slot.item.key;
-        let label = slot.item.label;
-        let show_label = !slot.collapsed && !label.is_empty();
-        if slot.item.key_first {
-            if !key.is_empty() {
-                spans.push(RtSpan::styled(key, kstyle));
-            }
-            if show_label {
-                if !key.is_empty() {
-                    spans.push(RtSpan::styled(" ", lstyle));
-                }
-                spans.push(RtSpan::styled(label, lstyle));
-            }
-        } else {
-            if show_label {
-                spans.push(RtSpan::styled(label, lstyle));
-                spans.push(RtSpan::styled(" ", lstyle));
-            }
-            if !key.is_empty() {
-                spans.push(RtSpan::styled(key, kstyle));
-            }
-        }
-        frame.render_widget(Paragraph::new(RtLine::from(spans)), Rect::from(slot.rect));
-    }
-
-    // Highlight the hovered button, reusing the link-hover look (bold + underline
-    // patched over the button's own styling), so it reads as a button.
-    if let Some(idx) = model.footer_hover {
-        if let Some(slot) = slots.iter().find(|s| s.index == idx) {
-            let area_all = frame.area();
-            let buf = frame.buffer_mut();
-            let hover = Modifier::BOLD | Modifier::UNDERLINED;
-            for x in slot.rect.x..slot.rect.right() {
-                if x >= area_all.width || slot.rect.y >= area_all.height {
-                    continue;
-                }
-                if let Some(cell) = buf.cell_mut((x, slot.rect.y)) {
-                    let style = cell.style().patch(Style::default().add_modifier(hover));
-                    cell.set_style(style);
-                }
-            }
-        }
-    }
+    let slots = footer_layout(model, from_ratatui(area));
+    footer::render(
+        frame,
+        area,
+        &slots,
+        model.footer_hover,
+        model.no_color,
+        model.theme,
+    );
 }
 
 /// Draw the in-page search editor into the status bar: a `/` prompt, then the
@@ -919,7 +662,7 @@ fn render_places(model: &Model, frame: &mut Frame, area: Rect) {
     // two border columns removed) rows are truncated to: a long bookmark row that
     // reached the border let the selected row's reversed bar spill past it;
     // truncating to the inner width keeps every row strictly inside the border.
-    let overlay: Rect = places_overlay_rect(model, area.into()).into();
+    let overlay = to_ratatui(places_overlay_rect(model, from_ratatui(area)));
     let inner = overlay.width.saturating_sub(2) as usize;
 
     let mut lines: Vec<RtLine<'static>> = Vec::new();
@@ -1060,271 +803,27 @@ fn place_label(place: &Place) -> String {
     }
 }
 
-/// Draw the transient toast: a small bordered box floated at the bottom-right of
-/// the content (never over the status bar), coloured by kind. An error is an
-/// attention red with a `⚠`; an info note is a calm green with a `✓`. Under
-/// `no_color` both fall back to reverse video. A no-op when no toast is up.
+/// Draw lnomad's transient toast over the content ([`toast::render`]). A no-op
+/// when no toast is up.
 fn render_toast(model: &Model, frame: &mut Frame, area: Rect) {
-    let Some(toast) = &model.toast else {
+    let Some(t) = &model.toast else {
         return;
     };
     let [_topbar, content, _status] = regions(area);
-    // Too little room to float a bordered box: skip rather than draw garbage.
-    if content.width < 8 || content.height < 3 {
-        return;
-    }
-    let (glyph, accent) = match toast.kind {
-        ToastKind::Error => ('⚠', Color::Rgb(255, 95, 95)),
-        ToastKind::Info => ('✓', Color::Rgb(120, 220, 120)),
-    };
-    let style = if model.no_color {
-        Style::default().add_modifier(Modifier::REVERSED)
-    } else {
-        Style::default().fg(accent)
-    };
-    // A one-column margin from the content's right edge, room for both borders,
-    // and the message truncated to whatever inner width is left.
-    let margin = 1u16;
-    let max_inner = content.width.saturating_sub(2 + 2 * margin).max(1) as usize;
-    let body = truncate_to_cols(&format!("{glyph} {}", toast.text), max_inner);
-    let inner_w = UnicodeWidthStr::width(body.as_str()) as u16;
-    let box_w = inner_w + 2;
-    let box_h = 3u16;
-    // Bottom-right of the content, sitting just above the status bar.
-    let overlay = Rect {
-        x: content.right().saturating_sub(box_w + margin),
-        y: content.bottom().saturating_sub(box_h),
-        width: box_w,
-        height: box_h,
-    };
-    let block = Block::default().borders(Borders::ALL).style(style);
-    frame.render_widget(Clear, overlay);
-    frame.render_widget(
-        Paragraph::new(RtSpan::styled(body, style)).block(block),
-        overlay,
-    );
+    toast::render(frame, content, t, model.no_color);
 }
 
-/// Draw the centered help overlay: the keybindings grouped under dim titles,
-/// each entry's keys in the bright chrome fg and BOLD and its description in the
-/// muted chrome fg — the same visual language as the footer strip, theme-aware
-/// and `no_color`-safe. The block's border title carries the heading and the
-/// close hints, so the body has no heading line.
+/// Draw lnomad's help overlay ([`help::render`] over its keybinding groups).
 fn render_help(model: &Model, frame: &mut Frame, area: Rect) {
-    let groups = help_groups();
-    let col = help_key_col(&groups);
-
-    // Group titles are dim; under `no_color` the reverse-video fill already
-    // delineates them, so drop the DIM (no DIM under reverse) and let the plain
-    // style show through.
-    let muted = chrome_muted_style(model.no_color, model.theme);
-    let title_style = if model.no_color {
-        muted
-    } else {
-        muted.add_modifier(Modifier::DIM)
-    };
-    let keys_style = chrome_text_style(model.no_color, model.theme).add_modifier(Modifier::BOLD);
-    let desc_style = muted;
-
-    // Build the styled lines. Each entry's keys cell and its (padded) description
-    // reproduce `help_lines` exactly, so the styled overlay and its plain-text
-    // projection stay byte-for-byte aligned.
-    let mut lines: Vec<RtLine> = Vec::new();
-    for (gi, group) in groups.iter().enumerate() {
-        if gi > 0 {
-            lines.push(RtLine::from(""));
-        }
-        lines.push(RtLine::from(RtSpan::styled(
-            group.title.to_string(),
-            title_style,
-        )));
-        for e in &group.entries {
-            let pad = col.saturating_sub(UnicodeWidthStr::width(e.keys)) + HELP_GAP;
-            lines.push(RtLine::from(vec![
-                RtSpan::styled(format!("{HELP_INDENT}{}", e.keys), keys_style),
-                RtSpan::styled(format!("{}{}", " ".repeat(pad), e.desc), desc_style),
-            ]));
-        }
-    }
-
-    // Size the overlay to the widest line plus its two borders, so no line wraps
-    // in a normal-width terminal. `Wrap` below stays as a safety net for
-    // terminals too narrow to hold the widest line. The plain projection gives
-    // the widths so the sizing can never drift from the rendered content.
-    let inner = help_lines()
-        .iter()
-        .map(|l| UnicodeWidthStr::width(l.as_str()))
-        .max()
-        .unwrap_or(0) as u16;
-    let width = (inner + 2).min(area.width);
-    let height = (lines.len() as u16 + 2).min(area.height);
-    let overlay = Rect {
-        x: area.x + (area.width.saturating_sub(width)) / 2,
-        y: area.y + (area.height.saturating_sub(height)) / 2,
-        width,
-        height,
-    };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" help — Esc, ? or click to close ")
-        .style(chrome_style(model.no_color, model.theme));
-    frame.render_widget(Clear, overlay);
-
-    // The block's inner height is the viewport; the help lines are the content.
-    // When the terminal is too short to hold them all, draw the slice starting at
-    // `help_scroll` (clamped) and paint a scrollbar on the right border. The
-    // shared `scrolled` rule keeps the offset in range, so slicing is always
-    // sound.
-    let total = lines.len();
-    let inner_h = height.saturating_sub(2) as usize;
-    let max = total.saturating_sub(inner_h);
-    let offset = model.help_scroll.min(max);
-    let visible: Vec<RtLine> = lines.into_iter().skip(offset).take(inner_h).collect();
-    frame.render_widget(
-        Paragraph::new(Text::from(visible))
-            .block(block)
-            .wrap(Wrap { trim: false }),
-        overlay,
+    help::render(
+        frame,
+        area,
+        &help_groups(),
+        " help — Esc, ? or click to close ",
+        model.help_scroll,
+        model.no_color,
+        model.theme,
     );
-    if max > 0 {
-        let mut state = ScrollbarState::new(max).position(offset);
-        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-            .begin_symbol(None)
-            .end_symbol(None);
-        frame.render_stateful_widget(scrollbar, overlay.inner(Margin::new(0, 1)), &mut state);
-    }
-}
-
-/// Map laid-out styled lines to a ratatui [`Text`], grouping runs of equal
-/// style into one span each (the same run-grouping the ANSI sink uses).
-pub fn to_ratatui_text(lines: &[RLine]) -> Text<'static> {
-    let mut out_lines: Vec<RtLine<'static>> = Vec::with_capacity(lines.len());
-    for line in lines {
-        let mut spans: Vec<RtSpan<'static>> = Vec::new();
-        let mut i = 0;
-        while i < line.cells.len() {
-            let st = line.cells[i].st;
-            let mut j = i;
-            let mut text = String::new();
-            while j < line.cells.len() && line.cells[j].st == st {
-                text.push(line.cells[j].ch);
-                j += 1;
-            }
-            spans.push(RtSpan::styled(text, rstyle_to_ratatui(st)));
-            i = j;
-        }
-        out_lines.push(RtLine::from(spans));
-    }
-    Text::from(out_lines)
-}
-
-/// Translate a resolved [`RStyle`] into a ratatui [`Style`]: RGB colours map
-/// directly, and bold/underline/italic map to the matching modifiers.
-fn rstyle_to_ratatui(st: RStyle) -> Style {
-    let mut style = Style::default();
-    if let Some((r, g, b)) = st.fg {
-        style = style.fg(Color::Rgb(r, g, b));
-    }
-    if let Some((r, g, b)) = st.bg {
-        style = style.bg(Color::Rgb(r, g, b));
-    }
-    if st.bold {
-        style = style.add_modifier(Modifier::BOLD);
-    }
-    if st.underline {
-        style = style.add_modifier(Modifier::UNDERLINED);
-    }
-    if st.italic {
-        style = style.add_modifier(Modifier::ITALIC);
-    }
-    style
-}
-
-/// The terminal side-effects the IO shell needs, abstracted so a test can
-/// substitute a mock and assert that `restore` runs, with no real terminal.
-pub trait TerminalOps {
-    /// Enter the UI: alternate screen, raw mode, mouse capture.
-    fn enter(&mut self) -> io::Result<()>;
-    /// Restore the terminal to how it was before [`enter`](TerminalOps::enter).
-    fn restore(&mut self) -> io::Result<()>;
-}
-
-/// The real crossterm terminal: alt-screen + raw mode + mouse capture on
-/// [`enter`](TerminalOps::enter), reversed on [`restore`](TerminalOps::restore).
-pub struct CrosstermTerminal {
-    out: Stdout,
-}
-
-impl CrosstermTerminal {
-    /// A terminal driver writing to stdout.
-    pub fn new() -> Self {
-        Self { out: io::stdout() }
-    }
-}
-
-impl Default for CrosstermTerminal {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl TerminalOps for CrosstermTerminal {
-    fn enter(&mut self) -> io::Result<()> {
-        enable_raw_mode()?;
-        execute!(self.out, EnterAlternateScreen, EnableMouseCapture)
-    }
-
-    fn restore(&mut self) -> io::Result<()> {
-        execute!(self.out, LeaveAlternateScreen, DisableMouseCapture)?;
-        disable_raw_mode()
-    }
-}
-
-/// A RAII guard that restores the terminal on drop. Constructing it enters the
-/// UI; dropping it (normally, on `?`, or during a panic unwind) restores it, so
-/// no code path can leave the terminal in raw/alt-screen mode.
-pub struct TerminalGuard<T: TerminalOps> {
-    ops: T,
-    restored: bool,
-}
-
-impl<T: TerminalOps> TerminalGuard<T> {
-    /// Enter the UI and return a guard that will restore it.
-    pub fn new(mut ops: T) -> io::Result<Self> {
-        ops.enter()?;
-        Ok(Self {
-            ops,
-            restored: false,
-        })
-    }
-
-    /// Restore the terminal now (idempotent); the drop becomes a no-op.
-    pub fn restore_now(&mut self) -> io::Result<()> {
-        if self.restored {
-            return Ok(());
-        }
-        self.restored = true;
-        self.ops.restore()
-    }
-}
-
-impl<T: TerminalOps> Drop for TerminalGuard<T> {
-    fn drop(&mut self) {
-        let _ = self.restore_now();
-    }
-}
-
-/// Install a panic hook that restores the terminal BEFORE the previous hook
-/// runs, so a panic's backtrace prints to a sane (cooked) terminal instead of
-/// the raw alternate screen.
-fn install_panic_hook() {
-    let previous = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        let mut out = io::stdout();
-        let _ = execute!(out, LeaveAlternateScreen, DisableMouseCapture);
-        let _ = disable_raw_mode();
-        previous(info);
-    }));
 }
 
 /// The result of a background fetch, tagged with the generation that issued it
@@ -1498,8 +997,8 @@ struct ImageEntry {
 /// neither, and the fetch queue is IO. The model carries only the slot states,
 /// which is all the layout and the assertions need.
 pub struct ImageStore {
-    picker: Option<Picker>,
-    backend: Backend,
+    /// What this terminal can draw.
+    pictures: Pictures,
     entries: HashMap<usize, ImageEntry>,
     task: Option<tokio::task::JoinHandle<()>>,
     generation: u64,
@@ -1513,8 +1012,7 @@ impl Default for ImageStore {
     /// picture to draw. What the unit tests and the print sink use.
     fn default() -> Self {
         ImageStore {
-            picker: None,
-            backend: Backend::Text,
+            pictures: Pictures::default(),
             entries: HashMap::new(),
             task: None,
             generation: 0,
@@ -1524,26 +1022,11 @@ impl Default for ImageStore {
 }
 
 impl ImageStore {
-    /// Ask the terminal what it can draw, and settle on a backend.
-    ///
-    /// The query talks to the terminal directly and wants raw mode, so this
-    /// runs after the terminal is set up. Any failure — a terminal that
-    /// answers nothing, a pipe, a query that times out — falls back to
-    /// half-blocks rather than propagating: a browser that refuses to start
-    /// because it could not identify the terminal would be absurd.
+    /// Ask the terminal what it can draw ([`Pictures::detect`]), with a
+    /// payload cache of `cache_bytes`.
     pub fn detect(no_color: bool, depth: ColorDepth, cache_bytes: u64) -> Self {
-        let picker = match no_color {
-            // Nothing will be drawn, so do not write query sequences at all.
-            true => None,
-            false => Some(Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks())),
-        };
-        let detected = picker
-            .as_ref()
-            .map(|p| p.protocol_type())
-            .unwrap_or(ProtocolType::Halfblocks);
         ImageStore {
-            picker,
-            backend: crate::image::choose_backend(detected, depth, no_color),
+            pictures: Pictures::detect(no_color, depth),
             entries: HashMap::new(),
             task: None,
             generation: 0,
@@ -1628,7 +1111,7 @@ impl ImageStore {
         };
         self.entries.insert(link, entry);
 
-        if self.backend == Backend::Text {
+        if self.pictures.backend() == Backend::Text {
             return AppEvent::ImageText {
                 link,
                 probe,
@@ -1655,7 +1138,7 @@ impl ImageStore {
     /// Decode and encode one held payload at the size the current layout
     /// allows, storing the result. Returns the cell size it will occupy.
     fn encode(&mut self, link: usize, probe: Probe, model: &Model) -> Result<(u16, u16), String> {
-        let Some(picker) = self.picker.as_ref() else {
+        let Some(font) = self.pictures.font_size() else {
             return Err("this terminal shows no images".to_string());
         };
         let Some(entry) = self.entries.get_mut(&link) else {
@@ -1665,25 +1148,14 @@ impl ImageStore {
         // Cell geometry and the row ceiling are both backend-dependent: a
         // graphics protocol paints the cell's full pixel box, half-blocks
         // carry one pixel across and two down whatever the font says.
+        let backend = self.pictures.backend();
         let cells = crate::image::fit_cells(
             (probe.width, probe.height),
-            self.backend.cell_pixels(picker.font_size()),
+            backend.cell_pixels(font),
             model.width.min(u16::MAX as usize) as u16,
-            self.backend.max_rows(model.viewport()),
+            crate::image::max_rows(backend, model.viewport()),
         );
-        let size = Size::new(cells.0, cells.1);
-        // `Fit` never enlarges, and it measures "large enough" in font-size
-        // pixels. On the half-block path that silently undoes the sizing
-        // above: a 300x300 portrait is only 38x19 cells of font box, so the
-        // protocol would shrink back to that and paint 38x38 half-block
-        // pixels. `Scale` honours the area we asked for, which is where the
-        // resolution lives when a cell carries one pixel across and two down.
-        let resize = match self.backend {
-            Backend::Halfblocks => Resize::Scale(Some(FilterType::Triangle)),
-            _ => Resize::Fit(None),
-        };
-        let sliced = SlicedProtocol::new_with_resize(picker, decoded, size, resize)
-            .map_err(|e| format!("cannot draw: {e}"))?;
+        let sliced = self.pictures.encode(decoded, cells)?;
         entry.protocol = Some(sliced);
         Ok(cells)
     }
@@ -1960,58 +1432,6 @@ async fn run_effects(effects: Vec<Effect>, model: &mut Model, shell: Shell<'_>) 
     }
 }
 
-/// How long to wait for the terminal's OSC 11 background reply before giving up
-/// and falling back to the dark theme. Kept short so a terminal that never
-/// answers does not stall startup.
-const BG_QUERY_TIMEOUT: Duration = Duration::from_millis(100);
-
-/// Query the terminal background for `--theme auto`, returning `None` (→ dark)
-/// when the flag is explicit, the query fails, or the terminal does not answer.
-///
-/// The `termbg` crate sends the OSC 11 query (falling back to `COLORFGBG`),
-/// parses the reply, and handles the timeout, tmux/screen wrapping and raw-mode
-/// save/restore itself. Its 16-bit-per-channel result is reduced to 8-bit; the
-/// foreground, when `COLORFGBG` provides one, is a luminance tiebreaker only.
-fn detect_background(flag: ThemeFlag) -> Option<Bg> {
-    if !matches!(flag, ThemeFlag::Auto) {
-        return None;
-    }
-    let bg = termbg::rgb(BG_QUERY_TIMEOUT).ok()?;
-    Some(Bg {
-        bg: rgb16_to_rgb8(bg),
-        fg: colorfgbg_foreground(),
-    })
-}
-
-/// Reduce a `termbg` 16-bit-per-channel colour to 8-bit by taking the high byte.
-fn rgb16_to_rgb8(c: termbg::Rgb) -> (u8, u8, u8) {
-    ((c.r >> 8) as u8, (c.g >> 8) as u8, (c.b >> 8) as u8)
-}
-
-/// The foreground colour implied by `COLORFGBG` (`"<fg>;<bg>"` of palette
-/// indices), as a coarse grey used only as a mid-tone tiebreaker. `None` when
-/// the variable is absent or unparsable.
-fn colorfgbg_foreground() -> Option<(u8, u8, u8)> {
-    let raw = std::env::var("COLORFGBG").ok()?;
-    let fg_index: u8 = raw.split(';').next()?.trim().parse().ok()?;
-    Some(ansi_index_grey(fg_index))
-}
-
-/// A grey whose luminance approximates a 16-colour palette index: the normal
-/// set (0..8) reads dark, the bright set (8..16) light. Only the relative
-/// luminance matters, so an exact palette is unnecessary.
-fn ansi_index_grey(index: u8) -> (u8, u8, u8) {
-    let v = match index {
-        0 => 0,
-        7 => 192,
-        8 => 96,
-        15 => 255,
-        i if i < 8 => 128,
-        _ => 224,
-    };
-    (v, v, v)
-}
-
 /// Run the interactive TUI, owning the [`Session`] and driving navigation.
 ///
 /// Does the initial fetch of `initial` and every subsequent navigation as a
@@ -2128,7 +1548,7 @@ pub async fn run_tui(
         // auto-dismiss, so an idle toast still expires.
         let animate = model.needs_tick();
         tokio::select! {
-            maybe_event = events.next() => match step_event(maybe_event) {
+            maybe_event = events.next() => match step_event(maybe_event, map_event) {
                 EventStep::Apply(app) => {
                     // A resize changes how many cells a picture may occupy, so
                     // every held picture is re-encoded for the new layout.
@@ -2276,76 +1696,6 @@ async fn close_session(session: Arc<Mutex<Session>>) -> Option<String> {
     }
 }
 
-/// A crossterm key event as the core's. One-to-one except for the keys no
-/// binding names, which all become [`KeyCode::Other`].
-fn key_event(key: crossterm::event::KeyEvent) -> KeyEvent {
-    use crossterm::event::{KeyCode as Ct, KeyEventKind as CtKind};
-    let code = match key.code {
-        Ct::Backspace => KeyCode::Backspace,
-        Ct::Enter => KeyCode::Enter,
-        Ct::Left => KeyCode::Left,
-        Ct::Right => KeyCode::Right,
-        Ct::Up => KeyCode::Up,
-        Ct::Down => KeyCode::Down,
-        Ct::Home => KeyCode::Home,
-        Ct::End => KeyCode::End,
-        Ct::PageUp => KeyCode::PageUp,
-        Ct::PageDown => KeyCode::PageDown,
-        Ct::Tab => KeyCode::Tab,
-        Ct::BackTab => KeyCode::BackTab,
-        Ct::Delete => KeyCode::Delete,
-        Ct::Insert => KeyCode::Insert,
-        Ct::F(n) => KeyCode::F(n),
-        Ct::Char(c) => KeyCode::Char(c),
-        Ct::Null => KeyCode::Null,
-        Ct::Esc => KeyCode::Esc,
-        _ => KeyCode::Other,
-    };
-    let kind = match key.kind {
-        CtKind::Press => KeyEventKind::Press,
-        CtKind::Repeat => KeyEventKind::Repeat,
-        CtKind::Release => KeyEventKind::Release,
-    };
-    KeyEvent {
-        code,
-        modifiers: key_modifiers(key.modifiers),
-        kind,
-    }
-}
-
-/// crossterm's modifier set as the core's; the bit order is the same.
-fn key_modifiers(mods: crossterm::event::KeyModifiers) -> KeyModifiers {
-    KeyModifiers::from_bits_truncate(mods.bits())
-}
-
-/// A crossterm mouse event as the core's, one-to-one.
-fn mouse_event(mouse: crossterm::event::MouseEvent) -> MouseEvent {
-    use crossterm::event::{MouseButton as CtButton, MouseEventKind as CtKind};
-    let button = |b: CtButton| match b {
-        CtButton::Left => MouseButton::Left,
-        CtButton::Right => MouseButton::Right,
-        CtButton::Middle => MouseButton::Middle,
-        CtButton::Back => MouseButton::Back,
-        CtButton::Forward => MouseButton::Forward,
-    };
-    let kind = match mouse.kind {
-        CtKind::Down(b) => MouseEventKind::Down(button(b)),
-        CtKind::Up(b) => MouseEventKind::Up(button(b)),
-        CtKind::Drag(b) => MouseEventKind::Drag(button(b)),
-        CtKind::Moved => MouseEventKind::Moved,
-        CtKind::ScrollDown => MouseEventKind::ScrollDown,
-        CtKind::ScrollUp => MouseEventKind::ScrollUp,
-        CtKind::ScrollLeft => MouseEventKind::ScrollLeft,
-        CtKind::ScrollRight => MouseEventKind::ScrollRight,
-    };
-    MouseEvent {
-        kind,
-        column: mouse.column,
-        row: mouse.row,
-        modifiers: key_modifiers(mouse.modifiers),
-    }
-}
-
 /// Translate a crossterm event into an [`AppEvent`], dropping the ones the UI
 /// does not act on (focus, paste).
 fn map_event(event: Event) -> Option<AppEvent> {
@@ -2357,54 +1707,24 @@ fn map_event(event: Event) -> Option<AppEvent> {
     }
 }
 
-/// What the event loop should do with one item pulled from the terminal
-/// [`EventStream`].
-enum EventStep {
-    /// Apply this app-event to the model (a mapped, actionable event).
-    Apply(AppEvent),
-    /// A recognised-but-inert event that maps to nothing: do nothing and keep
-    /// looping. Crossterm discards unparseable byte sequences internally (its
-    /// `parse_event` contract clears the buffer on error), so those never reach
-    /// us as a `Some(Err)` — the only event we ignore is a mapped-to-`None` one
-    /// (focus gained/lost, paste).
-    Ignore,
-    /// Leave the loop with this result: `Ok(())` on a clean close (the stream
-    /// ended), `Err` on a genuine IO error from the event stream (a stdin/poll
-    /// failure). Ignoring the latter would busy-loop on a dead terminal.
-    End(io::Result<()>),
-}
-
-/// Classify one `EventStream` item without touching the model, so the loop's
-/// exit behaviour is unit-testable. A `Some(Err)` is a real IO error (stdin or
-/// poll failure) — crossterm never surfaces unparseable sequences as errors, it
-/// discards them internally — so it is an exit, NOT ignore-and-continue:
-/// ignoring it risks a busy-loop on a dead terminal. `None` (stream closed) is a
-/// clean exit.
-fn step_event(item: Option<Result<Event, io::Error>>) -> EventStep {
-    match item {
-        Some(Ok(event)) => match map_event(event) {
-            Some(app) => EventStep::Apply(app),
-            None => EventStep::Ignore,
-        },
-        Some(Err(err)) => EventStep::End(Err(err)),
-        None => EventStep::End(Ok(())),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::app::geometry::{regions, Rect};
     use crate::bookmarks::Bookmark;
+    use crate::color::rgb_to_ansi256;
     use crate::discovery::NomadNodeRegistry;
     use crate::image::MAX_INLINE_IMAGES;
     use crate::page_cache::CacheEntry;
     use crate::render::RenderedLink;
+    use crate::render::{RLine, RStyle};
+    use crate::theme::Theme;
     use crate::url::{parse_url, DEFAULT_PATH};
     use leviculum_micron::parse;
+    use leviculum_ui::spinner::{hsv_to_rgb, HUE_STEP, SPIN_FRAMES};
+    use leviculum_ui_ratatui::images::{Picker, ProtocolType};
     use ratatui::backend::TestBackend;
-    use std::cell::Cell;
-    use std::rc::Rc;
+    use ratatui::style::Color;
 
     const SAMPLE: &str = include_str!("../tests/fixtures/sample.mu");
 
@@ -3377,95 +2697,6 @@ mod tests {
     }
 
     #[test]
-    fn hsv_to_rgb_known_conversions() {
-        // The primary and secondary hues at full saturation and value.
-        assert_eq!(hsv_to_rgb(0.0, 1.0, 1.0), (255, 0, 0), "h=0 -> red");
-        assert_eq!(hsv_to_rgb(60.0, 1.0, 1.0), (255, 255, 0), "h=60 -> yellow");
-        assert_eq!(hsv_to_rgb(120.0, 1.0, 1.0), (0, 255, 0), "h=120 -> green");
-        assert_eq!(hsv_to_rgb(180.0, 1.0, 1.0), (0, 255, 255), "h=180 -> cyan");
-        assert_eq!(hsv_to_rgb(240.0, 1.0, 1.0), (0, 0, 255), "h=240 -> blue");
-        assert_eq!(
-            hsv_to_rgb(300.0, 1.0, 1.0),
-            (255, 0, 255),
-            "h=300 -> magenta"
-        );
-        // Hue wraps: 360 == 0, and negatives fold back into range.
-        assert_eq!(
-            hsv_to_rgb(360.0, 1.0, 1.0),
-            (255, 0, 0),
-            "h=360 wraps to red"
-        );
-        assert_eq!(
-            hsv_to_rgb(-60.0, 1.0, 1.0),
-            (255, 0, 255),
-            "h=-60 -> magenta"
-        );
-        // s=1, v=1 always yields a fully saturated, full-brightness colour: one
-        // channel at 255 and at least one at 0.
-        for deg in (0..360).step_by(7) {
-            let (r, g, b) = hsv_to_rgb(deg as f32, 1.0, 1.0);
-            assert_eq!(r.max(g).max(b), 255, "not full brightness at h={deg}");
-            assert_eq!(r.min(g).min(b), 0, "not fully saturated at h={deg}");
-        }
-    }
-
-    #[test]
-    fn spinner_span_glides_smoothly_through_the_spectrum() {
-        // The glyph steps through the six braille frames as `spin` advances.
-        for spin in 0..12 {
-            assert_eq!(
-                &*spinner_span(spin).content,
-                SPIN_FRAMES[spin % SPIN_FRAMES.len()],
-                "glyph out of cycle at spin={spin}"
-            );
-        }
-        // Every frame is bold and carries the HSV colour for its hue.
-        let cycle = (360.0 / HUE_STEP).ceil() as usize;
-        for spin in 0..cycle {
-            let style = spinner_span(spin).style;
-            assert!(
-                style.add_modifier.contains(Modifier::BOLD),
-                "spinner not bold at spin={spin}"
-            );
-            let hue = (spin as f32 * HUE_STEP).rem_euclid(360.0);
-            let (r, g, b) = hsv_to_rgb(hue, 1.0, 1.0);
-            assert_eq!(
-                style.fg,
-                Some(Color::Rgb(r, g, b)),
-                "wrong hsv fg at spin={spin}"
-            );
-        }
-        // The colour glides smoothly: consecutive ticks shift the hue by only the
-        // small HUE_STEP, so each RGB channel moves by a bounded amount (no hard
-        // jumps). A single HUE_STEP spans at most one 60-degree sextant, over which
-        // a channel changes by at most 255.
-        let max_delta = (HUE_STEP / 60.0 * 255.0).ceil() as i32 + 1;
-        for spin in 0..cycle {
-            let a = spinner_span(spin).style.fg;
-            let b = spinner_span(spin + 1).style.fg;
-            let (Some(Color::Rgb(ar, ag, ab)), Some(Color::Rgb(br, bg, bb))) = (a, b) else {
-                panic!("spinner fg not an Rgb colour at spin={spin}");
-            };
-            assert_ne!(a, b, "hue did not change between spin={spin} and next");
-            for (x, y, ch) in [(ar, br, "r"), (ag, bg, "g"), (ab, bb, "b")] {
-                let d = (x as i32 - y as i32).abs();
-                assert!(
-                    d <= max_delta,
-                    "channel {ch} jumped by {d} (> {max_delta}) at spin={spin}"
-                );
-            }
-        }
-        // A full cycle spans the whole spectrum: the hue reaches both ends.
-        let hues: Vec<f32> = (0..cycle)
-            .map(|s| (s as f32 * HUE_STEP).rem_euclid(360.0))
-            .collect();
-        let min = hues.iter().cloned().fold(f32::MAX, f32::min);
-        let max = hues.iter().cloned().fold(f32::MIN, f32::max);
-        assert!(min < 30.0, "cycle does not start near hue 0 (min={min})");
-        assert!(max > 330.0, "cycle does not reach the far end (max={max})");
-    }
-
-    #[test]
     fn loading_status_bar_has_rainbow_bold_spinner_cell() {
         let mut m = loaded_model((80, 24));
         m.pending = Some(Pending {
@@ -3951,142 +3182,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn step_event_exits_on_stream_error_and_close() {
-        // A Some(Err) from the event stream is a genuine IO error (stdin/poll
-        // failure); crossterm discards unparseable sequences internally and
-        // never surfaces them as errors. So it EXITS the loop, carrying the
-        // error, rather than being ignored (which would busy-loop a dead tty).
-        let err = io::Error::other("poll failure");
-        assert!(matches!(step_event(Some(Err(err))), EventStep::End(Err(_))));
-        // A closed stream (None) is a clean exit.
-        assert!(matches!(step_event(None), EventStep::End(Ok(()))));
-        // A real key still maps to an applied app-event.
-        let ev = Event::Key(crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Char('q'),
-            crossterm::event::KeyModifiers::NONE,
-        ));
-        assert!(matches!(
-            step_event(Some(Ok(ev))),
-            EventStep::Apply(AppEvent::Key(_))
-        ));
-    }
-
-    /// Every crossterm key code the core knows, for the translation tests.
-    fn crossterm_codes() -> Vec<crossterm::event::KeyCode> {
-        use crossterm::event::KeyCode as Ct;
-        let mut codes = vec![
-            Ct::Backspace,
-            Ct::Enter,
-            Ct::Left,
-            Ct::Right,
-            Ct::Up,
-            Ct::Down,
-            Ct::Home,
-            Ct::End,
-            Ct::PageUp,
-            Ct::PageDown,
-            Ct::Tab,
-            Ct::BackTab,
-            Ct::Delete,
-            Ct::Insert,
-            Ct::F(1),
-            Ct::F(5),
-            Ct::Null,
-            Ct::Esc,
-            Ct::CapsLock,
-            Ct::KeypadBegin,
-        ];
-        codes.extend("abdefghkquwyAZ:/?1 ".chars().map(Ct::Char));
-        codes
-    }
-
-    /// Every combination of the six modifier bits, in crossterm's type.
-    fn crossterm_modifier_sets() -> Vec<crossterm::event::KeyModifiers> {
-        (0u8..64)
-            .map(crossterm::event::KeyModifiers::from_bits_truncate)
-            .collect()
-    }
-
-    /// The translation into the core's key type loses nothing a binding can
-    /// see: same code (or `Other` for the keys no binding names), same
-    /// modifier bits, same press/repeat/release.
-    #[test]
-    fn crossterm_keys_reach_the_core_one_to_one() {
-        use crossterm::event::{KeyCode as Ct, KeyEventKind as CtKind};
-        for code in crossterm_codes() {
-            for mods in crossterm_modifier_sets() {
-                for kind in [CtKind::Press, CtKind::Repeat, CtKind::Release] {
-                    let mut ct = crossterm::event::KeyEvent::new(code, mods);
-                    ct.kind = kind;
-                    let core = key_event(ct);
-                    assert_eq!(core.modifiers.bits(), mods.bits(), "{ct:?}");
-                    assert_eq!(format!("{:?}", core.kind), format!("{kind:?}"), "{ct:?}");
-                    let want = match code {
-                        Ct::CapsLock | Ct::KeypadBegin => "Other".to_string(),
-                        other => format!("{other:?}"),
-                    };
-                    assert_eq!(format!("{:?}", core.code), want, "{ct:?}");
-                }
-            }
-        }
-    }
-
-    /// The core's text-editing table is the one `tui-input`'s crossterm
-    /// backend applied before the cut (#219): for every key, every modifier
-    /// set and every kind, the same edit or the same refusal.
-    #[test]
-    fn the_core_edits_text_exactly_as_the_crossterm_backend_did() {
-        use crossterm::event::KeyEventKind as CtKind;
-        for code in crossterm_codes() {
-            for mods in crossterm_modifier_sets() {
-                for kind in [CtKind::Press, CtKind::Repeat, CtKind::Release] {
-                    let mut ct = crossterm::event::KeyEvent::new(code, mods);
-                    ct.kind = kind;
-                    let reference =
-                        tui_input::backend::crossterm::to_input_request(&Event::Key(ct));
-                    assert_eq!(input_request(&key_event(ct)), reference, "{ct:?}");
-                }
-            }
-        }
-    }
-
-    /// Mouse events cross with their button, position and modifiers intact.
-    #[test]
-    fn crossterm_mouse_events_reach_the_core_one_to_one() {
-        use crossterm::event::{MouseButton as CtButton, MouseEventKind as CtKind};
-        let buttons = [
-            CtButton::Left,
-            CtButton::Right,
-            CtButton::Middle,
-            CtButton::Back,
-            CtButton::Forward,
-        ];
-        let mut kinds = vec![
-            CtKind::Moved,
-            CtKind::ScrollDown,
-            CtKind::ScrollUp,
-            CtKind::ScrollLeft,
-            CtKind::ScrollRight,
-        ];
-        for b in buttons {
-            kinds.extend([CtKind::Down(b), CtKind::Up(b), CtKind::Drag(b)]);
-        }
-        for kind in kinds {
-            let ct = crossterm::event::MouseEvent {
-                kind,
-                column: 7,
-                row: 3,
-                modifiers: crossterm::event::KeyModifiers::ALT
-                    | crossterm::event::KeyModifiers::SHIFT,
-            };
-            let core = mouse_event(ct);
-            assert_eq!(format!("{:?}", core.kind), format!("{kind:?}"));
-            assert_eq!((core.column, core.row), (7, 3));
-            assert_eq!(core.modifiers, KeyModifiers::ALT | KeyModifiers::SHIFT);
-        }
-    }
-
     /// The core splits the frame into top bar, content and status bar on the
     /// same cells as the ratatui `Layout` the drawing code used before the cut
     /// (#219), down to frames too short to hold all three.
@@ -4102,8 +3197,7 @@ mod tests {
                     Constraint::Length(STATUS_ROWS),
                 ])
                 .split(area);
-                let core =
-                    crate::app::geometry::regions(area.into()).map(ratatui::layout::Rect::from);
+                let core = crate::app::geometry::regions(from_ratatui(area)).map(to_ratatui);
                 assert_eq!(core, [parts[0], parts[1], parts[2]], "{area:?}");
             }
         }
@@ -5468,56 +4562,6 @@ mod tests {
         let status = row_text(&buffer, 23, 80);
         assert!(status.contains('/'), "search prompt missing: {status:?}");
         assert!(status.contains("abc"), "query text missing: {status:?}");
-    }
-
-    // --- terminal guard (retained from phase 2) --------------------------
-
-    struct MockOps {
-        entered: Rc<Cell<bool>>,
-        restored: Rc<Cell<bool>>,
-    }
-
-    impl TerminalOps for MockOps {
-        fn enter(&mut self) -> io::Result<()> {
-            self.entered.set(true);
-            Ok(())
-        }
-        fn restore(&mut self) -> io::Result<()> {
-            self.restored.set(true);
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn guard_restores_on_drop() {
-        let entered = Rc::new(Cell::new(false));
-        let restored = Rc::new(Cell::new(false));
-        {
-            let guard = TerminalGuard::new(MockOps {
-                entered: entered.clone(),
-                restored: restored.clone(),
-            })
-            .expect("enter");
-            assert!(entered.get(), "enter should have run");
-            assert!(!restored.get(), "restore must not run before drop");
-            drop(guard);
-        }
-        assert!(restored.get(), "restore must run on drop");
-    }
-
-    #[test]
-    fn guard_restore_now_is_idempotent() {
-        let restored = Rc::new(Cell::new(false));
-        let mut guard = TerminalGuard::new(MockOps {
-            entered: Rc::new(Cell::new(false)),
-            restored: restored.clone(),
-        })
-        .expect("enter");
-        guard.restore_now().expect("restore");
-        assert!(restored.get());
-        restored.set(false);
-        guard.restore_now().expect("restore idempotent");
-        assert!(!restored.get(), "restore ran twice");
     }
 
     // --- phase 6: bookmarks, copy, places panel -------------------------
@@ -7060,41 +6104,6 @@ mod tests {
         assert!(matches!(ps[0], Place::Node { .. }));
     }
 
-    #[test]
-    fn fit_width_counts_vs16_presentation_as_wide() {
-        assert_eq!(fit_width(""), 0);
-        assert_eq!(fit_width("a"), 1);
-        // Ordinary wide emoji: unicode-width already says 2.
-        assert_eq!(fit_width("🌐"), 2);
-        assert_eq!(fit_width("📰"), 2);
-        // Emoji-presentation sequences (base + U+FE0F): unicode-width scores
-        // these as 1, but a terminal paints them 2 wide.
-        assert_eq!(fit_width("☯️"), 2);
-        assert_eq!(fit_width("☸️"), 2);
-        // The bare base char without VS16 keeps its text-default single column.
-        assert_eq!(fit_width("☯"), 1);
-    }
-
-    #[test]
-    fn truncate_to_cols_is_width_aware() {
-        assert_eq!(truncate_to_cols("hello", 10), "hello");
-        assert_eq!(truncate_to_cols("hello", 5), "hello");
-        // Cut to a budget: the ellipsis takes the last column.
-        assert_eq!(truncate_to_cols("hello world", 5), "hell…");
-        assert_eq!(
-            UnicodeWidthStr::width(truncate_to_cols("hello world", 5).as_str()),
-            5
-        );
-        // A wide char that would straddle the budget is dropped whole, so the
-        // result never exceeds the requested width.
-        let cut = truncate_to_cols("🚀ab", 2);
-        assert!(
-            UnicodeWidthStr::width(cut.as_str()) <= 2,
-            "over budget: {cut:?}"
-        );
-        assert_eq!(truncate_to_cols("anything", 0), "");
-    }
-
     /// Assert the places panel's right border on `row` is intact and no
     /// reversed selected-bar cell reaches or passes it (the overflow that
     /// truncation fixes). Panel width 72 centred in 80 cols → x=4, border at 75.
@@ -7994,8 +7003,7 @@ Text unter dem Bild.
             // Pinned rather than queried: `halfblocks()` fixes both the
             // protocol and the font size (10x20), so the assertions below do
             // not depend on which terminal runs the test.
-            picker: Some(Picker::halfblocks()),
-            backend: Backend::Halfblocks,
+            pictures: Pictures::new(Some(Picker::halfblocks()), Backend::Halfblocks),
             entries: HashMap::new(),
             task: None,
             generation: 0,
@@ -8110,8 +7118,7 @@ Text unter dem Bild.
             let mut picker = Picker::halfblocks();
             picker.set_protocol_type(protocol);
             let mut store = ImageStore {
-                picker: Some(picker),
-                backend: Backend::Graphics(protocol),
+                pictures: Pictures::new(Some(picker), Backend::Graphics(protocol)),
                 entries: HashMap::new(),
                 task: None,
                 generation: 0,

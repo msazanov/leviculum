@@ -35,8 +35,9 @@
 use leviculum_micron::{Align, Block, Field, FieldKind, Line, MicronDocument, Style};
 use unicode_width::UnicodeWidthChar;
 
-use crate::color::{rgb_to_ansi256, ColorDepth};
+use crate::color::ColorDepth;
 use crate::theme::Theme;
+pub use leviculum_ui::style::{RLine, RStyle, StyledChar};
 
 /// Per-depth section indent, matching the reference `SECTION_INDENT`.
 const SECTION_INDENT: usize = 2;
@@ -271,59 +272,6 @@ fn emit_ansi_line(cells: &[StyledChar], no_color: bool, depth: ColorDepth, out: 
     out.push('\n');
 }
 
-/// A resolved terminal style: colours already reduced to RGB, attributes as
-/// flags. `None` colours mean "use the terminal default" (no SGR emitted).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct RStyle {
-    /// Foreground colour, or `None` for the terminal default.
-    pub fg: Option<(u8, u8, u8)>,
-    /// Background colour, or `None` for the terminal default.
-    pub bg: Option<(u8, u8, u8)>,
-    /// Bold attribute.
-    pub bold: bool,
-    /// Underline attribute.
-    pub underline: bool,
-    /// Italic attribute.
-    pub italic: bool,
-}
-
-impl RStyle {
-    fn is_plain(&self) -> bool {
-        self.fg.is_none() && self.bg.is_none() && !self.bold && !self.underline && !self.italic
-    }
-
-    /// The self-contained SGR prefix for this style (starts by resetting). Under
-    /// [`ColorDepth::Truecolor`] colours emit as 24-bit `38;2;r;g;b` / `48;2;...`;
-    /// under [`ColorDepth::Ansi256`] they are downgraded to the nearest palette
-    /// index as `38;5;idx` / `48;5;idx`.
-    fn sgr(&self, depth: ColorDepth) -> String {
-        let mut s = String::from("\x1b[0");
-        if self.bold {
-            s.push_str(";1");
-        }
-        if self.italic {
-            s.push_str(";3");
-        }
-        if self.underline {
-            s.push_str(";4");
-        }
-        if let Some((r, g, b)) = self.fg {
-            match depth {
-                ColorDepth::Truecolor => s.push_str(&format!(";38;2;{r};{g};{b}")),
-                ColorDepth::Ansi256 => s.push_str(&format!(";38;5;{}", rgb_to_ansi256(r, g, b))),
-            }
-        }
-        if let Some((r, g, b)) = self.bg {
-            match depth {
-                ColorDepth::Truecolor => s.push_str(&format!(";48;2;{r};{g};{b}")),
-                ColorDepth::Ansi256 => s.push_str(&format!(";48;5;{}", rgb_to_ansi256(r, g, b))),
-            }
-        }
-        s.push('m');
-        s
-    }
-}
-
 /// Resolve a model [`Style`] to a terminal [`RStyle`].
 fn resolve_style(style: &Style) -> RStyle {
     RStyle {
@@ -333,31 +281,6 @@ fn resolve_style(style: &Style) -> RStyle {
         underline: style.underline,
         italic: style.italic,
     }
-}
-
-/// One styled character, the unit the layout engine works in.
-#[derive(Clone, Copy, Debug)]
-pub struct StyledChar {
-    /// The visible character.
-    pub ch: char,
-    /// Its resolved style.
-    pub st: RStyle,
-    /// The 1-based index of the link this cell is a clickable part of, if any.
-    /// Leading/trailing whitespace inside a link label is untagged so it stays
-    /// unstyled and outside the hit-test range.
-    pub link: Option<usize>,
-    /// The 1-based index of the form field this cell is part of, if any (the
-    /// whole rendered widget is tagged, including its brackets), for hit-testing
-    /// and the input-box overlay.
-    pub field: Option<usize>,
-}
-
-/// One laid-out output row: a sequence of styled cells, already wrapped,
-/// aligned and indented. The target-agnostic unit both sinks consume.
-#[derive(Clone, Debug, Default)]
-pub struct RLine {
-    /// The row's cells, left to right.
-    pub cells: Vec<StyledChar>,
 }
 
 /// The links that stand alone on their line, by 1-based link index.

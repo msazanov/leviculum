@@ -269,74 +269,18 @@ pub enum FooterAction {
     None,
 }
 
-/// One footer button: a key you can press and a label, which are the same thing
-/// you can also click. The key cell renders bright + bold, the label muted.
-#[derive(Clone, Copy, Debug)]
-pub struct FooterItem {
-    /// The pressable key (bright + bold), e.g. `Alt-←`, `f`, `Esc`.
-    pub key: &'static str,
-    /// The muted descriptive label, e.g. `back`, `hint` (empty for a sentence).
-    pub label: &'static str,
-    /// Whether the key renders before the label. Everything leads with its key
-    /// (`Alt-← back`, `f hint`).
-    pub key_first: bool,
-    /// What a press or click runs.
-    pub action: FooterAction,
-    /// Truncation priority: `None` never drops; `Some(rank)` drops when the row
-    /// is too narrow, lowest rank first.
-    pub drop_rank: Option<u8>,
-    /// Whether the control is currently usable; an unavailable nav item reads
-    /// muted rather than active.
-    pub available: bool,
-}
+/// One footer button of lnomad's strip: [`leviculum_ui::footer::FooterItem`]
+/// over lnomad's [`FooterAction`].
+pub type FooterItem = leviculum_ui::footer::FooterItem<FooterAction>;
 
-impl FooterItem {
-    /// A never-dropped, always-available mode-action button.
-    pub(crate) const fn action(key: &'static str, label: &'static str, act: FooterAction) -> Self {
-        FooterItem {
-            key,
-            label,
-            key_first: true,
-            action: act,
-            drop_rank: None,
-            available: true,
-        }
-    }
+/// A laid-out button of lnomad's strip.
+pub type FooterSlot = leviculum_ui::footer::FooterSlot<FooterAction>;
 
-    /// The same, but droppable at rank `r` when the row is too narrow.
-    pub(crate) const fn droppable(
-        key: &'static str,
-        label: &'static str,
-        act: FooterAction,
-        r: u8,
-    ) -> Self {
-        FooterItem {
-            drop_rank: Some(r),
-            ..FooterItem::action(key, label, act)
-        }
-    }
-
-    /// This item's rendered width, with labels (`false`) or collapsed to the key
-    /// glyph only (`true`).
-    pub(crate) fn width(&self, collapsed: bool) -> u16 {
-        let kw = UnicodeWidthStr::width(self.key) as u16;
-        if collapsed || self.label.is_empty() {
-            return kw.max(UnicodeWidthStr::width(self.label) as u16);
-        }
-        let lw = UnicodeWidthStr::width(self.label) as u16;
-        // key + one space + label (the key may be empty for a sentence).
-        if kw == 0 {
-            lw
-        } else {
-            kw + 1 + lw
-        }
-    }
-
-    /// Whether this item is part of the navigation trio (rendered before the
-    /// stronger divider).
-    pub(crate) fn is_nav(&self) -> bool {
+impl leviculum_ui::footer::FooterRole for FooterAction {
+    /// The navigation trio, rendered before the stronger divider.
+    fn is_nav(&self) -> bool {
         matches!(
-            self.action,
+            self,
             FooterAction::Back | FooterAction::Forward | FooterAction::Reload
         )
     }
@@ -425,115 +369,10 @@ pub(crate) fn footer_items(model: &Model) -> Vec<FooterItem> {
     items
 }
 
-/// The width of the divider drawn before the item at `kept`-position `pos`: a
-/// ` │ ` between items (a single space in collapsed mode, except at the stronger
-/// nav/mode boundary). Position 0 has no leading divider.
-pub(crate) fn footer_divider_width(pos: usize, is_strong: bool, collapsed: bool) -> u16 {
-    if pos == 0 {
-        0
-    } else if !collapsed || is_strong {
-        3 // " │ "
-    } else {
-        1 // a single space between collapsed glyphs
-    }
-}
-
-/// A laid-out footer button: the original item, whether its label is shown, and
-/// its screen rect. Drives rendering, click hit-testing and hover highlight.
-#[derive(Clone, Copy, Debug)]
-pub struct FooterSlot {
-    pub item: FooterItem,
-    /// Index into `footer_items` for the current mode (stable per mode), so a
-    /// hover can be remembered across the move-then-render round trip.
-    pub index: usize,
-    /// Whether the divider before this slot is the stronger nav/mode one.
-    pub strong_divider: bool,
-    /// The width of the divider gap before this slot (0 for the first slot).
-    pub div_before: u16,
-    pub collapsed: bool,
-    pub rect: Rect,
-}
-
-/// Lay the footer buttons out across `area`, dropping and then collapsing by
-/// priority so the row never overflows. Returns the kept slots (in order) with
-/// their screen rects.
+/// Lay lnomad's footer buttons out across `area`
+/// ([`leviculum_ui::footer::layout`] over [`footer_items`]).
 pub(crate) fn footer_layout(model: &Model, area: Rect) -> Vec<FooterSlot> {
-    let items = footer_items(model);
-
-    // Total width of a kept subset, laid with the given collapse.
-    let total_width = |kept: &[usize], collapsed: bool| -> u16 {
-        let mut w = 0u16;
-        for (pos, &i) in kept.iter().enumerate() {
-            let strong = footer_strong_before(&items, kept, pos);
-            w = w.saturating_add(footer_divider_width(pos, strong, collapsed));
-            w = w.saturating_add(items[i].width(collapsed));
-        }
-        w
-    };
-
-    // Drop droppable items (lowest rank first) until the subset fits.
-    let shrink = |collapsed: bool| -> Vec<usize> {
-        let mut kept: Vec<usize> = (0..items.len()).collect();
-        while total_width(&kept, collapsed) > area.width {
-            let victim = kept
-                .iter()
-                .copied()
-                .filter(|&i| items[i].drop_rank.is_some())
-                .min_by_key(|&i| items[i].drop_rank.unwrap_or(u8::MAX));
-            match victim {
-                Some(v) => kept.retain(|&i| i != v),
-                None => break,
-            }
-        }
-        kept
-    };
-
-    // Prefer full labels; only when even the non-droppable core overflows do we
-    // collapse to keys (re-adding items, since keys keep more of them).
-    let (kept, collapsed) = {
-        let labelled = shrink(false);
-        if total_width(&labelled, false) <= area.width {
-            (labelled, false)
-        } else {
-            (shrink(true), true)
-        }
-    };
-
-    // Assign rects left to right.
-    let mut out = Vec::with_capacity(kept.len());
-    let mut x = area.x;
-    for (pos, &i) in kept.iter().enumerate() {
-        let strong = footer_strong_before(&items, &kept, pos);
-        let dw = footer_divider_width(pos, strong, collapsed);
-        x = x.saturating_add(dw);
-        let w = items[i].width(collapsed);
-        out.push(FooterSlot {
-            item: items[i],
-            index: i,
-            strong_divider: strong,
-            div_before: dw,
-            collapsed,
-            rect: Rect {
-                x,
-                y: area.y,
-                width: w,
-                height: 1,
-            },
-        });
-        x = x.saturating_add(w);
-    }
-    out
-}
-
-/// Whether the divider before the kept item at `pos` is the stronger nav/mode
-/// boundary: true for the first non-nav item that follows a nav item.
-pub(crate) fn footer_strong_before(items: &[FooterItem], kept: &[usize], pos: usize) -> bool {
-    if pos == 0 {
-        return false;
-    }
-    let cur = &items[kept[pos]];
-    let prev = &items[kept[pos - 1]];
-    prev.is_nav() && !cur.is_nav()
+    leviculum_ui::footer::layout(footer_items(model), area)
 }
 
 /// Whether the footer currently shows its button strip. It now always does,
@@ -559,24 +398,7 @@ pub fn focused_link_target(model: &Model) -> Option<String> {
     }
 }
 
-/// One keybinding shown in the help overlay: the keys and their description. The
-/// description column is COMPUTED from the widest `keys` across all groups (see
-/// [`help_lines`]), never hand-padded, so it can never misalign.
-pub(crate) struct HelpEntry {
-    pub(crate) keys: &'static str,
-    pub(crate) desc: &'static str,
-}
-
-/// A titled group of [`HelpEntry`]s in the help overlay.
-pub(crate) struct HelpGroup {
-    pub(crate) title: &'static str,
-    pub(crate) entries: Vec<HelpEntry>,
-}
-
-/// The indent applied to every entry (its keys and description) under a group.
-pub(crate) const HELP_INDENT: &str = "  ";
-/// The gap between the (padded) keys column and the description column.
-pub(crate) const HELP_GAP: usize = 2;
+pub(crate) use leviculum_ui::help::{HelpEntry, HelpGroup};
 
 /// The keybinding groups shown in the help overlay. The Move group's scroll rows
 /// are pulled straight from [`SCROLL_KEYS`], so the overlay can never list a
@@ -710,42 +532,11 @@ pub(crate) fn help_groups() -> Vec<HelpGroup> {
     ]
 }
 
-/// The widest `keys` display width across every entry of every group: the width
-/// the keys column is padded to so all descriptions align.
-pub(crate) fn help_key_col(groups: &[HelpGroup]) -> usize {
-    groups
-        .iter()
-        .flat_map(|g| g.entries.iter())
-        .map(|e| UnicodeWidthStr::width(e.keys))
-        .max()
-        .unwrap_or(0)
-}
-
-/// The plain-text lines of the help overlay: each group's title, then its
-/// entries with every description aligned to the computed keys column, with a
-/// blank line between groups. The renderer and the layout both derive from this,
-/// so widths can never disagree and no padding is hand-counted. The block's own
-/// border title carries the heading, so no heading line lives in the body.
+/// The plain-text lines of lnomad's help overlay ([`leviculum_ui::help::lines`]
+/// over [`help_groups`]). The renderer and the layout both derive from this, so
+/// widths can never disagree.
 pub(crate) fn help_lines() -> Vec<String> {
-    let groups = help_groups();
-    let col = help_key_col(&groups);
-    let mut lines = Vec::new();
-    for (gi, group) in groups.iter().enumerate() {
-        if gi > 0 {
-            lines.push(String::new());
-        }
-        lines.push(group.title.to_string());
-        for e in &group.entries {
-            let pad = col.saturating_sub(UnicodeWidthStr::width(e.keys)) + HELP_GAP;
-            lines.push(format!(
-                "{HELP_INDENT}{}{}{}",
-                e.keys,
-                " ".repeat(pad),
-                e.desc
-            ));
-        }
-    }
-    lines
+    leviculum_ui::help::lines(&help_groups())
 }
 
 /// The help overlay's scroll geometry for the current terminal size: the number

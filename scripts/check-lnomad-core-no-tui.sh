@@ -25,37 +25,46 @@
 # source check, and tui-input with its default features is refused by the
 # graph check, naming the crate.
 #
-# Usage: check-lnomad-core-no-tui.sh --static | --build
+# The same two checks guard leviculum-ui, the terminal-free half of the UI
+# lnomad and lnmsg share (984, Codeberg #475): `--ui-static` runs source (over
+# leviculum-ui/src/) and graph (leviculum-ui with every feature) after its own
+# positive control, an injected ratatui import and tui-input's default
+# features in leviculum-ui's copy; `--ui-build` lints the crate alone. Its
+# terminal half, leviculum-ui-ratatui, is itself a forbidden name in both
+# graphs.
+#
+# Usage: check-lnomad-core-no-tui.sh --static | --build | --ui-static | --ui-build
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TAG="[lnomad-core-no-tui]"
-FORBIDDEN=(ratatui crossterm termbg terminal_size ratatui-image)
+FORBIDDEN=(ratatui crossterm termbg terminal_size ratatui-image leviculum-ui-ratatui)
 
-# check_source <workspace-root>
+# check_source <workspace-root> [<source dir, relative>]
 check_source() {
-    local core="$1/lnomad/src/app" hits
+    local rel="${2:-lnomad/src/app}"
+    local core="$1/$rel" hits
     # Comments may name the crates (the core documents what it mirrors);
     # code may not. `//` to end of line is dropped before matching.
     hits="$(grep -rn --include='*.rs' '' "$core" \
         | awk -F: '{line=$0; sub(/^[^:]*:[^:]*:/, "", line); sub(/\/\/.*/, "", line);
-                    if (line ~ /(^|[^A-Za-z0-9_])(ratatui|crossterm|termbg|terminal_size|ratatui_image|tui_input::backend)::/ ||
+                    if (line ~ /(^|[^A-Za-z0-9_])(ratatui|crossterm|termbg|terminal_size|ratatui_image|leviculum_ui_ratatui|tui_input::backend)::/ ||
                         line ~ /feature *= *"tui"/) print $1 ":" $2 ": " line}')"
     if [ -n "$hits" ]; then
-        echo "$TAG FAIL the core names a terminal crate or the tui feature:"
+        echo "$TAG FAIL $rel names a terminal crate or the tui feature:"
         printf '%s\n' "$hits" | sed "s#^$1/##; s/^/  /"
         echo "$TAG The core takes AppEvent in and gives Effect out; terminal types"
-        echo "$TAG belong in lnomad/src/tui.rs."
+        echo "$TAG belong in lnomad/src/tui.rs or leviculum-ui-ratatui."
         return 1
     fi
-    echo "$TAG ok   lnomad/src/app/ names no terminal crate and no tui gate"
+    echo "$TAG ok   $rel/ names no terminal crate and no tui gate"
 }
 
-# check_graph <workspace-root> <cargo lock flag>
+# check_graph <workspace-root> <cargo lock flag> [<package> <feature flag>]
 check_graph() {
-    local tree
-    if ! tree="$(cd "$1" && cargo tree "$2" -p lnomad --no-default-features \
+    local tree pkg="${3:-lnomad}" feat="${4:---no-default-features}"
+    if ! tree="$(cd "$1" && cargo tree "$2" -p "$pkg" "$feat" \
         -e normal --prefix none 2>&1)"; then
         echo "$TAG ERROR cargo tree failed:"
         printf '%s\n' "$tree" | sed 's/^/  /'
@@ -72,22 +81,28 @@ check_graph() {
     if [ "${#hits[@]}" -gt 0 ]; then
         mapfile -t hits < <(printf '%s\n' "${hits[@]}" | sort -u)
         for name in "${hits[@]}"; do
-            echo "$TAG FAIL lnomad without the tui feature carries $name"
-            echo "$TAG   path: $(cd "$1" && cargo tree "$2" -p lnomad --no-default-features \
+            echo "$TAG FAIL $pkg ($feat) carries $name"
+            echo "$TAG   path: $(cd "$1" && cargo tree "$2" -p "$pkg" "$feat" \
                 -e normal -i "$name" --prefix none 2>/dev/null | tr '\n' ' ')"
         done
-        echo "$TAG A terminal crate is an optional dependency behind the tui feature."
+        echo "$TAG A terminal crate is an optional dependency behind lnomad's tui"
+        echo "$TAG feature, and never one of leviculum-ui's."
         return 1
     fi
-    echo "$TAG ok   none of ${FORBIDDEN[*]} in lnomad's graph without the tui feature"
+    echo "$TAG ok   none of ${FORBIDDEN[*]} in $pkg's graph ($feat)"
+}
+
+# copy_tree <dest>: the workspace manifests and Rust sources the index knows.
+copy_tree() {
+    (cd "$ROOT" && git ls-files -z Cargo.toml Cargo.lock '*/Cargo.toml' '*.rs' \
+        | xargs -0 cp --parents -t "$1")
 }
 
 selftest() {
     local tmp out rc=0 rc2
     tmp="$(mktemp -d)"
     trap 'rm -rf "$tmp"' RETURN
-    (cd "$ROOT" && git ls-files -z Cargo.toml Cargo.lock '*/Cargo.toml' '*.rs' \
-        | xargs -0 cp --parents -t "$tmp")
+    copy_tree "$tmp"
     # The core files may be new and not yet committed; the copy takes the
     # working tree's core, which is what the real check reads too.
     mkdir -p "$tmp/lnomad/src/app"
@@ -122,6 +137,44 @@ selftest() {
     return "$rc"
 }
 
+# The same positive control for leviculum-ui: the working tree's crate passes
+# both checks, an injected ratatui import is refused by the source check, and
+# tui-input with its default features by the graph check.
+selftest_ui() {
+    local tmp out rc=0 rc2
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' RETURN
+    copy_tree "$tmp"
+    mkdir -p "$tmp/leviculum-ui/src"
+    cp "$ROOT"/leviculum-ui/src/*.rs "$tmp/leviculum-ui/src/"
+    cp "$ROOT/leviculum-ui/Cargo.toml" "$tmp/leviculum-ui/Cargo.toml"
+    if ! out="$(check_source "$tmp" leviculum-ui/src \
+        && check_graph "$tmp" --offline leviculum-ui --all-features)"; then
+        printf '%s\n' "$out"
+        echo "$TAG FAIL before any injection: the working tree is refused (above)"
+        return 1
+    fi
+    printf 'use ratatui::layout::Rect;\n' >> "$tmp/leviculum-ui/src/lib.rs"
+    rc2=0
+    out="$(check_source "$tmp" leviculum-ui/src)" || rc2=$?
+    if [ "$rc2" -ne 1 ] || ! printf '%s\n' "$out" | grep -qF "use ratatui::layout::Rect"; then
+        echo "$TAG SELFTEST FAIL: an injected ratatui import in leviculum-ui was not refused (exit $rc2)"
+        printf '%s\n' "$out"
+        rc=1
+    fi
+    sed -i -E 's/^tui-input = \{ version = "0.15", default-features = false \}$/tui-input = "0.15"/' \
+        "$tmp/leviculum-ui/Cargo.toml"
+    rc2=0
+    out="$(check_graph "$tmp" --offline leviculum-ui --all-features)" || rc2=$?
+    if [ "$rc2" -ne 1 ] || ! printf '%s\n' "$out" | grep -qF "carries ratatui"; then
+        echo "$TAG SELFTEST FAIL: tui-input with default features in leviculum-ui was not refused (exit $rc2)"
+        printf '%s\n' "$out"
+        rc=1
+    fi
+    [ "$rc" -eq 0 ] && echo "$TAG selftest ok: leviculum-ui refuses an injected ratatui import and tui-input's default features"
+    return "$rc"
+}
+
 case "${1:-}" in
     --static)
         selftest
@@ -133,8 +186,20 @@ case "${1:-}" in
             --quiet -- -D warnings)
         echo "$TAG ok   lnomad's core builds and lints clean without the tui feature"
         ;;
+    --ui-static)
+        TAG="[ui-no-terminal]"
+        selftest_ui
+        check_source "$ROOT" leviculum-ui/src
+        check_graph "$ROOT" --frozen leviculum-ui --all-features
+        ;;
+    --ui-build)
+        TAG="[ui-no-terminal]"
+        (cd "$ROOT" && cargo clippy --frozen -p leviculum-ui --all-targets --all-features \
+            --quiet -- -D warnings)
+        echo "$TAG ok   leviculum-ui builds and lints clean on its own"
+        ;;
     *)
-        echo "usage: $0 --static | --build" >&2
+        echo "usage: $0 --static | --build | --ui-static | --ui-build" >&2
         exit 2
         ;;
 esac

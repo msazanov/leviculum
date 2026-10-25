@@ -14,12 +14,7 @@
 //! arithmetic and the decisions, so they can be tested without a terminal.
 
 #[cfg(feature = "tui")]
-use ratatui_image::picker::ProtocolType;
-#[cfg(feature = "tui")]
-use ratatui_image::FontSize;
-
-#[cfg(feature = "tui")]
-use crate::color::ColorDepth;
+pub use leviculum_ui_ratatui::images::{choose_backend, Backend};
 
 /// The file extensions treated as inline images, lowercase.
 ///
@@ -43,94 +38,38 @@ pub const MAX_INLINE_IMAGES: usize = 8;
 /// Deliberately not applied to half-blocks: there a row IS two pixels of
 /// resolution, so the same cap costs detail rather than screen estate, and a
 /// picture drawn small enough to fit the cap is a picture nobody can make out
-/// (see the half-block sizing note on [`Backend::cell_pixels`]).
+/// (see the half-block sizing note on `Backend::cell_pixels` in
+/// `leviculum-ui-ratatui`).
 pub const MAX_IMAGE_ROWS: u16 = 24;
 
 /// How many viewport heights a half-block picture may occupy. See
-/// [`Backend::max_rows`] for why this is not 1: with half-blocks, height is
+/// `max_rows` for why this is not 1: with half-blocks, height is
 /// resolution, and a picture nobody can make out is worth less than one that
 /// costs a scroll.
 pub const HALFBLOCK_VIEWPORT_MULTIPLE: usize = 2;
 
-/// How the terminal will be asked to draw pictures.
+#[cfg(feature = "tui")]
+/// The row ceiling for an inline image on `backend`, given the page's
+/// viewport height.
 ///
-/// Not `Eq`: `ProtocolType` is only `PartialEq` upstream.
-#[cfg(feature = "tui")]
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Backend {
-    /// A real graphics protocol: Kitty, iTerm2 or Sixel.
-    Graphics(ProtocolType),
-    /// Unicode half-blocks with foreground and background colour. Works on any
-    /// colour terminal, at two pixels per cell.
-    Halfblocks,
-    /// No picture at all: a text box naming the file. What a monochrome
-    /// terminal, `--no-color`, or an undecodable payload gets.
-    Text,
-}
-
-#[cfg(feature = "tui")]
-impl Backend {
-    /// How many image pixels one character cell carries, which is what
-    /// "natural size" has to be measured in.
-    ///
-    /// A graphics protocol paints the cell's full pixel box, so the terminal's
-    /// font size is the answer. Half-blocks carry exactly one pixel across and
-    /// two down — the upper and lower half of the cell — whatever the font
-    /// size is. Measuring half-blocks against the font size was the bug this
-    /// distinction exists for: a 300x300 portrait came out as 38x38 pixels on
-    /// an 8x16 font, when the same 78-column page had room for 78x44.
-    pub fn cell_pixels(self, font: FontSize) -> (u16, u16) {
-        match self {
-            Backend::Graphics(_) => (font.width.max(1), font.height.max(1)),
-            Backend::Halfblocks => (1, 2),
-            // Nothing is drawn; the value is never used.
-            Backend::Text => (font.width.max(1), font.height.max(1)),
-        }
-    }
-
-    /// The row ceiling for an inline image on this backend, given the page's
-    /// viewport height.
-    ///
-    /// Under a graphics protocol the cap keeps one photograph from taking over
-    /// the page, and costs no detail: the pixels are there either way.
-    ///
-    /// Under half-blocks a row IS two pixels, so the same cap is the thing
-    /// standing between the reader and a recognisable picture. A square
-    /// portrait on a 24-row terminal fits 22 rows, i.e. 44 pixels tall, and
-    /// the aspect ratio then holds it to 44 wide however many columns the page
-    /// has. Allowing [`HALFBLOCK_VIEWPORT_MULTIPLE`] screens of height lets the
-    /// WIDTH become the binding constraint instead, which is what a reader
-    /// actually has to spare: the same portrait then fills 78 columns at 78x78
-    /// pixels — twice the linear resolution — at the price of scrolling once.
-    pub fn max_rows(self, viewport: usize) -> u16 {
-        let room = viewport.saturating_sub(2).max(1);
-        let bounded = match self {
-            Backend::Halfblocks => room.saturating_mul(HALFBLOCK_VIEWPORT_MULTIPLE),
-            _ => return MAX_IMAGE_ROWS.min(room.min(u16::MAX as usize) as u16),
-        };
-        bounded.min(u16::MAX as usize) as u16
-    }
-}
-
-/// Choose how to draw, from what the terminal answered and how much colour it
-/// has.
+/// Under a graphics protocol the cap keeps one photograph from taking over
+/// the page, and costs no detail: the pixels are there either way.
 ///
-/// The ladder is: a graphics protocol if the terminal claimed one; else
-/// half-blocks if there is colour to draw them with; else text. `no_color`
-/// overrides everything — a reader who asked for no colour did not ask for a
-/// picture painted out of coloured blocks either, and the graphics protocols
-/// are excluded with it so `--no-color` output stays plain.
-#[cfg(feature = "tui")]
-pub fn choose_backend(detected: ProtocolType, depth: ColorDepth, no_color: bool) -> Backend {
-    if no_color {
-        return Backend::Text;
-    }
-    match detected {
-        ProtocolType::Halfblocks => match depth {
-            ColorDepth::Truecolor | ColorDepth::Ansi256 => Backend::Halfblocks,
-        },
-        graphics => Backend::Graphics(graphics),
-    }
+/// Under half-blocks a row IS two pixels, so the same cap is the thing
+/// standing between the reader and a recognisable picture. A square
+/// portrait on a 24-row terminal fits 22 rows, i.e. 44 pixels tall, and
+/// the aspect ratio then holds it to 44 wide however many columns the page
+/// has. Allowing [`HALFBLOCK_VIEWPORT_MULTIPLE`] screens of height lets the
+/// WIDTH become the binding constraint instead, which is what a reader
+/// actually has to spare: the same portrait then fills 78 columns at 78x78
+/// pixels — twice the linear resolution — at the price of scrolling once.
+pub fn max_rows(backend: Backend, viewport: usize) -> u16 {
+    let room = viewport.saturating_sub(2).max(1);
+    let bounded = match backend {
+        Backend::Halfblocks => room.saturating_mul(HALFBLOCK_VIEWPORT_MULTIPLE),
+        _ => return MAX_IMAGE_ROWS.min(room.min(u16::MAX as usize) as u16),
+    };
+    bounded.min(u16::MAX as usize) as u16
 }
 
 /// The name a `/file/` request path points at, or `None` when the path is not
@@ -368,6 +307,7 @@ fn describe_inner(name: &str, probe: Option<&Probe>) -> String {
 #[cfg(all(test, feature = "tui"))]
 mod tests {
     use super::*;
+    use leviculum_ui_ratatui::images::{FontSize, ProtocolType};
 
     fn font() -> FontSize {
         FontSize {
@@ -422,38 +362,6 @@ mod tests {
             "/file/a.png"
         );
         assert_eq!(link_path("/file/a.png"), "/file/a.png");
-    }
-
-    #[test]
-    fn the_backend_ladder_ends_in_text() {
-        // A terminal that answered for a graphics protocol gets it.
-        assert_eq!(
-            choose_backend(ProtocolType::Kitty, ColorDepth::Truecolor, false),
-            Backend::Graphics(ProtocolType::Kitty)
-        );
-        assert_eq!(
-            choose_backend(ProtocolType::Sixel, ColorDepth::Ansi256, false),
-            Backend::Graphics(ProtocolType::Sixel)
-        );
-        // One that did not falls back to coloured blocks.
-        assert_eq!(
-            choose_backend(ProtocolType::Halfblocks, ColorDepth::Truecolor, false),
-            Backend::Halfblocks
-        );
-        assert_eq!(
-            choose_backend(ProtocolType::Halfblocks, ColorDepth::Ansi256, false),
-            Backend::Halfblocks
-        );
-        // --no-color means no picture, not a picture in fewer colours. It
-        // overrides even a working graphics protocol.
-        assert_eq!(
-            choose_backend(ProtocolType::Halfblocks, ColorDepth::Truecolor, true),
-            Backend::Text
-        );
-        assert_eq!(
-            choose_backend(ProtocolType::Kitty, ColorDepth::Truecolor, true),
-            Backend::Text
-        );
     }
 
     #[test]
@@ -514,20 +422,20 @@ mod tests {
         // because there height IS resolution.
         let tall = 60;
         assert_eq!(
-            Backend::Graphics(ProtocolType::Kitty).max_rows(tall),
+            max_rows(Backend::Graphics(ProtocolType::Kitty), tall),
             MAX_IMAGE_ROWS
         );
         assert_eq!(
-            Backend::Halfblocks.max_rows(tall),
+            max_rows(Backend::Halfblocks, tall),
             ((tall - 2) * HALFBLOCK_VIEWPORT_MULTIPLE) as u16
         );
         // A short viewport still bounds both, and never yields zero rows.
         assert_eq!(
-            Backend::Halfblocks.max_rows(3),
+            max_rows(Backend::Halfblocks, 3),
             HALFBLOCK_VIEWPORT_MULTIPLE as u16
         );
         assert_eq!(
-            Backend::Halfblocks.max_rows(0),
+            max_rows(Backend::Halfblocks, 0),
             HALFBLOCK_VIEWPORT_MULTIPLE as u16
         );
     }

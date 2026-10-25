@@ -178,6 +178,16 @@ interface](lnmsg-ui.md), section 2); each frontend maps them to its
 input. Code is shared where it is the same problem (model, update,
 layout), not for its own sake (rendering, input).
 
+2026-10-25 (984): on the terminal the shared code is two crates.
+`leviculum-ui` is the terminal-free half (styled text, palette, the key
+and mouse events with the text-editing table, the footer, help and toast
+models, the spinner frames, and the delivery glyph table), so a core can
+take it and stay terminal-free; `leviculum-ui-ratatui` is the ratatui half
+(the widgets, the terminal lifecycle, the event mapping, inline pictures).
+`lnomad` draws through them already; `lnmsg`'s TUI is built on them. The
+palette model is not there yet: `lnomad` has none to extract, so it lands
+with `lnmsg`'s TUI, in `leviculum-ui`, for both.
+
 ## Open
 
 - **The licence text for the map data.** OSM data is ODbL: which notice

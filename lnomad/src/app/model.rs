@@ -19,6 +19,7 @@ use crate::render::{
 };
 use crate::theme::Theme;
 use crate::url::Target;
+pub(crate) use leviculum_ui::text::truncate_to_cols;
 
 use super::chrome::*;
 use super::event::*;
@@ -78,54 +79,6 @@ pub(crate) fn content_width(cols: u16) -> usize {
 /// the fixed top-bar and status bar.
 pub(crate) fn content_height(rows: u16) -> usize {
     rows.saturating_sub(CHROME_ROWS) as usize
-}
-
-/// The column width a terminal actually PAINTS for `s`, used to fit text into a
-/// box. This is `unicode-width` PLUS one column for every `U+FE0F` VARIATION
-/// SELECTOR-16: `unicode-width` scores VS16 as 0 and a text-default base (e.g.
-/// `U+262F ☯`) as 1, but a terminal draws the resulting emoji-presentation
-/// sequence 2 columns wide. Over-counting is safe when fitting — we truncate a
-/// column early; under-counting overflows a border. ZWJ sequences are already
-/// over-counted by `unicode-width`, which is likewise safe, so they are left be.
-///
-/// This is deliberately a DIFFERENT notion of width from the plain
-/// `unicode-width` used for cell POSITIONS (`visible_links`, `visible_fields`,
-/// the search-match columns): those must keep agreeing with ratatui's own
-/// `unicode-width` cell layout for hit-testing. `fit_width` measures what the
-/// TERMINAL paints; the plain width measures what ratatui ADDRESSES.
-pub(crate) fn fit_width(s: &str) -> usize {
-    s.chars()
-        .map(|c| UnicodeWidthChar::width(c).unwrap_or(0) + usize::from(c == '\u{FE0F}'))
-        .sum()
-}
-
-/// Truncate `s` to at most `cols` display columns, ending with a `…` when
-/// anything is cut. Uses [`fit_width`] so an emoji-presentation sequence counts
-/// as the two columns a terminal paints, so the returned string never spills
-/// over a `cols`-wide overlay border. A zero budget yields an empty string.
-pub(crate) fn truncate_to_cols(s: &str, cols: usize) -> String {
-    if cols == 0 {
-        return String::new();
-    }
-    if fit_width(s) <= cols {
-        return s.to_string();
-    }
-    // Reserve one column for the ellipsis, then take as many full characters as
-    // fit. A wide char that would straddle the budget is dropped whole, so the
-    // result never exceeds `cols`.
-    let budget = cols - 1;
-    let mut out = String::new();
-    let mut width = 0usize;
-    for c in s.chars() {
-        let w = UnicodeWidthChar::width(c).unwrap_or(0) + usize::from(c == '\u{FE0F}');
-        if width + w > budget {
-            break;
-        }
-        out.push(c);
-        width += w;
-    }
-    out.push('…');
-    out
 }
 
 /// A vertical scroll motion, resolved against the current viewport height in
@@ -528,33 +481,7 @@ pub enum Effect {
     Quit,
 }
 
-/// Whether a transient toast carries an error or a neutral/success note. Drives
-/// the toast's accent colour and glyph.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ToastKind {
-    /// A failure the reader should notice (a bad link, a failed fetch): drawn in
-    /// an attention colour with a `⚠` prefix.
-    Error,
-    /// A neutral confirmation (copied, bookmarked, cancelled): drawn in a calm
-    /// colour with a `✓` prefix.
-    Info,
-}
-
-/// A transient, auto-dismissing notification floated over the content. Replaces
-/// the old sticky status-bar messages, leaving the status bar for the key-hints
-/// (or the loading spinner during a fetch).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Toast {
-    /// Whether this is an error or a neutral note.
-    pub kind: ToastKind,
-    /// The message text; carries the offending target for error toasts so it is
-    /// self-describing.
-    pub text: String,
-    /// The [`Model::now_tick`] value when the toast was shown, so its age (and
-    /// thus expiry) is a pure function of the monotonic tick counter and needs no
-    /// wall clock to unit-test.
-    pub shown_at: u64,
-}
+pub use leviculum_ui::toast::{Toast, ToastKind};
 
 /// The complete UI state. Pure data: [`update`] is the only thing that mutates
 /// it, and it never performs IO.

@@ -3,6 +3,8 @@ resolver = "2"
 members = [
     "leviculum-core",
     "leviculum-micron",
+    "leviculum-ui",
+    "leviculum-ui-ratatui",
     "lnomad",
     "lblogd",
     "leviculum-lxmf",
@@ -33,6 +35,8 @@ members = [
 default-members = [
     "leviculum-core",
     "leviculum-micron",
+    "leviculum-ui",
+    "leviculum-ui-ratatui",
     "lnomad",
     "lblogd",
     "leviculum-lxmf-node",

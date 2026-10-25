@@ -2143,6 +2143,28 @@ name = "leviculum-telemetry-policy"
 version = "0.1.0"
 
 [[package]]
+name = "leviculum-ui"
+version = "0.10.0-dev"
+dependencies = [
+ "tui-input",
+ "unicode-width",
+]
+
+[[package]]
+name = "leviculum-ui-ratatui"
+version = "0.10.0-dev"
+dependencies = [
+ "crossterm",
+ "image",
+ "leviculum-ui",
+ "ratatui",
+ "ratatui-image",
+ "termbg",
+ "tui-input",
+ "unicode-width",
+]
+
+[[package]]
 name = "libbz2-rs-sys"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2277,13 +2299,13 @@ dependencies = [
  "leviculum-core",
  "leviculum-micron",
  "leviculum-std",
+ "leviculum-ui",
+ "leviculum-ui-ratatui",
  "open",
  "ratatui",
- "ratatui-image",
  "rmpv",
  "serde",
  "tempfile",
- "termbg",
  "terminal_size",
  "thiserror 2.0.17",
  "tokio",
