@@ -107,7 +107,9 @@ for the interactive shell where the operator reads the `LNMSG_PN`
 line. What is persisted where: the identity at `${LNMSG_HOME}/identity`,
 the node default in `${LNMSG_HOME}/config`, the cross-run seen-message
 ids in `${LNMSG_HOME}/seen`; the selection itself is per-run and never
-written back.
+written back. (Superseded 2026-10-25: without `--pn` or the config
+key the adoption rule below decides, and its choice is written to
+`${LNMSG_HOME}/mailbox`.)
 
 ### Which node, and the trust question
 
@@ -116,7 +118,7 @@ TRUSTED** (its `NomadNetworkApp.py`, lines 607-631). columba auto-selects
 the fewest-hops node, full stop. The library's own auto-selection ranks by
 route, hops, peering cost and stamp cost
 (`select_outbound_propagation_node`,
-`leviculum-lxmf/src/router/propagation_runtime.rs:1214-1249`) with no trust
+`leviculum-lxmf/src/router/propagation_runtime.rs:1255-1297`) with no trust
 input at all, because it has no notion of trust.
 
 Your mailbox sees the *envelope* of every message sent to you: who sent it
@@ -132,6 +134,38 @@ accept. Automatic *failover* between nodes the user has already approved is
 fine and the library already does it
 (`leviculum-lxmf/src/router/propagation_runtime.rs:825-846`); automatic
 *adoption* of a stranger is not.
+
+**Amended 2026-10-25, Lew.** The paragraph above is superseded: zero-config
+is the rule for the messenger too ([Zero-config](zero-config.md)), and a
+picker in front of the first message is a settings dialog by another name.
+The messenger now adopts a node by itself, on first run and whenever the
+selected node becomes unreachable, and **shows** the choice; the picker is
+where the user changes it, not a gate before it. Adoption makes a node
+*selected*, never *trusted*; the envelope argument above still stands, and
+it is why the choice is shown rather than hidden.
+
+One node is never adopted: **the one on this device**. A mailbox is where
+others deliver while the messenger is off, and a node that is off whenever
+the messenger is holds nothing for it. The exception is the household: a
+stationary board or host that stays on is a fine mailbox for a phone or a
+laptop messenger, so the rule is "not the node on this device", not "not
+our node". A user who names the own node explicitly keeps it.
+
+How lnmsg tells the node on this device apart, measured 2026-10-25 (order
+967): a propagation node beside the daemon reaches it through a local
+client, so the daemon's path table holds it **zero hops away behind
+`LocalInterface[…]`**; a node anywhere else is at least one hop out on a
+real interface. lnsd with lnpnd and rnsd with lxmd give the same entry,
+so lnmsg reads the path table over the shared-instance RPC
+(`leviculum-std/src/daemon_rpc.rs`) and needs no new surface. The rule is
+`lnmsg/src/mailbox.rs`; its inputs, the persisted selection
+(`${LNMSG_HOME}/mailbox`, the hash and `adopted` or `user`) and the
+`mailbox:` line are `lnmsg/src/mailbox_state.rs`. A client hears only what
+is announced while it is attached, so a first run asks the daemon to
+replay the announces of its nearest path-table entries and selects once
+they are in (`DISCOVERY_LIMIT`, `lnmsg/src/engine.rs`). A daemon whose
+path table lnmsg cannot read (another user's `transport_identity`) gets
+no adoption at all, since nothing then tells the own node from another.
 
 Note that NomadNet's trust propagation makes this worse: trusting a person
 auto-trusts their node (its `Directory.py`, lines 198-202), which makes it

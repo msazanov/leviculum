@@ -848,7 +848,7 @@ of that at once does not answer the question.
    joined it; the authoritative derivation is the compile assert
    (`leviculum-nrf/heap-budget/src/lib.rs:330-337`, N ≤ 19) and the
    concept page says so
-   (`docs/src/concepts/propagation-node-on-a-board.md:936`). The
+   (`docs/src/concepts/propagation-node-on-a-board.md:942`). The
    cap 16 itself is right; the stated arithmetic beside it is the
    stale draft.
 

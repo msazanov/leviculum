@@ -368,11 +368,10 @@ daemon a controller without a configured BLE interface.
    default, which a configless daemon never joins.
 3. **The ceiling numbers.** Two `bootstrap_only` entries and two to three
    discovered are the starting values; a measurement moves them.
-4. **Zero-config against the mailbox's picker.** The messenger starts
-   without a settings dialog (2026-10-25, below), while [lnmsg: the
-   mailbox](lnmsg-mailbox.md) says a propagation node is never adopted
-   silently and asks for one keystroke (`lnmsg-mailbox.md:127`). Which one
-   gives way is Lew's decision and not made.
+4. **Zero-config against the mailbox's picker.** Closed 2026-10-25, Lew:
+   the picker gives way. The messenger adopts a mailbox by itself and
+   shows it, never the node on its own device; see the amendment in
+   [lnmsg: the mailbox](lnmsg-mailbox.md).
 
 ## Decision record
 
