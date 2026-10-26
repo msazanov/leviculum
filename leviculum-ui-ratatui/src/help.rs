@@ -11,9 +11,10 @@ use ratatui::widgets::{
 use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
-use leviculum_ui::help::{key_col, lines, HelpGroup, HELP_GAP, HELP_INDENT};
+use leviculum_ui::help::{key_col, overlay_rect, HelpGroup, HELP_GAP, HELP_INDENT};
 use leviculum_ui::theme::Theme;
 
+use crate::geometry::{from_ratatui, to_ratatui};
 use crate::style::{chrome_muted_style, chrome_style, chrome_text_style};
 
 /// Draw the centered help overlay: the keybindings grouped under dim titles,
@@ -66,23 +67,12 @@ pub fn render(
         }
     }
 
-    // Size the overlay to the widest line plus its two borders, so no line wraps
-    // in a normal-width terminal. `Wrap` below stays as a safety net for
-    // terminals too narrow to hold the widest line. The plain projection gives
-    // the widths so the sizing can never drift from the rendered content.
-    let inner = lines(groups)
-        .iter()
-        .map(|l| UnicodeWidthStr::width(l.as_str()))
-        .max()
-        .unwrap_or(0) as u16;
-    let width = (inner + 2).min(area.width);
-    let height = (styled.len() as u16 + 2).min(area.height);
-    let overlay = Rect {
-        x: area.x + (area.width.saturating_sub(width)) / 2,
-        y: area.y + (area.height.saturating_sub(height)) / 2,
-        width,
-        height,
-    };
+    // Sized to the widest line plus its two borders, so no line wraps in a
+    // normal-width terminal; `Wrap` below stays as a safety net for terminals
+    // too narrow to hold the widest line. The rectangle is the model's
+    // ([`overlay_rect`]), so a click hit-tests against what is drawn.
+    let overlay = to_ratatui(overlay_rect(groups, from_ratatui(area)));
+    let height = overlay.height;
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title)

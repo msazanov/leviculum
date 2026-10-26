@@ -1342,39 +1342,9 @@ pub(crate) fn full_hex(dest: &[u8; 16]) -> String {
     s
 }
 
-/// Encode `text` as an OSC 52 clipboard-set sequence: `ESC ] 52 ; c ;
-/// <base64(text)> ST` (ST = `ESC \`). The IO shell writes this straight to the
-/// terminal, which copies the payload to the system clipboard. Pure, so the
-/// encoding is unit-testable without a terminal.
-pub fn osc52(text: &str) -> String {
-    format!("\x1b]52;c;{}\x1b\\", base64_encode(text.as_bytes()))
-}
-
-/// Standard base64 (RFC 4648, with `=` padding) of `bytes`. Small and local so
-/// the OSC 52 helper needs no extra dependency.
-pub(crate) fn base64_encode(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let b0 = chunk[0] as u32;
-        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
-        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
-        let n = (b0 << 16) | (b1 << 8) | b2;
-        out.push(ALPHABET[(n >> 18) as usize & 0x3f] as char);
-        out.push(ALPHABET[(n >> 12) as usize & 0x3f] as char);
-        out.push(if chunk.len() > 1 {
-            ALPHABET[(n >> 6) as usize & 0x3f] as char
-        } else {
-            '='
-        });
-        out.push(if chunk.len() > 2 {
-            ALPHABET[n as usize & 0x3f] as char
-        } else {
-            '='
-        });
-    }
-    out
-}
+/// The OSC 52 clipboard-set sequence the IO shell writes for a copy: shared
+/// with lnmsg's drag selection, in `leviculum-ui`.
+pub use leviculum_ui::clipboard::osc52;
 
 /// Whether `target` is a non-idempotent form submit: it carries at least one
 /// `field_<name>` value collected from an on-page form. Such requests are never

@@ -11,6 +11,8 @@ use alloc::vec::Vec;
 
 use unicode_width::UnicodeWidthStr;
 
+use crate::geometry::Rect;
+
 /// One keybinding shown in the help overlay: the keys and their description. The
 /// description column is COMPUTED from the widest `keys` across all groups (see
 /// [`lines`]), never hand-padded, so it can never misalign.
@@ -69,4 +71,25 @@ pub fn lines(groups: &[HelpGroup]) -> Vec<String> {
         }
     }
     lines
+}
+
+/// Where the overlay is drawn over `area`: centred, the widest line plus its
+/// two borders wide and every line plus the borders high, each cut to the
+/// area. The renderer draws here and a program's click hit-tests against the
+/// same rectangle, so a click outside it is outside what the reader sees.
+pub fn overlay_rect(groups: &[HelpGroup], area: Rect) -> Rect {
+    let all = lines(groups);
+    let inner = all
+        .iter()
+        .map(|l| UnicodeWidthStr::width(l.as_str()))
+        .max()
+        .unwrap_or(0) as u16;
+    let width = (inner + 2).min(area.width);
+    let height = (all.len() as u16 + 2).min(area.height);
+    Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    }
 }

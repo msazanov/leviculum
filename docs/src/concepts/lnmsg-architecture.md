@@ -31,7 +31,7 @@ shows are derived from those chords:
 Resolution takes the most specific matching chord, the first among equals,
 which for these rows is the first-match scan `lnomad` always had
 (`best`, `leviculum-ui/src/keymap.rs:517`; `key_to_scroll`,
-`lnomad/src/app/event.rs:1954`). The table is read by both the key handler
+`lnomad/src/app/event.rs:1924`). The table is read by both the key handler
 and the help overlay (`lnomad/src/app/chrome.rs:406`).
 
 **What is not.** Everything else is a hand-written `if`-chain in
@@ -168,7 +168,7 @@ colours are hard-coded (`leviculum-ui/src/theme.rs:113-194`).
 **The handoff that already exists.** `lnomad` recognises `lxmf@<hash>`
 links, and because it has no composer it copies the address to the
 clipboard and says so in a toast (`follow_link`,
-`lnomad/src/app/event.rs:1598-1607`). The messenger is the natural target of that
+`lnomad/src/app/event.rs:1568-1577`). The messenger is the natural target of that
 handoff, and wiring the two together is an explicit goal.
 
 ## 2. `leviculum-lxmf`: what it gives and what it does not
@@ -806,9 +806,9 @@ toast whose expiry is a pure function and therefore unit-testable without
 real time passing (`Toast`, `leviculum-ui/src/toast.rs:23-33`, test at
 `lnomad/src/tui.rs:2763`),
 the `TerminalGuard` RAII plus panic hook that restores the terminal before
-the backtrace prints (`leviculum-ui-ratatui/src/terminal.rs:56-98`), and OSC 52 for the
+the backtrace prints (`leviculum-ui-ratatui/src/terminal.rs:81-123`), and OSC 52 for the
 clipboard so copy works over SSH with no X11 dependency (`osc52`,
-`lnomad/src/app/event.rs:1349-1381`).
+`leviculum-ui/src/clipboard.rs:14-42`, shared with `lnmsg` since 1036).
 
 **One thing to fix from day one**: `lnomad` is 11,873 lines in
 `src/tui.rs`. A messenger has strictly more state. Split

@@ -6,9 +6,11 @@
 //! palette and its colour maths, the programs' own key and mouse events with
 //! the text-editing table over them, the keymap table every reader of a
 //! key takes its chords from, the chrome models (footer strip, help
-//! overlay, toast), the loading spinner, and the delivery glyph table of
-//! `docs/src/concepts/lnmsg-ui.md`. No terminal crate is named here, which
-//! is what lets a program's core take these types and stay terminal-free;
+//! overlay, toast), the loading spinner, the delivery glyph table of
+//! `docs/src/concepts/lnmsg-ui.md`, the OSC 52 clipboard sequence, and the
+//! rule for following a link, with the finder for links in a message's
+//! text. No terminal crate is named here, which is what lets a program's
+//! core take these types and stay terminal-free;
 //! `just ui-no-terminal` checks it. The ratatui widgets over this model are
 //! `leviculum-ui-ratatui`.
 //!
@@ -24,6 +26,7 @@
 
 extern crate alloc;
 
+pub mod clipboard;
 pub mod color;
 pub mod commands;
 pub mod delivery;
@@ -32,6 +35,7 @@ pub mod geometry;
 pub mod help;
 pub mod input;
 pub mod keymap;
+pub mod link;
 pub mod spinner;
 pub mod style;
 pub mod text;

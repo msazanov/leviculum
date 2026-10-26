@@ -31,7 +31,7 @@ pub const DEFAULT_PATH: &str = "/page/index.mu";
 
 /// Length in hex characters of a Reticulum truncated destination hash
 /// (`RNS.Reticulum.TRUNCATED_HASHLENGTH // 8 * 2` = 16 bytes = 32 chars).
-pub const TRUNCATED_HASH_HEX_LEN: usize = 32;
+pub use leviculum_ui::link::TRUNCATED_HASH_HEX_LEN;
 
 /// A parsed page request target: where to link, what to ask for, and the query
 /// fields to carry.
@@ -131,109 +131,9 @@ pub fn parse_url(input: &str, current_dest: Option<[u8; 16]>) -> Result<Target, 
     })
 }
 
-/// How a followed link target should be handled.
-///
-/// A NomadNet page can carry three kinds of link: an in-mesh RNS destination we
-/// fetch ourselves, an external URL we hand to the system's default handler, and
-/// a URL whose scheme we refuse to open. The split is a security boundary: a
-/// page comes from an untrusted node, so only a whitelisted scheme is ever
-/// passed to a system handler.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LinkKind {
-    /// An RNS/NomadNet destination (`<hash>:/page/...`, `<hash>`, or the
-    /// same-destination `:/...` form). Followed by fetching it in-mesh.
-    Rns,
-    /// A NomadNet `lxmf@<hash>` target: an address to send a message to,
-    /// not a page to fetch. Carries the 32-hex destination hash.
-    ///
-    /// NomadNet opens a conversation with it. We have no message composer,
-    /// so the address is shown and copied instead; either way it must not be
-    /// mistaken for a page, which is what produced a spurious "malformed URL"
-    /// before this variant existed.
-    Lxmf(String),
-    /// An external URL with a safe scheme (`http`/`https`/`mailto`), openable in
-    /// the user's default handler. Carries the original URL verbatim.
-    External(String),
-    /// A URL with a scheme we will not hand to a system handler (`file`,
-    /// `javascript`, any custom scheme). Carries the offending scheme, lowercased.
-    Unsafe(String),
-}
-
-/// Classify a link target so the browser knows whether to fetch it in-mesh, open
-/// it externally, or refuse it. A pure function over the target string.
-///
-/// RNS targets keep NomadNet's colon grammar (`<32-hex>:/page/...`, a bare
-/// 32-hex hash, or the same-destination `:/...`). An external URL is recognised
-/// by a URI scheme (`<alpha><alnum|+-.>* :`); only `http`, `https` and `mailto`
-/// are safe to open, and every other scheme is refused. A 32-hex destination
-/// prefix is always read as an RNS hash, never a scheme, so a hash that happens
-/// to start with a letter is not mistaken for an external URL.
-pub fn classify_link(target: &str) -> LinkKind {
-    // The same-destination form starts with the colon and never has a scheme.
-    if target.starts_with(':') {
-        return LinkKind::Rns;
-    }
-    if let Some(hash) = lxmf_target(target) {
-        return LinkKind::Lxmf(hash);
-    }
-    match uri_scheme(target) {
-        Some(scheme) => {
-            // A full-length hex destination prefix is an RNS hash, not a scheme.
-            if scheme.len() == TRUNCATED_HASH_HEX_LEN
-                && scheme.bytes().all(|b| b.is_ascii_hexdigit())
-            {
-                return LinkKind::Rns;
-            }
-            match scheme.to_ascii_lowercase().as_str() {
-                "http" | "https" | "mailto" => LinkKind::External(target.to_string()),
-                other => LinkKind::Unsafe(other.to_string()),
-            }
-        }
-        // No scheme and no leading colon: a bare hash or relative page path.
-        None => LinkKind::Rns,
-    }
-}
-
-/// The destination hash of an `lxmf@<hash>` target, lowercased.
-///
-/// NomadNet's link grammar is `<destination-type>@<target>`, with `lxmf` a
-/// shorthand for the `lxmf.delivery` aspect (NomadNet `Browser.py`,
-/// `expand_shorthands` and `handle_link`). It accepts the target only as
-/// exactly [`TRUNCATED_HASH_HEX_LEN`] hex characters, so anything else is not
-/// an LXMF link and is left to the other rules.
-///
-/// Matching on the prefix rather than merely on the presence of `@` keeps a
-/// page path that happens to contain one (`<hash>:/page/a@b.mu`) a page path.
-fn lxmf_target(target: &str) -> Option<String> {
-    let (kind, hash) = target.split_once('@')?;
-    let kind = kind.to_ascii_lowercase();
-    if kind != "lxmf" && kind != "lxmf.delivery" {
-        return None;
-    }
-    if hash.len() != TRUNCATED_HASH_HEX_LEN || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return None;
-    }
-    Some(hash.to_ascii_lowercase())
-}
-
-/// The URI scheme of `s` (the run before the first `:`), if it is a well-formed
-/// scheme name: a leading ASCII letter followed by letters, digits, `+`, `-` or
-/// `.` (RFC 3986). Returns `None` when there is no colon or the prefix is not a
-/// valid scheme (e.g. it starts with a digit, as a numeric destination hash does).
-fn uri_scheme(s: &str) -> Option<&str> {
-    let idx = s.find(':')?;
-    let scheme = &s[..idx];
-    let mut chars = scheme.chars();
-    let first = chars.next()?;
-    if !first.is_ascii_alphabetic() {
-        return None;
-    }
-    if chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')) {
-        Some(scheme)
-    } else {
-        None
-    }
-}
+/// How a followed link is handled, shared with lnmsg's links in message
+/// bodies: in `leviculum-ui`, where both programs read it.
+pub use leviculum_ui::link::{classify_link, LinkKind};
 
 /// An empty path falls back to the default page, matching the reference.
 fn normalize_path(path: &str) -> String {

@@ -23,12 +23,33 @@ pub trait TerminalOps {
 /// [`enter`](TerminalOps::enter), reversed on [`restore`](TerminalOps::restore).
 pub struct CrosstermTerminal {
     out: Stdout,
+    mouse: bool,
 }
 
 impl CrosstermTerminal {
-    /// A terminal driver writing to stdout.
+    /// A terminal driver writing to stdout, capturing the mouse.
     pub fn new() -> Self {
-        Self { out: io::stdout() }
+        Self::with_mouse(true)
+    }
+
+    /// The same, capturing the mouse only when `mouse` is set: without
+    /// capture the terminal's own selection and copy work as in any other
+    /// program (lnmsg's `--no-mouse`).
+    pub fn with_mouse(mouse: bool) -> Self {
+        Self {
+            out: io::stdout(),
+            mouse,
+        }
+    }
+}
+
+/// Turn mouse capture on or off while the UI is up: a program's runtime
+/// toggle. Leaving the UI turns it off either way.
+pub fn set_mouse_capture(on: bool) -> io::Result<()> {
+    let mut out = io::stdout();
+    match on {
+        true => execute!(out, EnableMouseCapture),
+        false => execute!(out, DisableMouseCapture),
     }
 }
 
@@ -41,7 +62,11 @@ impl Default for CrosstermTerminal {
 impl TerminalOps for CrosstermTerminal {
     fn enter(&mut self) -> io::Result<()> {
         enable_raw_mode()?;
-        execute!(self.out, EnterAlternateScreen, EnableMouseCapture)
+        execute!(self.out, EnterAlternateScreen)?;
+        if self.mouse {
+            execute!(self.out, EnableMouseCapture)?;
+        }
+        Ok(())
     }
 
     fn restore(&mut self) -> io::Result<()> {

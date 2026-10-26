@@ -429,14 +429,16 @@ concrete moves:
 ### The mouse as a first-class citizen
 
 `lnomad` enables mouse capture unconditionally with no toggle
-(`leviculum-ui-ratatui/src/terminal.rs:42-45`) and handles neither drag nor selection
+(`leviculum-ui-ratatui/src/terminal.rs:63-70`, the capture it takes by
+`CrosstermTerminal::new`) and handles neither drag nor selection
 (`lnomad/src/app/event.rs:201`). In a browser that costs you the terminal's own
 copy-paste; in a messenger, where copying message text is a constant, it is
 worse.
 
 Proposal: handle drag selection ourselves over the message IR, so selecting
 text across wrapped lines and across message boundaries works and copies
-via OSC 52 (`lnomad/src/app/event.rs:1349-1381`, which works over SSH). Plus a
+via OSC 52 (`leviculum-ui/src/clipboard.rs:14-42`, lnomad's own until 1036
+shared it, which works over SSH). Plus a
 `--no-mouse` flag and a runtime toggle for people who want the terminal's
 own selection back. The `StyledChar` IR already carries per-cell ownership
 (`leviculum-ui/src/style.rs:82-95`), so the hit-testing is a small extension
