@@ -11,6 +11,13 @@
 //! `send_on_enter` off swaps `Enter` and `Alt-Enter`. Pinned in
 //! `tests/fixtures/tui_keys.frames`.
 //!
+//! The chat layout's session (section 7, slice 2) runs one exchange at 80 x
+//! 24 and at 120 x 40, the two mockups' sizes: a message from the peer on
+//! one day, ours on it and on the next, the peer's two replies arriving while
+//! the reader is scrolled up (the `new` rule above them, the view not moved),
+//! back to the newest, a reply, and the detail view of our first message with
+//! its proof. Pinned in `tests/fixtures/tui_chat.frames`.
+//!
 //! The daemon is the in-process one `mailbox_cli.rs` uses. The correspondent
 //! is a second lnmsg engine attached to it in this process
 //! (`lnmsg::engine::attach`), a full LXMF router, so the proof that turns the
@@ -29,6 +36,7 @@ use leviculum_std::Identity;
 use lnmsg::clock::Tokio;
 use lnmsg::effects::Terminal;
 use lnmsg::engine::{attach, delivery_address, AttachConfig};
+use lnmsg::fanout::Fanout;
 use lnmsg::outbox::{SendRequest, Via};
 use lnmsg::send::{run_send, SendOptions};
 
@@ -40,6 +48,7 @@ const LNMSG: &str = env!("CARGO_BIN_EXE_lnmsg");
 const EXPECTED: &str = include_str!("fixtures/tui_session.frames");
 const EXPECTED_LATE: &str = include_str!("fixtures/tui_late.frames");
 const EXPECTED_KEYS: &str = include_str!("fixtures/tui_keys.frames");
+const EXPECTED_CHAT: &str = include_str!("fixtures/tui_chat.frames");
 
 const SCRIPT: &str = "\
 until ready 20
@@ -552,7 +561,7 @@ async fn the_keymap_sessions_reach_the_same_screens_in_every_spelling() {
     assert!(plain.contains("Enter send · Alt-Enter newline"), "{plain}");
     assert_eq!(without_hint(body), without_hint(plain));
     assert_eq!(plain, frame(&plain_ctrl_j, "body"));
-    assert!(frame(&enhanced, "sent").contains("me: one"), "{enhanced}");
+    assert!(frame(&enhanced, "sent").contains("you: one"), "{enhanced}");
 
     // Ctrl-c outside compose says what quits, and the session goes on.
     assert!(
@@ -568,7 +577,10 @@ async fn the_keymap_sessions_reach_the_same_screens_in_every_spelling() {
     let off = frame(&enter_off, "body");
     assert!(off.contains("Alt-Enter send · Enter newline"), "{off}");
     assert!(off.contains("│one"), "{off}");
-    assert!(frame(&enter_off, "sent").contains("me: one"), "{enter_off}");
+    assert!(
+        frame(&enter_off, "sent").contains("you: one"),
+        "{enter_off}"
+    );
 
     if all != EXPECTED_KEYS {
         let kept = std::env::temp_dir().join("lnmsg-tui-keys.frames");
@@ -576,6 +588,240 @@ async fn the_keymap_sessions_reach_the_same_screens_in_every_spelling() {
         panic!(
             "the frames moved; this run's are in {}, the pinned ones in \
              lnmsg/tests/fixtures/tui_keys.frames\n{all}",
+            kept.display()
+        );
+    }
+}
+
+/// The chat session. Every time on screen comes from a `clock` step, and the
+/// test sends each of the peer's messages only once the frame before it is
+/// drawn, so each arrives under its own clock.
+const CHAT_SCRIPT: &str = "\
+until ready 20
+frame attached
+clock 2026-10-24 13:58
+until received 1 30
+clock 2026-10-24 14:02
+key enter
+key i
+type yes, from ten. Shall I bring the T114 and the long antenna?
+key enter
+until delivery delivered 30
+clock 2026-10-26 09:12
+type on my way
+key enter
+until delivery delivered 30
+key esc
+key k
+key k
+tick 12
+frame reading
+clock 2026-10-26 14:04
+until received 2 30
+tick 12
+frame first reply
+clock 2026-10-26 14:05
+until received 3 30
+tick 12
+frame new while reading
+key G
+frame newest
+clock 2026-10-26 14:06
+key i
+type the tripod fits
+key enter
+until delivery delivered 30
+tick 12
+frame replied
+key esc
+key g
+key j
+key enter
+frame detail
+key esc
+key q
+";
+
+/// A frame's lines with the message ids, which hash the LXMF timestamp and so
+/// differ on every run, written as `x`s of the same width.
+fn without_ids(frames: &str) -> String {
+    let mut out = String::new();
+    for line in frames.lines() {
+        let masked = match (line.find("id     "), line.find("router as ")) {
+            (Some(at), _) => {
+                let start = at + "id     ".len();
+                format!(
+                    "{}{}{}",
+                    &line[..start],
+                    "x".repeat(64),
+                    &line[start + 64..]
+                )
+            }
+            (None, Some(at)) => {
+                let start = at + "router as ".len();
+                format!("{}{}{}", &line[..start], "x".repeat(8), &line[start + 8..])
+            }
+            (None, None) => line.to_string(),
+        };
+        out.push_str(&masked);
+        out.push('\n');
+    }
+    out
+}
+
+/// One chat session at `size` against its own daemon, the peer answering on
+/// the script's frames.
+async fn chat_session(size: &str) -> String {
+    let daemon = daemon(&format!("tui-chat-{size}"), |b| b).await;
+    let home = tempfile::tempdir().expect("tui home");
+    let ours = fixed_identity(0x11);
+    std::fs::write(
+        home.path().join("identity"),
+        encode_identity(&ours).expect("storable"),
+    )
+    .expect("write the identity");
+    let our_address = delivery_address(&ours).expect("our address");
+    let theirs = fixed_identity(0x22);
+    let hex = |seed: u8| -> String {
+        let address = delivery_address(&fixed_identity(seed)).expect("an address");
+        address.iter().map(|b| format!("{b:02x}")).collect()
+    };
+    let script = home.path().join("chat.script");
+    let frames = home.path().join("chat.frames");
+    std::fs::write(&script, CHAT_SCRIPT).expect("write the script");
+    // A second correspondent that never answers, so the list has two rows.
+    let args: Vec<String> = vec![
+        "--instance".into(),
+        daemon.instance.clone(),
+        "--config".into(),
+        daemon.config_dir.path().display().to_string(),
+        "--to".into(),
+        hex(0x22),
+        "--to".into(),
+        hex(0x33),
+        "--script".into(),
+        script.display().to_string(),
+        "--frames".into(),
+        frames.display().to_string(),
+        "--size".into(),
+        size.into(),
+    ];
+    let child_home = home.path().to_path_buf();
+    let child = tokio::task::spawn_blocking(move || {
+        let mut command = Command::new(LNMSG);
+        command
+            .args(&args)
+            .env("LNMSG_HOME", &child_home)
+            .env("LNMSG_DISPLAY_NAME", "tui")
+            .env_remove("LEVICULUM_EVENT_LOG")
+            .env_remove("RUST_LOG")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let child = leviculum_std::process::spawn_supervised(command).expect("spawn lnmsg");
+        child.wait_with_output().expect("wait for lnmsg")
+    });
+
+    wait_for_frame(&frames, "attached", Duration::from_secs(20)).await;
+    let storage = tempfile::tempdir().expect("their storage");
+    let mut them = attach(AttachConfig {
+        instance: daemon.instance.clone(),
+        storage_dir: storage.path().to_path_buf(),
+        identity: theirs,
+        display_name: b"them".to_vec(),
+        notices: Terminal::new(storage.path().to_path_buf()),
+    })
+    .await
+    .expect("the correspondent attaches");
+    let options = SendOptions::new(daemon.instance.clone(), Duration::from_secs(20));
+    // The engine says `Ready` once, and each send waits for it: the sends go
+    // through taps of one fan-out, as the TUI's own runners do.
+    let mut fanout = Fanout::default();
+    for (after, body) in [
+        (None, "are you at the field site tomorrow?"),
+        (Some("reading"), "ok, bring the T114."),
+        (
+            Some("first reply"),
+            "and the small tripod\nif it fits in the bag",
+        ),
+    ] {
+        if let Some(label) = after {
+            wait_for_frame(&frames, label, Duration::from_secs(60)).await;
+        }
+        let mut tap = fanout.tap();
+        let clock = Tokio::new();
+        let send = run_send(
+            &mut tap,
+            SendRequest {
+                destination: our_address,
+                title: Vec::new(),
+                body: body.as_bytes().to_vec(),
+                via: Via::Direct,
+            },
+            &options,
+            &clock,
+        );
+        tokio::pin!(send);
+        let sent = loop {
+            tokio::select! {
+                sent = &mut send => break sent,
+                _ = tokio::time::sleep(Duration::from_millis(20)) => {
+                    let _ = fanout.pump(&mut them.outbox);
+                }
+            }
+        };
+        assert!(sent.is_ok(), "{body:?} did not go out: {sent:?}");
+    }
+
+    let output = child.await.expect("the lnmsg child thread");
+    them.stop().await;
+    let got = std::fs::read_to_string(&frames).expect("read the frames");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{size}: stderr: {}\nframes:\n{got}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    got
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_chat_layout_draws_the_mockups_at_both_sizes() {
+    let mut all = String::new();
+    for size in ["80x24", "120x40"] {
+        let frames = chat_session(size).await;
+        // Read while scrolled up: the rule above the replies, and the block
+        // being read still selected and on screen. (The whole exchange fits
+        // both panes, so it is drawn from the bottom and grows upward.)
+        let reading = frame(&frames, "reading");
+        let first = frame(&frames, "first reply");
+        let new = frame(&frames, "new while reading");
+        assert!(first.contains(" 1 new "), "{size}: {first}");
+        assert!(new.contains(" 2 new "), "{size}: {new}");
+        let selected = |f: &str| -> Vec<String> {
+            f.lines()
+                .filter_map(|row| row.split_once("││").map(|(_, pane)| pane))
+                .filter(|pane| pane.contains('▌'))
+                .map(str::to_string)
+                .collect()
+        };
+        assert!(!selected(reading).is_empty(), "{size}: {reading}");
+        assert_eq!(selected(reading), selected(new), "{size}: the cursor moved");
+        assert!(frame(&frames, "newest").contains("if it fits in the bag"));
+        let detail = frame(&frames, "detail");
+        assert!(
+            detail.contains("delivered: proof received"),
+            "{size}: {detail}"
+        );
+        assert!(detail.contains("from you to <"), "{size}: {detail}");
+        all.push_str(&format!("=== {size} ===\n{}", without_ids(&frames)));
+    }
+    if all != EXPECTED_CHAT {
+        let kept = std::env::temp_dir().join("lnmsg-tui-chat.frames");
+        let _ = std::fs::write(&kept, &all);
+        panic!(
+            "the frames moved; this run's are in {}, the pinned ones in \
+             lnmsg/tests/fixtures/tui_chat.frames\n{all}",
             kept.display()
         );
     }

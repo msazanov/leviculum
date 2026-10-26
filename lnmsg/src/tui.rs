@@ -29,6 +29,7 @@ use futures::StreamExt;
 use ratatui::backend::{CrosstermBackend, TestBackend};
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Modifier, Style};
+use ratatui::symbols::border;
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::{Frame, Terminal};
@@ -49,11 +50,12 @@ use lnmsg::effects::{Effects, Terminal as Files};
 use lnmsg::engine::{attach, AttachConfig, Attached};
 use lnmsg::fanout::{Fanout, Tap};
 use lnmsg::fetch::{run_fetch, FetchOptions};
-use lnmsg::mailbox_state::Stored;
+use lnmsg::mailbox_state::{self, Stored};
 use lnmsg::outbox::{SendRequest, Via};
 use lnmsg::seen::{SeenStore, SeenWrite};
 use lnmsg::send::{run_send_auto, AutoError, Leg, SendError, SendOptions};
 use lnmsg::ui::{self, help_groups, update, Pane, UiEffect, UiEvent, UiModel, View};
+use lnmsg::when::WallTime;
 use lnmsg::{display_name, identity, keys};
 
 /// The model as the terminal holds it: its text fields are `tui-input`'s.
@@ -72,8 +74,10 @@ const SLEEP_MAX_MS: u64 = 60_000;
 /// final state in hand ends well inside this; one still waiting on the
 /// network is dropped after it, as before.
 const SETTLE_MS: u64 = 1_000;
-/// The compose pane grows with its text up to this many rows, then scrolls.
-const COMPOSE_MAX_ROWS: usize = 5;
+/// A key script's time of day until its `clock` step says another:
+/// Monday 26 October 2026, 12:00, at UTC. A script never reads the wall
+/// clock, so its frames are the same on every run.
+const SCRIPT_CLOCK: (i64, u32, u32, u32, u32) = (2026, 10, 26, 12, 0);
 /// `tui.log`'s filter without `RUST_LOG`.
 const TUI_LOG_FILTER: &str = "warn,lnmsg=info";
 
@@ -99,6 +103,8 @@ struct ScreenEffects {
     notices: UnboundedSender<String>,
     /// The send runner's leg changes, for the running send's row.
     legs: UnboundedSender<Leg>,
+    /// Each selection a runner keeps, for the header's mailbox state.
+    mailbox: UnboundedSender<Stored>,
     files: PathBuf,
 }
 
@@ -116,6 +122,7 @@ impl Effects for ScreenEffects {
     }
 
     fn save_mailbox(&mut self, stored: &Stored) -> Result<(), String> {
+        let _ = self.mailbox.send(*stored);
         Files::new(self.files.clone()).save_mailbox(stored)
     }
 
@@ -162,6 +169,7 @@ struct Shell {
     done_rx: UnboundedReceiver<UiEvent>,
     notices_rx: UnboundedReceiver<String>,
     legs_rx: UnboundedReceiver<Leg>,
+    mailbox_rx: UnboundedReceiver<Stored>,
     /// Lines to print once the terminal is restored.
     afterwards: Vec<String>,
     /// The engine stopped answering.
@@ -216,6 +224,9 @@ impl Shell {
         while let Ok(line) = self.notices_rx.try_recv() {
             self.apply(UiEvent::Notice(line));
         }
+        while let Ok(stored) = self.mailbox_rx.try_recv() {
+            self.apply(chosen(&stored));
+        }
         self.start_next();
     }
 
@@ -265,6 +276,23 @@ impl Shell {
             }
         }
         task.abort();
+    }
+}
+
+/// The header's mailbox state for a kept selection.
+fn chosen(stored: &Stored) -> UiEvent {
+    UiEvent::MailboxChosen {
+        node: stored.node,
+        by_user: stored.chosen_by_user,
+    }
+}
+
+/// The wall clock with the host's UTC offset at this instant.
+fn local_now() -> WallTime {
+    let unix_secs = leviculum_std::local_time::unix_now_secs();
+    WallTime {
+        unix_secs,
+        offset_secs: leviculum_std::local_time::utc_offset_secs(unix_secs),
     }
 }
 
@@ -376,9 +404,11 @@ pub async fn run(options: TuiOptions) -> ExitCode {
 
     let (notices_tx, notices_rx) = unbounded_channel();
     let (legs_tx, legs_rx) = unbounded_channel();
+    let (mailbox_tx, mailbox_rx) = unbounded_channel();
     let effects = ScreenEffects {
         notices: notices_tx,
         legs: legs_tx,
+        mailbox: mailbox_tx,
         files: home.clone(),
     };
     let attached = match attach(AttachConfig {
@@ -401,6 +431,18 @@ pub async fn run(options: TuiOptions) -> ExitCode {
     let mut model = Model::new(&options.to);
     model.ascii = options.ascii;
     model.send_on_enter = config.send_on_enter.unwrap_or(true);
+    // The mailbox the header names before any run: `--pn` or the configured
+    // node, else what the last run kept.
+    let mailbox = match preferred_pn {
+        Some(node) => Some(UiEvent::MailboxChosen {
+            node,
+            by_user: true,
+        }),
+        None => mailbox_state::load(&home).as_ref().map(chosen),
+    };
+    if let Some(event) = mailbox {
+        update(&mut model, event);
+    }
     let (done_tx, done_rx) = unbounded_channel();
     let mut shell = Shell {
         model,
@@ -423,6 +465,7 @@ pub async fn run(options: TuiOptions) -> ExitCode {
         done_rx,
         notices_rx,
         legs_rx,
+        mailbox_rx,
         afterwards: Vec::new(),
         gone: false,
         redraw: false,
@@ -521,6 +564,12 @@ async fn run_terminal(shell: &mut Shell, options: &TuiOptions) -> Result<(), Str
     let mut terminal =
         Terminal::new(CrosstermBackend::new(std::io::stdout())).map_err(|e| e.to_string())?;
     let mut events = EventStream::new();
+    shell.apply(UiEvent::Clock(local_now()));
+    let size = terminal.size().map_err(|e| e.to_string())?;
+    shell.apply(UiEvent::Resize {
+        width: size.width,
+        height: size.height,
+    });
     let mut tick = tokio::time::interval(Duration::from_millis(TICK_MS));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut pump = tokio::time::interval(Duration::from_millis(PUMP_MS));
@@ -547,17 +596,21 @@ async fn run_terminal(shell: &mut Shell, options: &TuiOptions) -> Result<(), Str
                 EventStep::End(result) => break result.map_err(|e| e.to_string()),
             },
             _ = pump.tick() => shell.poll(),
-            _ = tick.tick() => shell.apply(UiEvent::Tick),
+            _ = tick.tick() => {
+                shell.apply(UiEvent::Clock(local_now()));
+                shell.apply(UiEvent::Tick);
+            }
         }
     };
     guard.restore_now().map_err(|e| e.to_string())?;
     result
 }
 
-/// Keys become key events; a resize is picked up by the next draw.
+/// Keys become key events; a resize tells the model its new pages.
 fn map_event(event: Event) -> Option<UiEvent> {
     match event {
         Event::Key(key) => Some(UiEvent::Key(key_event(key))),
+        Event::Resize(width, height) => Some(UiEvent::Resize { width, height }),
         _ => None,
     }
 }
@@ -622,6 +675,7 @@ enum Step {
     Frame(String),
     Until(Until, Duration),
     Sleep(u64),
+    Clock(WallTime),
 }
 
 /// The script's key names: `tab`, `backtab`, `enter`, `esc`, `up`, `down`,
@@ -687,6 +741,28 @@ fn single(text: &str) -> Option<char> {
     chars.next().is_none().then_some(c)
 }
 
+/// `2026-10-24 13:58`, at UTC.
+fn parse_clock(text: &str) -> Result<WallTime, String> {
+    let bad = || format!("bad clock {text:?}, YYYY-MM-DD HH:MM");
+    let (date, time) = text.split_once(' ').ok_or_else(bad)?;
+    let mut date = date.split('-').map(str::parse::<u32>);
+    let mut time = time.trim().split(':').map(str::parse::<u32>);
+    let next = |part: Option<Result<u32, _>>| part.and_then(Result::ok).ok_or_else(bad);
+    let (year, month, day) = (next(date.next())?, next(date.next())?, next(date.next())?);
+    let (hour, minute) = (next(time.next())?, next(time.next())?);
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) || hour > 23 || minute > 59 {
+        return Err(bad());
+    }
+    Ok(WallTime::from_civil(
+        i64::from(year),
+        month,
+        day,
+        hour,
+        minute,
+        0,
+    ))
+}
+
 fn parse_state(name: &str) -> Result<DeliveryState, String> {
     Ok(match name {
         "queued" => DeliveryState::Queued,
@@ -721,6 +797,9 @@ fn parse_state(name: &str) -> Result<DeliveryState, String> {
 /// sleep <ms>                     wait as the idle terminal does, up to 60000:
 ///                                the engine is read every 20 ms and one tick
 ///                                applied per 250 ms of the script's clock
+/// clock <YYYY-MM-DD> <HH:MM>      the time of day from now on, at UTC (the
+///                                script starts at 2026-10-26 12:00); it
+///                                stands still until the next clock step
 /// ```
 fn parse_script(text: &str) -> Result<Vec<Step>, String> {
     let mut steps = Vec::new();
@@ -754,6 +833,7 @@ fn parse_script(text: &str) -> Result<Vec<Step>, String> {
                 n => n.parse().map_err(|_| at(format!("bad tick count {n:?}")))?,
             }),
             "frame" => Step::Frame(rest.trim().to_string()),
+            "clock" => Step::Clock(parse_clock(rest.trim()).map_err(at)?),
             "sleep" => {
                 let ms = rest.trim();
                 match ms.parse::<u64>() {
@@ -830,6 +910,11 @@ async fn run_script(
         std::fs::File::create(frames).map_err(|e| format!("{}: {e}", frames.display()))?;
     let (width, height) = options.size;
     let mut terminal = Terminal::new(TestBackend::new(width, height)).map_err(|e| e.to_string())?;
+    shell.apply(UiEvent::Resize { width, height });
+    let (year, month, day, hour, minute) = SCRIPT_CLOCK;
+    shell.apply(UiEvent::Clock(WallTime::from_civil(
+        year, month, day, hour, minute, 0,
+    )));
     let mut count = 0usize;
     let mut dump = |terminal: &mut Terminal<TestBackend>, model: &Model, label: &str| {
         let view = ui::view(model);
@@ -846,6 +931,7 @@ async fn run_script(
         match step {
             Step::Key(key) => shell.apply(UiEvent::Key(key)),
             Step::Keyboard(enhanced) => shell.model.enhanced = enhanced,
+            Step::Clock(now) => shell.apply(UiEvent::Clock(now)),
             Step::Type(text) => {
                 for c in text.chars() {
                     shell.apply(UiEvent::Key(KeyEvent::new(
@@ -906,7 +992,7 @@ async fn run_script(
 }
 
 /// Bold for the focused pane's border and title.
-fn pane_block(title: &str, focused: bool) -> Block<'static> {
+fn pane_block(title: &str, focused: bool, borders: Borders) -> Block<'static> {
     let (title, style) = match focused {
         true => (
             format!("● {title}"),
@@ -915,57 +1001,72 @@ fn pane_block(title: &str, focused: bool) -> Block<'static> {
         false => (format!("  {title}"), Style::default()),
     };
     Block::default()
-        .borders(Borders::ALL)
+        .borders(borders)
         .border_style(style)
         .title(Span::styled(title, style))
 }
 
-/// Draw the screen: conversations left, messages right, the compose line
-/// under them, the footer at the bottom; the toast, the palette and the help
-/// on top.
+/// The compose box's border: its top corners join the conversation pane's
+/// sides, so the two read as one column.
+const COMPOSE_BORDER: border::Set = border::Set {
+    top_left: "├",
+    top_right: "┤",
+    ..border::PLAIN
+};
+
+/// Draw the screen: the list left the full height, the conversation and the
+/// compose box under it right, the footer at the bottom; the toast, the
+/// palette, the detail view and the help on top.
 pub fn draw(frame: &mut Frame, view: &View, theme: Theme, no_color: bool) {
     let compose_lines: Vec<&str> = view.compose.split('\n').collect();
-    let compose_rows = compose_lines.len().clamp(1, COMPOSE_MAX_ROWS) as u16;
-    let [body, compose, footer_row] = Layout::vertical([
-        Constraint::Min(3),
-        Constraint::Length(compose_rows + 2),
-        Constraint::Length(1),
+    let compose_rows = compose_lines.len().clamp(1, ui::COMPOSE_MAX_ROWS) as u16;
+    let [body, footer_row] =
+        Layout::vertical([Constraint::Min(3), Constraint::Length(1)]).areas(frame.area());
+    let [left, right] = Layout::horizontal([
+        Constraint::Length(ui::list_width(frame.area().width)),
+        Constraint::Min(0),
     ])
-    .areas(frame.area());
-    let [left, right] =
-        Layout::horizontal([Constraint::Percentage(30), Constraint::Percentage(70)]).areas(body);
+    .areas(body);
+    let [messages, compose] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(compose_rows + 2)]).areas(right);
 
-    let block = pane_block(&view.conversations_title, view.focus == Pane::Conversations);
+    let block = pane_block(
+        &view.conversations_title,
+        view.focus == Pane::Conversations,
+        Borders::ALL,
+    );
     let inner = block.inner(left);
     frame.render_widget(block, left);
     frame.render_widget(Paragraph::new(to_ratatui_text(&view.conversations)), inner);
 
-    let block = pane_block(&view.messages_title, view.focus == Pane::Messages);
-    let inner = block.inner(right);
-    frame.render_widget(block, right);
-    // Each message wrapped to the pane, then scrolled by rows so the
-    // cursor's message ends on screen.
-    let rows = inner.height as usize;
-    let mut wrapped = Vec::new();
-    let mut cursor_end = 0;
-    for (index, lines) in view.messages.iter().enumerate() {
-        wrapped.extend(ui::wrap(
-            lines,
-            inner.width as usize,
-            ui::CONTINUATION_INDENT,
-        ));
-        if index == view.message_cursor {
-            cursor_end = wrapped.len();
-        }
+    // The model laid the rows out at this pane's size: drawn as they come.
+    let mut block = pane_block(
+        &view.messages_title,
+        view.focus == Pane::Messages,
+        Borders::TOP | Borders::LEFT | Borders::RIGHT,
+    );
+    if !view.messages_title_right.is_empty() {
+        block =
+            block.title_top(Line::from(format!(" {} ", view.messages_title_right)).right_aligned());
     }
-    let skip = cursor_end.saturating_sub(rows);
-    let visible: Vec<_> = wrapped.into_iter().skip(skip).collect();
-    frame.render_widget(Paragraph::new(to_ratatui_text(&visible)), inner);
+    let inner = block.inner(messages);
+    frame.render_widget(block, messages);
+    // Laid out for a taller pane than this frame has (a resize the model has
+    // not heard of yet): the bottom rows, where the newest are.
+    let excess = view
+        .messages
+        .len()
+        .saturating_sub(usize::from(inner.height));
+    frame.render_widget(
+        Paragraph::new(to_ratatui_text(&view.messages[excess..])),
+        inner,
+    );
 
     // The compose pane: one row a line, up to five, scrolled to the
     // cursor's line and, sideways, to its column.
     let focused = view.focus == Pane::Compose;
-    let block = pane_block("compose", focused)
+    let block = pane_block(&view.compose_title, focused, Borders::ALL)
+        .border_set(COMPOSE_BORDER)
         .title_top(Line::from(format!(" {} ", view.compose_hint)).right_aligned());
     let inner = block.inner(compose);
     frame.render_widget(block, compose);
@@ -981,7 +1082,8 @@ pub fn draw(frame: &mut Frame, view: &View, theme: Theme, no_color: bool) {
         .map(|line| Line::from(line.chars().skip(scroll).collect::<String>()))
         .collect();
     frame.render_widget(Paragraph::new(Text::from(shown)), inner);
-    if focused && view.palette.is_none() && !view.help {
+    let overlay = view.palette.is_some() || view.help || view.detail.is_some();
+    if focused && !overlay {
         frame.set_cursor_position(Position::new(
             inner.x + (cursor_column - scroll) as u16,
             inner.y + (cursor_line - top) as u16,
@@ -992,9 +1094,17 @@ pub fn draw(frame: &mut Frame, view: &View, theme: Theme, no_color: bool) {
     leviculum_ui_ratatui::footer::render(frame, footer_row, &slots, None, no_color, theme);
 
     if let Some(note) = &view.toast {
-        // Wrapped, not cut: a failed auto send's toast names both legs.
-        let rows = ui::toast_rows(&toast::body(note), toast::max_inner(body));
-        toast::render_rows(frame, body, note.kind, &rows, no_color);
+        // Over both columns above the compose box, so it has the screen's
+        // width. Wrapped, not cut: a failed auto send's toast names both legs.
+        let over = Rect {
+            height: messages.height,
+            ..body
+        };
+        let rows = ui::toast_rows(&toast::body(note), toast::max_inner(over));
+        toast::render_rows(frame, over, note.kind, &rows, no_color);
+    }
+    if let Some(detail) = &view.detail {
+        draw_detail(frame, detail);
     }
     if let Some(palette) = &view.palette {
         let width = 40.min(frame.area().width);
@@ -1025,6 +1135,40 @@ pub fn draw(frame: &mut Frame, view: &View, theme: Theme, no_color: bool) {
             theme,
         );
     }
+}
+
+/// The widest the detail view is drawn: the 64 hex digits of an id and its
+/// label on one row.
+const DETAIL_MAX_WIDTH: u16 = 76;
+
+/// A message's detail view, centred over the panes, its rows wrapped.
+fn draw_detail(frame: &mut Frame, detail: &ui::DetailView) {
+    let screen = frame.area();
+    let width = DETAIL_MAX_WIDTH.min(screen.width.saturating_sub(2)).max(4);
+    let rows: Vec<String> = detail
+        .rows
+        .iter()
+        .flat_map(|row| match row.is_empty() {
+            true => vec![String::new()],
+            false => ui::toast_rows(row, usize::from(width - 2)),
+        })
+        .collect();
+    let height = (rows.len() as u16 + 2).min(screen.height.saturating_sub(1));
+    let area = Rect {
+        x: screen.x + screen.width.saturating_sub(width) / 2,
+        y: screen.y + screen.height.saturating_sub(height + 1) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!(" {} ", detail.title))
+        .title_bottom(Line::from(" Esc closes ").right_aligned());
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let lines: Vec<Line> = rows.into_iter().map(Line::from).collect();
+    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
 }
 
 /// The line and the column, in characters, of the `cursor`th character of
@@ -1096,6 +1240,24 @@ mod tests {
         assert!(parse_script("until leg sideways\n").is_err());
     }
 
+    /// `clock` names a local date and time at UTC; nonsense is refused.
+    #[test]
+    fn the_clock_step_parses_a_date_and_a_time() {
+        let steps = parse_script("clock 2026-10-24 13:58\n").expect("parses");
+        assert!(matches!(
+            steps[0],
+            Step::Clock(t) if t == WallTime::from_civil(2026, 10, 24, 13, 58, 0)
+        ));
+        for bad in [
+            "clock 2026-10-24\n",
+            "clock 2026-13-01 10:00\n",
+            "clock 2026-10-24 24:00\n",
+            "clock today noon\n",
+        ] {
+            assert!(parse_script(bad).is_err(), "{bad}");
+        }
+    }
+
     /// `until leg` holds for the newest message we wrote, not an older one.
     #[test]
     fn until_leg_reads_the_newest_sent_message() {
@@ -1110,8 +1272,16 @@ mod tests {
     }
 
     fn render(model: &Model) -> String {
+        let mut model = model.clone();
+        update(
+            &mut model,
+            UiEvent::Resize {
+                width: 80,
+                height: 16,
+            },
+        );
         let mut terminal = Terminal::new(TestBackend::new(80, 16)).expect("terminal");
-        let view = ui::view(model);
+        let view = ui::view(&model);
         terminal
             .draw(|frame| draw(frame, &view, Theme::Dark, true))
             .expect("draw");
@@ -1123,9 +1293,9 @@ mod tests {
         let model = Model::new(&[[0xab; 16]]);
         let screen = render(&model);
         assert!(screen.contains("● lnmsg (attaching)"), "{screen}");
-        assert!(screen.contains("▸ abababababababab"), "{screen}");
-        assert!(screen.contains(ui::NO_HISTORY), "{screen}");
-        assert!(screen.contains("  compose"), "{screen}");
+        assert!(screen.contains("▌<abababab…>"), "{screen}");
+        assert!(screen.contains(ui::layout::EARLIEST), "{screen}");
+        assert!(screen.contains("  to <abababab…>"), "{screen}");
         assert!(screen.contains("Tab pane"), "{screen}");
     }
 
@@ -1232,7 +1402,7 @@ mod tests {
     }
 
     /// The compose pane grows by a row per line, up to five, and a message
-    /// longer than its pane wraps under its mark.
+    /// longer than its block wraps at a space inside it.
     #[test]
     fn compose_grows_with_its_lines_and_a_long_message_wraps() {
         let mut model = Model::new(&[[0xab; 16]]);
@@ -1250,7 +1420,7 @@ mod tests {
         let rows: Vec<&str> = screen.lines().collect();
         let top = rows
             .iter()
-            .position(|row| row.contains("● compose"))
+            .position(|row| row.contains("● to <abababab…>"))
             .expect("the compose pane");
         // Five rows of text between the borders, the last five lines.
         let inner: Vec<&str> = rows[top + 1..top + 6]
@@ -1272,15 +1442,21 @@ mod tests {
         }
         update(&mut model, UiEvent::Key(parse_key("enter").expect("key")));
         let screen = render(&model);
-        assert!(screen.contains("me: word word"), "{screen}");
-        assert!(
-            screen.contains("│    word word"),
-            "the wrapped row is set in: {screen}"
-        );
-        assert!(
-            !screen.contains("w│"),
-            "no word is cut at the edge: {screen}"
-        );
+        // The conversation pane's side of each row, past the list.
+        let block: Vec<String> = screen
+            .lines()
+            .map(|row| row.chars().skip(26).collect::<String>())
+            .filter(|row| row.contains("word"))
+            .collect();
+        assert!(block.len() > 1, "{screen}");
+        for row in &block {
+            let inside = row.trim_matches(|c: char| c == '│' || c == ' ');
+            assert!(inside.starts_with("word"), "{inside:?}");
+            assert!(
+                inside.ends_with("word") || inside.ends_with('○'),
+                "{inside:?}"
+            );
+        }
     }
 
     /// A send that failed both ways: at 80x24 the toast wraps to three rows
@@ -1337,5 +1513,193 @@ mod tests {
         assert!(screen.contains("commands"), "{screen}");
         assert!(screen.contains("▸ send"), "{screen}");
         assert!(screen.contains("focus compose"), "{screen}");
+    }
+
+    use leviculum_lxmf::router::MessageState;
+    use lnmsg::outbox::OutboxEvent;
+
+    /// The 80 x 24 mockup's story with Alice and Bob: three days with Alice,
+    /// both sides, a mailbox and a sent-unproven mark, Bob opened while Alice
+    /// writes twice, Alice opened again at her `2 new`, and a reply on its
+    /// way.
+    fn mockup(width: u16, height: u16) -> Model {
+        let alice = [0x4f; 16];
+        let bob = [0xb7; 16];
+        let mut model = Model::new(&[alice, bob]);
+        update(&mut model, UiEvent::Resize { width, height });
+        update(
+            &mut model,
+            UiEvent::Engine(OutboxEvent::Ready {
+                address: [0xaf; 16],
+            }),
+        );
+        update(
+            &mut model,
+            UiEvent::MailboxChosen {
+                node: [0x9c; 16],
+                by_user: false,
+            },
+        );
+        let clock = |m: &mut Model, d, h, mi| {
+            update(
+                m,
+                UiEvent::Clock(WallTime::from_civil(2026, 10, d, h, mi, 3600)),
+            );
+        };
+        let mut n = 0u8;
+        let mut recv = |m: &mut Model, from: [u8; 16], body: &str| {
+            n += 1;
+            update(
+                m,
+                UiEvent::Engine(OutboxEvent::Received {
+                    message_id: [n; 32],
+                    source: from,
+                    title: Vec::new(),
+                    body: body.as_bytes().to_vec(),
+                    verified: true,
+                }),
+            );
+        };
+        let send = |m: &mut Model, body: &str, id: u8, state: MessageState| {
+            m.focus = Pane::Compose;
+            for c in body.chars() {
+                update(
+                    m,
+                    UiEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)),
+                );
+            }
+            update(
+                m,
+                UiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            );
+            update(
+                m,
+                UiEvent::Engine(OutboxEvent::Queued {
+                    message_id: [id; 32],
+                }),
+            );
+            update(
+                m,
+                UiEvent::Engine(OutboxEvent::State {
+                    message_id: [id; 32],
+                    state,
+                }),
+            );
+            update(m, UiEvent::SendDone(Ok(())));
+        };
+        clock(&mut model, 23, 19, 40);
+        recv(&mut model, alice, "did the board come back from the soak?");
+        clock(&mut model, 23, 19, 52);
+        send(
+            &mut model,
+            "yes, 100 % over the night, log is on the share",
+            0xa1,
+            MessageState::Delivered,
+        );
+        clock(&mut model, 24, 13, 58);
+        recv(&mut model, alice, "are you at the field site tomorrow? Dana says the north gate is locked after six, so the car park by the road it is.");
+        clock(&mut model, 24, 14, 2);
+        send(&mut model, "yes, from ten. Shall I bring the T114 and the long antenna, or is the stick enough for the hill?", 0xa2, MessageState::Delivered);
+        clock(&mut model, 24, 14, 3);
+        recv(&mut model, alice, "long one, the hill eats signal");
+        clock(&mut model, 26, 9, 12);
+        send(
+            &mut model,
+            "on my way",
+            0xa3,
+            MessageState::AwaitingCollection,
+        );
+        clock(&mut model, 26, 9, 31);
+        send(
+            &mut model,
+            "stuck at the level crossing",
+            0xa4,
+            MessageState::Sent,
+        );
+        clock(&mut model, 26, 12, 40);
+        recv(&mut model, bob, "the antenna is in the van");
+        // Bob is opened, Alice writes meanwhile.
+        model.focus = Pane::Conversations;
+        update(
+            &mut model,
+            UiEvent::Key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE)),
+        );
+        clock(&mut model, 26, 14, 4);
+        recv(&mut model, alice, "ok, bring the T114.");
+        clock(&mut model, 26, 14, 5);
+        recv(
+            &mut model,
+            alice,
+            "and the small tripod\nif it fits in the bag",
+        );
+        update(
+            &mut model,
+            UiEvent::Key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE)),
+        );
+        clock(&mut model, 26, 14, 6);
+        send(&mut model, "the tripod fits", 0xa5, MessageState::Sending);
+        model.toasts.clear();
+        model
+    }
+
+    fn screen(model: &Model, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+        let view = ui::view(model);
+        terminal
+            .draw(|frame| draw(frame, &view, Theme::Dark, true))
+            .expect("draw");
+        frame_text(terminal.backend())
+    }
+
+    /// The two mockups of section 5 drawn from a model: the same elements in
+    /// the same rows (the text differs), then the cursor on a sent message
+    /// in the conversation, its detail view, and the narrow fallback. Pinned
+    /// in `tests/fixtures/tui_layout.frames`.
+    #[test]
+    fn the_layout_draws_the_mockups_structure_at_both_sizes() {
+        let mut frames = String::new();
+        for (width, height) in [(80, 24), (120, 40)] {
+            let model = mockup(width, height);
+            let shot = screen(&model, width, height);
+            frames.push_str(&format!("--- {width} x {height} ---\n{shot}"));
+            let rows: Vec<&str> = shot.lines().collect();
+            // The list: Alice on top with the reply's time and the bar, Bob
+            // under her; the header with the trust state.
+            assert!(rows[1].starts_with("│▌<4f4f4f4f…>"), "{shot}");
+            assert!(rows[2].starts_with("│▌you: the tripod fits"), "{shot}");
+            assert!(rows[4].starts_with("│ <b7b7b7b7…>"), "{shot}");
+            assert!(rows[0].contains("<4f4f4f4f…>  unknown"), "{shot}");
+            // The rule, the date line, ours right, theirs left.
+            assert!(shot.contains("── Today ──"), "{shot}");
+            assert!(shot.contains(" 2 new "), "{shot}");
+            assert!(shot.contains("│ ok, bring the T114.  14:04 "), "{shot}");
+            assert!(shot.contains(" the tripod fits  14:06 ⠋ │"), "{shot}");
+            assert!(shot.contains("to <4f4f4f4f…>"), "{shot}");
+        }
+        let mut model = mockup(80, 24);
+        model.focus = Pane::Messages;
+        for _ in 0..6 {
+            update(&mut model, UiEvent::Key(parse_key("k").expect("key")));
+        }
+        frames.push_str(&format!("--- cursor ---\n{}", screen(&model, 80, 24)));
+        update(&mut model, UiEvent::Key(parse_key("enter").expect("key")));
+        let detail = screen(&model, 80, 24);
+        assert!(detail.contains("delivered: proof received"), "{detail}");
+        frames.push_str(&format!("--- detail ---\n{detail}"));
+        let model = mockup(60, 20);
+        frames.push_str(&format!(
+            "--- 60 x 20, narrow ---\n{}",
+            screen(&model, 60, 20)
+        ));
+        let expected = include_str!("../tests/fixtures/tui_layout.frames");
+        if frames != expected {
+            let kept = std::env::temp_dir().join("lnmsg-tui-layout.frames");
+            let _ = std::fs::write(&kept, &frames);
+            panic!(
+                "the frames moved; this run's are in {}, the pinned ones in \
+                 lnmsg/tests/fixtures/tui_layout.frames\n{frames}",
+                kept.display()
+            );
+        }
     }
 }

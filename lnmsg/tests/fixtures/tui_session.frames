@@ -1,85 +1,85 @@
 --- frame 1: attached ---
-┌● lnmsg afbda7b3──────┐┌  61ddb79ada973523799227bbaf41e204────────────────────┐
-│▸ 61ddb79ada973523    ││No history yet: this session's messages only.         │
-│                      ││                                                      │
-│                      ││                                                      │
-│                      ││                                                      │
-│                      ││                                                      │
-│                      ││                                                      │
-│                      ││                                                      │
-│                      ││                                                      │
-│                      ││                                                      │
-│                      ││                                                      │
-└──────────────────────┘└──────────────────────────────────────────────────────┘
-┌  compose───────────────────────────────────── Enter send · Alt-Enter newline ┐
-│                                                                              │
-└──────────────────────────────────────────────────────────────────────────────┘
+┌● lnmsg afbda7b3────────┐┌  <61ddb79a…>  unknown────────────────── no mailbox ┐
+│▌<61ddb79a…>            ││                                                    │
+│▌                       ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││           nothing earlier on this device           │
+│                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────────────────┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 2: typed ---
-┌  lnmsg afbda7b3──────┐┌  61ddb79ada973523799227bbaf41e204────────────────────┐
-│▸ 61ddb79ada973523    ││No history yet: this session's messages only.         │
-│                      ││                                                      │
-│                      ││                                                      │
-│                      ││                                                      │
-│                      ││                                                      │
-│                      ││                                                      │
-│                      ││                                                      │
-│                      ││                                                      │
-│                      ││                                                      │
-└──────────────────────┘└──────────────────────────────────────────────────────┘
-┌● compose───────────────────────────────────── Enter send · Alt-Enter newline ┐
-│hello from the tui                                                            │
-│on two lines                                                                  │
-└──────────────────────────────────────────────────────────────────────────────┘
+┌  lnmsg afbda7b3────────┐┌  <61ddb79a…>  unknown────────────────── no mailbox ┐
+│▌<61ddb79a…>            ││                                                    │
+│▌                       ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││           nothing earlier on this device           │
+│                        │├● to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
+│                        ││hello from the tui                                  │
+│                        ││on two lines                                        │
+└────────────────────────┘└────────────────────────────────────────────────────┘
 Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
 --- frame 3: queued ---
-┌  lnmsg afbda7b3──────┐┌  61ddb79ada973523799227bbaf41e204────────────────────┐
-│▸ 61ddb79ada973523    ││▸ ○ me: hello from the tui                            │
-│                      ││    on two lines                                      │
-│                      ││                                                      │
-│                      ││                                                      │
-│                      ││                                                      │
-│                      ││                                                      │
-│                      ││                                                      │
-│                      ││                                                      │
-│                      ││                                                      │
-│                      ││                                                      │
-└──────────────────────┘└──────────────────────────────────────────────────────┘
-┌● compose───────────────────────────────────── Enter send · Alt-Enter newline ┐
-│                                                                              │
-└──────────────────────────────────────────────────────────────────────────────┘
+┌  lnmsg afbda7b3────────┐┌  <61ddb79a…>  unknown────────────────── no mailbox ┐
+│▌<61ddb79a…>      12:00 ││                                                    │
+│▌you: hello from the t… ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││           nothing earlier on this device           │
+│                        ││                    ── Today ──                     │
+│                        ││                              hello from the tui    │
+│                        ││                              on two lines  12:00 ○ │
+│                        │├● to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────────────────┘└────────────────────────────────────────────────────┘
 Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
 --- frame 4: delivered ---
-┌  lnmsg afbda7b3──────┐┌  61ddb79ada973523799227bbaf41e204────────────────────┐
-│▸ 61ddb79ada973523    ││▸ ✓ me: hello from the tui                            │
-│                      ││    on two lines                                      │
-│                      ││                                                      │
-│                      ││                                                      │
-│                      ││                                                      │
-│                      ││                                                      │
-│                      ││                                                      │
-│                      ││                                                      │
-│                      ││                                                      │
-│                      ││                                                      │
-└──────────────────────┘└──────────────────────────────────────────────────────┘
-┌● compose───────────────────────────────────── Enter send · Alt-Enter newline ┐
-│                                                                              │
-└──────────────────────────────────────────────────────────────────────────────┘
+┌  lnmsg afbda7b3────────┐┌  <61ddb79a…>  unknown────────────────── no mailbox ┐
+│▌<61ddb79a…>      12:00 ││                                                    │
+│▌you: hello from the t… ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││           nothing earlier on this device           │
+│                        ││                    ── Today ──                     │
+│                        ││                              hello from the tui    │
+│                        ││                              on two lines  12:00 ✓ │
+│                        │├● to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────────────────┘└────────────────────────────────────────────────────┘
 Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
 --- frame 5: reply ---
-┌  lnmsg afbda7b3──────┐┌  61ddb79ada973523799227bbaf41e204────────────────────┐
-│▸ 61ddb79ada973523    ││  ✓ me: hello from the tui                            │
-│                      ││    on two lines                                      │
-│                      ││▸   them: hello back                                  │
-│                      ││    also on two lines                                 │
-│                      ││                                                      │
-│                      ││                                                      │
-│                      ││                                                      │
-│                      ││                                                      │
-│                      ││                     ┌───────────────────────────────┐│
-│                      ││                     │✓ message from 61ddb79ada973523││
-└──────────────────────┘└─────────────────────└───────────────────────────────┘┘
-┌● compose───────────────────────────────────── Enter send · Alt-Enter newline ┐
-│                                                                              │
-└──────────────────────────────────────────────────────────────────────────────┘
+┌  lnmsg afbda7b3────────┐┌  <61ddb79a…>  unknown────────────────── no mailbox ┐
+│▌<61ddb79a…>      12:00 ││                                                    │
+│▌hello back             ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││           nothing earlier on this device           │
+│                        ││                    ── Today ──                     │
+│                        ││                              hello from the tui    │
+│                        ││                              on two lines  12:00 ✓ │
+│                        ││                        ┌──────────────────────────┐│
+│                        ││ hello back             │✓ message from <61ddb79a…>││
+│                        ││ also on two lines  12:0└──────────────────────────┘│
+│                        │├● to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────────────────┘└────────────────────────────────────────────────────┘
 Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit

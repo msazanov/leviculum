@@ -1,0 +1,357 @@
+//! The chat layout in cells (`docs/src/concepts/lnmsg-keys-and-layout.md`,
+//! section 5): a conversation as blocks with their date lines and the `new`
+//! rule, and the list as two rows a conversation.
+//!
+//! Pure functions of the model's data, the pane's width and the time: the
+//! renderer draws the rows as they come, and the model's scrolling reads the
+//! same [`Laid`] to know where each message's block starts and ends.
+//!
+//! Monochrome. The colour tokens of section 5, "Colour", are proposed, not
+//! decided, so a block, the date line, the rule and the muted lines are drawn
+//! on the pane in its own colours; the selection is reverse video, which is
+//! the monochrome tier of the same table. Only the delivery marks keep the
+//! tones decided on 2026-08-10 ([`super::tone_rgb`]).
+
+use alloc::format;
+use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
+
+use leviculum_ui::delivery::glyph;
+use leviculum_ui::input::InputBuffer;
+use leviculum_ui::{RLine, RStyle};
+
+use super::{leg_label, name, plain, push, tone_rgb, wrap, Conversation, Message, UiModel};
+use crate::when::{date_label, list_time, WallTime};
+
+/// The top of what this device holds. Until the history slice that is the
+/// start of the session.
+pub const EARLIEST: &str = "nothing earlier on this device";
+
+/// Below this pane width ours are drawn flush left, with `you` before the
+/// time, because right alignment no longer reads as a side.
+pub const NARROW: usize = 40;
+
+/// The selection's bar in the margin.
+pub const BAR: char = '▌';
+
+/// What drawing a conversation needs besides the conversation.
+pub struct Draw {
+    pub now: Option<WallTime>,
+    /// The spinner's frame and the legs' seconds.
+    pub tick: u64,
+    pub ascii: bool,
+    /// The message drawn selected: the cursor's, while the pane has the focus.
+    pub selected: Option<usize>,
+}
+
+/// Where one message's rows are, separators above it included.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Span {
+    pub start: usize,
+    pub end: usize,
+}
+
+/// A conversation laid out: every row from the top of what the device holds,
+/// and each message's span among them.
+pub struct Laid {
+    pub rows: Vec<RLine>,
+    pub spans: Vec<Span>,
+}
+
+impl Laid {
+    /// No conversation open: the pane says only where the device's memory
+    /// begins.
+    pub fn empty(width: usize) -> Self {
+        Self {
+            rows: vec![centred(EARLIEST, width)],
+            spans: Vec::new(),
+        }
+    }
+}
+
+/// What was drawn last, for the blank row between blocks.
+#[derive(PartialEq)]
+enum Last {
+    Separator,
+    Block,
+}
+
+/// `conversation` as rows `width` cells wide: the top line, a centred date
+/// before each day's first message, the `new` rule where the unread begins,
+/// the blocks with a blank row between two of them.
+pub fn conversation(conversation: &Conversation, width: usize, draw: &Draw) -> Laid {
+    let width = width.max(1);
+    let mut laid = Laid::empty(width);
+    let mut last = Last::Separator;
+    let mut day = None;
+    for (index, message) in conversation.messages.iter().enumerate() {
+        let start = laid.rows.len();
+        if let (Some(at), Some(now)) = (message.at, draw.now) {
+            if day != Some(at.day()) {
+                day = Some(at.day());
+                if last == Last::Block {
+                    laid.rows.push(RLine::default());
+                }
+                laid.rows.push(date_line(&date_label(&at, &now), width));
+                last = Last::Separator;
+            }
+        }
+        if let Some(rule) = conversation.new_rule.filter(|rule| rule.at == index) {
+            if last == Last::Block {
+                laid.rows.push(RLine::default());
+            }
+            laid.rows.push(new_rule(rule.count, width));
+            last = Last::Separator;
+        }
+        if last == Last::Block {
+            laid.rows.push(RLine::default());
+        }
+        laid.rows
+            .extend(block(message, width, draw, draw.selected == Some(index)));
+        laid.spans.push(Span {
+            start,
+            end: laid.rows.len(),
+        });
+        last = Last::Block;
+    }
+    laid
+}
+
+/// `text` centred in `width` cells.
+fn centred(text: &str, width: usize) -> RLine {
+    let pad = width.saturating_sub(text.chars().count()) / 2;
+    plain(&format!("{}{text}", " ".repeat(pad)))
+}
+
+/// `── Saturday 24 October ──`, centred.
+fn date_line(label: &str, width: usize) -> RLine {
+    centred(&format!("── {label} ──"), width)
+}
+
+/// ` ───── 2 new ───── `, the pane's width less a margin cell either side.
+pub fn new_rule(count: usize, width: usize) -> RLine {
+    let label = format!(" {count} new ");
+    let inner = width.saturating_sub(2);
+    let dashes = inner.saturating_sub(label.chars().count());
+    let left = dashes / 2;
+    plain(&format!(
+        " {}{label}{} ",
+        "─".repeat(left),
+        "─".repeat(dashes - left)
+    ))
+}
+
+/// The widest a block's text may be: three quarters of the pane less the
+/// margin cell either side, or the whole pane on a narrow one.
+pub fn block_cap(width: usize) -> usize {
+    match width < NARROW {
+        true => width.saturating_sub(2),
+        false => (width * 3 / 4).saturating_sub(2),
+    }
+    .max(1)
+}
+
+/// What closes a block's last line: the leg a waiting send is on, `you` on a
+/// narrow pane, the time, and for ours the delivery mark in its tone.
+fn suffix(message: &Message, narrow: bool, draw: &Draw) -> RLine {
+    let mut words: Vec<String> = Vec::new();
+    if message.outbound && narrow {
+        words.push("you".into());
+    }
+    if let Some(at) = message.at {
+        words.push(at.hh_mm());
+    }
+    let mut text = words.join(" ");
+    if let Some(label) = message
+        .delivery
+        .and_then(|state| leg_label(message, state, draw.tick))
+    {
+        text = match text.is_empty() {
+            true => label,
+            false => format!("{label} · {text}"),
+        };
+    }
+    if !message.outbound && !message.verified {
+        text = match text.is_empty() {
+            true => "unverified".into(),
+            false => format!("{text} · unverified"),
+        };
+    }
+    let mut line = RLine::default();
+    if !text.is_empty() {
+        push(&mut line, &format!("  {text}"), RStyle::default());
+    }
+    if let Some(state) = message.delivery {
+        let row = glyph(state);
+        push(
+            &mut line,
+            if text.is_empty() { "  " } else { " " },
+            RStyle::default(),
+        );
+        let mark = RStyle {
+            fg: Some(tone_rgb(row.tone, row.dim)),
+            ..RStyle::default()
+        };
+        push(&mut line, row.symbol(draw.tick as usize, draw.ascii), mark);
+    }
+    line
+}
+
+/// One message's block: its lines wrapped at a space to the cap, the suffix
+/// closing the last one, ours flush right and theirs flush left with a margin
+/// cell either side, the selected one reversed behind the bar. The suffix may
+/// reach past the cap into the pane's last quarter, as in both mockups, and
+/// takes a row of its own only where the pane itself has no room for it.
+fn block(message: &Message, width: usize, draw: &Draw, selected: bool) -> Vec<RLine> {
+    let narrow = width < NARROW;
+    let cap = block_cap(width);
+    let body: Vec<RLine> = message.body.split('\n').map(plain).collect();
+    let mut rows = wrap(&body, cap, 0);
+    let suffix = suffix(message, narrow, draw);
+    if !suffix.cells.is_empty() {
+        match rows.last_mut() {
+            Some(last) if last.cells.len() + suffix.cells.len() <= width.saturating_sub(2) => {
+                last.cells.extend(suffix.cells);
+            }
+            _ => {
+                // On a row of its own, the leading spaces dropped.
+                let cells: Vec<_> = suffix
+                    .cells
+                    .into_iter()
+                    .skip_while(|c| c.ch == ' ')
+                    .collect();
+                rows.push(RLine { cells });
+            }
+        }
+    }
+    let inner = rows.iter().map(|row| row.cells.len()).max().unwrap_or(0);
+    let x = match message.outbound && !narrow {
+        true => width.saturating_sub(inner + 1).max(1),
+        false => 1,
+    };
+    rows.into_iter()
+        .map(|row| {
+            let mut line = RLine::default();
+            push(&mut line, &" ".repeat(x - 1), RStyle::default());
+            match selected {
+                true => push(&mut line, &String::from(BAR), RStyle::default()),
+                false => push(&mut line, " ", RStyle::default()),
+            }
+            let pad = inner - row.cells.len();
+            let mut cells = row.cells;
+            cells.extend(plain(&" ".repeat(pad)).cells);
+            if selected {
+                for cell in &mut cells {
+                    cell.st.reverse = true;
+                }
+            }
+            line.cells.extend(cells);
+            line
+        })
+        .collect()
+}
+
+/// Rows a list entry takes: name and time, preview and badge, a blank.
+pub const ENTRY_ROWS: usize = 3;
+
+/// How many conversations a list `height` rows high shows whole; the last
+/// one's blank row may fall off the bottom.
+pub fn entries_shown(height: usize) -> usize {
+    (height + 1) / ENTRY_ROWS
+}
+
+/// The list's rows on screen: two a conversation in the list's order, the
+/// selected one's behind the bar and, under focus, reversed, scrolled just
+/// far enough to show it.
+pub fn list<B: InputBuffer>(model: &UiModel<B>, width: usize, height: usize) -> Vec<RLine> {
+    let order = model.order();
+    let at = order.iter().position(|&i| i == model.selected).unwrap_or(0);
+    let first = (at + 1).saturating_sub(entries_shown(height).max(1));
+    let focused = model.focus == super::Pane::Conversations;
+    let mut rows = Vec::new();
+    for &index in &order[first..] {
+        let conversation = &model.conversations[index];
+        let here = index == model.selected;
+        let [top, bottom] = entry(conversation, width, model.now);
+        for mut row in [top, bottom] {
+            if here {
+                if let Some(cell) = row.cells.first_mut() {
+                    cell.ch = BAR;
+                }
+                if focused {
+                    let end = row.cells.len().saturating_sub(1);
+                    for cell in row.cells.iter_mut().take(end).skip(1) {
+                        cell.st.reverse = true;
+                    }
+                }
+            }
+            rows.push(row);
+        }
+        rows.push(RLine::default());
+    }
+    rows.truncate(height);
+    rows
+}
+
+/// One conversation's two rows, `width` cells with the bar's margin first
+/// and one blank last: the name and the last message's time, the last line's
+/// preview (`you:` when ours) and the unread count in brackets, reversed.
+fn entry(conversation: &Conversation, width: usize, now: Option<WallTime>) -> [RLine; 2] {
+    let room = width.saturating_sub(2);
+    let last = conversation.messages.last();
+    let time = match (last.and_then(|m| m.at), now) {
+        (Some(at), Some(now)) => list_time(&at, &now),
+        _ => String::new(),
+    };
+    let mut top = RLine::default();
+    push(&mut top, " ", RStyle::default());
+    let title = leviculum_ui::text::truncate_to_cols(
+        &name(&conversation.peer),
+        room.saturating_sub(time.chars().count() + 1),
+    );
+    let gap = room.saturating_sub(title.chars().count() + time.chars().count());
+    push(
+        &mut top,
+        &format!("{title}{}{time} ", " ".repeat(gap)),
+        RStyle::default(),
+    );
+
+    let badge = match conversation.unread {
+        0 => String::new(),
+        n => format!("[{n}]"),
+    };
+    let preview = match last {
+        Some(message) => {
+            let first = message.body.split('\n').next().unwrap_or("");
+            match message.outbound {
+                true => format!("you: {first}"),
+                false => first.into(),
+            }
+        }
+        None => String::new(),
+    };
+    let budget = match badge.is_empty() {
+        true => room,
+        false => room.saturating_sub(badge.chars().count() + 1),
+    };
+    let preview = leviculum_ui::text::truncate_to_cols(&preview, budget);
+    let gap = room.saturating_sub(preview.chars().count() + badge.chars().count());
+    let mut bottom = RLine::default();
+    push(&mut bottom, " ", RStyle::default());
+    push(
+        &mut bottom,
+        &format!("{preview}{}", " ".repeat(gap)),
+        RStyle::default(),
+    );
+    push(
+        &mut bottom,
+        &badge,
+        RStyle {
+            reverse: true,
+            ..RStyle::default()
+        },
+    );
+    push(&mut bottom, " ", RStyle::default());
+    [top, bottom]
+}
