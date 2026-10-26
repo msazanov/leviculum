@@ -62,6 +62,8 @@ const TICK_MS: u64 = 250;
 const PUMP_MS: u64 = 20;
 /// How long a script's `until` waits by default.
 const UNTIL_SECS: u64 = 30;
+/// The longest a script's `sleep` may ask for.
+const SLEEP_MAX_MS: u64 = 60_000;
 /// The compose pane grows with its text up to this many rows, then scrolls.
 const COMPOSE_MAX_ROWS: usize = 5;
 /// `tui.log`'s filter without `RUST_LOG`.
@@ -143,6 +145,9 @@ struct Shell {
     context: RunContext,
     jobs: VecDeque<Job>,
     running: bool,
+    /// Every leg a runner reported, with the message it was for (the
+    /// model's conversation and message index): a script's `until leg`.
+    legs_seen: Vec<((usize, usize), Leg)>,
     done_tx: UnboundedSender<UiEvent>,
     done_rx: UnboundedReceiver<UiEvent>,
     notices_rx: UnboundedReceiver<String>,
@@ -186,6 +191,9 @@ impl Shell {
         // Before the runner's end: a leg it moved onto belongs to the send
         // that is still at the front of the model's queue.
         while let Ok(leg) = self.legs_rx.try_recv() {
+            if let Some(&message) = self.model.sending.front() {
+                self.legs_seen.push((message, leg));
+            }
             self.apply(UiEvent::SendLeg(leg));
         }
         while let Ok(event) = self.done_rx.try_recv() {
@@ -366,6 +374,7 @@ pub async fn run(options: TuiOptions) -> ExitCode {
         },
         jobs: VecDeque::new(),
         running: false,
+        legs_seen: Vec::new(),
         done_tx,
         done_rx,
         notices_rx,
@@ -454,10 +463,13 @@ enum Until {
     Delivery(DeliveryState),
     /// This many received messages, across every conversation.
     Received(usize),
+    /// The send runner reported this leg for the newest message we wrote in
+    /// the selected conversation.
+    Leg(Leg),
 }
 
 impl Until {
-    fn holds(&self, model: &Model) -> bool {
+    fn holds(&self, model: &Model, legs_seen: &[((usize, usize), Leg)]) -> bool {
         match self {
             Self::Ready => model.address.is_some(),
             Self::Delivery(state) => {
@@ -478,6 +490,14 @@ impl Until {
                     .count()
                     >= *count
             }
+            Self::Leg(leg) => {
+                let newest = model
+                    .messages_of_selected()
+                    .iter()
+                    .rposition(|m| m.outbound)
+                    .map(|m| (model.selected, m));
+                newest.is_some_and(|newest| legs_seen.contains(&(newest, *leg)))
+            }
         }
     }
 }
@@ -490,6 +510,7 @@ enum Step {
     Tick(u32),
     Frame(String),
     Until(Until, Duration),
+    Sleep(u64),
 }
 
 /// The script's key names: `tab`, `backtab`, `enter`, `esc`, `up`, `down`,
@@ -552,6 +573,12 @@ fn parse_state(name: &str) -> Result<DeliveryState, String> {
 /// until ready [secs]             the engine is attached
 /// until delivery <state> [secs]  the newest sent message shows <state>
 /// until received <n> [secs]      n messages have arrived
+/// until leg <direct|propagated> [secs]
+///                                the runner is on that leg for the newest
+///                                sent message
+/// sleep <ms>                     wait as the idle terminal does, up to 60000:
+///                                the engine is read every 20 ms and one tick
+///                                applied per 250 ms of the script's clock
 /// ```
 fn parse_script(text: &str) -> Result<Vec<Step>, String> {
     let mut steps = Vec::new();
@@ -580,6 +607,13 @@ fn parse_script(text: &str) -> Result<Vec<Step>, String> {
                 n => n.parse().map_err(|_| at(format!("bad tick count {n:?}")))?,
             }),
             "frame" => Step::Frame(rest.trim().to_string()),
+            "sleep" => {
+                let ms = rest.trim();
+                match ms.parse::<u64>() {
+                    Ok(ms) if ms <= SLEEP_MAX_MS => Step::Sleep(ms),
+                    _ => return Err(at(format!("bad sleep {ms:?}, 0 to {SLEEP_MAX_MS} ms"))),
+                }
+            }
             "until" => {
                 let words: Vec<&str> = rest.split_whitespace().collect();
                 match words.as_slice() {
@@ -588,6 +622,14 @@ fn parse_script(text: &str) -> Result<Vec<Step>, String> {
                     }
                     ["delivery", state, tail @ ..] => Step::Until(
                         Until::Delivery(parse_state(state).map_err(at)?),
+                        secs(tail.first().copied()).map_err(at)?,
+                    ),
+                    ["leg", leg, tail @ ..] => Step::Until(
+                        Until::Leg(match *leg {
+                            "direct" => Leg::Direct,
+                            "propagated" => Leg::Propagated,
+                            other => return Err(at(format!("unknown leg {other:?}"))),
+                        }),
                         secs(tail.first().copied()).map_err(at)?,
                     ),
                     ["received", n, tail @ ..] => Step::Until(
@@ -625,8 +667,9 @@ fn frame_text(backend: &TestBackend) -> String {
 }
 
 /// A key script against the real engine, frames to a file. No tick happens
-/// unless the script asks for one, so a frame is a pure function of the
-/// script and the engine's events.
+/// unless the script asks for one (`tick`, or `sleep`'s one per 250 ms of its
+/// own length, however long the wall clock took), so a frame is a pure
+/// function of the script and the engine's events.
 async fn run_script(
     shell: &mut Shell,
     script: &Path,
@@ -672,7 +715,7 @@ async fn run_script(
                 let deadline = tokio::time::Instant::now() + within;
                 loop {
                     shell.poll();
-                    if until.holds(&shell.model) {
+                    if until.holds(&shell.model, &shell.legs_seen) {
                         break;
                     }
                     if tokio::time::Instant::now() >= deadline {
@@ -683,6 +726,22 @@ async fn run_script(
                         ));
                     }
                     tokio::time::sleep(Duration::from_millis(PUMP_MS)).await;
+                }
+            }
+            Step::Sleep(ms) => {
+                // The ticks are counted on the script's clock, not read off
+                // the wall: `sleep 2500` is ten ticks on a loaded host too.
+                let mut slept = 0;
+                let mut ticked = 0;
+                while slept < ms {
+                    let step = PUMP_MS.min(ms - slept);
+                    tokio::time::sleep(Duration::from_millis(step)).await;
+                    slept += step;
+                    shell.poll();
+                    while ticked + TICK_MS <= slept {
+                        ticked += TICK_MS;
+                        shell.apply(UiEvent::Tick);
+                    }
                 }
             }
         }
@@ -860,6 +919,38 @@ mod tests {
         ));
         assert!(parse_script("key nope\n").is_err());
         assert!(parse_script("until weather\n").is_err());
+    }
+
+    #[test]
+    fn sleep_and_until_leg_parse_and_sleep_is_capped() {
+        let steps =
+            parse_script("sleep 2500\nuntil leg direct 5\nuntil leg propagated\n").expect("parses");
+        assert!(matches!(steps[0], Step::Sleep(2500)));
+        assert!(matches!(
+            steps[1],
+            Step::Until(Until::Leg(Leg::Direct), d) if d == Duration::from_secs(5)
+        ));
+        assert!(matches!(
+            steps[2],
+            Step::Until(Until::Leg(Leg::Propagated), d) if d == Duration::from_secs(UNTIL_SECS)
+        ));
+        assert!(parse_script("sleep 60000\n").is_ok());
+        assert!(parse_script("sleep 60001\n").is_err());
+        assert!(parse_script("sleep\n").is_err());
+        assert!(parse_script("until leg sideways\n").is_err());
+    }
+
+    /// `until leg` holds for the newest message we wrote, not an older one.
+    #[test]
+    fn until_leg_reads_the_newest_sent_message() {
+        let mut model = Model::new(&[[0xab; 16]]);
+        for name in ["tab", "tab", "a", "enter", "b", "enter"] {
+            update(&mut model, UiEvent::Key(parse_key(name).expect("key")));
+        }
+        let until = Until::Leg(Leg::Direct);
+        assert!(!until.holds(&model, &[((0, 0), Leg::Direct)]));
+        assert!(!until.holds(&model, &[((0, 1), Leg::Propagated)]));
+        assert!(until.holds(&model, &[((0, 1), Leg::Direct)]));
     }
 
     fn render(model: &Model) -> String {

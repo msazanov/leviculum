@@ -30,6 +30,7 @@ use support::daemon;
 
 const LNMSG: &str = env!("CARGO_BIN_EXE_lnmsg");
 const EXPECTED: &str = include_str!("fixtures/tui_session.frames");
+const EXPECTED_LATE: &str = include_str!("fixtures/tui_late.frames");
 
 const SCRIPT: &str = "\
 until ready 20
@@ -47,6 +48,25 @@ until delivery delivered 30
 frame delivered
 until received 1 30
 frame reply
+key esc
+key q
+";
+
+/// A send to a correspondent that is not there yet: the row carries the
+/// direct leg and its seconds, then the correspondent attaches and the proof
+/// lands, and the script leaves in the pump that showed it.
+const LATE_SCRIPT: &str = "\
+until ready 20
+frame attached
+key enter
+key enter
+type are you there
+key enter
+until leg direct 5
+sleep 2500
+frame waiting
+until delivery delivered 30
+frame delivered
 key esc
 key q
 ";
@@ -165,6 +185,92 @@ async fn a_scripted_session_sends_sees_the_proof_and_reads_the_reply() {
         panic!(
             "the frames moved; this run's are in {}, the pinned ones in \
              lnmsg/tests/fixtures/tui_session.frames\n{got}",
+            kept.display()
+        );
+    }
+}
+
+/// The leg label's seconds come from the script's clock: `until leg` applies
+/// no tick and `sleep 2500` applies ten, one per 250 ms of its own length,
+/// so the row reads `direct 2 s` however long the host took.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_late_recipient_shows_the_direct_leg_and_the_log_keeps_its_steps() {
+    let daemon = daemon("tui-late", |b| b).await;
+    let home = tempfile::tempdir().expect("tui home");
+    let ours = fixed_identity(0x11);
+    std::fs::write(
+        home.path().join("identity"),
+        encode_identity(&ours).expect("storable"),
+    )
+    .expect("write the identity");
+    let theirs = fixed_identity(0x22);
+    let their_address = delivery_address(&theirs).expect("their address");
+    let their_hex: String = their_address.iter().map(|b| format!("{b:02x}")).collect();
+
+    let script = home.path().join("late.script");
+    let frames = home.path().join("late.frames");
+    std::fs::write(&script, LATE_SCRIPT).expect("write the script");
+    let args: Vec<String> = vec![
+        "tui".into(),
+        "--instance".into(),
+        daemon.instance.clone(),
+        "--config".into(),
+        daemon.config_dir.path().display().to_string(),
+        "--to".into(),
+        their_hex.clone(),
+        "--script".into(),
+        script.display().to_string(),
+        "--frames".into(),
+        frames.display().to_string(),
+        "--size".into(),
+        "80x16".into(),
+    ];
+    let child_home = home.path().to_path_buf();
+    let child = tokio::task::spawn_blocking(move || {
+        let mut command = Command::new(LNMSG);
+        command
+            .args(&args)
+            .env("LNMSG_HOME", &child_home)
+            .env("LNMSG_DISPLAY_NAME", "tui")
+            .env_remove("LEVICULUM_EVENT_LOG")
+            .env_remove("RUST_LOG")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let child = leviculum_std::process::spawn_supervised(command).expect("spawn lnmsg");
+        child.wait_with_output().expect("wait for lnmsg")
+    });
+
+    // Only once the label is on screen does the correspondent appear.
+    wait_for_frame(&frames, "waiting", Duration::from_secs(30)).await;
+    let storage = tempfile::tempdir().expect("their storage");
+    let them = attach(AttachConfig {
+        instance: daemon.instance.clone(),
+        storage_dir: storage.path().to_path_buf(),
+        identity: theirs,
+        display_name: b"them".to_vec(),
+        notices: Terminal::new(storage.path().to_path_buf()),
+    })
+    .await
+    .expect("the correspondent attaches");
+
+    let output = child.await.expect("the lnmsg child thread");
+    them.stop().await;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let got = std::fs::read_to_string(&frames).expect("read the frames");
+    let log = std::fs::read_to_string(home.path().join("tui.log")).unwrap_or_default();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {stderr}\nframes:\n{got}\ntui.log:\n{log}"
+    );
+
+    if got != EXPECTED_LATE {
+        let kept = std::env::temp_dir().join("lnmsg-tui-late.frames");
+        let _ = std::fs::write(&kept, &got);
+        panic!(
+            "the frames moved; this run's are in {}, the pinned ones in \
+             lnmsg/tests/fixtures/tui_late.frames\n{got}",
             kept.display()
         );
     }
