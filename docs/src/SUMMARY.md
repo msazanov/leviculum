@@ -30,6 +30,7 @@
 - [lnmsg: a terminal LXMF messenger](concepts/lnmsg.md)
   - [lnmsg: architecture](concepts/lnmsg-architecture.md)
   - [lnmsg: the user interface](concepts/lnmsg-ui.md)
+  - [lnmsg: keys, mouse and layout](concepts/lnmsg-keys-and-layout.md)
   - [lnmsg: conversation storage](concepts/lnmsg-storage.md)
   - [lnmsg: the mailbox, and who you talk to](concepts/lnmsg-mailbox.md)
 - [Public channels over LXMF](concepts/public-channels.md)

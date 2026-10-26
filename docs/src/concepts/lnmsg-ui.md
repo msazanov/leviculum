@@ -173,6 +173,11 @@ conversation is its address; `--to` lists one from the start). The keymap
 is still a `match` in `ui.rs` beside the help text, not yet the one table
 the decision asks for.
 
+The second round on the screen, the full key table (vi, Emacs, the mail
+and the chat programs side by side, per pane), the mouse, the chat layout
+in text mode and the slices after 1002, is
+[keys, mouse and layout](lnmsg-keys-and-layout.md) (2026-10-26).
+
 ## 2. Decision: what honesty about delivery looks like
 
 Most chat UIs lie by simplification: one check for sent, two for delivered,

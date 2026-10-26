@@ -13,7 +13,7 @@ conclusion. Between 2026-08-08 and 2026-08-10 all ten questions were
 settled, so the document graduates from discussion to record and the
 remaining work is issues and batches.
 
-The rejected alternatives are kept throughout, on all five pages. They are
+The rejected alternatives are kept throughout, on all six pages. They are
 the *why*: a decision recorded without the options it beat is an assertion,
 and the next person to ask "why not SQLite / why not modal keys / why not a
 daemon" has to re-derive the argument from nothing.
@@ -23,6 +23,10 @@ daemon" has to re-derive the argument from nothing.
   split, scriptability, and the library gaps.
 - [The user interface](lnmsg-ui.md) — the input model, and what honesty
   about delivery looks like.
+- [Keys, mouse and layout](lnmsg-keys-and-layout.md) — the full key
+  table across vi, Emacs and the mail and chat programs, the mouse, the
+  chat layout in text mode, and the slices that build them (a proposal of
+  2026-10-26, for confirmation).
 - [Conversation storage](lnmsg-storage.md) — SQLite, the schema, retention.
 - [The mailbox and who you talk to](lnmsg-mailbox.md) — propagation-node
   policy, trust, contacts and names.
