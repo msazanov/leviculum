@@ -227,8 +227,10 @@ pub struct MouseEvent {
     pub modifiers: KeyModifiers,
 }
 
-/// A one-line text field as a core holds it: what a key does to it, and what
-/// it holds. lnmsg's compose line is one.
+/// A text field as a core holds it: what a key does to it, and what it holds.
+/// lnmsg's compose pane is one; it holds more than one line once
+/// [`InputBuffer::newline`] has been called, and every other edit treats the
+/// line break as one character.
 pub trait InputBuffer {
     /// The text.
     fn value(&self) -> &str;
@@ -239,6 +241,10 @@ pub trait InputBuffer {
     fn edit(&mut self, key: &KeyEvent) -> bool;
     /// Empty the field and hand back what it held.
     fn take(&mut self) -> String;
+    /// Insert a line break at the cursor. Not an [`InputBuffer::edit`] key:
+    /// which key means "newline" is the caller's keymap (lnmsg's compose
+    /// pane binds `Alt-Enter`, where `Enter` sends), not the field's.
+    fn newline(&mut self);
 }
 
 /// The terminal's field: `tui-input`, edited through [`input_request`], the
@@ -265,6 +271,10 @@ impl InputBuffer for tui_input::Input {
 
     fn take(&mut self) -> String {
         self.value_and_reset()
+    }
+
+    fn newline(&mut self) {
+        self.handle(InputRequest::InsertChar('\n'));
     }
 }
 
@@ -314,5 +324,29 @@ pub fn input_request(key: &KeyEvent) -> Option<InputRequest> {
             Some(InsertChar(c))
         }
         _ => None,
+    }
+}
+
+#[cfg(all(test, feature = "std"))]
+mod tests {
+    use super::*;
+
+    /// The line break goes in at the cursor, and the field's other edits
+    /// treat it as the one character it is: a backspace right after it
+    /// joins the lines again.
+    #[test]
+    fn a_newline_goes_in_at_the_cursor_and_is_one_character() {
+        let mut field = tui_input::Input::default();
+        for c in "onetwo".chars() {
+            field.edit(&KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        for _ in 0..3 {
+            field.edit(&KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        }
+        field.newline();
+        assert_eq!(InputBuffer::value(&field), "one\ntwo");
+        assert_eq!(InputBuffer::cursor(&field), 4);
+        field.edit(&KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(field.take(), "onetwo");
     }
 }

@@ -141,7 +141,12 @@ In:
   `Home`/`End` jump, `Enter` opens the conversation or goes to compose,
   `?` help, `q` quits, `:` opens the palette.
 - Compose: plain keys type through the `tui-input` table lnomad's fields
-  use; `Enter` sends, and on an empty line does nothing; `Esc` goes back
+  use; `Enter` sends, and on an empty line does nothing; `Alt-Enter`
+  breaks the line (since 1002; crossterm reads the ESC CR a terminal sends
+  for it as `Enter` with `ALT`, and `Shift-Enter` arrives only under the
+  keyboard enhancement protocol, which `lnmsg tui` does not switch on yet,
+  so it is bound but legacy terminals cannot send it); the pane grows to
+  five rows and then scrolls; `Esc` goes back
   to the messages; `Ctrl-C` clears the line into the kill buffer
   (`Ctrl-Y` brings it back) and does not quit.
 - Everywhere: `Ctrl-P` opens the palette, `Ctrl-Q` quits.
@@ -150,15 +155,19 @@ In:
   the one table the desktop GUI will share.
 - Delivery glyphs from the table in section 2, mapped from the router's
   states as listed there; received messages, deduplicated by id, with an
-  unread count on a conversation that is not open.
+  unread count on a conversation that is not open. A body with line
+  breaks is drawn as its lines, wrapped to the pane at a space, the mark
+  on the first row only and the rest set in by four.
 - `lnmsg tui --script <file>` runs a key script against the real engine and
   writes the frames it asks for to a file; `lnmsg/tests/tui_snapshot.rs`
-  pins a session (open, type, send, `○` to `✓`, the reply) that way.
+  pins a session (open, type two lines, send, `○` to `✓`, a two-line
+  reply) that way; a script's `newline` step is `Alt-Enter`.
 
 Not in, and open: history (lnmsg keeps no message store yet, so the
 screen holds this session's messages and says so), trust states, the
-mouse, QR codes, the per-message detail view and its ledger, `Alt-Enter`
-for a newline and the `send_on_enter` switch, `f` hint mode, lnomad's full
+mouse, QR codes, the per-message detail view and its ledger, the
+`send_on_enter` switch and the keyboard enhancement protocol for
+`Shift-Enter`, `f` hint mode, lnomad's full
 `SCROLL_KEYS` table (only the motions above), and display names (a
 conversation is its address; `--to` lists one from the start). The keymap
 is still a `match` in `ui.rs` beside the help text, not yet the one table

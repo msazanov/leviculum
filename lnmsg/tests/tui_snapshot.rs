@@ -1,6 +1,6 @@
 //! `lnmsg tui` through the real binary, scripted, against a real daemon:
-//! open the conversation, type, send, watch the delivery mark move from `○`
-//! to `✓`, read the reply. The frames the script asks for are pinned in
+//! open the conversation, type two lines (`Alt-Enter` between them), send,
+//! watch the delivery mark move from `○` to `✓`, read the two-line reply. The frames the script asks for are pinned in
 //! `tests/fixtures/tui_session.frames`.
 //!
 //! The daemon is the in-process one `mailbox_cli.rs` uses. The correspondent
@@ -38,6 +38,8 @@ frame attached
 key enter
 key enter
 type hello from the tui
+newline
+type on two lines
 frame typed
 key enter
 frame queued
@@ -137,7 +139,7 @@ async fn a_scripted_session_sends_sees_the_proof_and_reads_the_reply() {
         SendRequest {
             destination: our_address,
             title: Vec::new(),
-            body: b"hello back".to_vec(),
+            body: b"hello back\nalso on two lines".to_vec(),
             via: Via::Direct,
         },
         &SendOptions::new(daemon.instance.clone(), Duration::from_secs(20)),

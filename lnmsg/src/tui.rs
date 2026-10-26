@@ -62,6 +62,8 @@ const TICK_MS: u64 = 250;
 const PUMP_MS: u64 = 20;
 /// How long a script's `until` waits by default.
 const UNTIL_SECS: u64 = 30;
+/// The compose pane grows with its text up to this many rows, then scrolls.
+const COMPOSE_MAX_ROWS: usize = 5;
 /// `tui.log`'s filter without `RUST_LOG`.
 const TUI_LOG_FILTER: &str = "warn,lnmsg=info";
 
@@ -544,6 +546,7 @@ fn parse_state(name: &str) -> Result<DeliveryState, String> {
 /// ```text
 /// key <name>                     one key (see parse_key)
 /// type <text>                    each character of the rest of the line
+/// newline                        Alt-Enter: a line break in compose
 /// tick [n]                       n spinner/toast ticks (1)
 /// frame [label]                  dump the screen
 /// until ready [secs]             the engine is attached
@@ -571,6 +574,7 @@ fn parse_script(text: &str) -> Result<Vec<Step>, String> {
         let step = match word {
             "key" => Step::Key(parse_key(rest.trim()).map_err(at)?),
             "type" => Step::Type(rest.to_string()),
+            "newline" => Step::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT)),
             "tick" => Step::Tick(match rest.trim() {
                 "" => 1,
                 n => n.parse().map_err(|_| at(format!("bad tick count {n:?}")))?,
@@ -708,9 +712,11 @@ fn pane_block(title: &str, focused: bool) -> Block<'static> {
 /// under them, the footer at the bottom; the toast, the palette and the help
 /// on top.
 pub fn draw(frame: &mut Frame, view: &View, theme: Theme, no_color: bool) {
+    let compose_lines: Vec<&str> = view.compose.split('\n').collect();
+    let compose_rows = compose_lines.len().clamp(1, COMPOSE_MAX_ROWS) as u16;
     let [body, compose, footer_row] = Layout::vertical([
         Constraint::Min(3),
-        Constraint::Length(3),
+        Constraint::Length(compose_rows + 2),
         Constraint::Length(1),
     ])
     .areas(frame.area());
@@ -725,23 +731,47 @@ pub fn draw(frame: &mut Frame, view: &View, theme: Theme, no_color: bool) {
     let block = pane_block(&view.messages_title, view.focus == Pane::Messages);
     let inner = block.inner(right);
     frame.render_widget(block, right);
+    // Each message wrapped to the pane, then scrolled by rows so the
+    // cursor's message ends on screen.
     let rows = inner.height as usize;
-    let skip = (view.message_cursor + 1).saturating_sub(rows);
-    let visible: Vec<_> = view.messages.iter().skip(skip).cloned().collect();
+    let mut wrapped = Vec::new();
+    let mut cursor_end = 0;
+    for (index, lines) in view.messages.iter().enumerate() {
+        wrapped.extend(ui::wrap(
+            lines,
+            inner.width as usize,
+            ui::CONTINUATION_INDENT,
+        ));
+        if index == view.message_cursor {
+            cursor_end = wrapped.len();
+        }
+    }
+    let skip = cursor_end.saturating_sub(rows);
+    let visible: Vec<_> = wrapped.into_iter().skip(skip).collect();
     frame.render_widget(Paragraph::new(to_ratatui_text(&visible)), inner);
 
+    // The compose pane: one row a line, up to five, scrolled to the
+    // cursor's line and, sideways, to its column.
     let focused = view.focus == Pane::Compose;
     let block = pane_block("compose", focused);
     let inner = block.inner(compose);
     frame.render_widget(block, compose);
+    let (cursor_line, cursor_column) = line_and_column(&view.compose, view.compose_cursor);
     let width = inner.width.max(1) as usize;
-    let scroll = (view.compose_cursor + 1).saturating_sub(width);
-    let shown: String = view.compose.chars().skip(scroll).collect();
-    frame.render_widget(Paragraph::new(shown), inner);
+    let height = inner.height.max(1) as usize;
+    let scroll = (cursor_column + 1).saturating_sub(width);
+    let top = (cursor_line + 1).saturating_sub(height);
+    let shown: Vec<Line> = compose_lines
+        .iter()
+        .skip(top)
+        .take(height)
+        .map(|line| Line::from(line.chars().skip(scroll).collect::<String>()))
+        .collect();
+    frame.render_widget(Paragraph::new(Text::from(shown)), inner);
     if focused && view.palette.is_none() && !view.help {
         frame.set_cursor_position(Position::new(
-            inner.x + (view.compose_cursor - scroll) as u16,
-            inner.y,
+            inner.x + (cursor_column - scroll) as u16,
+            inner.y + (cursor_line - top) as u16,
         ));
     }
 
@@ -780,6 +810,22 @@ pub fn draw(frame: &mut Frame, view: &View, theme: Theme, no_color: bool) {
             theme,
         );
     }
+}
+
+/// The line and the column, in characters, of the `cursor`th character of
+/// `text`.
+fn line_and_column(text: &str, cursor: usize) -> (usize, usize) {
+    let mut line = 0;
+    let mut column = 0;
+    for c in text.chars().take(cursor) {
+        if c == '\n' {
+            line += 1;
+            column = 0;
+        } else {
+            column += 1;
+        }
+    }
+    (line, column)
 }
 
 fn from_rect(rect: Rect) -> leviculum_ui::Rect {
@@ -846,6 +892,71 @@ mod tests {
         assert_eq!(model.compose.value(), "");
         update(&mut model, UiEvent::Key(parse_key("ctrl-y").expect("key")));
         assert_eq!(model.compose.value(), "hi");
+    }
+
+    #[test]
+    fn the_newline_step_is_alt_enter() {
+        let steps = parse_script("newline\n").expect("parses");
+        assert!(matches!(
+            steps[0],
+            Step::Key(KeyEvent {
+                code: KeyCode::Enter,
+                modifiers: KeyModifiers::ALT,
+                ..
+            })
+        ));
+    }
+
+    /// The compose pane grows by a row per line, up to five, and a message
+    /// longer than its pane wraps under its mark.
+    #[test]
+    fn compose_grows_with_its_lines_and_a_long_message_wraps() {
+        let mut model = Model::new(&[[0xab; 16]]);
+        for name in ["tab", "tab", "a"] {
+            update(&mut model, UiEvent::Key(parse_key(name).expect("key")));
+        }
+        for c in ['b', 'c', 'd', 'e', 'f', 'g'] {
+            leviculum_ui::input::InputBuffer::newline(&mut model.compose);
+            update(
+                &mut model,
+                UiEvent::Key(parse_key(&c.to_string()).expect("key")),
+            );
+        }
+        let screen = render(&model);
+        let rows: Vec<&str> = screen.lines().collect();
+        let top = rows
+            .iter()
+            .position(|row| row.contains("● compose"))
+            .expect("the compose pane");
+        // Five rows of text between the borders, the last five lines.
+        let inner: Vec<&str> = rows[top + 1..top + 6]
+            .iter()
+            .map(|row| row.trim_matches(|c: char| c == '│' || c == ' '))
+            .collect();
+        assert_eq!(inner, ["c", "d", "e", "f", "g"], "{screen}");
+        assert!(rows[top + 6].starts_with('└'), "{screen}");
+
+        let mut model = Model::new(&[[0xab; 16]]);
+        for name in ["tab", "tab"] {
+            update(&mut model, UiEvent::Key(parse_key(name).expect("key")));
+        }
+        for c in "word ".repeat(20).chars() {
+            update(
+                &mut model,
+                UiEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)),
+            );
+        }
+        update(&mut model, UiEvent::Key(parse_key("enter").expect("key")));
+        let screen = render(&model);
+        assert!(screen.contains("me: word word"), "{screen}");
+        assert!(
+            screen.contains("│    word word"),
+            "the wrapped row is set in: {screen}"
+        );
+        assert!(
+            !screen.contains("w│"),
+            "no word is cut at the edge: {screen}"
+        );
     }
 
     #[test]

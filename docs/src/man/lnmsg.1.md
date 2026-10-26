@@ -61,7 +61,7 @@ In **tui**, the focus follows the pane. `Tab` and `Shift-Tab` cycle the conversa
 
 In the conversations and the messages: `j`/`k` or the arrows move, `g`/`G` or `Home`/`End` jump to the top or bottom, `Enter` opens the conversation or goes to the compose line, `?` shows the help, `:` opens the command palette, `q` quits.
 
-In the compose line, keys type. `Enter` sends to the open conversation (an empty line sends nothing), `Esc` goes back to the messages, `Ctrl-C` clears the line (`Ctrl-Y` brings it back).
+In the compose line, keys type. `Enter` sends to the open conversation (an empty line sends nothing), `Alt-Enter` starts a new line, `Esc` goes back to the messages, `Ctrl-C` clears the line (`Ctrl-Y` brings it back).
 
 Everywhere: `Ctrl-P` opens the command palette, which matches what you type against `send`, `fetch`, `quit`, `help` and `focus conversations|messages|compose`; `Ctrl-Q` quits.
 

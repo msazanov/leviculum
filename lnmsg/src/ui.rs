@@ -421,6 +421,17 @@ fn on_key<B: InputBuffer + Default>(model: &mut UiModel<B>, key: KeyEvent) -> Ve
     }
     match model.focus {
         Pane::Compose => match key.code {
+            // A line break where the terminal tells the chord from `Enter`:
+            // `Alt-Enter` always (ESC CR, which crossterm reads as `Enter`
+            // with `ALT`), `Shift-Enter` only under the keyboard enhancement
+            // protocol, which is not switched on yet.
+            KeyCode::Enter
+                if key.modifiers.contains(KeyModifiers::ALT)
+                    || key.modifiers.contains(KeyModifiers::SHIFT) =>
+            {
+                model.compose.newline();
+                Vec::new()
+            }
             KeyCode::Enter => run(model, PaletteCommand::Send),
             KeyCode::Esc => {
                 model.focus = Pane::Messages;
@@ -739,8 +750,10 @@ pub struct View {
     pub conversations: Vec<RLine>,
     /// The messages pane's title: the selected peer's full address.
     pub messages_title: String,
-    /// One line per message, oldest first.
-    pub messages: Vec<RLine>,
+    /// Each message's lines, oldest message first: one per line of its
+    /// body, the delivery mark on the first. Unwrapped; the renderer wraps
+    /// them to the pane with [`wrap`].
+    pub messages: Vec<Vec<RLine>>,
     /// Which message line the cursor is on, for the renderer's scrolling.
     pub message_cursor: usize,
     /// The compose line and its cursor, in characters.
@@ -830,13 +843,13 @@ pub fn view<B: InputBuffer>(model: &UiModel<B>) -> View {
             })
             .collect(),
     };
-    let messages: Vec<RLine> = match model.messages_of_selected().is_empty() {
-        true => vec![plain(NO_HISTORY)],
+    let messages: Vec<Vec<RLine>> = match model.messages_of_selected().is_empty() {
+        true => vec![vec![plain(NO_HISTORY)]],
         false => model
             .messages_of_selected()
             .iter()
             .enumerate()
-            .map(|(i, m)| message_line(m, i == model.message_cursor, spin, model.ascii))
+            .map(|(i, m)| message_lines(m, i == model.message_cursor, spin, model.ascii))
             .collect(),
     };
     let messages_title = match model.conversations.get(model.selected) {
@@ -899,7 +912,70 @@ fn leg_label(message: &Message, state: DeliveryState, tick: u64) -> Option<Strin
     Some(format!("{word} {secs} s"))
 }
 
-fn message_line(message: &Message, here: bool, spin: usize, ascii: bool) -> RLine {
+/// How far a message's second and later rows are set in, below its mark.
+pub const CONTINUATION_INDENT: usize = 4;
+
+/// Cut `lines` to rows of at most `width` cells, every row after a line's
+/// first set in by `indent`, and the cells keeping their styles. A row the
+/// indent alone would fill is not indented, so a narrow pane still shows
+/// text.
+pub fn wrap(lines: &[RLine], width: usize, indent: usize) -> Vec<RLine> {
+    let width = width.max(1);
+    let indent = if indent < width { indent } else { 0 };
+    let mut rows = Vec::new();
+    for line in lines {
+        let mut cells = line.cells.as_slice();
+        let mut first = true;
+        loop {
+            let pad = if first { 0 } else { indent };
+            let room = width - pad;
+            // At the last space that fits, which the break then swallows; a
+            // word longer than the row is cut where the row ends.
+            let (take, skip) = if cells.len() <= room {
+                (cells.len(), 0)
+            } else {
+                match cells[..=room].iter().rposition(|cell| cell.ch == ' ') {
+                    Some(space) if space > 0 => (space, 1),
+                    _ => (room, 0),
+                }
+            };
+            let mut row = RLine::default();
+            push(&mut row, &" ".repeat(pad), RStyle::default());
+            row.cells.extend_from_slice(&cells[..take]);
+            rows.push(row);
+            cells = &cells[take + skip..];
+            first = false;
+            if cells.is_empty() {
+                break;
+            }
+        }
+    }
+    rows
+}
+
+/// A message as its lines: the first carries the cursor mark, the delivery
+/// mark and who wrote it, the others the rest of the body, set in by
+/// [`CONTINUATION_INDENT`].
+fn message_lines(message: &Message, here: bool, spin: usize, ascii: bool) -> Vec<RLine> {
+    let st = if here { bold() } else { RStyle::default() };
+    let mut body = message.body.split('\n');
+    let mut lines = vec![message_line(
+        message,
+        here,
+        spin,
+        ascii,
+        body.next().unwrap_or(""),
+    )];
+    for rest in body {
+        let mut line = RLine::default();
+        push(&mut line, &" ".repeat(CONTINUATION_INDENT), st);
+        push(&mut line, rest, st);
+        lines.push(line);
+    }
+    lines
+}
+
+fn message_line(message: &Message, here: bool, spin: usize, ascii: bool, first: &str) -> RLine {
     let mut line = RLine::default();
     let st = if here { bold() } else { RStyle::default() };
     push(&mut line, if here { "▸ " } else { "  " }, st);
@@ -929,7 +1005,7 @@ fn message_line(message: &Message, here: bool, spin: usize, ascii: bool) -> RLin
             );
         }
     }
-    push(&mut line, &message.body.replace('\n', " "), st);
+    push(&mut line, first, st);
     line
 }
 
@@ -1002,6 +1078,7 @@ pub fn help_groups() -> Vec<HelpGroup> {
             title: "Compose",
             entries: [
                 entry("Enter", "send (direct, else a propagation node)"),
+                entry("Alt-Enter", "new line"),
                 entry("Esc", "back to the messages"),
                 entry("Ctrl-C", "clear the line (Ctrl-Y brings it back)"),
             ]
@@ -1047,6 +1124,9 @@ mod tests {
         }
         fn take(&mut self) -> String {
             core::mem::take(&mut self.0)
+        }
+        fn newline(&mut self) {
+            self.0.push('\n');
         }
     }
 
@@ -1292,8 +1372,8 @@ mod tests {
     #[test]
     fn a_waiting_send_shows_its_leg_and_the_seconds_on_it() {
         let text = |model: &UiModel<Field>| -> String {
-            let line = view(model).messages.last().cloned().expect("a row");
-            line.cells.iter().map(|c| c.ch).collect()
+            let lines = view(model).messages.last().cloned().expect("a message");
+            lines[0].cells.iter().map(|c| c.ch).collect()
         };
         let mut model = UiModel::<Field>::new(&[PEER]);
         sent(&mut model, "hi");
@@ -1432,15 +1512,94 @@ mod tests {
     fn the_view_draws_the_glyph_and_says_there_is_no_history() {
         let mut model = UiModel::<Field>::new(&[PEER]);
         let empty = view(&model);
-        assert_eq!(text(&empty.messages[0]), NO_HISTORY);
+        assert_eq!(text(&empty.messages[0][0]), NO_HISTORY);
         assert_eq!(empty.messages_title, to_hex(&PEER));
         sent(&mut model, "hi");
         engine(&mut model, OutboxEvent::Queued { message_id: ID });
-        assert_eq!(text(&view(&model).messages[0]), "▸ ○ me: hi");
+        assert_eq!(text(&view(&model).messages[0][0]), "▸ ○ me: hi");
         state(&mut model, ID, MessageState::Delivered);
-        assert_eq!(text(&view(&model).messages[0]), "▸ ✓ me: hi");
+        assert_eq!(text(&view(&model).messages[0][0]), "▸ ✓ me: hi");
         model.ascii = true;
-        assert_eq!(text(&view(&model).messages[0]), "▸ v me: hi");
+        assert_eq!(text(&view(&model).messages[0][0]), "▸ v me: hi");
         assert_eq!(text(&view(&model).conversations[0]), "▸ abababababababab");
+    }
+
+    /// `Alt-Enter` puts a line break in the compose pane, `Enter` still
+    /// sends, and the sent body keeps its lines (leviculum 1002).
+    #[test]
+    fn alt_enter_breaks_the_line_and_enter_sends_both_lines() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        update(&mut model, key(KeyCode::Tab));
+        update(&mut model, key(KeyCode::Tab));
+        typed(&mut model, "one");
+        let effects = update(
+            &mut model,
+            UiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT)),
+        );
+        assert!(effects.is_empty(), "Alt-Enter must not send: {effects:?}");
+        update(
+            &mut model,
+            UiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT)),
+        );
+        typed(&mut model, "three");
+        assert_eq!(model.compose.value(), "one\n\nthree");
+        let effects = update(&mut model, key(KeyCode::Enter));
+        assert_eq!(
+            effects,
+            [UiEffect::Send {
+                to: PEER,
+                body: "one\n\nthree".to_string(),
+            }]
+        );
+    }
+
+    /// A body with line breaks is drawn as its lines, the mark on the first
+    /// only, both ways.
+    #[test]
+    fn a_multi_line_body_is_its_lines_with_the_mark_on_the_first() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        sent(&mut model, "");
+        model.compose.0 = "first\nsecond".to_string();
+        update(&mut model, key(KeyCode::Enter));
+        engine(
+            &mut model,
+            OutboxEvent::Received {
+                message_id: ID2,
+                source: PEER,
+                title: Vec::new(),
+                body: b"back\nagain".to_vec(),
+                verified: true,
+            },
+        );
+        let lines: Vec<Vec<String>> = view(&model)
+            .messages
+            .iter()
+            .map(|m| m.iter().map(text).collect())
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                vec!["  ○ me: first".to_string(), "    second".to_string()],
+                vec!["▸   them: back".to_string(), "    again".to_string()],
+            ]
+        );
+    }
+
+    #[test]
+    fn wrap_cuts_to_the_width_and_sets_the_rest_in() {
+        let rows: Vec<String> = wrap(&[plain("abcdefghij"), plain("")], 6, 2)
+            .iter()
+            .map(text)
+            .collect();
+        assert_eq!(rows, ["abcdef", "  ghij", ""]);
+        // At a space when one fits, and the space goes with the break.
+        let rows: Vec<String> = wrap(&[plain("ab cd efgh")], 6, 2)
+            .iter()
+            .map(text)
+            .collect();
+        assert_eq!(rows, ["ab cd", "  efgh"]);
+        // An indent as wide as the pane would leave no room: none then.
+        let rows: Vec<String> = wrap(&[plain("abcd")], 2, 2).iter().map(text).collect();
+        assert_eq!(rows, ["ab", "cd"]);
     }
 }
