@@ -18,6 +18,9 @@
 //! [`resolve_theme`] maps that plus the `--theme` flag onto a [`Theme`]. On any
 //! detection failure or timeout the result is [`Theme::Dark`].
 
+use crate::color::{Ink, Tier};
+use crate::tokens::tokens;
+
 /// The set of accent colours to render a page with.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Theme {
@@ -133,20 +136,15 @@ impl Theme {
         }
     }
 
-    /// The chrome-bar background (top-bar and status bar fill).
+    /// The chrome-bar background (top-bar and status bar fill): the
+    /// truecolor value of the `chrome` token ([`crate::tokens`]).
     pub fn chrome_bg(self) -> (u8, u8, u8) {
-        match self {
-            Theme::Dark => (38, 40, 49),
-            Theme::Light => (225, 228, 235),
-        }
+        truecolor(tokens(Tier::Truecolor, self).chrome.bg)
     }
 
     /// The chrome-bar foreground drawn over [`chrome_bg`](Theme::chrome_bg).
     pub fn chrome_fg(self) -> (u8, u8, u8) {
-        match self {
-            Theme::Dark => (205, 210, 220),
-            Theme::Light => (40, 44, 52),
-        }
+        truecolor(tokens(Tier::Truecolor, self).chrome.fg)
     }
 
     /// A muted-but-readable chrome foreground for the UNAVAILABLE top-bar
@@ -156,10 +154,7 @@ impl Theme {
     /// [`chrome_bg`](Theme::chrome_bg) so it stays legible. Not `Modifier::DIM`,
     /// which halves the foreground and drops below readable on the chrome bar.
     pub fn chrome_muted_fg(self) -> (u8, u8, u8) {
-        match self {
-            Theme::Dark => (140, 150, 165),
-            Theme::Light => (95, 100, 112),
-        }
+        truecolor(tokens(Tier::Truecolor, self).chrome_muted.fg)
     }
 
     /// The hint-badge foreground (the typed label glyphs).
@@ -196,6 +191,15 @@ impl Theme {
             Theme::Dark => (255, 255, 255),
             Theme::Light => (0, 0, 0),
         }
+    }
+}
+
+/// An RGB value of the truecolor table, which holds nothing else (a test of
+/// [`crate::tokens`] says so for the chrome).
+fn truecolor(ink: Option<Ink>) -> (u8, u8, u8) {
+    match ink {
+        Some(Ink::Rgb(r, g, b)) => (r, g, b),
+        _ => (0, 0, 0),
     }
 }
 

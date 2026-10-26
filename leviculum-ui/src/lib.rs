@@ -3,8 +3,9 @@
 //! interaction model").
 //!
 //! Code is shared where it is the same problem: a styled text model, one
-//! palette and its colour maths, the programs' own key and mouse events with
-//! the text-editing table over them, the keymap table every reader of a
+//! palette and its colour maths, the colour tokens with their tier ladder,
+//! the programs' own key and mouse events with the text-editing table over
+//! them, the keymap table every reader of a
 //! key takes its chords from, the chrome models (footer strip, help
 //! overlay, toast), the loading spinner, the delivery glyph table of
 //! `docs/src/concepts/lnmsg-ui.md`, the OSC 52 clipboard sequence, and the
@@ -41,8 +42,10 @@ pub mod style;
 pub mod text;
 pub mod theme;
 pub mod toast;
+pub mod tokens;
 
-pub use color::{resolve_depth, rgb_to_ansi256, ColorDepth, ColorFlag};
+pub use color::{resolve_tier, rgb_to_ansi256, ColorDepth, ColorFlag, Ink, Tier, TierEnv};
 pub use geometry::Rect;
 pub use style::{RLine, RStyle, StyledChar};
 pub use theme::{resolve_theme, Bg, Theme, ThemeFlag};
+pub use tokens::{tokens, Paint, Tokens};

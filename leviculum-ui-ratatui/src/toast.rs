@@ -2,13 +2,15 @@
 //! bottom-right of the content.
 
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span as RtSpan, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
 use leviculum_ui::text::truncate_to_cols;
 use leviculum_ui::toast::{Toast, ToastKind};
+use leviculum_ui::tokens::Tokens;
+
+use crate::style::paint;
 
 /// A one-column margin from the content's right edge.
 const MARGIN: u16 = 1;
@@ -32,13 +34,15 @@ fn glyph(kind: ToastKind) -> char {
 }
 
 /// Draw the transient toast: a small bordered box floated at the bottom-right of
-/// `content` (never over the status bar), coloured by kind. An error is an
-/// attention red with a `⚠`; an info note is a calm green with a `✓`. Under
-/// `no_color` both fall back to reverse video. One row, the text cut to the
-/// room there is; [`render_rows`] draws a toast its caller wrapped.
-pub fn render(frame: &mut Frame, content: Rect, toast: &Toast, no_color: bool) {
+/// `content` (never over the status bar), in the `toast` token
+/// ([`leviculum_ui::tokens`]), an error's border in the `error` token and its
+/// text behind a `⚠`, a note's behind a `✓`. Where the toast token is reverse
+/// video (16 colours and monochrome) the whole box is, an error's border too.
+/// One row, the text cut to the room there is; [`render_rows`] draws a toast
+/// its caller wrapped.
+pub fn render(frame: &mut Frame, content: Rect, toast: &Toast, tokens: &Tokens) {
     let row = truncate_to_cols(&body(toast), max_inner(content));
-    render_rows(frame, content, toast.kind, &[row], no_color);
+    render_rows(frame, content, toast.kind, &[row], tokens);
 }
 
 /// [`render`] with the rows already cut by the caller, each at most
@@ -50,20 +54,16 @@ pub fn render_rows(
     content: Rect,
     kind: ToastKind,
     rows: &[String],
-    no_color: bool,
+    tokens: &Tokens,
 ) {
     // Too little room to float a bordered box: skip rather than draw garbage.
     if content.width < 8 || content.height < 3 || rows.is_empty() {
         return;
     }
-    let accent = match kind {
-        ToastKind::Error => Color::Rgb(255, 95, 95),
-        ToastKind::Info => Color::Rgb(120, 220, 120),
-    };
-    let style = if no_color {
-        Style::default().add_modifier(Modifier::REVERSED)
-    } else {
-        Style::default().fg(accent)
+    let style = paint(tokens.toast);
+    let border = match (kind, tokens.toast.reverse, tokens.error.fg) {
+        (ToastKind::Error, false, Some(_)) => style.patch(paint(tokens.error)),
+        _ => style,
     };
     let max = max_inner(content);
     let shown = rows.len().min(content.height.saturating_sub(2) as usize);
@@ -81,7 +81,10 @@ pub fn render_rows(
         width: box_w,
         height: box_h,
     };
-    let block = Block::default().borders(Borders::ALL).style(style);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .style(style)
+        .border_style(border);
     frame.render_widget(Clear, overlay);
     frame.render_widget(Paragraph::new(Text::from(lines)).block(block), overlay);
 }

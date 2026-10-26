@@ -10,16 +10,16 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::color::{rgb_to_ansi256, ColorDepth};
+use crate::color::{rgb_to_ansi16, rgb_to_ansi256, ColorDepth, Ink};
 
-/// A resolved terminal style: colours already reduced to RGB, attributes as
-/// flags. `None` colours mean "use the terminal default" (no SGR emitted).
+/// A resolved terminal style: colours as [`Ink`]s, attributes as flags.
+/// `None` colours mean "use the terminal default" (no SGR emitted).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RStyle {
     /// Foreground colour, or `None` for the terminal default.
-    pub fg: Option<(u8, u8, u8)>,
+    pub fg: Option<Ink>,
     /// Background colour, or `None` for the terminal default.
-    pub bg: Option<(u8, u8, u8)>,
+    pub bg: Option<Ink>,
     /// Bold attribute.
     pub bold: bool,
     /// Underline attribute.
@@ -42,10 +42,11 @@ impl RStyle {
             && !self.reverse
     }
 
-    /// The self-contained SGR prefix for this style (starts by resetting). Under
-    /// [`ColorDepth::Truecolor`] colours emit as 24-bit `38;2;r;g;b` / `48;2;...`;
-    /// under [`ColorDepth::Ansi256`] they are downgraded to the nearest palette
-    /// index as `38;5;idx` / `48;5;idx`.
+    /// The self-contained SGR prefix for this style (starts by resetting). An
+    /// RGB colour emits as 24-bit `38;2;r;g;b` / `48;2;...` under
+    /// [`ColorDepth::Truecolor`], as its nearest xterm-256 index under
+    /// [`ColorDepth::Ansi256`] and as its nearest ANSI colour under
+    /// [`ColorDepth::Ansi16`]; an indexed one emits as itself at every depth.
     pub fn sgr(&self, depth: ColorDepth) -> String {
         let mut s = String::from("\x1b[0");
         if self.bold {
@@ -60,20 +61,32 @@ impl RStyle {
         if self.reverse {
             s.push_str(";7");
         }
-        if let Some((r, g, b)) = self.fg {
-            match depth {
-                ColorDepth::Truecolor => s.push_str(&format!(";38;2;{r};{g};{b}")),
-                ColorDepth::Ansi256 => s.push_str(&format!(";38;5;{}", rgb_to_ansi256(r, g, b))),
-            }
+        if let Some(ink) = self.fg {
+            s.push_str(&sgr_ink(ink, depth, 30, 90, 38));
         }
-        if let Some((r, g, b)) = self.bg {
-            match depth {
-                ColorDepth::Truecolor => s.push_str(&format!(";48;2;{r};{g};{b}")),
-                ColorDepth::Ansi256 => s.push_str(&format!(";48;5;{}", rgb_to_ansi256(r, g, b))),
-            }
+        if let Some(ink) = self.bg {
+            s.push_str(&sgr_ink(ink, depth, 40, 100, 48));
         }
         s.push('m');
         s
+    }
+}
+
+/// One colour's SGR parameters, `;` first: `base` + n for the eight
+/// colours, `bright` + n for their bright halves, `extended` for the rest.
+fn sgr_ink(ink: Ink, depth: ColorDepth, base: u8, bright: u8, extended: u8) -> String {
+    let index = match (ink, depth) {
+        (Ink::Rgb(r, g, b), ColorDepth::Truecolor) => {
+            return format!(";{extended};2;{r};{g};{b}");
+        }
+        (Ink::Rgb(r, g, b), ColorDepth::Ansi256) => rgb_to_ansi256(r, g, b),
+        (Ink::Rgb(r, g, b), ColorDepth::Ansi16) => rgb_to_ansi16(r, g, b),
+        (Ink::Indexed(n), _) => n,
+    };
+    match index {
+        0..=7 => format!(";{}", base + index),
+        8..=15 => format!(";{}", bright + index - 8),
+        _ => format!(";{extended};5;{index}"),
     }
 }
 
@@ -109,8 +122,8 @@ mod tests {
     #[test]
     fn a_style_emits_one_self_contained_sgr_at_either_depth() {
         let st = RStyle {
-            fg: Some((0, 175, 255)),
-            bg: Some((0, 0, 0)),
+            fg: Some(Ink::Rgb(0, 175, 255)),
+            bg: Some(Ink::Rgb(0, 0, 0)),
             bold: true,
             underline: true,
             italic: true,
@@ -130,5 +143,28 @@ mod tests {
                 rgb_to_ansi256(0, 0, 0)
             )
         );
+        assert_eq!(st.sgr(ColorDepth::Ansi16), "\x1b[0;1;3;4;7;36;40m");
+    }
+
+    #[test]
+    fn an_indexed_colour_emits_as_itself_at_every_depth() {
+        let st = RStyle {
+            fg: Some(Ink::Indexed(15)),
+            bg: Some(Ink::Indexed(4)),
+            ..RStyle::default()
+        };
+        let wide = RStyle {
+            fg: Some(Ink::Indexed(255)),
+            bg: Some(Ink::Indexed(24)),
+            ..RStyle::default()
+        };
+        for depth in [
+            ColorDepth::Truecolor,
+            ColorDepth::Ansi256,
+            ColorDepth::Ansi16,
+        ] {
+            assert_eq!(st.sgr(depth), "\x1b[0;97;44m");
+            assert_eq!(wide.sgr(depth), "\x1b[0;38;5;255;48;5;24m");
+        }
     }
 }

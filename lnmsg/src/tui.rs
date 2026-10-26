@@ -1251,7 +1251,17 @@ pub fn draw(frame: &mut Frame, view: &View, theme: Theme, no_color: bool) {
             ..body
         };
         let rows = ui::toast_rows(&toast::body(note), toast::max_inner(over));
-        toast::render_rows(frame, over, note.kind, &rows, no_color);
+        let tier = match no_color {
+            true => leviculum_ui::Tier::Mono,
+            false => leviculum_ui::Tier::Truecolor,
+        };
+        toast::render_rows(
+            frame,
+            over,
+            note.kind,
+            &rows,
+            leviculum_ui::tokens(tier, theme),
+        );
     }
     if let Some(detail) = &view.detail {
         draw_detail(frame, detail);

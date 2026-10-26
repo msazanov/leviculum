@@ -68,6 +68,8 @@ pub fn choose_backend(detected: ProtocolType, depth: ColorDepth, no_color: bool)
     match detected {
         ProtocolType::Halfblocks => match depth {
             ColorDepth::Truecolor | ColorDepth::Ansi256 => Backend::Halfblocks,
+            // Sixteen colours draw no picture a reader would recognise.
+            ColorDepth::Ansi16 => Backend::Text,
         },
         graphics => Backend::Graphics(graphics),
     }
@@ -187,6 +189,10 @@ mod tests {
         assert_eq!(
             choose_backend(ProtocolType::Halfblocks, ColorDepth::Ansi256, false),
             Backend::Halfblocks
+        );
+        assert_eq!(
+            choose_backend(ProtocolType::Halfblocks, ColorDepth::Ansi16, false),
+            Backend::Text
         );
         // --no-color means no picture, not a picture in fewer colours. It
         // overrides even a working graphics protocol.

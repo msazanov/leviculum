@@ -10,7 +10,7 @@ use unicode_width::UnicodeWidthChar;
 use leviculum_micron::{FieldKind, MicronDocument};
 
 use crate::bookmarks::Bookmarks;
-use crate::color::ColorDepth;
+use crate::color::{ColorDepth, Tier};
 use crate::discovery::NomadNodeRegistry;
 use crate::image::{ImageSlot, SlotState};
 use crate::page_cache::PageCache;
@@ -20,6 +20,7 @@ use crate::render::{
 use crate::theme::Theme;
 use crate::url::Target;
 pub(crate) use leviculum_ui::text::truncate_to_cols;
+use leviculum_ui::tokens::{tokens, Tokens};
 
 use super::chrome::*;
 use super::event::*;
@@ -748,6 +749,12 @@ impl Model {
         let (w, vp) = (self.width, self.viewport());
         self.relayout(w);
         self.clamp_scroll(vp);
+    }
+
+    /// The colour tokens the chrome reads (`leviculum_ui::tokens`): the tier
+    /// is the depth, or monochrome under [`no_color`](Model::no_color).
+    pub fn tokens(&self) -> &'static Tokens {
+        tokens(Tier::of(self.no_color, self.depth), self.theme)
     }
 
     /// Toggle between the dark and light theme, re-laying the page out so the

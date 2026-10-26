@@ -35,7 +35,7 @@
 use leviculum_micron::{Align, Block, Field, FieldKind, Line, MicronDocument, Style};
 use unicode_width::UnicodeWidthChar;
 
-use crate::color::ColorDepth;
+use crate::color::{ColorDepth, Ink};
 use crate::theme::Theme;
 pub use leviculum_ui::style::{RLine, RStyle, StyledChar};
 
@@ -275,8 +275,8 @@ fn emit_ansi_line(cells: &[StyledChar], no_color: bool, depth: ColorDepth, out: 
 /// Resolve a model [`Style`] to a terminal [`RStyle`].
 fn resolve_style(style: &Style) -> RStyle {
     RStyle {
-        fg: style.fg.as_ref().and_then(|c| c.rgb),
-        bg: style.bg.as_ref().and_then(|c| c.rgb),
+        fg: style.fg.as_ref().and_then(|c| c.rgb).map(Ink::from),
+        bg: style.bg.as_ref().and_then(|c| c.rgb).map(Ink::from),
         bold: style.bold,
         underline: style.underline,
         italic: style.italic,
@@ -470,8 +470,8 @@ impl Renderer<'_> {
         let indent = Self::indent_for(depth as usize);
         let content_width = self.width.saturating_sub(indent).max(MIN_WIDTH);
         let band = RStyle {
-            fg: Some(fg),
-            bg: Some(bg),
+            fg: Some(fg.into()),
+            bg: Some(bg.into()),
             ..RStyle::default()
         };
         let visuals = if chars.is_empty() {
@@ -639,7 +639,7 @@ impl Renderer<'_> {
                     col_end: 0,
                 });
                 let link_style = RStyle {
-                    fg: Some(self.theme.link_fg()),
+                    fg: Some(self.theme.link_fg().into()),
                     underline: true,
                     ..base
                 };
@@ -724,8 +724,8 @@ impl Renderer<'_> {
             .map(|c| StyledChar {
                 ch: c.ch,
                 st: RStyle {
-                    fg: Some(fg),
-                    bg: Some(bg),
+                    fg: Some(fg.into()),
+                    bg: Some(bg.into()),
                     bold: c.st.bold,
                     underline: c.st.underline,
                     italic: c.st.italic,

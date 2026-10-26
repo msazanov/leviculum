@@ -63,7 +63,7 @@ use leviculum_ui_ratatui::geometry::{from_ratatui, to_ratatui};
 use leviculum_ui_ratatui::images::{self as pictures, Pictures, SlicedProtocol};
 use leviculum_ui_ratatui::spinner::spinner_span;
 use leviculum_ui_ratatui::style::{
-    chrome_muted_style, chrome_style, chrome_text_style, downgrade_buffer, rgb,
+    chrome_muted_style, chrome_style, chrome_text_style, downgrade_buffer, paint, rgb,
 };
 use leviculum_ui_ratatui::terminal::install_panic_hook;
 use leviculum_ui_ratatui::{chip, footer, help, toast};
@@ -192,7 +192,7 @@ fn render_focus(model: &Model, frame: &mut Frame) {
     };
     let area = frame.area();
     let buf = frame.buffer_mut();
-    let highlight = Style::default().add_modifier(Modifier::REVERSED);
+    let highlight = paint(model.tokens().selection);
     for vl in visible_links(model) {
         if vl.index != idx {
             continue;
@@ -377,7 +377,7 @@ fn render_images(model: &Model, images: &ImageStore, frame: &mut Frame, area: Re
                 let text = crate::image::status_line(&slot.name, state);
                 let style = match model.no_color {
                     true => Style::default().add_modifier(Modifier::DIM),
-                    false => Style::default().fg(rgb(model.theme.chrome_muted_fg())),
+                    false => paint(model.tokens().muted),
                 };
                 let rect = Rect {
                     x: body.x + x as u16,
@@ -655,7 +655,7 @@ fn render_places(model: &Model, frame: &mut Frame, area: Rect) {
     let text_style = chrome_text_style(model.no_color, model.theme);
     let muted = chrome_muted_style(model.no_color, model.theme);
     let header = text_style.add_modifier(Modifier::BOLD);
-    let selected = Style::default().add_modifier(Modifier::REVERSED);
+    let selected = paint(model.tokens().selection);
 
     // The centred overlay box, shared with the click / hover hit-test so both
     // agree on where the panel sits. Its width fixes the inner display width (the
@@ -810,7 +810,7 @@ fn render_toast(model: &Model, frame: &mut Frame, area: Rect) {
         return;
     };
     let [_topbar, content, _status] = regions(area);
-    toast::render(frame, content, t, model.no_color);
+    toast::render(frame, content, t, model.tokens());
 }
 
 /// Draw lnomad's help overlay ([`help::render`] over its keybinding groups).
@@ -2729,11 +2729,15 @@ mod tests {
         assert!(all.contains("no path"), "toast text missing:\n{all}");
         assert!(all.contains('⚠'), "error glyph missing:\n{all}");
 
-        // The attention red is painted on the toast cells.
+        // The toast token fills the box and the error token draws its border
+        // (leviculum_ui::tokens, the dark truecolor table).
         let mut found_error_style = false;
         for y in 0..buffer.area.height {
             for x in 0..buffer.area.width {
-                if buffer[(x, y)].fg == Color::Rgb(255, 95, 95) {
+                let cell = &buffer[(x, y)];
+                if cell.fg == Color::Rgb(0xff, 0x6b, 0x6b)
+                    && cell.bg == Color::Rgb(0x3a, 0x3f, 0x4a)
+                {
                     found_error_style = true;
                 }
             }

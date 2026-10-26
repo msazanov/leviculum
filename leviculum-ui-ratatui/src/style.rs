@@ -6,13 +6,62 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line as RtLine, Span as RtSpan, Text};
 use ratatui::Frame;
 
-use leviculum_ui::color::{rgb_to_ansi256, ColorDepth};
+use leviculum_ui::color::{rgb_to_ansi16, rgb_to_ansi256, ColorDepth, Ink};
 use leviculum_ui::style::{RLine, RStyle};
 use leviculum_ui::theme::Theme;
+use leviculum_ui::tokens::Paint;
 
 /// A ratatui [`Color`] from a theme RGB triple.
 pub fn rgb(c: (u8, u8, u8)) -> Color {
     Color::Rgb(c.0, c.1, c.2)
+}
+
+/// A ratatui [`Color`] from an [`Ink`]. The sixteen ANSI colours become
+/// ratatui's named ones, which crossterm sends as `30`-`37` and `90`-`97`,
+/// the forms a 16-colour terminal reads; the rest stay indexed.
+pub fn ink(ink: Ink) -> Color {
+    match ink {
+        Ink::Rgb(r, g, b) => Color::Rgb(r, g, b),
+        Ink::Indexed(n) => ansi(n),
+    }
+}
+
+/// An index as ratatui names it.
+fn ansi(n: u8) -> Color {
+    match n {
+        0 => Color::Black,
+        1 => Color::Red,
+        2 => Color::Green,
+        3 => Color::Yellow,
+        4 => Color::Blue,
+        5 => Color::Magenta,
+        6 => Color::Cyan,
+        7 => Color::Gray,
+        8 => Color::DarkGray,
+        9 => Color::LightRed,
+        10 => Color::LightGreen,
+        11 => Color::LightYellow,
+        12 => Color::LightBlue,
+        13 => Color::LightMagenta,
+        14 => Color::LightCyan,
+        15 => Color::White,
+        n => Color::Indexed(n),
+    }
+}
+
+/// The style a colour token ([`leviculum_ui::tokens`]) draws in.
+pub fn paint(paint: Paint) -> Style {
+    let mut style = Style::default();
+    if let Some(fg) = paint.fg {
+        style = style.fg(ink(fg));
+    }
+    if let Some(bg) = paint.bg {
+        style = style.bg(ink(bg));
+    }
+    if paint.reverse {
+        style = style.add_modifier(Modifier::REVERSED);
+    }
+    style
 }
 
 /// The style the fixed top-bar and status bar are filled with, full width, so
@@ -56,8 +105,9 @@ pub fn chrome_muted_style(no_color: bool, theme: Theme) -> Style {
     }
 }
 
-/// Downgrade the rendered buffer's 24-bit colours to the xterm-256 palette when
-/// the resolved [`ColorDepth`] is [`ColorDepth::Ansi256`]. A no-op under
+/// Downgrade the rendered buffer's 24-bit colours to the xterm-256 palette or
+/// the sixteen ANSI colours when the resolved [`ColorDepth`] is one of them.
+/// Indexed colours, which the token table names itself, pass. A no-op under
 /// [`ColorDepth::Truecolor`] and under `no_color` (where `NO_COLOR` already wins
 /// and the buffer carries the reverse-video chrome instead of colour), so both
 /// leave the buffer byte-identical to before this feature.
@@ -70,8 +120,8 @@ pub fn downgrade_buffer(frame: &mut Frame, depth: ColorDepth, no_color: bool) {
     for y in area.top()..area.bottom() {
         for x in area.left()..area.right() {
             if let Some(cell) = buf.cell_mut((x, y)) {
-                cell.fg = downgrade_color(cell.fg);
-                cell.bg = downgrade_color(cell.bg);
+                cell.fg = downgrade_to(cell.fg, depth);
+                cell.bg = downgrade_to(cell.bg, depth);
             }
         }
     }
@@ -80,9 +130,16 @@ pub fn downgrade_buffer(frame: &mut Frame, depth: ColorDepth, no_color: bool) {
 /// Map a single 24-bit [`Color::Rgb`] to its nearest xterm-256 [`Color::Indexed`];
 /// every other colour (already-indexed, named, reset) passes through unchanged.
 pub fn downgrade_color(color: Color) -> Color {
-    match color {
-        Color::Rgb(r, g, b) => Color::Indexed(rgb_to_ansi256(r, g, b)),
-        other => other,
+    downgrade_to(color, ColorDepth::Ansi256)
+}
+
+/// [`downgrade_color`] at a depth: the nearest xterm-256 index, or the
+/// nearest of the sixteen as its named colour.
+pub fn downgrade_to(color: Color, depth: ColorDepth) -> Color {
+    match (color, depth) {
+        (Color::Rgb(r, g, b), ColorDepth::Ansi256) => Color::Indexed(rgb_to_ansi256(r, g, b)),
+        (Color::Rgb(r, g, b), ColorDepth::Ansi16) => ansi(rgb_to_ansi16(r, g, b)),
+        (other, _) => other,
     }
 }
 
@@ -109,15 +166,15 @@ pub fn to_ratatui_text(lines: &[RLine]) -> Text<'static> {
     Text::from(out_lines)
 }
 
-/// Translate a resolved [`RStyle`] into a ratatui [`Style`]: RGB colours map
-/// directly, and bold/underline/italic/reverse map to the matching modifiers.
+/// Translate a resolved [`RStyle`] into a ratatui [`Style`]: colours map by
+/// [`ink`], and bold/underline/italic/reverse map to the matching modifiers.
 pub fn rstyle_to_ratatui(st: RStyle) -> Style {
     let mut style = Style::default();
-    if let Some((r, g, b)) = st.fg {
-        style = style.fg(Color::Rgb(r, g, b));
+    if let Some(fg) = st.fg {
+        style = style.fg(ink(fg));
     }
-    if let Some((r, g, b)) = st.bg {
-        style = style.bg(Color::Rgb(r, g, b));
+    if let Some(bg) = st.bg {
+        style = style.bg(ink(bg));
     }
     if st.bold {
         style = style.add_modifier(Modifier::BOLD);

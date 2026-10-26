@@ -239,7 +239,7 @@ fn suffix(message: &Message, narrow: bool, draw: &Draw) -> RLine {
             RStyle::default(),
         );
         let mark = RStyle {
-            fg: Some(tone_rgb(row.tone, row.dim)),
+            fg: Some(tone_rgb(row.tone, row.dim).into()),
             ..RStyle::default()
         };
         push(&mut line, row.symbol(draw.tick as usize, draw.ascii), mark);
