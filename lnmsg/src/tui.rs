@@ -872,7 +872,9 @@ pub fn draw(frame: &mut Frame, view: &View, theme: Theme, no_color: bool) {
     leviculum_ui_ratatui::footer::render(frame, footer_row, &slots, None, no_color, theme);
 
     if let Some(note) = &view.toast {
-        toast::render(frame, body, note, no_color);
+        // Wrapped, not cut: a failed auto send's toast names both legs.
+        let rows = ui::toast_rows(&toast::body(note), toast::max_inner(body));
+        toast::render_rows(frame, body, note.kind, &rows, no_color);
     }
     if let Some(palette) = &view.palette {
         let width = 40.min(frame.area().width);
@@ -1082,6 +1084,49 @@ mod tests {
             !screen.contains("w│"),
             "no word is cut at the edge: {screen}"
         );
+    }
+
+    /// A send that failed both ways: at 80x24 the toast wraps to three rows
+    /// and both legs' reasons are on screen, the frame pinned in
+    /// `tests/fixtures/tui_toast_two_legs.frame`.
+    #[test]
+    fn a_two_leg_failure_toast_wraps_and_shows_both_legs() {
+        let mut model = Model::new(&[[0xab; 16]]);
+        for name in ["tab", "tab", "h", "i", "enter"] {
+            update(&mut model, UiEvent::Key(parse_key(name).expect("key")));
+        }
+        let direct = SendError::Unreachable {
+            destination: [0xab; 16],
+            waited: Duration::from_secs(30),
+        };
+        let fallback = SendError::NoPropagationNode(
+            "no mailbox chosen: no propagation node has been heard".to_string(),
+        );
+        update(
+            &mut model,
+            UiEvent::SendDone(Err(format!("direct: {direct}\npropagated: {fallback}"))),
+        );
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+        let view = ui::view(&model);
+        terminal
+            .draw(|frame| draw(frame, &view, Theme::Dark, true))
+            .expect("draw");
+        let screen = frame_text(terminal.backend());
+        assert!(screen.contains("not sent: direct: no route to"), "{screen}");
+        assert!(
+            screen.contains("propagated: no propagation node"),
+            "{screen}"
+        );
+        let expected = include_str!("../tests/fixtures/tui_toast_two_legs.frame");
+        if screen != expected {
+            let kept = std::env::temp_dir().join("lnmsg-tui-toast-two-legs.frame");
+            let _ = std::fs::write(&kept, &screen);
+            panic!(
+                "the frame moved; this run's is in {}, the pinned one in \
+                 lnmsg/tests/fixtures/tui_toast_two_legs.frame\n{screen}",
+                kept.display()
+            );
+        }
     }
 
     #[test]

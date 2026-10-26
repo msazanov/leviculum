@@ -953,6 +953,24 @@ pub fn wrap(lines: &[RLine], width: usize, indent: usize) -> Vec<RLine> {
     rows
 }
 
+/// The most rows a toast takes: enough for both legs of a failed auto send
+/// at 80 columns, few enough to leave the messages pane readable.
+pub const TOAST_MAX_ROWS: usize = 3;
+
+/// `text` wrapped to `width` at word boundaries with [`wrap`], as the
+/// messages pane wraps a message but with no indent, in at most
+/// [`TOAST_MAX_ROWS`] rows: what does not fit is cut at the end of the last
+/// row with a `…`.
+pub fn toast_rows(text: &str, width: usize) -> Vec<String> {
+    let as_text = |row: &RLine| row.cells.iter().map(|cell| cell.ch).collect::<String>();
+    let mut rows: Vec<String> = wrap(&[plain(text)], width, 0).iter().map(as_text).collect();
+    if rows.len() > TOAST_MAX_ROWS {
+        let rest = rows.split_off(TOAST_MAX_ROWS - 1).join(" ");
+        rows.push(leviculum_ui::text::truncate_to_cols(&rest, width));
+    }
+    rows
+}
+
 /// A message as its lines: the first carries the cursor mark, the delivery
 /// mark and who wrote it, the others the rest of the body, set in by
 /// [`CONTINUATION_INDENT`].
@@ -1583,6 +1601,19 @@ mod tests {
                 vec!["▸   them: back".to_string(), "    again".to_string()],
             ]
         );
+    }
+
+    #[test]
+    fn a_toast_wraps_at_words_to_three_rows_and_cuts_the_rest() {
+        assert_eq!(toast_rows("short", 20), ["short"]);
+        assert_eq!(
+            toast_rows("not sent: direct: no route; propagated: none", 20),
+            ["not sent: direct: no", "route; propagated:", "none"]
+        );
+        let long = toast_rows(&"word ".repeat(20), 12);
+        assert_eq!(long.len(), TOAST_MAX_ROWS, "{long:?}");
+        assert!(long[2].ends_with('…'), "{long:?}");
+        assert!(long.iter().all(|row| row.chars().count() <= 12), "{long:?}");
     }
 
     #[test]
