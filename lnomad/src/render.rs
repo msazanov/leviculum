@@ -280,6 +280,7 @@ fn resolve_style(style: &Style) -> RStyle {
         bold: style.bold,
         underline: style.underline,
         italic: style.italic,
+        reverse: false,
     }
 }
 
@@ -728,6 +729,7 @@ impl Renderer<'_> {
                     bold: c.st.bold,
                     underline: c.st.underline,
                     italic: c.st.italic,
+                    reverse: c.st.reverse,
                 },
                 // Keep the link/field tags so an element inside a heading stays
                 // hit-testable.

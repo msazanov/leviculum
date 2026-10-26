@@ -110,7 +110,7 @@ pub fn to_ratatui_text(lines: &[RLine]) -> Text<'static> {
 }
 
 /// Translate a resolved [`RStyle`] into a ratatui [`Style`]: RGB colours map
-/// directly, and bold/underline/italic map to the matching modifiers.
+/// directly, and bold/underline/italic/reverse map to the matching modifiers.
 pub fn rstyle_to_ratatui(st: RStyle) -> Style {
     let mut style = Style::default();
     if let Some((r, g, b)) = st.fg {
@@ -127,6 +127,9 @@ pub fn rstyle_to_ratatui(st: RStyle) -> Style {
     }
     if st.italic {
         style = style.add_modifier(Modifier::ITALIC);
+    }
+    if st.reverse {
+        style = style.add_modifier(Modifier::REVERSED);
     }
     style
 }

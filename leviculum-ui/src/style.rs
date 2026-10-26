@@ -26,12 +26,20 @@ pub struct RStyle {
     pub underline: bool,
     /// Italic attribute.
     pub italic: bool,
+    /// Reverse video: foreground and background swapped. What a monochrome
+    /// screen draws a selection in, where a colour screen would tint it.
+    pub reverse: bool,
 }
 
 impl RStyle {
     /// Whether this style sets nothing: no colour, no attribute.
     pub fn is_plain(&self) -> bool {
-        self.fg.is_none() && self.bg.is_none() && !self.bold && !self.underline && !self.italic
+        self.fg.is_none()
+            && self.bg.is_none()
+            && !self.bold
+            && !self.underline
+            && !self.italic
+            && !self.reverse
     }
 
     /// The self-contained SGR prefix for this style (starts by resetting). Under
@@ -48,6 +56,9 @@ impl RStyle {
         }
         if self.underline {
             s.push_str(";4");
+        }
+        if self.reverse {
+            s.push_str(";7");
         }
         if let Some((r, g, b)) = self.fg {
             match depth {
@@ -103,17 +114,18 @@ mod tests {
             bold: true,
             underline: true,
             italic: true,
+            reverse: true,
         };
         assert!(!st.is_plain());
         assert!(RStyle::default().is_plain());
         assert_eq!(
             st.sgr(ColorDepth::Truecolor),
-            "\x1b[0;1;3;4;38;2;0;175;255;48;2;0;0;0m"
+            "\x1b[0;1;3;4;7;38;2;0;175;255;48;2;0;0;0m"
         );
         assert_eq!(
             st.sgr(ColorDepth::Ansi256),
             format!(
-                "\x1b[0;1;3;4;38;5;{};48;5;{}m",
+                "\x1b[0;1;3;4;7;38;5;{};48;5;{}m",
                 rgb_to_ansi256(0, 175, 255),
                 rgb_to_ansi256(0, 0, 0)
             )
