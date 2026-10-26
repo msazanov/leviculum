@@ -83,6 +83,16 @@ pick a side. The device settles it.
   `DISPLAY_FLIP_VERTICALLY=1`. The MADCTL byte is stated nowhere; it
   could be derived from LovyanGFX's ST7789 driver at rotation 3, which
   nobody has checked.
+- On our unit (2026-10-26): the community port's probe build reports
+  `[DISP] ST7789 320x240 madctl=0xb0`. The map-fill measurement firmware
+  (`docs/drafts/map-measurement-2026-10.md`) sets MADCTL 0x00.
+- Observed 2026-10-26 (Lew, at the display while the opt 3 map-fill
+  firmware ran): the map is drawn and clean, but rotated 90 degrees
+  clockwise against the host reference `view-full.png`; the river sits
+  top left on the device and bottom left on the host. So the panel is
+  mounted landscape, 320 wide and 240 high. MADCTL 0x00 addresses it
+  portrait; the community port's 0xB0 (MY|MV) is the landscape variant.
+  Mirroring cannot be judged without text.
 - Peripheral power: GPIO18, on when low (`VEXT_ENABLE`/`VEXT_ON_VALUE`
   in both). MeshCore's board code switches it on to power the screen.
 
@@ -142,6 +152,8 @@ the keyboard controller at I2C 0x6D (2026-10-25 00:30 CET, build
   to the community port's bench (cedrivard/Leviculum, rp2350-m9-net, 2026-10), an AG3352 answered the Airoha `$PAIR` boot init on the bench
   unit. The three-way contradiction above stays as the history of what
   the public sources said; see "What the community port measured".
+  Measured on our unit on 2026-10-26: an Airoha AG3352 (see "Two
+  conflicts the device settles").
 
 ### Sensors
 
@@ -171,6 +183,10 @@ Meshtastic variant keeps the LR1110 default ceiling of 22. The
 with what was probed on a bench and what stays unknown without the
 schematic: see its section "Worked example: ThinkNode M9 (incomplete)"
 (`leviculum-lr11xx/README.md`).
+
+On our unit (2026-10-26) the community port's probe build reports
+`[LORA] init ok, lr11xx hw=0x22 type=0x01 fw=0x0303` and clamps a
+requested 22 dBm to 17 dBm.
 
 ### Power
 
@@ -207,20 +223,28 @@ schematic: see its section "Worked example: ThinkNode M9 (incomplete)"
 
 ### Two conflicts the device settles
 
-The public sources disagree on two parts. Neither has been measured on
-our unit.
+The public sources disagree on two parts. The first is settled on our
+unit since 2026-10-26, the second is still open.
 
-- **The GNSS module.** The wiki names an ATGM336H-5NR32 (and a BM72A);
-  the Meshtastic variant an AG3352 at 115200 baud, put to sleep with
-  `$PAIR003` and then EN low; the MeshCore variant an L76K at 9600 baud.
-  The measurement that settles it: read the boot NMEA banner on the
-  GNSS UART at both 9600 and 115200 baud. The community port's `$PAIR`
-  answer (see "What the community port measured") points at the Airoha
-  family, but it is that port's reading, not ours.
-- **The keyboard controller.** The wiki names an ESP32-S2 ("U10"); the
-  Meshtastic variant's comments an STC8H. The measurement that settles
-  it: a register read over I2C that only one of the two answers, or the
-  marking on the chip once the case is open.
+- **The GNSS module: an Airoha AG3352.** The wiki names an
+  ATGM336H-5NR32 (and a BM72A); the Meshtastic variant an AG3352 at
+  115200 baud, put to sleep with `$PAIR003` and then EN low; the
+  MeshCore variant an L76K at 9600 baud. Measured on 2026-10-26 with the
+  community port's probe build (fork commit 7a699446): it sweeps the
+  GNSS UART at 9600, 38400 and 115200 baud and at 115200 got
+  `$PAIR021,AG3352` back (`ack=ok`; the scanner is
+  `AirohaInit::ag3352()`, `leviculum-nrf/gnss-init/src/airoha.rs:116,242-247`
+  in the fork). 234 NMEA sentences followed in 60 s, with no fix
+  indoors. An L76K or an ATGM336H does not answer `$PAIR021` with that
+  literal. So Meshtastic was right, and the wiki's ATGM336H/BM72A and
+  MeshCore's L76K are wrong for this unit. The build logs the literal
+  match and counters, not the sentences themselves.
+- **The keyboard controller: open.** The wiki names an ESP32-S2 ("U10");
+  the Meshtastic variant's comments an STC8H. All that is measured is
+  that something answers at I2C 0x6D; the probe build reads register
+  0x01 only on a key press, and logs no chip ID. The measurement that
+  settles it: a register read over I2C that only one of the two
+  answers, or the marking on the chip once the case is open.
 
 ### What the unit on the rig confirmed
 
@@ -249,6 +273,13 @@ byte to the board (the reviewer's bench notes):
   ACKs at 0x6D, so by the probe it is V1.1 and its GNSS enable line is
   active high. That is the probe's reading; the pin itself has not been
   measured yet.
+- **The probe image is on disk** (2026-10-26):
+  `/home/lew/rig-run/m9-leviculum-7a699446-nosd.bin` on schneckenschreck,
+  reproducible byte for byte from the fork's ELF with `espflash
+  save-image`. espflash's default partition table (factory at 0x10000,
+  length 0xfa0000) ends below the identity sector at 0xff0000 and leaves
+  it untouched, which is why the unit's identity survived two map-fill
+  flashes and the restore of the probe build.
 
 ## What changed since August
 
@@ -427,6 +458,29 @@ Nothing in this section is built yet, except where a dated note says otherwise.
      does not answer has to fall back to the RNode probe instead of being
      dropped. The ROM-loader MAC stays the identity of the one path that
      resets the board anyway: flashing.
+   - **2026-10-26, the M9 is on the rig (#473).** The rig.toml entry has
+     this shape:
+
+     ```toml
+     [devices.thinknode-m9]
+     firmware = "lnode-uart"
+     vid_pid = "1a86:7522"
+     serial = "<identity>"
+     ```
+
+     `RigDevice` has no `profile` field: `firmware` names the device
+     profile, and the key is the unit's identity from the banner. It
+     changes on a flash erase or a vendor restore. `periculum devices
+     --probe` confirmed the M9 by its banner (`fw=7a699446`). The T-Beams
+     (`1a86:55d4`) were never offered to the banner reader, since the
+     profile claims only `1a86:7522`. The probe cost 0.5 to 7 s,
+     depending on where the 5 s banner cycle stands (two runs: 0.52 and
+     7.07 s). The probe does not reset the M9: `BOOT_COUNT` stayed
+     unbroken across two probes. What does reset it is a pyserial
+     `open()`, even with `dtr=False` and `rts=False`: pyserial clears DTR
+     and then RTS one after the other, and one line moving alone pulls
+     EN through the CH340K. A termios reader that opens the port without
+     moving the lines (the `m9-listen4.py` shape) does not reset it.
    - **2026-10-25, the flashing half (#473).** `lnflash/src/esp.rs` writes
      an ESP32 through the ROM loader with `espflash` (preferred, it carries
      its own stubs and takes the ELF) or `esptool`, with `--no-stub` when
@@ -487,8 +541,9 @@ compared with the T1000-E's numbers.
   switch is the hard off, the 8 s gesture is sleep (2026-10-25, Lew,
   "Decided").
 - **The GNSS receiver:** AG3352, ATGM336H or L76K, identified on the
-  device. Resolved by the community port's bench (cedrivard/Leviculum, rp2350-m9-net, 2026-10) in favour of the AG3352 (see "What the
-  community port measured").
+  device. Closed 2026-10-26: an AG3352, measured on our unit (see "Two
+  conflicts the device settles"), as the community port's bench
+  (cedrivard/Leviculum, rp2350-m9-net, 2026-10) had found.
 - **GPIO10's direction:** the GNSS idle interrupt (input) or a line held
   high (output); in the community port's bench (cedrivard/Leviculum, rp2350-m9-net, 2026-10) the board file and the README disagree.
 - **SRAM after WiFi and BLE:** how much of the 512 KB is left once both

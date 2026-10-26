@@ -7,7 +7,8 @@ decoded and drawn within the ESP32-S3R8's budget (512 KB SRAM, 8 MB
 PSRAM, no GPU) with existing libraries and no renderer of our own.
 This is the host half. Every number below was measured on the host,
 except the ESP32-S3 times, which are an estimate scaled by CoreMark and
-are labelled as such. No workspace crate changed and nothing was added
+are labelled as such, and the device rows of "Device measurement",
+measured on the M9 on 2026-10-26. No workspace crate changed and nothing was added
 to any shipping crate; the throwaway crates live under
 `/tmp/map-measure/` and their sources are in the appendix.
 
@@ -243,7 +244,7 @@ of our own on `embedded-graphics`, measured on the device before any
 product code; PNG tiles are the documented fallback only. This section
 is the preparation of that measurement: the filler, the host harness and
 the M9 binary are built, the host numbers are below, and the device rows
-are empty until the reviewer has flashed the binary.
+were measured on 2026-10-26.
 
 ### What was built
 
@@ -332,25 +333,73 @@ the active list, bucket heads and ring ends; the band-buffer fallback
 was not needed, the whole frame fits in internal SRAM. The linker leaves
 about 52 KiB for the stack.
 
-### Device rows, for the reviewer
+### Device rows, measured 2026-10-26
 
 Cycles are `CCOUNT` at 240 MHz, the median of the three repetitions of
-a cycle. Flush is CASET, RASET and RAMWR plus 153,600 bytes over SPI2 at
-40 MHz with DMA.
+cycle 2; cycles 1 to 3 differ by at most 0.002 ms, and only repetition 1
+of cycle 1 runs cold (full, SRAM: 177.015 ms instead of 176.665 ms). ms
+is `CCOUNT` / 240,000. Flush is CASET, RASET and RAMWR plus 153,600
+bytes over SPI2 at 40 MHz with DMA. Measured by the reviewer on the rig
+unit with the two pinned ELFs of this section, 12 cycles for opt 3 and
+5 for opt s; the raw values are in `step3-mapfill-table.txt` under
+`/home/lew/rig-run/m9-2026-10-26/` on the rig host.
 
 | Build | Profile | Frame | clear | project+clip | fill | stroke | total | flush |
 |---|---|---|---|---|---|---|---|---|
-| opt 3 | full | SRAM | | | | | | |
-| opt 3 | full | PSRAM | | | | | | |
-| opt 3 | stripped | SRAM | | | | | | |
-| opt 3 | stripped | PSRAM | | | | | | |
-| opt s | full | SRAM | | | | | | |
-| opt s | full | PSRAM | | | | | | |
-| opt s | stripped | SRAM | | | | | | |
-| opt s | stripped | PSRAM | | | | | | |
+| opt 3 | full | SRAM | 2.880 ms | 27.142 ms | 90.763 ms | 55.881 ms | 176.666 ms | 30.795 ms |
+| opt 3 | full | PSRAM | 4.143 ms | 27.618 ms | 98.036 ms | 57.781 ms | 187.578 ms | 31.506 ms |
+| opt 3 | stripped | SRAM | 2.880 ms | 19.340 ms | 12.502 ms | 55.881 ms | 90.603 ms | 30.795 ms |
+| opt 3 | stripped | PSRAM | 4.143 ms | 20.040 ms | 17.087 ms | 57.778 ms | 99.047 ms | 31.506 ms |
+| opt s | full | SRAM | 2.880 ms | 26.540 ms | 86.912 ms | 54.656 ms | 170.988 ms | 30.805 ms |
+| opt s | full | PSRAM | 4.143 ms | 27.021 ms | 93.610 ms | 55.401 ms | 180.175 ms | 31.516 ms |
+| opt s | stripped | SRAM | 2.880 ms | 19.085 ms | 12.438 ms | 54.656 ms | 89.059 ms | 30.805 ms |
+| opt s | stripped | PSRAM | 4.143 ms | 19.800 ms | 16.974 ms | 55.399 ms | 96.317 ms | 31.517 ms |
 
-The `phase=counts` lines from the device must equal the host table
-above; if they do not, the device ran other code.
+The same rows in `CCOUNT` cycles:
+
+| Build | Profile | Frame | clear | project+clip | fill | stroke | total | flush |
+|---|---|---|---|---|---|---|---|---|
+| opt 3 | full | SRAM | 691,200 | 6,514,005 | 21,783,087 | 13,411,375 | 42,399,726 | 7,390,878 |
+| opt 3 | full | PSRAM | 994,224 | 6,628,321 | 23,528,751 | 13,867,452 | 45,018,810 | 7,561,401 |
+| opt 3 | stripped | SRAM | 691,200 | 4,641,586 | 3,000,526 | 13,411,375 | 21,744,746 | 7,390,878 |
+| opt 3 | stripped | PSRAM | 994,224 | 4,809,648 | 4,100,771 | 13,866,671 | 23,771,375 | 7,561,401 |
+| opt s | full | SRAM | 691,202 | 6,369,651 | 20,858,775 | 13,117,457 | 41,037,150 | 7,393,248 |
+| opt s | full | PSRAM | 994,417 | 6,484,923 | 22,466,309 | 13,296,256 | 43,241,970 | 7,563,888 |
+| opt s | stripped | SRAM | 691,202 | 4,580,485 | 2,985,008 | 13,117,457 | 21,374,217 | 7,393,248 |
+| opt s | stripped | PSRAM | 994,354 | 4,752,095 | 4,073,759 | 13,295,726 | 23,115,999 | 7,563,999 |
+
+Per frame, the full profile costs about 177 ms to draw plus 31 ms to
+flush, the stripped one about 90 ms plus 31 ms; fill and stroke are the
+two targets, and stroke alone is 55 ms in both profiles. Whether the
+vector path holds or the PNG fallback takes over is Lew's decision,
+recorded on `docs/src/concepts/handheld-messenger.md` when taken.
+
+- **Counts match.** All 144 (opt 3) and 60 (opt s) `phase=counts`
+  lines equal the host table above for both ELFs, so the device ran the
+  same code.
+- **PSRAM came up** with 8,388,608 bytes; both frames were measured, no
+  `skipped=absent`, no error, no panic.
+- **Phases.** The firmware's phases are clear, project_clip, fill and
+  stroke. There is no decode phase: the fixture is already geometry.
+- **Flush.** 30.795 ms from SRAM for 153,600 bytes, whose wire time at
+  40 MHz is 30.72 ms: 99.8 % of the line rate.
+- **opt s is faster than opt 3**, by about 3 % (full, SRAM: 170.99
+  against 176.67 ms), perhaps the smaller `.text` in the cache; not
+  investigated.
+- **Against the estimate.** The CoreMark-scaled estimate above (85 ms
+  full, 35 ms stripped) was optimistic: the device is 2.1x slower for
+  the full profile and 2.6x slower for the stripped one.
+- **Orientation, observed 2026-10-26.** Lew looked at the display while
+  the opt 3 firmware ran. The map is drawn and clean (roads, building
+  outlines, the river blue, parks green) but rotated 90 degrees
+  clockwise against `view-full.png`: the river sits top left on the
+  device and bottom left on the host. The panel is mounted landscape
+  (320 wide, 240 high); the measurement firmware sets MADCTL 0x00,
+  which addresses it portrait, where the community port's 0xB0 (MY|MV)
+  is the landscape variant. Mirroring cannot be judged without text.
+  Per cycle, the full-profile passes draw the buildings two to three
+  times, then the stripped passes leave the screen without buildings
+  until the next cycle.
 
 ## Exact commands
 
