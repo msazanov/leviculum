@@ -682,6 +682,42 @@ impl CentralTask {
         // in an unsubscribed gap.
         let notify_stream = tx_char.notify().await.map_err(transport)?;
 
+        // The socket primer (1004): one keepalive byte, written WITH
+        // response, so the write that triggers the peer's AcquireWrite
+        // is a frame whose bytes carry nothing. A BlueZ peripheral
+        // forwards the triggering write from a pointer into its
+        // per-connection ATT receive buffer only after the AcquireWrite
+        // D-Bus round trip (bluez-5.82 `src/gatt-database.c`,
+        // `pending_write_new` stores the pointer `acquire_write_reply`
+        // later sends; the buffer is `src/shared/att.c` `chan->buf`,
+        // reused for every inbound PDU) — so every PDU the peer
+        // receives inside that round trip rewrites the forwarded
+        // bytes. On the bench (tier-3 smoke, 2026-10-25) the PDU was
+        // the peer's answer to BlueZ's own reverse discovery, and the
+        // T114's identity arrived as GATT debris. Length survives the
+        // race (`iov_len` is fixed when the write arrives), content
+        // does not: a one-byte frame is a keepalive whatever its byte
+        // decays to — to us (`links::LinkTable::peripheral_frame`), to
+        // the firmware (`columba.rs::gatt_events`) and to the
+        // reference (`ble-reticulum@07d94130` `BLEInterface.py`
+        // filters pre-identity keepalives). The response comes back
+        // only after the socket is flushed (`acquire_write_reply`
+        // calls `gatt_db_attribute_write_result` after
+        // `sock_io_send`), so the identity below takes the live-socket
+        // path (`chrc_write_cb`) and arrives byte-exact.
+        rx_char
+            .write_ext(
+                &[leviculum_core::framing::ble::KEEPALIVE_BYTE],
+                &CharacteristicWriteRequest {
+                    op_type: WriteOp::Request,
+                    ..Default::default()
+                },
+            )
+            .await
+            // The peer answered the primer with an error: it will not
+            // take the handshake either (579).
+            .map_err(SetupError::with(DialFailure::NoHandshake))?;
+
         // The 16-byte identity handshake, written WITH response
         // (BLE_PROTOCOL_v2.2 §Identity Handshake: a Write Request).
         rx_char

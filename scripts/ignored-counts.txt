@@ -118,6 +118,19 @@
 # periculum's ble_room_departure cell covers the full three-node scenario.
 1    -p leviculum-std --test ble_returning_peer_resight
 
+# ble_handshake_primer (2026-10-26, 1004): the minimal reproduction of the
+# BlueZ AcquireWrite pending-write decay — the triggering write is forwarded
+# from the reused ATT receive buffer after the D-Bus round trip, which turned
+# the T114's identity handshake into GATT debris on the bench — and the proof
+# that the dial's keepalive primer delivers the identity byte-exact through
+# the same hostile window. Needs the patched btvirt, /dev/vhci and the system
+# bluetoothd (host-global Bluetooth state, the ble_room lock class), so no
+# tier can run it. Run by name with
+# `cargo test -p leviculum-std --test ble_handshake_primer -- --ignored
+# --nocapture` beside any change to the dial's handshake order or the
+# peripheral write path.
+1    -p leviculum-std --test ble_handshake_primer
+
 # ble_stranger_identity (2026-10-25, 996): the minimal reproduction of a
 # stranger's 16-byte RX write becoming a mesh peer, and the positive control
 # that the Columba subscribe-then-handshake sequence still links. Needs the

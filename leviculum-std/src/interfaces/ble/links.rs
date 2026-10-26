@@ -4270,6 +4270,34 @@ mod tests {
         assert_eq!(last, Inbound::Packet(packet));
     }
 
+    /// The dial's socket primer (1004) as the BlueZ race can deliver
+    /// it: the AcquireWrite-triggering write is forwarded from a reused
+    /// receive buffer, so its CONTENT may be rewritten in flight while
+    /// its length holds. A one-byte frame of any value before the
+    /// identity is therefore a keepalive — never a handshake, never an
+    /// error — and the identity that follows still opens the link.
+    #[test]
+    fn a_corrupted_one_byte_primer_leaves_the_handshake_intact() {
+        let mut t = table();
+        // Not KEEPALIVE_BYTE: the byte the race happened to leave.
+        assert_eq!(
+            t.peripheral_frame(ADDR_1, 185, &[0xAB], 100),
+            Inbound::Keepalive
+        );
+        assert_eq!(t.link_count(), 0);
+        assert_eq!(
+            t.peripheral_frame(ADDR_1, 185, &ID_A, 200),
+            Inbound::HandshakeComplete {
+                identity: ID_A,
+                displaced: None
+            }
+        );
+        assert_eq!(
+            t.link_by_addr(&ADDR_1).map(|l| l.role),
+            Some(Role::Peripheral)
+        );
+    }
+
     /// The #372 question, answered for lnsd: the peripheral side holds
     /// two centrals CONCURRENTLY. Both handshake, both links are live at
     /// once, their interleaved fragment streams reassemble on separate

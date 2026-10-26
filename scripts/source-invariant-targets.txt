@@ -153,6 +153,7 @@ skip  leviculum-mapfill frame                  # in-process framebuffer; subject
 skip  leviculum-micron parser_tests              # reads README.mu for snippets, but the subject is the parser
 skip  leviculum-proxy log_backpressure           # spawns the proxy binary
 skip  leviculum-proxy proxy_control              # binds sockets under a tokio runtime
+skip  leviculum-std   ble_handshake_primer       # btvirt + bluetoothd, no daemon; the #[ignore]d 1004 reproduction, run by name
 skip  leviculum-std   ble_adapter_return         # btvirt + two lnsd + bluetoothd; the #[ignore]d 600 reproduction, run by name
 skip  leviculum-std   ble_link_gap_floor         # btvirt + two lnsd + bluetoothd; an #[ignore]d measurement grid, run by name
 skip  leviculum-std   ble_returning_peer_resight # btvirt + two lnsd + bluetoothd; the #[ignore]d #443 reproduction, run by name

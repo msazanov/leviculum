@@ -2838,10 +2838,46 @@ async fn run_central_session(
         };
         return Some(dial_stage_failure(DialStage::Subscribe, error));
     }
+    // The socket primer (1004): one keepalive byte, written WITH
+    // response, before the identity. A BlueZ peripheral forwards the
+    // write that triggers its AcquireWrite from a pointer into the
+    // per-connection ATT receive buffer, and only after a D-Bus round
+    // trip (bluez-5.82 `src/gatt-database.c`, `pending_write_new` /
+    // `acquire_write_reply`; the buffer is `src/shared/att.c`
+    // `chan->buf`, reused for every inbound PDU) — every PDU the peer
+    // receives inside that round trip rewrites the forwarded bytes.
+    // Both tier-3 smoke runs of 2026-10-25 delivered this board's
+    // handshake to lnsd as GATT debris exactly that way (run 1: the
+    // host's reverse discovery answered mid-round-trip; run 2: its
+    // closing Error Response rewrote the identity's first two bytes).
+    // Length survives the race, content does not: a one-byte frame is
+    // a keepalive whatever its byte decays to — lnsd, this firmware
+    // and the reference all tolerate one before the identity — and
+    // its response only returns once the peer's socket is live, so
+    // the identity that follows arrives byte-exact.
+    let Some(primer) = GattData::new(&[KEEPALIVE_BYTE]) else {
+        // Unreachable (1 <= GATT_VALUE_MAX), same guard as the
+        // handshake below.
+        return None;
+    };
+    if let Err(err) = client.rx_write(&primer).await {
+        crate::log::log_fmt(
+            "[BLE ] ",
+            format_args!("BLE_CENTRAL_FAIL addr={peer_value:012x} stage=primer err={err:?}"),
+        );
+        let _ = conn.disconnect();
+        // A peer that errors the primer will not take the handshake
+        // either; classified exactly as a handshake-stage failure.
+        let error = match err {
+            gatt_client::WriteError::Gatt(_) => StageError::PeerAnswered,
+            _ => StageError::Link,
+        };
+        return Some(dial_stage_failure(DialStage::Handshake, error));
+    }
     // The identity handshake: our 16-byte identity hash as the first
-    // write, which is how the peripheral — who never scans — learns who
-    // connected (v2.2 §Identity Handshake Protocol). Written WITH
-    // response: the confirmation is the one signal the session may
+    // 16-byte write, which is how the peripheral — who never scans —
+    // learns who connected (v2.2 §Identity Handshake Protocol). Written
+    // WITH response: the confirmation is the one signal the session may
     // start.
     let Some(handshake) = GattData::new(own_identity) else {
         // Unreachable (16 <= GATT_VALUE_MAX), but a truncated handshake
