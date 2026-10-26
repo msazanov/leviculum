@@ -75,6 +75,7 @@ tui = [
     "dep:crossterm",
     "dep:futures",
     "dep:tui-input",
+    "dep:open",
 ]
 
 [dependencies]
@@ -101,6 +102,9 @@ futures = { version = "0.3", optional = true }
 # Default features off: the default `ratatui-crossterm` feature pulls both
 # terminal crates in for a backend `leviculum_ui::input` restates.
 tui-input = { version = "0.15", default-features = false, optional = true }
+# A web or mail link in a message body, clicked, goes to the system's
+# handler as lnomad hands it one (`xdg-open` on Linux).
+open = { version = "5", optional = true }
 # The structured event log (docs/src/structured-event-logs.md) is a tracing
 # layer, so the emit sites are `tracing::debug!` calls with an `event` field.
 tracing.workspace = true

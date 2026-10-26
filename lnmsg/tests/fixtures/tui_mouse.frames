@@ -1,0 +1,354 @@
+=== click ===
+--- frame 1: attached ---
+┌● lnmsg afbda7b3────────┐┌  <61ddb79a…>  unknown────────────────── no mailbox ┐
+│▌<61ddb79a…>            ││                                                    │
+│▌                       ││                                                    │
+│                        ││                                                    │
+│ <5ec0ea2e…>            ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││           nothing earlier on this device           │
+│                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────────────────┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+--- frame 2: second conversation ---
+┌● lnmsg afbda7b3────────┐┌  <5ec0ea2e…>  unknown────────────────── no mailbox ┐
+│ <61ddb79a…>            ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│▌<5ec0ea2e…>            ││                                                    │
+│▌                       ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││           nothing earlier on this device           │
+│                        │├  to <5ec0ea2e…>──── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────────────────┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+--- frame 3: typed ---
+┌  lnmsg afbda7b3────────┐┌  <5ec0ea2e…>  unknown────────────────── no mailbox ┐
+│ <61ddb79a…>            ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│▌<5ec0ea2e…>            ││                                                    │
+│▌                       ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││           nothing earlier on this device           │
+│                        │├● to <5ec0ea2e…>──── Enter send · Alt-Enter newline ┤
+│                        ││hello by mouse                                      │
+└────────────────────────┘└────────────────────────────────────────────────────┘
+Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
+--- frame 4: sent by click ---
+┌  lnmsg afbda7b3────────┐┌  <5ec0ea2e…>  unknown────────────────── no mailbox ┐
+│▌<5ec0ea2e…>      12:00 ││                                                    │
+│▌you: hello by mouse    ││                                                    │
+│                        ││                                                    │
+│ <61ddb79a…>            ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││           nothing earlier on this device           │
+│                        ││                    ── Today ──                     │
+│                        ││                            hello by mouse  12:00 ○ │
+│                        │├● to <5ec0ea2e…>──── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────────────────┘└────────────────────────────────────────────────────┘
+Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
+--- frame 5: message selected ---
+┌  lnmsg afbda7b3────────┐┌● <5ec0ea2e…>  unknown────────────────── no mailbox ┐
+│▌<5ec0ea2e…>      12:00 ││                                                    │
+│▌you: hello by mouse    ││                                                    │
+│                        ││                                                    │
+│ <61ddb79a…>            ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││           nothing earlier on this device           │
+│                        ││                    ── Today ──                     │
+│                        ││                           ▌hello by mouse  12:00 ○ │
+│                        │├  to <5ec0ea2e…>──── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────────────────┘└────────────────────────────────────────────────────┘
+Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+--- frame 6: detail ---
+┌  lnmsg afbda7b3────────┐┌● <5ec0ea2e…>  unknown────────────────── no mailbox ┐
+│▌<5ec0ea2e…>      12:00 ││                                                    │
+│▌you: hello by mouse    ││                                                    │
+│                        ││                                                    │
+│ <61ddb79a…>            ││                                                    │
+│                        ││                                                    │
+│ ┌ message ─────────────────────────────────────────────────────────────────┐ │
+│ │from you to <5ec0ea2e…>                                                   │ │
+│ │peer   5ec0ea2ecbc35ac16053c86cc29663ec                                   │ │
+│ │id     none yet: the router has not queued it                             │ │
+│ │size   14 bytes                                                           │ │
+│ │state  queued                                                             │ │
+│ │                                                                          │ │
+│ │this session                                                              │ │
+│ │12:00:00  queued                                                          │ │
+│ └────────────────────────────────────────────────────────────── Esc closes ┘ │
+│                        ││                                                    │
+│                        ││           nothing earlier on this device           │
+│                        ││                    ── Today ──                     │
+│                        ││                           ▌hello by mouse  12:00 ○ │
+│                        │├  to <5ec0ea2e…>──── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────────────────┘└────────────────────────────────────────────────────┘
+Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+--- frame 7: closed ---
+┌  lnmsg afbda7b3────────┐┌● <5ec0ea2e…>  unknown────────────────── no mailbox ┐
+│▌<5ec0ea2e…>      12:00 ││                                                    │
+│▌you: hello by mouse    ││                                                    │
+│                        ││                                                    │
+│ <61ddb79a…>            ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││           nothing earlier on this device           │
+│                        ││                    ── Today ──                     │
+│                        ││                           ▌hello by mouse  12:00 ○ │
+│                        │├  to <5ec0ea2e…>──── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────────────────┘└────────────────────────────────────────────────────┘
+Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+--- frame 8: help ---
+┌ lnmsg help ──────────────────────────────────────────────────────────────────┐
+│Move                                                                          █
+│  j / k   ↓ / ↑   Ctrl-n / Ctrl-p               scroll a line                 █
+│  Ctrl-f / Ctrl-b   Ctrl-v   PageDown / PageUp  page down / up                █
+│  Ctrl-d / Ctrl-u                               half a page                   █
+│  g / G   Home / End                            top / bottom                  █
+│  Ctrl-↑ / Ctrl-↓                               top / bottom (Signal)         █
+│  PageDown / PageUp                             page the messages (compose)   █
+│                                                                              █
+│Conversations                                                                 █
+│  Enter                                         open the selected conversation█
+│  Alt-↑   Ctrl-Shift-Tab                        previous conversation         ║
+│  Alt-↓   Ctrl-Tab                              next conversation             ║
+│  Alt-Shift-↑                                   previous unread               ║
+│  Alt-Shift-↓                                   next unread                   ║
+│                                                Tab in mutt: here Alt-Shift-↓,║
+│Tab cycles the panes                                                          ║
+│  i / a   r   Ctrl-Shift-T                      write in this conversation    ║
+│  : focus conversations                         focus the conversation list   ║
+│                                                                              ║
+│Messages                                                                      ║
+│  Enter                                         the message's details         ║
+│                                                Ctrl-D in Signal: here Enter  ║
+└──────────────────────────────────────────────────────────────────────────────┘
+=== wheel ===
+--- frame 1: list focused ---
+┌● lnmsg afbda7b3────────┐┌  <61ddb79a…>  unknown────────────────── no mailbox ┐
+│▌<61ddb79a…>      12:00 ││                                 message 1  12:00 ○ │
+│▌you: message 10        ││                                                    │
+│                        ││                                 message 2  12:00 ○ │
+│ <5ec0ea2e…>            ││                                                    │
+│                        ││                                 message 3  12:00 ○ │
+│                        ││                                                    │
+│                        ││                                 message 4  12:00 ○ │
+│                        ││                                                    │
+│                        ││                                 message 5  12:00 ○ │
+│                        ││                                                    │
+│                        ││                                 message 6  12:00 ○ │
+│                        ││                                                    │
+│                        ││                                 message 7  12:00 ○ │
+│                        ││                                                    │
+│                        ││                                 message 8  12:00 ○ │
+│                        ││                                                    │
+│                        ││                                 message 9  12:00 ○ │
+│                        ││                                                    │
+│                        ││                                message 10  12:00 ○ │
+│                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────────────────┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+--- frame 2: wheeled up ---
+┌● lnmsg afbda7b3────────┐┌  <61ddb79a…>  unknown────────────────── no mailbox ┐
+│▌<61ddb79a…>      12:00 ││           nothing earlier on this device           │
+│▌you: message 10        ││                    ── Today ──                     │
+│                        ││                                 message 1  12:00 ○ │
+│ <5ec0ea2e…>            ││                                                    │
+│                        ││                                 message 2  12:00 ○ │
+│                        ││                                                    │
+│                        ││                                 message 3  12:00 ○ │
+│                        ││                                                    │
+│                        ││                                 message 4  12:00 ○ │
+│                        ││                                                    │
+│                        ││                                 message 5  12:00 ○ │
+│                        ││                                                    │
+│                        ││                                 message 6  12:00 ○ │
+│                        ││                                                    │
+│                        ││                                 message 7  12:00 ○ │
+│                        ││                                                    │
+│                        ││                                 message 8  12:00 ○ │
+│                        ││                                                    │
+│                        ││                                 message 9  12:00 ○ │
+│                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────────────────┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+--- frame 3: wheeled down ---
+┌● lnmsg afbda7b3────────┐┌  <61ddb79a…>  unknown────────────────── no mailbox ┐
+│▌<61ddb79a…>      12:00 ││                                 message 1  12:00 ○ │
+│▌you: message 10        ││                                                    │
+│                        ││                                 message 2  12:00 ○ │
+│ <5ec0ea2e…>            ││                                                    │
+│                        ││                                 message 3  12:00 ○ │
+│                        ││                                                    │
+│                        ││                                 message 4  12:00 ○ │
+│                        ││                                                    │
+│                        ││                                 message 5  12:00 ○ │
+│                        ││                                                    │
+│                        ││                                 message 6  12:00 ○ │
+│                        ││                                                    │
+│                        ││                                 message 7  12:00 ○ │
+│                        ││                                                    │
+│                        ││                                 message 8  12:00 ○ │
+│                        ││                                                    │
+│                        ││                                 message 9  12:00 ○ │
+│                        ││                                                    │
+│                        ││                                message 10  12:00 ○ │
+│                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────────────────┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+=== drag ===
+--- frame 1: two sent ---
+┌  lnmsg afbda7b3────────┐┌● <61ddb79a…>  unknown────────────────── no mailbox ┐
+│▌<61ddb79a…>      12:00 ││                                                    │
+│▌you: second line       ││                                                    │
+│                        ││                                                    │
+│ <5ec0ea2e…>            ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││           nothing earlier on this device           │
+│                        ││                    ── Today ──                     │
+│                        ││                                first line  12:00 ○ │
+│                        ││                                                    │
+│                        ││                              ▌second line  12:00 ○ │
+│                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────────────────┘└────────────────────────────────────────────────────┘
+Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+--- osc52 \e]52;c;Zmlyc3QgbGluZQpzZWNvbmQgbGluZQ==\e\ ---
+--- frame 2: dragged ---
+┌  lnmsg afbda7b3────────┐┌● <61ddb79a…>  unknown────────────────── no mailbox ┐
+│▌<61ddb79a…>      12:00 ││                                                    │
+│▌you: second line       ││                                                    │
+│                        ││                                                    │
+│ <5ec0ea2e…>            ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││           nothing earlier on this device           │
+│                        ││                    ── Today ──                     │
+│                        ││                               ▌f┌─────────────────┐│
+│                        ││                                 │✓ copied 22 chars││
+│                        ││                               se└─────────────────┘│
+│                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────────────────┘└────────────────────────────────────────────────────┘
+Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+--- frame 3: selected ---
+┌  lnmsg afbda7b3────────┐┌● <61ddb79a…>  unknown────────────────── no mailbox ┐
+│▌<61ddb79a…>      12:00 ││                                                    │
+│▌you: second line       ││                                                    │
+│                        ││                                                    │
+│ <5ec0ea2e…>            ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││           nothing earlier on this device           │
+│                        ││                    ── Today ──                     │
+│                        ││                               ▌first line  12:00 ○ │
+│                        ││                                                    │
+│                        ││                               second line  12:00 ○ │
+│                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────────────────┘└────────────────────────────────────────────────────┘
+Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit

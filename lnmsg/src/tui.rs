@@ -27,7 +27,7 @@ use crossterm::event::{
 };
 use futures::StreamExt;
 use ratatui::backend::{CrosstermBackend, TestBackend};
-use ratatui::layout::{Constraint, Layout, Position, Rect};
+use ratatui::layout::{Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::symbols::border;
 use ratatui::text::{Line, Span, Text};
@@ -36,13 +36,16 @@ use ratatui::{Frame, Terminal};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tui_input::Input;
 
+use leviculum_ui::clipboard::osc52;
 use leviculum_ui::delivery::DeliveryState;
 use leviculum_ui::footer;
 use leviculum_ui::input::{KeyCode, KeyEvent, KeyModifiers};
+use leviculum_ui::input::{MouseButton, MouseEvent, MouseEventKind};
 use leviculum_ui::theme::{resolve_theme, Theme, ThemeFlag};
 use leviculum_ui_ratatui::background::detect_background;
-use leviculum_ui_ratatui::event::{key_event, step_event, EventStep};
-use leviculum_ui_ratatui::terminal::{install_panic_hook, TerminalOps};
+use leviculum_ui_ratatui::event::{key_event, mouse_event, step_event, EventStep};
+use leviculum_ui_ratatui::geometry::to_ratatui;
+use leviculum_ui_ratatui::terminal::{install_panic_hook, set_mouse_capture, TerminalOps};
 use leviculum_ui_ratatui::{help, to_ratatui_text, toast, CrosstermTerminal, TerminalGuard};
 
 use lnmsg::clock::Tokio;
@@ -90,6 +93,9 @@ pub struct TuiOptions {
     pub timeout: u64,
     pub ascii: bool,
     pub no_color: bool,
+    /// Start with the mouse not captured, so the terminal's own selection
+    /// works; the palette's `mouse` turns capture on.
+    pub no_mouse: bool,
     pub script: Option<PathBuf>,
     pub frames: Option<PathBuf>,
     pub size: (u16, u16),
@@ -176,6 +182,20 @@ struct Shell {
     gone: bool,
     /// The reader asked for the screen to be drawn again from scratch.
     redraw: bool,
+    /// What the screen asked of the terminal and not yet done: the real
+    /// terminal does it, a script writes it into its frames.
+    outputs: Vec<Output>,
+}
+
+/// What the model asks of the terminal beyond drawing.
+#[derive(Debug, PartialEq, Eq)]
+enum Output {
+    /// Put the text on the clipboard.
+    Copy(String),
+    /// Hand the URL to the system.
+    Open(String),
+    /// Capture the mouse or let it go.
+    Mouse(bool),
 }
 
 impl Shell {
@@ -188,6 +208,9 @@ impl Shell {
                 UiEffect::Quit => {}
                 UiEffect::Redraw => self.redraw = true,
                 UiEffect::Notice(line) => self.afterwards.push(line),
+                UiEffect::Copy(text) => self.outputs.push(Output::Copy(text)),
+                UiEffect::Open(url) => self.outputs.push(Output::Open(url)),
+                UiEffect::Mouse(on) => self.outputs.push(Output::Mouse(on)),
             }
         }
         self.start_next();
@@ -430,6 +453,7 @@ pub async fn run(options: TuiOptions) -> ExitCode {
     };
     let mut model = Model::new(&options.to);
     model.ascii = options.ascii;
+    model.mouse = !options.no_mouse;
     model.send_on_enter = config.send_on_enter.unwrap_or(true);
     // The mailbox the header names before any run: `--pn` or the configured
     // node, else what the last run kept.
@@ -469,6 +493,7 @@ pub async fn run(options: TuiOptions) -> ExitCode {
         afterwards: Vec::new(),
         gone: false,
         redraw: false,
+        outputs: Vec::new(),
     };
 
     let outcome = match &options.script {
@@ -557,7 +582,7 @@ async fn run_terminal(shell: &mut Shell, options: &TuiOptions) -> Result<(), Str
     shell.model.enhanced = enhanced;
     log_keys(&shell.model);
     let mut guard = TerminalGuard::new(KeysTerminal {
-        inner: CrosstermTerminal::new(),
+        inner: CrosstermTerminal::with_mouse(shell.model.mouse),
         enhanced,
     })
     .map_err(|e| e.to_string())?;
@@ -576,6 +601,11 @@ async fn run_terminal(shell: &mut Shell, options: &TuiOptions) -> Result<(), Str
     pump.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     let result = loop {
+        for output in std::mem::take(&mut shell.outputs) {
+            if let Err(error) = run_output(output) {
+                shell.apply(UiEvent::Notice(error));
+            }
+        }
         if shell.redraw {
             shell.redraw = false;
             if let Err(error) = terminal.clear() {
@@ -606,10 +636,25 @@ async fn run_terminal(shell: &mut Shell, options: &TuiOptions) -> Result<(), Str
     result
 }
 
-/// Keys become key events; a resize tells the model its new pages.
+/// What the model asked of the terminal, done: the copy as OSC 52, the URL
+/// to the system's handler as lnomad hands it, the capture switched.
+fn run_output(output: Output) -> Result<(), String> {
+    match output {
+        Output::Copy(text) => {
+            crossterm::execute!(std::io::stdout(), crossterm::style::Print(osc52(&text)))
+                .map_err(|e| format!("copy: {e}"))
+        }
+        Output::Open(url) => open::that(&url).map_err(|e| format!("could not open {url}: {e}")),
+        Output::Mouse(on) => set_mouse_capture(on).map_err(|e| format!("mouse: {e}")),
+    }
+}
+
+/// Keys and the mouse become the model's events; a resize tells the model
+/// its new pages.
 fn map_event(event: Event) -> Option<UiEvent> {
     match event {
         Event::Key(key) => Some(UiEvent::Key(key_event(key))),
+        Event::Mouse(mouse) => Some(UiEvent::Mouse(mouse_event(mouse))),
         Event::Resize(width, height) => Some(UiEvent::Resize { width, height }),
         _ => None,
     }
@@ -676,6 +721,8 @@ enum Step {
     Until(Until, Duration),
     Sleep(u64),
     Clock(WallTime),
+    /// Mouse events, at screen cells.
+    Mouse(Vec<MouseEvent>),
 }
 
 /// The script's key names: `tab`, `backtab`, `enter`, `esc`, `up`, `down`,
@@ -741,6 +788,63 @@ fn single(text: &str) -> Option<char> {
     chars.next().is_none().then_some(c)
 }
 
+/// A mouse event at a script's cell, 1-based as the frames are counted.
+fn mouse_at(kind: MouseEventKind, col: u16, row: u16) -> MouseEvent {
+    MouseEvent {
+        kind,
+        column: col - 1,
+        row: row - 1,
+        modifiers: KeyModifiers::NONE,
+    }
+}
+
+/// `click`, `wheel` and `drag`: the events each stands for. Columns and rows
+/// are screen cells from 1, the frames' first row and column.
+fn parse_mouse(word: &str, rest: &str) -> Result<Vec<MouseEvent>, String> {
+    let words: Vec<&str> = rest.split_whitespace().collect();
+    let cell = |text: &str| -> Result<u16, String> {
+        match text.parse::<u16>() {
+            Ok(n) if n >= 1 => Ok(n),
+            _ => Err(format!("bad cell {text:?}, from 1")),
+        }
+    };
+    let left = MouseButton::Left;
+    match (word, words.as_slice()) {
+        ("click", [col, row]) => {
+            let (col, row) = (cell(col)?, cell(row)?);
+            Ok(vec![
+                mouse_at(MouseEventKind::Down(left), col, row),
+                mouse_at(MouseEventKind::Up(left), col, row),
+            ])
+        }
+        ("wheel", [way, col, row, tail @ ..]) => {
+            let kind = match *way {
+                "up" => MouseEventKind::ScrollUp,
+                "down" => MouseEventKind::ScrollDown,
+                other => return Err(format!("unknown wheel {other:?}, up or down")),
+            };
+            let n = match tail {
+                [] => 1,
+                [n] => n.parse::<usize>().map_err(|_| format!("bad count {n:?}"))?,
+                _ => return Err(format!("wheel takes up|down <col> <row> [n], not {rest:?}")),
+            };
+            let (col, row) = (cell(col)?, cell(row)?);
+            Ok((0..n).map(|_| mouse_at(kind, col, row)).collect())
+        }
+        ("drag", [c1, r1, c2, r2]) => {
+            let (c1, r1, c2, r2) = (cell(c1)?, cell(r1)?, cell(c2)?, cell(r2)?);
+            Ok(vec![
+                mouse_at(MouseEventKind::Down(left), c1, r1),
+                mouse_at(MouseEventKind::Drag(left), c2, r2),
+                mouse_at(MouseEventKind::Up(left), c2, r2),
+            ])
+        }
+        ("click", _) => Err(format!("click takes <col> <row>, not {rest:?}")),
+        ("wheel", _) => Err(format!("wheel takes up|down <col> <row> [n], not {rest:?}")),
+        _ => Err(format!("drag takes <col> <row> <col> <row>, not {rest:?}")),
+    }
+}
+
 /// `2026-10-24 13:58`, at UTC.
 fn parse_clock(text: &str) -> Result<WallTime, String> {
     let bad = || format!("bad clock {text:?}, YYYY-MM-DD HH:MM");
@@ -800,7 +904,18 @@ fn parse_state(name: &str) -> Result<DeliveryState, String> {
 /// clock <YYYY-MM-DD> <HH:MM>      the time of day from now on, at UTC (the
 ///                                script starts at 2026-10-26 12:00); it
 ///                                stands still until the next clock step
+/// click <col> <row>              the left button down and up at a cell
+/// wheel <up|down> <col> <row> [n]
+///                                n wheel notches at a cell (1)
+/// drag <col> <row> <col> <row>   the left button down at the first cell,
+///                                moved to the second and up there
 /// ```
+///
+/// Cells count from 1 at the top left, as the frames' rows and columns do.
+/// What the screen asks of the terminal is written into the frames where it
+/// happens: `--- osc52 <sequence> ---` for a copy (the escape character as
+/// `\e`), `--- open <url> ---` for a link handed to the system, which a
+/// script never launches, and `--- mouse on|off ---`.
 fn parse_script(text: &str) -> Result<Vec<Step>, String> {
     let mut steps = Vec::new();
     for (number, raw) in text.lines().enumerate() {
@@ -834,6 +949,7 @@ fn parse_script(text: &str) -> Result<Vec<Step>, String> {
             }),
             "frame" => Step::Frame(rest.trim().to_string()),
             "clock" => Step::Clock(parse_clock(rest.trim()).map_err(at)?),
+            "click" | "wheel" | "drag" => Step::Mouse(parse_mouse(word, rest).map_err(at)?),
             "sleep" => {
                 let ms = rest.trim();
                 match ms.parse::<u64>() {
@@ -916,7 +1032,14 @@ async fn run_script(
         year, month, day, hour, minute, 0,
     )));
     let mut count = 0usize;
-    let mut dump = |terminal: &mut Terminal<TestBackend>, model: &Model, label: &str| {
+    // A frame of the model, or without one a line of what the screen asked
+    // of the terminal.
+    let mut dump = |terminal: &mut Terminal<TestBackend>, model: Option<&Model>, label: &str| {
+        let Some(model) = model else {
+            return writeln!(out, "--- {label} ---")
+                .and_then(|()| out.flush())
+                .map_err(|e| format!("{}: {e}", frames.display()));
+        };
         let view = ui::view(model);
         terminal
             .draw(|frame| draw(frame, &view, Theme::Dark, true))
@@ -929,6 +1052,11 @@ async fn run_script(
     };
     for step in steps {
         match step {
+            Step::Mouse(events) => {
+                for event in events {
+                    shell.apply(UiEvent::Mouse(event));
+                }
+            }
             Step::Key(key) => shell.apply(UiEvent::Key(key)),
             Step::Keyboard(enhanced) => shell.model.enhanced = enhanced,
             Step::Clock(now) => shell.apply(UiEvent::Clock(now)),
@@ -948,7 +1076,7 @@ async fn run_script(
             Step::Frame(label) => {
                 // A script's screen is drawn whole every frame anyway.
                 shell.redraw = false;
-                dump(&mut terminal, &shell.model, &label)?
+                dump(&mut terminal, Some(&shell.model), &label)?
             }
             Step::Until(until, within) => {
                 let deadline = tokio::time::Instant::now() + within;
@@ -958,7 +1086,11 @@ async fn run_script(
                         break;
                     }
                     if tokio::time::Instant::now() >= deadline {
-                        dump(&mut terminal, &shell.model, &format!("timeout: {until:?}"))?;
+                        dump(
+                            &mut terminal,
+                            Some(&shell.model),
+                            &format!("timeout: {until:?}"),
+                        )?;
                         return Err(format!(
                             "script: {until:?} did not hold within {}s",
                             within.as_secs()
@@ -983,6 +1115,14 @@ async fn run_script(
                     }
                 }
             }
+        }
+        for output in std::mem::take(&mut shell.outputs) {
+            let line = match output {
+                Output::Copy(text) => format!("osc52 {}", osc52(&text).replace('\x1b', "\\e")),
+                Output::Open(url) => format!("open {url}"),
+                Output::Mouse(on) => format!("mouse {}", if on { "on" } else { "off" }),
+            };
+            dump(&mut terminal, None, &line)?;
         }
         if shell.model.quit {
             break;
@@ -1019,16 +1159,18 @@ const COMPOSE_BORDER: border::Set = border::Set {
 /// palette, the detail view and the help on top.
 pub fn draw(frame: &mut Frame, view: &View, theme: Theme, no_color: bool) {
     let compose_lines: Vec<&str> = view.compose.split('\n').collect();
-    let compose_rows = compose_lines.len().clamp(1, ui::COMPOSE_MAX_ROWS) as u16;
-    let [body, footer_row] =
-        Layout::vertical([Constraint::Min(3), Constraint::Length(1)]).areas(frame.area());
-    let [left, right] = Layout::horizontal([
-        Constraint::Length(ui::list_width(frame.area().width)),
-        Constraint::Min(0),
-    ])
-    .areas(body);
-    let [messages, compose] =
-        Layout::vertical([Constraint::Min(1), Constraint::Length(compose_rows + 2)]).areas(right);
+    let compose_rows = compose_lines.len().clamp(1, ui::COMPOSE_MAX_ROWS);
+    // The model's rectangles, the ones the mouse hit-tests against.
+    let area = frame.area();
+    let screen = ui::Screen::of(area.width, area.height, compose_rows);
+    let left = to_ratatui(screen.list);
+    let messages = to_ratatui(screen.messages);
+    let compose = to_ratatui(screen.compose);
+    let footer_row = to_ratatui(screen.footer);
+    let body = Rect {
+        height: footer_row.y,
+        ..area
+    };
 
     let block = pane_block(
         &view.conversations_title,
@@ -1070,15 +1212,16 @@ pub fn draw(frame: &mut Frame, view: &View, theme: Theme, no_color: bool) {
         .title_top(Line::from(format!(" {} ", view.compose_hint)).right_aligned());
     let inner = block.inner(compose);
     frame.render_widget(block, compose);
-    let (cursor_line, cursor_column) = line_and_column(&view.compose, view.compose_cursor);
-    let width = inner.width.max(1) as usize;
-    let height = inner.height.max(1) as usize;
-    let scroll = (cursor_column + 1).saturating_sub(width);
-    let top = (cursor_line + 1).saturating_sub(height);
+    let (top, scroll, cursor_line, cursor_column) = ui::compose_window(
+        &view.compose,
+        view.compose_cursor,
+        usize::from(inner.width),
+        usize::from(inner.height),
+    );
     let shown: Vec<Line> = compose_lines
         .iter()
         .skip(top)
-        .take(height)
+        .take(usize::from(inner.height.max(1)))
         .map(|line| Line::from(line.chars().skip(scroll).collect::<String>()))
         .collect();
     frame.render_widget(Paragraph::new(Text::from(shown)), inner);
@@ -1090,8 +1233,15 @@ pub fn draw(frame: &mut Frame, view: &View, theme: Theme, no_color: bool) {
         ));
     }
 
-    let slots = footer::layout(view.footer.clone(), from_rect(footer_row));
-    leviculum_ui_ratatui::footer::render(frame, footer_row, &slots, None, no_color, theme);
+    let slots = footer::layout(view.footer.clone(), screen.footer);
+    leviculum_ui_ratatui::footer::render(
+        frame,
+        footer_row,
+        &slots,
+        view.footer_hover,
+        no_color,
+        theme,
+    );
 
     if let Some(note) = &view.toast {
         // Over both columns above the compose box, so it has the screen's
@@ -1107,14 +1257,7 @@ pub fn draw(frame: &mut Frame, view: &View, theme: Theme, no_color: bool) {
         draw_detail(frame, detail);
     }
     if let Some(palette) = &view.palette {
-        let width = 40.min(frame.area().width);
-        let height = (palette.rows.len() as u16 + 3).min(frame.area().height);
-        let area = Rect {
-            x: frame.area().x + frame.area().width.saturating_sub(width) / 2,
-            y: frame.area().y + 2,
-            width,
-            height,
-        };
+        let area = to_ratatui(ui::palette_rect(palette.rows.len(), screen.area()));
         frame.render_widget(Clear, area);
         let block = Block::default().borders(Borders::ALL).title(" commands ");
         let inner = block.inner(area);
@@ -1137,29 +1280,10 @@ pub fn draw(frame: &mut Frame, view: &View, theme: Theme, no_color: bool) {
     }
 }
 
-/// The widest the detail view is drawn: the 64 hex digits of an id and its
-/// label on one row.
-const DETAIL_MAX_WIDTH: u16 = 76;
-
 /// A message's detail view, centred over the panes, its rows wrapped.
 fn draw_detail(frame: &mut Frame, detail: &ui::DetailView) {
-    let screen = frame.area();
-    let width = DETAIL_MAX_WIDTH.min(screen.width.saturating_sub(2)).max(4);
-    let rows: Vec<String> = detail
-        .rows
-        .iter()
-        .flat_map(|row| match row.is_empty() {
-            true => vec![String::new()],
-            false => ui::toast_rows(row, usize::from(width - 2)),
-        })
-        .collect();
-    let height = (rows.len() as u16 + 2).min(screen.height.saturating_sub(1));
-    let area = Rect {
-        x: screen.x + screen.width.saturating_sub(width) / 2,
-        y: screen.y + screen.height.saturating_sub(height + 1) / 2,
-        width,
-        height,
-    };
+    let (area, rows) = ui::detail_layout(detail, from_rect(frame.area()));
+    let area = to_ratatui(area);
     frame.render_widget(Clear, area);
     let block = Block::default()
         .borders(Borders::ALL)
@@ -1169,22 +1293,6 @@ fn draw_detail(frame: &mut Frame, detail: &ui::DetailView) {
     frame.render_widget(block, area);
     let lines: Vec<Line> = rows.into_iter().map(Line::from).collect();
     frame.render_widget(Paragraph::new(Text::from(lines)), inner);
-}
-
-/// The line and the column, in characters, of the `cursor`th character of
-/// `text`.
-fn line_and_column(text: &str, cursor: usize) -> (usize, usize) {
-    let mut line = 0;
-    let mut column = 0;
-    for c in text.chars().take(cursor) {
-        if c == '\n' {
-            line += 1;
-            column = 0;
-        } else {
-            column += 1;
-        }
-    }
-    (line, column)
 }
 
 fn from_rect(rect: Rect) -> leviculum_ui::Rect {
@@ -1386,6 +1494,45 @@ mod tests {
         );
         model.enhanced = true;
         assert!(render(&model).contains("Enter send · Shift-Enter newline"));
+    }
+
+    /// `click`, `wheel` and `drag` become the events a terminal sends, at
+    /// cells counted from 1 as the frames are; nonsense is refused.
+    #[test]
+    fn the_mouse_steps_parse_to_events_at_one_based_cells() {
+        let steps = parse_script("click 3 4\nwheel down 10 2 3\nwheel up 1 1\ndrag 2 2 9 5\n")
+            .expect("parses");
+        let events = |step: &Step| match step {
+            Step::Mouse(events) => events.iter().map(|e| (e.kind, e.column, e.row)).collect(),
+            _ => Vec::new(),
+        };
+        let left = MouseButton::Left;
+        assert_eq!(
+            events(&steps[0]),
+            [
+                (MouseEventKind::Down(left), 2, 3),
+                (MouseEventKind::Up(left), 2, 3)
+            ]
+        );
+        assert_eq!(events(&steps[1]), [(MouseEventKind::ScrollDown, 9, 1); 3]);
+        assert_eq!(events(&steps[2]), [(MouseEventKind::ScrollUp, 0, 0)]);
+        assert_eq!(
+            events(&steps[3]),
+            [
+                (MouseEventKind::Down(left), 1, 1),
+                (MouseEventKind::Drag(left), 8, 4),
+                (MouseEventKind::Up(left), 8, 4)
+            ]
+        );
+        for bad in [
+            "click 0 1\n",
+            "click 1\n",
+            "wheel sideways 1 1\n",
+            "wheel up 1 1 many\n",
+            "drag 1 1 2\n",
+        ] {
+            assert!(parse_script(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]
@@ -1699,6 +1846,79 @@ mod tests {
                 "the frames moved; this run's are in {}, the pinned ones in \
                  lnmsg/tests/fixtures/tui_layout.frames\n{frames}",
                 kept.display()
+            );
+        }
+    }
+
+    /// The text a frame shows in `cells`, in order.
+    fn under(frame: &str, cells: &[(u16, u16)]) -> String {
+        let rows: Vec<Vec<char>> = frame.lines().map(|row| row.chars().collect()).collect();
+        cells
+            .iter()
+            .map(|&(col, row)| {
+                rows.get(usize::from(row))
+                    .and_then(|r| r.get(usize::from(col)))
+                    .copied()
+                    .unwrap_or(' ')
+            })
+            .collect()
+    }
+
+    /// The hit boxes as the drawn frame shows them, at both mockup sizes:
+    /// the cells the model calls `send` read `send` on the compose box's
+    /// border, the mailbox state's read the mailbox words, a badge's its
+    /// count and a mark's its glyph.
+    #[test]
+    fn the_hit_boxes_are_the_cells_of_their_words() {
+        use lnmsg::ui::hit::{target_at, Target};
+        for (width, height) in [(80, 24), (120, 40)] {
+            let mut model = mockup(width, height);
+            // Bob's conversation gets a badge.
+            update(
+                &mut model,
+                UiEvent::Engine(OutboxEvent::Received {
+                    message_id: [0x77; 32],
+                    source: [0xb7; 16],
+                    title: Vec::new(),
+                    body: b"one for the badge".to_vec(),
+                    verified: true,
+                }),
+            );
+            model.toasts.clear();
+            let shot = screen(&model, width, height);
+            let mut map: Vec<(Target, Vec<(u16, u16)>)> = Vec::new();
+            for row in 0..height {
+                for col in 0..width {
+                    let target = target_at(&model, col, row);
+                    match map.iter_mut().find(|(t, _)| *t == target) {
+                        Some((_, cells)) => cells.push((col, row)),
+                        None => map.push((target, vec![(col, row)])),
+                    }
+                }
+            }
+            let of = |want: &dyn Fn(&Target) -> bool| -> Vec<(u16, u16)> {
+                map.iter()
+                    .filter(|(t, _)| want(t))
+                    .flat_map(|(_, cells)| cells.clone())
+                    .collect()
+            };
+            let send = of(&|t| *t == Target::Send);
+            assert_eq!(under(&shot, &send), "send", "{width}: {shot}");
+            assert!(send.iter().all(|&(_, row)| row == send[0].1));
+            let mailbox = of(&|t| *t == Target::Mailbox);
+            assert_eq!(
+                under(&shot, &mailbox),
+                "mailbox 9c9c9c9c adopted",
+                "{width}: {shot}"
+            );
+            let badge = of(&|t| matches!(t, Target::Badge(_)));
+            assert_eq!(under(&shot, &badge), "[1]", "{width}: {shot}");
+            let marks = of(&|t| matches!(t, Target::Block { mark: true, .. }));
+            let glyphs = under(&shot, &marks);
+            assert!(!glyphs.is_empty(), "{width}: {shot}");
+            assert!(
+                glyphs.chars().all(|c| "○◇⌂✓✗⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏".contains(c)),
+                "{width}: {glyphs:?}\n{shot}"
             );
         }
     }

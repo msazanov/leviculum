@@ -244,7 +244,7 @@ and the palette finds the action by the chat program's word too (`new
 chat`, `find`).
 
 **`:q` quits for free.** The palette's fuzzy match is a subsequence test
-(`fuzzy_match`, `leviculum-ui/src/commands.rs:92`), and `quit` is the only
+(`fuzzy_match`, `leviculum-ui/src/commands.rs:96`), and `quit` is the only
 palette name containing a `q`, so `:`, `q`, `Enter` quits as a vi user
 expects. That stays true only while it is tested, so the keymap slice
 pins it.
@@ -604,7 +604,7 @@ still shows around the blocks.
 
 The delivery marks have colours already, decided on 2026-08-10
 ([the user interface](lnmsg-ui.md), "the ledger and the glyph"), drawn
-today from one theme-blind palette (`lnmsg/src/ui.rs:1307`, `tone_rgb`).
+today from one theme-blind palette (`lnmsg/src/ui.rs:1699`, `tone_rgb`).
 That palette was chosen for a dark pane. On a white pane its yellow is
 1.7:1 and its amber 1.9:1, and over the own tint above its red is 2.8:1
 and every dim tone below 3:1. So the tones join the table, per theme and
@@ -659,7 +659,7 @@ look every test frame shows. One gap is fixed with it: `NO_COLOR` reaches
 the screen today only because crossterm drops colour sequences on output
 when it is set (`vendor/crossterm/src/style/types/colored.rs:76`), while
 `lnmsg`'s own `no_color` comes from the flag alone
-(`lnmsg/src/main.rs:403`), and `lnomad`'s from the flag and a non-tty
+(`lnmsg/src/main.rs:408`), and `lnomad`'s from the flag and a non-tty
 (`lnomad/src/main.rs:201`). So under `NO_COLOR` alone the colour is gone
 but the reverse video that `no_color` chooses instead
 (`leviculum-ui-ratatui/src/toast.rs:63`) never comes, and a toast draws as
@@ -668,7 +668,7 @@ plain text. Both programs read `NO_COLOR` into `no_color` themselves.
 #### 2. Light or dark
 
 `lnmsg` already asks the terminal for its background before raw mode
-(`lnmsg/src/tui.rs:547`), the same query `lnomad` makes: OSC 11, with
+(`lnmsg/src/tui.rs:572`), the same query `lnomad` makes: OSC 11, with
 `COLORFGBG` as the fallback, 100 ms to answer
 (`leviculum-ui-ratatui/src/background.rs:12`), decided by
 `resolve_theme` (`leviculum-ui/src/theme.rs:70`). It is hardcoded to
@@ -879,7 +879,7 @@ in truecolor, 3.4:1 to 9.3:1 and 3.1:1 to 8.6:1 in 256.
 #### 5. Tests the layout slice will carry
 
 - **The frames stay plain text.** The `frame` step of the key script
-  (`lnmsg/src/tui.rs:835`) writes characters only, and the existing
+  (`lnmsg/src/tui.rs:950`) writes characters only, and the existing
   snapshot frames keep pinning the monochrome look.
 - **A script step `styles <name>`** writes one frame's per-cell style as a
   map in the letters above: `.` `,` `=` for the three tints, `s` for a

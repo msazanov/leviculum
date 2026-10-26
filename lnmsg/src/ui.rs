@@ -41,10 +41,22 @@
 //!
 //! # What is not here
 //!
+//! # The mouse
+//!
+//! Section 5's table, "What the mouse does": [`UiEvent::Mouse`] carries a
+//! click, a wheel turn, a drag or a move at a cell, and [`hit`] says what is
+//! drawn there from the same layout the view draws, so a click lands on what
+//! the reader sees. The two targets that transmit, `send` on the compose
+//! box's border and the mailbox state in the header, run the same commands
+//! as `Enter` and `F5`. A drag over the conversation selects text and its
+//! release copies it ([`UiEffect::Copy`], OSC 52 in the terminal).
+//!
+//! # What is not here
+//!
 //! History: lnmsg keeps no message store on disk (only the seen record's
 //! ids), so the conversations are this session's, and the top of the pane
-//! says so (`nothing earlier on this device`). Names and trust states, the
-//! mouse, search and QR codes are later slices.
+//! says so (`nothing earlier on this device`). Names and trust states,
+//! search and QR codes are later slices.
 
 use alloc::collections::VecDeque;
 use alloc::format;
@@ -57,10 +69,14 @@ use leviculum_ui::commands::{self, Command as PaletteCommand, PaletteEntry};
 use leviculum_ui::delivery::{DeliveryState, Tone};
 use leviculum_ui::footer::{FooterItem, FooterRole};
 use leviculum_ui::help::HelpGroup;
-use leviculum_ui::input::{InputBuffer, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use leviculum_ui::input::{
+    InputBuffer, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+    MouseEventKind,
+};
 use leviculum_ui::keymap::{Ctx, ScrollCmd};
+use leviculum_ui::link::{classify_link, LinkKind};
 use leviculum_ui::toast::{Toast, ToastKind};
-use leviculum_ui::{RLine, RStyle, StyledChar};
+use leviculum_ui::{RLine, RStyle, Rect, StyledChar};
 
 use crate::address::to_hex;
 use crate::keys::{self, Action};
@@ -68,6 +84,7 @@ use crate::outbox::OutboxEvent;
 use crate::send::Leg;
 use crate::when::{list_time, WallTime};
 
+pub mod hit;
 pub mod layout;
 
 /// How many ticks a toast stays up. The shell ticks every 250 ms, so three
@@ -96,6 +113,43 @@ pub const WIDE_HEADER: usize = 76;
 /// at least [`LIST_MIN_WIDTH`], at most half.
 pub fn list_width(width: u16) -> u16 {
     (width * 3 / 10).max(LIST_MIN_WIDTH).min(width / 2)
+}
+
+/// Rows the wheel moves the conversation by, a notch at a time.
+pub const WHEEL_ROWS: usize = 3;
+
+/// Where the screen's parts are, in cells: the list left the full height
+/// above the footer, the conversation and the compose box beside it, the
+/// footer at the bottom. The renderer draws in these rectangles and the
+/// mouse hit-tests against them, so the two cannot disagree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Screen {
+    pub list: Rect,
+    pub messages: Rect,
+    pub compose: Rect,
+    pub footer: Rect,
+}
+
+impl Screen {
+    /// The parts of a `width` x `height` screen whose compose box shows
+    /// `compose_rows` rows.
+    pub fn of(width: u16, height: u16, compose_rows: usize) -> Self {
+        let body = height.saturating_sub(1);
+        let left = list_width(width).min(width);
+        let right = width - left;
+        let compose = (compose_rows as u16 + 2).min(body.saturating_sub(1));
+        Self {
+            list: Rect::new(0, 0, left, body),
+            messages: Rect::new(left, 0, right, body - compose),
+            compose: Rect::new(left, body - compose, right, compose),
+            footer: Rect::new(0, body, width, height.min(1)),
+        }
+    }
+
+    /// The whole screen.
+    pub fn area(&self) -> Rect {
+        Rect::new(0, 0, self.footer.width, self.footer.bottom())
+    }
 }
 
 /// The inner sizes of the two panes the model lays out, in cells.
@@ -354,6 +408,32 @@ pub struct UiModel<B> {
     pub mailbox: MailboxShown,
     /// Counts messages in and out, for the list's order.
     pub activity: u64,
+    /// Whether the mouse is captured (`--no-mouse` and the palette's `mouse`
+    /// turn it off, and the terminal's own selection works again).
+    pub mouse: bool,
+    /// The footer button under the pointer, a footer slot's index.
+    pub footer_hover: Option<usize>,
+    /// What a drag over the conversation selected.
+    pub selection: Option<Selection>,
+    /// The button press a drag or a release belongs to.
+    pub press: Option<Press>,
+}
+
+/// Text a drag selected in the open conversation, from where the button went
+/// down to where it is, each as a laid-out row and a column of the pane.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Selection {
+    pub anchor: (usize, usize),
+    pub head: (usize, usize),
+}
+
+/// A left button held down over the conversation: what it went down on,
+/// and whether it has moved since, which makes the release a copy and not a
+/// click.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Press {
+    pub target: hit::Target,
+    pub moved: bool,
 }
 
 impl<B: InputBuffer + Default> UiModel<B> {
@@ -383,6 +463,10 @@ impl<B: InputBuffer + Default> UiModel<B> {
             detail: None,
             mailbox: MailboxShown::default(),
             activity: 0,
+            mouse: true,
+            footer_hover: None,
+            selection: None,
+            press: None,
         };
         for peer in peers {
             model.conversation(*peer);
@@ -450,6 +534,7 @@ impl<B> UiModel<B> {
         }
         self.selected = index;
         self.scroll_top = None;
+        self.selection = None;
         if let Some(conversation) = self.conversations.get_mut(index) {
             conversation.unread = 0;
             self.message_cursor = conversation.messages.len().saturating_sub(1);
@@ -554,6 +639,8 @@ pub enum UiEvent {
     Clock(WallTime),
     /// The screen's size in cells.
     Resize { width: u16, height: u16 },
+    /// A click, a wheel turn, a drag or a move, at a screen cell.
+    Mouse(MouseEvent),
     /// The mailbox the stored record or a run selected.
     MailboxChosen { node: [u8; 16], by_user: bool },
     /// One event from the message engine.
@@ -588,6 +675,13 @@ pub enum UiEffect {
     Quit,
     /// Draw the whole screen again from scratch (`Ctrl-l`).
     Redraw,
+    /// Put this text on the clipboard (OSC 52 in the terminal).
+    Copy(String),
+    /// Hand this URL to the system's handler for it: an `http`, `https` or
+    /// `mailto` link in a body, which [`classify_link`] let through.
+    Open(String),
+    /// Capture the mouse, or let the terminal have it.
+    Mouse(bool),
     /// A line worth keeping after the screen is gone: the shell prints it
     /// once the terminal is restored. A toast is cut to the screen's width,
     /// and a failure's full text is often longer.
@@ -614,8 +708,11 @@ pub fn update<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) 
         }
         UiEvent::Resize { width, height } => {
             model.screen = (width, height);
+            model.selection = None;
+            model.press = None;
             Vec::new()
         }
+        UiEvent::Mouse(mouse) => on_mouse(model, mouse),
         UiEvent::MailboxChosen { node, by_user } => {
             model.mailbox.node = Some(node);
             model.mailbox.by_user = by_user;
@@ -675,7 +772,10 @@ fn on_key<B: InputBuffer + Default>(model: &mut UiModel<B>, key: KeyEvent) -> Ve
         return overlay_key(model, key);
     }
     let pane = model.focus;
+    // A selection lasts until the next key: the copy row copies it.
+    let selection = model.selection.take();
     match keys::resolve(&key, keys::panes_of(pane), ctx) {
+        Some(Action::Copy) => copy(model, selection),
         Some(action) => act(model, action, key),
         None => {
             if pane == Pane::Compose {
@@ -761,6 +861,275 @@ fn act<B: InputBuffer + Default>(
         Action::PreviousPane => model.focus = model.focus.prev(),
         Action::Palette => model.palette = Some(Palette::default()),
         Action::QuitHint => return quit_hint(model),
+        Action::Copy => return copy(model, None),
+    }
+    Vec::new()
+}
+
+/// `y` or `Alt-w`, and the release of a drag: the selection's text, or the
+/// message under the cursor whole, onto the clipboard.
+fn copy<B: InputBuffer>(model: &mut UiModel<B>, selection: Option<Selection>) -> Vec<UiEffect> {
+    let text = match selection {
+        Some(selection) => hit::selected_text(&model.laid(), &selection),
+        None => model
+            .messages_of_selected()
+            .get(model.message_cursor)
+            .map(|m| m.body.clone())
+            .unwrap_or_default(),
+    };
+    if text.is_empty() {
+        model.toast(ToastKind::Info, "nothing to copy".to_string());
+        return Vec::new();
+    }
+    model.toast(
+        ToastKind::Info,
+        format!("copied {} chars", text.chars().count()),
+    );
+    vec![UiEffect::Copy(text)]
+}
+
+/// One mouse event (section 5, "What the mouse does").
+fn on_mouse<B: InputBuffer + Default>(model: &mut UiModel<B>, mouse: MouseEvent) -> Vec<UiEffect> {
+    if !model.mouse {
+        return Vec::new();
+    }
+    let (col, row) = (mouse.column, mouse.row);
+    match mouse.kind {
+        MouseEventKind::Moved => {
+            model.footer_hover = hit::footer_slot_at(model, col, row);
+            Vec::new()
+        }
+        MouseEventKind::Down(MouseButton::Left) => click(model, col, row),
+        MouseEventKind::Drag(MouseButton::Left) => {
+            drag(model, col, row);
+            Vec::new()
+        }
+        MouseEventKind::Up(MouseButton::Left) => release(model),
+        MouseEventKind::ScrollDown => wheel(model, col, row, true),
+        MouseEventKind::ScrollUp => wheel(model, col, row, false),
+        _ => Vec::new(),
+    }
+}
+
+/// The left button went down at a cell.
+fn click<B: InputBuffer + Default>(model: &mut UiModel<B>, col: u16, row: u16) -> Vec<UiEffect> {
+    use hit::Target;
+    model.selection = None;
+    model.press = None;
+    let target = hit::target_at(model, col, row);
+    match target {
+        Target::Nothing | Target::InsideOverlay => {}
+        Target::OutsideOverlay => {
+            model.help = false;
+            model.palette = None;
+            model.detail = None;
+        }
+        Target::Footer(act) => return footer_click(model, act),
+        Target::Pane(pane) => model.focus = pane,
+        Target::Conversation(index) => {
+            model.focus = Pane::Conversations;
+            if index != model.selected {
+                model.select(index);
+            }
+        }
+        Target::Badge(index) => open_at_new(model, index),
+        Target::Block { message, .. } => {
+            model.focus = Pane::Messages;
+            point_at(model, message);
+            model.press = Some(Press {
+                target,
+                moved: false,
+            });
+        }
+        Target::Mailbox => return run(model, PaletteCommand::Fetch),
+        Target::Compose { at } => {
+            model.focus = Pane::Compose;
+            model.compose.set_cursor(at);
+        }
+        Target::Send => {
+            model.focus = Pane::Compose;
+            return run(model, PaletteCommand::Send);
+        }
+    }
+    Vec::new()
+}
+
+/// What a footer button runs when clicked: its row's action, the same the
+/// key runs.
+fn footer_click<B: InputBuffer + Default>(
+    model: &mut UiModel<B>,
+    button: FooterAct,
+) -> Vec<UiEffect> {
+    match button {
+        FooterAct::Row(Some(action)) => act(
+            model,
+            action,
+            KeyEvent::new(KeyCode::Null, KeyModifiers::NONE),
+        ),
+        FooterAct::Row(None) => Vec::new(),
+        FooterAct::PaletteRun => {
+            overlay_key(model, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        }
+        FooterAct::PaletteClose => {
+            model.palette = None;
+            Vec::new()
+        }
+    }
+}
+
+/// The badge: the conversation opened at its `new` rule, the first unread
+/// message under the cursor and the rule at the top of the view.
+fn open_at_new<B: InputBuffer>(model: &mut UiModel<B>, index: usize) {
+    let rule = model.conversations.get(index).and_then(|c| c.new_rule);
+    model.select(index);
+    model.focus = Pane::Messages;
+    let Some(rule) = rule else {
+        return;
+    };
+    let laid = model.laid();
+    let bottom = laid.rows.len().saturating_sub(model.message_rows());
+    // The span's first row that is drawn: the rule, not the blank above it.
+    let top = laid.spans.get(rule.at).map_or(bottom, |span| {
+        (span.start..span.end)
+            .find(|&row| !laid.rows[row].cells.is_empty())
+            .unwrap_or(span.start)
+    });
+    model.message_cursor = rule.at;
+    model.scroll_top = (top < bottom).then_some(top);
+}
+
+/// The cursor onto message `index`, the view where it is: a click selects
+/// what the reader sees, it does not scroll to it.
+fn point_at<B: InputBuffer>(model: &mut UiModel<B>, index: usize) {
+    let total = model.laid().rows.len();
+    let bottom = total.saturating_sub(model.message_rows());
+    let top = model.top_of(total);
+    let last = model.messages_of_selected().len().saturating_sub(1);
+    model.message_cursor = index;
+    model.scroll_top = match index == last && top >= bottom {
+        true => None,
+        false => Some(top),
+    };
+}
+
+/// The pointer moved with the left button held: a press on the conversation
+/// selects from where it went down to here.
+fn drag<B: InputBuffer>(model: &mut UiModel<B>, col: u16, row: u16) {
+    let Some(press) = model.press.as_mut() else {
+        return;
+    };
+    let hit::Target::Block { cell: anchor, .. } = press.target else {
+        return;
+    };
+    let Some(head) = hit::pane_cell(model, col, row) else {
+        return;
+    };
+    if head != anchor {
+        if let Some(press) = model.press.as_mut() {
+            press.moved = true;
+        }
+    }
+    if model.press.as_ref().is_some_and(|p| p.moved) {
+        model.selection = Some(Selection { anchor, head });
+    }
+}
+
+/// The left button came up: a drag copies what it selected, a click on a
+/// mark opens the detail view and one on a link follows it.
+fn release<B: InputBuffer + Default>(model: &mut UiModel<B>) -> Vec<UiEffect> {
+    let Some(press) = model.press.take() else {
+        return Vec::new();
+    };
+    let hit::Target::Block {
+        message,
+        mark,
+        link,
+        ..
+    } = press.target
+    else {
+        return Vec::new();
+    };
+    if press.moved {
+        // The selection stays drawn, and `y` copies it again.
+        let selection = model.selection;
+        return copy(model, selection);
+    }
+    if mark {
+        model.detail = Some((model.selected, message));
+        return Vec::new();
+    }
+    match link.and_then(|link| model.laid().links.get(link).cloned()) {
+        Some(target) => follow(model, &target),
+        None => Vec::new(),
+    }
+}
+
+/// A link in a body, followed as lnomad follows one ([`classify_link`]): a
+/// web or mail URL goes to the system's handler, an `lxmf@` address opens
+/// its conversation for writing, a NomadNet page is copied for a browser.
+fn follow<B: InputBuffer + Default>(model: &mut UiModel<B>, target: &str) -> Vec<UiEffect> {
+    match classify_link(target) {
+        LinkKind::External(url) => {
+            model.toast(ToastKind::Info, format!("opening {url}"));
+            vec![UiEffect::Open(url)]
+        }
+        LinkKind::Lxmf(hash) => match crate::address::parse(&hash) {
+            Ok(peer) => {
+                let index = model.conversation(peer);
+                model.select(index);
+                model.focus = Pane::Compose;
+                model.toast(ToastKind::Info, format!("writing to {}", name(&peer)));
+                Vec::new()
+            }
+            Err(_) => Vec::new(),
+        },
+        LinkKind::Rns => {
+            model.toast(
+                ToastKind::Info,
+                "page link copied: open it in lnomad".to_string(),
+            );
+            vec![UiEffect::Copy(target.to_string())]
+        }
+        LinkKind::Unsafe(scheme) => {
+            model.toast(ToastKind::Error, format!("won't open {scheme}: link"));
+            Vec::new()
+        }
+    }
+}
+
+/// The wheel scrolls the pane under the pointer, whichever has the focus:
+/// the list a conversation a notch, the conversation [`WHEEL_ROWS`] rows
+/// without moving its cursor, the compose box a line of the body.
+fn wheel<B: InputBuffer>(model: &mut UiModel<B>, col: u16, row: u16, down: bool) -> Vec<UiEffect> {
+    if model.help || model.palette.is_some() || model.detail.is_some() {
+        return Vec::new();
+    }
+    match hit::pane_at(model, col, row) {
+        Some(Pane::Conversations) => scroll_list(
+            model,
+            match down {
+                true => ScrollCmd::LineDown,
+                false => ScrollCmd::LineUp,
+            },
+        ),
+        Some(Pane::Messages) => {
+            let total = model.laid().rows.len();
+            let bottom = total.saturating_sub(model.message_rows());
+            let top = model.top_of(total);
+            let top = match down {
+                true => (top + WHEEL_ROWS).min(bottom),
+                false => top.saturating_sub(WHEEL_ROWS),
+            };
+            model.scroll_top = (top < bottom).then_some(top);
+        }
+        Some(Pane::Compose) => {
+            let code = match down {
+                true => KeyCode::Down,
+                false => KeyCode::Up,
+            };
+            model.compose.edit(&KeyEvent::new(code, KeyModifiers::NONE));
+        }
+        None => {}
     }
     Vec::new()
 }
@@ -994,6 +1363,18 @@ fn run<B: InputBuffer + Default>(model: &mut UiModel<B>, command: PaletteCommand
             let hint = keys::compose_hint(model.ctx());
             model.toast(ToastKind::Info, hint);
             Vec::new()
+        }
+        PaletteCommand::Mouse => {
+            model.mouse = !model.mouse;
+            model.footer_hover = None;
+            model.press = None;
+            model.selection = None;
+            let text = match model.mouse {
+                true => "mouse on: click, wheel and drag",
+                false => "mouse off: the terminal selects text",
+            };
+            model.toast(ToastKind::Info, text.to_string());
+            vec![UiEffect::Mouse(model.mouse)]
         }
     }
 }
@@ -1232,9 +1613,18 @@ fn on_send_unproven<B>(model: &mut UiModel<B>, detail: String) -> Vec<UiEffect> 
     vec![UiEffect::Notice(format!("send: {detail}"))]
 }
 
-/// What a footer button runs.
+/// What a footer button runs when clicked.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct FooterAct(pub Option<PaletteCommand>);
+pub enum FooterAct {
+    /// Its row's action, the one its key runs; `None` for a row the mouse
+    /// leaves alone, the transmitting `send`, whose click target is the
+    /// word on the compose box's border.
+    Row(Option<Action>),
+    /// The open palette's `Enter run`.
+    PaletteRun,
+    /// The open palette's `Esc close`.
+    PaletteClose,
+}
 
 impl FooterRole for FooterAct {
     fn is_nav(&self) -> bool {
@@ -1290,6 +1680,8 @@ pub struct View {
     pub focus: Pane,
     /// The footer buttons.
     pub footer: Vec<FooterItem<FooterAct>>,
+    /// The footer button under the pointer, a slot's index.
+    pub footer_hover: Option<usize>,
     /// The toast to float, if any.
     pub toast: Option<Toast>,
     /// The palette, when open.
@@ -1457,7 +1849,8 @@ pub fn view<B: InputBuffer>(model: &UiModel<B>) -> View {
             .cloned()
             .unwrap_or_default(),
     };
-    let laid = model.laid();
+    let mut laid = model.laid();
+    let texts = core::mem::take(&mut laid.texts);
     let rows = model.message_rows();
     let top = model.top_of(laid.rows.len());
     let mut messages = Vec::with_capacity(sizes.messages.1);
@@ -1470,7 +1863,19 @@ pub fn view<B: InputBuffer>(model: &UiModel<B>) -> View {
     }
     let shown = laid.rows.len().saturating_sub(top).min(rows);
     messages.extend((shown..rows).map(|_| RLine::default()));
-    messages.extend(laid.rows.into_iter().skip(top).take(shown));
+    let range = model.selection.map(|s| hit::ordered(&s));
+    for (at, mut row) in laid.rows.into_iter().enumerate().skip(top).take(shown) {
+        // The selected text in inverse video, against whatever it was drawn
+        // in: the selected block is reversed already.
+        if let (Some((from, to)), Some(Some(text))) = (range, texts.get(at)) {
+            for col in hit::selected_columns(text, at, from, to) {
+                if let Some(cell) = row.cells.get_mut(col) {
+                    cell.st.reverse = !cell.st.reverse;
+                }
+            }
+        }
+        messages.push(row);
+    }
     let compose_title = match peer {
         Some(peer) => format!("to {}", name(&peer)),
         None => "compose".to_string(),
@@ -1513,11 +1918,83 @@ pub fn view<B: InputBuffer>(model: &UiModel<B>) -> View {
         compose_hint: keys::compose_hint(ctx),
         focus: model.focus,
         footer: footer(model),
+        footer_hover: model.footer_hover,
         toast: model.current_toast().cloned(),
         palette,
         help: model.help,
         detail: model.detail.and_then(|(c, m)| detail_view(model, c, m)),
     }
+}
+
+/// The rows and the column the compose box is scrolled to, a box `width` x
+/// `height` cells inside showing `text` with the cursor at `cursor`: as far
+/// down and right as keeps the cursor in it. The cursor's line and column
+/// come back with them.
+pub fn compose_window(
+    text: &str,
+    cursor: usize,
+    width: usize,
+    height: usize,
+) -> (usize, usize, usize, usize) {
+    let (line, column) = line_and_column(text, cursor);
+    let scroll = (column + 1).saturating_sub(width.max(1));
+    let top = (line + 1).saturating_sub(height.max(1));
+    (top, scroll, line, column)
+}
+
+/// The line and the column, in characters, of the `cursor`th character of
+/// `text`.
+pub fn line_and_column(text: &str, cursor: usize) -> (usize, usize) {
+    let mut line = 0;
+    let mut column = 0;
+    for c in text.chars().take(cursor) {
+        if c == '\n' {
+            line += 1;
+            column = 0;
+        } else {
+            column += 1;
+        }
+    }
+    (line, column)
+}
+
+/// Where the palette is drawn over `screen`, `rows` matches under its query
+/// line: 40 cells wide, centred, two rows from the top.
+pub fn palette_rect(rows: usize, screen: Rect) -> Rect {
+    let width = 40.min(screen.width);
+    let height = (rows as u16 + 3).min(screen.height);
+    Rect::new(
+        screen.x + screen.width.saturating_sub(width) / 2,
+        screen.y + 2,
+        width,
+        height,
+    )
+}
+
+/// The widest the detail view is drawn: the 64 hex digits of an id and its
+/// label on one row.
+pub const DETAIL_MAX_WIDTH: u16 = 76;
+
+/// Where a detail view is drawn over `screen`, centred, and its rows wrapped
+/// to that width.
+pub fn detail_layout(detail: &DetailView, screen: Rect) -> (Rect, Vec<String>) {
+    let width = DETAIL_MAX_WIDTH.min(screen.width.saturating_sub(2)).max(4);
+    let rows: Vec<String> = detail
+        .rows
+        .iter()
+        .flat_map(|row| match row.is_empty() {
+            true => vec![String::new()],
+            false => toast_rows(row, usize::from(width - 2)),
+        })
+        .collect();
+    let height = (rows.len() as u16 + 2).min(screen.height.saturating_sub(1));
+    let area = Rect::new(
+        screen.x + screen.width.saturating_sub(width) / 2,
+        screen.y + screen.height.saturating_sub(height + 1) / 2,
+        width,
+        height,
+    );
+    (area, rows)
 }
 
 /// `direct 12 s` or `via mailbox 40 s`: which leg a waiting send is on and
@@ -1596,11 +2073,11 @@ pub fn toast_rows(text: &str, width: usize) -> Vec<String> {
 fn footer<B>(model: &UiModel<B>) -> Vec<FooterItem<FooterAct>> {
     if model.palette.is_some() {
         return vec![
-            FooterItem::action("Enter", "run", FooterAct(None)),
-            FooterItem::action("Esc", "close", FooterAct(None)),
+            FooterItem::action("Enter", "run", FooterAct::PaletteRun),
+            FooterItem::action("Esc", "close", FooterAct::PaletteClose),
         ];
     }
-    keys::footer(keys::panes_of(model.focus), model.ctx(), FooterAct)
+    keys::footer(keys::panes_of(model.focus), model.ctx(), FooterAct::Row)
 }
 
 /// The help overlay's text, every row of the keymap ([`keys::help_groups`]).
@@ -1612,19 +2089,22 @@ pub fn help_groups() -> Vec<HelpGroup> {
 mod tests {
     use super::*;
 
-    /// A minimal field for the model's tests: insert and backspace, the two
-    /// edits these tests make, and `Ctrl-U`. The terminal's field is `tui_input::Input`.
+    /// A minimal field for the model's tests: insert and backspace at the
+    /// end, the edits these tests make, `Ctrl-U`, and a cursor a click
+    /// places, which the next edit puts back at the end. The terminal's
+    /// field is `tui_input::Input`.
     #[derive(Default, Clone, Debug)]
-    struct Field(String);
+    struct Field(String, Option<usize>);
 
     impl InputBuffer for Field {
         fn value(&self) -> &str {
             &self.0
         }
         fn cursor(&self) -> usize {
-            self.0.chars().count()
+            self.1.unwrap_or(self.0.chars().count())
         }
         fn edit(&mut self, key: &KeyEvent) -> bool {
+            self.1 = None;
             match key.code {
                 KeyCode::Char(c)
                     if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
@@ -1644,10 +2124,15 @@ mod tests {
             }
         }
         fn take(&mut self) -> String {
+            self.1 = None;
             core::mem::take(&mut self.0)
         }
         fn newline(&mut self) {
+            self.1 = None;
             self.0.push('\n');
+        }
+        fn set_cursor(&mut self, at: usize) {
+            self.1 = Some(at.min(self.0.chars().count()));
         }
     }
 
@@ -2767,5 +3252,381 @@ mod tests {
         );
         assert!(text(&wide.messages[1]).trim().chars().all(|c| c == '─'));
         assert_eq!(wide.compose_title, "to <abababab…>");
+    }
+
+    // The mouse (section 5, "What the mouse does"), fed to the model as the
+    // terminal sends it: cells from 0, the left button down and up.
+
+    fn mouse(kind: MouseEventKind, col: u16, row: u16) -> UiEvent {
+        UiEvent::Mouse(MouseEvent {
+            kind,
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        })
+    }
+
+    fn press(model: &mut UiModel<Field>, (col, row): (u16, u16)) -> Vec<UiEffect> {
+        let mut effects = update(
+            model,
+            mouse(MouseEventKind::Down(MouseButton::Left), col, row),
+        );
+        effects.extend(update(
+            model,
+            mouse(MouseEventKind::Up(MouseButton::Left), col, row),
+        ));
+        effects
+    }
+
+    /// Every cell of the screen whose target `want` takes, in reading order.
+    fn cells(model: &UiModel<Field>, want: impl Fn(&hit::Target) -> bool) -> Vec<(u16, u16)> {
+        let (width, height) = model.screen;
+        (0..height)
+            .flat_map(|row| (0..width).map(move |col| (col, row)))
+            .filter(|&(col, row)| want(&hit::target_at(model, col, row)))
+            .collect()
+    }
+
+    /// The screen cell of the `nth` character of the first conversation row
+    /// holding `needle`.
+    fn cell_of(model: &UiModel<Field>, needle: &str, nth: usize) -> (u16, u16) {
+        let screen = hit::screen(model);
+        let (row, col) = rows(model)
+            .iter()
+            .enumerate()
+            .find_map(|(r, line)| {
+                line.find(needle)
+                    .map(|byte| (r, line[..byte].chars().count() + nth))
+            })
+            .unwrap_or_else(|| panic!("{needle:?} not on screen: {:#?}", rows(model)));
+        (
+            screen.messages.x + 1 + col as u16,
+            screen.messages.y + 1 + row as u16,
+        )
+    }
+
+    /// A model with one conversation of `n` short messages from the peer.
+    fn chatty(n: u8) -> UiModel<Field> {
+        let mut model = UiModel::<Field>::new(&[PEER, OTHER]);
+        clock(&mut model, 26, 12, 0);
+        for id in 1..=n {
+            receive(&mut model, PEER, id, &format!("message {id}"));
+        }
+        model.toasts.clear();
+        model
+    }
+
+    #[test]
+    fn a_click_focuses_its_pane_and_the_wheel_scrolls_the_one_under_the_pointer() {
+        let mut model = chatty(15);
+        assert_eq!(model.focus, Pane::Conversations);
+        let screen = hit::screen(&model);
+        let over_messages = (screen.messages.x + 10, screen.messages.y + 5);
+        update(
+            &mut model,
+            mouse(MouseEventKind::ScrollUp, over_messages.0, over_messages.1),
+        );
+        // The conversation moved, the focus and the list did not.
+        let total = model.laid().rows.len();
+        let bottom = total - model.message_rows();
+        assert_eq!(model.scroll_top, Some(bottom - WHEEL_ROWS));
+        assert_eq!(model.focus, Pane::Conversations);
+        assert_eq!(model.selected, 0);
+        update(
+            &mut model,
+            mouse(MouseEventKind::ScrollDown, over_messages.0, over_messages.1),
+        );
+        assert_eq!(model.scroll_top, None, "back at the newest");
+        // The wheel over the list steps the conversation, whatever has the
+        // focus.
+        model.focus = Pane::Compose;
+        update(&mut model, mouse(MouseEventKind::ScrollDown, 3, 5));
+        assert_eq!(model.selected, 1);
+        assert_eq!(model.focus, Pane::Compose);
+        // A click on a pane's border focuses it.
+        press(&mut model, (screen.messages.x, screen.messages.y + 3));
+        assert_eq!(model.focus, Pane::Messages);
+        press(&mut model, (screen.compose.x, screen.compose.y + 1));
+        assert_eq!(model.focus, Pane::Compose);
+        press(&mut model, (0, 10));
+        assert_eq!(model.focus, Pane::Conversations);
+    }
+
+    #[test]
+    fn a_click_on_a_row_opens_it_and_one_on_the_badge_opens_it_at_its_new_rule() {
+        let mut model = UiModel::<Field>::new(&[PEER, OTHER]);
+        clock(&mut model, 26, 12, 0);
+        // Read with OTHER, then left it for PEER, and two arrive from OTHER.
+        model.selected = 1;
+        for id in 1..=12 {
+            receive(&mut model, OTHER, id, &format!("old {id}"));
+        }
+        update(&mut model, UiEvent::Run(PaletteCommand::NextConversation));
+        let at_peer = cells(&model, |t| *t == hit::Target::Conversation(0));
+        press(&mut model, at_peer[0]);
+        assert_eq!((model.selected, model.focus), (0, Pane::Conversations));
+        for id in 13..=24 {
+            receive(&mut model, OTHER, id, &format!("new {id}"));
+        }
+        assert_eq!(model.conversations[1].unread, 12);
+        let badge = cells(&model, |t| *t == hit::Target::Badge(1));
+        assert_eq!(badge.len(), "[12]".len(), "{badge:?}");
+        assert!(badge
+            .windows(2)
+            .all(|w| w[1].0 == w[0].0 + 1 && w[1].1 == w[0].1));
+        press(&mut model, badge[1]);
+        assert_eq!(model.selected, 1);
+        assert_eq!(model.focus, Pane::Messages);
+        assert_eq!(model.conversations[1].unread, 0);
+        assert_eq!(model.message_cursor, 12, "the first unread message");
+        let shown = rows(&model);
+        assert!(shown[0].contains(" 12 new "), "{shown:#?}");
+        assert!(shown[1].contains("new 13"), "{shown:#?}");
+    }
+
+    #[test]
+    fn a_click_selects_a_message_and_one_on_its_mark_opens_the_detail_view() {
+        let mut model = chatty(15);
+        say(&mut model, "the newest, ours");
+        let mark = cells(&model, |t| {
+            matches!(t, hit::Target::Block { mark: true, .. })
+        });
+        assert_eq!(mark.len(), 1, "one cell, the glyph: {mark:?}");
+        // A message up the screen, selected where it is: the view stays.
+        let older = cell_of(&model, "message 10", 2);
+        press(&mut model, older);
+        assert_eq!(model.focus, Pane::Messages);
+        assert_eq!(model.message_cursor, 9);
+        assert!(rows(&model).iter().any(|r| r.contains("message 10")));
+        assert!(rows(&model).iter().any(|r| r.contains("the newest, ours")));
+        assert_eq!(model.detail, None);
+        press(&mut model, mark[0]);
+        assert_eq!(model.detail, Some((0, 15)));
+        // Inside the detail view a click does nothing, outside it closes.
+        let area = hit::screen(&model).area();
+        let detail = detail_view(&model, 0, 15).expect("a detail view");
+        let (rect, _) = detail_layout(&detail, area);
+        press(&mut model, (rect.x + 2, rect.y + 1));
+        assert_eq!(model.detail, Some((0, 15)));
+        press(&mut model, (0, 0));
+        assert_eq!(model.detail, None);
+    }
+
+    #[test]
+    fn a_click_in_compose_places_the_cursor_at_its_cell() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        model.focus = Pane::Compose;
+        typed(&mut model, "first line");
+        model.compose.newline();
+        typed(&mut model, "second");
+        model.focus = Pane::Conversations;
+        let screen = hit::screen(&model);
+        let (x, y) = (screen.compose.x + 1, screen.compose.y + 1);
+        press(&mut model, (x + 3, y + 1));
+        assert_eq!(model.focus, Pane::Compose);
+        assert_eq!(model.compose.cursor(), "first line\n".len() + 3);
+        press(&mut model, (x + 30, y));
+        assert_eq!(model.compose.cursor(), "first line".len(), "the line's end");
+    }
+
+    /// The quiet keyboard holds for the mouse: of every cell on the screen,
+    /// in every pane's focus and at both mockup sizes, the only clicks that
+    /// transmit are on the word `send` on the compose box's border and on
+    /// the mailbox state in the header, and each of them does.
+    #[test]
+    fn the_only_clicks_that_transmit_are_send_and_the_mailbox_state() {
+        let mut seen = Vec::new();
+        for (width, height) in [(80, 24), (120, 40)] {
+            for focus in [Pane::Conversations, Pane::Messages, Pane::Compose] {
+                let mut model = chatty(4);
+                update(&mut model, UiEvent::Resize { width, height });
+                update(
+                    &mut model,
+                    UiEvent::MailboxChosen {
+                        node: [0x9c; 16],
+                        by_user: false,
+                    },
+                );
+                say(&mut model, "see https://example.org/x");
+                model.focus = Pane::Compose;
+                typed(&mut model, "a draft");
+                model.focus = focus;
+                for row in 0..height {
+                    for col in 0..width {
+                        let target = hit::target_at(&model, col, row);
+                        let mut clicked = model.clone();
+                        let effects = press(&mut clicked, (col, row));
+                        let tx = effects
+                            .iter()
+                            .any(|e| matches!(e, UiEffect::Send { .. } | UiEffect::Fetch));
+                        if tx && !seen.contains(&target) {
+                            seen.push(target.clone());
+                        }
+                        match target {
+                            hit::Target::Send | hit::Target::Mailbox => {
+                                assert!(tx, "{target:?} at {col},{row} did not transmit")
+                            }
+                            _ => assert!(!tx, "{target:?} at {col},{row} transmitted"),
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(seen, [hit::Target::Mailbox, hit::Target::Send]);
+    }
+
+    #[test]
+    fn a_footer_click_runs_its_row_and_a_hover_marks_it() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        let screen = hit::screen(&model);
+        let slots = leviculum_ui::footer::layout(view(&model).footer, screen.footer);
+        let help = slots
+            .iter()
+            .find(|slot| slot.item.label == "help")
+            .expect("? help in the list's footer");
+        update(
+            &mut model,
+            mouse(MouseEventKind::Moved, help.rect.x + 1, help.rect.y),
+        );
+        assert_eq!(model.footer_hover, Some(help.index));
+        assert_eq!(view(&model).footer_hover, Some(help.index));
+        update(&mut model, mouse(MouseEventKind::Moved, 5, 5));
+        assert_eq!(model.footer_hover, None);
+        press(&mut model, (help.rect.x, help.rect.y));
+        assert!(model.help);
+        // The help fills an 80 x 24 screen, so any click closes it, as in
+        // lnomad.
+        press(&mut model, (40, 12));
+        assert!(!model.help);
+        // `send` in compose's footer is left to the border's word.
+        model.focus = Pane::Compose;
+        let slots = leviculum_ui::footer::layout(view(&model).footer, screen.footer);
+        let send = slots
+            .iter()
+            .find(|slot| slot.item.label == "send")
+            .expect("Enter send in compose's footer");
+        assert_eq!(send.item.action, FooterAct::Row(None));
+        update(
+            &mut model,
+            mouse(MouseEventKind::Moved, send.rect.x, send.rect.y),
+        );
+        assert_eq!(model.footer_hover, None);
+    }
+
+    #[test]
+    fn a_drag_copies_the_text_of_the_blocks_without_times_and_marks() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        clock(&mut model, 26, 12, 0);
+        receive(&mut model, PEER, 1, "the quick brown fox");
+        say(&mut model, "jumps over\nthe lazy dog");
+        model.toasts.clear();
+        let from = cell_of(&model, "the quick", 0);
+        let to = cell_of(&model, "the lazy dog", "the lazy dog".len() - 1);
+        update(
+            &mut model,
+            mouse(MouseEventKind::Down(MouseButton::Left), from.0, from.1),
+        );
+        update(
+            &mut model,
+            mouse(MouseEventKind::Drag(MouseButton::Left), to.0, to.1),
+        );
+        let effects = update(
+            &mut model,
+            mouse(MouseEventKind::Up(MouseButton::Left), to.0, to.1),
+        );
+        let text = "the quick brown fox\njumps over\nthe lazy dog";
+        assert_eq!(effects, [UiEffect::Copy(text.to_string())]);
+        assert_eq!(
+            model.current_toast().map(|t| t.text.as_str()),
+            Some("copied 43 chars")
+        );
+        // The selection is drawn in inverse video against the block, which
+        // the focus reversed: the time beside it stays as the block is.
+        let line = view(&model)
+            .messages
+            .into_iter()
+            .find(|l| text_of(l).contains("the quick"))
+            .expect("the row");
+        let quick: Vec<bool> = line
+            .cells
+            .iter()
+            .filter(|c| c.ch != ' ' && c.ch != layout::BAR)
+            .map(|c| c.st.reverse)
+            .collect();
+        assert!(quick[..16].iter().all(|r| *r != quick[16]), "{quick:?}");
+        assert!(
+            quick[16..].iter().all(|r| *r == quick[16]),
+            "the time: {quick:?}"
+        );
+        // `y` copies the selection again; with none, `Alt-w` copies the
+        // message under the cursor whole, the one the drag began on.
+        assert_eq!(
+            update(&mut model, key(KeyCode::Char('y'))),
+            [UiEffect::Copy(text.to_string())]
+        );
+        assert_eq!(
+            update(&mut model, alt_key('w')),
+            [UiEffect::Copy("the quick brown fox".to_string())]
+        );
+        // Part of a line: from inside one word to inside the next.
+        let from = cell_of(&model, "quick", 1);
+        let to = cell_of(&model, "brown", 2);
+        update(
+            &mut model,
+            mouse(MouseEventKind::Down(MouseButton::Left), from.0, from.1),
+        );
+        update(
+            &mut model,
+            mouse(MouseEventKind::Drag(MouseButton::Left), to.0, to.1),
+        );
+        let effects = update(
+            &mut model,
+            mouse(MouseEventKind::Up(MouseButton::Left), to.0, to.1),
+        );
+        assert_eq!(effects, [UiEffect::Copy("uick bro".to_string())]);
+    }
+
+    fn text_of(line: &RLine) -> String {
+        line.cells.iter().map(|c| c.ch).collect()
+    }
+
+    #[test]
+    fn a_click_on_a_link_follows_it_as_lnomad_does() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        let other = to_hex(&OTHER);
+        receive(
+            &mut model,
+            PEER,
+            1,
+            &format!("see https://example.org/a. or write lxmf@{other}"),
+        );
+        let url = cell_of(&model, "https://", 3);
+        assert_eq!(
+            press(&mut model, url),
+            [UiEffect::Open("https://example.org/a".to_string())]
+        );
+        let lxmf = cell_of(&model, "lxmf@", 0);
+        assert_eq!(press(&mut model, lxmf), []);
+        assert_eq!(model.conversations[model.selected].peer, OTHER);
+        assert_eq!(model.focus, Pane::Compose);
+    }
+
+    #[test]
+    fn the_mouse_switch_turns_capture_off_and_the_model_deaf_to_it() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        assert_eq!(
+            update(&mut model, UiEvent::Run(PaletteCommand::Mouse)),
+            [UiEffect::Mouse(false)]
+        );
+        assert!(!model.mouse);
+        let screen = hit::screen(&model);
+        press(&mut model, (screen.compose.x + 2, screen.compose.y + 1));
+        assert_eq!(model.focus, Pane::Conversations);
+        assert_eq!(
+            update(&mut model, UiEvent::Run(PaletteCommand::Mouse)),
+            [UiEffect::Mouse(true)]
+        );
+        press(&mut model, (screen.compose.x + 2, screen.compose.y + 1));
+        assert_eq!(model.focus, Pane::Compose);
     }
 }

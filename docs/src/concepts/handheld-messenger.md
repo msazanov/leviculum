@@ -42,7 +42,7 @@ map as decided on 2026-10-25, and what is open.
   model that lives in the `no_std` core. Its frontend already
   talks to the backend only through `Outbox` (`lnmsg/src/outbox.rs:194`),
   but the crate is `std`. It depends on `leviculum-std` and tokio
-  (`lnmsg/Cargo.toml:87`, `lnmsg/Cargo.toml:91`), since 2026-10-25 behind its `std` feature,
+  (`lnmsg/Cargo.toml:88`, `lnmsg/Cargo.toml:92`), since 2026-10-25 behind its `std` feature,
   and `just lnmsg-core-no-std` holds the core to `no_std` (green since
   993; the pass order is in [lnmsg: architecture](lnmsg-architecture.md),
   "Plan: the lnmsg core without std").

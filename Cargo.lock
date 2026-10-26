@@ -2330,6 +2330,7 @@ dependencies = [
  "leviculum-std",
  "leviculum-ui",
  "leviculum-ui-ratatui",
+ "open",
  "rand_core 0.6.4",
  "ratatui",
  "serde_json",

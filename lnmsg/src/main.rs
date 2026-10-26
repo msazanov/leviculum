@@ -135,6 +135,11 @@ struct TuiArgs {
     #[arg(long)]
     no_color: bool,
 
+    /// Leave the mouse to the terminal, so its own selection and copy work;
+    /// the palette's `mouse` captures it again.
+    #[arg(long)]
+    no_mouse: bool,
+
     /// Run a key script instead of reading the keyboard, and write every
     /// `frame` it asks for to --frames. For tests and demos.
     #[arg(long, value_name = "FILE")]
@@ -401,6 +406,7 @@ async fn run_tui(args: TuiArgs) -> ExitCode {
         timeout: args.timeout,
         ascii: args.ascii,
         no_color: args.no_color,
+        no_mouse: args.no_mouse,
         script: args.script,
         frames: args.frames,
         size,

@@ -46,6 +46,9 @@ pub enum Command {
     Redraw,
     /// Swap what `Enter` does in compose: send, or break the line.
     SendOnEnter,
+    /// Turn mouse capture off, so the terminal's own selection works, and on
+    /// again.
+    Mouse,
 }
 
 /// One palette row: the words the reader filters on, and what it runs.
@@ -58,7 +61,7 @@ pub struct PaletteEntry {
 }
 
 /// The table, in the order the palette lists it unfiltered.
-pub const COMMANDS: [PaletteEntry; 14] = [
+pub const COMMANDS: [PaletteEntry; 15] = [
     entry("send", Command::Send),
     entry("fetch", Command::Fetch),
     entry("quit", Command::Quit),
@@ -73,6 +76,7 @@ pub const COMMANDS: [PaletteEntry; 14] = [
     entry("details", Command::Details),
     entry("redraw", Command::Redraw),
     entry("send on enter", Command::SendOnEnter),
+    entry("mouse", Command::Mouse),
 ];
 
 /// The entry that runs `command`.

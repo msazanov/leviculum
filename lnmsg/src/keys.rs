@@ -13,9 +13,10 @@
 //! enhanced one, and `:` `q` `Enter` quits.
 //!
 //! Not here yet, because what they run is a later slice: new conversation
-//! (`m`, `C`), search (`/`, `Ctrl-s`, `n`/`N`), copy (`y`, `Alt-w`), hints
-//! (`f`), delete (`d`), the mouse, and `Ctrl-x Ctrl-c` (a two-key sequence,
-//! which the table does not model).
+//! (`m`, `C`), search (`/`, `Ctrl-s`, `n`/`N`), hints (`f`), delete (`d`),
+//! and `Ctrl-x Ctrl-c` (a two-key sequence, which the table does not
+//! model). The mouse is not a chord: what it does is [`crate::ui::hit`],
+//! and only its capture switch is a row, the palette's `mouse`.
 
 use alloc::format;
 use alloc::string::String;
@@ -70,6 +71,8 @@ pub enum Action {
     Palette,
     /// `Ctrl-c` outside compose: say what quits.
     QuitHint,
+    /// Copy the drag's selection, or the message under the cursor.
+    Copy,
 }
 
 const fn key(code: KeyCode, mods: Mods, action: Action, panes: Panes) -> Chord<Action> {
@@ -148,6 +151,14 @@ pub const ROWS: &[Row<Action>] = {
         .palette("details")
         .footer("details")
         .note("Ctrl-D in Signal: here Enter"),
+        Row::new(
+            "copy the message's text, or what a drag selected",
+            MESSAGES_GROUP,
+            &[
+                &[key(Char('y'), Mods::Plain, Copy, MESSAGES)],
+                &[key(Char('w'), ALT, Copy, MESSAGES)],
+            ],
+        ),
         Row::new(
             "previous conversation",
             CONVERSATIONS,
@@ -410,6 +421,12 @@ pub const ROWS: &[Row<Action>] = {
             )]],
         ),
         Row::new("Enter sends, or breaks the line", EVERYWHERE, &[]).palette("send on enter"),
+        Row::new(
+            "mouse capture off and on (--no-mouse starts it off)",
+            EVERYWHERE,
+            &[],
+        )
+        .palette("mouse"),
     ]
 };
 
@@ -471,13 +488,12 @@ pub fn help_groups() -> Vec<HelpGroup> {
         .collect()
 }
 
-/// What a footer button runs when clicked: the palette command its row
-/// runs, if it is one.
-pub fn footer_command(row: &Row<Action>) -> Option<Command> {
-    match row.chords().next()?.action {
-        Action::Run(command) => Some(command),
-        _ => None,
-    }
+/// What a footer button runs when clicked: the action of the chord it
+/// shows. Nothing for a row that transmits: the mouse sends with the word
+/// `send` on the compose box's border and fetches with the mailbox state,
+/// and with nothing else (section 5, "What the mouse does").
+pub fn footer_action(row: &Row<Action>, chord: &Chord<Action>) -> Option<Action> {
+    (!row.tx).then_some(chord.action)
 }
 
 /// The footer buttons for `pane` under `ctx`: every row with a footer
@@ -485,13 +501,13 @@ pub fn footer_command(row: &Row<Action>) -> Option<Command> {
 pub fn footer<A: Copy>(
     pane: Panes,
     ctx: Ctx,
-    act: impl Fn(Option<Command>) -> A,
+    act: impl Fn(Option<Action>) -> A,
 ) -> Vec<FooterItem<A>> {
     ROWS.iter()
         .filter_map(|row| {
             let spec = row.footer?;
             let chord = row.live_chord(pane, ctx)?;
-            let action = act(footer_command(row));
+            let action = act(footer_action(row, chord));
             Some(match spec.drop_rank {
                 None => FooterItem::action(chord.label(), spec.label, action),
                 Some(rank) => FooterItem::droppable(chord.label(), spec.label, action, rank),

@@ -4,7 +4,9 @@
 //!
 //! Pure functions of the model's data, the pane's width and the time: the
 //! renderer draws the rows as they come, and the model's scrolling reads the
-//! same [`Laid`] to know where each message's block starts and ends.
+//! same [`Laid`] to know where each message's block starts and ends. The
+//! mouse reads it too ([`super::hit`]): which cells of a row are a body's
+//! text, where a delivery mark is, which cells are a link.
 //!
 //! Monochrome. The colour tokens of section 5, "Colour", are proposed, not
 //! decided, so a block, the date line, the rule and the muted lines are drawn
@@ -19,6 +21,7 @@ use alloc::vec::Vec;
 
 use leviculum_ui::delivery::glyph;
 use leviculum_ui::input::InputBuffer;
+use leviculum_ui::link::find_links;
 use leviculum_ui::{RLine, RStyle};
 
 use super::{leg_label, name, plain, push, tone_rgb, wrap, Conversation, Message, UiModel};
@@ -50,13 +53,37 @@ pub struct Draw {
 pub struct Span {
     pub start: usize,
     pub end: usize,
+    /// The delivery mark's cells, a click target: the row, the first column
+    /// and how many columns.
+    pub mark: Option<(usize, usize, usize)>,
+}
+
+/// Which cells of a row are a message's text: what a drag copies, without
+/// the margin, the bar, the time or the mark.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RowText {
+    /// The message's index in the conversation.
+    pub message: usize,
+    /// The text's first column in the pane.
+    pub start: usize,
+    /// Its columns, which may be none on an empty line of a body.
+    pub len: usize,
+    /// The row goes on the row above's line: the wrap swallowed a space
+    /// between them.
+    pub wrapped: bool,
 }
 
 /// A conversation laid out: every row from the top of what the device holds,
 /// and each message's span among them.
 pub struct Laid {
     pub rows: Vec<RLine>,
+    /// Each row's text, beside `rows`: `None` on a separator, a blank and the
+    /// time's own row.
+    pub texts: Vec<Option<RowText>>,
     pub spans: Vec<Span>,
+    /// The links in the bodies; a cell's [`leviculum_ui::StyledChar::link`]
+    /// is its index here plus one.
+    pub links: Vec<String>,
 }
 
 impl Laid {
@@ -65,8 +92,16 @@ impl Laid {
     pub fn empty(width: usize) -> Self {
         Self {
             rows: vec![centred(EARLIEST, width)],
+            texts: vec![None],
             spans: Vec::new(),
+            links: Vec::new(),
         }
+    }
+
+    /// A row with no text on it.
+    fn push(&mut self, row: RLine) {
+        self.rows.push(row);
+        self.texts.push(None);
     }
 }
 
@@ -91,27 +126,37 @@ pub fn conversation(conversation: &Conversation, width: usize, draw: &Draw) -> L
             if day != Some(at.day()) {
                 day = Some(at.day());
                 if last == Last::Block {
-                    laid.rows.push(RLine::default());
+                    laid.push(RLine::default());
                 }
-                laid.rows.push(date_line(&date_label(&at, &now), width));
+                laid.push(date_line(&date_label(&at, &now), width));
                 last = Last::Separator;
             }
         }
         if let Some(rule) = conversation.new_rule.filter(|rule| rule.at == index) {
             if last == Last::Block {
-                laid.rows.push(RLine::default());
+                laid.push(RLine::default());
             }
-            laid.rows.push(new_rule(rule.count, width));
+            laid.push(new_rule(rule.count, width));
             last = Last::Separator;
         }
         if last == Last::Block {
-            laid.rows.push(RLine::default());
+            laid.push(RLine::default());
         }
-        laid.rows
-            .extend(block(message, width, draw, draw.selected == Some(index)));
+        let first = laid.rows.len();
+        let drawn = block(
+            message,
+            index,
+            width,
+            draw,
+            draw.selected == Some(index),
+            &mut laid.links,
+        );
+        laid.rows.extend(drawn.rows);
+        laid.texts.extend(drawn.texts);
         laid.spans.push(Span {
             start,
             end: laid.rows.len(),
+            mark: drawn.mark.map(|(row, col, len)| (first + row, col, len)),
         });
         last = Last::Block;
     }
@@ -202,16 +247,49 @@ fn suffix(message: &Message, narrow: bool, draw: &Draw) -> RLine {
     line
 }
 
+/// A block's rows, which cells of each are text, and where its mark is
+/// among them.
+struct Block {
+    rows: Vec<RLine>,
+    texts: Vec<Option<RowText>>,
+    /// The row in the block, the first column and the columns.
+    mark: Option<(usize, usize, usize)>,
+}
+
 /// One message's block: its lines wrapped at a space to the cap, the suffix
 /// closing the last one, ours flush right and theirs flush left with a margin
 /// cell either side, the selected one reversed behind the bar. The suffix may
 /// reach past the cap into the pane's last quarter, as in both mockups, and
-/// takes a row of its own only where the pane itself has no room for it.
-fn block(message: &Message, width: usize, draw: &Draw, selected: bool) -> Vec<RLine> {
+/// takes a row of its own only where the pane itself has no room for it. A
+/// link in the body is underlined and its cells name it in `links`.
+fn block(
+    message: &Message,
+    index: usize,
+    width: usize,
+    draw: &Draw,
+    selected: bool,
+    links: &mut Vec<String>,
+) -> Block {
     let narrow = width < NARROW;
     let cap = block_cap(width);
-    let body: Vec<RLine> = message.body.split('\n').map(plain).collect();
-    let mut rows = wrap(&body, cap, 0);
+    let mut rows = Vec::new();
+    let mut wrapped = Vec::new();
+    for text in message.body.split('\n') {
+        let mut line = plain(text);
+        for found in find_links(text) {
+            links.push(found.target);
+            let id = links.len();
+            for cell in &mut line.cells[found.start..found.end] {
+                cell.link = Some(id);
+                cell.st.underline = true;
+            }
+        }
+        for (n, row) in wrap(&[line], cap, 0).into_iter().enumerate() {
+            rows.push(row);
+            wrapped.push(n > 0);
+        }
+    }
+    let text_lens: Vec<usize> = rows.iter().map(|row| row.cells.len()).collect();
     let suffix = suffix(message, narrow, draw);
     if !suffix.cells.is_empty() {
         match rows.last_mut() {
@@ -234,7 +312,27 @@ fn block(message: &Message, width: usize, draw: &Draw, selected: bool) -> Vec<RL
         true => width.saturating_sub(inner + 1).max(1),
         false => 1,
     };
-    rows.into_iter()
+    // The mark closes the last row: its cells are that row's last.
+    let mark = message.delivery.and_then(|state| {
+        let len = glyph(state)
+            .symbol(draw.tick as usize, draw.ascii)
+            .chars()
+            .count();
+        let row = rows.len().checked_sub(1)?;
+        Some((row, x + rows[row].cells.len() - len, len))
+    });
+    let texts = (0..rows.len())
+        .map(|row| {
+            text_lens.get(row).map(|&len| RowText {
+                message: index,
+                start: x,
+                len,
+                wrapped: wrapped[row],
+            })
+        })
+        .collect();
+    let rows = rows
+        .into_iter()
         .map(|row| {
             let mut line = RLine::default();
             push(&mut line, &" ".repeat(x - 1), RStyle::default());
@@ -258,7 +356,8 @@ fn block(message: &Message, width: usize, draw: &Draw, selected: bool) -> Vec<RL
             line.cells.extend(cells);
             line
         })
-        .collect()
+        .collect();
+    Block { rows, texts, mark }
 }
 
 /// Rows a list entry takes: name and time, preview and badge, a blank.
@@ -275,8 +374,7 @@ pub fn entries_shown(height: usize) -> usize {
 /// far enough to show it.
 pub fn list<B: InputBuffer>(model: &UiModel<B>, width: usize, height: usize) -> Vec<RLine> {
     let order = model.order();
-    let at = order.iter().position(|&i| i == model.selected).unwrap_or(0);
-    let first = (at + 1).saturating_sub(entries_shown(height).max(1));
+    let first = list_first(model, height);
     let focused = model.focus == super::Pane::Conversations;
     let mut rows = Vec::new();
     for &index in &order[first..] {
@@ -301,6 +399,29 @@ pub fn list<B: InputBuffer>(model: &UiModel<B>, width: usize, height: usize) -> 
     }
     rows.truncate(height);
     rows
+}
+
+/// The first conversation on screen, in the list's order, of a list
+/// `height` rows high: scrolled just far enough to show the selected one.
+pub fn list_first<B>(model: &UiModel<B>, height: usize) -> usize {
+    let at = model
+        .order()
+        .iter()
+        .position(|&i| i == model.selected)
+        .unwrap_or(0);
+    (at + 1).saturating_sub(entries_shown(height).max(1))
+}
+
+/// The badge's columns in a list entry's second row `width` cells wide: the
+/// first and how many, `[3]` flush right before the last cell.
+pub fn badge_cells(conversation: &Conversation, width: usize) -> Option<(usize, usize)> {
+    match conversation.unread {
+        0 => None,
+        n => {
+            let len = format!("[{n}]").chars().count();
+            Some((width.saturating_sub(1 + len), len))
+        }
+    }
 }
 
 /// One conversation's two rows, `width` cells with the bar's margin first

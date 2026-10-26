@@ -18,6 +18,12 @@
 //! back to the newest, a reply, and the detail view of our first message with
 //! its proof. Pinned in `tests/fixtures/tui_chat.frames`.
 //!
+//! The mouse's sessions (section 7, slice 3) click a conversation, the
+//! compose box, `send` on its border, a message, its mark and the footer's
+//! `? help`; turn the wheel over the conversation while the list has the
+//! focus; and drag across two messages, whose release copies them by OSC 52.
+//! Pinned in `tests/fixtures/tui_mouse.frames`.
+//!
 //! The daemon is the in-process one `mailbox_cli.rs` uses. The correspondent
 //! is a second lnmsg engine attached to it in this process
 //! (`lnmsg::engine::attach`), a full LXMF router, so the proof that turns the
@@ -49,6 +55,7 @@ const EXPECTED: &str = include_str!("fixtures/tui_session.frames");
 const EXPECTED_LATE: &str = include_str!("fixtures/tui_late.frames");
 const EXPECTED_KEYS: &str = include_str!("fixtures/tui_keys.frames");
 const EXPECTED_CHAT: &str = include_str!("fixtures/tui_chat.frames");
+const EXPECTED_MOUSE: &str = include_str!("fixtures/tui_mouse.frames");
 
 const SCRIPT: &str = "\
 until ready 20
@@ -446,6 +453,16 @@ key q
 /// Run one script against `daemon` with two correspondents that never
 /// answer, and hand back its frames.
 async fn run_keys_script(daemon: &support::Daemon, name: &str, script: &str) -> String {
+    run_script_at(daemon, name, script, "80x16").await.0
+}
+
+/// The same at `size`, with `tui.log` beside the frames.
+async fn run_script_at(
+    daemon: &support::Daemon,
+    name: &str,
+    script: &str,
+    size: &str,
+) -> (String, String) {
     let home = tempfile::tempdir().expect("tui home");
     std::fs::write(
         home.path().join("identity"),
@@ -473,7 +490,7 @@ async fn run_keys_script(daemon: &support::Daemon, name: &str, script: &str) -> 
         "--frames".into(),
         frames.display().to_string(),
         "--size".into(),
-        "80x16".into(),
+        size.into(),
     ];
     let child_home = home.path().to_path_buf();
     let output = tokio::task::spawn_blocking(move || {
@@ -505,7 +522,7 @@ async fn run_keys_script(daemon: &support::Daemon, name: &str, script: &str) -> 
         log.contains("KEYS enhancement=no newline=Alt-Enter send=Enter"),
         "{name}: tui.log:\n{log}"
     );
-    got
+    (got, log)
 }
 
 /// A frame without the compose pane's border, which carries the hint.
@@ -822,6 +839,151 @@ async fn the_chat_layout_draws_the_mockups_at_both_sizes() {
         panic!(
             "the frames moved; this run's are in {}, the pinned ones in \
              lnmsg/tests/fixtures/tui_chat.frames\n{all}",
+            kept.display()
+        );
+    }
+}
+
+/// The mouse (section 7, slice 3), by clicks alone: the second
+/// conversation's row, the compose box, `send` on its border (the send
+/// goes out: its leg is in `tui.log`), the message, its mark (the detail
+/// view), outside the view (closed), and the footer's `? help`. Cells count
+/// from 1, as the frames do.
+const CLICK_SCRIPT: &str = "\
+until ready 20
+frame attached
+click 5 5
+frame second conversation
+click 40 22
+type hello by mouse
+frame typed
+click 55 21
+frame sent by click
+click 60 20
+frame message selected
+click 78 20
+frame detail
+click 2 2
+frame closed
+click 62 24
+frame help
+key esc
+key q
+";
+
+/// The wheel over the conversation while the list has the focus: the
+/// conversation scrolls six rows for two notches, the focus and the list
+/// stay, and two notches back are the newest again.
+const WHEEL_SCRIPT: &str = "\
+until ready 20
+key i
+type message 1
+key enter
+type message 2
+key enter
+type message 3
+key enter
+type message 4
+key enter
+type message 5
+key enter
+type message 6
+key enter
+type message 7
+key enter
+type message 8
+key enter
+type message 9
+key enter
+type message 10
+key enter
+key esc
+key esc
+frame list focused
+wheel up 50 10 2
+frame wheeled up
+wheel down 50 10 2
+frame wheeled down
+key q
+";
+
+/// A drag across two of our messages copies their text by OSC 52, without
+/// the times and the marks.
+const DRAG_SCRIPT: &str = "\
+until ready 20
+key i
+type first line
+key enter
+type second line
+key enter
+key esc
+frame two sent
+drag 60 18 69 20
+frame dragged
+tick 12
+frame selected
+key q
+";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_mouse_clicks_wheels_and_drags_through_the_screen() {
+    let daemon = daemon("tui-mouse", |b| b).await;
+    let mut all = String::new();
+    let mut runs = Vec::new();
+    for (name, script) in [
+        ("click", CLICK_SCRIPT),
+        ("wheel", WHEEL_SCRIPT),
+        ("drag", DRAG_SCRIPT),
+    ] {
+        let (frames, log) = run_script_at(&daemon, name, script, "80x24").await;
+        all.push_str(&format!("=== {name} ===\n{frames}"));
+        runs.push((frames, log));
+    }
+    let [(click, click_log), (wheel, _), (drag, _)] =
+        runs.try_into().unwrap_or_else(|_| panic!("three sessions"));
+
+    // The click on the second row opened it; the one on `send` sent, the
+    // runner's first leg is in the log.
+    assert!(
+        frame(&click, "second conversation").contains("│▌<5ec0ea2e…>"),
+        "{click}"
+    );
+    assert!(
+        frame(&click, "sent by click").contains("hello by mouse  12:00 ○"),
+        "{click}"
+    );
+    assert!(
+        click_log.contains("SEND leg=direct to=5ec0ea2e"),
+        "tui.log:\n{click_log}"
+    );
+    assert!(frame(&click, "message selected").contains("▌hello by mouse"));
+    assert!(frame(&click, "detail").contains("from you to <5ec0ea2e…>"));
+    assert!(!frame(&click, "closed").contains("from you to"));
+    assert!(frame(&click, "help").contains("lnmsg help"), "{click}");
+
+    // The wheel moved the conversation and nothing else.
+    let up = frame(&wheel, "wheeled up");
+    assert_ne!(up, frame(&wheel, "list focused"));
+    assert!(up.contains("● lnmsg"), "the list kept the focus: {up}");
+    assert!(!up.contains("message 10  12:00"), "{up}");
+    assert_eq!(frame(&wheel, "wheeled down"), frame(&wheel, "list focused"));
+
+    // The drag's release copied the two lines and only them.
+    let copied = format!(
+        "--- osc52 {} ---",
+        leviculum_ui::clipboard::osc52("first line\nsecond line").replace('\x1b', "\\e")
+    );
+    assert!(drag.contains(&copied), "{copied}\n{drag}");
+    assert!(
+        frame(&drag, "dragged").contains("copied 22 chars"),
+        "{drag}"
+    );
+    if all != EXPECTED_MOUSE {
+        let kept = std::env::temp_dir().join("lnmsg-tui-mouse.frames");
+        let _ = std::fs::write(&kept, &all);
+        panic!(
+            "the frames moved; this run's are in {}, the pinned ones in \
+             lnmsg/tests/fixtures/tui_mouse.frames\n{all}",
             kept.display()
         );
     }
