@@ -551,6 +551,70 @@ async fn via_auto_delivers_direct_when_the_python_receiver_is_online() {
     mesh.daemon.stop().await.expect("stop the Rust daemon");
 }
 
+/// The `t=` of the first event-log line that starts with `prefix` and
+/// carries every one of `fields`.
+fn event_ms(log: &str, prefix: &str, fields: &[&str]) -> Option<u64> {
+    log.lines()
+        .filter(|line| line.starts_with(prefix))
+        .find(|line| {
+            fields
+                .iter()
+                .all(|field| line.split_whitespace().any(|token| token == *field))
+        })
+        .and_then(|line| {
+            line.split_whitespace()
+                .find_map(|token| token.strip_prefix("t="))
+                .and_then(|t| t.parse().ok())
+        })
+}
+
+/// The compose line's send against a stock Python LXMF receiver on one
+/// daemon: the direct leg is proven well inside a second (leviculum 1002).
+///
+/// Lew's hand test and the 1001 cell measured 3985 to 4008 ms from Enter to
+/// the receive on one host, four runs alike, with the wire exchange itself
+/// about 4 ms: the router held a message queued between two processing
+/// passes until the next pass of its four-second interval. The reference
+/// sends from `handle_outbound` at once, so the same receiver took 3 ms from
+/// `lxmf_node send`. Measured between our own `LNMSG_ENQUEUED` and the
+/// proof's `LNMSG_STATE`, so attaching and resolving are not in the number;
+/// 2 s leaves the link handshake a wide margin on a loaded runner and is
+/// still half of what the old interval cost.
+#[tokio::test(flavor = "multi_thread")]
+async fn via_auto_to_a_python_receiver_is_proven_well_inside_a_second() {
+    let peer = PythonPeer::start();
+    let python_address = peer.lxmf_init();
+    let mut mesh = Mesh::start(peer.rns_port).await;
+    peer.lxmf_announce();
+
+    let sent = mesh
+        .send(
+            vec![
+                python_address,
+                "--via".to_string(),
+                "auto".to_string(),
+                "--timeout".to_string(),
+                "40".to_string(),
+            ],
+            b"how long does this take\n".to_vec(),
+        )
+        .await;
+    assert_eq!(sent.code, Some(0), "{sent}");
+
+    let queued = event_ms(&sent.log, "LNMSG_ENQUEUED ", &[]).expect("an enqueue line");
+    let proven = event_ms(&sent.log, "LNMSG_STATE ", &["state=Delivered"])
+        .unwrap_or_else(|| panic!("the direct leg ends on the proof: {sent}"));
+    let took = proven.saturating_sub(queued);
+    eprintln!("enqueue to proof: {took} ms");
+    assert!(
+        took < 2_000,
+        "{took} ms from the enqueue to the proof; the router waited for its \
+         processing interval: {sent}"
+    );
+
+    mesh.daemon.stop().await.expect("stop the Rust daemon");
+}
+
 /// The whole mailbox round against a real Python propagation node: a sender
 /// client uploads with `--via propagated` (exit 3, "a node holds it"), the
 /// Python node stores it, and the recipient client drains it with the

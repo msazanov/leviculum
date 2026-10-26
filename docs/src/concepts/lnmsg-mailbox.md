@@ -217,7 +217,7 @@ consequence spelled out, not a config-file default nobody reads.
 - The sync schedule (there is none in the library).
 - Persistence of known propagation nodes and of the selection, since
   neither is in the router snapshot (`snapshot`,
-  `leviculum-lxmf/src/router.rs:2078-2095`); replay via
+  `leviculum-lxmf/src/router.rs:2084-2101`); replay via
   `restore_known_propagation_node`
   (`leviculum-lxmf/src/router/propagation_runtime.rs:1436`).
 - Re-selection after restart.
@@ -259,7 +259,7 @@ Two further facts a UI must not paper over. `Message::verification` can be
 `Unverified` when the source identity has never been announced to us
 (`leviculum-lxmf/src/message.rs:232-234`), and such messages **are
 delivered to the application anyway**
-(`leviculum-lxmf/src/router.rs:1477-1480`). And the router discards the
+(`leviculum-lxmf/src/router.rs:1483-1486`). And the router discards the
 display name from announces entirely, so **the client must maintain its own
 hash-to-name map** from raw `NodeEvent::AnnounceReceived`.
 

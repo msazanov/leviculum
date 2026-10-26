@@ -859,8 +859,14 @@ impl LxmfRouter {
             core: TickOutput::default(),
             events: vec![RouterEvent::MessageQueued(id)],
         };
-        // The entry this call created is due now. A host driven by the returned
-        // `next_deadline_ms` would otherwise sleep past it.
+        // The entry this call created is due now, and so is the processing
+        // pass that sends it: the reference starts `process_outbound` from
+        // `handle_outbound` (`reference/LXMF/LXMF/LXMRouter.py:1793`) rather
+        // than leaving the message for its four-second loop. Without this the
+        // next `tick` returns early until `next_job_ms`, and a send waited out
+        // the rest of the interval, 3.9 s on one host (leviculum 1002). A host
+        // driven by the returned `next_deadline_ms` comes back at once.
+        self.next_job_ms = self.next_job_ms.min(now_ms);
         self.apply_deadline(&mut output.core);
         Ok(self.finish_output(output))
     }
@@ -3700,6 +3706,44 @@ mod persistence_tests {
             .any(|action| matches!(action, Action::Broadcast { .. })));
     }
 
+    /// A message queued between two processing passes goes out on the next
+    /// tick, not on the next pass of the interval (leviculum 1002). The
+    /// reference kicks `process_outbound` from `handle_outbound` itself
+    /// (`reference/LXMF/LXMF/LXMRouter.py:1793`); the four-second interval is
+    /// its housekeeping cadence, and a host that ticked the router just
+    /// before the send made every message wait out the rest of it.
+    #[test]
+    fn a_message_queued_inside_the_processing_interval_goes_out_on_the_next_tick() {
+        let (mut router, mut node) = router_and_node(RouterConfig::default());
+        let destination = announced_peer(&mut router, &mut node, 0x7a);
+        let _ = router.tick(&mut node).expect("an idle pass");
+        assert_eq!(router.next_job_ms, 1_000 + PROCESSING_INTERVAL_MS);
+
+        let mut queued = message(0x7b);
+        queued.destination_hash = destination.into_bytes();
+        queued.method = DeliveryMethod::Opportunistic;
+        let id = queued.message_id;
+        let queued_output = router.enqueue(&node, queued).expect("enqueue");
+        assert_eq!(
+            queued_output.core.next_deadline_ms,
+            Some(1_000),
+            "the host is asked back at once"
+        );
+
+        let output = router.tick(&mut node).expect("the next tick");
+        assert!(
+            output.events.iter().any(|event| matches!(
+                event,
+                RouterEvent::MessageState {
+                    message_id,
+                    state: MessageState::Sending,
+                } if *message_id == id
+            )),
+            "the message must leave on the tick after enqueue: {:?}",
+            output.events
+        );
+    }
+
     #[test]
     fn idle_scheduler_tick_does_not_request_a_checkpoint() {
         let (mut router, mut node) = router_and_node(RouterConfig::default());
@@ -3980,12 +4024,14 @@ mod persistence_tests {
     #[test]
     fn queued_outbound_accepts_both_stamp_lengths_and_becomes_due() {
         let (mut router, node) = router_and_node(RouterConfig::default());
-        router.next_job_ms = 90_000;
 
         for (seed, length, now_ms) in [(43, 16, 1_200), (44, 32, 1_100)] {
             let queued = message(seed);
             let id = queued.message_id;
             let _ = router.enqueue(&node, queued).unwrap();
+            // Parked after the enqueue, which wakes the scheduler itself:
+            // what is under test is that the stamp result wakes it too.
+            router.next_job_ms = 90_000;
 
             let output = router
                 .set_outbound_stamp(&id, vec![seed; length], now_ms)
