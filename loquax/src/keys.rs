@@ -12,8 +12,14 @@
 //! palette name has a row, the quiet keyboard, a plain chord beside every
 //! enhanced one, and `:` `q` `Enter` quits.
 //!
+//! The search (slice 4) adds a pane and a context: [`SEARCH`] is its field,
+//! and while one is open ([`SEARCHING`]) the list is its results, `Enter`
+//! there opens a result, `Esc` closes the search, and `n`/`N` and
+//! `Ctrl-s`/`Ctrl-r` step the matches, which outside a search is not their
+//! meaning (`Ctrl-r` fetches then).
+//!
 //! Not here yet, because what they run is a later slice: new conversation
-//! (`m`, `C`), search (`/`, `Ctrl-s`, `n`/`N`), hints (`f`), delete (`d`),
+//! (`m`, `C`), hints (`f`), delete (`d`),
 //! and `Ctrl-x Ctrl-c` (a two-key sequence, which the table does not
 //! model). The mouse is not a chord: what it does is [`crate::ui::hit`],
 //! and only its capture switch is a row, the palette's `mouse`.
@@ -37,14 +43,24 @@ pub const COMPOSE: Panes = Panes(1 << 3);
 /// An open overlay (the help, the palette): only what is bound here reaches
 /// past it.
 pub const OVERLAY: Panes = Panes(1 << 4);
+/// The search field, the design page's **S**: it takes plain typing, as
+/// compose does.
+pub const SEARCH: Panes = Panes(1 << 5);
 /// The two command panes.
 pub const COMMAND_PANES: Panes = Panes(LIST.0 | MESSAGES.0);
+/// The three panes `Tab` cycles through outside a search.
+pub const THREE_PANES: Panes = Panes(LIST.0 | MESSAGES.0 | COMPOSE.0);
 /// Every pane outside an overlay, the design page's **all**.
-pub const EVERY: Panes = Panes(LIST.0 | MESSAGES.0 | COMPOSE.0);
+pub const EVERY: Panes = Panes(THREE_PANES.0 | SEARCH.0);
+/// Where the results of an open search are stepped: the field, and the list
+/// which shows them.
+const RESULTS: Panes = Panes(SEARCH.0 | LIST.0);
 
 /// `send_on_enter` is off: `Enter` breaks the line in compose and the
 /// modifier chord sends.
 pub const ENTER_BREAKS: Ctx = Ctx(1 << 1);
+/// A search is open: the list shows its results.
+pub const SEARCHING: Ctx = Ctx(1 << 2);
 
 /// What a key runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,6 +89,13 @@ pub enum Action {
     QuitHint,
     /// Copy the drag's selection, or the message under the cursor.
     Copy,
+    /// Open the selected result of the search.
+    OpenResult,
+    /// The next match (`true`) or the previous one: a result row in the
+    /// field and the list, a message in the open conversation.
+    Match(bool),
+    /// Close the search; the list comes back.
+    CloseSearch,
 }
 
 const fn key(code: KeyCode, mods: Mods, action: Action, panes: Panes) -> Chord<Action> {
@@ -138,9 +161,15 @@ pub const ROWS: &[Row<Action>] = {
         Row::new(
             "open the selected conversation",
             CONVERSATIONS,
-            &[&[key(Enter, NONE, run(C::FocusMessages), LIST)]],
+            &[&[key(Enter, NONE, run(C::FocusMessages), LIST).unless(SEARCHING)]],
         )
         .palette("focus messages")
+        .footer("open"),
+        Row::new(
+            "open the selected result",
+            CONVERSATIONS,
+            &[&[key(Enter, NONE, OpenResult, RESULTS).when(SEARCHING)]],
+        )
         .footer("open"),
         // Messages; listed here so its footer leads the messages pane's.
         Row::new(
@@ -210,6 +239,56 @@ pub const ROWS: &[Row<Action>] = {
         .palette("focus compose")
         .footer_droppable("write", 3),
         Row::new("focus the conversation list", CONVERSATIONS, &[]).palette("focus conversations"),
+        // Search (slice 4): `Ctrl-s` opens it and, once it is open, steps
+        // to the next match, as Emacs's incremental search does; in compose
+        // it always goes back to the field.
+        Row::new(
+            "search names and messages",
+            CONVERSATIONS,
+            &[
+                &[key(Char('/'), Mods::Plain, run(C::Search), COMMAND_PANES)],
+                &[
+                    key(Char('s'), CTRL, run(C::Search), COMMAND_PANES).unless(SEARCHING),
+                    key(Char('s'), CTRL, run(C::Search), COMPOSE).quiet(),
+                ],
+                &[key(Char('F'), CTRL_SHIFT, run(C::Search), EVERY).enhanced()],
+            ],
+        )
+        .palette("search")
+        .note("Ctrl-F in Signal: here /"),
+        Row::new(
+            "next / previous match",
+            CONVERSATIONS,
+            &[
+                &[
+                    key(Char('n'), Mods::Plain, Match(true), COMMAND_PANES).when(SEARCHING),
+                    key(Char('N'), Mods::Plain, Match(false), COMMAND_PANES).when(SEARCHING),
+                ],
+                &[
+                    key(Char('s'), CTRL, Match(true), RESULTS.with(MESSAGES)).when(SEARCHING),
+                    key(Char('r'), CTRL, Match(false), RESULTS.with(MESSAGES)).when(SEARCHING),
+                ],
+            ],
+        )
+        .footer_spelled("next, previous"),
+        Row::new(
+            "search field to its results",
+            CONVERSATIONS,
+            &[&[
+                key(Tab, Mods::Any, NextPane, SEARCH),
+                key(BackTab, Mods::Any, PreviousPane, SEARCH),
+            ]],
+        )
+        .footer_droppable("to the results", 4),
+        Row::new(
+            "close the search",
+            CONVERSATIONS,
+            &[
+                &[key(Esc, NONE, CloseSearch, RESULTS).when(SEARCHING)],
+                &[key(Char('g'), CTRL, CloseSearch, RESULTS).when(SEARCHING)],
+            ],
+        )
+        .footer("close search"),
         // Compose. The Enter rule: Enter sends and Shift-Enter (enhanced),
         // Alt-Enter and Ctrl-j break the line; Ctrl-Enter (enhanced) always
         // sends and never breaks. With send_on_enter off, Enter breaks and
@@ -335,8 +414,8 @@ pub const ROWS: &[Row<Action>] = {
             "next / previous pane",
             EVERYWHERE,
             &[&[
-                key(Tab, Mods::Any, NextPane, EVERY),
-                key(BackTab, Mods::Any, PreviousPane, EVERY),
+                key(Tab, Mods::Any, NextPane, THREE_PANES),
+                key(BackTab, Mods::Any, PreviousPane, THREE_PANES),
             ]],
         )
         .footer("pane"),
@@ -384,7 +463,7 @@ pub const ROWS: &[Row<Action>] = {
             EVERYWHERE,
             &[
                 &[key(F(5), Mods::Any, run(C::Fetch), EVERY)],
-                &[key(Char('r'), CTRL, run(C::Fetch), COMMAND_PANES)],
+                &[key(Char('r'), CTRL, run(C::Fetch), COMMAND_PANES).unless(SEARCHING)],
             ],
         )
         .palette("fetch")
@@ -417,7 +496,7 @@ pub const ROWS: &[Row<Action>] = {
                 Char('c'),
                 CTRL,
                 QuitHint,
-                Panes(LIST.0 | MESSAGES.0 | OVERLAY.0),
+                Panes(LIST.0 | MESSAGES.0 | SEARCH.0 | OVERLAY.0),
             )]],
         ),
         Row::new("Enter sends, or breaks the line", EVERYWHERE, &[]).palette("send on enter"),
@@ -443,6 +522,7 @@ pub fn panes_of(pane: crate::ui::Pane) -> Panes {
         crate::ui::Pane::Conversations => LIST.with(Panes::SCROLL),
         crate::ui::Pane::Messages => MESSAGES.with(Panes::SCROLL),
         crate::ui::Pane::Compose => COMPOSE,
+        crate::ui::Pane::Search => SEARCH,
     }
 }
 
@@ -503,23 +583,47 @@ pub fn footer_action(row: &Row<Action>, chord: &Chord<Action>) -> Option<Action>
 }
 
 /// The footer buttons for `pane` under `ctx`: every row with a footer
-/// label and a chord this terminal can send there, its key that chord.
+/// label and a chord this terminal can send there, its key that chord. A
+/// spelled row ([`leviculum_ui::keymap::Row::footer_spelled`]) has a button
+/// for each spelling that is live there, its key the whole spelling
+/// (`n / N next, previous`), clicked as its first chord; any after the
+/// first drop before every other button on a narrow footer.
 pub fn footer<A: Copy>(
     pane: Panes,
     ctx: Ctx,
     act: impl Fn(Option<Action>) -> A,
 ) -> Vec<FooterItem<A>> {
-    ROWS.iter()
-        .filter_map(|row| {
-            let spec = row.footer?;
-            let chord = row.live_chord(pane, ctx)?;
-            let action = act(footer_action(row, chord));
-            Some(match spec.drop_rank {
-                None => FooterItem::action(chord.label(), spec.label, action),
-                Some(rank) => FooterItem::droppable(chord.label(), spec.label, action, rank),
-            })
-        })
-        .collect()
+    let mut items = Vec::new();
+    for row in ROWS {
+        let Some(spec) = row.footer else {
+            continue;
+        };
+        if spec.spelled {
+            let mut first = true;
+            for (index, spelling) in row.spellings.iter().enumerate() {
+                if let Some(chord) = spelling.iter().find(|c| c.live(pane, ctx)) {
+                    let (keys, action) = (row.spelling_keys(index), act(footer_action(row, chord)));
+                    // The first spelling stays; another is the first thing a
+                    // narrow footer drops.
+                    items.push(match first {
+                        true => FooterItem::action(keys, spec.label, action),
+                        false => FooterItem::droppable(keys, spec.label, action, 0),
+                    });
+                    first = false;
+                }
+            }
+            continue;
+        }
+        let Some(chord) = row.live_chord(pane, ctx) else {
+            continue;
+        };
+        let action = act(footer_action(row, chord));
+        items.push(match spec.drop_rank {
+            None => FooterItem::action(chord.label(), spec.label, action),
+            Some(rank) => FooterItem::droppable(chord.label(), spec.label, action, rank),
+        });
+    }
+    items
 }
 
 /// The chord that does `what` in compose right now.
@@ -553,17 +657,22 @@ mod tests {
     use leviculum_ui::commands::{filter, COMMANDS};
     use leviculum_ui::keymap::{all_best, canonical};
 
-    const PANES: [Panes; 4] = [
+    const PANES: [Panes; 5] = [
         Panes(LIST.0 | Panes::SCROLL.0),
         Panes(MESSAGES.0 | Panes::SCROLL.0),
         COMPOSE,
         OVERLAY,
+        SEARCH,
     ];
-    const CTXS: [Ctx; 4] = [
+    const CTXS: [Ctx; 8] = [
         Ctx::NONE,
         Ctx::ENHANCED,
         ENTER_BREAKS,
         Ctx(Ctx::ENHANCED.0 | ENTER_BREAKS.0),
+        SEARCHING,
+        Ctx(SEARCHING.0 | Ctx::ENHANCED.0),
+        Ctx(SEARCHING.0 | ENTER_BREAKS.0),
+        Ctx(SEARCHING.0 | Ctx::ENHANCED.0 | ENTER_BREAKS.0),
     ];
 
     /// Every action `key` reaches at the winning rank across both tables.

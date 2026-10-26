@@ -55,8 +55,18 @@
 //!
 //! History: loquax keeps no message store on disk (only the seen record's
 //! ids), so the conversations are this session's, and the top of the pane
-//! says so (`nothing earlier on this device`). Names and trust states,
-//! search and QR codes are later slices.
+//! says so (`nothing earlier on this device`). Names and trust states and QR
+//! codes are later slices.
+//!
+//! # The search
+//!
+//! `/` or `Ctrl-s` turns the list pane into the search ([`search`]): its
+//! field on top, the results under it as the query is typed, the plain
+//! list while the field is empty. A result opens with `Enter` or a click,
+//! a message's at that message with the match marked in its block, and
+//! while the search is open `n`/`N` and `Ctrl-s`/`Ctrl-r` step the matches
+//! of the open conversation in place. `Esc` closes it and the list comes
+//! back; the conversation keeps what it showed.
 
 use alloc::collections::VecDeque;
 use alloc::format;
@@ -87,6 +97,7 @@ use crate::when::{list_time, WallTime};
 
 pub mod hit;
 pub mod layout;
+pub mod search;
 
 /// How many ticks a toast stays up. The shell ticks every 250 ms, so three
 /// seconds.
@@ -189,22 +200,31 @@ pub enum Pane {
     Messages,
     /// The compose line.
     Compose,
+    /// The search's field, at the top of the list pane while a search is
+    /// open; the list under it is its results.
+    Search,
 }
 
 impl Pane {
-    fn next(self) -> Self {
-        match self {
-            Self::Conversations => Self::Messages,
-            Self::Messages => Self::Compose,
-            Self::Compose => Self::Conversations,
+    /// The pane `Tab` goes to: the three in turn, the field before the
+    /// list while a search is open.
+    fn next(self, searching: bool) -> Self {
+        match (self, searching) {
+            (Self::Search, _) => Self::Conversations,
+            (Self::Conversations, _) => Self::Messages,
+            (Self::Messages, _) => Self::Compose,
+            (Self::Compose, true) => Self::Search,
+            (Self::Compose, false) => Self::Conversations,
         }
     }
 
-    fn prev(self) -> Self {
-        match self {
-            Self::Conversations => Self::Compose,
-            Self::Messages => Self::Conversations,
-            Self::Compose => Self::Messages,
+    fn prev(self, searching: bool) -> Self {
+        match (self, searching) {
+            (Self::Search, _) => Self::Compose,
+            (Self::Conversations, true) => Self::Search,
+            (Self::Conversations, false) => Self::Compose,
+            (Self::Messages, _) => Self::Conversations,
+            (Self::Compose, _) => Self::Messages,
         }
     }
 }
@@ -242,6 +262,9 @@ pub struct Message {
     /// The leg the runner last reported, kept after it ends so a late proof
     /// still names the way the message went.
     pub last_leg: Option<Leg>,
+    /// The model's activity count when it was written or arrived: the
+    /// search lists messages most recent first by it.
+    pub activity: u64,
 }
 
 impl Message {
@@ -258,6 +281,7 @@ impl Message {
             at,
             ledger: vec![LedgerEntry::new(at, "queued")],
             last_leg: None,
+            activity: 0,
         }
     }
 
@@ -424,6 +448,8 @@ pub struct UiModel<B> {
     /// Light or dark: which half of the token table the tier draws from. The
     /// palette's `theme` turns it.
     pub theme: Theme,
+    /// The search, when open: the list pane is its field and results.
+    pub search: Option<search::Search<B>>,
 }
 
 /// Text a drag selected in the open conversation, from where the button went
@@ -476,6 +502,7 @@ impl<B: InputBuffer + Default> UiModel<B> {
             press: None,
             tier: Tier::Mono,
             theme: Theme::Dark,
+            search: None,
         };
         for peer in peers {
             model.conversation(*peer);
@@ -495,7 +522,33 @@ impl<B> UiModel<B> {
         if !self.send_on_enter {
             ctx = ctx.with(keys::ENTER_BREAKS);
         }
+        if self.search.is_some() {
+            ctx = ctx.with(keys::SEARCHING);
+        }
         ctx
+    }
+
+    /// What the open search looks for, when it looks for anything: the
+    /// list shows results and the conversation marks the matches.
+    pub fn query(&self) -> Option<&str>
+    where
+        B: InputBuffer,
+    {
+        self.search
+            .as_ref()
+            .map(|s| s.query.value())
+            .filter(|q| !q.is_empty())
+    }
+
+    /// The open search's results, in the list's order.
+    pub fn hits(&self) -> Vec<search::Hit>
+    where
+        B: InputBuffer,
+    {
+        match self.query() {
+            Some(query) => search::hits(&self.conversations, &self.order(), query),
+            None => Vec::new(),
+        }
     }
 
     /// The colour tokens of the tier and theme.
@@ -624,6 +677,7 @@ impl<B> UiModel<B> {
                     ascii: self.ascii,
                     selected,
                     tokens: self.tokens(),
+                    mark: self.query(),
                 },
             ),
             None => layout::Laid::empty(self.sizes().messages.0, self.tokens()),
@@ -793,8 +847,20 @@ fn on_key<B: InputBuffer + Default>(model: &mut UiModel<B>, key: KeyEvent) -> Ve
         Some(Action::Copy) => copy(model, selection),
         Some(action) => act(model, action, key),
         None => {
-            if pane == Pane::Compose {
-                model.compose.edit(&key);
+            match pane {
+                Pane::Compose => {
+                    model.compose.edit(&key);
+                }
+                Pane::Search => {
+                    if let Some(search) = model.search.as_mut() {
+                        // Every keystroke runs the matcher again: the
+                        // results are derived, only the cursor resets.
+                        if search.query.edit(&key) {
+                            search.selected = 0;
+                        }
+                    }
+                }
+                _ => {}
             }
             Vec::new()
         }
@@ -872,13 +938,136 @@ fn act<B: InputBuffer + Default>(
                 _ => Pane::Conversations,
             };
         }
-        Action::NextPane => model.focus = model.focus.next(),
-        Action::PreviousPane => model.focus = model.focus.prev(),
+        Action::NextPane => model.focus = model.focus.next(model.search.is_some()),
+        Action::PreviousPane => model.focus = model.focus.prev(model.search.is_some()),
         Action::Palette => model.palette = Some(Palette::default()),
         Action::QuitHint => return quit_hint(model),
         Action::Copy => return copy(model, None),
+        Action::OpenResult => open_result(model),
+        Action::Match(forward) => match model.focus {
+            Pane::Messages => step_match(model, forward),
+            _ => step_result(model, if forward { 1 } else { -1 }),
+        },
+        Action::CloseSearch => close_search(model),
     }
     Vec::new()
+}
+
+/// `/`, `Ctrl-s` or a click on `/ search`: the search opens with the cursor
+/// in its field, or the cursor goes back to the open one's.
+fn open_search<B: InputBuffer + Default>(model: &mut UiModel<B>) {
+    if model.search.is_none() {
+        model.search = Some(search::Search::default());
+    }
+    model.focus = Pane::Search;
+}
+
+/// `Esc` in the field or the results: the list comes back with the focus,
+/// and the conversation keeps what it shows.
+fn close_search<B>(model: &mut UiModel<B>) {
+    model.search = None;
+    model.focus = Pane::Conversations;
+}
+
+/// Open the selected result: a conversation at its newest message, a
+/// message's conversation at that message, its block selected and the match
+/// marked in it. The search stays open, so `n` goes on from there. With an
+/// empty field the list is the plain one, and its selected conversation
+/// opens.
+fn open_result<B: InputBuffer>(model: &mut UiModel<B>) {
+    let hits = model.hits();
+    if model.query().is_none() {
+        model.focus = Pane::Messages;
+        return;
+    }
+    let selected = model.search.as_ref().map_or(0, |s| s.selected);
+    match hits.get(selected) {
+        Some(&search::Hit::Conversation(index)) => {
+            if index != model.selected {
+                model.select(index);
+            }
+            model.focus = Pane::Messages;
+        }
+        Some(&search::Hit::Message {
+            conversation,
+            message,
+        }) => {
+            if conversation != model.selected {
+                model.select(conversation);
+            }
+            model.focus = Pane::Messages;
+            reveal(model, message);
+        }
+        None => model.toast(ToastKind::Info, search::NO_MATCHES.to_string()),
+    }
+}
+
+/// Move the results' cursor by `by` rows of results, held to the list.
+fn step_result<B: InputBuffer>(model: &mut UiModel<B>, by: isize) {
+    let count = model.hits().len();
+    if let Some(search) = model.search.as_mut() {
+        let last = count.saturating_sub(1);
+        search.selected = search.selected.saturating_add_signed(by).min(last);
+    }
+}
+
+/// `n` or `N` in the open conversation: the cursor onto the next or the
+/// previous message that matches, the view scrolled to it, round to the
+/// other end past the last.
+fn step_match<B: InputBuffer>(model: &mut UiModel<B>, forward: bool) {
+    let Some(query) = model.query() else {
+        return;
+    };
+    let stops = match model.conversations.get(model.selected) {
+        Some(conversation) => search::matching_messages(conversation, query),
+        None => Vec::new(),
+    };
+    let at = model.message_cursor;
+    let next = match forward {
+        true => stops.iter().find(|&&m| m > at).or(stops.first()),
+        false => stops.iter().rev().find(|&&m| m < at).or(stops.last()),
+    };
+    match next.copied() {
+        Some(message) => {
+            let wrapped = match forward {
+                true => message <= at,
+                false => message >= at,
+            };
+            if wrapped && stops.len() > 1 {
+                let end = if forward { "first" } else { "last" };
+                model.toast(ToastKind::Info, format!("round to the {end} match"));
+            }
+            reveal(model, message);
+        }
+        None => model.toast(ToastKind::Info, "no match in this conversation".to_string()),
+    }
+}
+
+/// The cursor onto message `index` of the open conversation, the view
+/// scrolled just far enough to show its block, its start where it is taller
+/// than the pane; back at the newest with the bottom in view, the pane
+/// follows the newest again.
+fn reveal<B: InputBuffer>(model: &mut UiModel<B>, index: usize) {
+    let last = model.messages_of_selected().len().saturating_sub(1);
+    let index = index.min(last);
+    model.message_cursor = index;
+    let laid = model.laid();
+    let rows = model.message_rows().max(1);
+    let total = laid.rows.len();
+    let bottom = total.saturating_sub(rows);
+    let mut top = model.top_of(total);
+    if let Some(span) = laid.spans.get(index) {
+        if span.end > top + rows {
+            top = span.end - rows;
+        }
+        if span.start < top {
+            top = span.start;
+        }
+    }
+    model.scroll_top = match index == last && top >= bottom {
+        true => None,
+        false => Some(top),
+    };
 }
 
 /// `y` or `Alt-w`, and the release of a drag: the selection's text, or the
@@ -948,6 +1137,13 @@ fn click<B: InputBuffer + Default>(model: &mut UiModel<B>, col: u16, row: u16) -
             }
         }
         Target::Badge(index) => open_at_new(model, index),
+        Target::SearchHint | Target::SearchField => open_search(model),
+        Target::Result(index) => {
+            if let Some(search) = model.search.as_mut() {
+                search.selected = index;
+            }
+            open_result(model);
+        }
         Target::Block { message, .. } => {
             model.focus = Pane::Messages;
             point_at(model, message);
@@ -1120,7 +1316,7 @@ fn wheel<B: InputBuffer>(model: &mut UiModel<B>, col: u16, row: u16, down: bool)
         return Vec::new();
     }
     match hit::pane_at(model, col, row) {
-        Some(Pane::Conversations) => scroll_list(
+        Some(Pane::Conversations | Pane::Search) => scroll_list(
             model,
             match down {
                 true => ScrollCmd::LineDown,
@@ -1165,14 +1361,36 @@ fn quit_hint<B>(model: &mut UiModel<B>) -> Vec<UiEffect> {
 /// Move the cursor of the conversation list or the messages.
 fn scroll<B: InputBuffer>(model: &mut UiModel<B>, pane: Pane, cmd: ScrollCmd) {
     match pane {
-        Pane::Conversations => scroll_list(model, cmd),
-        _ => scroll_messages(model, cmd),
+        Pane::Conversations | Pane::Search => scroll_list(model, cmd),
+        Pane::Messages | Pane::Compose => scroll_messages(model, cmd),
     }
+}
+
+/// The results of an open search move by result, a page being the results
+/// a list pane shows.
+fn scroll_results<B: InputBuffer>(model: &mut UiModel<B>, cmd: ScrollCmd) {
+    let count = model.hits().len() as isize;
+    let page = layout::entries_shown(model.sizes().list.1.saturating_sub(search::FIELD_ROWS)).max(1)
+        as isize;
+    let by = match cmd {
+        ScrollCmd::LineDown => 1,
+        ScrollCmd::LineUp => -1,
+        ScrollCmd::PageDown => page,
+        ScrollCmd::PageUp => -page,
+        ScrollCmd::HalfPageDown => (page / 2).max(1),
+        ScrollCmd::HalfPageUp => -(page / 2).max(1),
+        ScrollCmd::Top => -count,
+        ScrollCmd::Bottom => count,
+    };
+    step_result(model, by);
 }
 
 /// The list moves in its own order, a page being the conversations it
 /// shows.
 fn scroll_list<B: InputBuffer>(model: &mut UiModel<B>, cmd: ScrollCmd) {
+    if model.query().is_some() {
+        return scroll_results(model, cmd);
+    }
     let order = model.order();
     let Some(at) = order.iter().position(|&i| i == model.selected) else {
         return;
@@ -1391,6 +1609,10 @@ fn run<B: InputBuffer + Default>(model: &mut UiModel<B>, command: PaletteCommand
             model.toast(ToastKind::Info, text.to_string());
             vec![UiEffect::Mouse(model.mouse)]
         }
+        PaletteCommand::Search => {
+            open_search(model);
+            Vec::new()
+        }
         PaletteCommand::Theme => {
             model.theme = model.theme.toggle();
             let name = match model.theme {
@@ -1427,6 +1649,7 @@ fn send<B: InputBuffer + Default>(model: &mut UiModel<B>) -> Vec<UiEffect> {
     let index = conversation.messages.len() - 1;
     let activity = model.bump();
     model.conversations[model.selected].activity = activity;
+    model.conversations[model.selected].messages[index].activity = activity;
     // Signal's rule: what you send is where the view goes.
     model.message_cursor = index;
     model.scroll_top = None;
@@ -1529,6 +1752,7 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
                     },
                 )],
                 last_leg: None,
+                activity,
             });
             if !open {
                 conversation.unread += 1;
@@ -1679,8 +1903,17 @@ pub struct DetailView {
 /// What each part of the screen shows.
 #[derive(Clone, Debug)]
 pub struct View {
-    /// The conversations pane's title: our own address, short.
+    /// The conversations pane's title: our own address, short, or `Search`
+    /// while a search is open.
     pub conversations_title: String,
+    /// Its right end: `esc closes` while a search is open.
+    pub conversations_title_right: String,
+    /// On its bottom border, right-aligned: `/ search`, the click that
+    /// opens the search, while none is open.
+    pub list_hint: String,
+    /// The column of the cursor in the search field, in the pane, while the
+    /// field has the focus.
+    pub search_cursor: Option<usize>,
     /// The list's rows on screen, two a conversation and a blank between.
     pub conversations: Vec<RLine>,
     /// The conversation's header: the peer's name and trust state.
@@ -1721,6 +1954,47 @@ pub struct View {
 
 /// The empty conversations pane's line.
 pub const NO_CONVERSATIONS: &str = "No conversations: start with --to <address>.";
+
+/// The list's bottom border while no search is open: a click on it opens
+/// one (section 5, "What the mouse does").
+pub const SEARCH_HINT: &str = "/ search";
+
+/// The list pane's title while a search is open, and its right end.
+pub const SEARCH_TITLE: &str = "Search";
+pub const SEARCH_CLOSES: &str = "esc closes";
+
+/// The list pane while a search is open, `width` x `height` inside: the
+/// field and a blank, then the plain list while the field is empty, else the
+/// results scrolled to show the selected one. The cursor's column in the
+/// field comes with them.
+fn search_pane<B: InputBuffer>(
+    model: &UiModel<B>,
+    open: &search::Search<B>,
+    width: usize,
+    height: usize,
+) -> (Vec<RLine>, usize) {
+    const PREFIX: &str = " / ";
+    let query: Vec<char> = open.query.value().chars().collect();
+    let cursor = open.query.cursor().min(query.len());
+    let visible = width.saturating_sub(PREFIX.len() + 1).max(1);
+    let scroll = (cursor + 1).saturating_sub(visible);
+    let shown: String = query.iter().skip(scroll).take(visible).collect();
+    let mut rows = vec![plain(&format!("{PREFIX}{shown}")), RLine::default()];
+    let below = height.saturating_sub(search::FIELD_ROWS);
+    match model.query() {
+        None if model.conversations.is_empty() => {
+            rows.extend(wrap(&[plain(NO_CONVERSATIONS)], width, 0));
+        }
+        None => rows.extend(layout::list(model, width, below)),
+        Some(query) => {
+            let laid = search::rows(model, query, width);
+            let first = search::first_row(&laid, open.selected, below);
+            rows.extend(laid.rows.into_iter().skip(first).take(below));
+        }
+    }
+    rows.truncate(height);
+    (rows, PREFIX.len() + cursor - scroll)
+}
 
 /// An address cut to what a pane shows.
 pub fn short(address: &[u8; 16]) -> String {
@@ -1835,9 +2109,13 @@ fn detail_view<B>(model: &UiModel<B>, c: usize, m: usize) -> Option<DetailView> 
 /// The screen.
 pub fn view<B: InputBuffer>(model: &UiModel<B>) -> View {
     let sizes = model.sizes();
-    let conversations = match model.conversations.is_empty() {
-        true => wrap(&[plain(NO_CONVERSATIONS)], sizes.list.0, 0),
-        false => layout::list(model, sizes.list.0, sizes.list.1),
+    let (conversations, search_cursor) = match (&model.search, model.conversations.is_empty()) {
+        (Some(open), _) => {
+            let (rows, cursor) = search_pane(model, open, sizes.list.0, sizes.list.1);
+            (rows, (model.focus == Pane::Search).then_some(cursor))
+        }
+        (None, true) => (wrap(&[plain(NO_CONVERSATIONS)], sizes.list.0, 0), None),
+        (None, false) => (layout::list(model, sizes.list.0, sizes.list.1), None),
     };
     let wide = sizes.messages.0 >= WIDE_HEADER;
     let peer = model.conversations.get(model.selected).map(|c| c.peer);
@@ -1921,11 +2199,22 @@ pub fn view<B: InputBuffer>(model: &UiModel<B>) -> View {
             })
             .collect(),
     });
+    let searching = model.search.is_some();
     View {
-        conversations_title: match model.address {
-            Some(address) => format!("loquax {}", &to_hex(&address)[..8]),
-            None => "loquax (attaching)".to_string(),
+        conversations_title: match (searching, model.address) {
+            (true, _) => SEARCH_TITLE.to_string(),
+            (false, Some(address)) => format!("loquax {}", &to_hex(&address)[..8]),
+            (false, None) => "loquax (attaching)".to_string(),
         },
+        conversations_title_right: match searching {
+            true => SEARCH_CLOSES.to_string(),
+            false => String::new(),
+        },
+        list_hint: match searching {
+            true => String::new(),
+            false => SEARCH_HINT.to_string(),
+        },
+        search_cursor,
         conversations,
         messages_title,
         messages_title_right,
@@ -3666,5 +3955,287 @@ mod tests {
         );
         press(&mut model, (screen.compose.x + 2, screen.compose.y + 1));
         assert_eq!(model.focus, Pane::Compose);
+    }
+
+    // The search (slice 4).
+
+    /// The list pane's rows as text, trailing blanks cut.
+    fn list_rows(model: &UiModel<Field>) -> Vec<String> {
+        view(model)
+            .conversations
+            .iter()
+            .map(|line| text(line).trim_end().to_string())
+            .collect()
+    }
+
+    /// A model of two conversations: PEER with three messages, two of them
+    /// with a `tripod`, OTHER with one, written in this order, so the list
+    /// has OTHER on top.
+    fn searchable() -> UiModel<Field> {
+        let mut model = UiModel::<Field>::new(&[PEER, OTHER]);
+        update(
+            &mut model,
+            UiEvent::Resize {
+                width: 120,
+                height: 40,
+            },
+        );
+        clock(&mut model, 26, 14, 0);
+        receive(&mut model, PEER, 1, "did the board come back?");
+        clock(&mut model, 26, 14, 5);
+        receive(
+            &mut model,
+            PEER,
+            2,
+            "and the small tripod\nif it fits in the bag",
+        );
+        clock(&mut model, 26, 14, 6);
+        say(&mut model, "the Tripod fits");
+        update(&mut model, key(KeyCode::Char('j')));
+        clock(&mut model, 26, 14, 7);
+        say(&mut model, "the tripod stays in the van");
+        model.toasts.clear();
+        model
+    }
+
+    fn search_for(model: &mut UiModel<Field>, query: &str) {
+        model.focus = Pane::Conversations;
+        update(model, key(KeyCode::Char('/')));
+        assert_eq!(model.focus, Pane::Search);
+        typed(model, query);
+    }
+
+    /// Conversations by name first, then messages, each most recent first;
+    /// the match is case-blind and a message whose conversation matches by
+    /// name is in both groups.
+    #[test]
+    fn the_matcher_groups_conversations_then_messages_most_recent_first() {
+        let mut model = searchable();
+        let tripod = search::hits(&model.conversations, &model.order(), "tripod");
+        let m = |conversation, message| search::Hit::Message {
+            conversation,
+            message,
+        };
+        assert_eq!(tripod, [m(1, 0), m(0, 2), m(0, 1)]);
+        assert_eq!(
+            search::hits(&model.conversations, &model.order(), "TRIPOD"),
+            tripod
+        );
+        // `abab` is PEER's name, and one of our messages says it.
+        say(&mut model, "ask abababab about it");
+        let by_name = search::hits(&model.conversations, &model.order(), "ABAB");
+        assert_eq!(by_name, [search::Hit::Conversation(0), m(1, 1)]);
+        assert!(search::hits(&model.conversations, &model.order(), "").is_empty());
+        assert!(search::hits(&model.conversations, &model.order(), "drone").is_empty());
+    }
+
+    #[test]
+    fn find_and_mark_ignore_case_and_mark_the_first_match_only() {
+        assert_eq!(search::find("The Tripod", "tripod"), Some((4, 6)));
+        assert_eq!(search::find("Ärger", "ä"), Some((0, 1)));
+        assert_eq!(search::find("tripod", ""), None);
+        assert_eq!(search::find("pod", "tripod"), None);
+        assert_eq!(
+            search::mark_first("tripod, and a tripod again", "TRIPOD"),
+            "«tripod», and a tripod again"
+        );
+        assert_eq!(search::mark_first("no match", "x"), "no match");
+    }
+
+    /// A preview is the body on one line, the first match marked, and cut so
+    /// the match stays in view.
+    #[test]
+    fn a_preview_joins_the_lines_and_keeps_the_match_in_view() {
+        let body = "and the small tripod\nif it fits in the bag";
+        assert_eq!(
+            search::preview(body, "tripod", 29),
+            "and the small «tripod» if it…"
+        );
+        // Past the room: the start goes.
+        assert_eq!(search::preview(body, "bag", 24), "…if it fits in the «bag»");
+        assert_eq!(search::preview(body, "fits", 18), "…pod if it «fits»…");
+        let short = search::preview(body, "fits", 24);
+        assert!(short.contains("«fits»"), "{short}");
+        assert_eq!(short.chars().count(), 24, "{short}");
+    }
+
+    /// The search as the list shows it at 120 x 40: the field, the groups
+    /// with their counts, two rows a result with who and when, the match
+    /// marked; one row per message however often it matches; `no matches`
+    /// when nothing does; the plain list again for an empty field.
+    #[test]
+    fn the_results_take_the_list_pane_as_the_query_is_typed() {
+        let mut model = searchable();
+        say(&mut model, "a tripod, and a tripod again");
+        search_for(&mut model, "tri");
+        let shown = list_rows(&model);
+        assert_eq!(shown[0], " / tri");
+        assert_eq!(shown[1], "");
+        assert_eq!(view(&model).conversations_title, SEARCH_TITLE);
+        assert_eq!(view(&model).conversations_title_right, SEARCH_CLOSES);
+        assert_eq!(view(&model).list_hint, "");
+        assert_eq!(view(&model).search_cursor, Some(6));
+        typed(&mut model, "pod");
+        let shown = list_rows(&model);
+        assert!(shown[2].starts_with(" MESSAGES"), "{shown:#?}");
+        assert!(shown[2].ends_with(" 4"), "{shown:#?}");
+        assert_eq!(shown[3], " ▌you to <cdcdcdcd…>        14:07");
+        assert_eq!(shown[4], " ▌a «tripod», and a tripod again");
+        assert_eq!(shown[7], "  the «tripod» stays in the van");
+        assert_eq!(shown[9], "  you to <abababab…>        14:06");
+        assert_eq!(shown[10], "  the «Tripod» fits");
+        assert_eq!(shown[12], "  <abababab…>               14:05");
+        assert_eq!(shown[13], "  and the small «tripod» if it f…");
+        typed(&mut model, "s");
+        assert_eq!(list_rows(&model)[2], format!(" {}", search::NO_MATCHES));
+        // Backspaced to empty: the plain list under the field.
+        for _ in 0.."tripods".len() {
+            update(&mut model, key(KeyCode::Backspace));
+        }
+        let shown = list_rows(&model);
+        assert_eq!(shown[0], " /");
+        assert!(shown[2].starts_with("▌<cdcdcdcd…>"), "{shown:#?}");
+        assert!(shown[5].starts_with(" <abababab…>"), "{shown:#?}");
+    }
+
+    /// `Enter` on a message opens its conversation at it: the block selected
+    /// and the match marked in place; `n` and `N` step the matches of that
+    /// conversation round its ends; `Esc` twice brings the list back and the
+    /// conversation keeps what it shows.
+    #[test]
+    fn a_message_result_opens_at_the_message_and_n_steps_the_matches() {
+        let mut model = searchable();
+        search_for(&mut model, "tripod");
+        assert_eq!(model.focus, Pane::Search);
+        update(&mut model, key(KeyCode::Tab));
+        assert_eq!(model.focus, Pane::Conversations);
+        update(&mut model, key(KeyCode::Char('j')));
+        update(&mut model, key(KeyCode::Char('n')));
+        assert_eq!(model.search.as_ref().map(|s| s.selected), Some(2));
+        update(&mut model, key(KeyCode::Enter));
+        assert_eq!(model.selected, 0);
+        assert_eq!(model.focus, Pane::Messages);
+        assert_eq!(model.message_cursor, 1);
+        let shown = rows(&model);
+        assert!(
+            shown.iter().any(|r| r.contains("▌and the small «tripod»")),
+            "{shown:#?}"
+        );
+        assert!(
+            shown.iter().any(|r| r.contains("the «Tripod» fits")),
+            "{shown:#?}"
+        );
+        assert!(shown.iter().all(|r| !r.contains("«board»")));
+        update(&mut model, key(KeyCode::Char('n')));
+        assert_eq!(model.message_cursor, 2);
+        update(&mut model, key(KeyCode::Char('n')));
+        assert_eq!(model.message_cursor, 1, "round to the first");
+        assert!(model
+            .current_toast()
+            .is_some_and(|t| t.text.contains("first")));
+        update(&mut model, ctrl_key('r'));
+        assert_eq!(model.message_cursor, 2, "Ctrl-r is N, round to the last");
+        update(&mut model, ctrl_key('s'));
+        assert_eq!(model.message_cursor, 1, "Ctrl-s is n");
+        update(&mut model, key(KeyCode::Esc));
+        assert_eq!(model.focus, Pane::Conversations);
+        assert!(model.search.is_some());
+        update(&mut model, key(KeyCode::Esc));
+        assert!(model.search.is_none());
+        assert_eq!(model.focus, Pane::Conversations);
+        assert_eq!(model.selected, 0, "the conversation stays open");
+        assert_eq!(model.message_cursor, 1);
+        assert!(rows(&model).iter().all(|r| !r.contains('«')));
+        assert!(list_rows(&model)
+            .iter()
+            .any(|r| r.starts_with("▌<abababab…>")));
+    }
+
+    /// `Ctrl-s` opens the search from every pane, compose included; while it
+    /// is open `Ctrl-s` in the results steps them and `Ctrl-r` is the previous
+    /// one, not the fetch it is outside a search.
+    #[test]
+    fn ctrl_s_opens_the_search_everywhere_and_ctrl_r_fetches_only_outside_it() {
+        let mut model = searchable();
+        model.focus = Pane::Compose;
+        update(&mut model, ctrl_key('s'));
+        assert_eq!(model.focus, Pane::Search);
+        typed(&mut model, "tripod");
+        assert_eq!(model.compose.value(), "", "the field took the typing");
+        update(&mut model, ctrl_key('s'));
+        assert_eq!(model.search.as_ref().map(|s| s.selected), Some(1));
+        update(&mut model, key(KeyCode::Tab));
+        assert!(update(&mut model, ctrl_key('r')).is_empty(), "no fetch");
+        assert_eq!(model.search.as_ref().map(|s| s.selected), Some(0));
+        update(&mut model, key(KeyCode::Enter));
+        assert_eq!(model.selected, 1, "the first result is OTHER's message");
+        update(&mut model, key(KeyCode::Esc));
+        update(&mut model, key(KeyCode::Esc));
+        assert!(model.search.is_none());
+        assert_eq!(update(&mut model, ctrl_key('r')), [UiEffect::Fetch]);
+    }
+
+    /// While the search is open the footer is its own: in the field `Enter
+    /// open`, the `Ctrl-s / Ctrl-r` pair, `Tab to the results`, `Esc close
+    /// search`; in the results `n / N` as well. Outside it neither.
+    #[test]
+    fn the_footer_of_an_open_search_comes_from_its_rows() {
+        let mut model = searchable();
+        let footer = |model: &UiModel<Field>| -> Vec<String> {
+            view(model)
+                .footer
+                .iter()
+                .map(|item| format!("{} {}", item.key, item.label))
+                .collect()
+        };
+        assert!(!footer(&model).iter().any(|i| i.contains("next, previous")));
+        search_for(&mut model, "tripod");
+        let field = footer(&model);
+        assert_eq!(
+            field[..4],
+            [
+                "Enter open",
+                "Ctrl-s / Ctrl-r next, previous",
+                "Tab to the results",
+                "Esc close search"
+            ],
+            "{field:?}"
+        );
+        update(&mut model, key(KeyCode::Tab));
+        let results = footer(&model);
+        assert!(
+            results.contains(&"n / N next, previous".to_string()),
+            "{results:?}"
+        );
+        assert!(
+            results.contains(&"Esc close search".to_string()),
+            "{results:?}"
+        );
+        assert!(!results.contains(&"Tab to the results".to_string()));
+    }
+
+    /// The mouse: `/ search` on the list's bottom border opens the search, a
+    /// click on a result opens it, one on the field puts the cursor there.
+    #[test]
+    fn a_click_opens_the_search_and_a_result() {
+        let mut model = searchable();
+        let hint = cells(&model, |t| *t == hit::Target::SearchHint);
+        assert_eq!(hint.len(), SEARCH_HINT.chars().count());
+        let screen = hit::screen(&model);
+        assert!(hint.iter().all(|&(_, row)| row == screen.list.bottom() - 1));
+        press(&mut model, hint[0]);
+        assert_eq!(model.focus, Pane::Search);
+        assert!(cells(&model, |t| *t == hit::Target::SearchHint).is_empty());
+        typed(&mut model, "tripod");
+        let third = cells(&model, |t| *t == hit::Target::Result(2));
+        assert_eq!(third.len(), 2 * usize::from(screen.list.width - 2));
+        model.focus = Pane::Conversations;
+        press(&mut model, third[0]);
+        assert_eq!(model.selected, 0);
+        assert_eq!(model.message_cursor, 1);
+        assert_eq!(model.focus, Pane::Messages);
+        let field = cells(&model, |t| *t == hit::Target::SearchField);
+        press(&mut model, field[0]);
+        assert_eq!(model.focus, Pane::Search);
     }
 }

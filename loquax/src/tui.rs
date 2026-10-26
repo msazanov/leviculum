@@ -1306,14 +1306,26 @@ pub fn draw(frame: &mut Frame, view: &View) {
         ..area
     };
 
-    let block = pane_block(
+    // The list, or the search in its place: its field on top, `esc closes`
+    // on its border; `/ search` on the bottom border while none is open.
+    let mut block = pane_block(
         &view.conversations_title,
-        view.focus == Pane::Conversations,
+        matches!(view.focus, Pane::Conversations | Pane::Search),
         Borders::ALL,
     );
+    if !view.conversations_title_right.is_empty() {
+        block = block
+            .title_top(Line::from(format!(" {} ", view.conversations_title_right)).right_aligned());
+    }
+    if !view.list_hint.is_empty() {
+        block = block.title_bottom(Line::from(format!(" {} ", view.list_hint)).right_aligned());
+    }
     let inner = block.inner(left);
     frame.render_widget(block, left);
     frame.render_widget(Paragraph::new(to_ratatui_text(&view.conversations)), inner);
+    let search_cursor = view
+        .search_cursor
+        .map(|column| Position::new(inner.x + column as u16, inner.y));
 
     // The model laid the rows out at this pane's size: drawn as they come.
     let mut block = pane_block(
@@ -1365,6 +1377,9 @@ pub fn draw(frame: &mut Frame, view: &View) {
             inner.x + (cursor_column - scroll) as u16,
             inner.y + (cursor_line - top) as u16,
         ));
+    }
+    if let (Some(position), false) = (search_cursor, overlay) {
+        frame.set_cursor_position(position);
     }
 
     let slots = footer::layout(view.footer.clone(), screen.footer);
@@ -2034,6 +2049,82 @@ mod tests {
             panic!(
                 "the frames moved; this run's are in {}, the pinned ones in \
                  loquax/tests/fixtures/tui_layout.frames\n{frames}",
+                kept.display()
+            );
+        }
+    }
+
+    /// The search of section 5's 120 x 40 mockup, drawn from the model at
+    /// both sizes: the field and the messages group as `tripod` is typed,
+    /// the third result opened with its match marked in place, both groups
+    /// for a query that is a name and a word of a message, and the list back
+    /// after `Esc`. Pinned in `tests/fixtures/tui_search.frames`.
+    #[test]
+    fn the_search_draws_the_mockups_structure_at_both_sizes() {
+        let keys = |model: &mut Model, names: &[&str]| {
+            for name in names {
+                update(model, UiEvent::Key(parse_key(name).expect("key")));
+            }
+        };
+        let typed = |model: &mut Model, text: &str| {
+            for c in text.chars() {
+                update(
+                    model,
+                    UiEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)),
+                );
+            }
+        };
+        let mut frames = String::new();
+        for (width, height) in [(120, 40), (80, 24)] {
+            let mut model = mockup(width, height);
+            update(
+                &mut model,
+                UiEvent::Engine(OutboxEvent::Received {
+                    message_id: [0x7b; 32],
+                    source: [0xb7; 16],
+                    title: Vec::new(),
+                    body: b"the tripod is with 4f4f4f4f".to_vec(),
+                    verified: true,
+                }),
+            );
+            model.toasts.clear();
+            keys(&mut model, &["esc", "esc", "/"]);
+            typed(&mut model, "tripod");
+            let shot = screen(&model, width, height);
+            assert!(shot.contains("● Search"), "{shot}");
+            assert!(shot.contains(" esc closes "), "{shot}");
+            assert!(shot.contains("│ / tripod"), "{shot}");
+            assert!(shot.contains("│ MESSAGES"), "{shot}");
+            assert!(shot.contains("Esc close search"), "{shot}");
+            frames.push_str(&format!("--- {width} x {height}: typed ---\n{shot}"));
+            keys(&mut model, &["tab", "j", "j", "enter"]);
+            let shot = screen(&model, width, height);
+            assert!(shot.contains("▌and the small «tripod»"), "{shot}");
+            assert!(shot.contains(" the «tripod» fits "), "{shot}");
+            frames.push_str(&format!("--- {width} x {height}: opened ---\n{shot}"));
+            keys(&mut model, &["/"]);
+            for _ in 0.."tripod".len() {
+                keys(&mut model, &["backspace"]);
+            }
+            typed(&mut model, "4f4f");
+            let shot = screen(&model, width, height);
+            assert!(shot.contains("│ CONVERSATIONS"), "{shot}");
+            assert!(shot.contains("│ MESSAGES"), "{shot}");
+            assert!(shot.contains("<«4f4f»4f4f…>"), "{shot}");
+            frames.push_str(&format!("--- {width} x {height}: both groups ---\n{shot}"));
+            keys(&mut model, &["esc"]);
+            let shot = screen(&model, width, height);
+            assert!(shot.contains(" / search "), "{shot}");
+            assert!(!shot.contains('«'), "{shot}");
+            frames.push_str(&format!("--- {width} x {height}: closed ---\n{shot}"));
+        }
+        let expected = include_str!("../tests/fixtures/tui_search.frames");
+        if frames != expected {
+            let kept = std::env::temp_dir().join("loquax-tui-search.frames");
+            let _ = std::fs::write(&kept, &frames);
+            panic!(
+                "the frames moved; this run's are in {}, the pinned ones in \
+                 loquax/tests/fixtures/tui_search.frames\n{frames}",
                 kept.display()
             );
         }

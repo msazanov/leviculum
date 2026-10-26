@@ -21,6 +21,7 @@ use leviculum_ui::input::InputBuffer;
 use leviculum_ui::Rect;
 
 use super::layout::{self, Laid, RowText, ENTRY_ROWS};
+use super::search;
 use super::{
     detail_layout, palette_rect, view, FooterAct, Pane, Screen, Selection, UiModel, WIDE_HEADER,
 };
@@ -36,6 +37,14 @@ pub enum Target {
     Conversation(usize),
     /// A conversation's unread badge.
     Badge(usize),
+    /// `/ search` on the list's bottom border: opens the search.
+    SearchHint,
+    /// The open search's field and the blank under it: the cursor goes
+    /// there.
+    SearchField,
+    /// A result of the open search, by its index among the results: opens
+    /// it.
+    Result(usize),
     /// A cell of the open conversation's message `message`, at `cell` (a
     /// laid-out row and a column of the pane): where a drag starts. On the
     /// message's delivery mark, `mark`; on a link of its body, the link's
@@ -78,9 +87,9 @@ fn inner(rect: Rect, bottom_border: bool) -> Rect {
     )
 }
 
-/// The columns a title drawn right-aligned in a border row occupies: its
-/// text `" {words} "` ends one cell before the corner. The first column of
-/// `words` and how many.
+/// The columns a title drawn right-aligned in a border row (the top or the
+/// bottom one) occupies: its text `" {words} "` ends one cell before the
+/// corner. The first column of `words` and how many.
 fn right_title(rect: Rect, words: &str) -> (u16, u16) {
     let len = words.chars().count() as u16;
     (rect.right().saturating_sub(2 + len), len)
@@ -149,6 +158,10 @@ pub fn target_at<B: InputBuffer>(model: &UiModel<B>, col: u16, row: u16) -> Targ
         };
     }
     if rect_contains(screen.list, col, row) {
+        let (x, len) = right_title(screen.list, &shown.list_hint);
+        if len > 0 && on(col, row, x, screen.list.bottom().saturating_sub(1), len) {
+            return Target::SearchHint;
+        }
         return list_target(model, screen.list, col, row);
     }
     if rect_contains(screen.messages, col, row) {
@@ -209,10 +222,39 @@ fn compose_index(text: &str, cursor: usize, box_: Rect, x: u16, y: u16) -> usize
         + column
 }
 
-/// A click in the conversation list.
+/// A click in the conversation list, or in the search that took its place.
 fn list_target<B: InputBuffer>(model: &UiModel<B>, list: Rect, col: u16, row: u16) -> Target {
-    let area = inner(list, true);
-    if model.conversations.is_empty() || !rect_contains(area, col, row) {
+    let mut area = inner(list, true);
+    if !rect_contains(area, col, row) {
+        return Target::Pane(Pane::Conversations);
+    }
+    if let Some(open) = &model.search {
+        let r = usize::from(row - area.y);
+        if r < search::FIELD_ROWS {
+            return Target::SearchField;
+        }
+        if let Some(query) = model.query() {
+            let below = usize::from(area.height).saturating_sub(search::FIELD_ROWS);
+            let laid = search::rows(model, query, usize::from(area.width));
+            let at = search::first_row(&laid, open.selected, below) + r - search::FIELD_ROWS;
+            return laid
+                .starts
+                .iter()
+                .position(|&start| at >= start && at < start + 2)
+                .map_or(Target::Pane(Pane::Conversations), Target::Result);
+        }
+        // An empty field shows the plain list under it.
+        area = Rect::new(
+            area.x,
+            area.y + search::FIELD_ROWS as u16,
+            area.width,
+            area.height.saturating_sub(search::FIELD_ROWS as u16),
+        );
+        if !rect_contains(area, col, row) {
+            return Target::Pane(Pane::Conversations);
+        }
+    }
+    if model.conversations.is_empty() {
         return Target::Pane(Pane::Conversations);
     }
     let r = usize::from(row - area.y);

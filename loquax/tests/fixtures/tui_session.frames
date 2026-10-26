@@ -13,7 +13,7 @@
 │                        ││           nothing earlier on this device           │
 │                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
-└────────────────────────┘└────────────────────────────────────────────────────┘
+└────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 2: typed ---
 ┌  loquax afbda7b3───────┐┌  <61ddb79a…>  unknown────────────────── no mailbox ┐
@@ -30,7 +30,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        │├● to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
 │                        ││hello from the tui                                  │
 │                        ││on two lines                                        │
-└────────────────────────┘└────────────────────────────────────────────────────┘
+└────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
 --- frame 3: queued ---
 ┌  loquax afbda7b3───────┐┌  <61ddb79a…>  unknown────────────────── no mailbox ┐
@@ -47,7 +47,7 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 │                        ││                              on two lines  12:00 ○ │
 │                        │├● to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
-└────────────────────────┘└────────────────────────────────────────────────────┘
+└────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
 --- frame 4: delivered ---
 ┌  loquax afbda7b3───────┐┌  <61ddb79a…>  unknown────────────────── no mailbox ┐
@@ -64,7 +64,7 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 │                        ││                              on two lines  12:00 ✓ │
 │                        │├● to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
-└────────────────────────┘└────────────────────────────────────────────────────┘
+└────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
 --- frame 5: reply ---
 ┌  loquax afbda7b3───────┐┌  <61ddb79a…>  unknown────────────────── no mailbox ┐
@@ -81,5 +81,5 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 │                        ││ also on two lines  12:0└──────────────────────────┘│
 │                        │├● to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
-└────────────────────────┘└────────────────────────────────────────────────────┘
+└────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit

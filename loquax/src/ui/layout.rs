@@ -43,7 +43,7 @@ pub const NARROW: usize = 40;
 pub const BAR: char = '▌';
 
 /// What drawing a conversation needs besides the conversation.
-pub struct Draw {
+pub struct Draw<'a> {
     pub now: Option<WallTime>,
     /// The spinner's frame and the legs' seconds.
     pub tick: u64,
@@ -52,6 +52,9 @@ pub struct Draw {
     pub selected: Option<usize>,
     /// The colour tokens of the model's tier and theme.
     pub tokens: &'static Tokens,
+    /// The open search's query: each block marks its first match in place,
+    /// between `«` and `»` (section 5, the 120 x 40 mockup).
+    pub mark: Option<&'a str>,
 }
 
 /// A style drawn in a token's colours.
@@ -131,7 +134,7 @@ enum Last {
 /// `conversation` as rows `width` cells wide: the top line, a centred date
 /// before each day's first message, the `new` rule where the unread begins,
 /// the blocks with a blank row between two of them.
-pub fn conversation(conversation: &Conversation, width: usize, draw: &Draw) -> Laid {
+pub fn conversation(conversation: &Conversation, width: usize, draw: &Draw<'_>) -> Laid {
     let width = width.max(1);
     let mut laid = Laid::empty(width, draw.tokens);
     let mut last = Last::Separator;
@@ -232,7 +235,7 @@ pub fn block_cap(width: usize) -> usize {
 /// words take the block's time colour, unless the block is selected, where
 /// they take its text colour; a mark without a tone (16 colours) takes the
 /// text colour too.
-fn suffix(message: &Message, narrow: bool, draw: &Draw, selected: bool) -> RLine {
+fn suffix(message: &Message, narrow: bool, draw: &Draw<'_>, selected: bool) -> RLine {
     let mut words: Vec<String> = Vec::new();
     if message.outbound && narrow {
         words.push("you".into());
@@ -298,12 +301,13 @@ struct Block {
 /// block in 16 colours and monochrome) reverses the text alone. The suffix may
 /// reach past the cap into the pane's last quarter, as in both mockups, and
 /// takes a row of its own only where the pane itself has no room for it. A
-/// link in the body is underlined and its cells name it in `links`.
+/// link in the body is underlined and its cells name it in `links`. With a
+/// search open the body's first match is marked, the marks part of the text.
 fn block(
     message: &Message,
     index: usize,
     width: usize,
-    draw: &Draw,
+    draw: &Draw<'_>,
     selected: bool,
     links: &mut Vec<String>,
 ) -> Block {
@@ -311,7 +315,11 @@ fn block(
     let cap = block_cap(width);
     let mut rows = Vec::new();
     let mut wrapped = Vec::new();
-    for text in message.body.split('\n') {
+    let body = match draw.mark {
+        Some(query) => super::search::mark_first(&message.body, query),
+        None => message.body.clone(),
+    };
+    for text in body.split('\n') {
         let mut line = plain(text);
         for found in find_links(text) {
             links.push(found.target);

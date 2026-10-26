@@ -51,6 +51,9 @@ pub enum Command {
     Mouse,
     /// Swap the light and the dark colours for the session.
     Theme,
+    /// Open the search over the conversations and their messages, or put
+    /// the cursor back in its field.
+    Search,
 }
 
 /// One palette row: the words the reader filters on, and what it runs.
@@ -63,7 +66,7 @@ pub struct PaletteEntry {
 }
 
 /// The table, in the order the palette lists it unfiltered.
-pub const COMMANDS: [PaletteEntry; 16] = [
+pub const COMMANDS: [PaletteEntry; 17] = [
     entry("send", Command::Send),
     entry("fetch", Command::Fetch),
     entry("quit", Command::Quit),
@@ -80,6 +83,7 @@ pub const COMMANDS: [PaletteEntry; 16] = [
     entry("send on enter", Command::SendOnEnter),
     entry("mouse", Command::Mouse),
     entry("theme", Command::Theme),
+    entry("search", Command::Search),
 ];
 
 /// The entry that runs `command`.

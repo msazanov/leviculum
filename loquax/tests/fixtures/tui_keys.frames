@@ -14,7 +14,7 @@
 │                        ││           nothing earlier on this device           │
 │                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
-└────────────────────────┘└────────────────────────────────────────────────────┘
+└────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 2: second ---
 ┌● loquax afbda7b3───────┐┌  <5ec0ea2e…>  unknown────────────────── no mailbox ┐
@@ -31,7 +31,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││           nothing earlier on this device           │
 │                        │├  to <5ec0ea2e…>──── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
-└────────────────────────┘└────────────────────────────────────────────────────┘
+└────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 3: first ---
 ┌● loquax afbda7b3───────┐┌  <61ddb79a…>  unknown────────────────── no mailbox ┐
@@ -48,7 +48,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││           nothing earlier on this device           │
 │                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
-└────────────────────────┘└────────────────────────────────────────────────────┘
+└────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 4: messages ---
 ┌  loquax afbda7b3───────┐┌● <61ddb79a…>  unknown────────────────── no mailbox ┐
@@ -65,7 +65,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││           nothing earlier on this device           │
 │                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
-└────────────────────────┘└────────────────────────────────────────────────────┘
+└────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 5: compose ---
 ┌  loquax afbda7b3───────┐┌  <61ddb79a…>  unknown────────────────── no mailbox ┐
@@ -82,7 +82,7 @@ Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help �
 │                        ││           nothing earlier on this device           │
 │                        │├● to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
 │                        ││hello                                               │
-└────────────────────────┘└────────────────────────────────────────────────────┘
+└────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
 --- frame 6: list ---
 ┌● loquax afbda7b3───────┐┌  <61ddb79a…>  unknown────────────────── no mailbox ┐
@@ -99,7 +99,7 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 │                        ││           nothing earlier on this device           │
 │                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
 │                        ││hello                                               │
-└────────────────────────┘└────────────────────────────────────────────────────┘
+└────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 7: help ---
 ┌ loquax help ─────────────────────────────────────────────────────────────────┐
@@ -113,10 +113,10 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                                                                              ║
 │Conversations                                                                 ║
 │  Enter                                         open the selected conversation║
+│  Enter                                         open the selected result      ║
 │  Alt-↑   Ctrl-Shift-Tab                        previous conversation         ║
 │  Alt-↓   Ctrl-Tab                              next conversation             ║
 │  Alt-Shift-↑                                   previous unread               ║
-│  Alt-Shift-↓                                   next unread                   ║
 └──────────────────────────────────────────────────────────────────────────────┘
 --- frame 8: closed ---
 ┌● loquax afbda7b3───────┐┌  <61ddb79a…>  unknown────────────────── no mailbox ┐
@@ -133,7 +133,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││           nothing earlier on this device           │
 │                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
 │                        ││hello                                               │
-└────────────────────────┘└────────────────────────────────────────────────────┘
+└────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 === emacs ===
 --- frame 1: attached ---
@@ -151,7 +151,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││           nothing earlier on this device           │
 │                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
-└────────────────────────┘└────────────────────────────────────────────────────┘
+└────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 2: second ---
 ┌● loquax afbda7b3───────┐┌  <5ec0ea2e…>  unknown────────────────── no mailbox ┐
@@ -168,7 +168,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││           nothing earlier on this device           │
 │                        │├  to <5ec0ea2e…>──── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
-└────────────────────────┘└────────────────────────────────────────────────────┘
+└────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 3: first ---
 ┌● loquax afbda7b3───────┐┌  <61ddb79a…>  unknown────────────────── no mailbox ┐
@@ -185,7 +185,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││           nothing earlier on this device           │
 │                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
-└────────────────────────┘└────────────────────────────────────────────────────┘
+└────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 4: messages ---
 ┌  loquax afbda7b3───────┐┌● <61ddb79a…>  unknown────────────────── no mailbox ┐
@@ -202,7 +202,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││           nothing earlier on this device           │
 │                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
-└────────────────────────┘└────────────────────────────────────────────────────┘
+└────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 5: compose ---
 ┌  loquax afbda7b3───────┐┌  <61ddb79a…>  unknown────────────────── no mailbox ┐
@@ -219,7 +219,7 @@ Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help �
 │                        ││           nothing earlier on this device           │
 │                        │├● to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
 │                        ││hello                                               │
-└────────────────────────┘└────────────────────────────────────────────────────┘
+└────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
 --- frame 6: list ---
 ┌● loquax afbda7b3───────┐┌  <61ddb79a…>  unknown────────────────── no mailbox ┐
@@ -236,7 +236,7 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 │                        ││           nothing earlier on this device           │
 │                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
 │                        ││hello                                               │
-└────────────────────────┘└────────────────────────────────────────────────────┘
+└────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 7: help ---
 ┌ loquax help ─────────────────────────────────────────────────────────────────┐
@@ -250,10 +250,10 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                                                                              ║
 │Conversations                                                                 ║
 │  Enter                                         open the selected conversation║
+│  Enter                                         open the selected result      ║
 │  Alt-↑   Ctrl-Shift-Tab                        previous conversation         ║
 │  Alt-↓   Ctrl-Tab                              next conversation             ║
 │  Alt-Shift-↑                                   previous unread               ║
-│  Alt-Shift-↓                                   next unread                   ║
 └──────────────────────────────────────────────────────────────────────────────┘
 --- frame 8: closed ---
 ┌● loquax afbda7b3───────┐┌  <61ddb79a…>  unknown────────────────── no mailbox ┐
@@ -270,7 +270,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││           nothing earlier on this device           │
 │                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
 │                        ││hello                                               │
-└────────────────────────┘└────────────────────────────────────────────────────┘
+└────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 === enhanced ===
 --- frame 1: body ---
@@ -288,7 +288,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        │├● to <61ddb79a…>── Enter send · Shift-Enter newline ┤
 │                        ││one                                                 │
 │                        ││two                                                 │
-└────────────────────────┘└────────────────────────────────────────────────────┘
+└────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
 --- frame 2: sent ---
 ┌  loquax afbda7b3───────┐┌  <61ddb79a…>  unknown────────────────── no mailbox ┐
@@ -305,7 +305,7 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 │                        ││                                       two  12:00 ○ │
 │                        │├● to <61ddb79a…>── Enter send · Shift-Enter newline ┤
 │                        ││                                                    │
-└────────────────────────┘└────────────────────────────────────────────────────┘
+└────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
 --- frame 3: ctrl-c ---
 ┌● loquax afbda7b3───────┐┌  <61ddb79a…>  unknown────────────────── no mailbox ┐
@@ -322,7 +322,7 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 │                        ││                                    └──────────────┘│
 │                        │├  to <61ddb79a…>── Enter send · Shift-Enter newline ┤
 │                        ││                                                    │
-└────────────────────────┘└────────────────────────────────────────────────────┘
+└────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 4: still here ---
 ┌● loquax afbda7b3───────┐┌  <5ec0ea2e…>  unknown────────────────── no mailbox ┐
@@ -339,7 +339,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││           nothing earlier on this d└──────────────┘│
 │                        │├  to <5ec0ea2e…>── Enter send · Shift-Enter newline ┤
 │                        ││                                                    │
-└────────────────────────┘└────────────────────────────────────────────────────┘
+└────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 === plain-alt-enter ===
 --- frame 1: body ---
@@ -357,7 +357,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        │├● to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
 │                        ││one                                                 │
 │                        ││two                                                 │
-└────────────────────────┘└────────────────────────────────────────────────────┘
+└────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
 === plain-ctrl-j ===
 --- frame 1: body ---
@@ -375,7 +375,7 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 │                        │├● to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
 │                        ││one                                                 │
 │                        ││two                                                 │
-└────────────────────────┘└────────────────────────────────────────────────────┘
+└────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
 === enter-off ===
 --- frame 1: switched ---
@@ -393,7 +393,7 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 │                        ││           nothing└────────────────────────────────┘│
 │                        │├  to <61ddb79a…>──── Alt-Enter send · Enter newline ┤
 │                        ││                                                    │
-└────────────────────────┘└────────────────────────────────────────────────────┘
+└────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 2: body ---
 ┌  loquax afbda7b3───────┐┌  <61ddb79a…>  unknown────────────────── no mailbox ┐
@@ -410,7 +410,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        │├● to <61ddb79a…>──── Alt-Enter send · Enter newline ┤
 │                        ││one                                                 │
 │                        ││two                                                 │
-└────────────────────────┘└────────────────────────────────────────────────────┘
+└────────────── / search ┘└────────────────────────────────────────────────────┘
 Alt-Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
 --- frame 3: sent ---
 ┌  loquax afbda7b3───────┐┌  <61ddb79a…>  unknown────────────────── no mailbox ┐
@@ -427,5 +427,5 @@ Alt-Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl
 │                        ││                  └────────────────────────────────┘│
 │                        │├● to <61ddb79a…>──── Alt-Enter send · Enter newline ┤
 │                        ││                                                    │
-└────────────────────────┘└────────────────────────────────────────────────────┘
+└────────────── / search ┘└────────────────────────────────────────────────────┘
 Alt-Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit

@@ -21,7 +21,7 @@
 │                        ││                           the tripod fits  14:06 ⠋ │
 │                        │├● to <4f4f4f4f…>──── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
-└────────────────────────┘└────────────────────────────────────────────────────┘
+└────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
 --- 120 x 40 ---
 ┌  loquax afafafaf─────────────────┐┌  <4f4f4f4f…>  unknown────────────────────────── 4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f ┐
@@ -62,7 +62,7 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 │                                  ││                                                         the tripod fits  14:06 ⠋ │
 │                                  │├● to <4f4f4f4f…>────────────────────────────────── Enter send · Alt-Enter newline ┤
 │                                  ││                                                                                  │
-└──────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────┘
+└──────────────────────── / search ┘└──────────────────────────────────────────────────────────────────────────────────┘
 Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
 --- cursor ---
 ┌  loquax afafafaf───────┐┌● <4f4f4f4f…>  unknown──── mailbox 9c9c9c9c adopted ┐
@@ -87,7 +87,7 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 │                        ││                           the tripod fits  14:06 ⠋ │
 │                        │├  to <4f4f4f4f…>──── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
-└────────────────────────┘└────────────────────────────────────────────────────┘
+└────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- detail ---
 ┌  loquax afafafaf───────┐┌● <4f4f4f4f…>  unknown──── mailbox 9c9c9c9c adopted ┐
@@ -112,7 +112,7 @@ Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help �
 │                        ││                           the tripod fits  14:06 ⠋ │
 │                        │├  to <4f4f4f4f…>──── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
-└────────────────────────┘└────────────────────────────────────────────────────┘
+└────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- 60 x 20, narrow ---
 ┌  loquax afafafaf───────┐┌  <4f4f4f4f…>  unknown──────────┐
@@ -133,5 +133,5 @@ Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help �
 │                        ││ the tripod fits  you 14:06 ⠋   │
 │                        │├ Enter send · Alt-Enter newline ┤
 │                        ││                                │
-└────────────────────────┘└────────────────────────────────┘
+└────────────── / search ┘└────────────────────────────────┘
 Enter send │ Tab pane │ Esc back │ Ctrl-q quit

@@ -1,0 +1,398 @@
+=== 120x40 ===
+--- frame 1: typed ---
+┌● Search────────────── esc closes ┐┌  <5ec0ea2e…>  unknown────────────────────────── 5ec0ea2ecbc35ac16053c86cc29663ec ┐
+│ / tripod                         ││                                                                       no mailbox │
+│                                  ││ ──────────────────────────────────────────────────────────────────────────────── │
+│ MESSAGES                       3 ││                                                                                  │
+│ ▌you to <5ec0ea2e…>        14:07 ││                                                                                  │
+│ ▌the «tripod» stays in the van,… ││                                                                                  │
+│                                  ││                                                                                  │
+│  you to <61ddb79a…>        14:06 ││                                                                                  │
+│  the «tripod» fits               ││                                                                                  │
+│                                  ││                                                                                  │
+│  you to <61ddb79a…>        14:05 ││                                                                                  │
+│  and the small «tripod» if it f… ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                          nothing earlier on this device                          │
+│                                  ││                                   ── Today ──                                    │
+│                                  ││                     the «tripod» stays in the van, 61ddb79a has the bag  14:07 ○ │
+│                                  │├  to <5ec0ea2e…>────────────────────────────────── Enter send · Alt-Enter newline ┤
+│                                  ││                                                                                  │
+└──────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────┘
+Enter open │ Ctrl-s / Ctrl-r next, previous │ Tab to the results │ Esc close search │ Alt-x commands │ Ctrl-q quit
+--- frame 2: opened ---
+┌  Search────────────── esc closes ┐┌● <61ddb79a…>  unknown────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
+│ / tripod                         ││                                                                       no mailbox │
+│                                  ││ ──────────────────────────────────────────────────────────────────────────────── │
+│ MESSAGES                       3 ││                                                                                  │
+│  you to <5ec0ea2e…>        14:07 ││                                                                                  │
+│  the «tripod» stays in the van,… ││                                                                                  │
+│                                  ││                                                                                  │
+│  you to <61ddb79a…>        14:06 ││                                                                                  │
+│  the «tripod» fits               ││                                                                                  │
+│                                  ││                                                                                  │
+│ ▌you to <61ddb79a…>        14:05 ││                                                                                  │
+│ ▌and the small «tripod» if it f… ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                          nothing earlier on this device                          │
+│                                  ││                             ── Friday 23 October ──                              │
+│                                  ││                                  did the board come back from the soak?  19:40 ○ │
+│                                  ││                                                                                  │
+│                                  ││                                   ── Today ──                                    │
+│                                  ││                                                  ▌and the small «tripod»         │
+│                                  ││                                                  ▌if it fits in the bag  14:05 ○ │
+│                                  ││                                                                                  │
+│                                  ││                                                       the «tripod» fits  14:06 ○ │
+│                                  │├  to <61ddb79a…>────────────────────────────────── Enter send · Alt-Enter newline ┤
+│                                  ││                                                                                  │
+└──────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────┘
+Enter details │ i write │ n / N next, previous │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+--- frame 3: next ---
+┌  Search────────────── esc closes ┐┌● <61ddb79a…>  unknown────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
+│ / tripod                         ││                                                                       no mailbox │
+│                                  ││ ──────────────────────────────────────────────────────────────────────────────── │
+│ MESSAGES                       3 ││                                                                                  │
+│  you to <5ec0ea2e…>        14:07 ││                                                                                  │
+│  the «tripod» stays in the van,… ││                                                                                  │
+│                                  ││                                                                                  │
+│  you to <61ddb79a…>        14:06 ││                                                                                  │
+│  the «tripod» fits               ││                                                                                  │
+│                                  ││                                                                                  │
+│ ▌you to <61ddb79a…>        14:05 ││                                                                                  │
+│ ▌and the small «tripod» if it f… ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                          nothing earlier on this device                          │
+│                                  ││                             ── Friday 23 October ──                              │
+│                                  ││                                  did the board come back from the soak?  19:40 ○ │
+│                                  ││                                                                                  │
+│                                  ││                                   ── Today ──                                    │
+│                                  ││                                                   and the small «tripod»         │
+│                                  ││                                                   if it fits in the bag  14:05 ○ │
+│                                  ││                                                                                  │
+│                                  ││                                                      ▌the «tripod» fits  14:06 ○ │
+│                                  │├  to <61ddb79a…>────────────────────────────────── Enter send · Alt-Enter newline ┤
+│                                  ││                                                                                  │
+└──────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────┘
+Enter details │ i write │ n / N next, previous │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+--- frame 4: previous ---
+┌  Search────────────── esc closes ┐┌● <61ddb79a…>  unknown────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
+│ / tripod                         ││                                                                       no mailbox │
+│                                  ││ ──────────────────────────────────────────────────────────────────────────────── │
+│ MESSAGES                       3 ││                                                                                  │
+│  you to <5ec0ea2e…>        14:07 ││                                                                                  │
+│  the «tripod» stays in the van,… ││                                                                                  │
+│                                  ││                                                                                  │
+│  you to <61ddb79a…>        14:06 ││                                                                                  │
+│  the «tripod» fits               ││                                                                                  │
+│                                  ││                                                                                  │
+│ ▌you to <61ddb79a…>        14:05 ││                                                                                  │
+│ ▌and the small «tripod» if it f… ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                          nothing earlier on this device                          │
+│                                  ││                             ── Friday 23 October ──                              │
+│                                  ││                                  did the board come back from the soak?  19:40 ○ │
+│                                  ││                                                                                  │
+│                                  ││                                   ── Today ──                                    │
+│                                  ││                                                  ▌and the small «tripod»         │
+│                                  ││                                                  ▌if it fits in the bag  14:05 ○ │
+│                                  ││                                                                                  │
+│                                  ││                                                       the «tripod» fits  14:06 ○ │
+│                                  │├  to <61ddb79a…>────────────────────────────────── Enter send · Alt-Enter newline ┤
+│                                  ││                                                                                  │
+└──────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────┘
+Enter details │ i write │ n / N next, previous │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+--- frame 5: both groups ---
+┌● Search────────────── esc closes ┐┌  <61ddb79a…>  unknown────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
+│ / 61dd                           ││                                                                       no mailbox │
+│                                  ││ ──────────────────────────────────────────────────────────────────────────────── │
+│ CONVERSATIONS                  1 ││                                                                                  │
+│ ▌<«61dd»b79a…>             14:06 ││                                                                                  │
+│ ▌you: the tripod fits            ││                                                                                  │
+│                                  ││                                                                                  │
+│ MESSAGES                       1 ││                                                                                  │
+│  you to <5ec0ea2e…>        14:07 ││                                                                                  │
+│  …ipod stays in the van, «61dd»… ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                          nothing earlier on this device                          │
+│                                  ││                             ── Friday 23 October ──                              │
+│                                  ││                                  did the board come back from the soak?  19:40 ○ │
+│                                  ││                                                                                  │
+│                                  ││                                   ── Today ──                                    │
+│                                  ││                                                   and the small tripod           │
+│                                  ││                                                   if it fits in the bag  14:05 ○ │
+│                                  ││                                                                                  │
+│                                  ││                                                         the tripod fits  14:06 ○ │
+│                                  │├  to <61ddb79a…>────────────────────────────────── Enter send · Alt-Enter newline ┤
+│                                  ││                                                                                  │
+└──────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────┘
+Enter open │ Ctrl-s / Ctrl-r next, previous │ Tab to the results │ Esc close search │ Alt-x commands │ Ctrl-q quit
+--- frame 6: closed ---
+┌● loquax afbda7b3─────────────────┐┌  <61ddb79a…>  unknown────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
+│ <5ec0ea2e…>                14:07 ││                                                                       no mailbox │
+│ you: the tripod stays in the va… ││ ──────────────────────────────────────────────────────────────────────────────── │
+│                                  ││                                                                                  │
+│▌<61ddb79a…>                14:06 ││                                                                                  │
+│▌you: the tripod fits             ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                          nothing earlier on this device                          │
+│                                  ││                             ── Friday 23 October ──                              │
+│                                  ││                                  did the board come back from the soak?  19:40 ○ │
+│                                  ││                                                                                  │
+│                                  ││                                   ── Today ──                                    │
+│                                  ││                                                   and the small tripod           │
+│                                  ││                                                   if it fits in the bag  14:05 ○ │
+│                                  ││                                                                                  │
+│                                  ││                                                         the tripod fits  14:06 ○ │
+│                                  │├  to <61ddb79a…>────────────────────────────────── Enter send · Alt-Enter newline ┤
+│                                  ││                                                                                  │
+└──────────────────────── / search ┘└──────────────────────────────────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+=== 80x24 ===
+--- frame 1: typed ---
+┌● Search──── esc closes ┐┌  <5ec0ea2e…>  unknown────────────────── no mailbox ┐
+│ / tripod               ││                                                    │
+│                        ││                                                    │
+│ MESSAGES             3 ││                                                    │
+│ ▌you to <5ec0ea… 14:07 ││                                                    │
+│ ▌the «tripod» stays i… ││                                                    │
+│                        ││                                                    │
+│  you to <61ddb7… 14:06 ││                                                    │
+│  the «tripod» fits     ││                                                    │
+│                        ││                                                    │
+│  you to <61ddb7… 14:05 ││                                                    │
+│  … the small «tripod»… ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││           nothing earlier on this device           │
+│                        ││                    ── Today ──                     │
+│                        ││                     the «tripod» stays in the van, │
+│                        ││                     61ddb79a has the bag  14:07 ○  │
+│                        │├  to <5ec0ea2e…>──── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────────────────┘└────────────────────────────────────────────────────┘
+Enter open │ Ctrl-s / Ctrl-r next, previous │ Esc close search │ Ctrl-q quit
+--- frame 2: opened ---
+┌  Search──── esc closes ┐┌● <61ddb79a…>  unknown────────────────── no mailbox ┐
+│ / tripod               ││                                                    │
+│                        ││                                                    │
+│ MESSAGES             3 ││                                                    │
+│  you to <5ec0ea… 14:07 ││                                                    │
+│  the «tripod» stays i… ││                                                    │
+│                        ││                                                    │
+│  you to <61ddb7… 14:06 ││                                                    │
+│  the «tripod» fits     ││                                                    │
+│                        ││                                                    │
+│ ▌you to <61ddb7… 14:05 ││           nothing earlier on this device           │
+│ ▌… the small «tripod»… ││              ── Friday 23 October ──               │
+│                        ││                   did the board come back from the │
+│                        ││                   soak?  19:40 ○                   │
+│                        ││                                                    │
+│                        ││                    ── Today ──                     │
+│                        ││                    ▌and the small «tripod»         │
+│                        ││                    ▌if it fits in the bag  14:05 ○ │
+│                        ││                                                    │
+│                        ││                         the «tripod» fits  14:06 ○ │
+│                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────────────────┘└────────────────────────────────────────────────────┘
+Enter details │ i write │ n / N next, previous │ Tab pane │ Esc back │ q quit
+--- frame 3: next ---
+┌  Search──── esc closes ┐┌● <61ddb79a…>  unknown────────────────── no mailbox ┐
+│ / tripod               ││                                                    │
+│                        ││                                                    │
+│ MESSAGES             3 ││                                                    │
+│  you to <5ec0ea… 14:07 ││                                                    │
+│  the «tripod» stays i… ││                                                    │
+│                        ││                                                    │
+│  you to <61ddb7… 14:06 ││                                                    │
+│  the «tripod» fits     ││                                                    │
+│                        ││                                                    │
+│ ▌you to <61ddb7… 14:05 ││           nothing earlier on this device           │
+│ ▌… the small «tripod»… ││              ── Friday 23 October ──               │
+│                        ││                   did the board come back from the │
+│                        ││                   soak?  19:40 ○                   │
+│                        ││                                                    │
+│                        ││                    ── Today ──                     │
+│                        ││                     and the small «tripod»         │
+│                        ││                     if it fits in the bag  14:05 ○ │
+│                        ││                                                    │
+│                        ││                        ▌the «tripod» fits  14:06 ○ │
+│                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────────────────┘└────────────────────────────────────────────────────┘
+Enter details │ i write │ n / N next, previous │ Tab pane │ Esc back │ q quit
+--- frame 4: previous ---
+┌  Search──── esc closes ┐┌● <61ddb79a…>  unknown────────────────── no mailbox ┐
+│ / tripod               ││                                                    │
+│                        ││                                                    │
+│ MESSAGES             3 ││                                                    │
+│  you to <5ec0ea… 14:07 ││                                                    │
+│  the «tripod» stays i… ││                                                    │
+│                        ││                                                    │
+│  you to <61ddb7… 14:06 ││                                                    │
+│  the «tripod» fits     ││                                                    │
+│                        ││                                                    │
+│ ▌you to <61ddb7… 14:05 ││           nothing earlier on this device           │
+│ ▌… the small «tripod»… ││              ── Friday 23 October ──               │
+│                        ││                   did the board come back from the │
+│                        ││                   soak?  19:40 ○                   │
+│                        ││                                                    │
+│                        ││                    ── Today ──                     │
+│                        ││                    ▌and the small «tripod»         │
+│                        ││                    ▌if it fits in the bag  14:05 ○ │
+│                        ││                                                    │
+│                        ││                         the «tripod» fits  14:06 ○ │
+│                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────────────────┘└────────────────────────────────────────────────────┘
+Enter details │ i write │ n / N next, previous │ Tab pane │ Esc back │ q quit
+--- frame 5: both groups ---
+┌● Search──── esc closes ┐┌  <61ddb79a…>  unknown────────────────── no mailbox ┐
+│ / 61dd                 ││                                                    │
+│                        ││                                                    │
+│ CONVERSATIONS        1 ││                                                    │
+│ ▌<«61dd»b79a…>   14:06 ││                                                    │
+│ ▌you: the tripod fits  ││                                                    │
+│                        ││                                                    │
+│ MESSAGES             1 ││                                                    │
+│  you to <5ec0ea… 14:07 ││                                                    │
+│  … in the van, «61dd»… ││                                                    │
+│                        ││           nothing earlier on this device           │
+│                        ││              ── Friday 23 October ──               │
+│                        ││                   did the board come back from the │
+│                        ││                   soak?  19:40 ○                   │
+│                        ││                                                    │
+│                        ││                    ── Today ──                     │
+│                        ││                     and the small tripod           │
+│                        ││                     if it fits in the bag  14:05 ○ │
+│                        ││                                                    │
+│                        ││                           the tripod fits  14:06 ○ │
+│                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────────────────┘└────────────────────────────────────────────────────┘
+Enter open │ Ctrl-s / Ctrl-r next, previous │ Esc close search │ Ctrl-q quit
+--- frame 6: closed ---
+┌● loquax afbda7b3───────┐┌  <61ddb79a…>  unknown────────────────── no mailbox ┐
+│ <5ec0ea2e…>      14:07 ││                                                    │
+│ you: the tripod stays… ││                                                    │
+│                        ││                                                    │
+│▌<61ddb79a…>      14:06 ││                                                    │
+│▌you: the tripod fits   ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││           nothing earlier on this device           │
+│                        ││              ── Friday 23 October ──               │
+│                        ││                   did the board come back from the │
+│                        ││                   soak?  19:40 ○                   │
+│                        ││                                                    │
+│                        ││                    ── Today ──                     │
+│                        ││                     and the small tripod           │
+│                        ││                     if it fits in the bag  14:05 ○ │
+│                        ││                                                    │
+│                        ││                           the tripod fits  14:06 ○ │
+│                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit

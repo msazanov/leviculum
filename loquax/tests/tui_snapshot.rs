@@ -29,6 +29,14 @@
 //! focus; and drag across two messages, whose release copies them by OSC 52.
 //! Pinned in `tests/fixtures/tui_mouse.frames`.
 //!
+//! The search's session (section 7, slice 4) runs at 120 x 40 and at 80 x
+//! 24: four messages in two conversations, `/` and `tripod` (the messages
+//! group, three), the third result opened at its message with the match
+//! marked in place, `n` and `N` stepping the matches there, a query that
+//! is a conversation's name and a word of a message (both groups), and
+//! `Esc` bringing the list back with the conversation as it was. Pinned in
+//! `tests/fixtures/tui_search_session.frames`.
+//!
 //! The daemon is the in-process one `mailbox_cli.rs` uses. The correspondent
 //! is a second loquax engine attached to it in this process
 //! (`loquax::engine::attach`), a full LXMF router, so the proof that turns the
@@ -62,6 +70,7 @@ const EXPECTED_KEYS: &str = include_str!("fixtures/tui_keys.frames");
 const EXPECTED_CHAT: &str = include_str!("fixtures/tui_chat.frames");
 const EXPECTED_MOUSE: &str = include_str!("fixtures/tui_mouse.frames");
 const EXPECTED_STYLES: &str = include_str!("fixtures/tui_chat.styles");
+const EXPECTED_SEARCH: &str = include_str!("fixtures/tui_search_session.frames");
 
 const SCRIPT: &str = "\
 until ready 20
@@ -1077,6 +1086,112 @@ async fn the_mouse_clicks_wheels_and_drags_through_the_screen() {
         panic!(
             "the frames moved; this run's are in {}, the pinned ones in \
              loquax/tests/fixtures/tui_mouse.frames\n{all}",
+            kept.display()
+        );
+    }
+}
+
+/// The search, by keys alone, against correspondents that never answer: our
+/// messages are what it finds. No step waits on the engine after `ready`,
+/// so every frame is the same on every run.
+const SEARCH_SCRIPT: &str = "\
+until ready 20
+clock 2026-10-23 19:40
+key enter
+key i
+type did the board come back from the soak?
+key enter
+clock 2026-10-26 14:05
+type and the small tripod
+newline
+type if it fits in the bag
+key enter
+clock 2026-10-26 14:06
+type the tripod fits
+key enter
+key esc
+key esc
+key j
+key enter
+key i
+clock 2026-10-26 14:07
+type the tripod stays in the van, 61ddb79a has the bag
+key enter
+key esc
+key esc
+key /
+type tripod
+frame typed
+key tab
+key j
+key j
+key enter
+frame opened
+key n
+frame next
+key N
+frame previous
+key /
+key backspace
+key backspace
+key backspace
+key backspace
+key backspace
+key backspace
+type 61dd
+frame both groups
+key esc
+frame closed
+key q
+";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_search_finds_opens_and_steps_in_place_at_both_sizes() {
+    let daemon = daemon("tui-search", |b| b).await;
+    let mut all = String::new();
+    for size in ["120x40", "80x24"] {
+        let (frames, _) =
+            run_script_at(&daemon, &format!("search-{size}"), SEARCH_SCRIPT, size).await;
+        let typed = frame(&frames, "typed");
+        assert!(typed.contains("● Search"), "{size}: {typed}");
+        assert!(typed.contains(" esc closes "), "{size}: {typed}");
+        assert!(typed.contains("│ / tripod"), "{size}: {typed}");
+        assert!(typed.contains("│ MESSAGES "), "{size}: {typed}");
+        assert!(!typed.contains("│ CONVERSATIONS "), "{size}: {typed}");
+        assert!(typed.contains("Esc close search"), "{size}: {typed}");
+        // The third result, opened at its message: the block selected and
+        // the match marked in place.
+        let opened = frame(&frames, "opened");
+        assert!(
+            opened.contains("▌and the small «tripod»"),
+            "{size}: {opened}"
+        );
+        assert!(opened.contains("the «tripod» fits"), "{size}: {opened}");
+        assert!(opened.contains("n / N next, previous"), "{size}: {opened}");
+        assert!(
+            frame(&frames, "next").contains("▌the «tripod» fits"),
+            "{size}"
+        );
+        assert_eq!(opened, frame(&frames, "previous"), "{size}: N went back");
+        let both = frame(&frames, "both groups");
+        assert!(both.contains("│ CONVERSATIONS "), "{size}: {both}");
+        assert!(both.contains("│ MESSAGES "), "{size}: {both}");
+        assert!(both.contains("<«61dd»b79a…>"), "{size}: {both}");
+        // Closed: the list and its `/ search` back, nothing marked, the
+        // conversation still the one the result opened.
+        let closed = frame(&frames, "closed");
+        assert!(closed.contains("● loquax"), "{size}: {closed}");
+        assert!(closed.contains(" / search "), "{size}: {closed}");
+        assert!(!closed.contains('«'), "{size}: {closed}");
+        assert!(closed.contains("<61ddb79a…>  unknown"), "{size}: {closed}");
+        all.push_str(&format!("=== {size} ===\n{frames}"));
+    }
+    if all != EXPECTED_SEARCH {
+        let kept = std::env::temp_dir().join("loquax-tui-search-session.frames");
+        let _ = std::fs::write(&kept, &all);
+        panic!(
+            "the frames moved; this run's are in {}, the pinned ones in \
+             loquax/tests/fixtures/tui_search_session.frames\n{all}",
             kept.display()
         );
     }
