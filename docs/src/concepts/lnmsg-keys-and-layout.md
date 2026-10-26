@@ -12,9 +12,11 @@ The table in section 3, the four changes to slice one it asks for
 (section 3, "Four changes to what slice one does") and the Enter rule
 (section 3, Compose) were decided by Lew on 2026-10-26 at 18:15, and slice
 1 of section 7, the keymap, is built (leviculum 1030). The layout in
-section 5 and the slice order in section 7 are the plan the later slices
-are ordered from. The colour part of section 5 ("Colour") is proposed,
-not decided.
+section 5 is Lew's (2026-10-26: Signal's shape in text mode, ours right,
+theirs left) and slice 2, the chat layout, is built in monochrome
+(leviculum 1033; section 5, "Built", names where it differs). The slice
+order in section 7 is the plan the later slices are ordered from. The
+colour part of section 5 ("Colour") is proposed, not decided.
 
 ## 1. The principles (Lew, 2026-10-26)
 
@@ -519,6 +521,48 @@ filled from the keymap rows that carry a label for the focused pane, so
 it changes with the focus and drops low-priority hints first on a narrow
 screen.
 
+### Built 2026-10-26 (leviculum 1033)
+
+The list, the header, the blocks, the date lines, the `new` rule, the
+narrow fallback, the top line and the compose box are drawn as above
+(d13c1a6d, 7b72a2ef, 27e356f0), in `lnmsg/src/ui/layout.rs` from the
+model, so the model knows the screen's size and the time of day. The
+frames are pinned at both mockup sizes: from the model in
+`lnmsg/tests/fixtures/tui_layout.frames`, from a real exchange against a
+daemon in `tui_chat.frames`. Where they differ from the mockups:
+
+- **No search row and no pinned rule.** The list starts at its first
+  conversation. Search is slice 4, pinning needs history (slice 6).
+- **Names are the address**, `<9c31e0a2…>`, everywhere a name stands, and
+  every peer is `unknown`, until slice 5.
+- **The list's title is our own address** (`lnmsg afbda7b3`), as before,
+  not `Chats`.
+- **The header's second row at 120 columns has the mailbox half only**
+  (`mailbox 9c31e0a2 adopted · synced 14:03`, right-aligned, with the rule
+  under it). How the peer is reached and when it was last heard need the
+  path table read for the screen, which nothing does yet. At 80 columns
+  the mailbox state is words, the longest form that fits, never the `⌂`
+  and an age.
+- **The time may reach past the three-quarter cap** when the block's last
+  line has no room for it inside: the text wraps at the cap, the time and
+  the mark take the pane's last quarter if they fit there, else a row of
+  their own. Both mockups already do this.
+- **A send still waiting names its leg** before the time
+  (`are you there  direct 2 s · 12:00 ○`), and a received message whose
+  signature did not verify says `unverified` after its time.
+- **The focus mark** `●` before a pane's title stays, the mockups leave it
+  out. The footer is the keymap's (slice 1), not the mockup's text.
+- **Monochrome.** The selected block is reversed behind a `▌` bar while
+  the conversation has the focus, the list's selected row likewise, the
+  badge always; no colour token is drawn, because "Colour" below is
+  proposed and not decided. The delivery marks keep the tones of
+  2026-08-10.
+- **Times are the moment this session saw the message**, sent from the
+  compose line or arrived, not the LXMF timestamp the sender put in it:
+  until the history slice the device holds no other time, and a peer's
+  clock is not ours to show. A key script pins the clock with a `clock`
+  step.
+
 ### Colour
 
 **Status: proposed 2026-10-26, for Lew's decision.** Lew asked on
@@ -560,7 +604,7 @@ still shows around the blocks.
 
 The delivery marks have colours already, decided on 2026-08-10
 ([the user interface](lnmsg-ui.md), "the ledger and the glyph"), drawn
-today from one theme-blind palette (`lnmsg/src/ui.rs:907`, `tone_rgb`).
+today from one theme-blind palette (`lnmsg/src/ui.rs:1307`, `tone_rgb`).
 That palette was chosen for a dark pane. On a white pane its yellow is
 1.7:1 and its amber 1.9:1, and over the own tint above its red is 2.8:1
 and every dim tone below 3:1. So the tones join the table, per theme and
@@ -624,7 +668,7 @@ plain text. Both programs read `NO_COLOR` into `no_color` themselves.
 #### 2. Light or dark
 
 `lnmsg` already asks the terminal for its background before raw mode
-(`lnmsg/src/tui.rs:504`), the same query `lnomad` makes: OSC 11, with
+(`lnmsg/src/tui.rs:547`), the same query `lnomad` makes: OSC 11, with
 `COLORFGBG` as the fallback, 100 ms to answer
 (`leviculum-ui-ratatui/src/background.rs:12`), decided by
 `resolve_theme` (`leviculum-ui/src/theme.rs:70`). It is hardcoded to
@@ -835,7 +879,7 @@ in truecolor, 3.4:1 to 9.3:1 and 3.1:1 to 8.6:1 in 256.
 #### 5. Tests the layout slice will carry
 
 - **The frames stay plain text.** The `frame` step of the key script
-  (`lnmsg/src/tui.rs:756`) writes characters only, and the existing
+  (`lnmsg/src/tui.rs:835`) writes characters only, and the existing
   snapshot frames keep pinning the monochrome look.
 - **A script step `styles <name>`** writes one frame's per-cell style as a
   map in the letters above: `.` `,` `=` for the three tints, `s` for a
@@ -972,7 +1016,12 @@ layout's.
    view with this session's ledger, behind `Enter` on a message. Depends
    on 1 (the `Enter` row). Its colours are section 5, "Colour", as Lew
    decides it: the tokens, the tier ladder, the `theme` key, and the
-   delivery tones moved into the table; it invents none. *Acceptance:*
+   delivery tones moved into the table; it invents none. *Done
+   2026-10-26 in monochrome, leviculum 1033 (d13c1a6d, 7b72a2ef,
+   27e356f0); section 5, "Built", names the differences. Open: the colour
+   tokens, the tier ladder, the `theme` key, the `styles` script step and
+   the token test, all waiting on "Colour", item 6; the 1001 phase is
+   periculum's.* *Acceptance:*
    snapshots at 80 x 24 and 120 x 40 whose structure is the mockups';
    unit tests over `view` for alignment, wrapping and the `new` line; the
    style maps and the token test of "Colour", item 5. *1001 phase:* Bob's reply arriving while

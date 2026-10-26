@@ -196,6 +196,21 @@ changes of [keys, mouse and layout](lnmsg-keys-and-layout.md), section 3:
 and `Ctrl-n` are motions and the palette is `:` or `Alt-x`, and `Ctrl-c`
 quits nowhere.
 
+### Built 2026-10-26, the chat layout
+
+1033 (#232) is slice 2 of [keys, mouse and layout](lnmsg-keys-and-layout.md),
+section 7: the list as two rows a conversation, most recent first, with
+the last line's preview, the time and the unread badge; the conversation
+as blocks, ours right and theirs left, with a date line between days, the
+`new` rule where the unread begins and the narrow fallback below 40 cells;
+the header with the trust state and the mailbox state; and the detail view
+behind `Enter` on a message, with the ledger of what this session saw
+happen to it, in place of the toast of 1030. The model hears the screen's
+size and the clock, so a page is the pane's height and a reply arriving
+while the reader is scrolled up leaves the view where it is. Monochrome:
+the colour part of that page is still a proposal. Its section 5, "Built",
+lists where the screen differs from the mockups.
+
 The second round on the screen, the full key table (vi, Emacs, the mail
 and the chat programs side by side, per pane), the mouse, the chat layout
 in text mode and the slices after 1002, is
@@ -424,7 +439,7 @@ text across wrapped lines and across message boundaries works and copies
 via OSC 52 (`lnomad/src/app/event.rs:1349-1381`, which works over SSH). Plus a
 `--no-mouse` flag and a runtime toggle for people who want the terminal's
 own selection back. The `StyledChar` IR already carries per-cell ownership
-(`leviculum-ui/src/style.rs:71-84`), so the hit-testing is a small extension
+(`leviculum-ui/src/style.rs:82-95`), so the hit-testing is a small extension
 of `visible_links` rather than new machinery.
 
 ### Terminal QR for paper messages and for your own address

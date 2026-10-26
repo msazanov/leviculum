@@ -131,7 +131,7 @@ magnitude" (`lnomad/src/image_cache.rs:11-14`).
 (`lnomad/src/render.rs:192-217`) produces `Vec<RLine>` where `RLine`, the
 shared styled text model of `leviculum-ui` since 984, is a vector of
 `StyledChar { ch, st, link, field }`
-(`leviculum-ui/src/style.rs:71-92`): already wrapped, aligned and indented,
+(`leviculum-ui/src/style.rs:82-103`): already wrapped, aligned and indented,
 one `RLine` per output row, every cell carrying its resolved style and its
 owning link index. That IR feeds either `to_ratatui_text`
 (`leviculum-ui-ratatui/src/style.rs:91-110`) for the TUI or `emit_ansi`
@@ -142,7 +142,7 @@ every scrollable window (`scrolled`, `lnomad/src/app/model.rs:96-111`).
 
 Two rendering caveats. Wrapping compares `cur.len() > width`, i.e.
 character count rather than display width (`wrap`,
-`lnomad/src/render.rs:771-798`), which will overflow on CJK and emoji. No
+`lnomad/src/render.rs:773-800`), which will overflow on CJK and emoji. No
 test covering that was found, so whether it is a known limitation or an
 oversight is unclear. And the whole page is laid out eagerly on every
 relayout (`lnomad/src/app/model.rs:707-731`), including on every keystroke in a
