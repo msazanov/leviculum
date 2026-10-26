@@ -1083,7 +1083,33 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             iface_pacing_rejections: link.iface_pacing_rejections(),
             attached_interface: link.attached_interface(),
             cipher: link.cipher(),
+            keepalive_ms: link.keepalive_ms(),
+            stale_time_ms: link.stale_time_ms(),
+            keepalives_sent: link.keepalives_sent(),
+            keepalives_acked: link.keepalives_acked(),
+            keepalive_rtt_ms: link.keepalive_rtt_ms(),
         })
+    }
+
+    /// Override this link's keepalive interval (seconds, clamped to the
+    /// protocol minimum), or restore the RTT-derived value with `None`.
+    ///
+    /// Both ends of a link must agree on the interval, otherwise the side
+    /// with the shorter stale window closes a quiet link. Returns `false`
+    /// for an unknown link.
+    pub fn set_link_keepalive(&mut self, link_id: &LinkId, secs: Option<u64>) -> bool {
+        let link_id = self.resolve_link_id(link_id);
+        let Some(link) = self.links.get_mut(&link_id) else {
+            return false;
+        };
+        link.set_keepalive_override(secs);
+        if secs.is_none() {
+            // Re-derive from the handshake RTT (0 when the sample is absent,
+            // which yields the protocol floor); establishment recomputes it.
+            let rtt_us = link.rtt_us().unwrap_or(0);
+            link.update_keepalive_from_rtt(rtt_us as f64 / 1_000_000.0);
+        }
+        true
     }
 
     // Internal: Link Packet Processing
@@ -1887,6 +1913,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         } else {
             // Initiator side: a valid responder echo reset the watchdog.
             // process_keepalive() already bumped keepalives_acked.
+            link.record_keepalive_rtt(now_ms);
             crate::tracing::debug!(
                 target: "leviculum_core::link",
                 "LINK_ACTIVITY link={} kind=keepalive_resp t_ms={} keepalives_sent={} keepalives_acked={}",

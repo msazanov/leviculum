@@ -352,6 +352,12 @@ pub struct LinkStats {
     pub(crate) iface_pacing_rejections: u64,
     pub(crate) attached_interface: Option<usize>,
     pub(crate) cipher: crate::LinkCipher,
+    // — keepalive telemetry —
+    pub(crate) keepalive_ms: u64,
+    pub(crate) stale_time_ms: u64,
+    pub(crate) keepalives_sent: u64,
+    pub(crate) keepalives_acked: u64,
+    pub(crate) keepalive_rtt_ms: Option<u64>,
 }
 
 impl LinkStats {
@@ -437,6 +443,33 @@ impl LinkStats {
     /// Cipher this link was established with. An application that only wants GCM links on some paths checks it here.
     pub fn cipher(&self) -> crate::LinkCipher {
         self.cipher
+    }
+
+    /// Keepalive interval in force for this link (milliseconds)
+    pub fn keepalive_ms(&self) -> u64 {
+        self.keepalive_ms
+    }
+
+    /// Inbound silence after which the link goes stale (milliseconds)
+    pub fn stale_time_ms(&self) -> u64 {
+        self.stale_time_ms
+    }
+
+    /// Proactive keepalives sent since establishment (initiator)
+    pub fn keepalives_sent(&self) -> u64 {
+        self.keepalives_sent
+    }
+
+    /// Keepalive echoes received since establishment (initiator)
+    pub fn keepalives_acked(&self) -> u64 {
+        self.keepalives_acked
+    }
+
+    /// Round trip of the last acknowledged keepalive (initiator), ms.
+    /// Unlike [`rtt_ms`](Self::rtt_ms) this is refreshed during the link's
+    /// life.
+    pub fn keepalive_rtt_ms(&self) -> Option<u64> {
+        self.keepalive_rtt_ms
     }
 }
 

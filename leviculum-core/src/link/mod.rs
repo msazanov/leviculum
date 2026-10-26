@@ -482,6 +482,8 @@ pub struct Link {
     /// Count of keepalive responses received (initiator), since establishment.
     /// Diagnostic counter only; not used for any timeout decision.
     keepalives_acked: u64,
+    /// Round trip of the last acknowledged keepalive (initiator), ms.
+    keepalive_rtt_ms: Option<u64>,
     /// Last LRRTT transmit and retry state for mode-7 GCM initiators.
     /// CBC Links remain one-shot for Python-RNS interoperability.
     rtt_sent_at_ms: Option<u64>,
@@ -647,6 +649,7 @@ impl Link {
             last_keepalive_ms: 0,
             keepalives_sent: 0,
             keepalives_acked: 0,
+            keepalive_rtt_ms: None,
             rtt_sent_at_ms: None,
             rtt_send_count: 0,
             rtt_confirmed: false,
@@ -796,6 +799,7 @@ impl Link {
             last_keepalive_ms: 0,
             keepalives_sent: 0,
             keepalives_acked: 0,
+            keepalive_rtt_ms: None,
             rtt_sent_at_ms: None,
             rtt_send_count: 0,
             rtt_confirmed: false,
@@ -1653,6 +1657,19 @@ impl Link {
     /// Number of keepalive responses received since establishment (diagnostic).
     pub fn keepalives_acked(&self) -> u64 {
         self.keepalives_acked
+    }
+
+    /// Round trip of the most recent acknowledged keepalive in milliseconds
+    /// (initiator only), measured from the send time to the echo.
+    pub fn keepalive_rtt_ms(&self) -> Option<u64> {
+        self.keepalive_rtt_ms
+    }
+
+    /// Record the round trip of an acknowledged keepalive (clock ms).
+    pub(crate) fn record_keepalive_rtt(&mut self, now_ms: u64) {
+        if self.last_keepalive_ms != 0 {
+            self.keepalive_rtt_ms = Some(now_ms.saturating_sub(self.last_keepalive_ms));
+        }
     }
 
     pub(crate) fn rtt_sent_at_ms(&self) -> Option<u64> {

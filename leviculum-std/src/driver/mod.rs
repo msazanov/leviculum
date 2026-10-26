@@ -3658,6 +3658,17 @@ impl ReticulumNode {
         self.inner.lock_recover().link_stats(link_id)
     }
 
+    /// Override one link's keepalive interval (seconds), `None` restores the
+    /// RTT-derived value. Returns `false` for an unknown link. Both ends
+    /// must set the same value.
+    pub fn set_link_keepalive(
+        &self,
+        link_id: &leviculum_core::link::LinkId,
+        secs: Option<u64>,
+    ) -> bool {
+        self.inner.lock_recover().set_link_keepalive(link_id, secs)
+    }
+
     /// Announce a registered destination on all interfaces
     ///
     /// Builds the announce packet and queues it as a Broadcast action.
