@@ -24,7 +24,7 @@ anywhere](handheld-messenger.md)).
 
 No schematic is public. Elecrow's wiki quotes the V1.0 schematic, and
 Elecrow's technical support is the address for it. Until it is here,
-the facts below come from four public sources, and each one names the
+the facts below come from five public sources, and each one names the
 source it rests on:
 
 - **the wiki**: Elecrow's ThinkNode M9 wiki, Meshtastic edition,
@@ -34,9 +34,16 @@ source it rests on:
 - **the Meshtastic variant**: `variants/esp32s3/ELECROW-ThinkNode-M9/`
   in the Meshtastic firmware, develop branch;
 - **the MeshCore variant**: `variants/thinknode_m9/` in MeshCore, main
-  branch.
+  branch;
+- **the FCC filing**: FCC ID 2BDNA-TNM9, Shenzhen Elecrow Limited, last
+  application 2026-08-10. Only a search snippet was read: the filing
+  sits behind a bot wall, so its exhibits (test report, photos) have not
+  been read, and the list of exhibits itself is likely, not confirmed. No
+  CE document was found.
 
-The two variants were read on 2026-10-21. None of these sources is the
+The two variants were read on 2026-10-21 and again on 2026-10-26 (the
+Meshtastic variant at commit 38ae9aab of 2026-10-16), the wiki on
+2026-10-26. None of these sources is the
 hardware reference (rule `feedback_schematic_is_the_hardware_reference`),
 so where they disagree this page keeps the disagreement and does not
 pick a side. The device settles it.
@@ -63,10 +70,19 @@ pick a side. The device settles it.
 ### Display
 
 - 2.4-inch TFT, 240x320, ST7789, no touch. Both variants configure the
-  ST7789.
+  ST7789; the wiki does not name the controller, so the part is likely,
+  not confirmed.
 - Pins (both variants): CS 16, DC 15, RESET 14, TE 19, backlight 17.
   The backlight is on when the pin is low (`TFT_BACKLIGHT_ON LOW` in
   both).
+- The backlight pin drives a MOS switch, not the panel (the wiki's
+  `BL_EN`). The Meshtastic variant dims it with PWM at 44 kHz, active
+  low (`TFT_PWM_FREQ 44000`, `LGFX_INVERT_LIGHT`).
+- Orientation: the panel is 240x320 natively. The Meshtastic variant
+  rotates it with `LGFX_ROTATION=3`, the MeshCore variant sets
+  `DISPLAY_FLIP_VERTICALLY=1`. The MADCTL byte is stated nowhere; it
+  could be derived from LovyanGFX's ST7789 driver at rotation 3, which
+  nobody has checked.
 - Peripheral power: GPIO18, on when low (`VEXT_ENABLE`/`VEXT_ON_VALUE`
   in both). MeshCore's board code switches it on to power the screen.
 
@@ -74,10 +90,12 @@ pick a side. The device settles it.
 
 - 37-key QWERTY plus navigation and function keys (the wiki), read
   through a controller on its own I2C bus, SDA 20 and SCL 21 (both
-  variants).
+  variants and the wiki).
 - KB_INT on GPIO12 signals a key press and wakes the chip from light
   sleep; the Meshtastic variant says it rests low and rises on a press.
   The keyboard light is on GPIO46 (both variants).
+- Register 0x03 takes the long-press time in milliseconds, 16 bits big
+  endian; the Meshtastic variant writes 700 (`variant.cpp`).
 - **Contradiction:** the wiki names an ESP32-S2 as the controller (U10,
   reading a 5x10 matrix); the Meshtastic variant's comments name an
   STC8H. Which chip it is decides nothing for a port as long as the I2C
@@ -88,10 +106,14 @@ pick a side. The device settles it.
 ### Two hardware revisions
 
 The Meshtastic variant tells two revisions apart by the keyboard
-controller's I2C address: **0x6C is V1.0, 0x6D is V1.1** (`m9Version`).
-The GNSS enable line has the opposite polarity on the two: **active low
-on V1.0, active high on V1.1**. The MeshCore variant knows only active
-low, which is V1.0. A port has to probe the address at boot, as the
+controller's I2C address: the controller ACKs at **0x6C on V1.0 and at
+0x6D on V1.1** (`m9Version` 1 and 2; `variant.cpp`, commit 38ae9aab,
+2026-10-16; when both answer, the later probe wins). The only
+difference visible in that code is the GNSS enable line's polarity:
+**active low on V1.0, active high on V1.1**. Other differences in
+parts or pins are unknown. The MeshCore variant ignores the revision
+and knows only active low, which is V1.0; so its GNSS handling on a
+V1.1 board is unverified (inferred, not tested). A port has to probe the address at boot, as the
 Meshtastic variant does, before it touches the GNSS enable line. The
 wiki describes V1.0 only. The unit on our bench is **V1.1**: the
 community port's probe build printed `[BOARD] m9_version=2` and found
@@ -125,8 +147,8 @@ the keyboard controller at I2C 0x6D (2026-10-25 00:30 CET, build
 
 On a second I2C bus, SCL 6 and SDA 7 (both variants):
 
-- a PCF8563 RTC at 0x51 (both variants), backed by its own RTC_3V3
-  supply (the wiki);
+- a PCF8563 RTC at 0x51 on GPIO6 and GPIO7 (both variants), backed by
+  its own RTC_3V3 supply (the wiki);
 - a QMC6309 magnetometer (the wiki);
 - a QMI8658B IMU (the wiki).
 
@@ -138,7 +160,13 @@ follows the wiki, which names the part.
 A Semtech LR1110 with a 3.3 V TCXO on DIO3 (both variants), the RF
 switch on DIO5 and DIO6 with the same table in both variants (standby
 LL, RX HL, TX HH, TX_HP LH, DIO5 first), and NSS 39, BUSY 41, IRQ 42
-(DIO9), NRESET 45. The MeshCore variant transmits at 22 dBm. The
+(DIO9), NRESET 45. DIO7 and DIO8 are "reserved nets in the schematic"
+(the wiki). The switch table holds both TX HH and TX_HP LH, so both PA
+paths are wired; which switch IC sits there and which DIO drives which
+of its inputs is unknown. The MeshCore variant transmits at 22 dBm and
+calls `setRegulatorDCDC()` after `begin()`; that is generic LR1110 code
+for every board, not proof that the M9 carries the DC-DC inductor. The
+Meshtastic variant keeps the LR1110 default ceiling of 22. The
 `leviculum-lr11xx` README carries these values as a `Board` sketch,
 with what was probed on a bench and what stays unknown without the
 schematic: see its section "Worked example: ThinkNode M9 (incomplete)"
@@ -147,13 +175,21 @@ schematic: see its section "Worked example: ThinkNode M9 (incomplete)"
 ### Power
 
 - A 2300 mAh LiPo with protection (the wiki).
-- An LGS4056HDA charger ending the charge at 4.35 V (the wiki).
+- An LGS4056HDA charger ending the charge at 4.35 V (the wiki). Its
+  current is set by a resistor, I = 1000/R (the wiki, quoting the
+  schematic); R is unknown, so the charge current is too.
+- GPIO18 is `VDD_PERIPH_EN`, which "enables power to sensors/LCD-related
+  peripherals" (the wiki). Which of the SD card, the GNSS module and the
+  display hang on it is unknown; the GNSS module has its own EN on
+  GPIO11.
 - Battery voltage on GPIO13 through a 2:1 divider (the wiki; the
   Meshtastic variant's `BATTERY_PIN 13` with `ADC_MULTIPLIER 2.0`).
 - USB power detected on GPIO1, low when present (the wiki's 5V_TEST;
   `EXT_PWR_DETECT 1` in both variants).
 - A slide switch for on and off, a hidden RESET button, and BOOT on
-  GPIO0 (the wiki). Decided 2026-10-25 (Lew): the slide switch is the
+  GPIO0 (the wiki). No source describes the slide switch's electrical
+  role: whether it cuts the battery, the regulator or only signals a
+  pin is unknown. Decided 2026-10-25 (Lew): the slide switch is the
   hard off, a board fact and not part of the one-button grammar; the
   8 s gesture on the M9 is sleep (see "Decided").
 
@@ -168,6 +204,23 @@ schematic: see its section "Worked example: ThinkNode M9 (incomplete)"
 - 2026-10-24, on our unit: the DTR/RTS auto-reset through the CH340K
   works; esptool entered the ROM loader on the first try, three times,
   with no button pressed.
+
+### Two conflicts the device settles
+
+The public sources disagree on two parts. Neither has been measured on
+our unit.
+
+- **The GNSS module.** The wiki names an ATGM336H-5NR32 (and a BM72A);
+  the Meshtastic variant an AG3352 at 115200 baud, put to sleep with
+  `$PAIR003` and then EN low; the MeshCore variant an L76K at 9600 baud.
+  The measurement that settles it: read the boot NMEA banner on the
+  GNSS UART at both 9600 and 115200 baud. The community port's `$PAIR`
+  answer (see "What the community port measured") points at the Airoha
+  family, but it is that port's reading, not ours.
+- **The keyboard controller.** The wiki names an ESP32-S2 ("U10"); the
+  Meshtastic variant's comments an STC8H. The measurement that settles
+  it: a register read over I2C that only one of the two answers, or the
+  marking on the chip once the case is open.
 
 ### What the unit on the rig confirmed
 
@@ -192,7 +245,10 @@ byte to the board (the reviewer's bench notes):
   the chip's revision v0.2 is not the board's. The community port's probe
   build, flashed after the backup, printed `[BOARD]
   m9_version=2` and found the keyboard controller at I2C 0x6D
-  (2026-10-25 00:30 CET, build 7a699446 of the community fork).
+  (2026-10-25 00:30 CET, build 7a699446 of the community fork). Our unit
+  ACKs at 0x6D, so by the probe it is V1.1 and its GNSS enable line is
+  active high. That is the probe's reading; the pin itself has not been
+  measured yet.
 
 ## What changed since August
 
@@ -208,7 +264,7 @@ LR1110MB1DXS shield's PA table (`LR1110MB1DXS_PA_TABLE`,
 `leviculum-nrf/src/boards/t1000e.rs:145-147`).
 
 The driver's README has a section headed "Worked example: ThinkNode M9
-(incomplete)" (`leviculum-lr11xx/README.md:142-161`). Its values come from
+(incomplete)" (`leviculum-lr11xx/README.md:142-163`). Its values come from
 Meshtastic's M9 variant, and some were probed on a bench:
 
 - the TCXO at 3.3 V;
@@ -217,7 +273,7 @@ Meshtastic's M9 variant, and some were probed on a bench:
   clean `GetErrors`, so a 32.768 kHz crystal is fitted.
 
 On one M9 the driver initialised, ran CAD, transmitted, and received
-frames over the air (`leviculum-lr11xx/README.md:259-267`). There is still
+frames over the air (`leviculum-lr11xx/README.md:261-269`). There is still
 no `Board` constant for the M9. The PA table and whether the DC-DC
 inductor is fitted cannot be settled without the Elecrow schematic.
 
@@ -321,7 +377,11 @@ Nothing in this section is built yet, except where a dated note says otherwise.
 1. **The schematic first.** The hardware reference is Elecrow's schematic.
    Pinouts from other firmware and values probed on a bench do not replace
    it (rule `feedback_schematic_is_the_hardware_reference`). The PA table
-   and the DC-DC question above wait for it.
+   and the DC-DC question above wait for it. No schematic is public (no
+   repository, issue or teardown found on 2026-10-26); the address is
+   techsupport@elecrow.com, named by the wiki, and the request asks for
+   both V1.0 and V1.1. The FCC filing's exhibits are the other source for
+   the conducted power, once someone reads them in a browser.
 2. **Save the factory firmware** before anything is written to the
    flash. Done 2026-10-25 (see "What the unit on the rig confirmed").
 3. **Open a bring-up issue with a boot proof** before any radio work: the

@@ -156,8 +156,10 @@ Bench-probed on one M9 (LR1110 fw 0x0303): `RegMode::DcDc` with `LfClk::Rc`
 and with `LfClk::Xtal` (`wait_32k_ready`) both init with a clean `GetErrors`,
 so a 32.768 kHz crystal is fitted. Still unknown without the Elecrow
 schematic: whether the DC-DC inductor is fitted (Meshtastic runs LDO), the
-PA table and the exact TCXO start-up time. A wrong guess usually fails at
-init: a wrong TCXO voltage shows up as `Calibration(errors=0x0020)`, and
+PA table and the exact TCXO start-up time. Both PA paths are wired and the
+firmware uses 22 dBm; the PA table stays unknown until the schematic or the
+FCC report. A wrong guess usually fails at init: a wrong TCXO voltage
+shows up as `Calibration(errors=0x0020)`, and
 `LfClk::Xtal` without a crystal as `Calibration(errors=0x0040)`.
 
 ## 6. Receive model
