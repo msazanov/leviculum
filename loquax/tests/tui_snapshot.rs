@@ -45,6 +45,15 @@
 //! `Carol`, keeps that name over the `Caroline` it announces and is `known`.
 //! Pinned in `tests/fixtures/tui_names.frames`.
 //!
+//! The history's session (section 7, slice 6) runs loquax three times over
+//! one home: an exchange with Bob and a send to Carol, who never answers,
+//! cut off by quitting; a restart with no `--to`, which lists both from the
+//! store, Bob by the name he announced in the first run, our proven message
+//! `✓` and the cut-off send `○` with the restart in its ledger, then pins
+//! Bob and deletes his reply (`d`, `y`); and a third start that shows the
+//! pin above its rule and the reply gone. Pinned in
+//! `tests/fixtures/tui_history.frames`.
+//!
 //! The daemon is the in-process one `mailbox_cli.rs` uses. The correspondent
 //! is a second loquax engine attached to it in this process
 //! (`loquax::engine::attach`), a full LXMF router, so the proof that turns the
@@ -80,6 +89,7 @@ const EXPECTED_MOUSE: &str = include_str!("fixtures/tui_mouse.frames");
 const EXPECTED_STYLES: &str = include_str!("fixtures/tui_chat.styles");
 const EXPECTED_SEARCH: &str = include_str!("fixtures/tui_search_session.frames");
 const EXPECTED_NAMES: &str = include_str!("fixtures/tui_names.frames");
+const EXPECTED_HISTORY: &str = include_str!("fixtures/tui_history.frames");
 
 const SCRIPT: &str = "\
 until ready 20
@@ -1327,6 +1337,227 @@ async fn names_from_announces_carry_their_hash_collide_and_yield_to_a_petname() 
         panic!(
             "the frames moved; this run's are in {}, the pinned ones in \
              loquax/tests/fixtures/tui_names.frames\n{got}",
+            kept.display()
+        );
+    }
+}
+
+/// The first run: the exchange, then a send to Carol, who is never there,
+/// and quit while the runner still waits for her.
+const HISTORY_FIRST: &str = "\
+until ready 20
+frame attached
+key enter
+key i
+type are you at the field site?
+key enter
+until delivery delivered 30
+frame delivered
+until received 1 30
+key esc
+key alt-down
+key i
+type leaving in ten
+key enter
+until leg direct 10
+frame cut off
+key esc
+key q
+";
+
+/// The restart, with no `--to`: what the list holds is the store's.
+const HISTORY_SECOND: &str = "\
+until ready 20
+frame restarted
+key enter
+key enter
+frame ledger
+key esc
+key esc
+key alt-down
+frame bob
+key :
+type pin
+key enter
+frame pinned
+key tab
+key d
+frame asked
+key y
+frame deleted
+key q
+";
+
+const HISTORY_THIRD: &str = "\
+until ready 20
+frame again
+key q
+";
+
+/// One run of loquax over `home`, `--to` each of `to`.
+async fn history_run(
+    daemon: &support::Daemon,
+    home: &Path,
+    name: &str,
+    script: &str,
+    to: &[u8],
+) -> tokio::task::JoinHandle<std::process::Output> {
+    let script_path = home.join(format!("{name}.script"));
+    let frames = home.join(format!("{name}.frames"));
+    std::fs::write(&script_path, script).expect("write the script");
+    let _ = std::fs::remove_file(&frames);
+    let mut args: Vec<String> = vec![
+        "--instance".into(),
+        daemon.instance.clone(),
+        "--config".into(),
+        daemon.config_dir.path().display().to_string(),
+    ];
+    for &seed in to {
+        let address = delivery_address(&fixed_identity(seed)).expect("an address");
+        args.extend([
+            "--to".into(),
+            address.iter().map(|b| format!("{b:02x}")).collect(),
+        ]);
+    }
+    args.extend([
+        "--script".into(),
+        script_path.display().to_string(),
+        "--frames".into(),
+        frames.display().to_string(),
+        "--size".into(),
+        "80x24".into(),
+    ]);
+    let child_home = home.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let mut command = Command::new(LNMSG);
+        command
+            .args(&args)
+            .env("LNMSG_HOME", &child_home)
+            .env("LNMSG_DISPLAY_NAME", "tui")
+            .env_remove("LEVICULUM_EVENT_LOG")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let child = leviculum_std::process::spawn_supervised(command).expect("spawn loquax");
+        child.wait_with_output().expect("wait for loquax")
+    })
+}
+
+/// A run's frames, after it ended well.
+async fn history_frames(
+    run: tokio::task::JoinHandle<std::process::Output>,
+    home: &Path,
+    name: &str,
+) -> String {
+    let output = run.await.expect("the loquax child thread");
+    let got = std::fs::read_to_string(home.join(format!("{name}.frames"))).unwrap_or_default();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{name}: stderr: {}\nframes:\n{got}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    got
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restart_shows_the_earlier_exchange_with_its_marks() {
+    let daemon = daemon("tui-history", |b| b).await;
+    let home = tempfile::tempdir().expect("tui home");
+    std::fs::write(
+        home.path().join("identity"),
+        encode_identity(&fixed_identity(0x11)).expect("storable"),
+    )
+    .expect("write the identity");
+    let our_address = delivery_address(&fixed_identity(0x11)).expect("our address");
+
+    // The first run, with Bob there for the exchange.
+    let first = history_run(&daemon, home.path(), "first", HISTORY_FIRST, &[0x22, 0x33]).await;
+    wait_for_frame(
+        &home.path().join("first.frames"),
+        "attached",
+        Duration::from_secs(20),
+    )
+    .await;
+    let storage = tempfile::tempdir().expect("bob's storage");
+    let mut bob = attach(AttachConfig {
+        instance: daemon.instance.clone(),
+        storage_dir: storage.path().to_path_buf(),
+        identity: fixed_identity(0x22),
+        display_name: b"Bob".to_vec(),
+        notices: Terminal::new(storage.path().to_path_buf()),
+    })
+    .await
+    .expect("Bob attaches");
+    wait_for_frame(
+        &home.path().join("first.frames"),
+        "delivered",
+        Duration::from_secs(40),
+    )
+    .await;
+    let reply = run_send(
+        &mut bob.outbox,
+        SendRequest {
+            destination: our_address,
+            title: Vec::new(),
+            body: b"yes, from ten".to_vec(),
+            via: Via::Direct,
+        },
+        &SendOptions::new(daemon.instance.clone(), Duration::from_secs(20)),
+        &Tokio::new(),
+    )
+    .await;
+    assert!(reply.is_ok(), "Bob's reply did not go out: {reply:?}");
+    let first = history_frames(first, home.path(), "first").await;
+    bob.stop().await;
+    let cut = frame(&first, "cut off");
+    assert!(cut.contains("leaving in ten"), "{cut}");
+
+    // The restart: no `--to`, and nobody else attached.
+    let second = history_run(&daemon, home.path(), "second", HISTORY_SECOND, &[]).await;
+    let second = history_frames(second, home.path(), "second").await;
+    let restarted = frame(&second, "restarted");
+    assert!(restarted.contains("leaving in ten"), "{restarted}");
+    assert!(
+        restarted.contains(" ○"),
+        "the cut-off send is queued: {restarted}"
+    );
+    assert!(
+        restarted.contains("Bob ·61dd"),
+        "Bob's name from the first run: {restarted}"
+    );
+    assert!(
+        frame(&second, "ledger").contains("loquax restarted: no longer being sent"),
+        "{second}"
+    );
+    let bob_frame = frame(&second, "bob");
+    assert!(
+        bob_frame.contains("are you at the field site?"),
+        "{bob_frame}"
+    );
+    assert!(bob_frame.contains(" ✓"), "the proof survived: {bob_frame}");
+    assert!(bob_frame.contains("yes, from ten"), "{bob_frame}");
+    assert!(frame(&second, "pinned").contains('┄'), "{second}");
+    assert!(frame(&second, "asked").contains("y deletes"), "{second}");
+    assert!(
+        !frame(&second, "deleted").contains("yes, from ten"),
+        "{second}"
+    );
+
+    // A third start: the pin and the delete were written.
+    let third = history_run(&daemon, home.path(), "third", HISTORY_THIRD, &[]).await;
+    let third = history_frames(third, home.path(), "third").await;
+    let again = frame(&third, "again");
+    assert!(again.contains('┄'), "{again}");
+    assert!(!again.contains("yes, from ten"), "{again}");
+
+    let all = format!("=== first ===\n{first}=== second ===\n{second}=== third ===\n{third}");
+    if all != EXPECTED_HISTORY {
+        let kept = std::env::temp_dir().join("loquax-tui-history.frames");
+        let _ = std::fs::write(&kept, &all);
+        panic!(
+            "the frames moved; this run's are in {}, the pinned ones in \
+             loquax/tests/fixtures/tui_history.frames\n{all}",
             kept.display()
         );
     }

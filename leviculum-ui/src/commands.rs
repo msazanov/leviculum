@@ -54,6 +54,12 @@ pub enum Command {
     /// Open the search over the conversations and their messages, or put
     /// the cursor back in its field.
     Search,
+    /// Delete the message under the cursor from this device, after asking.
+    DeleteMessage,
+    /// Delete the open conversation from this device, after asking.
+    DeleteConversation,
+    /// Pin the open conversation above the others, or unpin it.
+    Pin,
 }
 
 /// One palette row: the words the reader filters on, and what it runs.
@@ -66,7 +72,7 @@ pub struct PaletteEntry {
 }
 
 /// The table, in the order the palette lists it unfiltered.
-pub const COMMANDS: [PaletteEntry; 17] = [
+pub const COMMANDS: [PaletteEntry; 20] = [
     entry("send", Command::Send),
     entry("fetch", Command::Fetch),
     entry("quit", Command::Quit),
@@ -84,6 +90,9 @@ pub const COMMANDS: [PaletteEntry; 17] = [
     entry("mouse", Command::Mouse),
     entry("theme", Command::Theme),
     entry("search", Command::Search),
+    entry("delete message", Command::DeleteMessage),
+    entry("delete conversation", Command::DeleteConversation),
+    entry("pin", Command::Pin),
 ];
 
 /// The entry that runs `command`.
@@ -108,17 +117,49 @@ pub fn fuzzy_match(query: &str, name: &str) -> bool {
         .all(|q| rest.any(|n| n.eq_ignore_ascii_case(&q)))
 }
 
-/// The entries `query` matches, in table order.
+/// The entries `query` matches: the one it names exactly first, then those
+/// it begins, then the rest, each in table order. Without the ranking
+/// `:pin` and `Enter` ran `previous conversation`, whose letters hold `p`,
+/// `i` and `n` in order and which stands first in the table.
 pub fn filter(query: &str) -> Vec<&'static PaletteEntry> {
-    COMMANDS
+    let query = query.trim();
+    let mut found: Vec<&'static PaletteEntry> = COMMANDS
         .iter()
         .filter(|e| fuzzy_match(query, e.name))
-        .collect()
+        .collect();
+    found.sort_by_key(|e| {
+        let exact = e.name.eq_ignore_ascii_case(query);
+        let prefix = e
+            .name
+            .get(..query.len())
+            .is_some_and(|start| start.eq_ignore_ascii_case(query));
+        (!exact, !prefix)
+    });
+    found
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_whole_name_or_its_start_ranks_before_a_scattered_match() {
+        let names = |query: &str| -> Vec<&str> { filter(query).iter().map(|e| e.name).collect() };
+        assert_eq!(names("pin")[0], "pin");
+        assert!(names("pin").contains(&"previous conversation"));
+        assert_eq!(names("delete m")[0], "delete message");
+        assert_eq!(names("PIN")[0], "pin");
+        // A scattered match alone keeps the table's order.
+        assert_eq!(
+            names("fc"),
+            [
+                "fetch",
+                "focus conversations",
+                "focus messages",
+                "focus compose"
+            ]
+        );
+    }
 
     #[test]
     fn an_empty_query_lists_the_whole_table_in_order() {

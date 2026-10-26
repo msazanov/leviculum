@@ -78,5 +78,7 @@ pub mod names;
 pub mod outbox;
 pub mod seen;
 pub mod send;
+#[cfg(feature = "history")]
+pub mod store;
 pub mod ui;
 pub mod when;

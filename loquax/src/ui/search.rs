@@ -7,9 +7,10 @@
 //! and its short hash, or the address while a peer has no name) and the
 //! message bodies. [`hits`] lists what it finds in two groups,
 //! the conversations first and then the messages, each most recent first;
-//! a message whose conversation also matches by name is in both. Until the
-//! history slice it searches what this session holds; with history it is
-//! the FTS5 index of storage.
+//! a message whose conversation also matches by name is in both. The
+//! matcher searches what the screen has loaded; what the store holds
+//! further back its FTS5 index finds ([`Hit::Stored`]), and those join the
+//! messages group by their age.
 //!
 //! [`rows`] lays the results out as the list pane shows them under the
 //! field: a group header with its count, then two rows a result, who and
@@ -24,6 +25,7 @@ use alloc::vec::Vec;
 use leviculum_ui::text::{fit_width, truncate_to_cols};
 use leviculum_ui::{RLine, RStyle};
 
+use super::history::StoredHit;
 use super::layout::{painted, BAR};
 use super::{bold, push, Conversation, UiModel};
 use crate::names::Names;
@@ -51,6 +53,8 @@ pub struct Search<B> {
     pub query: B,
     /// The selected result, an index into [`hits`].
     pub selected: usize,
+    /// What the store found for the query below what the screen loaded.
+    pub stored: Vec<StoredHit>,
 }
 
 /// One result.
@@ -60,6 +64,9 @@ pub enum Hit {
     Conversation(usize),
     /// A message whose text matches.
     Message { conversation: usize, message: usize },
+    /// A message the store found that the screen has not loaded, by its
+    /// index in [`Search::stored`].
+    Stored(usize),
 }
 
 /// Where `needle` first occurs in `hay`, ignoring case: its first
@@ -103,12 +110,14 @@ pub fn mark_first(text: &str, query: &str) -> String {
 
 /// What `query` finds among `conversations`: those whose name matches, in
 /// `order` (the list's, most recent first), then every message whose text
-/// matches, the most recent first. Nothing for an empty query.
+/// matches, `stored` among them, the most recent first. Nothing for an
+/// empty query.
 pub fn hits(
     conversations: &[Conversation],
     names: &Names,
     order: &[usize],
     query: &str,
+    stored: &[StoredHit],
 ) -> Vec<Hit> {
     if query.is_empty() {
         return Vec::new();
@@ -129,6 +138,9 @@ pub fn hits(
                 messages.push((message.activity, hit));
             }
         }
+    }
+    for (index, hit) in stored.iter().enumerate() {
+        messages.push((hit.key, Hit::Stored(index)));
     }
     messages.sort_by_key(|&(activity, _)| core::cmp::Reverse(activity));
     out.extend(messages.into_iter().map(|(_, hit)| hit));
@@ -179,8 +191,12 @@ pub struct Laid {
 
 /// `query`'s results `width` cells wide, `selected` behind the bar and,
 /// with `focused`, in the selection's colours.
-pub fn rows<B>(model: &UiModel<B>, query: &str, width: usize) -> Laid {
-    let found = hits(&model.conversations, &model.names, &model.order(), query);
+pub fn rows<B: leviculum_ui::input::InputBuffer>(
+    model: &UiModel<B>,
+    query: &str,
+    width: usize,
+) -> Laid {
+    let found = model.hits();
     let mut laid = Laid {
         rows: Vec::new(),
         starts: Vec::new(),
@@ -202,13 +218,15 @@ pub fn rows<B>(model: &UiModel<B>, query: &str, width: usize) -> Laid {
     for (index, hit) in found.iter().enumerate() {
         let first_of_group = match (index, hit) {
             (0, _) => true,
-            (_, Hit::Message { .. }) => matches!(found[index - 1], Hit::Conversation(_)),
+            (_, Hit::Message { .. } | Hit::Stored(_)) => {
+                matches!(found[index - 1], Hit::Conversation(_))
+            }
             _ => false,
         };
         if first_of_group {
             let (title, n) = match hit {
                 Hit::Conversation(_) => (CONVERSATIONS, count(true)),
-                Hit::Message { .. } => (MESSAGES, count(false)),
+                Hit::Message { .. } | Hit::Stored(_) => (MESSAGES, count(false)),
             };
             laid.rows.push(header(title, n, width));
         }
@@ -271,6 +289,13 @@ fn entry<B>(
             conversation,
             message,
         } => (conversation, Some(message)),
+        Hit::Stored(index) => {
+            let found = model.search.as_ref().and_then(|s| s.stored.get(index));
+            return match found {
+                Some(stored) => stored_entry(model, stored, query, room, now),
+                None => [RLine::default(), RLine::default()],
+            };
+        }
     };
     let conversation = &model.conversations[conversation];
     let shown = message
@@ -306,6 +331,43 @@ fn entry<B>(
         }
         (_, None) => String::new(),
     };
+    let gap = room.saturating_sub(text.chars().count());
+    let mut bottom = RLine::default();
+    push(
+        &mut bottom,
+        &format!(" {text}{} ", " ".repeat(gap)),
+        RStyle::default(),
+    );
+    [top, bottom]
+}
+
+/// A stored result's two rows, as a loaded message's: who and when over the
+/// text with the mark.
+fn stored_entry<B>(
+    model: &UiModel<B>,
+    hit: &StoredHit,
+    query: &str,
+    room: usize,
+    now: Option<WallTime>,
+) -> [RLine; 2] {
+    let time = match (hit.at, now) {
+        (Some(at), Some(now)) => list_time(&at, &now),
+        _ => String::new(),
+    };
+    let label = model.names.label(&hit.peer);
+    let who = match hit.outbound {
+        true => format!("you to {label}"),
+        false => label,
+    };
+    let title = truncate_to_cols(&who, room.saturating_sub(time.chars().count() + 1));
+    let gap = room.saturating_sub(fit_width(&title) + time.chars().count());
+    let mut top = RLine::default();
+    push(
+        &mut top,
+        &format!(" {title}{}{time} ", " ".repeat(gap)),
+        RStyle::default(),
+    );
+    let text = preview(&hit.body, query, room);
     let gap = room.saturating_sub(text.chars().count());
     let mut bottom = RLine::default();
     push(

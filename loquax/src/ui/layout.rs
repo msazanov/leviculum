@@ -33,9 +33,18 @@ use super::{leg_label, plain, push, wrap, Conversation, Message, UiModel};
 use crate::names::Names;
 use crate::when::{date_label, list_time, WallTime};
 
-/// The top of what this device holds. Until the history slice that is the
-/// start of the session.
+/// The top of what this device holds: the store's first message with the
+/// peer.
 pub const EARLIEST: &str = "nothing earlier on this device";
+
+/// The top of what the screen loaded, when the store holds more: reaching it
+/// loads the next page.
+pub fn earlier_line(count: usize) -> String {
+    format!("{count} earlier on this device, scroll up for them")
+}
+
+/// The rule under the pinned conversations.
+pub const PIN_RULE: char = '┄';
 
 /// Below this pane width ours are drawn flush left, with `you` before the
 /// time, because right alignment no longer reads as a side.
@@ -139,6 +148,13 @@ enum Last {
 pub fn conversation(conversation: &Conversation, width: usize, draw: &Draw<'_>) -> Laid {
     let width = width.max(1);
     let mut laid = Laid::empty(width, draw.tokens);
+    if conversation.earlier > 0 {
+        laid.rows[0] = centred(
+            &earlier_line(conversation.earlier),
+            width,
+            painted(draw.tokens.muted),
+        );
+    }
     let mut last = Last::Separator;
     let mut day = None;
     for (index, message) in conversation.messages.iter().enumerate() {
@@ -458,6 +474,13 @@ pub fn list<B: InputBuffer>(model: &UiModel<B>, width: usize, height: usize) -> 
     let first = list_first(model, height);
     let focused = model.focus == super::Pane::Conversations;
     let mut rows = Vec::new();
+    // The rule goes in the blank row under the last pinned conversation,
+    // when another follows it.
+    let last_pinned = order
+        .iter()
+        .rposition(|&i| model.conversations[i].pinned)
+        .filter(|&at| at + 1 < order.len())
+        .map(|at| order[at]);
     for &index in &order[first..] {
         let conversation = &model.conversations[index];
         let here = index == model.selected;
@@ -479,7 +502,18 @@ pub fn list<B: InputBuffer>(model: &UiModel<B>, width: usize, height: usize) -> 
             }
             rows.push(row);
         }
-        rows.push(RLine::default());
+        match last_pinned == Some(index) {
+            true => {
+                let mut rule = RLine::default();
+                push(&mut rule, " ", RStyle::default());
+                let dots: String =
+                    core::iter::repeat_n(PIN_RULE, width.saturating_sub(2)).collect();
+                push(&mut rule, &dots, painted(model.tokens().muted));
+                push(&mut rule, " ", RStyle::default());
+                rows.push(rule);
+            }
+            false => rows.push(RLine::default()),
+        }
     }
     rows.truncate(height);
     rows

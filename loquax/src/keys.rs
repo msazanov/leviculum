@@ -18,8 +18,11 @@
 //! `Ctrl-s`/`Ctrl-r` step the matches, which outside a search is not their
 //! meaning (`Ctrl-r` fetches then).
 //!
+//! Delete (`d`, then `y`) and the palette's `delete conversation` and `pin`
+//! came with the history (slice 6).
+//!
 //! Not here yet, because what they run is a later slice: new conversation
-//! (`m`, `C`), hints (`f`), delete (`d`),
+//! (`m`, `C`), hints (`f`),
 //! and `Ctrl-x Ctrl-c` (a two-key sequence, which the table does not
 //! model). The mouse is not a chord: what it does is [`crate::ui::hit`],
 //! and only its capture switch is a row, the palette's `mouse`.
@@ -188,6 +191,17 @@ pub const ROWS: &[Row<Action>] = {
                 &[key(Char('w'), ALT, Copy, MESSAGES)],
             ],
         ),
+        Row::new(
+            "delete the message",
+            MESSAGES_GROUP,
+            &[&[key(Char('d'), Mods::Plain, run(C::DeleteMessage), MESSAGES)]],
+        )
+        .palette("delete message")
+        .note("on this device; y confirms"),
+        Row::new("delete the conversation", CONVERSATIONS, &[])
+            .palette("delete conversation")
+            .note("on this device; y confirms"),
+        Row::new("pin or unpin the conversation", CONVERSATIONS, &[]).palette("pin"),
         Row::new(
             "previous conversation",
             CONVERSATIONS,

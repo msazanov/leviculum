@@ -138,7 +138,7 @@ Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help �
 │ │size   14 bytes                                                           │ │
 │ │state  queued                                                             │ │
 │ │                                                                          │ │
-│ │this session                                                              │ │
+│ │on this device                                                            │ │
 │ │12:00:00  queued                                                          │ │
 │ └────────────────────────────────────────────────────────────── Esc closes ┘ │
 │                        ││                                                    │
@@ -184,9 +184,12 @@ Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help �
 │  Ctrl-↑ / Ctrl-↓                               top / bottom (Signal)         █
 │  PageDown / PageUp                             page the messages (compose)   █
 │                                                                              █
-│Conversations                                                                 █
+│Conversations                                                                 ║
 │  Enter                                         open the selected conversation║
 │  Enter                                         open the selected result      ║
+│  : delete conversation                         delete the conversation       ║
+│                                                on this device; y confirms    ║
+│  : pin                                         pin or unpin the conversation ║
 │  Alt-↑   Ctrl-Shift-Tab                        previous conversation         ║
 │  Alt-↓   Ctrl-Tab                              next conversation             ║
 │  Alt-Shift-↑                                   previous unread               ║
@@ -195,9 +198,6 @@ Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help �
 │Tab cycles the panes                                                          ║
 │  i / a   r   Ctrl-Shift-T                      write in this conversation    ║
 │  : focus conversations                         focus the conversation list   ║
-│  /   Ctrl-s   Ctrl-Shift-F                     search names and messages     ║
-│                                                Ctrl-F in Signal: here /      ║
-│  n / N   Ctrl-s / Ctrl-r                       next / previous match         ║
 └──────────────────────────────────────────────────────────────────────────────┘
 === wheel ===
 --- frame 1: list focused ---

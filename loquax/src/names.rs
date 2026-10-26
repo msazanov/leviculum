@@ -37,8 +37,8 @@
 //!
 //! # What is not here
 //!
-//! The names heard are this session's: the store across restarts is the
-//! history slice. A petname is set in the contacts file, not yet from the
+//! A name heard is kept in the history store (`crate::store`) and named
+//! again after a restart ([`Names::remember`]). A petname is set in the contacts file, not yet from the
 //! screen; and `blocked` is a state the header says, not yet a filter on
 //! what arrives.
 
@@ -402,6 +402,14 @@ impl Names {
             None => Heard::New,
             Some(was) if was == name => Heard::Same,
             Some(was) => Heard::Changed { was, now: name },
+        }
+    }
+
+    /// A name the store kept from an earlier run: the peer is named by it
+    /// until it announces again, and a different name then is a change.
+    pub fn remember(&mut self, peer: [u8; 16], name: &str) {
+        if let Some(name) = sanitise(name) {
+            self.announced.insert(peer, name);
         }
     }
 

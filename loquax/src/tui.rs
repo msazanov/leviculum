@@ -57,9 +57,11 @@ use loquax::engine::{attach, AttachConfig, Attached};
 use loquax::fanout::{Fanout, Tap};
 use loquax::fetch::{run_fetch, FetchOptions};
 use loquax::mailbox_state::{self, Stored};
-use loquax::outbox::{SendRequest, Via};
+use loquax::outbox::{OutboxEvent, SendRequest, Via};
 use loquax::seen::{SeenStore, SeenWrite};
 use loquax::send::{run_send_auto, AutoError, Leg, SendError, SendOptions};
+use loquax::store::Store;
+use loquax::ui::history::StoreRead;
 use loquax::ui::{self, help_groups, update, Pane, UiEffect, UiEvent, UiModel, View};
 use loquax::when::WallTime;
 use loquax::{display_name, identity, keys};
@@ -165,9 +167,16 @@ enum Job {
     Fetch,
 }
 
-/// The engine, the fan-out, the job queue, and the model they feed.
+/// The engine, the fan-out, the job queue, the store, and the model they
+/// feed.
 struct Shell {
     model: Model,
+    /// The history: every fold's changes are written here before the next
+    /// event, and pages and search results are read from it.
+    store: Store,
+    /// The store failed a write: said once, then on every later failure in
+    /// the log.
+    store_failed: bool,
     attached: Attached,
     fanout: Fanout,
     context: RunContext,
@@ -206,10 +215,15 @@ enum Output {
 }
 
 impl Shell {
-    /// Fold one event and run what comes back.
+    /// Fold one event, write what it changed to the store, and run what
+    /// comes back.
     fn apply(&mut self, event: UiEvent) {
-        for effect in update(&mut self.model, event) {
+        let effects = update(&mut self.model, event);
+        self.persist();
+        let mut answers = Vec::new();
+        for effect in effects {
             match effect {
+                UiEffect::Store(read) => answers.extend(self.read(read)),
                 UiEffect::Send { to, body } => self.jobs.push_back(Job::Send { to, body }),
                 UiEffect::Fetch => self.jobs.push_back(Job::Fetch),
                 UiEffect::Quit => {}
@@ -220,7 +234,72 @@ impl Shell {
                 UiEffect::Mouse(on) => self.outputs.push(Output::Mouse(on)),
             }
         }
+        for answer in answers {
+            self.apply(answer);
+        }
         self.start_next();
+    }
+
+    /// The fold's changes, in one transaction. A failed write is said on
+    /// screen and kept for after the screen: the message is still shown,
+    /// but the reader must know it will not be there after a restart.
+    fn persist(&mut self) {
+        let writes = self.model.take_writes();
+        if let Err(error) = self.store.write(&writes) {
+            loquax::events::store_failed(&error.to_string());
+            if !self.store_failed {
+                self.store_failed = true;
+                self.afterwards.push(error.to_string());
+            }
+            update(
+                &mut self.model,
+                UiEvent::Notice(format!("not saved: {error}")),
+            );
+        }
+    }
+
+    /// What the screen asked the store, answered as the event the model
+    /// waits for.
+    fn read(&mut self, read: StoreRead) -> Option<UiEvent> {
+        let answer = match read {
+            StoreRead::Earlier {
+                peer,
+                before,
+                through,
+            } => self
+                .store
+                .earlier(peer, before, through)
+                .map(|(messages, earlier)| UiEvent::Earlier {
+                    peer,
+                    messages,
+                    earlier,
+                }),
+            StoreRead::Search(query) => self
+                .store
+                .search(&query, &self.model.loaded_from())
+                .map(|hits| UiEvent::StoredHits { query, hits }),
+        };
+        match answer {
+            Ok(event) => Some(event),
+            Err(error) => {
+                loquax::events::store_failed(&error.to_string());
+                self.afterwards.push(error.to_string());
+                Some(UiEvent::Notice(format!("history: {error}")))
+            }
+        }
+    }
+
+    /// A name an announce carried, kept for the next run.
+    fn keep_name(&mut self, destination: [u8; 16]) {
+        if self.model.address == Some(destination) {
+            return;
+        }
+        let Some(name) = self.model.names.announced(&destination).map(str::to_string) else {
+            return;
+        };
+        if let Err(error) = self.store.save_name(destination, &name) {
+            loquax::events::store_failed(&error.to_string());
+        }
     }
 
     /// Everything that arrived since the last call, without waiting.
@@ -228,7 +307,17 @@ impl Shell {
         match self.fanout.pump(&mut self.attached.outbox) {
             Ok(events) => {
                 for event in events {
+                    let named = match &event {
+                        OutboxEvent::Announced {
+                            destination,
+                            name: Some(_),
+                        } => Some(*destination),
+                        _ => None,
+                    };
                     self.apply(UiEvent::Engine(event));
+                    if let Some(destination) = named {
+                        self.keep_name(destination);
+                    }
                 }
             }
             Err(gone) => {
@@ -315,6 +404,12 @@ fn chosen(stored: &Stored) -> UiEvent {
         node: stored.node,
         by_user: stored.chosen_by_user,
     }
+}
+
+/// A key script's clock before its first `clock` step.
+fn script_clock() -> WallTime {
+    let (year, month, day, hour, minute) = SCRIPT_CLOCK;
+    WallTime::from_civil(year, month, day, hour, minute, 0)
 }
 
 /// The wall clock with the host's UTC offset at this instant.
@@ -415,6 +510,23 @@ pub async fn run(options: TuiOptions) -> ExitCode {
         Ok(identity) => identity,
         Err(error) => return super::failure(error, "no-identity"),
     };
+    // The history, before the daemon: a damaged store stops the start with
+    // the file named, and nothing is written over it.
+    let address = match loquax::engine::delivery_address(&identity) {
+        Ok(address) => address,
+        Err(error) => return super::failure(error, "no-identity"),
+    };
+    let store = match Store::open_in(&home, address) {
+        Ok(store) => store,
+        Err(error) => return super::failure(error, "no-store"),
+    };
+    let history = match store
+        .restore()
+        .and_then(|restored| Ok((restored, store.names()?, store.last_key()?)))
+    {
+        Ok(history) => history,
+        Err(error) => return super::failure(error, "no-store"),
+    };
     let display_name = match display_name::from_process(None) {
         Ok(resolved) => resolved,
         Err(error) => return super::usage(error),
@@ -464,6 +576,19 @@ pub async fn run(options: TuiOptions) -> ExitCode {
     };
     let mut model = Model::new(&options.to);
     model.names = loquax::names::Names::new(contacts);
+    let (restored, names, last_key) = history;
+    for (peer, name) in &names {
+        model.names.remember(*peer, name);
+    }
+    // The time the restart's ledger lines carry: the script's own clock, or
+    // the wall clock.
+    let start = match options.script {
+        Some(_) => script_clock(),
+        None => local_now(),
+    };
+    update(&mut model, UiEvent::Clock(start));
+    model.restore(restored);
+    model.activity = model.activity.max(last_key);
     model.ascii = options.ascii;
     model.mouse = !options.no_mouse;
     model.send_on_enter = config.send_on_enter.unwrap_or(true);
@@ -488,6 +613,8 @@ pub async fn run(options: TuiOptions) -> ExitCode {
     let (done_tx, done_rx) = unbounded_channel();
     let mut shell = Shell {
         model,
+        store,
+        store_failed: false,
         attached,
         fanout: Fanout::default(),
         context: RunContext {
@@ -1152,10 +1279,7 @@ async fn run_script(
     let (width, height) = options.size;
     let mut terminal = Terminal::new(TestBackend::new(width, height)).map_err(|e| e.to_string())?;
     shell.apply(UiEvent::Resize { width, height });
-    let (year, month, day, hour, minute) = SCRIPT_CLOCK;
-    shell.apply(UiEvent::Clock(WallTime::from_civil(
-        year, month, day, hour, minute, 0,
-    )));
+    shell.apply(UiEvent::Clock(script_clock()));
     let mut count = 0usize;
     // A frame of the model, or without one a line of what the screen asked
     // of the terminal.

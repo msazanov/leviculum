@@ -168,6 +168,13 @@ pub fn done_without_path(code: u8, path_requests: u32, path_wait_ms: u64) {
     );
 }
 
+/// The history store refused a write or a read (`loquax::store`): what is on
+/// screen is not on disk. The screen says so too; this is the line a reader of
+/// the log greps for.
+pub fn store_failed(detail: &str) {
+    tracing::warn!(event = "LNMSG_STORE_FAILED", detail = %scalar(detail));
+}
+
 // The debug log (leviculum 1002). Not structured events: plain `info` lines
 // for `${LNMSG_HOME}/tui.log`, which the TUI writes at `info` for loquax's own
 // targets, so a send that waits can be read back as what each leg did. No

@@ -1,0 +1,253 @@
+=== first ===
+--- frame 1: attached ---
+┌● loquax afbda7b3───────┐┌  <61ddb79a…>  unknown────────────────── no mailbox ┐
+│▌<61ddb79a…>            ││                                                    │
+│▌                       ││                                                    │
+│                        ││                                                    │
+│ <5ec0ea2e…>            ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││           nothing earlier on this device           │
+│                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+--- frame 2: delivered ---
+┌  loquax afbda7b3───────┐┌  Bob ·61dd  unknown──────────────────── no mailbox ┐
+│▌Bob ·61dd        12:00 ││                                                    │
+│▌you: are you at the f… ││                                                    │
+│                        ││                                                    │
+│ <5ec0ea2e…>            ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││           nothing earlier on this device           │
+│                        ││                    ── Today ──                     │
+│                        ││                are you at the field site?  12:00 ✓ │
+│                        │├● to Bob ·61dd────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
+--- frame 3: cut off ---
+┌  loquax afbda7b3───────┐┌  <5ec0ea2e…>  unknown────────────────── no mailbox ┐
+│▌<5ec0ea2e…>      12:00 ││                                                    │
+│▌you: leaving in ten    ││                                                    │
+│                        ││                                                    │
+│ Bob ·61dd        12:00 ││                                                    │
+│ yes, from ten          ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││           nothing earlier┌────────────────────────┐│
+│                        ││                    ── Tod│✓ message from Bob ·61dd││
+│                        ││               leaving in └────────────────────────┘│
+│                        │├● to <5ec0ea2e…>──── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
+=== second ===
+--- frame 1: restarted ---
+┌● loquax afbda7b3───────┐┌  <5ec0ea2e…>  unknown────────────────── no mailbox ┐
+│▌<5ec0ea2e…>      12:00 ││                                                    │
+│▌you: leaving in ten    ││                                                    │
+│                        ││                                                    │
+│ Bob ·61dd        12:00 ││                                                    │
+│ yes, from ten          ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││           nothing earlier on this device           │
+│                        ││                    ── Today ──                     │
+│                        ││                            leaving in ten  12:00 ○ │
+│                        │├  to <5ec0ea2e…>──── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+--- frame 2: ledger ---
+┌  loquax afbda7b3───────┐┌● <5ec0ea2e…>  unknown────────────────── no mailbox ┐
+│▌<5ec0ea2e…>      12:00 ││                                                    │
+│▌you: leaving in ten    ││                                                    │
+│                        ││                                                    │
+│ Bob ·61dd        12:00 ││                                                    │
+│ ┌ message ─────────────────────────────────────────────────────────────────┐ │
+│ │from you to <5ec0ea2e…>                                                   │ │
+│ │peer   5ec0ea2ecbc35ac16053c86cc29663ec                                   │ │
+│ │id     none yet: the router has not queued it                             │ │
+│ │size   14 bytes                                                           │ │
+│ │state  queued                                                             │ │
+│ │                                                                          │ │
+│ │on this device                                                            │ │
+│ │12:00:00  queued                                                          │ │
+│ │12:00:00  trying direct                                                   │ │
+│ │12:00:00  loquax restarted: no longer being sent                          │ │
+│ └────────────────────────────────────────────────────────────── Esc closes ┘ │
+│                        ││           nothing earlier on this device           │
+│                        ││                    ── Today ──                     │
+│                        ││                           ▌leaving in ten  12:00 ○ │
+│                        │├  to <5ec0ea2e…>──── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+--- frame 3: bob ---
+┌● loquax afbda7b3───────┐┌  Bob ·61dd  unknown──────────────────── no mailbox ┐
+│ <5ec0ea2e…>      12:00 ││                                                    │
+│ you: leaving in ten    ││                                                    │
+│                        ││                                                    │
+│▌Bob ·61dd        12:00 ││                                                    │
+│▌yes, from ten          ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││           nothing earlier on this device           │
+│                        ││                    ── Today ──                     │
+│                        ││                are you at the field site?  12:00 ✓ │
+│                        ││                                                    │
+│                        ││ yes, from ten  12:00                               │
+│                        │├  to Bob ·61dd────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+--- frame 4: pinned ---
+┌● loquax afbda7b3───────┐┌  Bob ·61dd  unknown──────────────────── no mailbox ┐
+│▌Bob ·61dd        12:00 ││                                                    │
+│▌yes, from ten          ││                                                    │
+│ ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄ ││                                                    │
+│ <5ec0ea2e…>      12:00 ││                                                    │
+│ you: leaving in ten    ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││           nothing earlier on this device           │
+│                        ││                    ── Today ──                     │
+│                        ││                are you at the f┌──────────────────┐│
+│                        ││                                │✓ pinned Bob ·61dd││
+│                        ││ yes, from ten  12:00           └──────────────────┘│
+│                        │├  to Bob ·61dd────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+--- frame 5: asked ---
+┌  loquax afbda7b3───────┐┌● Bob ·61dd  unknown──────────────────── no mailbox ┐
+│▌Bob ·61dd        12:00 ││                                                    │
+│▌yes, from ten          ││                                                    │
+│ ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄ ││                                                    │
+│ <5ec0ea2e…>      12:00 ││                                                    │
+│ you: leaving in ten    ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││           nothing earlier on this device           │
+│                        ││                    ── Today ──                     │
+│   ┌─────────────────────────────────────────────────────────────────────────┐│
+│   │⚠ delete this message from this device? y deletes, any other key keeps it││
+│   └─────────────────────────────────────────────────────────────────────────┘│
+│                        │├  to Bob ·61dd────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+--- frame 6: deleted ---
+┌  loquax afbda7b3───────┐┌● Bob ·61dd  unknown──────────────────── no mailbox ┐
+│▌Bob ·61dd        12:00 ││                                                    │
+│▌you: are you at the f… ││                                                    │
+│ ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄ ││                                                    │
+│ <5ec0ea2e…>      12:00 ││                                                    │
+│ you: leaving in ten    ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││           nothi┌──────────────────────────────────┐│
+│                        ││                │✓ message deleted from this device││
+│                        ││               ▌└──────────────────────────────────┘│
+│                        │├  to Bob ·61dd────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+=== third ===
+--- frame 1: again ---
+┌● loquax afbda7b3───────┐┌  Bob ·61dd  unknown──────────────────── no mailbox ┐
+│▌Bob ·61dd        12:00 ││                                                    │
+│▌you: are you at the f… ││                                                    │
+│ ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄ ││                                                    │
+│ <5ec0ea2e…>      12:00 ││                                                    │
+│ you: leaving in ten    ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││           nothing earlier on this device           │
+│                        ││                    ── Today ──                     │
+│                        ││                are you at the field site?  12:00 ✓ │
+│                        │├  to Bob ·61dd────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit

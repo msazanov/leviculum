@@ -71,8 +71,13 @@ std = [
 # Plain `loquax` (and `loquax tui`): the terminal frontend over the core's `ui` model, on the
 # shared widgets (leviculum-ui-ratatui). Off by default: the CLI is what a
 # script installs, and it carries no terminal crate.
+# The message store (`loquax::store`): SQLite with its FTS5 index, the
+# history of docs/src/concepts/loquax-storage.md. The terminal messenger
+# reads and writes it; the CLI does not yet.
+history = ["std", "dep:rusqlite"]
 tui = [
     "std",
+    "history",
     "leviculum-ui/std",
     "dep:leviculum-ui-ratatui",
     "dep:ratatui",
@@ -109,6 +114,10 @@ tui-input = { version = "0.15", default-features = false, optional = true }
 # A web or mail link in a message body, clicked, goes to the system's
 # handler as lnomad hands it one (`xdg-open` on Linux).
 open = { version = "5", optional = true }
+# The history (`history`): bundled, so the musl-static binary carries its
+# SQLite and FTS5 (the build probe of loquax-storage.md, "Options", C), at
+# the version leviculum-cli already ships.
+rusqlite = { version = "0.40.2", default-features = false, features = ["bundled"], optional = true }
 # The structured event log (docs/src/structured-event-logs.md) is a tracing
 # layer, so the emit sites are `tracing::debug!` calls with an `event` field.
 tracing.workspace = true

@@ -161,7 +161,7 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 │ │size   59 bytes                                                           │ │
 │ │state  delivered                                                          │ │
 │ │                                                                          │ │
-│ │this session                                                              │ │
+│ │on this device                                                            │ │
 │ │14:02:00  queued                                                          │ │
 │ │14:02:00  trying direct                                                   │ │
 │ │14:02:00  queued by the router as xxxxxxxx                                │ │
@@ -441,7 +441,7 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 │                     │size   59 bytes                                                           │                     │
 │                     │state  delivered                                                          │                     │
 │                     │                                                                          │                     │
-│                     │this session                                                              │                     │
+│                     │on this device                                                            │                     │
 │                     │14:02:00  queued                                                          │                     │
 │                     │14:02:00  trying direct                                                   │                     │
 │                     │14:02:00  queued by the router as xxxxxxxx                                │                     │

@@ -34,12 +34,10 @@
 //! with two rows a conversation, most recent first; the open conversation as
 //! blocks, ours flush right and theirs flush left, with a date line between
 //! days and a `new` rule where the unread begins; a detail view per message
-//! with what this session saw happen to it. The model knows the screen's size
+//! with what this device saw happen to it. The model knows the screen's size
 //! ([`UiEvent::Resize`]) and the time of day ([`UiEvent::Clock`]), because
 //! where a block wraps and what a page is depend on the one, and every time on
 //! screen on the other; [`layout`] turns a conversation into rows.
-//!
-//! # What is not here
 //!
 //! # The mouse
 //!
@@ -51,12 +49,20 @@
 //! as `Enter` and `F5`. A drag over the conversation selects text and its
 //! release copies it ([`UiEffect::Copy`], OSC 52 in the terminal).
 //!
+//! # History
+//!
+//! The conversations, their messages and ledgers, the pins and the names
+//! heard outlive the process in the shell's store ([`history`]): the model
+//! starts from what it hands back ([`UiModel::restore`]) and says after each
+//! fold what changed ([`UiModel::take_writes`]). The top of a conversation
+//! is the top of the store (`nothing earlier on this device`), or says how
+//! much more the store holds above what is loaded. A message is deleted from
+//! the device with `d` and `y`, a conversation from the palette, and the
+//! palette's `pin` puts a conversation above the list's rule.
+//!
 //! # What is not here
 //!
-//! History: loquax keeps no message store on disk (only the seen record's
-//! ids), so the conversations are this session's, and the top of the pane
-//! says so (`nothing earlier on this device`), and the names heard are this
-//! session's. QR codes are a later slice.
+//! QR codes are a later slice.
 //!
 //! # Names
 //!
@@ -76,7 +82,7 @@
 //! of the open conversation in place. `Esc` closes it and the list comes
 //! back; the conversation keeps what it showed.
 
-use alloc::collections::VecDeque;
+use alloc::collections::{BTreeSet, VecDeque};
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec;
@@ -104,6 +110,9 @@ use crate::outbox::OutboxEvent;
 use crate::send::Leg;
 use crate::when::{list_time, WallTime};
 
+use history::{Confirm, StoreRead, StoreWrite, StoredHit};
+
+pub mod history;
 pub mod hit;
 pub mod layout;
 pub mod search;
@@ -261,12 +270,13 @@ pub struct Message {
     /// (`✓`) or a refusal (`✗`) moves it, not the router's retries on new
     /// links nor its giving up on them, since the peer may well have it.
     pub unproven: bool,
-    /// When this session wrote or received it; `None` before the shell said
+    /// When this device wrote or received it; `None` before the shell said
     /// the time.
     pub at: Option<WallTime>,
     /// The body's bytes, as they went or came.
     pub size: usize,
-    /// What this session saw happen to it, oldest first: the detail view.
+    /// What this device saw happen to it, oldest first, across restarts:
+    /// the detail view.
     pub ledger: Vec<LedgerEntry>,
     /// The leg the runner last reported, kept after it ends so a late proof
     /// still names the way the message went.
@@ -325,7 +335,7 @@ pub struct NewRule {
     pub count: usize,
 }
 
-/// One correspondent and this session's messages with them.
+/// One correspondent and the messages with them the screen loaded.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Conversation {
     /// Their LXMF address.
@@ -343,6 +353,12 @@ pub struct Conversation {
     /// What the conversation says between its messages: the peer's name
     /// changes, each once.
     pub notes: Vec<Note>,
+    /// Pinned above the list's rule (the palette's `pin`), kept in the
+    /// store.
+    pub pinned: bool,
+    /// How many older messages the store holds than the screen loaded: the
+    /// top of the pane says so, and reaching it loads the next page.
+    pub earlier: usize,
 }
 
 /// A line the conversation says between its messages, centred.
@@ -363,6 +379,8 @@ impl Conversation {
             new_rule: None,
             activity: 0,
             notes: Vec::new(),
+            pinned: false,
+            earlier: 0,
         }
     }
 
@@ -475,6 +493,17 @@ pub struct UiModel<B> {
     /// The names this session heard and the reader's contacts: how every
     /// pane names a peer ([`crate::names`]).
     pub names: Names,
+    /// Messages a fold changed, by conversation and key, for the store
+    /// ([`UiModel::take_writes`]).
+    changed: BTreeSet<([u8; 16], u64)>,
+    /// Conversations whose own state (pin, unread) a fold changed.
+    changed_peers: BTreeSet<[u8; 16]>,
+    /// Deletions for the store, in the order they were made.
+    forgotten: Vec<StoreWrite>,
+    /// A delete waiting for its `y`, and the question on screen.
+    pub confirm: Option<(Confirm, Toast)>,
+    /// A stored search result to open once its page has loaded.
+    reveal_pending: Option<([u8; 16], u64)>,
 }
 
 /// Text a drag selected in the open conversation, from where the button went
@@ -529,6 +558,11 @@ impl<B: InputBuffer + Default> UiModel<B> {
             theme: Theme::Dark,
             search: None,
             names: Names::default(),
+            changed: BTreeSet::new(),
+            changed_peers: BTreeSet::new(),
+            forgotten: Vec::new(),
+            confirm: None,
+            reveal_pending: None,
         };
         for peer in peers {
             model.conversation(*peer);
@@ -571,10 +605,17 @@ impl<B> UiModel<B> {
     where
         B: InputBuffer,
     {
-        match self.query() {
-            Some(query) => search::hits(&self.conversations, &self.names, &self.order(), query),
-            None => Vec::new(),
-        }
+        let Some(query) = self.query() else {
+            return Vec::new();
+        };
+        let stored = self.search.as_ref().map_or(&[][..], |s| &s.stored[..]);
+        search::hits(
+            &self.conversations,
+            &self.names,
+            &self.order(),
+            query,
+            stored,
+        )
     }
 
     /// The colour tokens of the tier and theme.
@@ -611,6 +652,10 @@ impl<B> UiModel<B> {
 
     /// The toast to draw now, if any is still young enough.
     pub fn current_toast(&self) -> Option<&Toast> {
+        // A question stays up until it is answered.
+        if let Some((_, question)) = &self.confirm {
+            return Some(question);
+        }
         self.toasts
             .last()
             .filter(|t| self.tick.saturating_sub(t.shown_at) < TOAST_TICKS)
@@ -629,16 +674,23 @@ impl<B> UiModel<B> {
         self.scroll_top = None;
         self.selection = None;
         if let Some(conversation) = self.conversations.get_mut(index) {
-            conversation.unread = 0;
+            if conversation.unread > 0 {
+                conversation.unread = 0;
+                self.changed_peers.insert(conversation.peer);
+            }
             self.message_cursor = conversation.messages.len().saturating_sub(1);
         }
     }
 
-    /// The conversations in the list's order: by their last message, most
-    /// recent first; those without one after, in the order they came.
+    /// The conversations in the list's order: the pinned first, then the
+    /// rest, each by their last message, most recent first; those without
+    /// one after, in the order they came.
     pub fn order(&self) -> Vec<usize> {
         let mut order: Vec<usize> = (0..self.conversations.len()).collect();
-        order.sort_by_key(|&i| core::cmp::Reverse(self.conversations[i].activity));
+        order.sort_by_key(|&i| {
+            let c = &self.conversations[i];
+            (core::cmp::Reverse(c.pinned), core::cmp::Reverse(c.activity))
+        });
         order
     }
 
@@ -754,6 +806,16 @@ pub enum UiEvent {
     /// fallback's "trying a propagation node", a mailbox adoption), the
     /// lines the CLI writes to stderr.
     Notice(String),
+    /// The store's answer to [`StoreRead::Earlier`]: older messages of
+    /// `peer`'s conversation, oldest first, and how many it holds before
+    /// them still.
+    Earlier {
+        peer: [u8; 16],
+        messages: Vec<Message>,
+        earlier: usize,
+    },
+    /// The store's answer to [`StoreRead::Search`].
+    StoredHits { query: String, hits: Vec<StoredHit> },
 }
 
 /// What the shell is asked to do.
@@ -781,6 +843,8 @@ pub enum UiEffect {
     /// once the terminal is restored. A toast is cut to the screen's width,
     /// and a failure's full text is often longer.
     Notice(String),
+    /// Ask the store for what the screen has not loaded.
+    Store(StoreRead),
 }
 
 /// Fold one event into the model.
@@ -819,6 +883,18 @@ pub fn update<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) 
             Vec::new()
         }
         UiEvent::SendDone(result) => on_send_done(model, result),
+        UiEvent::Earlier {
+            peer,
+            messages,
+            earlier,
+        } => {
+            model.on_earlier(peer, messages, earlier);
+            Vec::new()
+        }
+        UiEvent::StoredHits { query, hits } => {
+            model.on_stored_hits(&query, hits);
+            Vec::new()
+        }
         UiEvent::SendUnproven(detail) => on_send_unproven(model, detail),
         UiEvent::SendLeg(leg) => {
             let (tick, now) = (model.tick, model.now);
@@ -850,6 +926,12 @@ pub fn update<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) 
 }
 
 fn on_key<B: InputBuffer + Default>(model: &mut UiModel<B>, key: KeyEvent) -> Vec<UiEffect> {
+    if model.confirm.is_some() {
+        let yes = key.code == KeyCode::Char('y')
+            && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT);
+        model.answer(yes);
+        return Vec::new();
+    }
     let ctx = model.ctx();
     if model.help || model.palette.is_some() || model.detail.is_some() {
         // Only `Ctrl-q`, `Ctrl-c` and backing out reach past an overlay.
@@ -878,11 +960,18 @@ fn on_key<B: InputBuffer + Default>(model: &mut UiModel<B>, key: KeyEvent) -> Ve
                     model.compose.edit(&key);
                 }
                 Pane::Search => {
+                    let more = model.store_has_more();
                     if let Some(search) = model.search.as_mut() {
                         // Every keystroke runs the matcher again: the
-                        // results are derived, only the cursor resets.
+                        // results are derived, only the cursor resets. What
+                        // the screen has not loaded the store searches.
                         if search.query.edit(&key) {
                             search.selected = 0;
+                            search.stored.clear();
+                            let query = search.query.value();
+                            if more && !query.is_empty() {
+                                return vec![UiEffect::Store(StoreRead::Search(query.to_string()))];
+                            }
                         }
                     }
                 }
@@ -943,8 +1032,16 @@ fn act<B: InputBuffer + Default>(
 ) -> Vec<UiEffect> {
     match action {
         Action::Run(command) => return run(model, command),
-        Action::Scroll(cmd) => scroll(model, model.focus, cmd),
-        Action::ScrollMessages(cmd) => scroll(model, Pane::Messages, cmd),
+        Action::Scroll(cmd) => {
+            scroll(model, model.focus, cmd);
+            if model.focus == Pane::Messages {
+                return model.earlier_wanted();
+            }
+        }
+        Action::ScrollMessages(cmd) => {
+            scroll(model, Pane::Messages, cmd);
+            return model.earlier_wanted();
+        }
         Action::Newline => model.compose.newline(),
         Action::Edit => {
             model.compose.edit(&key);
@@ -969,7 +1066,7 @@ fn act<B: InputBuffer + Default>(
         Action::Palette => model.palette = Some(Palette::default()),
         Action::QuitHint => return quit_hint(model),
         Action::Copy => return copy(model, None),
-        Action::OpenResult => open_result(model),
+        Action::OpenResult => return open_result(model),
         Action::Match(forward) => match model.focus {
             Pane::Messages => step_match(model, forward),
             _ => step_result(model, if forward { 1 } else { -1 }),
@@ -1000,11 +1097,11 @@ fn close_search<B>(model: &mut UiModel<B>) {
 /// marked in it. The search stays open, so `n` goes on from there. With an
 /// empty field the list is the plain one, and its selected conversation
 /// opens.
-fn open_result<B: InputBuffer>(model: &mut UiModel<B>) {
+fn open_result<B: InputBuffer>(model: &mut UiModel<B>) -> Vec<UiEffect> {
     let hits = model.hits();
     if model.query().is_none() {
         model.focus = Pane::Messages;
-        return;
+        return Vec::new();
     }
     let selected = model.search.as_ref().map_or(0, |s| s.selected);
     match hits.get(selected) {
@@ -1024,8 +1121,15 @@ fn open_result<B: InputBuffer>(model: &mut UiModel<B>) {
             model.focus = Pane::Messages;
             reveal(model, message);
         }
+        Some(&search::Hit::Stored(index)) => {
+            let found = model.search.as_ref().and_then(|s| s.stored.get(index));
+            if let Some(hit) = found.cloned() {
+                return model.open_stored(&hit);
+            }
+        }
         None => model.toast(ToastKind::Info, search::NO_MATCHES.to_string()),
     }
+    Vec::new()
 }
 
 /// Move the results' cursor by `by` rows of results, held to the list.
@@ -1361,6 +1465,7 @@ fn wheel<B: InputBuffer>(model: &mut UiModel<B>, col: u16, row: u16, down: bool)
                 false => top.saturating_sub(WHEEL_ROWS),
             };
             model.scroll_top = (top < bottom).then_some(top);
+            return model.earlier_wanted();
         }
         Some(Pane::Compose) => {
             let code = match down {
@@ -1563,7 +1668,7 @@ fn state_words(state: DeliveryState) -> &'static str {
     }
 }
 
-/// `Enter` on a message: its detail view, with what this session saw
+/// `Enter` on a message: its detail view, with what this device saw
 /// happen to it (loquax-keys-and-layout.md, section 7, slice 2).
 fn details<B>(model: &mut UiModel<B>) -> Vec<UiEffect> {
     if model
@@ -1642,6 +1747,18 @@ fn run<B: InputBuffer + Default>(model: &mut UiModel<B>, command: PaletteCommand
             open_search(model);
             Vec::new()
         }
+        PaletteCommand::DeleteMessage => {
+            model.ask_delete_message();
+            Vec::new()
+        }
+        PaletteCommand::DeleteConversation => {
+            model.ask_delete_conversation();
+            Vec::new()
+        }
+        PaletteCommand::Pin => {
+            model.toggle_pin();
+            Vec::new()
+        }
         PaletteCommand::Theme => {
             model.theme = model.theme.toggle();
             let name = match model.theme {
@@ -1679,6 +1796,7 @@ fn send<B: InputBuffer + Default>(model: &mut UiModel<B>) -> Vec<UiEffect> {
     let activity = model.bump();
     model.conversations[model.selected].activity = activity;
     model.conversations[model.selected].messages[index].activity = activity;
+    model.touch(model.selected, index);
     // Signal's rule: what you send is where the view goes.
     model.message_cursor = index;
     model.scroll_top = None;
@@ -1801,16 +1919,21 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
                 last_leg: None,
                 activity,
             });
+            let peer = conversation.peer;
+            model.changed.insert((peer, activity));
             if !open {
+                model.changed_peers.insert(peer);
+                let conversation = &mut model.conversations[index];
                 conversation.unread += 1;
                 conversation.mark_new();
             } else if follow {
+                let conversation = &mut model.conversations[index];
                 // A reader at the newest message stays at the newest.
                 model.message_cursor = conversation.messages.len() - 1;
             } else {
                 // One reading earlier messages keeps the view, and the rule
                 // says where the new ones begin.
-                conversation.mark_new();
+                model.conversations[index].mark_new();
             }
             let from = model.names.label(&source);
             model.toast(ToastKind::Info, format!("message from {from}"));
@@ -1821,7 +1944,10 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
 }
 
 impl<B> UiModel<B> {
+    /// Message `message` of conversation `conversation`, to change: the
+    /// store will learn of it.
     fn message_mut(&mut self, conversation: usize, message: usize) -> Option<&mut Message> {
+        self.touch(conversation, message);
         self.conversations
             .get_mut(conversation)?
             .messages
@@ -1833,6 +1959,7 @@ fn apply_state<B>(model: &mut UiModel<B>, id: [u8; 32], state: MessageState) {
     let shown = delivery_of(state);
     let now = model.now;
     let running = model.sending.clone();
+    let changed = &mut model.changed;
     for (c, conversation) in model.conversations.iter_mut().enumerate() {
         for (m, message) in conversation.messages.iter_mut().enumerate() {
             if !message.outbound || message.id != Some(id) {
@@ -1854,6 +1981,7 @@ fn apply_state<B>(model: &mut UiModel<B>, id: [u8; 32], state: MessageState) {
                     None => words.to_string(),
                 };
                 message.note(now, &line);
+                changed.insert((conversation.peer, message.activity));
             }
             message.delivery = Some(shown);
         }
@@ -2136,7 +2264,7 @@ fn detail_view<B>(model: &UiModel<B>, c: usize, m: usize) -> Option<DetailView> 
             (None, false) => "signature NOT verified".to_string(),
         },
         String::new(),
-        "this session".to_string(),
+        "on this device".to_string(),
     ];
     for entry in &message.ledger {
         let at = entry
@@ -3546,7 +3674,7 @@ mod tests {
                 "size   5 bytes",
                 "state  delivered",
                 "",
-                "this session",
+                "on this device",
                 "14:02:00  queued",
                 "14:02:00  trying direct",
                 "14:02:00  queued by the router as 11111111",
@@ -4056,24 +4184,49 @@ mod tests {
     #[test]
     fn the_matcher_groups_conversations_then_messages_most_recent_first() {
         let mut model = searchable();
-        let tripod = search::hits(&model.conversations, &model.names, &model.order(), "tripod");
+        let tripod = search::hits(
+            &model.conversations,
+            &model.names,
+            &model.order(),
+            "tripod",
+            &[],
+        );
         let m = |conversation, message| search::Hit::Message {
             conversation,
             message,
         };
         assert_eq!(tripod, [m(1, 0), m(0, 2), m(0, 1)]);
         assert_eq!(
-            search::hits(&model.conversations, &model.names, &model.order(), "TRIPOD"),
+            search::hits(
+                &model.conversations,
+                &model.names,
+                &model.order(),
+                "TRIPOD",
+                &[]
+            ),
             tripod
         );
         // `abab` is PEER's name, and one of our messages says it.
         say(&mut model, "ask abababab about it");
-        let by_name = search::hits(&model.conversations, &model.names, &model.order(), "ABAB");
-        assert_eq!(by_name, [search::Hit::Conversation(0), m(1, 1)]);
-        assert!(search::hits(&model.conversations, &model.names, &model.order(), "").is_empty());
-        assert!(
-            search::hits(&model.conversations, &model.names, &model.order(), "drone").is_empty()
+        let by_name = search::hits(
+            &model.conversations,
+            &model.names,
+            &model.order(),
+            "ABAB",
+            &[],
         );
+        assert_eq!(by_name, [search::Hit::Conversation(0), m(1, 1)]);
+        assert!(
+            search::hits(&model.conversations, &model.names, &model.order(), "", &[]).is_empty()
+        );
+        assert!(search::hits(
+            &model.conversations,
+            &model.names,
+            &model.order(),
+            "drone",
+            &[]
+        )
+        .is_empty());
     }
 
     #[test]
@@ -4409,14 +4562,14 @@ mod tests {
         let order = model.order();
         for query in ["alice", "ABAB", "e ·ab"] {
             assert_eq!(
-                search::hits(&model.conversations, &model.names, &order, query),
+                search::hits(&model.conversations, &model.names, &order, query, &[]),
                 [search::Hit::Conversation(0)],
                 "{query}"
             );
         }
         // The other has no name: its address form still matches.
         assert_eq!(
-            search::hits(&model.conversations, &model.names, &order, "cdcdcdcd"),
+            search::hits(&model.conversations, &model.names, &order, "cdcdcdcd", &[]),
             [search::Hit::Conversation(1)]
         );
     }
@@ -4430,5 +4583,374 @@ mod tests {
         let width = leviculum_ui::text::fit_width(&row);
         assert_eq!(width, usize::from(list_width(model.screen.0)) - 2, "{row}");
         assert!(row.trim_end().ends_with("… ·abab"), "{row}");
+    }
+
+    // The history (loquax-keys-and-layout.md, section 7, slice 6).
+
+    /// A stored message for `restore`, keyed `key`.
+    fn stored(key: u64, outbound: bool, body: &str, delivery: Option<DeliveryState>) -> Message {
+        Message {
+            outbound,
+            body: body.to_string(),
+            id: Some([key as u8; 32]),
+            delivery,
+            verified: true,
+            leg: None,
+            unproven: false,
+            at: Some(at(25, 14, key as u32 % 60)),
+            size: body.len(),
+            ledger: vec![LedgerEntry::new(Some(at(25, 14, 0)), "queued")],
+            last_leg: None,
+            activity: key,
+        }
+    }
+
+    fn restored(peer: [u8; 16], messages: Vec<Message>, earlier: usize) -> history::Restored {
+        history::Restored {
+            peer,
+            pinned: false,
+            unread: 0,
+            messages,
+            earlier,
+        }
+    }
+
+    fn message_writes(writes: &[StoreWrite]) -> Vec<u64> {
+        writes
+            .iter()
+            .filter_map(|w| match w {
+                StoreWrite::Message { message, .. } => Some(message.activity),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The restart, said honestly: what was in flight comes back `○` with
+    /// the reason in its ledger, and is written back so; what was proven
+    /// stays proven; new messages are keyed after the store's last.
+    #[test]
+    fn a_restart_shows_a_cut_off_send_queued_and_keys_go_on() {
+        let mut model = UiModel::<Field>::new(&[]);
+        clock(&mut model, 26, 12, 0);
+        model.restore(vec![restored(
+            PEER,
+            vec![
+                stored(3, true, "proven", Some(DeliveryState::Delivered)),
+                stored(4, false, "theirs", None),
+                stored(7, true, "in flight", Some(DeliveryState::InFlight)),
+            ],
+            0,
+        )]);
+        let messages = model.messages_of_selected();
+        assert_eq!(messages[0].delivery, Some(DeliveryState::Delivered));
+        assert_eq!(messages[2].delivery, Some(DeliveryState::Queued));
+        assert_eq!(
+            messages[2].ledger.last().map(|e| e.what.as_str()),
+            Some(history::RESTARTED)
+        );
+        assert_eq!(
+            messages[2].ledger.last().and_then(|e| e.at),
+            Some(at(26, 12, 0))
+        );
+        assert_eq!(model.message_cursor, 2);
+        assert_eq!(message_writes(&model.take_writes()), [7]);
+        assert!(model.take_writes().is_empty(), "taken once");
+        assert!(shown(&model).contains(&layout::EARLIEST.to_string()));
+
+        model.focus = Pane::Compose;
+        typed(&mut model, "after the restart");
+        update(&mut model, key(KeyCode::Enter));
+        let writes = model.take_writes();
+        assert_eq!(message_writes(&writes), [8]);
+    }
+
+    /// Every change a fold makes to a message reaches the store: the send,
+    /// its id, each state, and a reply with the unread count of a
+    /// conversation not open.
+    #[test]
+    fn the_store_learns_every_change_once_per_fold() {
+        let mut model = UiModel::<Field>::new(&[PEER, OTHER]);
+        sent(&mut model, "hello");
+        let first = message_writes(&model.take_writes());
+        assert_eq!(first.len(), 1);
+        engine(&mut model, OutboxEvent::Queued { message_id: ID });
+        assert_eq!(message_writes(&model.take_writes()), first);
+        state(&mut model, ID, MessageState::Delivered);
+        let writes = model.take_writes();
+        match &writes[..] {
+            [StoreWrite::Message { message, .. }] => {
+                assert_eq!(message.delivery, Some(DeliveryState::Delivered));
+            }
+            other => panic!("one message write, not {other:?}"),
+        }
+        // A tick changes nothing the store keeps.
+        update(&mut model, UiEvent::Tick);
+        assert!(model.take_writes().is_empty());
+        receive(&mut model, OTHER, 9, "elsewhere");
+        let writes = model.take_writes();
+        assert!(writes.contains(&StoreWrite::Conversation {
+            peer: OTHER,
+            pinned: false,
+            unread: 1
+        }));
+        assert_eq!(message_writes(&writes).len(), 1);
+        // Opening it reads it: the store learns the count is gone.
+        update(&mut model, UiEvent::Run(PaletteCommand::NextUnread));
+        assert_eq!(
+            model.take_writes(),
+            [StoreWrite::Conversation {
+                peer: OTHER,
+                pinned: false,
+                unread: 0
+            }]
+        );
+    }
+
+    /// `d` asks, `y` deletes, any other key keeps; a send still running is
+    /// not deleted at all.
+    #[test]
+    fn d_then_y_deletes_a_message_and_another_key_keeps_it() {
+        let mut model = UiModel::<Field>::new(&[]);
+        model.restore(vec![restored(
+            PEER,
+            vec![
+                stored(1, false, "one", None),
+                stored(2, false, "two", None),
+                stored(3, false, "three", None),
+            ],
+            0,
+        )]);
+        model.take_writes();
+        update(&mut model, key(KeyCode::Tab));
+        update(&mut model, key(KeyCode::Up));
+        assert_eq!(model.message_cursor, 1);
+        update(&mut model, key(KeyCode::Char('d')));
+        let question = view(&model).toast.map(|t| t.text).unwrap_or_default();
+        assert!(question.contains("y deletes"), "{question}");
+        // The question stays up past a toast's life.
+        for _ in 0..TOAST_TICKS * 2 {
+            update(&mut model, UiEvent::Tick);
+        }
+        assert!(view(&model).toast.is_some());
+        update(&mut model, key(KeyCode::Char('n')));
+        assert_eq!(model.messages_of_selected().len(), 3);
+        assert!(model.take_writes().is_empty());
+
+        update(&mut model, key(KeyCode::Char('d')));
+        update(&mut model, key(KeyCode::Char('y')));
+        let bodies: Vec<&str> = model
+            .messages_of_selected()
+            .iter()
+            .map(|m| m.body.as_str())
+            .collect();
+        assert_eq!(bodies, ["one", "three"]);
+        assert_eq!(model.message_cursor, 1);
+        assert_eq!(model.take_writes(), [StoreWrite::ForgetMessage { key: 2 }]);
+
+        // A send the runner still works on stays.
+        model.focus = Pane::Compose;
+        typed(&mut model, "running");
+        update(&mut model, key(KeyCode::Enter));
+        model.focus = Pane::Messages;
+        update(&mut model, key(KeyCode::Char('d')));
+        assert!(model.confirm.is_none());
+        assert_eq!(model.messages_of_selected().len(), 3);
+    }
+
+    #[test]
+    fn the_palette_deletes_a_conversation_after_asking() {
+        let mut model = UiModel::<Field>::new(&[]);
+        model.restore(vec![
+            restored(PEER, vec![stored(5, false, "newer", None)], 0),
+            restored(OTHER, vec![stored(2, false, "older", None)], 0),
+        ]);
+        assert_eq!(model.conversations[model.selected].peer, PEER);
+        update(&mut model, UiEvent::Run(PaletteCommand::DeleteConversation));
+        update(&mut model, key(KeyCode::Char('y')));
+        assert_eq!(model.conversations.len(), 1);
+        assert_eq!(model.conversations[model.selected].peer, OTHER);
+        assert_eq!(model.message_cursor, 0);
+        assert_eq!(
+            model.take_writes(),
+            [StoreWrite::ForgetConversation { peer: PEER }]
+        );
+    }
+
+    /// A pinned conversation sits on top above the dotted rule, whatever
+    /// came in since, and the pin is written.
+    #[test]
+    fn a_pinned_conversation_sits_above_the_rule() {
+        let mut model = UiModel::<Field>::new(&[]);
+        model.restore(vec![
+            restored(PEER, vec![stored(5, false, "newer", None)], 0),
+            restored(OTHER, vec![stored(2, false, "older", None)], 0),
+        ]);
+        update(&mut model, UiEvent::Run(PaletteCommand::NextConversation));
+        assert_eq!(model.conversations[model.selected].peer, OTHER);
+        update(&mut model, UiEvent::Run(PaletteCommand::Pin));
+        assert_eq!(
+            model.take_writes(),
+            [StoreWrite::Conversation {
+                peer: OTHER,
+                pinned: true,
+                unread: 0
+            }]
+        );
+        receive(&mut model, PEER, 9, "newest of all");
+        let order: Vec<[u8; 16]> = model
+            .order()
+            .iter()
+            .map(|&i| model.conversations[i].peer)
+            .collect();
+        assert_eq!(order, [OTHER, PEER]);
+        let list: Vec<String> = view(&model).conversations.iter().map(text).collect();
+        assert!(
+            list[2].trim().chars().all(|c| c == layout::PIN_RULE),
+            "{list:?}"
+        );
+        assert!(!list[2].trim().is_empty());
+        assert!(
+            list[5].trim().is_empty(),
+            "no rule under the last: {list:?}"
+        );
+        update(&mut model, UiEvent::Run(PaletteCommand::Pin));
+        let list: Vec<String> = view(&model).conversations.iter().map(text).collect();
+        assert!(list.iter().all(|row| !row.contains(layout::PIN_RULE)));
+    }
+
+    /// The top of what is loaded says how much more the store holds;
+    /// reaching it asks for the next page, which goes above with the cursor
+    /// still on the message it was on.
+    #[test]
+    fn reaching_the_top_loads_the_earlier_page() {
+        let mut model = UiModel::<Field>::new(&[]);
+        clock(&mut model, 26, 12, 0);
+        model.restore(vec![restored(
+            PEER,
+            vec![
+                stored(10, false, "ten", None),
+                stored(11, false, "eleven", None),
+            ],
+            9,
+        )]);
+        assert!(shown(&model).contains(&layout::earlier_line(9)));
+        update(&mut model, key(KeyCode::Tab));
+        let effects = update(&mut model, key(KeyCode::Up));
+        assert_eq!(
+            effects,
+            [UiEffect::Store(StoreRead::Earlier {
+                peer: PEER,
+                before: 10,
+                through: None
+            })]
+        );
+        let older: Vec<Message> = (1..=9).map(|k| stored(k, false, "old", None)).collect();
+        update(
+            &mut model,
+            UiEvent::Earlier {
+                peer: PEER,
+                messages: older,
+                earlier: 0,
+            },
+        );
+        assert_eq!(model.messages_of_selected().len(), 11);
+        assert_eq!(model.message_cursor, 9, "still on ten");
+        assert_eq!(model.messages_of_selected()[9].body, "ten");
+        assert_eq!(
+            text(&model.laid().rows[0]).trim(),
+            layout::EARLIEST,
+            "the top of the conversation is the top of the store now"
+        );
+        // Nothing more to ask for.
+        update(&mut model, key(KeyCode::Char('g')));
+        assert!(update(&mut model, key(KeyCode::Up)).is_empty());
+    }
+
+    /// A search reaches below what the screen loaded through the store: its
+    /// hit joins the messages group, and opening it loads the conversation
+    /// down to it and opens it there.
+    #[test]
+    fn a_stored_search_hit_opens_at_its_message() {
+        let mut model = UiModel::<Field>::new(&[]);
+        clock(&mut model, 26, 12, 0);
+        model.restore(vec![restored(
+            PEER,
+            vec![stored(10, false, "the tripod fits", None)],
+            9,
+        )]);
+        update(&mut model, key(KeyCode::Char('/')));
+        typed(&mut model, "tri");
+        let last = update(&mut model, key(KeyCode::Char('p')));
+        assert_eq!(
+            last,
+            [UiEffect::Store(StoreRead::Search("trip".to_string()))]
+        );
+        assert_eq!(model.loaded_from().get(&PEER), Some(&10));
+        let old = StoredHit {
+            peer: PEER,
+            key: 4,
+            outbound: false,
+            body: "bring the tripod".to_string(),
+            at: Some(at(25, 14, 4)),
+        };
+        // An answer to an older query is dropped.
+        update(
+            &mut model,
+            UiEvent::StoredHits {
+                query: "tri".to_string(),
+                hits: vec![old.clone()],
+            },
+        );
+        assert_eq!(model.hits().len(), 1);
+        update(
+            &mut model,
+            UiEvent::StoredHits {
+                query: "trip".to_string(),
+                hits: vec![old],
+            },
+        );
+        assert_eq!(
+            model.hits(),
+            [
+                search::Hit::Message {
+                    conversation: 0,
+                    message: 0
+                },
+                search::Hit::Stored(0)
+            ]
+        );
+        let results: Vec<String> = view(&model).conversations.iter().map(text).collect();
+        assert!(
+            results.iter().any(|row| row.contains("bring the «trip»od")),
+            "{results:?}"
+        );
+        update(&mut model, key(KeyCode::Tab));
+        update(&mut model, key(KeyCode::Down));
+        let effects = update(&mut model, key(KeyCode::Enter));
+        assert_eq!(
+            effects,
+            [UiEffect::Store(StoreRead::Earlier {
+                peer: PEER,
+                before: 10,
+                through: Some(4)
+            })]
+        );
+        let older: Vec<Message> = (4..=9)
+            .map(|k| match k {
+                4 => stored(k, false, "bring the tripod", None),
+                _ => stored(k, false, "old", None),
+            })
+            .collect();
+        update(
+            &mut model,
+            UiEvent::Earlier {
+                peer: PEER,
+                messages: older,
+                earlier: 3,
+            },
+        );
+        assert_eq!(model.focus, Pane::Messages);
+        assert_eq!(model.message_cursor, 0);
+        assert_eq!(model.messages_of_selected()[0].body, "bring the tripod");
     }
 }

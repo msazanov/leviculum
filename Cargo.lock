@@ -2393,6 +2393,7 @@ dependencies = [
  "open",
  "rand_core 0.6.4",
  "ratatui",
+ "rusqlite",
  "serde_json",
  "tempfile",
  "tokio",

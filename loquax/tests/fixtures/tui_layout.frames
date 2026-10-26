@@ -102,7 +102,7 @@ Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help �
 │ │size   96 bytes                                                           │ │
 │ │state  delivered                                                          │ │
 │ │                                                                          │ │
-│ │this session                                                              │ │
+│ │on this device                                                            │ │
 │ │14:02:00  queued                                                          │ │
 │ │14:02:00  queued by the router as a2a2a2a2                                │ │
 │ │14:02:00  delivered: proof received                                       │ │
