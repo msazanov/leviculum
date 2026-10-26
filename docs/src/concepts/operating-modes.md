@@ -21,16 +21,16 @@ today:
 - **The propagation node role** ([An LXMF propagation node on a
   board](propagation-node-on-a-board.md)). `pn.rs` is in every image: all
   four board binaries load its configuration at boot
-  (`leviculum-nrf/src/bin/t114.rs:632`,
-  `leviculum-nrf/src/bin/rak4631.rs:651`,
-  `leviculum-nrf/src/bin/solarnode.rs:718`,
-  `leviculum-nrf/src/bin/t1000e.rs:636`).
+  (`leviculum-nrf/src/bin/t114.rs:630`,
+  `leviculum-nrf/src/bin/rak4631.rs:652`,
+  `leviculum-nrf/src/bin/solarnode.rs:716`,
+  `leviculum-nrf/src/bin/t1000e.rs:634`).
 - **Telemetry at the announce cadence** ([Announce
   cadence](announce-cadence.md), [Telemetry](telemetry.md)).
 
 Nothing ever sleeps. The T1000-E board file says so in as many words:
 the GNSS receiver's RTC supply goes low only in Meshtastic's deep sleep,
-"which this firmware has none of" (`leviculum-nrf/src/boards/t1000e.rs:178-179`).
+"which this firmware has none of" (`leviculum-nrf/src/boards/t1000e.rs:176-177`).
 
 ## Tracker
 

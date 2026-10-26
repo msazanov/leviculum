@@ -34,7 +34,6 @@ use alloc::collections::BTreeMap;
 use embassy_executor::Spawner;
 use embassy_futures::select::{select, select3, select4, Either, Either3, Either4};
 use embassy_nrf::gpio::Level;
-use embassy_nrf::spim;
 use embassy_time::{Duration, Instant, Timer};
 
 use leviculum_core::embedded_storage::EmbeddedStorage;
@@ -381,7 +380,6 @@ async fn main(spawner: Spawner) {
         p.P1_10.into(), // NRESET
         p.P0_07.into(), // BUSY
         p.P1_01.into(), // IRQ (DIO9)
-        spim::Frequency::M4,
         &t1000e::LR1110,
     )
     .await;

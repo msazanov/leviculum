@@ -27,30 +27,21 @@ pub type LoRaBusy = peripherals::P0_17;
 /// SX1262 DIO1 interrupt output
 pub type LoRaDio1 = peripherals::P0_20;
 
-/// SX1262 SPI frequency in Hz (Meshtastic uses 4 MHz; RNode uses 16 MHz)
-pub const LORA_SPI_FREQ_HZ: u32 = 4_000_000;
-/// SX1262 TCXO voltage supplied via DIO3 (volts)
-pub const LORA_TCXO_VOLTAGE: f32 = 1.8;
-/// SX1262 max TX power (dBm)
-pub const LORA_MAX_POWER_DBM: i8 = 22;
-// The OCP current limit is not here. It is written as part of the
-// transmit-power sequence, which has to stay in one host-testable piece
-// (`leviculum_core::sx126x::OCP_HIGH_POWER`); this constant was never read by
-// anything and a second copy of the number is a second thing to keep in step.
-/// SX1262 uses DIO2 as internal RF switch (no external RXEN/TXEN pins)
-pub const LORA_DIO2_AS_RF_SWITCH: bool = true;
-/// SX1262 BUSY polling timeout (ms, from RNode firmware)
-pub const LORA_BUSY_TIMEOUT_MS: u32 = 100;
+// The SX1262's other facts live where they are read: the SPI clock in
+// `lora::init`, the TCXO select byte in `CONFIG.lora_tcxo_voltage_reg`
+// (1.8 V), the power ceiling and the OCP limit in the transmit-power
+// sequence (`leviculum_core::sx126x`, +22 dBm), the BUSY timeout in
+// `sx1262.rs`. DIO2 drives the RF switch, there are no RXEN/TXEN pins.
+// A copy of any of them here would be a second number to keep in step.
 
 // Green LED
 /// Green indicator LED (active LOW)
 pub type LedPin = peripherals::P1_03;
 
 // NeoPixel (2x SK6812)
-/// NeoPixel data pin (GRB, 800 kHz WS2812 protocol)
+/// NeoPixel data pin (GRB, 800 kHz WS2812 protocol). Nothing drives the
+/// two LEDs yet.
 pub type NeoPixelPin = peripherals::P0_14;
-/// Number of addressable NeoPixel LEDs
-pub const NEOPIXEL_COUNT: usize = 2;
 
 // UART (NFC pins repurposed as GPIO)
 /// UART RX (header P1, NFC pin repurposed)
@@ -173,13 +164,10 @@ pub const CONFIG: super::BoardConfig = super::BoardConfig {
     usb_pid: 0x0001,
     usb_manufacturer: "leviculum",
     usb_product: "leviculum T114",
-    log_prefix: "T114",
     identity_flash_page: 0xEC000,
     radio_config_flash_page: 0xEB000,
     telemetry_flash_page: 0xEA000,
     lora_tcxo_voltage_reg: 0x02, // 1.8 V
-    lora_spi_freq_hz: LORA_SPI_FREQ_HZ,
-    lora_max_power_dbm: LORA_MAX_POWER_DBM,
     // No QSPI part on this board. See the block above.
     qspi_part: None,
 };

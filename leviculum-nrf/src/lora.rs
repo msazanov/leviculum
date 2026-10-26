@@ -1675,16 +1675,17 @@ async fn rx_window(
 // Init
 //
 // Board-agnostic: GPIO pins arrive as AnyPin (degraded in the bin file),
-// the SPI clock comes from `BoardConfig`, and what the transceiver needs
-// beyond its bus and its three lines is the part's own `FrontEnd`
-// (`crate::radio`): a TCXO byte and an optional RX-enable line on the
-// SX1262, the whole board description on the LR11xx. SPI peripheral is
-// still typed because embassy-nrf does not expose an erased-instance
-// Spim. SPI2 is used on every board (SPI3 has a MISO read bug on the
-// T114) — same instance keeps the shared Spim<'static> type stable.
+// and what the transceiver needs beyond its bus and its three lines is the
+// part's own `FrontEnd` (`crate::radio`): a TCXO byte and an optional
+// RX-enable line on the SX1262, the whole board description on the LR11xx.
+// SPI2 stays typed (embassy-nrf has no erased-instance Spim) and serves
+// every board (SPI3 has a MISO read bug on the T114), which keeps the
+// shared Spim<'static> type stable. The SPI clock is 4 MHz on every board,
+// so it is set here, not passed in: Meshtastic's value, well inside both
+// parts' 16 MHz. A board that needs another brings the parameter back.
 //
-// 10 parameters: the radio's full pin/bus/board wiring arrives here once
-// at boot. A grouping struct would only move the same ten names one file
+// 9 parameters: the radio's full pin/bus/board wiring arrives here once
+// at boot. A grouping struct would only move the same nine names one file
 // up; every caller is a board bring-up that lists them all anyway.
 #[allow(clippy::too_many_arguments)]
 pub async fn init(
@@ -1698,11 +1699,10 @@ pub async fn init(
     // DIO1 on the SX1262, DIO9 on the LR11xx: the line the chip raises
     // for an interrupt.
     irq: Peri<'static, AnyPin>,
-    spi_freq: spim::Frequency,
     front_end: crate::radio::FrontEnd,
 ) -> Radio {
     let mut spi_config = spim::Config::default();
-    spi_config.frequency = spi_freq;
+    spi_config.frequency = spim::Frequency::M4;
 
     let spi = Spim::new(spi_periph, SpiIrqs, sck, miso, mosi, spi_config);
 

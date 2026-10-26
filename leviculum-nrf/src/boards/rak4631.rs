@@ -34,19 +34,14 @@ pub type LoRaReset = peripherals::P1_06;
 /// SX1262 LoRa front-end power enable (HIGH = on)
 pub type LoRaPowerEn = peripherals::P1_05;
 
-/// SX1262 SPI frequency in Hz (4 MHz, matches T114 / Meshtastic).
-pub const LORA_SPI_FREQ_HZ: u32 = 4_000_000;
-/// SX1262 TCXO voltage supplied via DIO3 (volts). RNode firmware drives the
-/// RAK4631 TCXO at 3.3 V (`sx126x.cpp` `enableTCXO`: BOARD_RAK4631 ->
-/// MODE_TCXO_3_3V_6X), unlike the Heltec T114 which it drives at 1.8 V. Match
-/// the RAK reference here so the SX1262 clock is stable over long airtimes.
-pub const LORA_TCXO_VOLTAGE: f32 = 3.3;
-/// SX1262 max TX power (dBm). Same SX1262 die as on T114 → +22 dBm.
-pub const LORA_MAX_POWER_DBM: i8 = 22;
-/// SX1262 uses DIO2 as internal RF switch (no external RXEN/TXEN GPIO).
-/// Antenna-switch pad P1.07 exists on the schematic but MUST NOT be driven
-/// by the host — DIO2 owns it.
-pub const LORA_DIO2_AS_RF_SWITCH: bool = true;
+// The TCXO runs at 3.3 V (`CONFIG.lora_tcxo_voltage_reg`): RNode firmware
+// drives the RAK4631 TCXO there (`sx126x.cpp` `enableTCXO`: BOARD_RAK4631 ->
+// MODE_TCXO_3_3V_6X), unlike the Heltec T114 which it drives at 1.8 V, so the
+// SX1262 clock is stable over long airtimes. DIO2 drives the RF switch, there
+// is no RXEN/TXEN GPIO: the antenna-switch pad P1.07 exists on the schematic
+// but MUST NOT be driven by the host — DIO2 owns it. The SPI clock is
+// `lora::init`'s, the power ceiling the transmit-power sequence's
+// (`leviculum_core::sx126x`, the same die and +22 dBm as on the T114).
 
 // LEDs (on the RAK4631 module, exposed via baseboard)
 /// Green LED1 (active HIGH).
@@ -81,7 +76,8 @@ pub type GnssTx = peripherals::P0_16;
 /// GNSS UART RX (ZOE-M8Q → MCU).
 pub type GnssRx = peripherals::P0_15;
 /// GNSS UART baud rate. ZOE-M8Q ships at 9600 baud (u-blox factory
-/// default).
+/// default), where the presence machine's sweep starts; the boot line
+/// `[GNSS_PRESENCE] state=detecting` names it.
 pub const GNSS_BAUD: u32 = 9600;
 
 // GNSS PPS / TIMEPULSE: NONE, and this is the second alias on this board
@@ -188,13 +184,10 @@ pub const CONFIG: super::BoardConfig = super::BoardConfig {
     usb_pid: 0x0002,
     usb_manufacturer: "leviculum",
     usb_product: "leviculum RAK4631",
-    log_prefix: "RAK",
     identity_flash_page: 0xEC000,
     radio_config_flash_page: 0xEB000,
     telemetry_flash_page: 0xEA000,
     lora_tcxo_voltage_reg: 0x07, // 3.3 V (RNode MODE_TCXO_3_3V_6X for BOARD_RAK4631)
-    lora_spi_freq_hz: LORA_SPI_FREQ_HZ,
-    lora_max_power_dbm: LORA_MAX_POWER_DBM,
     // No QSPI part on this module. See the block above.
     qspi_part: None,
 };

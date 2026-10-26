@@ -49,8 +49,6 @@ pub struct BoardConfig {
     pub usb_manufacturer: &'static str,
     /// USB iProduct string.
     pub usb_product: &'static str,
-    /// Short tag used in identity log lines (e.g. "T114", "RAK").
-    pub log_prefix: &'static str,
     /// Internal-flash byte address of the page reserved for identity storage.
     pub identity_flash_page: u32,
     /// Internal-flash byte address of the page reserved for the persisted
@@ -69,10 +67,6 @@ pub struct BoardConfig {
     /// SX1262 TCXO voltage select byte for `SetDIO3AsTcxoCtrl`
     /// (0x02 = 1.8 V, see datasheet §13.3.6).
     pub lora_tcxo_voltage_reg: u8,
-    /// SX1262 SPI bus frequency in Hz.
-    pub lora_spi_freq_hz: u32,
-    /// SX1262 maximum TX power in dBm.
-    pub lora_max_power_dbm: i8,
     /// The QSPI NOR part this board carries: its JEDEC id, its density and
     /// the bus clock it is driven at. The boot probe refuses to hand out a
     /// device whose id does not match this ([`crate::qspi`]).

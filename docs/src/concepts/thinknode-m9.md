@@ -261,7 +261,7 @@ The radio driver is no longer open-ended. `leviculum-lr11xx` exists. Cedric
 Rivard contributed it as a0f0c3a0 (#451), and it carries the SenseCAP
 T1000-E today: the board file runs the LR1110 through it with the
 LR1110MB1DXS shield's PA table (`LR1110MB1DXS_PA_TABLE`,
-`leviculum-nrf/src/boards/t1000e.rs:145-147`).
+`leviculum-nrf/src/boards/t1000e.rs:143-145`).
 
 The driver's README has a section headed "Worked example: ThinkNode M9
 (incomplete)" (`leviculum-lr11xx/README.md:142-163`). Its values come from

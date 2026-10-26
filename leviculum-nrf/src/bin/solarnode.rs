@@ -34,7 +34,6 @@ use alloc::collections::BTreeMap;
 use embassy_executor::Spawner;
 use embassy_futures::select::{select, select3, select4, Either, Either3, Either4};
 use embassy_nrf::gpio::Level;
-use embassy_nrf::spim;
 use embassy_time::{Duration, Instant, Timer};
 
 use leviculum_core::embedded_storage::EmbeddedStorage;
@@ -425,7 +424,6 @@ async fn main(spawner: Spawner) {
         p.P0_28.into(), // RESET
         p.P0_29.into(), // BUSY
         p.P0_03.into(), // DIO1
-        spim::Frequency::M4,
         leviculum_nrf::radio::FrontEnd {
             tcxo_voltage_reg: solarnode::CONFIG.lora_tcxo_voltage_reg,
             // The line the other two boards do not have: DIO2 steers the

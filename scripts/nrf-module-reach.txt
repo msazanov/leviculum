@@ -7,19 +7,19 @@ src/announce.rs (587): log lora pn telemetry
 src/banner.rs (56): log_critical media name
 src/battery.rs (324):
 src/bin/qspi-selftest.rs (634):
-src/bin/rak4631.rs (1469):
+src/bin/rak4631.rs (1470):
 src/bin/sd-ram-probe.rs (294):
-src/bin/solarnode.rs (1505):
-src/bin/t1000e.rs (1377): feedback
-src/bin/t114.rs (1415):
+src/bin/solarnode.rs (1503):
+src/bin/t1000e.rs (1375): feedback
+src/bin/t114.rs (1413):
 src/ble/columba.rs (3225): info log radio_store warn
 src/ble/mod.rs (891): info log media radio_store transport_stats warn
 src/ble/notify.rs (238): ble log
-src/boards/mod.rs (90): lora qspi radio_store telemetry
-src/boards/rak4631.rs (215):
-src/boards/solarnode.rs (418): lora qspi vext
-src/boards/t1000e.rs (377): button feedback radio
-src/boards/t114.rs (200):
+src/boards/mod.rs (84): lora qspi radio_store telemetry
+src/boards/rak4631.rs (208):
+src/boards/solarnode.rs (410): lora qspi vext
+src/boards/t1000e.rs (372): button feedback radio
+src/boards/t114.rs (188):
 src/boot_count.rs (96): boot_trace radio_store record_store
 src/boot_trace.rs (27):
 src/button.rs (86):

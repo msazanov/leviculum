@@ -16,7 +16,6 @@ use alloc::collections::BTreeMap;
 use embassy_executor::Spawner;
 use embassy_futures::select::{select, select3, select4, Either, Either3, Either4};
 use embassy_nrf::gpio::Level;
-use embassy_nrf::spim;
 use embassy_time::{Duration, Instant, Timer};
 
 use leviculum_core::embedded_storage::EmbeddedStorage;
@@ -357,7 +356,6 @@ async fn main(spawner: Spawner) {
         p.P0_25.into(),
         p.P0_17.into(),
         p.P0_20.into(),
-        spim::Frequency::M4,
         leviculum_nrf::radio::FrontEnd {
             tcxo_voltage_reg: t114::CONFIG.lora_tcxo_voltage_reg,
             // No host-driven RX enable: DIO2 owns the whole antenna switch on

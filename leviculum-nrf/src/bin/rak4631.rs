@@ -17,7 +17,6 @@ use alloc::collections::BTreeMap;
 use embassy_executor::Spawner;
 use embassy_futures::select::{select, select3, select4, Either, Either3, Either4};
 use embassy_nrf::gpio::{Level, Output, OutputDrive};
-use embassy_nrf::spim;
 use embassy_time::{Duration, Instant, Timer};
 
 use leviculum_core::embedded_storage::EmbeddedStorage;
@@ -142,7 +141,10 @@ async fn main(spawner: Spawner) {
     // tail always carries a [GNSS_PRESENCE] anchor. A replay keyed on
     // the three settled states treats it like no line at all.
     #[cfg(feature = "gnss")]
-    log_critical!("[GNSS_PRESENCE] state=detecting baud=9600");
+    log_critical!(
+        "[GNSS_PRESENCE] state=detecting baud={}",
+        rak4631::GNSS_BAUD
+    );
     leviculum_nrf::log_boot_diagnostics(
         &boot,
         &boot_count,
@@ -386,7 +388,6 @@ async fn main(spawner: Spawner) {
         p.P1_06.into(), // RESET
         p.P1_14.into(), // BUSY
         p.P1_15.into(), // DIO1
-        spim::Frequency::M4,
         leviculum_nrf::radio::FrontEnd {
             tcxo_voltage_reg: rak4631::CONFIG.lora_tcxo_voltage_reg,
             // No host-driven RX enable: DIO2 owns the whole antenna switch, and
