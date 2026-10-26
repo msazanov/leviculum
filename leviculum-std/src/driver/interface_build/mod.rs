@@ -242,6 +242,9 @@ mod tests {
         tunnel_notify_tx: mpsc::Sender<InterfaceId>,
         peer_event_tx: mpsc::Sender<(InterfaceId, crate::interfaces::PeerEvent)>,
         inventory: crate::interfaces::inventory::SharedInventory,
+        // An explicit storage root, so no builder falls back to
+        // `Config::default_config_dir()` and the host's ~/.reticulum.
+        storage: tempfile::TempDir,
     }
 
     impl CtxOwner {
@@ -264,6 +267,7 @@ mod tests {
                     tunnel_notify_tx,
                     peer_event_tx,
                     inventory: crate::interfaces::inventory::InterfaceInventory::shared(),
+                    storage: tempfile::tempdir().expect("tempdir"),
                 },
                 new_iface_rx,
             )
@@ -277,7 +281,7 @@ mod tests {
                 tunnel_notify_tx: &self.tunnel_notify_tx,
                 peer_event_tx: &self.peer_event_tx,
                 corrupt_every: None,
-                storage_path: None,
+                storage_path: Some(self.storage.path().to_path_buf()),
                 outbound_socket_hook: None,
                 host_resolver: None,
                 inventory: self.inventory.clone(),
