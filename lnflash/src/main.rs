@@ -968,6 +968,9 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
     }
 
     let dir = manifest::locate(cli.bundle.as_deref())?;
+    if let Some(note) = manifest::passed_over(cli.bundle.as_deref(), &dir) {
+        eprintln!("lnflash: {note}");
+    }
     let manifest = manifest::load(&dir, &catalogue)?;
 
     ui.say(&format!(

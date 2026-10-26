@@ -366,20 +366,49 @@ fn a_bundle_missing_the_nordic_licence_will_not_even_load() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("s140_nrf52_7.3.0_license-agreement.txt"));
 }
 
+/// An explicit `--bundle` that holds nothing, run once as given and once
+/// with `$LNFLASH_BUNDLE` pointing at a real bundle. The second run is what
+/// a host with the lnflash package is for the first: the walk goes on past
+/// the explicit path to a bundle the host owns. Which of the two the bare
+/// run is depends on the host, so the run is held only to what both share.
+fn passed_over_or_refused(extra: &[&str]) -> Vec<(bool, Output)> {
+    let nowhere = TempDir::new().unwrap();
+    let absent = nowhere.path().join("absent").display().to_string();
+    let planted = unpacked_bundle();
+    let mut args = vec!["--bundle", absent.as_str()];
+    args.extend_from_slice(extra);
+    [None, Some((lnflash::manifest::BUNDLE_ENV, planted.path()))]
+        .into_iter()
+        .map(|env| {
+            let out = run(&args, env);
+            let err = String::from_utf8_lossy(&out.stderr).into_owned();
+            // Whether it refused or went on, the operator is told the path they
+            // gave holds no bundle.
+            assert!(err.contains(&absent), "{err}");
+            (err.contains("no bundle found"), out)
+        })
+        .collect()
+}
+
 #[test]
 fn no_bundle_anywhere_names_every_place_it_looked() {
-    let nowhere = TempDir::new().unwrap();
-    let out = run(
-        &[
-            "--bundle",
-            &nowhere.path().join("absent").display().to_string(),
-        ],
-        None,
-    );
-    assert!(!out.status.success());
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("absent"), "{err}");
-    assert!(err.contains("/usr/share/lnflash"), "{err}");
+    // Every root the walk tries, by name, is proven by locate_with's unit
+    // tests over TempDir roots; this binary walks the host's real
+    // /usr/share/lnflash, which may hold the packaged bundle. So it is held
+    // only to naming the path it was given, and, where it did refuse, to
+    // naming the distro path too. `--check-bundle` keeps a run that went on
+    // off the bus.
+    let runs = passed_over_or_refused(&["--check-bundle"]);
+    // The planted run went on: the walk reaches a later root.
+    assert!(!runs[1].0, "the planted bundle was not found");
+    assert!(runs[1].1.status.success(), "{}", stdout(&runs[1].1));
+    for (refused, out) in &runs {
+        if *refused {
+            assert!(!out.status.success());
+            let err = String::from_utf8_lossy(&out.stderr);
+            assert!(err.contains("/usr/share/lnflash"), "{err}");
+        }
+    }
 }
 
 #[test]
@@ -866,27 +895,26 @@ fn a_transmit_spacing_that_does_not_fit_the_wire_stops_at_the_command_line() {
     }
 }
 
+/// The other half of #342: the config sessions stopped needing images, the
+/// flashing paths did not.
+///
+/// This no longer asserts the refusal itself. On a host with the lnflash
+/// package installed the binary finds the bundle at /usr/share/lnflash and
+/// goes on, so "no bundle found" held only on hosts without it (#476). The
+/// refusal text is proven by `manifest`'s unit tests over `locate_with`,
+/// which build every root under a TempDir. What holds on every host is kept
+/// here, for the bare run and for one that a planted `$LNFLASH_BUNDLE` sends
+/// on: stderr names the path that was given, and the flash does not report
+/// success, because it either refused or found an empty bus.
 #[test]
 fn a_flash_still_refuses_to_run_without_a_bundle_and_says_so() {
-    // The other half of #342: the config sessions stopped needing images, the
-    // flashing paths did not. The error has to name what is missing for the
-    // operation that was asked for.
-    let nowhere = TempDir::new().unwrap();
     let empty = TempDir::new().unwrap();
-    let out = run(
-        &[
-            "--bundle",
-            &nowhere.path().join("absent").display().to_string(),
-            "--yes",
-            "--sysfs",
-            &empty.path().display().to_string(),
-        ],
-        None,
-    );
-    assert!(!out.status.success());
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("no bundle found"), "{err}");
-    assert!(err.contains("absent"), "{err}");
+    let sysfs = empty.path().display().to_string();
+    let runs = passed_over_or_refused(&["--yes", "--sysfs", &sysfs]);
+    assert!(!runs[1].0, "the planted bundle was not found");
+    for (_, out) in &runs {
+        assert!(!out.status.success(), "{}", stdout(out));
+    }
 }
 
 #[test]

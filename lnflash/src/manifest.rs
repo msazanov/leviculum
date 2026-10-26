@@ -1045,6 +1045,22 @@ pub fn locate_with(roots: &BundleRoots, explicit: Option<&Path>) -> Result<PathB
     Err(Error::NoBundle(tried))
 }
 
+/// What to tell the operator when `--bundle` named a path that holds no
+/// bundle and the walk went on to a later root: the run must not use some
+/// other bundle silently. `None` when there was no `--bundle` or it was the
+/// one found.
+pub fn passed_over(explicit: Option<&Path>, found: &Path) -> Option<String> {
+    let explicit = explicit?;
+    if found == explicit || found == explicit.join(FIRMWARE_DIR) {
+        return None;
+    }
+    Some(format!(
+        "no bundle at {}; using the one at {}",
+        explicit.display(),
+        found.display()
+    ))
+}
+
 pub fn hex_digest(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     let mut out = String::with_capacity(64);
@@ -1871,6 +1887,59 @@ convert = "hex-to-uf2"
             }
             other => panic!("expected NoBundle, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn the_refusal_main_prints_says_no_bundle_and_names_every_root() {
+        // main prints this Display behind "lnflash: ". The CLI test cannot
+        // hold the binary to it on a host with the lnflash package
+        // installed, because there the walk finds /usr/share/lnflash.
+        let base = TempDir::new().unwrap();
+        let roots = roots_under(base.path());
+        let missing = base.path().join("gone");
+        let err = locate_with(&roots, Some(&missing)).unwrap_err().to_string();
+        assert!(err.starts_with("no bundle found; looked in "), "{err}");
+        for root in ["gone", "env", "beside", "system"] {
+            let dir = base.path().join(root);
+            assert!(err.contains(&dir.display().to_string()), "{err}");
+            assert!(
+                err.contains(&dir.join(FIRMWARE_DIR).display().to_string()),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_process_roots_end_at_the_distro_path() {
+        // The only fact the TempDir roots above cannot carry: production
+        // walks to /usr/share/lnflash. Building the roots reads no file.
+        assert_eq!(
+            BundleRoots::from_process().system,
+            PathBuf::from(SYSTEM_BUNDLE)
+        );
+        assert_eq!(SYSTEM_BUNDLE, "/usr/share/lnflash");
+    }
+
+    #[test]
+    fn an_explicit_bundle_that_was_passed_over_is_named() {
+        let base = TempDir::new().unwrap();
+        let roots = roots_under(base.path());
+        fs::create_dir(&roots.system).unwrap();
+        fs::write(roots.system.join(MANIFEST_NAME), "").unwrap();
+        let missing = base.path().join("gone");
+        let found = locate_with(&roots, Some(&missing)).unwrap();
+        let note = passed_over(Some(&missing), &found).unwrap();
+        assert!(note.contains(&missing.display().to_string()), "{note}");
+        assert!(note.contains(&roots.system.display().to_string()), "{note}");
+
+        // Found where it was pointed, as the manifest dir or the tarball
+        // root, or not pointed at all: nothing to say.
+        assert_eq!(passed_over(Some(&roots.system), &found), None);
+        assert_eq!(
+            passed_over(Some(base.path()), &base.path().join(FIRMWARE_DIR)),
+            None
+        );
+        assert_eq!(passed_over(None, &found), None);
     }
 
     #[test]
