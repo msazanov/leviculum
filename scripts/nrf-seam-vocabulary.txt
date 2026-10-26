@@ -20,6 +20,8 @@ src/boards/solarnode.rs: vext doc x1
 src/boards/t1000e.rs: button doc x1
 src/boards/t1000e.rs: feedback::buzzer_task doc x1
 src/boards/t1000e.rs: radio doc x1
+src/boards/t114.rs: st7789 doc x1
+src/boards/t114.rs: st7789::TftWiring x2
 src/boot_count.rs: radio_store doc x1
 src/boot_count.rs: record_store doc x1
 src/boot_count.rs: record_store::region doc x1
@@ -63,13 +65,6 @@ src/radio_store.rs: flash::shared_flash doc x1
 src/record_store.rs: ble doc x1
 src/record_store.rs: flash::SharedFlash x4 doc x1
 src/record_store.rs: usb doc x1
-src/st7789.rs: boards::t114::TftBacklight x1
-src/st7789.rs: boards::t114::TftCs x1
-src/st7789.rs: boards::t114::TftDc x1
-src/st7789.rs: boards::t114::TftMosi x1
-src/st7789.rs: boards::t114::TftPowerEn x1
-src/st7789.rs: boards::t114::TftReset x1
-src/st7789.rs: boards::t114::TftSck x1
 src/st7789.rs: log_stack x2
 src/st7789.rs: vext::wait_ready x1 doc x1
 src/store_spike.rs: flash::SharedFlash x1
@@ -90,4 +85,3 @@ src/usb.rs: record_store::request_board_list x1
 src/usb.rs: record_store::request_storm x1
 src/usb.rs: reset_stack_watermark x1 doc x1
 src/vext.rs: boards::t114::VEXT_WARMUP_MS x2 doc x2
-src/vext.rs: boards::t114::VextEnable x1

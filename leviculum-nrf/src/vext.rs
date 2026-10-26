@@ -33,7 +33,7 @@
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use embassy_nrf::gpio::{Level, Output, OutputDrive};
+use embassy_nrf::gpio::{Level, Output, OutputDrive, Pin};
 use embassy_nrf::Peri;
 use embassy_time::{Instant, Timer};
 use static_cell::StaticCell;
@@ -53,8 +53,10 @@ static WARM_AT_MS: AtomicU32 = AtomicU32::new(0);
 /// before spawning any task that reads a peripheral on the rail.
 ///
 /// A second call is a no-op beyond the log line: the peripheral is moved
-/// in, so the type system already makes it a single call per boot.
-pub fn raise(pin: Peri<'static, crate::boards::t114::VextEnable>) {
+/// in, so the type system already makes it a single call per boot. The
+/// pin type is the caller's: the binary names its board's alias
+/// (`raise::<t114::VextEnable>`), so this module names no board's pin.
+pub fn raise<P: Pin>(pin: Peri<'static, P>) {
     let out = Output::new(pin, Level::High, OutputDrive::Standard);
     let warm_at = Instant::now()
         .as_millis()

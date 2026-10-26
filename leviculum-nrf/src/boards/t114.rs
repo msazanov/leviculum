@@ -89,6 +89,32 @@ pub type TftBacklight = peripherals::P0_15;
 /// TFT power enable
 pub type TftPowerEn = peripherals::P0_03;
 
+/// The display's wiring for [`crate::st7789`], built from the aliases
+/// above, so the binary can only hand over this board's pins.
+#[cfg(feature = "bsp-t114")]
+#[allow(clippy::too_many_arguments)]
+pub fn tft_wiring(
+    spi: Peri<'static, peripherals::SPI3>,
+    sck: Peri<'static, TftSck>,
+    mosi: Peri<'static, TftMosi>,
+    cs: Peri<'static, TftCs>,
+    dc: Peri<'static, TftDc>,
+    rst: Peri<'static, TftReset>,
+    vtft: Peri<'static, TftPowerEn>,
+    leda: Peri<'static, TftBacklight>,
+) -> crate::st7789::TftWiring {
+    crate::st7789::TftWiring {
+        spi,
+        sck: sck.into(),
+        mosi: mosi.into(),
+        cs: cs.into(),
+        dc: dc.into(),
+        rst: rst.into(),
+        vtft: vtft.into(),
+        leda: leda.into(),
+    }
+}
+
 // QSPI Flash: NONE. There are deliberately no pin aliases here, and
 // `CONFIG.qspi_part` is `None`, so `bin/t114.rs` never configures P1.14,
 // P1.15, P1.12, P1.13, P0.07 or P0.05 as a flash bus. The six reasons,

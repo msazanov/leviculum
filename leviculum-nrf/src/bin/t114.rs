@@ -141,7 +141,7 @@ async fn main(spawner: Spawner) {
     // the display power"; RNode setup()). Raised as early as the
     // peripherals exist so its 1 s warmup overlaps the rest of init
     // instead of delaying a consumer.
-    leviculum_nrf::vext::raise(p.P0_21);
+    leviculum_nrf::vext::raise::<t114::VextEnable>(p.P0_21);
     let mut led = t114::led(p.P1_03);
 
     let rng = Entropy;
@@ -499,16 +499,15 @@ async fn main(spawner: Spawner) {
         log_critical!("[STG] display-spawn");
         leviculum_nrf::st7789::init(
             &spawner,
-            leviculum_nrf::st7789::TftWiring {
-                spi: p.SPI3,
-                sck: p.P1_08,
-                mosi: p.P1_09,
-                cs: p.P0_11,
-                dc: p.P0_12,
-                rst: p.P0_02,
-                vtft: p.P0_03,
-                leda: p.P0_15,
-            },
+            t114::tft_wiring(
+                p.SPI3, p.P1_08, // sck
+                p.P1_09, // mosi
+                p.P0_11, // cs
+                p.P0_12, // dc
+                p.P0_02, // rst
+                p.P0_03, // vtft
+                p.P0_15, // leda
+            ),
             identity_hash,
         );
         info!("display task spawned (ST7789 blind-drive)");

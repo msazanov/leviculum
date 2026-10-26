@@ -11,7 +11,7 @@ today, and what is open.
 ## The hardware
 
 Every board file names a `UserButton` and a `LedPin`
-(`leviculum-nrf/src/boards/t114.rs:39,153`,
+(`leviculum-nrf/src/boards/t114.rs:39,179`,
 `leviculum-nrf/src/boards/rak4631.rs:48,57`,
 `leviculum-nrf/src/boards/solarnode.rs:87,93`,
 `leviculum-nrf/src/boards/t1000e.rs:279,284`). The Pocket (`rak4631.rs`)
@@ -22,7 +22,7 @@ and the Solar Node add a `LedNotificationPin`
 and the T114 an ST7789 (`leviculum-nrf/src/bin/t114.rs:491`).
 
 Since 889 every board brings the button up with the same task
-(`leviculum-nrf/src/bin/t114.rs:519`,
+(`leviculum-nrf/src/bin/t114.rs:518`,
 `leviculum-nrf/src/bin/solarnode.rs:572`,
 `leviculum-nrf/src/bin/rak4631.rs:528`,
 `leviculum-nrf/src/bin/t1000e.rs:518`). The T114 and the Solar Node used
@@ -34,7 +34,7 @@ power button (`leviculum-nrf/src/boards/t1000e.rs:280-284`).
 
 Before 892 the LEDs said nothing a user asked for. The T114, the Solar
 Node and the T1000-E flashed theirs once at boot and never touched it
-again (`leviculum-nrf/src/bin/t114.rs:592`,
+again (`leviculum-nrf/src/bin/t114.rs:591`,
 `leviculum-nrf/src/bin/solarnode.rs:669`,
 `leviculum-nrf/src/bin/t1000e.rs:593`). The Pocket V2's two LEDs pulsed
 LoRa TX and RX activity (`leviculum-nrf/src/led.rs`), and a bare RAK4631
@@ -305,7 +305,7 @@ recognised and logged, `action=long` and `action=hold8`, and do
 nothing; the 8 s mark has no signal of its own), the boot-time factory
 reset, and the T114's display wake: its ST7789 has no power control yet
 and stays lit (`leviculum-nrf/src/st7789.rs:33-34`; its panel says so,
-`leviculum-nrf/src/st7789.rs:395`).
+`leviculum-nrf/src/st7789.rs:396`).
 
 ## See also
 

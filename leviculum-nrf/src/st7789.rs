@@ -58,7 +58,7 @@
 //! image by one row into an area we clear to black at init — cosmetic at
 //! worst.
 
-use embassy_nrf::gpio::{Level, Output, OutputDrive};
+use embassy_nrf::gpio::{AnyPin, Level, Output, OutputDrive};
 use embassy_nrf::peripherals;
 use embassy_nrf::spim::{self, Spim};
 use embassy_nrf::{bind_interrupts, Peri};
@@ -246,17 +246,18 @@ impl St7789 {
 }
 
 /// Full TFT wiring, bundled so the task signature stays within reason.
-/// Field types are the board aliases — the bin file can only hand over
-/// the correct physical pins.
+/// The pins are plain (`AnyPin`), as an embassy task cannot be generic; the
+/// board file builds the value from its aliases (`boards::t114::tft_wiring`),
+/// so the bin file can still only hand over the correct physical pins.
 pub struct TftWiring {
     pub spi: Peri<'static, peripherals::SPI3>,
-    pub sck: Peri<'static, crate::boards::t114::TftSck>,
-    pub mosi: Peri<'static, crate::boards::t114::TftMosi>,
-    pub cs: Peri<'static, crate::boards::t114::TftCs>,
-    pub dc: Peri<'static, crate::boards::t114::TftDc>,
-    pub rst: Peri<'static, crate::boards::t114::TftReset>,
-    pub vtft: Peri<'static, crate::boards::t114::TftPowerEn>,
-    pub leda: Peri<'static, crate::boards::t114::TftBacklight>,
+    pub sck: Peri<'static, AnyPin>,
+    pub mosi: Peri<'static, AnyPin>,
+    pub cs: Peri<'static, AnyPin>,
+    pub dc: Peri<'static, AnyPin>,
+    pub rst: Peri<'static, AnyPin>,
+    pub vtft: Peri<'static, AnyPin>,
+    pub leda: Peri<'static, AnyPin>,
 }
 
 #[embassy_executor::task]

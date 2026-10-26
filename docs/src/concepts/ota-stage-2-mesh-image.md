@@ -50,7 +50,7 @@ optimisation; it is the property that makes the operation survivable.**
 not read off a header — three units answered nothing to `05h`, `9Fh`,
 `90h` or the datasheet reset while every pin followed our drive, and both
 board files state `qspi_part: None`
-(`leviculum-nrf/src/boards/t114.rs:172`,
+(`leviculum-nrf/src/boards/t114.rs:198`,
 `leviculum-nrf/src/boards/rak4631.rs:192`). The `EXTERNAL_FLASH_DEVICES`
 lines in the vendor variant headers that once suggested otherwise sit
 under comments denying the part — RAK's own reads "No onboard flash"
