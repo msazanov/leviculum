@@ -50,18 +50,21 @@ With a picture focused (`Tab`), `Enter` saves it to the download directory and `
 :   How much fetched image data to keep in memory for revisits (default: 10). A page visited again then costs no airtime for pictures it has already shown. When the budget is exceeded, the pictures untouched longest are dropped until it fits again; a single picture larger than the whole budget is never kept. `0` disables the cache. Memory only — nothing is written to disk.
 
 **--no-color**
-:   Disable ANSI colour in the rendered output. Also suppresses inline images: a picture painted out of coloured blocks is not what a reader asking for no colour had in mind.
+:   Disable ANSI colour in the rendered output. Also suppresses inline images: a picture painted out of coloured blocks is not what a reader asking for no colour had in mind. **NO_COLOR** set and not empty does the same.
 
 **--theme** *theme*
-:   Colour theme for the interactive UI: `auto` detects the terminal background, `light` and `dark` force a theme. Ignored with **--print** and when output is not a terminal (default: `auto`).
+:   Colour theme for the interactive UI: `auto` detects the terminal background (dark when it does not answer), `light` and `dark` force a theme; `t` swaps them while browsing. Ignored with **--print** and when output is not a terminal (default: `auto`). **lnomad** has no settings file, so unlike **lnmsg**(1) there is no `theme` key.
 
-**--color** *depth*
-:   Terminal colour depth. `auto` picks true colour when `COLORTERM` is `truecolor` or `24bit` and otherwise falls back to the xterm-256 palette; `truecolor` and `256` force the depth. **--no-color** still overrides this (default: `auto`).
+**--color** *tier*
+:   Terminal colour tier. `auto` picks true colour when `COLORTERM` is `truecolor` or `24bit`, the xterm-256 palette when `TERM` contains `256color`, no colour when `TERM` is `dumb` or unset, and the sixteen ANSI colours otherwise; `truecolor`, `256` and `16` force the tier. A page's own colours are drawn at the nearest the tier has; in 16 colours inline pictures fall back to their text line. **--no-color** and **NO_COLOR** still override this (default: `auto`).
 
 ## ENVIRONMENT
 
-**COLORTERM**
-:   Consulted by `--color auto` to choose between true colour and the xterm-256 palette.
+**COLORTERM**, **TERM**
+:   Consulted by `--color auto` to choose the colour tier.
+
+**NO_COLOR**
+:   Set and not empty: no colour, as **--no-color**.
 
 **XDG_CONFIG_HOME**
 :   Base for **lnomad**'s own directory (`lnomad/`), holding the bookmarks (`bookmarks.toml`), the per-node identify decisions (`identify.toml`) and the identity **lnomad** reveals when identifying (`identity`). Defaults to `~/.config`.

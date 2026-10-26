@@ -51,13 +51,19 @@ lnmsg -- terminal LXMF messenger for Reticulum
 :   **tui** only: draw the delivery marks in ASCII.
 
 **--no-color**
-:   **tui** only: no colours.
+:   **tui** only: no colours. Alignment, the glyphs and reverse video for the selection, the badge and the toast carry everything, as they do in every colour tier too. **NO_COLOR** does the same.
+
+**--color** `auto`|`truecolor`|`256`|`16`
+:   **tui** only: the colour tier. `auto` (the default) takes true colour when **COLORTERM** is `truecolor` or `24bit`, the 256-colour palette when **TERM** contains `256color`, no colour when **TERM** is `dumb` or unset, and the sixteen ANSI colours otherwise. **--no-color** and **NO_COLOR** win over it.
+
+**--theme** `auto`|`dark`|`light`
+:   **tui** only: dark or light colours. `auto` asks the terminal for its background and takes dark when it does not answer within 100 ms. Over the config file's `theme` key; the palette's `theme` swaps the two for the session.
 
 **--no-mouse**
 :   **tui** only: leave the mouse to the terminal. Its own selection and copy then work as in any other program, and lnmsg sees no click, wheel or drag; the palette's `mouse` captures it again, and turns it off again.
 
 **--script** *file*, **--frames** *file*, **--size** *W*x*H*
-:   **tui** only: run a key script instead of reading the keyboard, and write each frame it asks for to **--frames** (default: the script's path with `.frames`), on a screen of **--size** (default 80x24). One step a line, `#` a comment: `key` *name* (`tab`, `backtab`, `enter`, `esc`, `up`, `down`, `left`, `right`, `home`, `end`, `pageup`, `pagedown`, `backspace`, `delete`, `space`, `f1` to `f12`, or one character, after any of the prefixes `ctrl-`, `alt-` and `shift-`, so `shift-enter` and `ctrl-enter` too), `type` *text*, `newline` (Alt-Enter, a line break in compose), `keyboard` `enhanced`|`plain` (the keyboard the screen is told it has: its hint offers `Shift-Enter` and `Ctrl-Enter` only when enhanced; plain until said), `tick` [*n*], `sleep` *ms* (up to 60000: read the engine as the idle screen does and tick once per 250 ms of *ms*), `frame` [*label*], and `until ready`, `until delivery` *state*, `until received` *n*, `until leg` `direct`|`propagated` (the send runner reported that leg for the newest sent message), each with an optional timeout in seconds (default 30), and `clock` *YYYY-MM-DD* *HH:MM* (the time of day from then on, at UTC; a script starts at 2026-10-26 12:00 and never reads the wall clock, so its frames are the same on every run). The mouse steps take screen cells counted from 1 at the top left, as the frames' rows and columns are: `click` *col* *row* (the left button down and up), `wheel` `up`|`down` *col* *row* [*n*] (*n* notches, 1 by default) and `drag` *col* *row* *col* *row* (down at the first cell, moved to the second and up there). What the screen asks of the terminal goes into the frames where it happens: `--- osc52` *sequence* `---` for a copy, the escape character written `\e`, and `--- open` *url* `---` for a link, which a script never launches. *state* is one of `queued`, `inflight`, `sent`, `mailbox`, `delivered`, `rejected`, `failed`. An `until` that does not hold in time draws a last frame and exits 1.
+:   **tui** only: run a key script instead of reading the keyboard, and write each frame it asks for to **--frames** (default: the script's path with `.frames`), on a screen of **--size** (default 80x24). One step a line, `#` a comment: `key` *name* (`tab`, `backtab`, `enter`, `esc`, `up`, `down`, `left`, `right`, `home`, `end`, `pageup`, `pagedown`, `backspace`, `delete`, `space`, `f1` to `f12`, or one character, after any of the prefixes `ctrl-`, `alt-` and `shift-`, so `shift-enter` and `ctrl-enter` too), `type` *text*, `newline` (Alt-Enter, a line break in compose), `keyboard` `enhanced`|`plain` (the keyboard the screen is told it has: its hint offers `Shift-Enter` and `Ctrl-Enter` only when enhanced; plain until said), `tick` [*n*], `sleep` *ms* (up to 60000: read the engine as the idle screen does and tick once per 250 ms of *ms*), `frame` [*label*], and `until ready`, `until delivery` *state*, `until received` *n*, `until leg` `direct`|`propagated` (the send runner reported that leg for the newest sent message), each with an optional timeout in seconds (default 30), and `clock` *YYYY-MM-DD* *HH:MM* (the time of day from then on, at UTC; a script starts at 2026-10-26 12:00 and never reads the wall clock, so its frames are the same on every run). A script draws without colour and dark, whatever the terminal it runs in, until `tier` `mono`|`16`|`256`|`truecolor` and `theme` `dark`|`light` say otherwise; `styles` *name* writes the screen's colours as a map to the frames file's path with `.styles` added, one letter a cell: `.` your block, `,` theirs, `=` the date pill, `!` the `new` rule, `^` a selected block or reverse video, `t` the toast, `e` the error colour, blank the terminal's own. The mouse steps take screen cells counted from 1 at the top left, as the frames' rows and columns are: `click` *col* *row* (the left button down and up), `wheel` `up`|`down` *col* *row* [*n*] (*n* notches, 1 by default) and `drag` *col* *row* *col* *row* (down at the first cell, moved to the second and up there). What the screen asks of the terminal goes into the frames where it happens: `--- osc52` *sequence* `---` for a copy, the escape character written `\e`, and `--- open` *url* `---` for a link, which a script never launches. *state* is one of `queued`, `inflight`, `sent`, `mailbox`, `delivered`, `rejected`, `failed`. An `until` that does not hold in time draws a last frame and exits 1.
 
 ## KEYS
 
@@ -71,13 +77,15 @@ In the compose line, keys type. `Enter` sends to the open conversation (an empty
 
 **send_on_enter**: with `send_on_enter = false` in `$LNMSG_HOME/config`, or after the palette's `send on enter`, `Enter` breaks the line and `Alt-Enter` sends (`Ctrl-Enter` too, where the terminal can send it).
 
-Everywhere: `Alt-x` opens the command palette, which matches what you type against the actions' names (`send`, `fetch`, `quit`, `help`, `details`, `next conversation`, `send on enter`, `mouse`, ...). `Alt-↓`/`Alt-↑` select the next or previous conversation, `Alt-Shift-↓`/`Alt-Shift-↑` the next or previous one with unread messages. `F5` fetches the mailbox, `Ctrl-l` redraws the screen, `Ctrl-q` quits. `Ctrl-c` quits nowhere; outside compose it says that `Ctrl-q` does.
+Everywhere: `Alt-x` opens the command palette, which matches what you type against the actions' names (`send`, `fetch`, `quit`, `help`, `details`, `next conversation`, `send on enter`, `mouse`, `theme`, ...). `Alt-↓`/`Alt-↑` select the next or previous conversation, `Alt-Shift-↓`/`Alt-Shift-↑` the next or previous one with unread messages. `F5` fetches the mailbox, `Ctrl-l` redraws the screen, `Ctrl-q` quits. `Ctrl-c` quits nowhere; outside compose it says that `Ctrl-q` does.
 
 ## THE SCREEN
 
 **The list.** Two rows a conversation, the most recent first: its name (the address's first eight hex digits in angle brackets, until names arrive), the time of its last message (`14:05` today, the weekday this week, else the date), then the last line, `you:` before it when it was yours, and in brackets the count of messages not yet read. The selected conversation has a bar in the margin, reversed while the list has the focus. The conversation's title says the peer, its trust (`unknown` until names arrive) and the mailbox: the selected node, how it was chosen and when this session last fetched from it.
 
-**A message** is a block: yours flush right, theirs flush left, at most three quarters of the pane wide, the text wrapped at a space and a line break kept, and the time closing the last line, for yours with its delivery mark (see DELIVERY MARKS). A centred date separates the days, and the top of the conversation says `nothing earlier on this device`, because lnmsg keeps no history yet. On a pane narrower than 40 cells yours are drawn flush left too, with `you` before the time. A message is reversed behind a bar while the conversation has the focus and the cursor is on it.
+**A message** is a block: yours flush right, theirs flush left, at most three quarters of the pane wide, the text wrapped at a space and a line break kept, and the time closing the last line, for yours with its delivery mark (see DELIVERY MARKS). A centred date separates the days, and the top of the conversation says `nothing earlier on this device`, because lnmsg keeps no history yet. On a pane narrower than 40 cells yours are drawn flush left too, with `you` before the time. A message is drawn selected behind a bar while the conversation has the focus and the cursor is on it.
+
+**Colour.** In colour your blocks are tinted blue and theirs grey, each a rectangle of its text with a cell of margin either side; the time takes a softer colour of its block, the date sits on a pill of its own between dashes, and the `new` rule takes an accent. A selected block takes a stronger tint; in 16 colours and without colour it is reversed. On a dark terminal in 16 colours their blocks are not tinted. Colour only reinforces: the side is where the block sits, the delivery state is the glyph, the unread count is a word.
 
 **The `new` rule.** Where the messages begin that arrived while the conversation was not open, or while you were reading earlier ones, a full-width rule says how many (`2 new`). It stays until you leave the conversation. A message that arrives while you have scrolled up draws the rule above it and does not move what you are reading; `G` or `End` goes back to the newest, and from there the conversation follows what arrives.
 
@@ -99,7 +107,7 @@ Without capture the terminal's own selection works as before: drag to select, an
 
 ## DELIVERY MARKS
 
-`○` queued; a spinner while a link is built or the bytes go out; `◇` handed to the network, no proof back; `⌂` left in a propagation node's mailbox; `✓` a delivery proof came back; `✗` refused (red) or given up (dim). Only `✓` is green, and only a proof makes it. With **--ascii**: `.` `*` `o` `^` `v` `x`.
+`○` queued; a spinner while a link is built or the bytes go out; `◇` handed to the network, no proof back; `⌂` left in a propagation node's mailbox; `✓` a delivery proof came back; `✗` refused (red) or given up (dim). Only `✓` is green, and only a proof makes it. Each tone has a value per theme and colour tier; in 16 colours a mark takes its block's text colour, and without colour none. With **--ascii**: `.` `*` `o` `^` `v` `x`.
 
 ## EXIT STATUS
 
@@ -116,9 +124,15 @@ Without capture the terminal's own selection works as before: drag to select, an
 **LEVICULUM_EVENT_LOG**
 :   Append the run's structured events, including the message id, to this file.
 
+**NO_COLOR**
+:   Set and not empty: **tui** draws without colour, as **--no-color**.
+
+**COLORTERM**, **TERM**
+:   Read by **--color** `auto`.
+
 ## FILES
 
-`$LNMSG_HOME/identity` is your address; back it up. **tui** writes its warnings to `$LNMSG_HOME/tui.log` instead of the screen, with a line for each step of each send leg (`SEND`), each path answer (`PATH`) and each call to the daemon (`RPC`); and once at start a `KEYS` line naming the keyboard and its live chords (`KEYS enhancement=no newline=Alt-Enter send=Enter`); **RUST_LOG** replaces its filter (default `warn,lnmsg=info`). `$LNMSG_HOME/config` holds `key = value` lines: `propagation_node` (see **--pn**) and `send_on_enter` (`true`, the default, or `false`).
+`$LNMSG_HOME/identity` is your address; back it up. **tui** writes its warnings to `$LNMSG_HOME/tui.log` instead of the screen, with a line for each step of each send leg (`SEND`), each path answer (`PATH`) and each call to the daemon (`RPC`); and once at start a `KEYS` line naming the keyboard and its live chords (`KEYS enhancement=no newline=Alt-Enter send=Enter`); **RUST_LOG** replaces its filter (default `warn,lnmsg=info`). `$LNMSG_HOME/config` holds `key = value` lines: `propagation_node` (see **--pn**), `send_on_enter` (`true`, the default, or `false`) and `theme` (`auto`, the default, `dark` or `light`; see **--theme**).
 
 ## SEE ALSO
 

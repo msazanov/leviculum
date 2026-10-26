@@ -244,7 +244,7 @@ and the palette finds the action by the chat program's word too (`new
 chat`, `find`).
 
 **`:q` quits for free.** The palette's fuzzy match is a subsequence test
-(`fuzzy_match`, `leviculum-ui/src/commands.rs:96`), and `quit` is the only
+(`fuzzy_match`, `leviculum-ui/src/commands.rs:99`), and `quit` is the only
 palette name containing a `q`, so `:`, `q`, `Enter` quits as a vi user
 expects. That stays true only while it is tested, so the keymap slice
 pins it.
@@ -565,11 +565,13 @@ daemon in `tui_chat.frames`. Where they differ from the mockups:
 
 ### Colour
 
-**Status: proposed 2026-10-26, for Lew's decision.** Lew asked on
-2026-10-26 whether background and foreground colours can carry the two
-sides in a terminal the way Signal and WhatsApp do on the phone. They
-can. This part says how, and slice 2 of section 7 draws what Lew takes
-from it.
+**Status: Decided 2026-10-26 (Lew), built 53b6c159 and ddff9dd2
+(leviculum 1042).** Lew asked on 2026-10-26 whether background and
+foreground colours can carry the two sides in a terminal the way Signal
+and WhatsApp do on the phone. They can. This part says how; Lew took all
+five proposals of part 6 as they stood, and "Built" after it names where
+the build differs from the text. The table is `leviculum-ui/src/tokens.rs`
+(`tokens`, `leviculum-ui/src/tokens.rs:353`).
 
 The model is the desktop apps': Signal Desktop and WhatsApp Desktop tint
 our own blocks in the app's accent and draw the other side's in a neutral
@@ -604,7 +606,7 @@ still shows around the blocks.
 
 The delivery marks have colours already, decided on 2026-08-10
 ([the user interface](lnmsg-ui.md), "the ledger and the glyph"), drawn
-today from one theme-blind palette (`lnmsg/src/ui.rs:1699`, `tone_rgb`).
+until 1042 from one theme-blind palette (`tone_rgb` in `lnmsg`'s `ui`).
 That palette was chosen for a dark pane. On a white pane its yellow is
 1.7:1 and its amber 1.9:1, and over the own tint above its red is 2.8:1
 and every dim tone below 3:1. So the tones join the table, per theme and
@@ -628,7 +630,7 @@ xterm palette; over the cyan one the red (1) is 3.0:1 and the green (2)
 1.1:1. The glyph carries the state on its own (rule 3 below).
 
 The 256 tier names its own indexes rather than sending the truecolor
-values through `rgb_to_ansi256` (`leviculum-ui/src/color.rs:65`). The
+values through `rgb_to_ansi256` (`leviculum-ui/src/color.rs:240`). The
 nearest index does not keep contrast: the dark own time `#a9c1e6` on
 `#1d3f6e` is 5.8:1, its nearest pair 146 on 23 is 3.6:1, and the light one
 falls from 5.9:1 to 4.3:1.
@@ -636,18 +638,21 @@ falls from 5.9:1 to 4.3:1.
 **How the tier is chosen.** In this order, the first that holds:
 
 1. `--no-color`, or `NO_COLOR` set and not empty: monochrome.
-2. `--color truecolor|256|16`: that tier. `lnomad` has the flag with two
-   values (`lnomad/src/main.rs:62`); `lnmsg` gets it, and both gain `16`.
-3. `COLORTERM` is `truecolor` or `24bit`: truecolor (today's rule,
-   `resolve_depth`, `leviculum-ui/src/color.rs:43`).
+2. `--color truecolor|256|16`: that tier. `lnomad` had the flag with two
+   values (`lnomad/src/main.rs:65`); `lnmsg` has it now
+   (`lnmsg/src/main.rs:144`), and both have `16`.
+3. `COLORTERM` is `truecolor` or `24bit`: truecolor (the rule
+   `resolve_depth` had before 1042).
 4. `TERM` contains `256color`: 256. `xterm-256color`, `tmux-256color` and
    `screen-256color` land here.
 5. `TERM` is `dumb` or unset: monochrome.
 6. Anything else (`linux`, `xterm`, `screen`, `vt220`): 16.
 
-Today steps 4 to 6 do not exist and every terminal without `COLORTERM`
-gets 256, which the Linux console and a bare `xterm` render as their own
-nearest guess. A terminfo lookup of the `colors` capability would be
+Before 1042 steps 4 to 6 did not exist and every terminal without
+`COLORTERM` got 256, which the Linux console and a bare `xterm` render as
+their own nearest guess. The ladder is `resolve_tier`
+(`leviculum-ui/src/color.rs:138`), pure over a snapshot of the
+environment. A terminfo lookup of the `colors` capability would be
 exact where `TERM` is a name the heuristic does not know; the only
 terminfo reader in `Cargo.lock` arrives with `termwiz`, outside the
 shipped programs, so it is not proposed now.
@@ -655,35 +660,36 @@ shipped programs, so it is not proposed now.
 **Monochrome stays first class.** It is the layout of today: alignment,
 the glyphs, reverse video for the badge, the focused selection and the
 toast, no colour at all. The snapshot frames pin it, and it is the one
-look every test frame shows. One gap is fixed with it: `NO_COLOR` reaches
-the screen today only because crossterm drops colour sequences on output
-when it is set (`vendor/crossterm/src/style/types/colored.rs:76`), while
-`lnmsg`'s own `no_color` comes from the flag alone
-(`lnmsg/src/main.rs:408`), and `lnomad`'s from the flag and a non-tty
-(`lnomad/src/main.rs:201`). So under `NO_COLOR` alone the colour is gone
-but the reverse video that `no_color` chooses instead
-(`leviculum-ui-ratatui/src/toast.rs:63`) never comes, and a toast draws as
-plain text. Both programs read `NO_COLOR` into `no_color` themselves.
+look every test frame shows. One gap was fixed with it: until 1042
+`NO_COLOR` reached the screen only because crossterm drops colour
+sequences on output when it is set
+(`vendor/crossterm/src/style/types/colored.rs:76`), while `lnmsg`'s own
+`no_color` came from the flag alone and `lnomad`'s from the flag and a
+non-tty. So under `NO_COLOR` alone the colour was gone but the reverse
+video that `no_color` chooses instead never came, and a toast drew as
+plain text. Both programs now read `NO_COLOR` through the ladder, whose
+first rung it is.
 
 #### 2. Light or dark
 
-`lnmsg` already asks the terminal for its background before raw mode
-(`lnmsg/src/tui.rs:572`), the same query `lnomad` makes: OSC 11, with
+`lnmsg` asks the terminal for its background before raw mode
+(`lnmsg/src/tui.rs:585`), the same query `lnomad` makes: OSC 11, with
 `COLORFGBG` as the fallback, 100 ms to answer
 (`leviculum-ui-ratatui/src/background.rs:12`), decided by
-`resolve_theme` (`leviculum-ui/src/theme.rs:70`). It is hardcoded to
-`auto` there. Proposed:
+`resolve_theme` (`leviculum-ui/src/theme.rs:73`). It was hardcoded to
+`auto` there until 1042. Built as proposed:
 
 - a key `theme = auto|dark|light` in `lnmsg`'s config file
-  (`lnmsg/src/config.rs`, which holds `key = value` lines), `auto` the
+  (`lnmsg/src/config.rs:99`, which holds `key = value` lines), `auto` the
   default;
 - `--theme auto|dark|light` on the command line over the key, as `lnomad`
-  has it (`lnomad/src/main.rs:56`);
+  has it (`lnomad/src/main.rs:57`);
 - a terminal that does not answer in time and sets no `COLORFGBG` gives
   dark, as in `lnomad`;
 - a palette action `theme` toggles for the session, the way `t` calls
   `toggle_theme` in lnomad (`lnomad/src/app/event.rs:697`); no key, the
-  keymap is decided.
+  keymap is decided. Its toast names the theme it turned to
+  (`lnmsg/src/ui.rs:1394`).
 
 #### 3. What colour carries and what it must not carry alone
 
@@ -879,7 +885,7 @@ in truecolor, 3.4:1 to 9.3:1 and 3.1:1 to 8.6:1 in 256.
 #### 5. Tests the layout slice will carry
 
 - **The frames stay plain text.** The `frame` step of the key script
-  (`lnmsg/src/tui.rs:950`) writes characters only, and the existing
+  (`lnmsg/src/tui.rs:975`) writes characters only, and the existing
   snapshot frames keep pinning the monochrome look.
 - **A script step `styles <name>`** writes one frame's per-cell style as a
   map in the letters above: `.` `,` `=` for the three tints, `s` for a
@@ -899,44 +905,88 @@ in truecolor, 3.4:1 to 9.3:1 and 3.1:1 to 8.6:1 in 256.
   256 uses the xterm-256 values of the indexes; 16 is checked on the
   xterm default palette and the VGA palette of the Linux console, and only
   for the text pairs, since the marks there are text. The ratio is the
-  WCAG 2.x one, sRGB linearised: `luminance` in `leviculum-ui/src/theme.rs:63`
+  WCAG 2.x one, sRGB linearised: `luminance` in `leviculum-ui/src/theme.rs:66`
   is a linear approximation that serves the light or dark decision and
   must not be reused for it.
 - **The tier ladder** gains unit tests over its pure decision, as
-  `resolve_depth` has today: each `TERM` and `COLORTERM` case above, and
+  `resolve_depth` had: each `TERM` and `COLORTERM` case above, and
   `NO_COLOR` empty and set.
 
-#### 6. Open for Lew
+#### 6. Decided (Lew, 2026-10-26)
 
-1. **The hues.** One proposal per tier:
-   - truecolor: a deep blue own tint (`#1d3f6e`) on dark and a pale blue
-     one (`#d3e3fd`) with dark text on light. Blue because it is Signal's
-     own side, and because green, red, amber and yellow already mean a
-     delivery state; a green own tint, as WhatsApp has, would sit under a
-     green `✓` that means delivered. Pale with dark text on light rather
-     than Signal's saturated bubble with white text, because a saturated
-     block several rows tall is heavy in a cell grid.
-   - 256: 24 and 189, cube colours close to the above, picked by hand so
-     every pair holds its bar rather than by nearest colour; their side
-     236 and 254.
-   - 16: blue (4) under bright white on dark, cyan (6) under black on
-     light, the two pairs that hold above 7:1 on both the xterm and the VGA
-     palette.
-2. **Their blocks tinted or neutral.** Proposed tinted in truecolor and
-   256, as the desktop apps do, and on light in 16; untinted on dark in
-   16. The alternative is untinted everywhere, which leaves the side to
-   alignment alone and makes ours the only colour on the pane.
-3. **The date as a pill or as today's rule.** Proposed a pill; the rule
-   with its dashes stays in every tier and the pill is laid under the
-   label only.
-4. **Whether `lnomad` adopts the same tokens for its chrome.** Proposed:
-   the shared ones (muted, selection, toast, error, the tier ladder and
-   `NO_COLOR`) move to `leviculum-ui` and both programs read them; `lnomad`
+Lew took the five proposals as they stood, on 2026-10-26 at 21:10:
+
+1. **The hues** as the table has them: the own tint `#1d3f6e` on dark and
+   `#d3e3fd` on light in truecolor, 24 and 189 in 256, blue (4) under
+   bright white on dark and cyan (6) under black on light in 16. Blue
+   because it is Signal's own side and because green, red, amber and
+   yellow already mean a delivery state; pale with dark text on light,
+   because a saturated block several rows tall is heavy in a cell grid.
+2. **Their blocks tinted** with the grey of the table in truecolor and
+   256, and on light in 16; untinted on dark in 16, where the eight have
+   no grey background.
+3. **The date as a pill** under its label; the rule with its dashes stays
+   in every tier.
+4. **The shared tokens move to `leviculum-ui`** (muted, selection, toast,
+   error, the tier ladder and `NO_COLOR`), and `lnomad` reads them. It
    keeps NomadNet's heading bands and its link colour, which belong to
-   micron pages. Its chrome bars (`chrome_bg`, `theme.rs`) and the toast
-   accents of `leviculum-ui-ratatui/src/toast.rs:59` become tokens of the
-   same table.
-5. **The toggle.** A palette action only, as proposed, or a key too.
+   micron pages; its chrome bars (`chrome_bg` in `Theme`) and the toast
+   accents that `leviculum-ui-ratatui`'s toast drew before 1042 became
+   tokens of the same table.
+5. **The toggle is a palette action only**, no key.
+
+#### Built 2026-10-26 (leviculum 1042)
+
+Built in 53b6c159 (`leviculum-ui`, `lnomad`) and ddff9dd2 (`lnmsg`), with
+these differences from the text above:
+
+- **A colour is an `Ink`**, RGB or a palette index, because the 256 and
+  16 tiers name their own indexes: the styled text model carried RGB
+  only. The sixteen go out as the named SGR colours (`30` to `37`, `90`
+  to `97`) a 16-colour terminal reads.
+- **The style map has one letter for reverse video.** Part 5 kept `s`
+  for a selected block and `r` for reverse video; the build writes `^`
+  for both, because a selected block in 16 colours and in monochrome is
+  reverse video and a map of styles cannot tell the two apart. The
+  letters (`style_letter`, `lnmsg/src/tui.rs:1070`): `.` ours, `,`
+  theirs, `=` the date pill, `!` the unread rule, `^` a selected block's
+  tint or reverse video, `t` the toast, `e` the error colour, blank for
+  the pane. Where two tokens share their colours the earlier letter wins:
+  in 16 colours on light the date pill is their block's pair (0 on 7)
+  and maps as `,`. The script sets the tier and theme with `tier` and
+  `theme` steps and starts monochrome and dark, whatever the host.
+- **The fixture session** is the 80 x 24 chat session of slice 2: while
+  the reader is scrolled up it opens the palette's `theme`, whose toast
+  then stands for the toast token, and writes the six maps and the
+  monochrome one over that screen into `tui_chat.styles`. The error toast
+  is not in that session; a unit test draws one in every tier.
+- **A tint covers the margins, reverse video does not.** A tinted block
+  is its text plus a margin cell either side, the bar in the left one
+  when selected; a reverse-video block reverses its text alone, as the
+  monochrome screen did before.
+- **Muted** are the top line, the dashes of a date rule and the rule
+  under the wide header. The `you` of the narrow pane sits in the
+  block's suffix and takes the time colour with the rest of it.
+- **The toast** is the toast token's pair over the whole box, and an
+  error toast's border is the error token. Where the toast token is
+  reverse video (16 colours, monochrome) the whole box is, the error
+  border too. In `lnomad` this replaces the red and green toast text.
+- **The marks are uncoloured in monochrome.** Before, `lnmsg --no-color`
+  still sent each mark's RGB tone.
+- **`lnmsg`'s footer and help** draw `lnomad`'s chrome colours in RGB, so
+  `lnmsg` downgrades them in 256 and 16 colours as `lnomad` always has.
+- **`lnomad`'s chrome tokens** hold its bars' colours: the truecolor
+  values it drew before, and in 256 and 16 the indexes its depth
+  post-pass lands them on, which a test pins, so the bars did not move.
+  Its pictures' status line takes the muted token. Under `--color 16`
+  its pictures fall back to text: sixteen colours draw no half-block
+  picture a reader recognises.
+- **`lnomad` has no settings file**, so the `theme` key is `lnmsg`'s
+  alone; `lnomad` keeps `--theme`.
+- **The 16-colour pane foregrounds are outside the test**, as part 5
+  has it (only the text pairs there). Measured anyway: the error colour
+  9 over the `#282c34` reference pane is 3.5:1 on the xterm palette and
+  4.45:1 on the VGA one, under the 4.5 a text pair would need; every other 16-colour pane pair is above 5:1.
 
 ### What the mouse does
 
@@ -1064,10 +1114,11 @@ layout's.
    decides it: the tokens, the tier ladder, the `theme` key, and the
    delivery tones moved into the table; it invents none. *Done
    2026-10-26 in monochrome, leviculum 1033 (d13c1a6d, 7b72a2ef,
-   27e356f0); section 5, "Built", names the differences. Open: the colour
-   tokens, the tier ladder, the `theme` key, the `styles` script step and
-   the token test, all waiting on "Colour", item 6; the 1001 phase is
-   periculum's.* *Acceptance:*
+   27e356f0); section 5, "Built", names the differences. The colour half
+   done 2026-10-26, leviculum 1042 (53b6c159, ddff9dd2): the tokens, the
+   tier ladder, the `theme` key and palette action, the `styles` script
+   step and the token test; "Colour", "Built", names the differences.
+   Open: the 1001 phase, periculum's.* *Acceptance:*
    snapshots at 80 x 24 and 120 x 40 whose structure is the mockups';
    unit tests over `view` for alignment, wrapping and the `new` line; the
    style maps and the token test of "Colour", item 5. *1001 phase:* Bob's reply arriving while

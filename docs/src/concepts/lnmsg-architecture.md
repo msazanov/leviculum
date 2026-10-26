@@ -48,7 +48,7 @@ help overlay's non-scroll groups are a second, unlinked static list
    toast; `Ctrl-C` quits from anywhere; an open help overlay swallows
    everything; an open places panel takes over.
 2. *Mode gating*. `Mode::{Browse, Address, Hint, Search, Field}`
-   (`lnomad/src/app/model.rs:114-133`), each with its own handler. Text modes
+   (`lnomad/src/app/model.rs:115-134`), each with its own handler. Text modes
    forward unclaimed keys to a `tui_input::Input` editor. `Mode::Field`
    uses a whitelist rather than a catch-all so that "field editing never
    leaks into browse hotkeys" (`lnomad/src/app/event.rs:438`, whitelist at
@@ -73,7 +73,7 @@ That is a cost-aware keymap, and a messenger sends over the same radios.
 
 **Architecture.** Elm-style with an explicit effect list. The core sits in
 `lnomad/src/app/` since the #219 cut (2026-10-25): `Model` at
-`lnomad/src/app/model.rs:476-635` (`#[derive(Clone, Debug, Default)]` at
+`lnomad/src/app/model.rs:477-636` (`#[derive(Clone, Debug, Default)]` at
 `:565`), `Effect` at `:478-532`; `AppEvent` at
 `lnomad/src/app/event.rs:25-92` and `update(&mut Model, AppEvent) ->
 Vec<Effect>` at `:98-208`. The terminal frontend is `lnomad/src/tui.rs`:
@@ -101,7 +101,7 @@ slices (`spawn_discovery`, `lnomad/src/tui.rs:1265-1306`), and a
 (`lnomad/src/tui.rs:1646-1648`). The main loop has five arms
 (`lnomad/src/tui.rs:1550-1653`), and the timer arm is conditionally enabled
 (`, if animate` at `:2229`, driven by `needs_tick()` at
-`lnomad/src/app/model.rs:815-818`) so an idle browser does not wake eight
+`lnomad/src/app/model.rs:822-825`) so an idle browser does not wake eight
 times a second.
 
 **Persistence.** Three small files under
@@ -131,21 +131,21 @@ magnitude" (`lnomad/src/image_cache.rs:11-14`).
 (`lnomad/src/render.rs:192-217`) produces `Vec<RLine>` where `RLine`, the
 shared styled text model of `leviculum-ui` since 984, is a vector of
 `StyledChar { ch, st, link, field }`
-(`leviculum-ui/src/style.rs:82-103`): already wrapped, aligned and indented,
+(`leviculum-ui/src/style.rs:95-116`): already wrapped, aligned and indented,
 one `RLine` per output row, every cell carrying its resolved style and its
 owning link index. That IR feeds either `to_ratatui_text`
-(`leviculum-ui-ratatui/src/style.rs:91-110`) for the TUI or `emit_ansi`
+(`leviculum-ui-ratatui/src/style.rs:148-167`) for the TUI or `emit_ansi`
 (`lnomad/src/render.rs:225-231`) for `--print`. Scrolling is a slice, not a
 widget scroll, because the page is pre-wrapped
 (`lnomad/src/tui.rs:317-324`), and there is one scroll rule shared by
-every scrollable window (`scrolled`, `lnomad/src/app/model.rs:96-111`).
+every scrollable window (`scrolled`, `lnomad/src/app/model.rs:97-112`).
 
 Two rendering caveats. Wrapping compares `cur.len() > width`, i.e.
 character count rather than display width (`wrap`,
 `lnomad/src/render.rs:773-800`), which will overflow on CJK and emoji. No
 test covering that was found, so whether it is a known limitation or an
 oversight is unclear. And the whole page is laid out eagerly on every
-relayout (`lnomad/src/app/model.rs:707-731`), including on every keystroke in a
+relayout (`lnomad/src/app/model.rs:708-732`), including on every keystroke in a
 form field (`:1657-1660`).
 
 **Scriptability, and the absence of settings.** `--print` fetches, renders
@@ -155,15 +155,15 @@ raw ANSI page text and nothing else: no link markers, no legend, and with
 (`lnomad/src/render.rs:144-147`). There is no JSON output anywhere in the
 crate: `serde_json` is not a dependency. Non-interactive detection is
 automatic: `interactive = !args.print && stdin().is_terminal() &&
-stdout().is_terminal()` (`lnomad/src/main.rs:167-168`), so piping never
+stdout().is_terminal()` (`lnomad/src/main.rs:174-175`), so piping never
 blocks on the UI. Exit codes: 0 success, 1 operational failure, 2 argument
-or URL error (`lnomad/src/main.rs:174`, `:188`, `:222`, `:238`).
+or URL error (`lnomad/src/main.rs:181`, `:188`, `:222`, `:238`).
 
 `lnomad` has no settings file at all. `--config` points at the *Reticulum*
 config directory; the `lnomad/` directory holds only data. The theme is
 auto-detected via OSC 11 before raw mode is entered
 (`lnomad/src/tui.rs:1448-1455`) and toggled at runtime with `t`; theme
-colours are hard-coded (`leviculum-ui/src/theme.rs:113-194`).
+colours are hard-coded (`leviculum-ui/src/theme.rs:116-189`).
 
 **The handoff that already exists.** `lnomad` recognises `lxmf@<hash>`
 links, and because it has no composer it copies the address to the
@@ -784,13 +784,13 @@ terms without a terminal, exactly as `leviculum-lxmf-node` is.
 Three specific things `lnomad` does that must change:
 
 1. **Bottom-anchored scrolling with a pinned flag.** `lnomad`'s `scroll` is
-   the index of the top visible line (`lnomad/src/app/model.rs:96-111`). A
+   the index of the top visible line (`lnomad/src/app/model.rs:97-112`). A
    message list wants a "pinned to bottom" boolean so an inbound message
    appends without yanking the viewport out from under a user who has
    scrolled up. NomadNet gets this wrong: it resets to the bottom on every
    refresh (NomadNet's `Conversations.py`, line 2287).
 2. **Windowed layout.** `lnomad` re-lays out the whole page on every
-   relayout (`lnomad/src/app/model.rs:707-731`). A ten-thousand-message
+   relayout (`lnomad/src/app/model.rs:708-732`). A ten-thousand-message
    conversation must not do that, and a compose buffer must not trigger it
    per keystroke. Lay out the visible window plus a margin, and cache per
    message keyed by `(message_id, width, theme)`.
@@ -804,7 +804,7 @@ Things to carry over unchanged: the generation counter for stale-result
 rejection (`spawn_fetch`, `lnomad/src/tui.rs:861-902`), the tick-counted
 toast whose expiry is a pure function and therefore unit-testable without
 real time passing (`Toast`, `leviculum-ui/src/toast.rs:23-33`, test at
-`lnomad/src/tui.rs:2763`),
+`lnomad/src/tui.rs:2767`),
 the `TerminalGuard` RAII plus panic hook that restores the terminal before
 the backtrace prints (`leviculum-ui-ratatui/src/terminal.rs:81-123`), and OSC 52 for the
 clipboard so copy works over SSH with no X11 dependency (`osc52`,
@@ -824,7 +824,7 @@ opportunity: "send me a message when the backup finishes" is a real use and
 needs no UI at all.
 
 Non-interactive subcommands from the start, following `lnomad`'s automatic
-non-tty detection (`lnomad/src/main.rs:167-168`) and its exit-code
+non-tty detection (`lnomad/src/main.rs:174-175`) and its exit-code
 convention (0, 1, 2):
 
 ```

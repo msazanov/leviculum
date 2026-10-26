@@ -84,9 +84,9 @@ Concretely:
   all, and each entry shows its key if it has one. NomadNet's static
   shortcut bar is the failure mode to avoid.
 - **`f` hint mode from `lnomad`** (`hints`,
-  `lnomad/src/app/model.rs:952-989`), extended to conversations. Its best
+  `lnomad/src/app/model.rs:959-996`), extended to conversations. Its best
   property is that it matches either the hint label *or* a substring of the
-  target's text (`hint_matches`, `lnomad/src/app/model.rs:979-989`), so `f`
+  target's text (`hint_matches`, `lnomad/src/app/model.rs:986-996`), so `f`
   then typing part of a contact's name jumps to that conversation. That is
   a better contact switcher than anything in either prior-art program.
 
@@ -207,9 +207,23 @@ the header with the trust state and the mailbox state; and the detail view
 behind `Enter` on a message, with the ledger of what this session saw
 happen to it, in place of the toast of 1030. The model hears the screen's
 size and the clock, so a page is the pane's height and a reply arriving
-while the reader is scrolled up leaves the view where it is. Monochrome:
-the colour part of that page is still a proposal. Its section 5, "Built",
-lists where the screen differs from the mockups.
+while the reader is scrolled up leaves the view where it is. Its section
+5, "Built", lists where the screen differs from the mockups.
+
+### Built 2026-10-26, the colours
+
+1042 (#232) is the colour half of the same slice, section 5, "Colour",
+as Lew decided it on 2026-10-26: one token table in `leviculum-ui` with a
+value for each of four tiers (monochrome, 16, 256, truecolor) and two
+themes, our blocks tinted blue and theirs grey, the date as a pill, the
+`new` rule in an accent, the delivery tones per theme and tier. The tier
+comes from a ladder over `--no-color`, `NO_COLOR`, `--color`, `COLORTERM`
+and `TERM`, the theme from `--theme`, the config file's `theme` key and
+the terminal's background, and the palette's `theme` swaps light and dark
+for the session. `lnomad` reads the same table for its toast, selection,
+muted text and chrome bars. Monochrome is the look the frames pin; the
+colour is pinned as per-cell style maps beside them. "Colour", "Built",
+lists where the build differs from the text.
 
 ### Built 2026-10-26, the mouse
 
@@ -340,7 +354,13 @@ with its glyph, tone, dimming and ASCII fallback; its tests hold the rules
 above (green and `✓` only on proof, only the working states animate). The
 spinner rows draw the shared loading spinner of `leviculum-ui/src/spinner.rs`,
 the one `lnomad` shows, so its frames are the ones the table lists. The
-tones are resolved against the palette by the frontend.
+tones are resolved against the palette by the frontend. Since 1042 that
+palette is the token table of `leviculum-ui/src/tokens.rs`, a colour per
+tone for each theme and tier, measured against our own block's tint and
+its selected tint because a mark only ever sits in our own block: the one
+dark-pane palette before it put the yellow at 1.7:1 on a white pane. In
+16 colours a mark takes its block's text colour, and the glyph alone
+carries the state, as it does in monochrome.
 
 `lnmsg` draws it since 2026-10-25 (994), and maps the router's states
 onto the rows in `lnmsg::ui::delivery_of`: `Generating` and `Outbound` are
@@ -460,7 +480,7 @@ via OSC 52 (`leviculum-ui/src/clipboard.rs:14-42`, lnomad's own until 1036
 shared it, which works over SSH). Plus a
 `--no-mouse` flag and a runtime toggle for people who want the terminal's
 own selection back. The `StyledChar` IR already carries per-cell ownership
-(`leviculum-ui/src/style.rs:82-95`), so the hit-testing is a small extension
+(`leviculum-ui/src/style.rs:95-108`), so the hit-testing is a small extension
 of `visible_links` rather than new machinery.
 
 ### Terminal QR for paper messages and for your own address

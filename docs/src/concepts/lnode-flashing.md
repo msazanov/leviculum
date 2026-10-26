@@ -43,9 +43,9 @@ Automatic today:
 
 - **Bundle discovery**: `--bundle`, then `$LNFLASH_BUNDLE`, then next to
   the binary, then `/usr/share/lnflash` (`locate`,
-  `lnflash/src/manifest.rs:988`).
+  `lnflash/src/manifest.rs:1018`).
 - **The self check**: `--check-bundle` verifies the manifest and every
-  payload checksum (`verify_all`, `lnflash/src/main.rs:1005`).
+  payload checksum (`verify_all`, `lnflash/src/main.rs:1008`).
 - **Entry** by the 1200-baud touch, then waiting for the bootloader
   (`enter_bootloader`, `lnflash/src/flow.rs:3928`).
 - **Identity from the bootloader**, never from the running firmware
@@ -53,7 +53,7 @@ Automatic today:
   precondition with its remedy, and the read back of the `[FW_BUILD]`
   banner.
 - **Transports**: `uf2-msc` and `dfu-serial`, the two variants of
-  `Transport` (`lnflash/src/manifest.rs:128`). The third, the ESP32 ROM
+  `Transport` (`lnflash/src/manifest.rs:129`). The third, the ESP32 ROM
   loader through `espflash` or `esptool`, exists as `lnflash/src/esp.rs`,
   but no flash run reaches it yet: nothing in `flow.rs` calls it.
 
@@ -91,8 +91,8 @@ Where it stops, nothing written:
   `lnflash/src/flow.rs:2810`), or a remedy that did not take
   (`RemedyDidNotTake`, `lnflash/src/flow.rs:658`).
 - Not root: said in the first lines (`is_root`,
-  `lnflash/src/main.rs:1012`), the run identifies and then cannot write.
-- An empty bus fails a real run (`lnflash/src/main.rs:1039`).
+  `lnflash/src/main.rs:1015`), the run identifies and then cannot write.
+- An empty bus fails a real run (`lnflash/src/main.rs:1042`).
 
 No estimate yet:
 

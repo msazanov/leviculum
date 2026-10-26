@@ -36,6 +36,7 @@ interaction model across all three?
 | one interaction model: same commands, same palette names, same delivery glyphs | [A messenger whose core runs anywhere](handheld-messenger.md), "One interaction model"; [lnmsg: the user interface](lnmsg-ui.md), sections 1 and 2 |
 | keyboard first: the palette, no modes, `Enter` sends | [lnmsg: the user interface](lnmsg-ui.md), section 1 |
 | the delivery glyphs `○ ◇ ⌂ ✓ ✗` and the braille spinner, with an ASCII fallback | [lnmsg: the user interface](lnmsg-ui.md), section 2 |
+| one palette: the GUI takes its colours from the token table of `leviculum-ui/src/tokens.rs`, the truecolor values of each theme, as both terminal programs do | [keys, mouse and layout](lnmsg-keys-and-layout.md), section 5, "Colour" |
 | licence compatible with `AGPL-3.0-or-later` | `Cargo.toml:89`, [Licensing and third-party notices](licensing-and-notices.md) |
 | German and Polish text, in the UI and in received messages | Lew, 2026-10-25 |
 | Rust only, no webview | Lew, 2026-10-25 |

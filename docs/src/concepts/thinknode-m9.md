@@ -420,7 +420,7 @@ Nothing in this section is built yet, except where a dated note says otherwise.
 4. **Give the rig an ESP32 side.** Nothing on the rig handles this chip
    family as an LNode today:
    - `lnflash` knows two transports, `uf2-msc` and `dfu-serial`
-     (`Transport`, `lnflash/src/manifest.rs:128-138`). An ESP32-S3 has no
+     (`Transport`, `lnflash/src/manifest.rs:129-139`). An ESP32-S3 has no
      UF2 and no DFU and is written with `espflash`.
    - periculum's LNode profile identifies a board by its USB vendor string
      and interface numbers (`periculum/periculum/devices/lnode.toml:24-32`).
