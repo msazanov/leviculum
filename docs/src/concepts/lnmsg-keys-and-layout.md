@@ -13,7 +13,8 @@ The table in section 3, the four changes to slice one it asks for
 (section 3, Compose) were decided by Lew on 2026-10-26 at 18:15, and slice
 1 of section 7, the keymap, is built (leviculum 1030). The layout in
 section 5 and the slice order in section 7 are the plan the later slices
-are ordered from.
+are ordered from. The colour part of section 5 ("Colour") is proposed,
+not decided.
 
 ## 1. The principles (Lew, 2026-10-26)
 
@@ -518,6 +519,381 @@ filled from the keymap rows that carry a label for the focused pane, so
 it changes with the focus and drops low-priority hints first on a narrow
 screen.
 
+### Colour
+
+**Status: proposed 2026-10-26, for Lew's decision.** Lew asked on
+2026-10-26 whether background and foreground colours can carry the two
+sides in a terminal the way Signal and WhatsApp do on the phone. They
+can. This part says how, and slice 2 of section 7 draws what Lew takes
+from it.
+
+The model is the desktop apps': Signal Desktop and WhatsApp Desktop tint
+our own blocks in the app's accent and draw the other side's in a neutral
+grey, keep the text inside both at full contrast, set the date as a small
+pill on a tint of its own, and draw the unread line in an accent. Each of
+those is a token below.
+
+#### 1. Three tiers, one table
+
+One table of tokens, each with a value for a dark and for a light
+terminal in each of three colour tiers. Foreground over background where
+a token sets both; a token that sets only a foreground is drawn on the
+pane. The pane itself is never painted: it stays the terminal's own
+background and foreground, as `lnomad` leaves its content
+(`leviculum-ui/src/theme.rs`, module doc), so a reader's terminal theme
+still shows around the blocks.
+
+| Token | truecolor dark | truecolor light | 256 dark | 256 light | 16 dark | 16 light |
+|---|---|---|---|---|---|---|
+| pane, text on pane | unset | unset | unset | unset | unset | unset |
+| muted on pane (`you`, the `nothing earlier` line, separator rules) | `#9aa1ad` | `#5f6672` | 246 | 242 | 7 | unset |
+| own block, text | `#f2f5fa` on `#1d3f6e` | `#0b1a2e` on `#d3e3fd` | 255 on 24 | 16 on 189 | 15 on 4 | 0 on 6 |
+| own block, time | `#a9c1e6` | `#3b5578` | 153 | 238 | 15 | 0 |
+| their block, text | `#e6e8ec` on `#2f333b` | `#1a1c20` on `#ebedf0` | 255 on 236 | 235 on 254 | unset | 0 on 7 |
+| their block, time | `#aab0ba` | `#565c66` | 248 | 241 | 7 | 0 |
+| own block, selected | `#ffffff` on `#285a9e` | `#0b1a2e` on `#b3cdf6` | 231 on 25 | 16 on 153 | reverse | reverse |
+| their block, selected | `#ffffff` on `#454b56` | `#1a1c20` on `#d3d8e0` | 231 on 239 | 235 on 252 | reverse | reverse |
+| date pill | `#d0d4dc` on `#3a3f4a` | `#2b2f36` on `#e4e7ec` | 252 on 238 | 237 on 253 | unset | 0 on 7 |
+| unread rule and count | `#f0a030` | `#a34f00` | 214 | 94 | 11 | 4 |
+| toast | `#e6e8ec` on `#3a3f4a` | `#ffffff` on `#2b2f36` | 255 on 238 | 231 on 237 | reverse | reverse |
+| error (text, the error toast's border) | `#ff6b6b` | `#b3261e` | 203 | 124 | 9 | 1 |
+
+The delivery marks have colours already, decided on 2026-08-10
+([the user interface](lnmsg-ui.md), "the ledger and the glyph"), drawn
+today from one theme-blind palette (`lnmsg/src/ui.rs:907`, `tone_rgb`).
+That palette was chosen for a dark pane. On a white pane its yellow is
+1.7:1 and its amber 1.9:1, and over the own tint above its red is 2.8:1
+and every dim tone below 3:1. So the tones join the table, per theme and
+tier, measured against the own tint and the selected own tint, because a
+mark only ever sits in an own block:
+
+| Tone (state) | truecolor dark | truecolor light | 256 dark | 256 light |
+|---|---|---|---|---|
+| dim gray (queued) | `#b4bcc8` | `#4f5866` | 250 | 240 |
+| dim yellow (proof of work) | `#c8ad4a` | `#7d6a33` | 179 | 94 |
+| yellow (in flight) | `#f2d45c` | `#6b5200` | 221 | 58 |
+| amber (sent, unproven) | `#ffb347` | `#8a4500` | 214 | 130 |
+| blue (in a mailbox) | `#a8ccff` | `#1a46a0` | 153 | 19 |
+| green (delivered) | `#6fe39a` | `#176a35` | 121 | 22 |
+| red (refused) | `#ff8a80` | `#a3211a` | 217 | 124 |
+| dim red (given up) | `#e8a29c` | `#8a4a45` | 181 | 95 |
+
+In 16 colours the marks take the block's text colour. Over the blue own
+tint the bright red (9) is 2.4:1 and the bright blue (12) 2.0:1 on the
+xterm palette; over the cyan one the red (1) is 3.0:1 and the green (2)
+1.1:1. The glyph carries the state on its own (rule 3 below).
+
+The 256 tier names its own indexes rather than sending the truecolor
+values through `rgb_to_ansi256` (`leviculum-ui/src/color.rs:65`). The
+nearest index does not keep contrast: the dark own time `#a9c1e6` on
+`#1d3f6e` is 5.8:1, its nearest pair 146 on 23 is 3.6:1, and the light one
+falls from 5.9:1 to 4.3:1.
+
+**How the tier is chosen.** In this order, the first that holds:
+
+1. `--no-color`, or `NO_COLOR` set and not empty: monochrome.
+2. `--color truecolor|256|16`: that tier. `lnomad` has the flag with two
+   values (`lnomad/src/main.rs:62`); `lnmsg` gets it, and both gain `16`.
+3. `COLORTERM` is `truecolor` or `24bit`: truecolor (today's rule,
+   `resolve_depth`, `leviculum-ui/src/color.rs:43`).
+4. `TERM` contains `256color`: 256. `xterm-256color`, `tmux-256color` and
+   `screen-256color` land here.
+5. `TERM` is `dumb` or unset: monochrome.
+6. Anything else (`linux`, `xterm`, `screen`, `vt220`): 16.
+
+Today steps 4 to 6 do not exist and every terminal without `COLORTERM`
+gets 256, which the Linux console and a bare `xterm` render as their own
+nearest guess. A terminfo lookup of the `colors` capability would be
+exact where `TERM` is a name the heuristic does not know; the only
+terminfo reader in `Cargo.lock` arrives with `termwiz`, outside the
+shipped programs, so it is not proposed now.
+
+**Monochrome stays first class.** It is the layout of today: alignment,
+the glyphs, reverse video for the badge, the focused selection and the
+toast, no colour at all. The snapshot frames pin it, and it is the one
+look every test frame shows. One gap is fixed with it: `NO_COLOR` reaches
+the screen today only because crossterm drops colour sequences on output
+when it is set (`vendor/crossterm/src/style/types/colored.rs:76`), while
+`lnmsg`'s own `no_color` comes from the flag alone
+(`lnmsg/src/main.rs:403`), and `lnomad`'s from the flag and a non-tty
+(`lnomad/src/main.rs:201`). So under `NO_COLOR` alone the colour is gone
+but the reverse video that `no_color` chooses instead
+(`leviculum-ui-ratatui/src/toast.rs:63`) never comes, and a toast draws as
+plain text. Both programs read `NO_COLOR` into `no_color` themselves.
+
+#### 2. Light or dark
+
+`lnmsg` already asks the terminal for its background before raw mode
+(`lnmsg/src/tui.rs:504`), the same query `lnomad` makes: OSC 11, with
+`COLORFGBG` as the fallback, 100 ms to answer
+(`leviculum-ui-ratatui/src/background.rs:12`), decided by
+`resolve_theme` (`leviculum-ui/src/theme.rs:70`). It is hardcoded to
+`auto` there. Proposed:
+
+- a key `theme = auto|dark|light` in `lnmsg`'s config file
+  (`lnmsg/src/config.rs`, which holds `key = value` lines), `auto` the
+  default;
+- `--theme auto|dark|light` on the command line over the key, as `lnomad`
+  has it (`lnomad/src/main.rs:56`);
+- a terminal that does not answer in time and sets no `COLORFGBG` gives
+  dark, as in `lnomad`;
+- a palette action `theme` toggles for the session, the way `t` calls
+  `toggle_theme` in lnomad (`lnomad/src/app/event.rs:697`); no key, the
+  keymap is decided.
+
+#### 3. What colour carries and what it must not carry alone
+
+- **The side is carried by alignment and tint, never by tint alone.** A
+  colour-blind reader, a monochrome terminal and a 16-colour dark terminal
+  (where their blocks are not tinted, there being no grey background among
+  the eight) all read the side from where the block sits. Below 40 cells,
+  where ours go flush left, the `you` before the time carries it, as
+  section 5 already has it. On a pane close to the their tint (a `#282c34`
+  terminal against `#2f333b`) the their tint all but vanishes, which is
+  fine for this reason.
+- **The delivery state is the glyph.** Colour reinforces it and the
+  `--ascii` marks carry it the same way; nothing about colour changes
+  which mark is drawn, and colour applies to whichever mark set is on.
+- **Unread is a rule with a count.** The `2 new` text is the signal; its
+  colour is a help. The badge in the list stays reverse video in every
+  tier.
+- **Selection is the bar in the margin** in the list, and in the
+  conversation a block's selected tint plus the same bar; in 16 colours
+  and in monochrome it is reverse video.
+- **The time inside a block** takes the block's time colour; on a selected
+  block it takes the block's text colour, so no third pair has to be
+  checked.
+
+#### 4. Mockups
+
+The frames of section 5 once more, each followed by its tint map: the same
+cells, `.` where the own tint lands, `,` where the their tint lands, `=`
+where the date pill lands, blank for the pane. A tinted block is the
+rectangle of its text plus one cell either side, which is the margin the
+frame already leaves; consecutive messages of one side stay separate
+rectangles, so their ragged edge shows where one ends. Text colours are
+not mapped.
+
+**80 x 24.**
+
+```text
+┌─ Chats ────────────────┐┌─ Alice ·4f2a  known ───────────── mailbox ⌂ 4 min ─┐
+│/ search                ││                                                    │
+│                        ││                                                    │
+│▌Alice ·4f2a      14:05 ││             ── Saturday 24 October ──              │
+│▌ok, bring the T114.    ││ are you at the field site tomorrow?  13:58         │
+│ ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄ ││                                                    │
+│ Bob ·b7d0        12:40 ││                yes, from ten. Shall I bring the    │
+│ you: the antenna is…   ││                T114 and the long antenna?  14:02 ✓ │
+│                        ││                                                    │
+│ <9c31e0a2…>        Fri ││                    ── Today ──                     │
+│ hello? is this th… [1] ││                                 on my way  09:12 ⌂ │
+│                        ││                                                    │
+│ Carol ·17ee     22 Oct ││ ──────────────────── 2 new ─────────────────────── │
+│ you: thanks, merged    ││ ok, bring the T114.  14:04                         │
+│                        ││                                                    │
+│                        ││ and the small tripod                               │
+│                        ││ if it fits in the bag  14:05                       │
+│                        ││                                                    │
+│                        ││                           the tripod fits  14:06 ⠹ │
+│                        │├─ to Alice ──────── Enter send · Alt-Enter newline ─┤
+│                        ││ sure, and I will charge                            │
+│                        ││ the batteries tonight▏                             │
+└────────────────────────┘└────────────────────────────────────────────────────┘
+ Tab focus  Alt-↑↓ chat  / search  : commands  ? help  Ctrl-Q quit              
+```
+
+```text
+┌────────────────────────┐┌────────────────────────────────────────────────────┐
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││               =====================                │
+│                        ││,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,        │
+│                        ││                                                    │
+│                        ││               .....................................│
+│                        ││               .....................................│
+│                        ││                                                    │
+│                        ││                      =======                       │
+│                        ││                                ....................│
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││,,,,,,,,,,,,,,,,,,,,,,,,,,,,                        │
+│                        ││                                                    │
+│                        ││,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,                      │
+│                        ││,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,                      │
+│                        ││                                                    │
+│                        ││                          ..........................│
+│                        │├────────────────────────────────────────────────────┤
+│                        ││                                                    │
+│                        ││                                                    │
+└────────────────────────┘└────────────────────────────────────────────────────┘
+```
+
+Text over the own tint is 9.7:1 on dark and 13.5:1 on light in
+truecolor, 6.1:1 and 15.1:1 in 256; over the their tint 10.3:1 and
+14.5:1, 11.4:1 and 11.9:1; the times over the tints 5.7:1 to 5.9:1 in
+truecolor and 4.7:1 to 7.0:1 in 256. In 16 colours the pairs are bright
+white on blue (15 on 4) and black on cyan (0 on 6) for ours, black on
+white (0 on 7) for theirs on light: 9.4:1, 10.6:1 and 16.7:1 on the xterm
+palette, 13.3:1, 7.3:1 and 9.0:1 on the VGA one.
+
+**120 x 40, with a search open.**
+
+```text
+┌─ Search ──────────── esc closes ─┐┌─ Alice ·4f2a  known ────────────────────────── 4f2a91c03be8d7e15a60f2b44c9d0e71 ─┐
+│ / tripod▏                        ││ direct, 2 hops · heard 14:05             mailbox 9c31e0a2 adopted · synced 14:03 │
+│                                  ││ ──────────────────────────────────────────────────────────────────────────────── │
+│ CONVERSATIONS                  2 ││                                                                                  │
+│  Alice ·4f2a               14:06 ││                                                                                  │
+│  you: the «tripod» fits          ││                                                                                  │
+│                                  ││                                                                                  │
+│  Bob ·b7d0                 3 Oct ││                                                                                  │
+│  «tripod» stays in the van       ││                                                                                  │
+│                                  ││                                                                                  │
+│ MESSAGES                       3 ││                          nothing earlier on this device                          │
+│ ▌Alice                     14:05 ││                             ── Friday 23 October ──                              │
+│ ▌and the small «tripod» if it…   ││ did the board come back from the soak?  19:40                                    │
+│                                  ││                          yes, 100 % over the night, log is on the share  19:52 ✓ │
+│  you to Alice              14:06 ││                                                                                  │
+│  the «tripod» fits               ││                            ── Saturday 24 October ──                             │
+│                                  ││ are you at the field site tomorrow? Dana says the north                          │
+│  Bob                       3 Oct ││ gate is locked after six, so the car park by the road it is.  13:58              │
+│  the «tripod» stays in the van,  ││                                                                                  │
+│                                  ││                           yes, from ten. Shall I bring the T114 and the long     │
+│                                  ││                           antenna, or is the stick enough for the hill?  14:02 ✓ │
+│                                  ││                                                                                  │
+│                                  ││ long one, the hill eats signal  14:03                                            │
+│                                  ││                                                                                  │
+│                                  ││                                   ── Today ──                                    │
+│                                  ││                                                               on my way  09:12 ⌂ │
+│                                  ││                                             stuck at the level crossing  09:31 ◇ │
+│                                  ││                                                                                  │
+│                                  ││ ────────────────────────────── 2 new ─────────────────────────────────────────── │
+│                                  ││ ok, bring the T114.  14:04                                                       │
+│                                  ││                                                                                  │
+│                                  ││ and the small «tripod»                                                           │
+│                                  ││ if it fits in the bag  14:05                                                     │
+│                                  ││                                                                                  │
+│                                  ││                                                       the «tripod» fits  14:06 ✓ │
+│                                  ││                                                          leaving in ten  14:07 ○ │
+│                                  │├─ to Alice ─────────────────────── Enter send · Alt-Enter newline · M-x commands ─┤
+│                                  ││ ▏                                                                                │
+└──────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────┘
+ Enter open  n / N next, previous  Ctrl-S / Ctrl-R next, previous  Tab to the results  Esc close search                 
+```
+
+```text
+┌──────────────────────────────────┐┌──────────────────────────────────────────────────────────────────────────────────┐
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                               ===================                                │
+│                                  ││,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,                                   │
+│                                  ││                         .........................................................│
+│                                  ││                                                                                  │
+│                                  ││                              =====================                               │
+│                                  ││,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,             │
+│                                  ││,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,             │
+│                                  ││                                                                                  │
+│                                  ││                          ........................................................│
+│                                  ││                          ........................................................│
+│                                  ││                                                                                  │
+│                                  ││,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,                                           │
+│                                  ││                                                                                  │
+│                                  ││                                     =======                                      │
+│                                  ││                                                              ....................│
+│                                  ││                                            ......................................│
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││,,,,,,,,,,,,,,,,,,,,,,,,,,,,                                                      │
+│                                  ││                                                                                  │
+│                                  ││,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,                                                    │
+│                                  ││,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,                                                    │
+│                                  ││                                                                                  │
+│                                  ││                                                      ............................│
+│                                  ││                                                         .........................│
+│                                  │├──────────────────────────────────────────────────────────────────────────────────┤
+│                                  ││                                                                                  │
+└──────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────┘
+```
+
+The same pairs, plus the two the larger frame adds: the date pill is
+7.1:1 on dark and 10.8:1 on light in truecolor (6.3:1 and 8.1:1 in 256),
+and the `2 new` rule over the pane is at least 6.5:1 on dark and 5.3:1 on
+light in truecolor against the reference panes (`#000000` and `#282c34`,
+`#ffffff` and `#fdf6e3`). The marks in this frame (`✓` `⌂` `◇` `○`) are
+5.1:1 to 6.7:1 over the own tint and 3.6:1 to 5.4:1 over the selected one
+in truecolor, 3.4:1 to 9.3:1 and 3.1:1 to 8.6:1 in 256.
+
+#### 5. Tests the layout slice will carry
+
+- **The frames stay plain text.** The `frame` step of the key script
+  (`lnmsg/src/tui.rs:756`) writes characters only, and the existing
+  snapshot frames keep pinning the monochrome look.
+- **A script step `styles <name>`** writes one frame's per-cell style as a
+  map in the letters above: `.` `,` `=` for the three tints, `s` for a
+  selected block, `r` for reverse video, blank for the pane. One fixture
+  per theme and tier, six in all, of one session that has every token on
+  screen (both sides, a date, the `new` line, a selected block, a toast).
+  The six differ where the table differs: no `,` and no `=` in 16 dark,
+  `r` for selection in both 16 maps. A seventh fixture under `--no-color`
+  holds only blanks and `r`.
+- **A unit test over the token table.** The table is a struct per theme
+  and tier, so a missing token does not compile. The test asserts every
+  text pair (text and time over each tint, over each selected tint, the
+  pill, the toast) at 4.5:1 or more, every pane foreground at 4.5:1 or
+  more against the two reference panes of its theme, and every delivery
+  tone at 3:1 or more over the own tint and the selected own tint
+  (WCAG 2.1, 1.4.11, the bar for a graphic). Truecolor uses the values;
+  256 uses the xterm-256 values of the indexes; 16 is checked on the
+  xterm default palette and the VGA palette of the Linux console, and only
+  for the text pairs, since the marks there are text. The ratio is the
+  WCAG 2.x one, sRGB linearised: `luminance` in `leviculum-ui/src/theme.rs:63`
+  is a linear approximation that serves the light or dark decision and
+  must not be reused for it.
+- **The tier ladder** gains unit tests over its pure decision, as
+  `resolve_depth` has today: each `TERM` and `COLORTERM` case above, and
+  `NO_COLOR` empty and set.
+
+#### 6. Open for Lew
+
+1. **The hues.** One proposal per tier:
+   - truecolor: a deep blue own tint (`#1d3f6e`) on dark and a pale blue
+     one (`#d3e3fd`) with dark text on light. Blue because it is Signal's
+     own side, and because green, red, amber and yellow already mean a
+     delivery state; a green own tint, as WhatsApp has, would sit under a
+     green `✓` that means delivered. Pale with dark text on light rather
+     than Signal's saturated bubble with white text, because a saturated
+     block several rows tall is heavy in a cell grid.
+   - 256: 24 and 189, cube colours close to the above, picked by hand so
+     every pair holds its bar rather than by nearest colour; their side
+     236 and 254.
+   - 16: blue (4) under bright white on dark, cyan (6) under black on
+     light, the two pairs that hold above 7:1 on both the xterm and the VGA
+     palette.
+2. **Their blocks tinted or neutral.** Proposed tinted in truecolor and
+   256, as the desktop apps do, and on light in 16; untinted on dark in
+   16. The alternative is untinted everywhere, which leaves the side to
+   alignment alone and makes ours the only colour on the pane.
+3. **The date as a pill or as today's rule.** Proposed a pill; the rule
+   with its dashes stays in every tier and the pill is laid under the
+   label only.
+4. **Whether `lnomad` adopts the same tokens for its chrome.** Proposed:
+   the shared ones (muted, selection, toast, error, the tier ladder and
+   `NO_COLOR`) move to `leviculum-ui` and both programs read them; `lnomad`
+   keeps NomadNet's heading bands and its link colour, which belong to
+   micron pages. Its chrome bars (`chrome_bg`, `theme.rs`) and the toast
+   accents of `leviculum-ui-ratatui/src/toast.rs:59` become tokens of the
+   same table.
+5. **The toggle.** A palette action only, as proposed, or a key too.
+
 ### What the mouse does
 
 | Element | Click | Wheel | Other |
@@ -562,6 +938,10 @@ a click that transmits is as deliberate as the `Enter` it stands for.
 - **Avatars and emoji pickers.** Cells are better spent on text; emoji
   arrive and are drawn as the terminal draws them.
 
+One thing is copied on purpose that a terminal could leave out: a colour
+per side, ours tinted and theirs neutral (Lew, 2026-10-26; section 5,
+"Colour").
+
 ## 7. The slices after 1002
 
 Dated 2026-10-26. Order and dependencies only. Each has its acceptance,
@@ -590,9 +970,12 @@ layout's.
    `new` line, the narrow fallback; the header with trust (every peer
    `unknown` until slice 5) and mailbox state; the per-message detail
    view with this session's ledger, behind `Enter` on a message. Depends
-   on 1 (the `Enter` row). *Acceptance:* snapshots at 80 x 24 and 120 x 40
-   whose structure is the mockups'; unit tests over `view` for alignment,
-   wrapping and the `new` line. *1001 phase:* Bob's reply arriving while
+   on 1 (the `Enter` row). Its colours are section 5, "Colour", as Lew
+   decides it: the tokens, the tier ladder, the `theme` key, and the
+   delivery tones moved into the table; it invents none. *Acceptance:*
+   snapshots at 80 x 24 and 120 x 40 whose structure is the mockups';
+   unit tests over `view` for alignment, wrapping and the `new` line; the
+   style maps and the token test of "Colour", item 5. *1001 phase:* Bob's reply arriving while
    Alice reads earlier messages draws the `new` line above it, and her
    detail view of the first message lists the proof.
 3. **The mouse.** The table of section 5; drag selection and OSC 52;
