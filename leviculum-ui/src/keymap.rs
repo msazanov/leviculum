@@ -388,7 +388,14 @@ pub struct FooterSpec {
     pub label: &'static str,
     /// `None` never drops, else the rank it drops at, lowest first.
     pub drop_rank: Option<u8>,
+    /// One button a live spelling, its key the spelling's chords joined
+    /// (`n / N next, previous`), where a row's chords are a pair of
+    /// directions; else one button, its key the first live chord.
+    pub spelled: bool,
 }
+
+/// The most spellings a row has, so each one's keys fit a fixed table.
+pub const MAX_SPELLINGS: usize = 4;
 
 /// One action as the reader sees it.
 #[derive(Clone, Copy, Debug)]
@@ -409,6 +416,7 @@ pub struct Row<A: 'static> {
     /// Whether running it puts bytes on the air.
     pub tx: bool,
     keys: Label<96>,
+    spelled: [Label<48>; MAX_SPELLINGS],
 }
 
 impl<A: Copy + 'static> Row<A> {
@@ -427,6 +435,7 @@ impl<A: Copy + 'static> Row<A> {
             note: None,
             tx: false,
             keys: row_keys(spellings),
+            spelled: spelling_keys(spellings),
         }
     }
 
@@ -445,6 +454,18 @@ impl<A: Copy + 'static> Row<A> {
         self.footer = Some(FooterSpec {
             label,
             drop_rank: None,
+            spelled: false,
+        });
+        self
+    }
+
+    /// A footer button labelled `label` for each spelling with a live chord,
+    /// never dropped: a pair of directions reads as one (`n / N`).
+    pub const fn footer_spelled(mut self, label: &'static str) -> Self {
+        self.footer = Some(FooterSpec {
+            label,
+            drop_rank: None,
+            spelled: true,
         });
         self
     }
@@ -455,6 +476,7 @@ impl<A: Copy + 'static> Row<A> {
         self.footer = Some(FooterSpec {
             label,
             drop_rank: Some(rank),
+            spelled: false,
         });
         self
     }
@@ -474,6 +496,12 @@ impl<A: Copy + 'static> Row<A> {
     /// The keys as the help shows them, derived from the chords.
     pub fn keys(&self) -> &str {
         self.keys.as_str()
+    }
+
+    /// Spelling `index`'s keys as the help shows them (`n / N`), its quiet
+    /// chords left out; empty past the last spelling.
+    pub fn spelling_keys(&self, index: usize) -> &str {
+        self.spelled.get(index).map_or("", Label::as_str)
     }
 
     /// Every chord, in display order.
@@ -509,6 +537,30 @@ const fn row_keys<A: Copy + 'static>(spellings: &[Spelling<A>]) -> Label<96> {
         s += 1;
     }
     label
+}
+
+const fn spelling_keys<A: Copy + 'static>(spellings: &[Spelling<A>]) -> [Label<48>; MAX_SPELLINGS] {
+    assert!(
+        spellings.len() <= MAX_SPELLINGS,
+        "a row has more spellings than MAX_SPELLINGS"
+    );
+    let mut out = [Label::<48>::EMPTY; MAX_SPELLINGS];
+    let mut s = 0;
+    while s < spellings.len() {
+        let chords = spellings[s];
+        let mut c = 0;
+        while c < chords.len() {
+            if !chords[c].quiet {
+                if !out[s].is_empty() {
+                    out[s] = out[s].push(" / ");
+                }
+                out[s] = out[s].push_label(&chords[c].label);
+            }
+            c += 1;
+        }
+        s += 1;
+    }
+    out
 }
 
 /// The action `key` resolves to among `rows` in `pane` under `ctx`, with the
@@ -709,6 +761,22 @@ mod tests {
 
     /// The most specific chord wins; a plain arrow still scrolls however it
     /// is held, as it always did in lnomad.
+    /// Each spelling's keys on their own, quiet chords left out, for a
+    /// footer that shows a pair of directions as one button.
+    #[test]
+    fn a_spelling_s_keys_are_its_chords_joined() {
+        let line = &SCROLL_ROWS[0];
+        assert_eq!(line.spelling_keys(0), "j / k");
+        assert_eq!(line.spelling_keys(2), "Ctrl-n / Ctrl-p");
+        assert_eq!(line.spelling_keys(3), "");
+        let page = &SCROLL_ROWS[1];
+        assert_eq!(page.spelling_keys(1), "Ctrl-v");
+        assert_eq!(page.spelling_keys(2), "");
+        let row = Row::<ScrollCmd>::new("pair", "group", &[]).footer_spelled("next, previous");
+        assert_eq!(row.footer.map(|f| f.spelled), Some(true));
+        assert_eq!(row.footer.map(|f| f.drop_rank), Some(None));
+    }
+
     #[test]
     fn exact_modifiers_beat_a_class_which_beats_any() {
         const OWN: &[Row<u8>] = &[Row::new(
