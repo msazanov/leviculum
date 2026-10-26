@@ -181,6 +181,21 @@ conversation is its address; `--to` lists one from the start). The keymap
 is still a `match` in `ui.rs` beside the help text, not yet the one table
 the decision asks for.
 
+### Built 2026-10-26, slice two: the keymap
+
+1030 (#232) closed four items of that list: the keymap is one table,
+`lnmsg/src/keys.rs` beside the shared scroll rows of
+`leviculum-ui/src/keymap.rs`, which `lnomad` reads too, and the key
+handler, the help overlay, the footer, the palette's keys and the compose
+pane's hint all derive from it; lnomad's full scroll table applies in the
+two command panes; the `send_on_enter` switch (config key and palette
+toggle); and the keyboard enhancement protocol, pushed where the terminal
+speaks it, for `Shift-Enter` and `Ctrl-Enter`. With it the four decided
+changes of [keys, mouse and layout](lnmsg-keys-and-layout.md), section 3:
+`Enter` on a message shows its details, compose is `i`, `a`, `r`, `Ctrl-p`
+and `Ctrl-n` are motions and the palette is `:` or `Alt-x`, and `Ctrl-c`
+quits nowhere.
+
 The second round on the screen, the full key table (vi, Emacs, the mail
 and the chat programs side by side, per pane), the mouse, the chat layout
 in text mode and the slices after 1002, is

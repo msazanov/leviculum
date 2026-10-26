@@ -54,17 +54,19 @@ lnmsg -- terminal LXMF messenger for Reticulum
 :   **tui** only: no colours.
 
 **--script** *file*, **--frames** *file*, **--size** *W*x*H*
-:   **tui** only: run a key script instead of reading the keyboard, and write each frame it asks for to **--frames** (default: the script's path with `.frames`), on a screen of **--size** (default 80x24). One step a line, `#` a comment: `key` *name* (`tab`, `backtab`, `enter`, `esc`, `up`, `down`, `home`, `end`, `backspace`, `ctrl-`*c*, or one character), `type` *text*, `newline` (Alt-Enter, a line break in compose), `tick` [*n*], `sleep` *ms* (up to 60000: read the engine as the idle screen does and tick once per 250 ms of *ms*), `frame` [*label*], and `until ready`, `until delivery` *state*, `until received` *n*, `until leg` `direct`|`propagated` (the send runner reported that leg for the newest sent message), each with an optional timeout in seconds (default 30). *state* is one of `queued`, `inflight`, `sent`, `mailbox`, `delivered`, `rejected`, `failed`. An `until` that does not hold in time draws a last frame and exits 1.
+:   **tui** only: run a key script instead of reading the keyboard, and write each frame it asks for to **--frames** (default: the script's path with `.frames`), on a screen of **--size** (default 80x24). One step a line, `#` a comment: `key` *name* (`tab`, `backtab`, `enter`, `esc`, `up`, `down`, `left`, `right`, `home`, `end`, `pageup`, `pagedown`, `backspace`, `delete`, `space`, `f1` to `f12`, or one character, after any of the prefixes `ctrl-`, `alt-` and `shift-`, so `shift-enter` and `ctrl-enter` too), `type` *text*, `newline` (Alt-Enter, a line break in compose), `keyboard` `enhanced`|`plain` (the keyboard the screen is told it has: its hint offers `Shift-Enter` and `Ctrl-Enter` only when enhanced; plain until said), `tick` [*n*], `sleep` *ms* (up to 60000: read the engine as the idle screen does and tick once per 250 ms of *ms*), `frame` [*label*], and `until ready`, `until delivery` *state*, `until received` *n*, `until leg` `direct`|`propagated` (the send runner reported that leg for the newest sent message), each with an optional timeout in seconds (default 30). *state* is one of `queued`, `inflight`, `sent`, `mailbox`, `delivered`, `rejected`, `failed`. An `until` that does not hold in time draws a last frame and exits 1.
 
 ## KEYS
 
-In **tui**, the focus follows the pane. `Tab` and `Shift-Tab` cycle the conversations, the messages and the compose line.
+In **tui**, the focus follows the pane. `Tab` and `Shift-Tab` cycle the conversations, the messages and the compose line. `?` (or `F1` from any pane) shows every key; the help, the footer and the palette are built from the same table the keys are.
 
-In the conversations and the messages: `j`/`k` or the arrows move, `g`/`G` or `Home`/`End` jump to the top or bottom, `Enter` opens the conversation or goes to the compose line, `?` shows the help, `:` opens the command palette, `q` quits.
+In the conversations and the messages: `j`/`k`, the arrows or `Ctrl-n`/`Ctrl-p` move, `Ctrl-f`/`Ctrl-b`, `Space` and `PageDown`/`PageUp` page, `Ctrl-d`/`Ctrl-u` move half a page, `g`/`G`, `Home`/`End`, `Alt-<`/`Alt->` or `Ctrl-↑`/`Ctrl-↓` jump to the top or bottom. `Enter` opens the selected conversation; on a message it shows what is known of it. `i`, `a` or `r` start writing. `:` opens the command palette (`:q` and `Enter` quit), `Ctrl-r` fetches the mailbox, `q` quits.
 
-In the compose line, keys type. `Enter` sends to the open conversation (an empty line sends nothing), `Alt-Enter` starts a new line, `Esc` goes back to the messages, `Ctrl-C` clears the line (`Ctrl-Y` brings it back).
+In the compose line, keys type. `Enter` sends to the open conversation (an empty line sends nothing). `Alt-Enter` and `Ctrl-j` break the line; where the terminal speaks the keyboard enhancement protocol, `Shift-Enter` breaks it too and `Ctrl-Enter` sends, and never breaks it. The compose pane's border names the two chords live in this terminal. The Emacs keys edit: `Ctrl-a`/`Ctrl-e` and `Home`/`End` the line's start and end, `Alt-<`/`Alt->` the body's, `Ctrl-p`/`Ctrl-n` and the arrows move a line, `Ctrl-b`/`Ctrl-f` a character, `Alt-b`/`Alt-f` a word, `Ctrl-d` deletes forward, `Alt-d` and `Alt-Backspace` delete a word, `Ctrl-k` kills to the end and `Ctrl-y` yanks. `Ctrl-c` clears the line into the kill buffer (`Ctrl-y` brings it back). `Esc` or `Ctrl-g` go back to the messages, and from there to the conversations. `PageDown`/`PageUp` page the messages.
 
-Everywhere: `Ctrl-P` opens the command palette, which matches what you type against `send`, `fetch`, `quit`, `help` and `focus conversations|messages|compose`; `Ctrl-Q` quits.
+**send_on_enter**: with `send_on_enter = false` in `$LNMSG_HOME/config`, or after the palette's `send on enter`, `Enter` breaks the line and `Alt-Enter` sends (`Ctrl-Enter` too, where the terminal can send it).
+
+Everywhere: `Alt-x` opens the command palette, which matches what you type against the actions' names (`send`, `fetch`, `quit`, `help`, `details`, `next conversation`, `send on enter`, ...). `Alt-↓`/`Alt-↑` select the next or previous conversation, `Alt-Shift-↓`/`Alt-Shift-↑` the next or previous one with unread messages. `F5` fetches the mailbox, `Ctrl-l` redraws the screen, `Ctrl-q` quits. `Ctrl-c` quits nowhere; outside compose it says that `Ctrl-q` does.
 
 ## DELIVERY MARKS
 
@@ -87,7 +89,7 @@ Everywhere: `Ctrl-P` opens the command palette, which matches what you type agai
 
 ## FILES
 
-`$LNMSG_HOME/identity` is your address; back it up. **tui** writes its warnings to `$LNMSG_HOME/tui.log` instead of the screen, with a line for each step of each send leg (`SEND`), each path answer (`PATH`) and each call to the daemon (`RPC`); **RUST_LOG** replaces its filter (default `warn,lnmsg=info`).
+`$LNMSG_HOME/identity` is your address; back it up. **tui** writes its warnings to `$LNMSG_HOME/tui.log` instead of the screen, with a line for each step of each send leg (`SEND`), each path answer (`PATH`) and each call to the daemon (`RPC`); and once at start a `KEYS` line naming the keyboard and its live chords (`KEYS enhancement=no newline=Alt-Enter send=Enter`); **RUST_LOG** replaces its filter (default `warn,lnmsg=info`). `$LNMSG_HOME/config` holds `key = value` lines: `propagation_node` (see **--pn**) and `send_on_enter` (`true`, the default, or `false`).
 
 ## SEE ALSO
 

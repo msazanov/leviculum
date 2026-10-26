@@ -7,11 +7,13 @@ follows the pane, a command palette, no modes, `Enter` in compose the one
 keystroke that transmits. What this page adds is the full key table, the
 mouse, and the layout, and the order they get built in.
 
-**Status: proposal, 2026-10-26.** The principles in section 1 are Lew's
-and decided. The table in section 3, the four changes to slice one it
-asks for (section 3, "Four changes to what slice one does"), the layout
-in section 5 and the slice order in section 7 are this page's proposal,
-for Lew to confirm before any slice is ordered.
+**Status: decided 2026-10-26.** The principles in section 1 are Lew's.
+The table in section 3, the four changes to slice one it asks for
+(section 3, "Four changes to what slice one does") and the Enter rule
+(section 3, Compose) were decided by Lew on 2026-10-26 at 18:15, and slice
+1 of section 7, the keymap, is built (leviculum 1030). The layout in
+section 5 and the slice order in section 7 are the plan the later slices
+are ordered from.
 
 ## 1. The principles (Lew, 2026-10-26)
 
@@ -164,7 +166,7 @@ chord `lnmsg` adds to them.
 
 | Action | vi | Emacs | mail, chat | mouse | where |
 |---|---|---|---|---|---|
-| send **TX** | | | `Enter` (Signal, WhatsApp); `Ctrl-Enter` *(enh.)* (Signal) | click `send` on the box's border | C |
+| send **TX** | | | `Enter` (Signal, WhatsApp); `Ctrl-Enter` *(enh.)* (Signal), which never breaks the line | click `send` on the box's border | C |
 | line break | | `Ctrl-j` | `Alt-Enter`; `Shift-Enter` *(enh.)* (Signal, WhatsApp) | | C |
 | line start / end | | `Ctrl-a` / `Ctrl-e` | `Home` / `End` | click places the cursor | C |
 | character, word | | `Ctrl-f` / `Ctrl-b`, `Alt-f` / `Alt-b` | `→` / `←`, `Ctrl-→` / `Ctrl-←` | | C |
@@ -173,13 +175,24 @@ chord `lnmsg` adds to them.
 | clear to a recoverable draft | | | `Ctrl-c` (decided 2026-08-08; `Ctrl-y` brings it back) | | C |
 | leave compose | `Esc` | `Ctrl-g` | `Esc` | click another pane | C |
 
+**The Enter rule** (decided 2026-10-26). With the keyboard enhancement
+protocol active, `Shift-Enter` breaks the line and `Ctrl-Enter` sends;
+`Ctrl-Enter` never breaks the line, in any setting. Without it, `Alt-Enter`
+and `Ctrl-j` break the line. `Ctrl-j` and `Alt-Enter` work in both worlds,
+since a terminal that sends them sends them either way. The compose frame's
+hint names the chords live in this terminal, `Enter send · Shift-Enter
+newline` or `Enter send · Alt-Enter newline`, never both. With
+`send_on_enter` off, `Enter` breaks the line and `Alt-Enter` sends (and
+`Ctrl-Enter`, which the hint offers where the terminal can send it):
+`Ctrl-Enter send · Enter newline` or `Alt-Enter send · Enter newline`.
+
 ### Everywhere
 
 | Action | vi | Emacs | mail, chat | mouse | where |
 |---|---|---|---|---|---|
 | next / previous pane | | | `Tab` / `Shift-Tab` | click the pane | all |
 | back out, cancel, close | `Esc` | `Ctrl-g` | `Esc` (WhatsApp closes the chat) | click outside the overlay | all: C to M to L, and any overlay closes |
-| command palette | `:` | `Alt-x` | `Ctrl-p` (the editors' palette, not a chat habit) | | `:` and `Ctrl-p` L M; `Alt-x` all |
+| command palette | `:` | `Alt-x` | | | `:` L M; `Alt-x` all |
 | help | `?` | | `F1` | click `? help` in the footer | `?` L M; `F1` all |
 | fetch the mailbox **TX** | | | `F5`; `Ctrl-r` (`lnomad`'s reload) | click the mailbox state in the header | `F5` all; `Ctrl-r` L M |
 | redraw | | `Ctrl-l` | (mutt `Ctrl-l`) | | all |
@@ -199,7 +212,11 @@ mouse target:
   palette from compose is `Alt-x`, or `Esc` and then `:`.
 - **In the command panes, the shared scroll rows win**, because they are
   `lnomad`'s and a reader of both programs must not learn two meanings:
-  `Ctrl-f` pages and `Ctrl-d` half-pages there, as in vi and aerc.
+  `Ctrl-f` pages and `Ctrl-d` half-pages there, as in vi and aerc, and
+  `Ctrl-p` moves up a line. This page first also offered `Ctrl-p` as the
+  palette in L M (the editors' palette); that row shadowed the scroll row,
+  the keymap slice's shadowing test refused it, and the palette is `:` and
+  `Alt-x`.
 - **The chat programs' `Ctrl` letters lose to both**: Signal's and
   WhatsApp's `Ctrl-N` (new conversation) is Emacs's next line, their
   `Ctrl-F` (search) is a page in L M and a character in C, Signal's
@@ -231,47 +248,64 @@ pins it.
 
 ### Four changes to what slice one does
 
-The table asks four things of slice one (lnmsg-ui.md, "Built 2026-10-25,
-slice one") that Lew decides before the keymap slice is ordered:
+The table asked four things of slice one (lnmsg-ui.md, "Built 2026-10-25,
+slice one"). **Decided 2026-10-26** (Lew, 18:15), all four, and built with
+the keymap slice (leviculum 1030), each pinned by a test in
+`lnmsg/src/ui.rs`:
 
 1. **`Enter` on a message opens its detail view**, as in mutt and Signal;
-   today it moves to compose (`command_pane_key` in `lnmsg/src/ui.rs`).
-   Compose is then `i`, `a`, `r`, `Tab` or a click.
-2. **`Ctrl-p` and `Ctrl-n` in compose become Emacs line motions**, now
-   that a body has lines (1002); today `Ctrl-P` opens the palette from
-   every pane (`on_key` in `lnmsg/src/ui.rs`). The palette from compose
-   is `Alt-x`.
-3. **`Ctrl-c` quits nowhere.** Today it quits outside compose
-   (`on_key` in `lnmsg/src/ui.rs`); the reflex that throws a draft away in
-   compose copies or quits elsewhere by habit, and a messenger that
-   vanishes on a copy reflex loses the screen. Pressed outside compose it
-   shows a toast, `Ctrl-q quits`.
+   before, it moved to compose. Compose is `i`, `a`, `r`, `Tab` or a click.
+   Until the detail view of slice 2 exists, `Enter` shows what the session
+   knows of the message in a one-line toast (who wrote it, its delivery
+   state in words, the first bytes of its id).
+   (`enter_on_a_message_shows_its_details_and_i_a_r_compose`)
+2. **`Ctrl-p` and `Ctrl-n` in compose are Emacs line motions**, now that a
+   body has lines (1002); before, `Ctrl-P` opened the palette from every
+   pane. The palette from compose is `Alt-x`.
+   (`ctrl_p_is_a_motion_everywhere_and_never_the_palette`)
+3. **`Ctrl-c` quits nowhere.** Before, it quit outside compose; the reflex
+   that throws a draft away in compose copies or quits elsewhere by habit,
+   and a messenger that vanishes on a copy reflex loses the screen.
+   Pressed outside compose it shows a toast, `Ctrl-q quits`.
+   (`ctrl_c_quits_nowhere_and_says_ctrl_q_does`)
 4. **The `send_on_enter` switch's email style swaps `Enter` and
    `Alt-Enter`** (`Enter` breaks the line, `Alt-Enter` sends) instead of
-   sending on `Ctrl-D`, which Emacs needs as delete forward.
+   sending on `Ctrl-D`, which Emacs needs as delete forward. The switch is
+   the `send_on_enter` key of lnmsg's config and the palette's `send on
+   enter`, on by default. (`send_on_enter_off_swaps_enter_and_alt_enter`)
 
 ### What the terminal can and cannot send
 
 - `Ctrl-j` is the line break every terminal can send: in raw mode a
   terminal's `0x0A` reaches crossterm 0.29 as `Ctrl-J`, not as `Enter`
   (`src/event/sys/unix/parse.rs` in crossterm, branch 0.29: the `b'\n'`
-  arm applies only outside raw mode), so it needs no enhancement.
-- `Alt-f`, `Alt-b` and `Alt-d` do not edit today. The editing table
-  (`input_request`, `leviculum-ui/src/input.rs:299`) accepts them with
-  `META` only, which a terminal reports under the enhancement protocol and
-  not otherwise, while the frontend passes crossterm's `ALT` through as
-  `ALT`; and it maps `Meta-d` to deleting the word *back*, where Emacs
-  kills the word forward. `Ctrl-d` (delete forward) is not in it at all.
-  The keymap slice fixes the three, in the shared table, so `lnomad`'s
-  address bar gets them too.
-- `Ctrl-a` and `Home` go to the start of the whole body, not of its line,
-  since the body became multi-line (`GoToStart` over one buffer); the
-  keymap slice makes them line motions and `Alt-<` the body's start.
+  arm applies only outside raw mode), so it needs no enhancement. Before
+  the keymap slice no row bound it, so it did nothing.
+- `Alt-f`, `Alt-b` and `Alt-d` did not edit before the keymap slice. The
+  editing table (`input_request`, `leviculum-ui/src/input.rs`) accepted
+  them with `META` only, which a terminal reports under the enhancement
+  protocol and not otherwise, while the frontend passes crossterm's `ALT`
+  through as `ALT`; and it mapped `Meta-d` to deleting the word *back*,
+  where Emacs kills the word forward. `Ctrl-d` (delete forward) was not in
+  it at all. The keymap slice fixed the three in the shared table, so
+  `lnomad`'s address bar has them too.
+- `Ctrl-a` and `Home` went to the start of the whole body, not of its
+  line, once the body became multi-line (`GoToStart` over one buffer). A
+  buffer of lines now edits through `line_request`, where `Ctrl-a`,
+  `Ctrl-e`, `Home` and `End` are line motions, `↑`, `↓`, `Ctrl-p` and
+  `Ctrl-n` move a line keeping the column, and `Alt-<`/`Alt->` are the
+  body's start and end. On one line that is the plain table, so
+  `lnomad`'s single-line fields are unchanged.
 - `Ctrl-s` reaches the program: raw mode clears `IXON`, so the terminal
   does not take it as flow control.
-- The enhancement rows need `PushKeyboardEnhancementFlags` where
-  crossterm reports support; `lnmsg` does not push it yet
-  (lnmsg-ui.md, slice one). The keymap slice does, and pops it on exit.
+- The enhancement rows need `PushKeyboardEnhancementFlags` where crossterm
+  reports support. `lnmsg` pushes `DISAMBIGUATE_ESCAPE_CODES` where
+  `supports_keyboard_enhancement` says so, pops it on every way out
+  (the terminal guard and the panic hook), and writes the live chords once
+  to `tui.log`: `KEYS enhancement=yes newline=Shift-Enter send=Enter`.
+  Without support nothing changes. A key script can spell `shift-enter`
+  and `ctrl-enter` whatever the host terminal is, and `keyboard enhanced`
+  tells the screen which world it is in, so `tui_snapshot` pins both.
 
 ## 4. One table, four readers
 
@@ -312,7 +346,28 @@ The keymap and the palette are shared with lnflash's GUI once it exists
 (Codeberg #476), so a flashing action is a palette entry there, not a
 new grammar.
 
-What makes it testable, and what the slice's unit tests hold:
+Built so in 1030: the rows are `leviculum-ui/src/keymap.rs` (`Row`,
+`Chord`, `SCROLL_ROWS`) and `lnmsg/src/keys.rs` (`ROWS`). A row reads
+
+```rust
+Row::new("send", COMPOSE_GROUP, &[
+    &[key(Enter, NONE, run(C::Send), COMPOSE).unless(ENTER_BREAKS)],
+    &[key(Enter, CTRL, run(C::Send), COMPOSE).enhanced()],
+    &[key(Enter, ALT, run(C::Send), COMPOSE).when(ENTER_BREAKS)],
+]).palette("send").footer("send").tx()
+```
+
+and its help keys, `Enter   Ctrl-Enter   Alt-Enter`, are built from those
+chords at compile time. A key resolves to the most specific chord (exact
+modifiers over a class over any), the first among equals, which for the
+scroll rows is `lnomad`'s old first-match scan, so its behaviour and its
+golden files did not move. Three scroll spellings `lnomad`'s help never
+listed (`Space`, `Alt-v`, `Alt-<`/`Alt->`) are quiet chords: they work and
+stay out of the displayed keys, so `lnomad`'s overlay keeps its width.
+
+What makes it testable, and what the slice's unit tests hold
+(`lnmsg/src/keys.rs`, the tests module; the shared rows' own in
+`leviculum-ui/src/keymap.rs`):
 
 - no chord resolves to two actions in one pane (no shadowing, which
   `lnomad`'s first-match scan cannot see);
@@ -518,7 +573,8 @@ the one in the order text in one place: the mouse comes after the layout,
 because its targets (the delivery mark, the badge, the blocks) are the
 layout's.
 
-1. **The keymap table and help from it.** Section 4: the shared rows move
+1. **The keymap table and help from it.** *Done 2026-10-26, leviculum
+   1030 (55fa7b45, 654ff43d).* Section 4: the shared rows move
    to `leviculum-ui`, `lnomad` reads them, `lnmsg`'s rows join, help,
    footer and palette derive from the table; the four changes of section
    3 if Lew takes them; `Alt-f`/`Alt-b`/`Alt-d`/`Ctrl-d`/`Ctrl-j` in the
