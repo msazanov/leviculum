@@ -548,8 +548,8 @@ The mapping from board to binary and features used by the flash recipes:
 | SenseCAP T1000-E | `t1000e` | `bsp-t1000e` |
 
 (Feature sets as invoked in the `just flash`, `just flash-rak4631`, and
-`just flash-rak4631-pocket` recipes: `Justfile:2084`, `Justfile:2112`,
-`Justfile:2126`.)
+`just flash-rak4631-pocket` recipes: `Justfile:2085`, `Justfile:2113`,
+`Justfile:2127`.)
 
 ### What the `lnflash` bundle carries
 

@@ -1632,6 +1632,7 @@ ci-gate:
     {{manifest}} ci-gate-workspace-lib -- cargo test --workspace --lib
     {{just_executable()}} build-integ-bins
     bash scripts/ci-gate-integ.sh
+    {{just_executable()}} lnmsg-tui
 
 # First run after a fresh CARGO_TARGET_DIR: 20-40 min. Nothing triggers this
 # automatically: it is typed once per batch. A post-commit hook detached it

@@ -95,7 +95,12 @@ which includes the rnsd_interop harness by `#[path]` and so runs the
 harness's own tests and the four tests that spawn a Python peer
 through it. The script's header holds the
 list, one written reason per entry, and checks every entry against the
-tree so a stale one is a red gate. The citation guard runs in full but
+tree so a stale one is a red gate. A target that declares
+`required-features` (`lnmsg`'s `tui_snapshot`) is left out of that
+featureless run too, because cargo refuses the whole invocation over
+it, and `ci-gate` runs the recipe that passes the feature
+(`just lnmsg-tui`) right after; `check-standard-integ` holds both
+halves. The citation guard runs in full but
 skips the citations into the absent references and prints how many
 (about 2600). Everything left out runs on the tier-2 nightly with the
 submodules present, which is what the publish gate reads.
