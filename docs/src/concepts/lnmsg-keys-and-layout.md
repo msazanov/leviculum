@@ -307,6 +307,9 @@ pane; the help overlay is built from the rows (`HelpGroup`,
 `leviculum-ui/src/help.rs`); the footer takes the rows that carry a label
 for the focused pane; the palette lists every row's name and shows its
 first chord. The desktop GUI reads the same table.
+The keymap and the palette are shared with lnflash's GUI once it exists
+(Codeberg #476), so a flashing action is a palette entry there, not a
+new grammar.
 
 What makes it testable, and what the slice's unit tests hold:
 

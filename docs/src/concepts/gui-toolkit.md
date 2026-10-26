@@ -309,6 +309,9 @@ later change of toolkit does not touch the core. The comparison above
 stays as the record of why. The decision is also recorded on [A messenger
 whose core runs anywhere](handheld-messenger.md), "The core/frontend
 cut".
+lnflash is the third user of the shared widgets, after `lnmsg` and
+`lnomad` (decided 2026-10-26, Lew, Codeberg #476; [Flashing an
+LNode](lnode-flashing.md), "Product goal").
 
 Why, as the proposal of 2026-10-25 put it: the M9 frontend is then the
 terminal frontend's view code on a different backend, which is the most

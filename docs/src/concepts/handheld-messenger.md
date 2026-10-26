@@ -184,6 +184,10 @@ palette, the same delivery glyph table ([lnmsg: the user
 interface](lnmsg-ui.md), section 2); each frontend maps them to its
 input. Code is shared where it is the same problem (model, update,
 layout), not for its own sake (rendering, input).
+lnflash is the third user of the shared widgets, after `lnmsg` and
+`lnomad` (decided 2026-10-26, Lew, Codeberg #476), and its rule "start,
+it flashes, done" is the zero config form of this model ([Flashing an
+LNode](lnode-flashing.md), "Product goal").
 
 2026-10-25, Lew: `lnomad` and `lnmsg` stay two programs with shared
 widgets. Since 984 the shared widgets are two crates.

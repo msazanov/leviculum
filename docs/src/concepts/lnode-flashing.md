@@ -13,6 +13,99 @@ firmware or our own. Each picks its own USB identity, and a crashed one
 picks none. The bootloader underneath is the same in all five cases,
 answers on a fixed USB ID, and publishes what it is in a text file.
 
+## Product goal (decided 2026-10-26, Lew)
+
+Recorded on Codeberg #476, which is the authority; this section only
+places it. **Zero config for nine of ten users.** Start `lnflash` and it
+flashes every attached board it recognises and has firmware for in the
+bundle, with the newest image that fits the board and with settings it
+can estimate on its own. The user who knows nothing about the hardware
+must be able to use it well.
+
+**Power users keep every choice:** parameters, a configuration, prompts
+or menus to set, query and override each decision, and a dry run that
+prints what would happen.
+
+**A small, modern GUI for the same tool**, sharing widgets and the
+interaction model with the messenger and the browser ([GUI
+toolkit](gui-toolkit.md), "Decision"; [A messenger whose core runs
+anywhere](handheld-messenger.md), "The core/frontend cut"). The same
+rule holds there: start, it flashes, done; everything else sits behind
+an advanced view.
+
+### Where the tool stands against the goal
+
+Read from `lnflash/src/`, its README and `lnflash(1)` on 2026-10-26.
+This is a reading, not the audit; the end-to-end audit with a test per
+path is #476's task 1.
+
+Automatic today:
+
+- **Bundle discovery**: `--bundle`, then `$LNFLASH_BUNDLE`, then next to
+  the binary, then `/usr/share/lnflash` (`locate`,
+  `lnflash/src/manifest.rs:988`).
+- **The self check**: `--check-bundle` verifies the manifest and every
+  payload checksum (`verify_all`, `lnflash/src/main.rs:1005`).
+- **Entry** by the 1200-baud touch, then waiting for the bootloader
+  (`enter_bootloader`, `lnflash/src/flow.rs:3928`).
+- **Identity from the bootloader**, never from the running firmware
+  (`resolve_identity`, `lnflash/src/flow.rs:530`), the SoftDevice
+  precondition with its remedy, and the read back of the `[FW_BUILD]`
+  banner.
+- **Transports**: `uf2-msc` and `dfu-serial`, the two variants of
+  `Transport` (`lnflash/src/manifest.rs:128`). The third, the ESP32 ROM
+  loader through `espflash` or `esptool`, exists as `lnflash/src/esp.rs`,
+  but no flash run reaches it yet: nothing in `flow.rs` calls it.
+
+Where it asks:
+
+- A Board-ID several models publish, when `--board` does not name one:
+  type the board's name (`board_id_shared`,
+  `lnflash/src/flow.rs:365`).
+- A board at level *expected*: type yes, which `--yes` deliberately never
+  gives (`put_level_question`, `lnflash/src/flow.rs:408`).
+- "Overwrite the firmware on this board?" on both transports (`Cancelled`,
+  `lnflash/src/flow.rs:3292` and `lnflash/src/flow.rs:3471`).
+- A double-tap when no software trigger worked (`wait_for_human`,
+  `lnflash/src/flow.rs:3973`); under `--yes` this fails the board.
+- After the flash, without the matching flags: the radio settings, eu868
+  on Enter (`ask_for_radio`, `lnflash/src/flow.rs:3846`); remote status
+  queries, no on Enter (`ASK_MANAGEMENT`, `lnflash/src/mgmt.rs:111`);
+  telemetry, no on Enter (`ASK_TELEMETRY`, `lnflash/src/telemetry.rs:97`).
+
+Where it stops, nothing written:
+
+- No Board-ID (`NoBoardId`, `lnflash/src/flow.rs:539`); a Board-ID the
+  bundle does not carry (`UnknownBoard`, `lnflash/src/flow.rs:548`); the
+  wrong model for `--board` (`WrongBoard`, `lnflash/src/flow.rs:560`); a
+  shared Board-ID without the typed name (`AmbiguousBoardId`,
+  `lnflash/src/flow.rs:372`); level *expected* without the typed yes
+  (`NeedsConfirmation`, `lnflash/src/flow.rs:424`).
+- A dfu-serial bootloader on an ID no board claims (`UnknownBootloader`,
+  `lnflash/src/flow.rs:452`); a running ID shared beyond the boards
+  `--board` names (`SharedRunningId`, `lnflash/src/flow.rs:3058`); a
+  board touched into its bootloader that turns out not named
+  (`TouchedNotNamed`, `lnflash/src/flow.rs:3145`); a bootloader that
+  never appeared (`NoBootloader`, `lnflash/src/flow.rs:3992`).
+- A SoftDevice the bundle has no remedy for (`NoRemedy`,
+  `lnflash/src/flow.rs:2810`), or a remedy that did not take
+  (`RemedyDidNotTake`, `lnflash/src/flow.rs:658`).
+- Not root: said in the first lines (`is_root`,
+  `lnflash/src/main.rs:1012`), the run identifies and then cannot write.
+- An empty bus fails a real run (`lnflash/src/main.rs:1039`).
+
+No estimate yet:
+
+- **Region**: none is guessed. The offered default is always eu868
+  (`default_preset`, `lnflash/src/flow.rs:3836`).
+- **Radio settings**: a preset or the fields, prompted or given; nothing
+  is derived from the board or the place.
+- **Revision**: nothing in `lnflash/src/` reads a board revision; the
+  serial DFU init packet states `DEVICE_REVISION_ANY`
+  (`lnflash/src/dfu.rs:71`). Choice of image per revision: not checked.
+- Two boards of one kind, a failed flash and a pulled cable as zero
+  config paths: not checked here; that is the audit.
+
 ## The three states a board can be in
 
 **Application.** Our firmware enumerates `1209:0001` (T114) or
