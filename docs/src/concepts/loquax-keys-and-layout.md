@@ -686,9 +686,72 @@ the mailbox page's decision, or fills a gap they leave:
   still shown, because neither page decides what blocking does to it.
 - **Names are this session's.** The store across restarts is the history
   slice; a peer heard in an earlier run is its address until it announces
-  again.
+  again. (Kept across restarts since 1049, "Built 2026-10-27, history".)
 - **Our own announce**, if it comes back, names nobody.
 - **A script waits for names** with `until named <n> [secs]`.
+
+### Built 2026-10-27, history (leviculum 1049)
+
+The history is built: the store in `loquax/src/store.rs` (SQLite with its
+FTS5 index, `${LNMSG_HOME}/history.sqlite3`, as
+[storage](loquax-storage.md) decided), the model's side in
+`loquax/src/ui/history.rs`. The model notes what each fold changed and the
+terminal's shell writes it in one transaction before the next event; the
+engine, which runs under the core lock and does no I/O, writes nothing. At
+start every conversation in the store is listed, `--to` or not, with its
+newest messages, its marks, its ledger, its pin and its unread count, and
+the names peers announced. The frames are pinned from three runs over one
+home in `loquax/tests/fixtures/tui_history.frames`: an exchange with Bob
+and a send to Carol cut off by quitting; a restart that shows both from the
+store, Bob by name, the proof `✓`, the cut-off send `○` with the restart in
+its ledger, then pins Bob and deletes his reply; and a third start that
+shows the pin and the deletion kept. Where it differs from the text above,
+or fills a gap it leaves:
+
+- **The top line is the store's start**: `nothing earlier on this device`
+  where a conversation's first stored message is loaded. A conversation
+  loads its newest 200 messages at start (`LOAD_WINDOW`); above them the
+  top line says `180 earlier on this device, scroll up for them`, and
+  reaching the top, by key or wheel, loads 200 more above, the cursor and
+  the view staying on what the reader was reading. The pages say "the last
+  screens" and name no number.
+- **The restart discontinuity** is the page's: a send still queued or in
+  flight at exit is `○` after the restart, with `loquax restarted: no
+  longer being sent` in its ledger at the time of the start. Nothing sends
+  it again, because nothing holds the router's queue across a restart
+  (`loquax/src/engine.rs`, "What it deliberately does not do"); no screen
+  line marks the restart beyond that. A proof or a refusal that came before
+  the exit is kept as it was.
+- **The ledger spans runs**: the detail view's heading says `on this
+  device`, no longer `this session`.
+- **The search keeps its matcher** for what the screen has loaded, so a
+  loaded message matches exactly as before; for messages older than a
+  conversation's loaded window the store's FTS5 index answers (trigram
+  tokens, a substring of three characters or more; a shorter query scans
+  with `LIKE`, whose case folding is ASCII only), and those results join
+  the messages group by age. Opening one loads its conversation down to it
+  and opens it there.
+- **Delete** is `d` in the messages, then `y`; any other key keeps the
+  message and says so, and the question stays up until answered, unlike a
+  toast. A message the send runner still works on is not deleted: it says
+  to wait until it settles, because the runner holds its place. A
+  conversation is deleted from the palette (`delete conversation`), after
+  the same question; it leaves the list, and comes back if the peer writes
+  again.
+- **Pin** is the palette's `pin`, a toggle. Pinned conversations stand
+  first, most recent first among themselves, and the dotted rule takes the
+  blank row under the last of them when an unpinned one follows. No key and
+  no mouse target, as the element text has it.
+- **The palette ranks** a name typed whole and then one it begins before
+  the scattered matches (`leviculum-ui/src/commands.rs:124`); without it
+  `:pin` and `Enter` ran `previous conversation`, whose letters hold
+  `p`, `i`, `n` in order.
+- **The unread count** and the `new` rule survive a restart: a conversation
+  that had unread messages shows its badge, and its rule above them when
+  opened.
+- **The command line writes no history**: `loquax send` and `loquax fetch`
+  print and exit as before. A message a `fetch` from the command line
+  drained is therefore never in the history.
 
 ### Colour
 
@@ -1283,7 +1346,9 @@ layout's.
    sanitising (control characters, glyph look-alikes, width cap) and the
    collision mark. *1001 phase:* Bob's client announces a display name and
    Alice's list and header carry it with its short hash.
-6. **History.** The SQLite store of [storage](loquax-storage.md),
+6. **History.** *Done 2026-10-27, leviculum 1049; section 5, "Built
+   2026-10-27, history", names the differences. Open: the 1001 phase,
+   periculum's.* The SQLite store of [storage](loquax-storage.md),
    conversations and messages across restarts, the ledger persisted,
    search over FTS5, local delete, pinning, and the restart discontinuity
    shown honestly (a message queued at exit is `○` again after restart).

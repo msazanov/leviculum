@@ -132,3 +132,65 @@ Nothing in this program may use `fs::write` on a file it cannot afford to
 lose, and nothing may treat a corrupt load as an empty load
 (`lnomad/src/bookmarks.rs:116-130`). Bookmarks can be silently forgotten.
 Mail cannot.
+
+## Built 2026-10-27 (leviculum 1049)
+
+Option C as decided, in `loquax/src/store.rs` behind the `history` feature
+(which `tui` turns on), at `${LNMSG_HOME}/history.sqlite3`: `rusqlite`
+0.40 with `bundled`, the version `leviculum-cli` already links, so the
+musl-static `.deb` gained no new crate and its third-party notices did not
+change. The screen's side is `loquax/src/ui/history.rs`; slice 6 of
+[keys, mouse and layout](loquax-keys-and-layout.md) says what the reader
+sees, section 5, "Built 2026-10-27, history". Where the build fills a gap
+this page leaves, or departs from it:
+
+- **The key.** The schema above keys a message by `(id, identity)`. A
+  message we write has no LXMF id until the router queues it, and a send
+  that falls back to a mailbox is queued again under a second id, so the
+  key is the screen's own message counter (`seq`, `Message::activity`),
+  continued at start from the largest the store holds; `id` is a column,
+  indexed. `identity` (our delivery address) scopes every row, as
+  decided.
+- **The columns kept empty.** `title`, `fields` and `timestamp` (the
+  sender's clock) exist and stay NULL: the engine's `Received` event hands
+  the screen neither the fields nor the wire timestamp, and the screen
+  drops the title. Filling them is a change to the event, not to the
+  schema. Until then nothing sorts on the sender's clock at all; the order
+  is ours, `received_at` and the counter.
+- **Three more tables.** `ledger`, a row a line of the delivery ledger,
+  deleted with its message (the retention rule above); `conversations`,
+  for the pin and the unread count; `names`, the names peers announced,
+  so a peer is named after a restart. `message_text` is the FTS5 index,
+  external content over `messages` kept by triggers, with the `trigram`
+  tokenizer so a query matches a substring, as the screen's own matcher
+  does. A query shorter than three characters scans with `LIKE`.
+- **Writes.** The model notes what a fold changed, and the shell writes it
+  in one `BEGIN IMMEDIATE` transaction before the next event, rollback
+  journal, `synchronous=FULL`, foreign keys on. A crash leaves the store as
+  before the write or after it. The engine does no I/O under the core lock,
+  so it does not write; this page's "the client's problem" is the screen's
+  shell. A write that fails is said in a toast and after the screen, and
+  logged as `LNMSG_STORE_FAILED`; the message stays on the screen.
+- **The durability rule.** A missing file is a first start and is created
+  with the schema. A file that is there is checked before anything reads
+  it for the screen: SQLite reads its header and schema (and so refuses a
+  file shorter than the page count its header gives, "database disk image
+  is malformed", and one that is not SQLite at all), the schema version
+  must be this program's (`PRAGMA user_version`, a later one is refused as
+  newer, version 0 as not a loquax store, which covers an empty file), and
+  all five tables must be there. Any of these stops `loquax` with the
+  file's path and what to do (move it aside, or restore a backup); nothing
+  is written over it. The tests cut a real store by its last page and by
+  half after opening it whole as the positive control, and refuse an empty
+  file, a text file and another program's SQLite file. A page damaged in
+  the middle of an otherwise whole file is found when it is read, and is
+  then an error, never an empty answer.
+- **Paging.** The screen loads a conversation's newest 200 messages and
+  asks for 200 more when the reader reaches the top: both index lookups on
+  `(identity, conversation, seq)`, as "On the 2 GB Raspberry Pi question"
+  argues.
+- **Retention** is as decided: text and its ledger are kept until the
+  reader deletes them (`d`, or the palette's `delete conversation`).
+  Attachments do not exist yet, so neither does their byte budget.
+- **Only the terminal writes.** `loquax send` and `loquax fetch` on the
+  command line do not touch the store.

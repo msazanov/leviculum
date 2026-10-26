@@ -12,6 +12,10 @@ loquax attaches to a Reticulum shared instance that is already running,
 does. It runs its own LXMF router but never a Reticulum stack of its own, so
 a daemon has to be running.
 
+The messenger keeps its conversations across restarts in
+`$LNMSG_HOME/history.sqlite3`, an SQLite file; it refuses to start over one
+it cannot read whole rather than begin an empty history on top of it.
+
 The `loquax` package ships the binary built with the `tui` feature and no
 service. Every option is in `loquax(1)`; the design is in
 `docs/src/concepts/loquax.md` and the pages beside it.

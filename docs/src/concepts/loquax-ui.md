@@ -266,6 +266,18 @@ conversation, and the header says the trust state in words: `known`,
 `unknown` or `blocked`. Its section 5, "Built 2026-10-26, names", lists
 where it differs from the decision in [the mailbox page](loquax-mailbox.md).
 
+### Built 2026-10-27, history
+
+1049 (#232) is slice 6 of [keys, mouse and layout](loquax-keys-and-layout.md),
+section 7: conversations, their messages with their marks and ledgers, the
+pins, the unread counts and the names heard outlive the process in the
+SQLite store of [storage](loquax-storage.md). A send cut off by quitting is
+`○` again after the restart, with the reason in its ledger. `d` then `y`
+deletes a message from the device, the palette deletes a conversation or
+pins one above the list's rule, and the search reaches older messages
+through the store's FTS5 index. Its section 5, "Built 2026-10-27, history",
+lists where it differs from the pages.
+
 The second round on the screen, the full key table (vi, Emacs, the mail
 and the chat programs side by side, per pane), the mouse, the chat layout
 in text mode and the slices after 1002, is
