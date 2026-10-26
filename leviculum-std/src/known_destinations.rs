@@ -543,26 +543,32 @@ mod tests {
 
     #[test]
     fn test_python_known_destinations_compat() {
-        // Read the actual Python rnsd known_destinations file if present
-        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-        let Some(home) = home else { return };
-        let path = home.join(".reticulum/storage/known_destinations");
-        if !path.exists() {
-            return;
-        }
-
-        let bytes = std::fs::read(&path).unwrap();
-        let entries = decode_known_destinations(&bytes).unwrap();
-        assert!(
-            !entries.is_empty(),
-            "Python known_destinations should have entries"
+        // Written by the reference rnsd, not read from the host's
+        // ~/.reticulum: see tests/fixtures/python-storage/README.md.
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/python-storage/known_destinations"
         );
+        let bytes = std::fs::read(path).unwrap();
+        let entries = decode_known_destinations(&bytes)
+            .unwrap_or_else(|e| panic!("{path} does not decode: {e:?}"));
+        assert!(!entries.is_empty(), "{path} decodes to no entries");
 
         // Verify all entries have valid structure
         for (hash, entry) in &entries {
             assert_eq!(hash.len(), TRUNCATED_HASHBYTES);
             assert_eq!(entry.public_key.len(), IDENTITY_KEY_SIZE);
+            assert_eq!(entry.packet_hash.len(), PACKET_HASH_LEN);
             assert!(entry.timestamp > 0.0);
+            assert_eq!(
+                entry.app_data.as_deref(),
+                Some(&b"leviculum fixture"[..]),
+                "the announcer's app_data survives the reference's serialiser"
+            );
+            assert!(
+                matches!(entry.use_state, KnownDestUseState::Used(t) if t > 0.0),
+                "the reference writes the fifth element as a float (Identity.remember)"
+            );
         }
 
         // Verify we can extract valid identities

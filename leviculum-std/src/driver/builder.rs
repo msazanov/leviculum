@@ -1818,21 +1818,17 @@ mod tests {
 
     #[test]
     fn test_python_transport_identity_compat() {
-        // Read the actual Python rnsd transport_identity file if present
-        let python_path = dirs::home_dir().map(|h| h.join(".reticulum/storage/transport_identity"));
-        let Some(path) = python_path else { return };
-        if !path.exists() {
-            return; // Skip if Python rnsd hasn't been run on this machine
-        }
-
-        let bytes = std::fs::read(&path).unwrap();
-        assert_eq!(
-            bytes.len(),
-            64,
-            "Python transport_identity should be 64 bytes"
+        // Written by the reference rnsd, not read from the host's
+        // ~/.reticulum: see tests/fixtures/python-storage/README.md.
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/python-storage/transport_identity"
         );
+        let bytes = std::fs::read(path).unwrap();
+        assert_eq!(bytes.len(), 64, "{path} should be 64 bytes");
 
-        let id = Identity::from_private_key_bytes(&bytes).unwrap();
+        let id = Identity::from_private_key_bytes(&bytes)
+            .unwrap_or_else(|e| panic!("{path} is not a private identity: {e:?}"));
         assert!(id.has_private_keys());
         // Verify the identity produces a valid hash (16 bytes)
         assert_eq!(id.hash().len(), 16);
@@ -1917,13 +1913,5 @@ mod tests {
             inner.probe_dest_hash().is_none(),
             "probe_dest_hash should be None when respond_to_probes is disabled"
         );
-    }
-
-    // Reuse the dirs module from config.rs for home dir lookup in tests
-    mod dirs {
-        use std::path::PathBuf;
-        pub(super) fn home_dir() -> Option<PathBuf> {
-            std::env::var_os("HOME").map(PathBuf::from)
-        }
     }
 }
