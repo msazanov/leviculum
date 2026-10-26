@@ -959,6 +959,52 @@ in truecolor, 3.4:1 to 9.3:1 and 3.1:1 to 8.6:1 in 256.
 The two TX targets are labelled with their word, never a bare glyph, so
 a click that transmits is as deliberate as the `Enter` it stands for.
 
+#### Built 2026-10-26 (leviculum 1036)
+
+The table is built (36c8a80e, 91dfc862) in `lnmsg/src/ui/hit.rs`, which
+answers what a cell is from the rectangles, the view and the laid-out
+rows the renderer draws, so the model's tests click the cells a reader
+sees. Where it differs from the table:
+
+- **Not there yet:** `+` in the list's title and `/ search`, whose
+  targets are slices 4 and 5 below; `f` hints for links.
+- **The wheel over the list** steps the conversation, a notch at a time:
+  the list has no view of its own, it scrolls just far enough to show the
+  selected one. Over the conversation it moves the view three rows and
+  leaves the cursor; over the compose box, a line of the body.
+- **A click on a message selects it where it is**; the view does not
+  scroll to it. The mark's hit box is its glyph, the badge's its brackets
+  and count.
+- **The footer's `send` is not a button.** The only clicks that transmit
+  are the two words, and a unit test clicks every cell at both mockup
+  sizes in every focus to hold it; the footer item in compose stays the
+  key it names. The other footer items run their row's action and
+  highlight under the pointer, as in `lnomad`.
+- **Any click closes the help**, as in `lnomad`: it fills an 80 x 24
+  screen and leaves no outside. The palette and the detail view close on
+  a click outside them; a click on a palette row does nothing yet, its
+  footer's `Enter run` and `Esc close` work.
+- **A drag selects from where it went down to where it is**, in reading
+  order and held to the text: the margin, the bar, the time and the mark
+  are never part of it. A copy has a new line between a body's lines and
+  between two messages, and a space where a line wrapped. The selection
+  is drawn in inverse video against the block, so on the reversed
+  selected block it shows as plain. `y` and `Alt-w` (section 3, the copy
+  row) copy the selection again, or without one the message under the
+  cursor whole.
+- **A link** is a word of a body that is an `http`, `https` or `mailto`
+  URL, an `lxmf@` address or a NomadNet page (`leviculum-ui/src/link.rs`,
+  the rule `lnomad` follows its links by). It is underlined; a click on it
+  hands a web or mail URL to the system's handler, opens the conversation
+  of an `lxmf@` address for writing (where `lnomad`, which has no
+  composer, copies the address), and copies a NomadNet page to open in
+  `lnomad`.
+- **`--no-mouse`** starts without capture and the palette's `mouse`
+  switches it; without capture the terminal's own selection works.
+- **A key script** says `click`, `wheel` and `drag` at cells counted from
+  1, and writes each copy's OSC 52 sequence into its frames
+  (`lnmsg/tests/fixtures/tui_mouse.frames`).
+
 ## 6. What is deliberately not copied from the phone apps
 
 - **Read receipts** beyond the LXMF proof. The proof says the bytes
@@ -1027,7 +1073,10 @@ layout's.
    style maps and the token test of "Colour", item 5. *1001 phase:* Bob's reply arriving while
    Alice reads earlier messages draws the `new` line above it, and her
    detail view of the first message lists the proof.
-3. **The mouse.** The table of section 5; drag selection and OSC 52;
+3. **The mouse.** *Done 2026-10-26, leviculum 1036 (36c8a80e,
+   91dfc862); section 5, "What the mouse does", names the differences.
+   Open: the 1001 phase, periculum's.* The table of section 5; drag
+   selection and OSC 52;
    `--no-mouse` and the palette toggle. Depends on 2. *Acceptance:* unit
    tests feeding mouse events to the model; the key script language gains
    `click` and `wheel` steps and `tui_snapshot` pins a session clicking a

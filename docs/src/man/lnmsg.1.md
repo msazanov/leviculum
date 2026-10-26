@@ -53,12 +53,17 @@ lnmsg -- terminal LXMF messenger for Reticulum
 **--no-color**
 :   **tui** only: no colours.
 
+**--no-mouse**
+:   **tui** only: leave the mouse to the terminal. Its own selection and copy then work as in any other program, and lnmsg sees no click, wheel or drag; the palette's `mouse` captures it again, and turns it off again.
+
 **--script** *file*, **--frames** *file*, **--size** *W*x*H*
-:   **tui** only: run a key script instead of reading the keyboard, and write each frame it asks for to **--frames** (default: the script's path with `.frames`), on a screen of **--size** (default 80x24). One step a line, `#` a comment: `key` *name* (`tab`, `backtab`, `enter`, `esc`, `up`, `down`, `left`, `right`, `home`, `end`, `pageup`, `pagedown`, `backspace`, `delete`, `space`, `f1` to `f12`, or one character, after any of the prefixes `ctrl-`, `alt-` and `shift-`, so `shift-enter` and `ctrl-enter` too), `type` *text*, `newline` (Alt-Enter, a line break in compose), `keyboard` `enhanced`|`plain` (the keyboard the screen is told it has: its hint offers `Shift-Enter` and `Ctrl-Enter` only when enhanced; plain until said), `tick` [*n*], `sleep` *ms* (up to 60000: read the engine as the idle screen does and tick once per 250 ms of *ms*), `frame` [*label*], and `until ready`, `until delivery` *state*, `until received` *n*, `until leg` `direct`|`propagated` (the send runner reported that leg for the newest sent message), each with an optional timeout in seconds (default 30), and `clock` *YYYY-MM-DD* *HH:MM* (the time of day from then on, at UTC; a script starts at 2026-10-26 12:00 and never reads the wall clock, so its frames are the same on every run). *state* is one of `queued`, `inflight`, `sent`, `mailbox`, `delivered`, `rejected`, `failed`. An `until` that does not hold in time draws a last frame and exits 1.
+:   **tui** only: run a key script instead of reading the keyboard, and write each frame it asks for to **--frames** (default: the script's path with `.frames`), on a screen of **--size** (default 80x24). One step a line, `#` a comment: `key` *name* (`tab`, `backtab`, `enter`, `esc`, `up`, `down`, `left`, `right`, `home`, `end`, `pageup`, `pagedown`, `backspace`, `delete`, `space`, `f1` to `f12`, or one character, after any of the prefixes `ctrl-`, `alt-` and `shift-`, so `shift-enter` and `ctrl-enter` too), `type` *text*, `newline` (Alt-Enter, a line break in compose), `keyboard` `enhanced`|`plain` (the keyboard the screen is told it has: its hint offers `Shift-Enter` and `Ctrl-Enter` only when enhanced; plain until said), `tick` [*n*], `sleep` *ms* (up to 60000: read the engine as the idle screen does and tick once per 250 ms of *ms*), `frame` [*label*], and `until ready`, `until delivery` *state*, `until received` *n*, `until leg` `direct`|`propagated` (the send runner reported that leg for the newest sent message), each with an optional timeout in seconds (default 30), and `clock` *YYYY-MM-DD* *HH:MM* (the time of day from then on, at UTC; a script starts at 2026-10-26 12:00 and never reads the wall clock, so its frames are the same on every run). The mouse steps take screen cells counted from 1 at the top left, as the frames' rows and columns are: `click` *col* *row* (the left button down and up), `wheel` `up`|`down` *col* *row* [*n*] (*n* notches, 1 by default) and `drag` *col* *row* *col* *row* (down at the first cell, moved to the second and up there). What the screen asks of the terminal goes into the frames where it happens: `--- osc52` *sequence* `---` for a copy, the escape character written `\e`, and `--- open` *url* `---` for a link, which a script never launches. *state* is one of `queued`, `inflight`, `sent`, `mailbox`, `delivered`, `rejected`, `failed`. An `until` that does not hold in time draws a last frame and exits 1.
 
 ## KEYS
 
 In **tui**, the focus follows the pane. `Tab` and `Shift-Tab` cycle the conversations, the messages and the compose line. `?` (or `F1` from any pane) shows every key; the help, the footer and the palette are built from the same table the keys are.
+
+In the messages, `y` or `Alt-w` copies what a drag selected (see MOUSE), or else the message under the cursor whole.
 
 In the conversations and the messages: `j`/`k`, the arrows or `Ctrl-n`/`Ctrl-p` move, `Ctrl-f`/`Ctrl-b`, `Space` and `PageDown`/`PageUp` page, `Ctrl-d`/`Ctrl-u` move half a page, `g`/`G`, `Home`/`End`, `Alt-<`/`Alt->` or `Ctrl-↑`/`Ctrl-↓` jump to the top or bottom. `Enter` opens the selected conversation; on a message it opens the message's detail view (see THE SCREEN). `i`, `a` or `r` start writing. `:` opens the command palette (`:q` and `Enter` quit), `Ctrl-r` fetches the mailbox, `q` quits.
 
@@ -66,7 +71,7 @@ In the compose line, keys type. `Enter` sends to the open conversation (an empty
 
 **send_on_enter**: with `send_on_enter = false` in `$LNMSG_HOME/config`, or after the palette's `send on enter`, `Enter` breaks the line and `Alt-Enter` sends (`Ctrl-Enter` too, where the terminal can send it).
 
-Everywhere: `Alt-x` opens the command palette, which matches what you type against the actions' names (`send`, `fetch`, `quit`, `help`, `details`, `next conversation`, `send on enter`, ...). `Alt-↓`/`Alt-↑` select the next or previous conversation, `Alt-Shift-↓`/`Alt-Shift-↑` the next or previous one with unread messages. `F5` fetches the mailbox, `Ctrl-l` redraws the screen, `Ctrl-q` quits. `Ctrl-c` quits nowhere; outside compose it says that `Ctrl-q` does.
+Everywhere: `Alt-x` opens the command palette, which matches what you type against the actions' names (`send`, `fetch`, `quit`, `help`, `details`, `next conversation`, `send on enter`, `mouse`, ...). `Alt-↓`/`Alt-↑` select the next or previous conversation, `Alt-Shift-↓`/`Alt-Shift-↑` the next or previous one with unread messages. `F5` fetches the mailbox, `Ctrl-l` redraws the screen, `Ctrl-q` quits. `Ctrl-c` quits nowhere; outside compose it says that `Ctrl-q` does.
 
 ## THE SCREEN
 
@@ -77,6 +82,20 @@ Everywhere: `Alt-x` opens the command palette, which matches what you type again
 **The `new` rule.** Where the messages begin that arrived while the conversation was not open, or while you were reading earlier ones, a full-width rule says how many (`2 new`). It stays until you leave the conversation. A message that arrives while you have scrolled up draws the rule above it and does not move what you are reading; `G` or `End` goes back to the newest, and from there the conversation follows what arrives.
 
 **The detail view.** `Enter` on a message shows who wrote it to whom, the peer's address, the message's id in full, its size and its state, and what this session saw happen to it, each with its time: queued, the leg tried, the router's states, the delivery proof, or the reason it failed. `Esc` or `q` closes it.
+
+## MOUSE
+
+In **tui** the mouse is captured unless **--no-mouse** says otherwise, and the palette's `mouse` switches it off and on. A click on a pane focuses it, and the wheel scrolls the pane under the pointer, whichever has the focus: the list a conversation a notch, the conversation three rows, the compose box a line. A click on a conversation's rows opens it; on its unread count, it opens at the `new` rule. A click on a message selects it where it is, without scrolling; on its delivery mark, it opens the detail view. A click in the compose box puts the cursor there.
+
+Two clicks transmit, and they are words: `send` on the compose box's border sends, as `Enter` does, and the mailbox state in the conversation's title (or in the row under it on a wide screen) fetches, as `F5` does. Nothing else the mouse can reach transmits; the footer's `send` is a key to press, not a button.
+
+A footer item runs its key's action, and the pointer over it highlights it. A click outside the palette or a detail view closes it; any click closes the help.
+
+Drag across the conversation to select text, across lines and messages: the release copies the selected text, without the times and the marks, to the clipboard by OSC 52, which works over SSH where the terminal allows it, and says `copied N chars`. `y` copies the selection again.
+
+A link in a message (`http`, `https` and `mailto` URLs, `lxmf@`*address*, a NomadNet page *address*`:/page/...`) is underlined. A click follows it as lnomad does: a web or mail link goes to the system's handler for it, an `lxmf@` address opens its conversation for writing, and a NomadNet page is copied, to open in lnomad. Any other scheme is refused.
+
+Without capture the terminal's own selection works as before: drag to select, and the terminal's copy key copies.
 
 ## DELIVERY MARKS
 

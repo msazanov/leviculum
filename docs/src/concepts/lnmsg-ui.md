@@ -211,6 +211,22 @@ while the reader is scrolled up leaves the view where it is. Monochrome:
 the colour part of that page is still a proposal. Its section 5, "Built",
 lists where the screen differs from the mockups.
 
+### Built 2026-10-26, the mouse
+
+1036 (#232) is slice 3 of [keys, mouse and layout](lnmsg-keys-and-layout.md),
+section 7, and the proposal "The mouse as a first-class citizen" below:
+a click focuses a pane and lands on what is drawn there (a conversation,
+its badge, a message, its delivery mark, a link, the compose box at a
+cell, a footer item), the wheel scrolls the pane under the pointer, and a
+drag over the conversation selects text across lines and messages and
+copies it by OSC 52 on release. The two clicks that transmit are the
+words `send` on the compose box's border and the mailbox state, the same
+commands as `Enter` and `F5`. `--no-mouse` and the palette's `mouse` give
+the terminal its own selection back. The OSC 52 sequence and the rule a
+link is followed by are `lnomad`'s, moved to `leviculum-ui` so both
+programs read one copy. Its section 5, "What the mouse does", lists where
+the screen differs from the table.
+
 The second round on the screen, the full key table (vi, Emacs, the mail
 and the chat programs side by side, per pane), the mouse, the chat layout
 in text mode and the slices after 1002, is
@@ -427,6 +443,9 @@ concrete moves:
   (`OutboundEntry`, `leviculum-lxmf/src/router/outbound.rs:58-72`).
 
 ### The mouse as a first-class citizen
+
+*Built 2026-10-26 for `lnmsg` (1036); section 1, "Built 2026-10-26, the
+mouse", says how.*
 
 `lnomad` enables mouse capture unconditionally with no toggle
 (`leviculum-ui-ratatui/src/terminal.rs:63-70`, the capture it takes by
