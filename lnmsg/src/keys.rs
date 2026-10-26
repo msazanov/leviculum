@@ -427,6 +427,12 @@ pub const ROWS: &[Row<Action>] = {
             &[],
         )
         .palette("mouse"),
+        Row::new(
+            "light and dark colours swapped for the session (--theme, the theme key)",
+            EVERYWHERE,
+            &[],
+        )
+        .palette("theme"),
     ]
 };
 

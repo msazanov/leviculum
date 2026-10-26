@@ -8,11 +8,14 @@
 //! mouse reads it too ([`super::hit`]): which cells of a row are a body's
 //! text, where a delivery mark is, which cells are a link.
 //!
-//! Monochrome. The colour tokens of section 5, "Colour", are proposed, not
-//! decided, so a block, the date line, the rule and the muted lines are drawn
-//! on the pane in its own colours; the selection is reverse video, which is
-//! the monochrome tier of the same table. Only the delivery marks keep the
-//! tones decided on 2026-08-10 ([`super::tone_rgb`]).
+//! In the colour tokens of section 5, "Colour" ([`leviculum_ui::tokens`]),
+//! which [`Draw`] carries for the model's tier and theme: a block is a
+//! rectangle of its tint, its text plus a margin cell either side; its time
+//! takes the block's time colour, its mark the tone of its state; the date
+//! takes a pill under its label, the `new` rule the unread colour, and the
+//! top line and the dashes the muted one. A token that is reverse video (a
+//! selected block in 16 colours and in monochrome) reverses the text alone,
+//! as the monochrome screen always has.
 
 use alloc::format;
 use alloc::string::String;
@@ -22,9 +25,10 @@ use alloc::vec::Vec;
 use leviculum_ui::delivery::glyph;
 use leviculum_ui::input::InputBuffer;
 use leviculum_ui::link::find_links;
+use leviculum_ui::tokens::{Paint, Tokens};
 use leviculum_ui::{RLine, RStyle};
 
-use super::{leg_label, name, plain, push, tone_rgb, wrap, Conversation, Message, UiModel};
+use super::{leg_label, name, plain, push, wrap, Conversation, Message, UiModel};
 use crate::when::{date_label, list_time, WallTime};
 
 /// The top of what this device holds. Until the history slice that is the
@@ -46,6 +50,18 @@ pub struct Draw {
     pub ascii: bool,
     /// The message drawn selected: the cursor's, while the pane has the focus.
     pub selected: Option<usize>,
+    /// The colour tokens of the model's tier and theme.
+    pub tokens: &'static Tokens,
+}
+
+/// A style drawn in a token's colours.
+pub fn painted(paint: Paint) -> RStyle {
+    RStyle {
+        fg: paint.fg,
+        bg: paint.bg,
+        reverse: paint.reverse,
+        ..RStyle::default()
+    }
 }
 
 /// Where one message's rows are, separators above it included.
@@ -89,9 +105,9 @@ pub struct Laid {
 impl Laid {
     /// No conversation open: the pane says only where the device's memory
     /// begins.
-    pub fn empty(width: usize) -> Self {
+    pub fn empty(width: usize, tokens: &Tokens) -> Self {
         Self {
-            rows: vec![centred(EARLIEST, width)],
+            rows: vec![centred(EARLIEST, width, painted(tokens.muted))],
             texts: vec![None],
             spans: Vec::new(),
             links: Vec::new(),
@@ -117,7 +133,7 @@ enum Last {
 /// the blocks with a blank row between two of them.
 pub fn conversation(conversation: &Conversation, width: usize, draw: &Draw) -> Laid {
     let width = width.max(1);
-    let mut laid = Laid::empty(width);
+    let mut laid = Laid::empty(width, draw.tokens);
     let mut last = Last::Separator;
     let mut day = None;
     for (index, message) in conversation.messages.iter().enumerate() {
@@ -128,7 +144,7 @@ pub fn conversation(conversation: &Conversation, width: usize, draw: &Draw) -> L
                 if last == Last::Block {
                     laid.push(RLine::default());
                 }
-                laid.push(date_line(&date_label(&at, &now), width));
+                laid.push(date_line(&date_label(&at, &now), width, draw.tokens));
                 last = Last::Separator;
             }
         }
@@ -136,7 +152,7 @@ pub fn conversation(conversation: &Conversation, width: usize, draw: &Draw) -> L
             if last == Last::Block {
                 laid.push(RLine::default());
             }
-            laid.push(new_rule(rule.count, width));
+            laid.push(new_rule(rule.count, width, draw.tokens));
             last = Last::Separator;
         }
         if last == Last::Block {
@@ -163,32 +179,42 @@ pub fn conversation(conversation: &Conversation, width: usize, draw: &Draw) -> L
     laid
 }
 
-/// `text` centred in `width` cells.
-fn centred(text: &str, width: usize) -> RLine {
+/// `text` centred in `width` cells, in `st`.
+fn centred(text: &str, width: usize, st: RStyle) -> RLine {
     let pad = width.saturating_sub(text.chars().count()) / 2;
-    plain(&format!("{}{text}", " ".repeat(pad)))
+    let mut line = plain(&" ".repeat(pad));
+    push(&mut line, text, st);
+    line
 }
 
-/// `── Saturday 24 October ──`, centred.
-fn date_line(label: &str, width: usize) -> RLine {
-    // decision pending: lnmsg-keys-and-layout.md section 5, "Colour", item 6
-    // (3, the date as a pill): the rule alone, on the pane.
-    centred(&format!("── {label} ──"), width)
+/// `── Saturday 24 October ──`, centred: the dashes muted, the label with a
+/// space either side on the date pill (decided 2026-10-26, part 6, 3).
+fn date_line(label: &str, width: usize, tokens: &Tokens) -> RLine {
+    let text = format!("── {label} ──");
+    let pad = width.saturating_sub(text.chars().count()) / 2;
+    let muted = painted(tokens.muted);
+    let mut line = plain(&" ".repeat(pad));
+    push(&mut line, "──", muted);
+    push(&mut line, &format!(" {label} "), painted(tokens.date_pill));
+    push(&mut line, "──", muted);
+    line
 }
 
 /// ` ───── 2 new ───── `, the pane's width less a margin cell either side.
-pub fn new_rule(count: usize, width: usize) -> RLine {
+/// The rule and its count in the unread colour.
+pub fn new_rule(count: usize, width: usize, tokens: &Tokens) -> RLine {
     let label = format!(" {count} new ");
     let inner = width.saturating_sub(2);
     let dashes = inner.saturating_sub(label.chars().count());
     let left = dashes / 2;
-    // decision pending: lnmsg-keys-and-layout.md section 5, "Colour", item 6
-    // (1, the hues): the unread rule's accent; on the pane until then.
-    plain(&format!(
-        " {}{label}{} ",
-        "─".repeat(left),
-        "─".repeat(dashes - left)
-    ))
+    let mut line = plain(" ");
+    push(
+        &mut line,
+        &format!("{}{label}{}", "─".repeat(left), "─".repeat(dashes - left)),
+        painted(tokens.unread),
+    );
+    push(&mut line, " ", RStyle::default());
+    line
 }
 
 /// The widest a block's text may be: three quarters of the pane less the
@@ -202,8 +228,11 @@ pub fn block_cap(width: usize) -> usize {
 }
 
 /// What closes a block's last line: the leg a waiting send is on, `you` on a
-/// narrow pane, the time, and for ours the delivery mark in its tone.
-fn suffix(message: &Message, narrow: bool, draw: &Draw) -> RLine {
+/// narrow pane, the time, and for ours the delivery mark in its tone. The
+/// words take the block's time colour, unless the block is selected, where
+/// they take its text colour; a mark without a tone (16 colours) takes the
+/// text colour too.
+fn suffix(message: &Message, narrow: bool, draw: &Draw, selected: bool) -> RLine {
     let mut words: Vec<String> = Vec::new();
     if message.outbound && narrow {
         words.push("you".into());
@@ -227,9 +256,15 @@ fn suffix(message: &Message, narrow: bool, draw: &Draw) -> RLine {
             false => format!("{text} · unverified"),
         };
     }
+    let time = match (selected, message.outbound) {
+        (true, _) => RStyle::default(),
+        (false, true) => painted(draw.tokens.own_time),
+        (false, false) => painted(draw.tokens.their_time),
+    };
     let mut line = RLine::default();
     if !text.is_empty() {
-        push(&mut line, &format!("  {text}"), RStyle::default());
+        push(&mut line, "  ", RStyle::default());
+        push(&mut line, &text, time);
     }
     if let Some(state) = message.delivery {
         let row = glyph(state);
@@ -239,7 +274,7 @@ fn suffix(message: &Message, narrow: bool, draw: &Draw) -> RLine {
             RStyle::default(),
         );
         let mark = RStyle {
-            fg: Some(tone_rgb(row.tone, row.dim).into()),
+            fg: draw.tokens.tones.of(row.tone, row.dim),
             ..RStyle::default()
         };
         push(&mut line, row.symbol(draw.tick as usize, draw.ascii), mark);
@@ -258,7 +293,9 @@ struct Block {
 
 /// One message's block: its lines wrapped at a space to the cap, the suffix
 /// closing the last one, ours flush right and theirs flush left with a margin
-/// cell either side, the selected one reversed behind the bar. The suffix may
+/// cell either side, the selected one behind the bar. The block's token
+/// tints the text and both margin cells; a reverse-video token (a selected
+/// block in 16 colours and monochrome) reverses the text alone. The suffix may
 /// reach past the cap into the pane's last quarter, as in both mockups, and
 /// takes a row of its own only where the pane itself has no room for it. A
 /// link in the body is underlined and its cells name it in `links`.
@@ -290,7 +327,7 @@ fn block(
         }
     }
     let text_lens: Vec<usize> = rows.iter().map(|row| row.cells.len()).collect();
-    let suffix = suffix(message, narrow, draw);
+    let suffix = suffix(message, narrow, draw, selected);
     if !suffix.cells.is_empty() {
         match rows.last_mut() {
             Some(last) if last.cells.len() + suffix.cells.len() <= width.saturating_sub(2) => {
@@ -331,29 +368,40 @@ fn block(
             })
         })
         .collect();
+    let tokens = draw.tokens;
+    let paint = match (message.outbound, selected) {
+        (true, false) => tokens.own,
+        (true, true) => tokens.own_selected,
+        (false, false) => tokens.their,
+        (false, true) => tokens.their_selected,
+    };
+    // A tint covers the margins; reverse video only the text, as it always
+    // has.
+    let (margin, text_paint) = match paint.reverse {
+        true => (Paint::NONE, paint),
+        false => (paint, paint),
+    };
     let rows = rows
         .into_iter()
         .map(|row| {
             let mut line = RLine::default();
             push(&mut line, &" ".repeat(x - 1), RStyle::default());
             match selected {
-                true => push(&mut line, &String::from(BAR), RStyle::default()),
-                false => push(&mut line, " ", RStyle::default()),
+                true => push(&mut line, &String::from(BAR), painted(margin)),
+                false => push(&mut line, " ", painted(margin)),
             }
             let pad = inner - row.cells.len();
-            // decision pending: lnmsg-keys-and-layout.md section 5, "Colour",
-            // item 6 (1, the hues; 2, their blocks tinted or neutral): the
-            // block's tint and time colour. Monochrome: the pane, and reverse
-            // video for the selected block, which is that table's 16-colour
-            // and monochrome entry.
             let mut cells = row.cells;
             cells.extend(plain(&" ".repeat(pad)).cells);
-            if selected {
-                for cell in &mut cells {
-                    cell.st.reverse = true;
-                }
+            for cell in &mut cells {
+                cell.st.fg = cell.st.fg.or(text_paint.fg);
+                cell.st.bg = text_paint.bg;
+                cell.st.reverse = text_paint.reverse;
             }
             line.cells.extend(cells);
+            if !margin.is_none() {
+                push(&mut line, " ", painted(margin));
+            }
             line
         })
         .collect();
@@ -387,9 +435,12 @@ pub fn list<B: InputBuffer>(model: &UiModel<B>, width: usize, height: usize) -> 
                     cell.ch = BAR;
                 }
                 if focused {
+                    let selection = painted(model.tokens().selection);
                     let end = row.cells.len().saturating_sub(1);
                     for cell in row.cells.iter_mut().take(end).skip(1) {
-                        cell.st.reverse = true;
+                        cell.st.fg = selection.fg.or(cell.st.fg);
+                        cell.st.bg = selection.bg.or(cell.st.bg);
+                        cell.st.reverse = selection.reverse;
                     }
                 }
             }

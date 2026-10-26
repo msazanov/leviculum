@@ -37,14 +37,17 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tui_input::Input;
 
 use leviculum_ui::clipboard::osc52;
+use leviculum_ui::color::{resolve_tier_from_env, ColorFlag, Tier};
 use leviculum_ui::delivery::DeliveryState;
 use leviculum_ui::footer;
 use leviculum_ui::input::{KeyCode, KeyEvent, KeyModifiers};
 use leviculum_ui::input::{MouseButton, MouseEvent, MouseEventKind};
 use leviculum_ui::theme::{resolve_theme, Theme, ThemeFlag};
+use leviculum_ui::tokens::Tokens;
 use leviculum_ui_ratatui::background::detect_background;
 use leviculum_ui_ratatui::event::{key_event, mouse_event, step_event, EventStep};
 use leviculum_ui_ratatui::geometry::to_ratatui;
+use leviculum_ui_ratatui::style::downgrade_buffer;
 use leviculum_ui_ratatui::terminal::{install_panic_hook, set_mouse_capture, TerminalOps};
 use leviculum_ui_ratatui::{help, to_ratatui_text, toast, CrosstermTerminal, TerminalGuard};
 
@@ -93,6 +96,10 @@ pub struct TuiOptions {
     pub timeout: u64,
     pub ascii: bool,
     pub no_color: bool,
+    /// `--color`: the ladder's second rung.
+    pub color: ColorFlag,
+    /// `--theme`, over the config file's `theme` key.
+    pub theme: Option<ThemeFlag>,
     /// Start with the mouse not captured, so the terminal's own selection
     /// works; the palette's `mouse` turns capture on.
     pub no_mouse: bool,
@@ -455,6 +462,12 @@ pub async fn run(options: TuiOptions) -> ExitCode {
     model.ascii = options.ascii;
     model.mouse = !options.no_mouse;
     model.send_on_enter = config.send_on_enter.unwrap_or(true);
+    // A script plays its own terminal: monochrome and dark until its `tier`
+    // and `theme` steps say otherwise, whatever the host's.
+    let theme_flag = options.theme.or(config.theme).unwrap_or_default();
+    if options.script.is_none() {
+        model.tier = resolve_tier_from_env(options.no_color, options.color);
+    }
     // The mailbox the header names before any run: `--pn` or the configured
     // node, else what the last run kept.
     let mailbox = match preferred_pn {
@@ -504,7 +517,7 @@ pub async fn run(options: TuiOptions) -> ExitCode {
                 .unwrap_or_else(|| script.with_extension("frames"));
             run_script(&mut shell, script, &frames, &options).await
         }
-        None => run_terminal(&mut shell, &options).await,
+        None => run_terminal(&mut shell, theme_flag).await,
     };
     shell.settle().await;
     let Shell {
@@ -564,12 +577,12 @@ fn log_keys(model: &Model) {
 }
 
 /// The real terminal: keys in, frames out, until the reader quits.
-async fn run_terminal(shell: &mut Shell, options: &TuiOptions) -> Result<(), String> {
+async fn run_terminal(shell: &mut Shell, theme: ThemeFlag) -> Result<(), String> {
     install_panic_hook();
     // Before the alternate screen, as lnomad does: the background query reads
     // its answer on stdin, which raw mode would hand to the key handler. The
-    // keyboard query likewise.
-    let theme = resolve_theme(detect_background(ThemeFlag::Auto), ThemeFlag::Auto);
+    // keyboard query likewise. Asked only under `auto`.
+    shell.model.theme = resolve_theme(detect_background(theme), theme);
     let enhanced = crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false);
     if enhanced {
         // Runs before install_panic_hook's restore, which leaves the screen.
@@ -613,7 +626,7 @@ async fn run_terminal(shell: &mut Shell, options: &TuiOptions) -> Result<(), Str
             }
         }
         let view = ui::view(&shell.model);
-        if let Err(error) = terminal.draw(|frame| draw(frame, &view, theme, options.no_color)) {
+        if let Err(error) = terminal.draw(|frame| draw(frame, &view)) {
             break Err(error.to_string());
         }
         if shell.model.quit {
@@ -723,6 +736,12 @@ enum Step {
     Clock(WallTime),
     /// Mouse events, at screen cells.
     Mouse(Vec<MouseEvent>),
+    /// The colour tier the screen is drawn in from now on.
+    Tier(Tier),
+    /// Light or dark from now on.
+    Theme(Theme),
+    /// The screen's style map, to the styles file.
+    Styles(String),
 }
 
 /// The script's key names: `tab`, `backtab`, `enter`, `esc`, `up`, `down`,
@@ -909,6 +928,12 @@ fn parse_state(name: &str) -> Result<DeliveryState, String> {
 ///                                n wheel notches at a cell (1)
 /// drag <col> <row> <col> <row>   the left button down at the first cell,
 ///                                moved to the second and up there
+/// tier <mono|16|256|truecolor>   the colour tier from now on (mono until
+///                                said, whatever the host terminal is)
+/// theme <dark|light>             the theme from now on (dark until said)
+/// styles <name>                  the screen's style map, one letter a cell
+///                                (see style_letter), to the frames file's
+///                                path with `.styles` added
 /// ```
 ///
 /// Cells count from 1 at the top left, as the frames' rows and columns do.
@@ -950,6 +975,21 @@ fn parse_script(text: &str) -> Result<Vec<Step>, String> {
             "frame" => Step::Frame(rest.trim().to_string()),
             "clock" => Step::Clock(parse_clock(rest.trim()).map_err(at)?),
             "click" | "wheel" | "drag" => Step::Mouse(parse_mouse(word, rest).map_err(at)?),
+            "tier" => match Tier::from_name(rest.trim()) {
+                Some(tier) => Step::Tier(tier),
+                None => {
+                    return Err(at(format!(
+                        "unknown tier {:?}, mono, 16, 256 or truecolor",
+                        rest.trim()
+                    )))
+                }
+            },
+            "theme" => match rest.trim() {
+                "dark" => Step::Theme(Theme::Dark),
+                "light" => Step::Theme(Theme::Light),
+                other => return Err(at(format!("unknown theme {other:?}, dark or light"))),
+            },
+            "styles" => Step::Styles(rest.trim().to_string()),
             "sleep" => {
                 let ms = rest.trim();
                 match ms.parse::<u64>() {
@@ -1009,6 +1049,72 @@ fn frame_text(backend: &TestBackend) -> String {
     out
 }
 
+/// A cell's letter in a style map: which token's colours it carries, the
+/// first in this order that matches.
+///
+/// ```text
+/// e   the error colour (an error toast's border)
+/// t   the toast
+/// ^   a selected block's tint, or reverse video (the list's selection, the
+///     badge, and the selection and the toast where the tier draws them
+///     reversed)
+/// .   our own block's tint
+/// ,   their block's tint
+/// =   the date pill
+/// !   the unread rule and its count
+///     anything else: the pane
+/// ```
+///
+/// Where two tokens share their colours the earlier letter wins: in 16
+/// colours on light the date pill is their block's pair, and draws as `,`.
+pub fn style_letter(cell: &ratatui::buffer::Cell, tokens: &Tokens) -> char {
+    use leviculum_ui_ratatui::style::ink;
+    let fg = |p: leviculum_ui::Paint| p.fg.map(ink);
+    let bg = |p: leviculum_ui::Paint| p.bg.map(ink);
+    let is = |c: ratatui::style::Color, want: Option<ratatui::style::Color>| want == Some(c);
+    if is(cell.fg, fg(tokens.error)) {
+        return 'e';
+    }
+    if is(cell.fg, fg(tokens.toast)) && is(cell.bg, bg(tokens.toast)) {
+        return 't';
+    }
+    if is(cell.bg, bg(tokens.own_selected)) || is(cell.bg, bg(tokens.their_selected)) {
+        return '^';
+    }
+    if is(cell.bg, bg(tokens.own)) {
+        return '.';
+    }
+    if is(cell.bg, bg(tokens.their)) {
+        return ',';
+    }
+    if is(cell.bg, bg(tokens.date_pill)) {
+        return '=';
+    }
+    if is(cell.fg, fg(tokens.unread)) {
+        return '!';
+    }
+    if cell.modifier.contains(Modifier::REVERSED) {
+        return '^';
+    }
+    ' '
+}
+
+/// The screen of a test backend as a style map, one row a line, trailing
+/// blanks cut.
+fn styles_text(backend: &TestBackend, tokens: &Tokens) -> String {
+    let buffer = backend.buffer();
+    let mut out = String::new();
+    for y in 0..buffer.area.height {
+        let row: String = (0..buffer.area.width)
+            .filter_map(|x| buffer.cell((x, y)))
+            .map(|cell| style_letter(cell, tokens))
+            .collect();
+        out.push_str(row.trim_end());
+        out.push('\n');
+    }
+    out
+}
+
 /// A key script against the real engine, frames to a file. No tick happens
 /// unless the script asks for one (`tick`, or `sleep`'s one per 250 ms of its
 /// own length, however long the wall clock took), so a frame is a pure
@@ -1024,6 +1130,12 @@ async fn run_script(
     log_keys(&shell.model);
     let mut out =
         std::fs::File::create(frames).map_err(|e| format!("{}: {e}", frames.display()))?;
+    let styles_path = {
+        let mut path = frames.as_os_str().to_owned();
+        path.push(".styles");
+        PathBuf::from(path)
+    };
+    let mut styles: Option<std::fs::File> = None;
     let (width, height) = options.size;
     let mut terminal = Terminal::new(TestBackend::new(width, height)).map_err(|e| e.to_string())?;
     shell.apply(UiEvent::Resize { width, height });
@@ -1042,7 +1154,7 @@ async fn run_script(
         };
         let view = ui::view(model);
         terminal
-            .draw(|frame| draw(frame, &view, Theme::Dark, true))
+            .draw(|frame| draw(frame, &view))
             .map_err(|e| e.to_string())?;
         count += 1;
         let text = frame_text(terminal.backend());
@@ -1059,6 +1171,25 @@ async fn run_script(
             }
             Step::Key(key) => shell.apply(UiEvent::Key(key)),
             Step::Keyboard(enhanced) => shell.model.enhanced = enhanced,
+            Step::Tier(tier) => shell.model.tier = tier,
+            Step::Theme(theme) => shell.model.theme = theme,
+            Step::Styles(label) => {
+                let view = ui::view(&shell.model);
+                terminal
+                    .draw(|frame| draw(frame, &view))
+                    .map_err(|e| e.to_string())?;
+                let map = styles_text(terminal.backend(), shell.model.tokens());
+                let file = match styles.as_mut() {
+                    Some(file) => file,
+                    None => styles.insert(
+                        std::fs::File::create(&styles_path)
+                            .map_err(|e| format!("{}: {e}", styles_path.display()))?,
+                    ),
+                };
+                write!(file, "--- styles: {label} ---\n{map}")
+                    .and_then(|()| file.flush())
+                    .map_err(|e| format!("{}: {e}", styles_path.display()))?;
+            }
             Step::Clock(now) => shell.apply(UiEvent::Clock(now)),
             Step::Type(text) => {
                 for c in text.chars() {
@@ -1157,7 +1288,10 @@ const COMPOSE_BORDER: border::Set = border::Set {
 /// Draw the screen: the list left the full height, the conversation and the
 /// compose box under it right, the footer at the bottom; the toast, the
 /// palette, the detail view and the help on top.
-pub fn draw(frame: &mut Frame, view: &View, theme: Theme, no_color: bool) {
+pub fn draw(frame: &mut Frame, view: &View) {
+    let (theme, tier) = (view.theme, view.tier);
+    let no_color = tier == Tier::Mono;
+    let tokens = leviculum_ui::tokens(tier, theme);
     let compose_lines: Vec<&str> = view.compose.split('\n').collect();
     let compose_rows = compose_lines.len().clamp(1, ui::COMPOSE_MAX_ROWS);
     // The model's rectangles, the ones the mouse hit-tests against.
@@ -1251,17 +1385,7 @@ pub fn draw(frame: &mut Frame, view: &View, theme: Theme, no_color: bool) {
             ..body
         };
         let rows = ui::toast_rows(&toast::body(note), toast::max_inner(over));
-        let tier = match no_color {
-            true => leviculum_ui::Tier::Mono,
-            false => leviculum_ui::Tier::Truecolor,
-        };
-        toast::render_rows(
-            frame,
-            over,
-            note.kind,
-            &rows,
-            leviculum_ui::tokens(tier, theme),
-        );
+        toast::render_rows(frame, over, note.kind, &rows, tokens);
     }
     if let Some(detail) = &view.detail {
         draw_detail(frame, detail);
@@ -1287,6 +1411,11 @@ pub fn draw(frame: &mut Frame, view: &View, theme: Theme, no_color: bool) {
             no_color,
             theme,
         );
+    }
+    // The footer and the help draw lnomad's chrome in RGB; the tokens name
+    // their own indexes and pass.
+    if let Some(depth) = tier.depth() {
+        downgrade_buffer(frame, depth, false);
     }
 }
 
@@ -1400,10 +1529,64 @@ mod tests {
         );
         let mut terminal = Terminal::new(TestBackend::new(80, 16)).expect("terminal");
         let view = ui::view(&model);
-        terminal
-            .draw(|frame| draw(frame, &view, Theme::Dark, true))
-            .expect("draw");
+        terminal.draw(|frame| draw(frame, &view)).expect("draw");
         frame_text(terminal.backend())
+    }
+
+    /// The style map of a model drawn 80 x 16 in a tier and theme.
+    fn styles(model: &Model, tier: Tier, theme: Theme) -> String {
+        let mut model = model.clone();
+        model.tier = tier;
+        model.theme = theme;
+        update(
+            &mut model,
+            UiEvent::Resize {
+                width: 80,
+                height: 16,
+            },
+        );
+        let mut terminal = Terminal::new(TestBackend::new(80, 16)).expect("terminal");
+        let view = ui::view(&model);
+        terminal.draw(|frame| draw(frame, &view)).expect("draw");
+        styles_text(terminal.backend(), model.tokens())
+    }
+
+    /// An error toast's border is the error colour and its inside the toast's;
+    /// where the toast is reverse video, all of it is.
+    #[test]
+    fn an_error_toast_maps_its_border_to_the_error_letter() {
+        let mut model = Model::new(&[[0xab; 16]]);
+        model.toasts.push(leviculum_ui::toast::Toast {
+            kind: leviculum_ui::toast::ToastKind::Error,
+            text: "fetch failed".into(),
+            shown_at: 0,
+        });
+        for theme in [Theme::Dark, Theme::Light] {
+            for tier in [Tier::Truecolor, Tier::Ansi256] {
+                let map = styles(&model, tier, theme);
+                assert!(map.contains("eeeeeeeee"), "{tier:?} {theme:?}:\n{map}");
+                assert!(map.contains("ettttt"), "{tier:?} {theme:?}:\n{map}");
+            }
+            let map = styles(&model, Tier::Ansi16, theme);
+            assert!(
+                !map.contains('e') && map.contains("^^^^^"),
+                "16 {theme:?}:\n{map}"
+            );
+        }
+        let map = styles(&model, Tier::Mono, Theme::Dark);
+        assert!(map.chars().all(|c| matches!(c, ' ' | '^' | '\n')), "{map}");
+    }
+
+    #[test]
+    fn a_script_sets_the_tier_and_the_theme_and_asks_for_a_style_map() {
+        let steps =
+            parse_script("tier 256\ntheme light\nstyles both sides\ntier mono\n").expect("parses");
+        assert!(matches!(steps[0], Step::Tier(Tier::Ansi256)));
+        assert!(matches!(steps[1], Step::Theme(Theme::Light)));
+        assert!(matches!(&steps[2], Step::Styles(l) if l == "both sides"));
+        assert!(matches!(steps[3], Step::Tier(Tier::Mono)));
+        assert!(parse_script("tier 8\n").is_err());
+        assert!(parse_script("theme solarized\n").is_err());
     }
 
     #[test]
@@ -1638,9 +1821,7 @@ mod tests {
         );
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
         let view = ui::view(&model);
-        terminal
-            .draw(|frame| draw(frame, &view, Theme::Dark, true))
-            .expect("draw");
+        terminal.draw(|frame| draw(frame, &view)).expect("draw");
         let screen = frame_text(terminal.backend());
         assert!(screen.contains("not sent: direct: no route to"), "{screen}");
         assert!(
@@ -1802,9 +1983,7 @@ mod tests {
     fn screen(model: &Model, width: u16, height: u16) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
         let view = ui::view(model);
-        terminal
-            .draw(|frame| draw(frame, &view, Theme::Dark, true))
-            .expect("draw");
+        terminal.draw(|frame| draw(frame, &view)).expect("draw");
         frame_text(terminal.backend())
     }
 

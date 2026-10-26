@@ -16,7 +16,12 @@
 //! one day, ours on it and on the next, the peer's two replies arriving while
 //! the reader is scrolled up (the `new` rule above them, the view not moved),
 //! back to the newest, a reply, and the detail view of our first message with
-//! its proof. Pinned in `tests/fixtures/tui_chat.frames`.
+//! its proof. Pinned in `tests/fixtures/tui_chat.frames`. While the reader
+//! is scrolled up, with both sides, a date, the `new` rule, a selected block
+//! and the palette's `theme` toast on screen, the 80 x 24 session writes the
+//! screen's style map in each tier and theme (section 5, "Colour", part 5),
+//! pinned in `tests/fixtures/tui_chat.styles`; the frames stay the
+//! monochrome ones.
 //!
 //! The mouse's sessions (section 7, slice 3) click a conversation, the
 //! compose box, `send` on its border, a message, its mark and the footer's
@@ -56,6 +61,7 @@ const EXPECTED_LATE: &str = include_str!("fixtures/tui_late.frames");
 const EXPECTED_KEYS: &str = include_str!("fixtures/tui_keys.frames");
 const EXPECTED_CHAT: &str = include_str!("fixtures/tui_chat.frames");
 const EXPECTED_MOUSE: &str = include_str!("fixtures/tui_mouse.frames");
+const EXPECTED_STYLES: &str = include_str!("fixtures/tui_chat.styles");
 
 const SCRIPT: &str = "\
 until ready 20
@@ -641,6 +647,28 @@ clock 2026-10-26 14:05
 until received 3 30
 tick 12
 frame new while reading
+key :
+type theme
+key enter
+tier truecolor
+theme dark
+styles truecolor dark
+theme light
+styles truecolor light
+tier 256
+theme dark
+styles 256 dark
+theme light
+styles 256 light
+tier 16
+theme dark
+styles 16 dark
+theme light
+styles 16 light
+tier mono
+styles mono
+theme dark
+tick 12
 key G
 frame newest
 clock 2026-10-26 14:06
@@ -687,8 +715,9 @@ fn without_ids(frames: &str) -> String {
 }
 
 /// One chat session at `size` against its own daemon, the peer answering on
-/// the script's frames.
-async fn chat_session(size: &str) -> String {
+/// the script's frames. The frames, and the style maps the script wrote
+/// beside them.
+async fn chat_session(size: &str) -> (String, String) {
     let daemon = daemon(&format!("tui-chat-{size}"), |b| b).await;
     let home = tempfile::tempdir().expect("tui home");
     let ours = fixed_identity(0x11);
@@ -799,14 +828,33 @@ async fn chat_session(size: &str) -> String {
         "{size}: stderr: {}\nframes:\n{got}",
         String::from_utf8_lossy(&output.stderr)
     );
-    got
+    let styles = std::fs::read_to_string(home.path().join("chat.frames.styles"))
+        .expect("read the style maps");
+    (got, styles)
+}
+
+/// One map of a styles file, by its label.
+fn styles_of<'a>(styles: &'a str, label: &str) -> &'a str {
+    let marker = format!("--- styles: {label} ---\n");
+    let start = styles
+        .find(&marker)
+        .unwrap_or_else(|| panic!("no style map {label:?} in:\n{styles}"))
+        + marker.len();
+    let end = styles[start..]
+        .find("--- styles:")
+        .map_or(styles.len(), |end| start + end);
+    &styles[start..end]
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_chat_layout_draws_the_mockups_at_both_sizes() {
     let mut all = String::new();
+    let mut maps = String::new();
     for size in ["80x24", "120x40"] {
-        let frames = chat_session(size).await;
+        let (frames, styles) = chat_session(size).await;
+        if size == "80x24" {
+            maps = styles;
+        }
         // Read while scrolled up: the rule above the replies, and the block
         // being read still selected and on screen. (The whole exchange fits
         // both panes, so it is drawn from the bottom and grows upward.)
@@ -839,6 +887,51 @@ async fn the_chat_layout_draws_the_mockups_at_both_sizes() {
         panic!(
             "the frames moved; this run's are in {}, the pinned ones in \
              lnmsg/tests/fixtures/tui_chat.frames\n{all}",
+            kept.display()
+        );
+    }
+
+    // The colour of the same screen (lnmsg-keys-and-layout.md, section 5,
+    // "Colour", part 5): six maps, one a tier and theme, and the monochrome
+    // one. They differ where the table differs.
+    let has = |label: &str, letter: char| styles_of(&maps, label).contains(letter);
+    for label in [
+        "truecolor dark",
+        "truecolor light",
+        "256 dark",
+        "256 light",
+        "16 dark",
+        "16 light",
+    ] {
+        for letter in ['.', '^', '!'] {
+            assert!(has(label, letter), "{label}: no {letter:?}");
+        }
+    }
+    for label in ["truecolor dark", "truecolor light", "256 dark", "256 light"] {
+        for letter in [',', '=', 't'] {
+            assert!(has(label, letter), "{label}: no {letter:?}");
+        }
+    }
+    // In 16 colours their blocks are untinted on dark, and the toast is
+    // reverse video in both.
+    for letter in [',', '=', 't'] {
+        assert!(!has("16 dark", letter), "16 dark: {letter:?}");
+    }
+    assert!(has("16 light", ','), "16 light: their blocks");
+    assert!(!has("16 light", 't'), "16 light: the toast");
+    assert!(
+        styles_of(&maps, "mono")
+            .chars()
+            .all(|c| matches!(c, ' ' | '^' | '\n')),
+        "monochrome holds only blanks and reverse video:\n{}",
+        styles_of(&maps, "mono")
+    );
+    if maps != EXPECTED_STYLES {
+        let kept = std::env::temp_dir().join("lnmsg-tui-chat.styles");
+        let _ = std::fs::write(&kept, &maps);
+        panic!(
+            "the style maps moved; this run's are in {}, the pinned ones in \
+             lnmsg/tests/fixtures/tui_chat.styles\n{maps}",
             kept.display()
         );
     }

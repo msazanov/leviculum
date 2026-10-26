@@ -49,6 +49,8 @@ pub enum Command {
     /// Turn mouse capture off, so the terminal's own selection works, and on
     /// again.
     Mouse,
+    /// Swap the light and the dark colours for the session.
+    Theme,
 }
 
 /// One palette row: the words the reader filters on, and what it runs.
@@ -61,7 +63,7 @@ pub struct PaletteEntry {
 }
 
 /// The table, in the order the palette lists it unfiltered.
-pub const COMMANDS: [PaletteEntry; 15] = [
+pub const COMMANDS: [PaletteEntry; 16] = [
     entry("send", Command::Send),
     entry("fetch", Command::Fetch),
     entry("quit", Command::Quit),
@@ -77,6 +79,7 @@ pub const COMMANDS: [PaletteEntry; 15] = [
     entry("redraw", Command::Redraw),
     entry("send on enter", Command::SendOnEnter),
     entry("mouse", Command::Mouse),
+    entry("theme", Command::Theme),
 ];
 
 /// The entry that runs `command`.

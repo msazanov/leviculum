@@ -1,22 +1,26 @@
 //! `lnmsg`'s own tiny config file.
 //!
 //! `${LNMSG_HOME}/config` (the same directory as the identity — see
-//! [`crate::identity::home_dir`]) holds `key = value` lines. Two keys:
-//! `propagation_node`, the persisted default for `--pn`, and
-//! `send_on_enter`, whether `Enter` in the compose pane sends (`true`, the
-//! default) or breaks the line (`false`, and the modifier chord sends):
+//! [`crate::identity::home_dir`]) holds `key = value` lines. Three keys:
+//! `propagation_node`, the persisted default for `--pn`; `send_on_enter`,
+//! whether `Enter` in the compose pane sends (`true`, the default) or breaks
+//! the line (`false`, and the modifier chord sends); and `theme`, `auto`
+//! (the default: ask the terminal), `dark` or `light`, which `--theme`
+//! overrides:
 //!
 //! ```text
 //! # the mailbox this machine uses when a direct delivery fails
 //! propagation_node = 76cff79ab2f43bebcb7398e08e56ee0f
 //! # Enter breaks the line; Alt-Enter (Ctrl-Enter where the terminal can) sends
 //! send_on_enter = false
+//! # a light terminal that does not answer the background query
+//! theme = light
 //! ```
 //!
 //! Deliberately not the Reticulum config file: that one belongs to the
 //! daemon and is shared with Python's `rnsd`, and a foreign key in it would
 //! be a compatibility hazard. And deliberately hand-parsed rather than a
-//! TOML dependency: two keys a decade from now do not justify a parser
+//! TOML dependency: three keys a decade from now do not justify a parser
 //! crate in a messenger's supply chain.
 //!
 //! A missing file means defaults. A present-but-wrong value is an error
@@ -25,6 +29,8 @@
 //! trace.
 
 use alloc::string::{String, ToString};
+
+use leviculum_ui::theme::ThemeFlag;
 
 use crate::address;
 
@@ -60,6 +66,8 @@ pub struct Config {
     pub propagation_node: Option<[u8; 16]>,
     /// `send_on_enter`, when the file sets it; unset is on.
     pub send_on_enter: Option<bool>,
+    /// `theme`, when the file sets it; unset is `auto`.
+    pub theme: Option<ThemeFlag>,
 }
 
 /// Read the config file's text.
@@ -84,6 +92,20 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
                         line: index + 1,
                         key: "send_on_enter",
                         detail: alloc::format!("{other:?} is not true or false"),
+                    });
+                }
+            });
+        }
+        if key.trim() == "theme" {
+            config.theme = Some(match value.trim().trim_matches('"') {
+                "auto" => ThemeFlag::Auto,
+                "dark" => ThemeFlag::Dark,
+                "light" => ThemeFlag::Light,
+                other => {
+                    return Err(ConfigError::BadValue {
+                        line: index + 1,
+                        key: "theme",
+                        detail: alloc::format!("{other:?} is not auto, dark or light"),
                     });
                 }
             });
@@ -216,6 +238,26 @@ mod tests {
             Err(ConfigError::BadValue {
                 line: 1,
                 key: "send_on_enter",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn theme_parses_and_a_typo_is_an_error() {
+        assert_eq!(parse_str("").expect("empty").theme, None);
+        for (text, flag) in [
+            ("theme = auto\n", ThemeFlag::Auto),
+            ("theme = dark\n", ThemeFlag::Dark),
+            ("theme = \"light\"\n", ThemeFlag::Light),
+        ] {
+            assert_eq!(parse_str(text).expect(text).theme, Some(flag), "{text}");
+        }
+        assert!(matches!(
+            parse_str("\ntheme = solarized\n"),
+            Err(ConfigError::BadValue {
+                line: 2,
+                key: "theme",
                 ..
             })
         ));

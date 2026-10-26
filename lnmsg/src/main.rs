@@ -131,9 +131,22 @@ struct TuiArgs {
     #[arg(long)]
     ascii: bool,
 
-    /// No colours.
+    /// No colours: the monochrome screen, reverse video for the selection
+    /// and the toast. `NO_COLOR` set and not empty does the same.
     #[arg(long)]
     no_color: bool,
+
+    /// The colour tier: `auto` climbs the ladder (`COLORTERM` truecolor or
+    /// 24bit, `TERM` with 256color, none on a dumb or unset `TERM`, else the
+    /// sixteen); `truecolor`, `256` and `16` force one. `--no-color` and
+    /// `NO_COLOR` still win.
+    #[arg(long, value_enum, default_value_t = ColorArg::Auto)]
+    color: ColorArg,
+
+    /// Light or dark colours: `auto` asks the terminal for its background
+    /// (dark when it does not answer). Over the config file's `theme` key.
+    #[arg(long, value_enum)]
+    theme: Option<ThemeArg>,
 
     /// Leave the mouse to the terminal, so its own selection and copy work;
     /// the palette's `mouse` captures it again.
@@ -238,6 +251,57 @@ enum ViaArg {
     Direct,
     /// Through a propagation node's mailbox, never a direct attempt.
     Propagated,
+}
+
+/// The `--color` choice.
+#[cfg(feature = "tui")]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum ColorArg {
+    /// Climb the ladder.
+    Auto,
+    /// 24-bit true colour.
+    Truecolor,
+    /// The xterm-256 palette.
+    #[value(name = "256")]
+    Ansi256,
+    /// The sixteen ANSI colours.
+    #[value(name = "16")]
+    Ansi16,
+}
+
+#[cfg(feature = "tui")]
+impl From<ColorArg> for leviculum_ui::ColorFlag {
+    fn from(arg: ColorArg) -> Self {
+        match arg {
+            ColorArg::Auto => Self::Auto,
+            ColorArg::Truecolor => Self::Truecolor,
+            ColorArg::Ansi256 => Self::Ansi256,
+            ColorArg::Ansi16 => Self::Ansi16,
+        }
+    }
+}
+
+/// The `--theme` choice.
+#[cfg(feature = "tui")]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum ThemeArg {
+    /// Ask the terminal.
+    Auto,
+    /// Dark colours.
+    Dark,
+    /// Light colours.
+    Light,
+}
+
+#[cfg(feature = "tui")]
+impl From<ThemeArg> for leviculum_ui::ThemeFlag {
+    fn from(arg: ThemeArg) -> Self {
+        match arg {
+            ThemeArg::Auto => Self::Auto,
+            ThemeArg::Dark => Self::Dark,
+            ThemeArg::Light => Self::Light,
+        }
+    }
 }
 
 fn usage(message: impl std::fmt::Display) -> ExitCode {
@@ -406,6 +470,8 @@ async fn run_tui(args: TuiArgs) -> ExitCode {
         timeout: args.timeout,
         ascii: args.ascii,
         no_color: args.no_color,
+        color: args.color.into(),
+        theme: args.theme.map(Into::into),
         no_mouse: args.no_mouse,
         script: args.script,
         frames: args.frames,

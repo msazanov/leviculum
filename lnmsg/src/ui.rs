@@ -66,7 +66,7 @@ use alloc::vec::Vec;
 
 use leviculum_lxmf::router::MessageState;
 use leviculum_ui::commands::{self, Command as PaletteCommand, PaletteEntry};
-use leviculum_ui::delivery::{DeliveryState, Tone};
+use leviculum_ui::delivery::DeliveryState;
 use leviculum_ui::footer::{FooterItem, FooterRole};
 use leviculum_ui::help::HelpGroup;
 use leviculum_ui::input::{
@@ -76,7 +76,8 @@ use leviculum_ui::input::{
 use leviculum_ui::keymap::{Ctx, ScrollCmd};
 use leviculum_ui::link::{classify_link, LinkKind};
 use leviculum_ui::toast::{Toast, ToastKind};
-use leviculum_ui::{RLine, RStyle, Rect, StyledChar};
+use leviculum_ui::tokens::{tokens, Tokens};
+use leviculum_ui::{RLine, RStyle, Rect, StyledChar, Theme, Tier};
 
 use crate::address::to_hex;
 use crate::keys::{self, Action};
@@ -417,6 +418,12 @@ pub struct UiModel<B> {
     pub selection: Option<Selection>,
     /// The button press a drag or a release belongs to.
     pub press: Option<Press>,
+    /// The colour tier the screen is drawn in: monochrome until the shell
+    /// says another, which is what every test frame shows.
+    pub tier: Tier,
+    /// Light or dark: which half of the token table the tier draws from. The
+    /// palette's `theme` turns it.
+    pub theme: Theme,
 }
 
 /// Text a drag selected in the open conversation, from where the button went
@@ -467,6 +474,8 @@ impl<B: InputBuffer + Default> UiModel<B> {
             footer_hover: None,
             selection: None,
             press: None,
+            tier: Tier::Mono,
+            theme: Theme::Dark,
         };
         for peer in peers {
             model.conversation(*peer);
@@ -487,6 +496,11 @@ impl<B> UiModel<B> {
             ctx = ctx.with(keys::ENTER_BREAKS);
         }
         ctx
+    }
+
+    /// The colour tokens of the tier and theme.
+    pub fn tokens(&self) -> &'static Tokens {
+        tokens(self.tier, self.theme)
     }
 
     /// The selected conversation's messages.
@@ -609,9 +623,10 @@ impl<B> UiModel<B> {
                     tick: self.tick,
                     ascii: self.ascii,
                     selected,
+                    tokens: self.tokens(),
                 },
             ),
-            None => layout::Laid::empty(self.sizes().messages.0),
+            None => layout::Laid::empty(self.sizes().messages.0, self.tokens()),
         }
     }
 
@@ -1376,6 +1391,15 @@ fn run<B: InputBuffer + Default>(model: &mut UiModel<B>, command: PaletteCommand
             model.toast(ToastKind::Info, text.to_string());
             vec![UiEffect::Mouse(model.mouse)]
         }
+        PaletteCommand::Theme => {
+            model.theme = model.theme.toggle();
+            let name = match model.theme {
+                Theme::Dark => "dark",
+                Theme::Light => "light",
+            };
+            model.toast(ToastKind::Info, format!("theme {name}"));
+            Vec::new()
+        }
     }
 }
 
@@ -1690,26 +1714,13 @@ pub struct View {
     pub help: bool,
     /// The detail view, when open.
     pub detail: Option<DetailView>,
+    /// The colour tier and the theme the screen is drawn in.
+    pub tier: Tier,
+    pub theme: Theme,
 }
 
 /// The empty conversations pane's line.
 pub const NO_CONVERSATIONS: &str = "No conversations: start with --to <address>.";
-
-/// The palette the delivery tones are drawn in.
-pub fn tone_rgb(tone: Tone, dim: bool) -> (u8, u8, u8) {
-    let (r, g, b) = match tone {
-        Tone::Gray => (150, 150, 150),
-        Tone::Yellow => (230, 200, 60),
-        Tone::Amber => (255, 170, 0),
-        Tone::Blue => (90, 150, 255),
-        Tone::Green => (80, 200, 120),
-        Tone::Red => (230, 80, 80),
-    };
-    match dim {
-        true => (r / 3 * 2, g / 3 * 2, b / 3 * 2),
-        false => (r, g, b),
-    }
-}
 
 /// An address cut to what a pane shows.
 pub fn short(address: &[u8; 16]) -> String {
@@ -1859,7 +1870,14 @@ pub fn view<B: InputBuffer>(model: &UiModel<B>) -> View {
         let words = mailbox.first().cloned().unwrap_or_default();
         let pad = width.saturating_sub(words.chars().count() + 1);
         messages.push(plain(&format!("{}{words}", " ".repeat(pad))));
-        messages.push(plain(&format!(" {} ", "─".repeat(width.saturating_sub(2)))));
+        let mut rule = plain(" ");
+        push(
+            &mut rule,
+            &"─".repeat(width.saturating_sub(2)),
+            layout::painted(model.tokens().muted),
+        );
+        push(&mut rule, " ", RStyle::default());
+        messages.push(rule);
     }
     let shown = laid.rows.len().saturating_sub(top).min(rows);
     messages.extend((shown..rows).map(|_| RLine::default()));
@@ -1923,6 +1941,8 @@ pub fn view<B: InputBuffer>(model: &UiModel<B>) -> View {
         palette,
         help: model.help,
         detail: model.detail.and_then(|(c, m)| detail_view(model, c, m)),
+        tier: model.tier,
+        theme: model.theme,
     }
 }
 
@@ -2719,6 +2739,24 @@ mod tests {
         assert!(model.help, "keys do not leak through the overlay");
         update(&mut model, key(KeyCode::Esc));
         assert!(!model.help);
+    }
+
+    #[test]
+    fn the_palette_s_theme_swaps_light_and_dark_and_says_which() {
+        let mut model = UiModel::<Field>::new(&[]);
+        assert_eq!(model.theme, Theme::Dark);
+        update(&mut model, UiEvent::Run(PaletteCommand::Theme));
+        assert_eq!(model.theme, Theme::Light);
+        assert_eq!(
+            model.current_toast().map(|t| t.text.as_str()),
+            Some("theme light")
+        );
+        update(&mut model, UiEvent::Run(PaletteCommand::Theme));
+        assert_eq!(model.theme, Theme::Dark);
+        assert_eq!(
+            model.current_toast().map(|t| t.text.as_str()),
+            Some("theme dark")
+        );
     }
 
     #[test]
