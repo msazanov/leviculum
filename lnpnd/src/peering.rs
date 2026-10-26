@@ -71,6 +71,45 @@ fn unix_secs() -> u64 {
         .unwrap_or(0)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Per-message visits of the rotation's unhandled count: one per
+    /// collected sequence, sort comparison and binary-search probe (the
+    /// oracle: one per message and peer). Pins the work, not the clock.
+    static ROTATION_VISITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[inline]
+fn count_rotation_visit() {
+    #[cfg(test)]
+    ROTATION_VISITS.with(|visits| visits.set(visits.get() + 1));
+}
+
+/// Each peer's count of `sequences` strictly above its cursor, omitting
+/// peers at zero. `PropagationStore::for_each` promises no order (the
+/// memory store walks by transient id), so this sorts once and
+/// binary-searches each cursor.
+fn unhandled_above_cursors(
+    mut sequences: Vec<u64>,
+    cursors: &[([u8; 16], u64)],
+) -> HashMap<[u8; 16], u64> {
+    sequences.sort_unstable_by(|a, b| {
+        count_rotation_visit();
+        a.cmp(b)
+    });
+    cursors
+        .iter()
+        .filter_map(|(hash, cursor)| {
+            let at_or_below = sequences.partition_point(|sequence| {
+                count_rotation_visit();
+                sequence <= cursor
+            });
+            let above = (sequences.len() - at_or_below) as u64;
+            (above > 0).then_some((*hash, above))
+        })
+        .collect()
+}
+
 /// One outbound sync round in flight.
 struct OutboundSync {
     peer: [u8; 16],
@@ -413,8 +452,36 @@ impl PeeringRuntime {
         }
     }
 
-    /// [`Self::unhandled_toward`] for every peer in one pass over the store.
+    /// [`Self::unhandled_toward`] for every peer: one pass over the store
+    /// collects the sequences, then [`unhandled_above_cursors`] counts each
+    /// peer's share in O(n log n + p log n) instead of a store walk per peer
+    /// (1011: 5 to 6 ms here at 20 000 messages and 20 peers, under the core
+    /// lock). Peers with nothing unhandled get no entry.
     fn unhandled_counts<S: PropagationStore>(
+        &self,
+        node: &PropagationNode<S>,
+    ) -> HashMap<[u8; 16], u64> {
+        let cursors: Vec<([u8; 16], u64)> = self
+            .table
+            .iter()
+            .map(|peer| (peer.destination_hash, peer.cursor))
+            .collect();
+        let mut sequences: Vec<u64> = Vec::new();
+        let walked = node.store().for_each(&mut |meta| {
+            count_rotation_visit();
+            sequences.push(meta.sequence);
+        });
+        if let Err(error) = walked {
+            tracing::warn!("lnpnd: store walk for rotation failed: {error}");
+        }
+        unhandled_above_cursors(sequences, &cursors)
+    }
+
+    /// The pre-1011 [`Self::unhandled_counts`], every peer's cursor tested
+    /// against every message: the equivalence oracle and the work pin's
+    /// positive control.
+    #[cfg(test)]
+    fn unhandled_counts_by_walk<S: PropagationStore>(
         &self,
         node: &PropagationNode<S>,
     ) -> HashMap<[u8; 16], u64> {
@@ -426,6 +493,7 @@ impl PeeringRuntime {
         let mut counts: HashMap<[u8; 16], u64> = HashMap::new();
         let walked = node.store().for_each(&mut |meta| {
             for (hash, cursor) in &cursors {
+                count_rotation_visit();
                 if meta.sequence > *cursor {
                     *counts.entry(*hash).or_default() += 1;
                 }
@@ -2039,5 +2107,115 @@ mod tests {
         assert_eq!(peers.len(), MAX_PEERS_DEFAULT - 2);
         assert!(peers.contains(&static_peer), "a static peer never rotates");
         assert!(!peers.contains(&[5; 16]) && !peers.contains(&[12; 16]));
+    }
+
+    /// A deterministic xorshift64 for the randomised rotation tests.
+    fn next_random(state: &mut u64) -> u64 {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        *state
+    }
+
+    /// A runtime whose table holds one peer per cursor, as restored from a
+    /// peer store.
+    fn runtime_with_cursors(cursors: &[u64]) -> PeeringRuntime {
+        let now = unix_secs();
+        let mut store = MemoryPeerStore::default();
+        for (n, cursor) in cursors.iter().enumerate() {
+            let mut persisted = record([n as u8 + 1; 16], 9, now);
+            persisted.cursor = *cursor;
+            store.save(&persisted).expect("memory store");
+        }
+        let (events_tx, _events) = std::sync::mpsc::channel();
+        let runtime = PeeringRuntime::new(
+            PeeringConfig::default(),
+            Box::new(store),
+            leviculum_std::generate_identity(),
+            events_tx,
+        );
+        assert_eq!(runtime.peer_count(), cursors.len());
+        runtime
+    }
+
+    /// A node over a memory store of `messages` appends with random
+    /// transient ids (so the store walks them out of sequence order), every
+    /// `purge_every`-th one purged again to leave gaps in the sequences.
+    fn node_with_messages(
+        messages: usize,
+        purge_every: usize,
+        state: &mut u64,
+    ) -> PropagationNode<MemoryPropagationStore> {
+        let mut store = MemoryPropagationStore::new(64 * (messages as u64 + 1));
+        let body = [7u8; leviculum_lxmf::propagation_store::MIN_BODY_LEN];
+        for n in 0..messages {
+            let mut transient_id = [0u8; 32];
+            for chunk in transient_id.chunks_mut(8) {
+                chunk.copy_from_slice(&next_random(state).to_le_bytes());
+            }
+            store
+                .append(&transient_id, 0, 0, &body)
+                .expect("the store has room");
+            if purge_every > 0 && n % purge_every == 0 {
+                store.purge(&transient_id).expect("memory purge");
+            }
+        }
+        PropagationNode::new(store, leviculum_lxmf::PropagationNodeConfig::default())
+    }
+
+    fn rotation_visits<T>(work: impl FnOnce() -> T) -> (T, u64) {
+        ROTATION_VISITS.with(|visits| visits.set(0));
+        let result = work();
+        (result, ROTATION_VISITS.with(|visits| visits.get()))
+    }
+
+    /// 1011: the sorted count gives the per-peer walk's answer for every
+    /// input. 1000 random stores (gapped sequences, walked out of order)
+    /// and tables (0 to 20 peers, cursors below, inside and above the
+    /// sequence range).
+    #[test]
+    fn sorted_unhandled_counts_match_the_per_peer_walk_on_random_stores() {
+        let mut state = 0x9e37_79b9_7f4a_7c15;
+        for case in 0..1000 {
+            let messages = (next_random(&mut state) % 301) as usize;
+            let purge_every = (next_random(&mut state) % 5) as usize;
+            let node = node_with_messages(messages, purge_every, &mut state);
+            let peers = (next_random(&mut state) % (MAX_PEERS_DEFAULT as u64 + 1)) as usize;
+            let cursors: Vec<u64> = (0..peers)
+                .map(|_| next_random(&mut state) % (messages as u64 + 3))
+                .collect();
+            let runtime = runtime_with_cursors(&cursors);
+            assert_eq!(
+                runtime.unhandled_counts(&node),
+                runtime.unhandled_counts_by_walk(&node),
+                "case {case}: {messages} messages, purge every {purge_every}, cursors {cursors:?}"
+            );
+        }
+    }
+
+    /// 1011: the rotation's unhandled count at the field's scale (20 000
+    /// stored messages, a full table of 20 peers) visits at most
+    /// n*ceil(log2 n) + p*ceil(log2 n) + n messages: the sort's
+    /// comparisons, the cursor searches and the one collecting pass. The
+    /// per-peer walk it replaced visits n*p, which the positive control
+    /// shows under the same counter.
+    #[test]
+    fn rotation_unhandled_count_visits_n_log_n_not_n_times_peers() {
+        let n: u64 = 20_000;
+        let p = MAX_PEERS_DEFAULT as u64;
+        let mut state = 0x2545_f491_4f6c_dd1d;
+        let node = node_with_messages(n as usize, 0, &mut state);
+        let cursors: Vec<u64> = (0..p).map(|k| k * n / p).collect();
+        let runtime = runtime_with_cursors(&cursors);
+
+        let (sorted, visits) = rotation_visits(|| runtime.unhandled_counts(&node));
+        let (walked, walk_visits) = rotation_visits(|| runtime.unhandled_counts_by_walk(&node));
+
+        let log2_n = u64::from(n.next_power_of_two().trailing_zeros());
+        let bound = n * log2_n + p * log2_n + n;
+        eprintln!("ROTATION_VISITS n={n} p={p} sorted={visits} bound={bound} walk={walk_visits}");
+        assert_eq!(sorted, walked);
+        assert_eq!(walk_visits, n * p, "positive control: the walk visits n*p");
+        assert!(visits <= bound, "{visits} visits exceed {bound}");
     }
 }
