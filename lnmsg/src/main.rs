@@ -1,5 +1,7 @@
-//! `lnmsg` binary: the non-interactive paths of the terminal LXMF messenger
-//! described in `docs/src/concepts/lnmsg.md`.
+//! `lnmsg` binary: the terminal LXMF messenger described in
+//! `docs/src/concepts/lnmsg.md`. With no subcommand it is the conversation
+//! view (`tui`, with the `tui` feature); the subcommands are the paths for
+//! scripts:
 //!
 //! ```sh
 //! echo "disk 91%" | lnmsg send <address> --title "backup"
@@ -57,8 +59,9 @@ const DEFAULT_FETCH_TIMEOUT_SECS: u64 = 60;
 #[command(
     name = "lnmsg",
     version = env!("LEVICULUM_VERSION"),
-    about = "Send and fetch LXMF messages over Reticulum",
-    long_about = "Send and fetch LXMF messages over a running Reticulum shared instance.\n\n\
+    about = "the Leviculum messenger; with no arguments it opens the conversation view",
+    long_about = "the Leviculum messenger; with no arguments it opens the conversation view\n\n\
+                  `send`, `fetch` and `address` are the commands for scripts. \
                   lnmsg attaches to a daemon that is already running (lnsd, or \
                   Python's rnsd) the same way lnomad does. It does not start a \
                   Reticulum stack of its own, so a daemon has to be running.\n\n\
@@ -69,9 +72,19 @@ const DEFAULT_FETCH_TIMEOUT_SECS: u64 = 60;
                   LEVICULUM_EVENT_LOG=<path> for the full run as structured \
                   events, including the message id."
 )]
+// No subcommand is the messenger (Lew, 2026-10-26), so the subcommand is an
+// `Option` and the messenger's options sit at the top level; `tui` stays as
+// a subcommand so every script and cell that names it keeps working.
+// `args_conflicts_with_subcommands` keeps the two forms apart: `lnmsg --to X
+// send` is an argument error, not a send with a stray flag.
+#[command(args_conflicts_with_subcommands = true)]
 struct Args {
+    #[cfg(feature = "tui")]
+    #[command(flatten)]
+    tui: TuiArgs,
+
     #[command(subcommand)]
-    command: SubCommand,
+    command: Option<SubCommand>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -82,7 +95,8 @@ enum SubCommand {
     Fetch(FetchArgs),
     /// Print this machine's own LXMF address.
     Address,
-    /// The terminal messenger: conversations, messages and a compose line.
+    /// The terminal messenger, as plain `lnmsg`: conversations, messages and
+    /// a compose line.
     #[cfg(feature = "tui")]
     Tui(TuiArgs),
 }
@@ -334,13 +348,24 @@ async fn main() -> ExitCode {
     // so an `info`-level line on stderr would be the only thing a cron job
     // ever saw from a send that worked. Whoever wants the detail asks for the
     // event log, which is where the message id lives.
-    #[cfg(feature = "tui")]
-    if let SubCommand::Tui(tui) = args.command {
-        return run_tui(tui).await;
-    }
+    let command = match args.command {
+        #[cfg(feature = "tui")]
+        Some(SubCommand::Tui(tui)) => return run_tui(tui).await,
+        #[cfg(feature = "tui")]
+        None => return run_tui(args.tui).await,
+        #[cfg(not(feature = "tui"))]
+        None => {
+            eprintln!(
+                "lnmsg: the messenger needs the `tui` feature, which this build lacks; \
+                 see lnmsg --help for the commands it has"
+            );
+            return ExitCode::from(EXIT_USAGE);
+        }
+        Some(command) => command,
+    };
     leviculum_std::event_log::install_global_subscriber("warn");
 
-    match args.command {
+    match command {
         SubCommand::Send(send) => run(send).await,
         SubCommand::Fetch(fetch) => run_fetch_command(fetch).await,
         SubCommand::Address => run_address(),
@@ -350,7 +375,7 @@ async fn main() -> ExitCode {
     }
 }
 
-/// `lnmsg tui`: parse what the shell needs, then hand over.
+/// `lnmsg` (or `lnmsg tui`): parse what the shell needs, then hand over.
 #[cfg(feature = "tui")]
 async fn run_tui(args: TuiArgs) -> ExitCode {
     let mut to = Vec::new();

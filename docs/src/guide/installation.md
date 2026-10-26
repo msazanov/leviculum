@@ -43,7 +43,7 @@ with `sudo apt install ./<file>.deb`.
 |---------|-------|----------|------------|
 | `leviculum` | `leviculum-nightly-{amd64,arm64}.deb` | `lnsd`, `lnstatus`, `lnstest`, `lncp`, `lnprobe`, `lnpath` | starts `lnsd` as a systemd service, sets up `/etc/reticulum` |
 | `lnpnd` | `lnpnd-nightly-{amd64,arm64}.deb` | `lnpnd`, the LXMF propagation node | enables its service but does not start it |
-| `lnmsg` | `lnmsg-nightly-{amd64,arm64}.deb` | `lnmsg`, the LXMF messenger, `lnmsg tui` included | nothing; no service |
+| `lnmsg` | `lnmsg-nightly-{amd64,arm64}.deb` | `lnmsg`, the LXMF messenger; plain `lnmsg` opens it, `send` and `fetch` are for scripts | nothing; no service |
 | `lnomad` | `lnomad-nightly-{amd64,arm64}.deb` | `lnomad`, the NomadNet browser | nothing; no service |
 | `lblogd` | `lblogd-nightly-{amd64,arm64}.deb` | `lblogd`, the blog server | starts its service on `127.0.0.1:8180` |
 | `lnflash` | `lnflash-nightly-amd64.deb` | `lnflash`, and the firmware bundle under `/usr/share/lnflash` | nothing; run it as root |

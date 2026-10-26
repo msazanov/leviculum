@@ -36,8 +36,8 @@ map as decided on 2026-10-25, and what is open.
 
 - **`lnmsg`, the terminal messenger.** It sends (direct, propagated, or
   `auto` with the fallback to a propagation node) and drains the
-  mailbox, and since 2026-10-25 (994) `lnmsg tui` is its terminal
-  frontend, slice one ([lnmsg: the user interface](lnmsg-ui.md), "Built
+  mailbox, and since 2026-10-25 (994) plain `lnmsg` opens its terminal
+  frontend (`lnmsg tui` under its old name), slice one ([lnmsg: the user interface](lnmsg-ui.md), "Built
   2026-10-25"): the first frontend on the shared widgets, over a screen
   model that lives in the `no_std` core. Its frontend already
   talks to the backend only through `Outbox` (`lnmsg/src/outbox.rs:194`),

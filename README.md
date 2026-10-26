@@ -74,7 +74,7 @@ Four programs ship as their own nightly packages, so none of them drags in the a
 # lnomad — Nomadnet terminal browser
 sudo apt install ./lnomad-nightly-amd64.deb
 
-# lnmsg — LXMF messenger: `lnmsg send` for scripts, `lnmsg tui` for people
+# lnmsg — LXMF messenger: plain `lnmsg` for people, `lnmsg send` for scripts
 sudo apt install ./lnmsg-nightly-amd64.deb
 
 # lnpnd — LXMF propagation node, drop-in for Python's lxmd

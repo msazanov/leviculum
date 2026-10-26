@@ -269,7 +269,7 @@ slice one") that Lew decides before the keymap slice is ordered:
 - `Ctrl-s` reaches the program: raw mode clears `IXON`, so the terminal
   does not take it as flow control.
 - The enhancement rows need `PushKeyboardEnhancementFlags` where
-  crossterm reports support; `lnmsg tui` does not push it yet
+  crossterm reports support; `lnmsg` does not push it yet
   (lnmsg-ui.md, slice one). The keymap slice does, and pops it on exit.
 
 ## 4. One table, four readers

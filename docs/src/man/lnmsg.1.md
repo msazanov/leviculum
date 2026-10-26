@@ -6,6 +6,7 @@ lnmsg -- terminal LXMF messenger for Reticulum
 
 ## SYNOPSIS
 
+**lnmsg** [**--to** *address*]... [*options*]
 **lnmsg send** [*options*] *address* [*body*]
 **lnmsg fetch** [*options*]
 **lnmsg address**
@@ -13,7 +14,7 @@ lnmsg -- terminal LXMF messenger for Reticulum
 
 ## DESCRIPTION
 
-**lnmsg** sends and receives LXMF messages over Reticulum. It attaches to a shared instance that is already running -- **lnsd**(1), or Python's **rnsd** -- and runs its own LXMF router; it never starts a Reticulum stack of its own. Its address is a pure function of the identity in its state directory, minted on first use and never replaced silently.
+**lnmsg** is the Leviculum messenger: with no subcommand it opens the conversation view, and **send**, **fetch** and **address** are the commands for scripts. It sends and receives LXMF messages over Reticulum, attaches to a shared instance that is already running -- **lnsd**(1), or Python's **rnsd** -- and runs its own LXMF router; it never starts a Reticulum stack of its own. Its address is a pure function of the identity in its state directory, minted on first use and never replaced silently.
 
 **send** queues one message. The body is the argument, or standard input when the argument is missing or `-`, one trailing newline removed. A send that worked prints nothing and exits 0, which means the message was queued and handed to the network, not that it was delivered. **--via auto**, the default, tries a direct delivery link first and falls back to a propagation node when none comes up; exit 3 says a propagation node holds the message. A message that went onto the link and got no delivery proof in time is not sent again through a propagation node, which would deliver it twice; the run says so and exits 1.
 
@@ -21,7 +22,7 @@ lnmsg -- terminal LXMF messenger for Reticulum
 
 **address** prints this machine's LXMF address.
 
-**tui** is the interactive messenger, built when **lnmsg** is compiled with its `tui` feature: conversations on the left, the open conversation's messages on the right, a compose line below. A message sent from it travels the way **send --via auto** sends it, and each sent message carries a delivery mark (see DELIVERY MARKS). lnmsg keeps no message history yet, so the screen holds the messages of this session only; **--to** lists a correspondent from the start.
+**lnmsg** without a subcommand, or **lnmsg tui** under its old name, is the interactive messenger: conversations on the left, the open conversation's messages on the right, a compose line below. A message sent from it travels the way **send --via auto** sends it, and each sent message carries a delivery mark (see DELIVERY MARKS). lnmsg keeps no message history yet, so the screen holds the messages of this session only; **--to** lists a correspondent from the start. The packages ship it; a build from source without the `tui` cargo feature has only the script commands, and a plain **lnmsg** there says so and exits 2.
 
 ## OPTIONS
 

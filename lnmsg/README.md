@@ -1,10 +1,11 @@
 # lnmsg
 
-A terminal LXMF messenger for Reticulum. `lnmsg send` queues one message for
-an LXMF address and is what a script calls; `lnmsg fetch` drains the
-propagation node's mailbox; `lnmsg address` prints this machine's own
-address; `lnmsg tui` is the interactive messenger, with conversations,
-messages and a compose line.
+A terminal LXMF messenger for Reticulum. Plain `lnmsg` opens the
+interactive messenger, with conversations, messages and a compose line
+(`lnmsg tui` is the same under its old name). The subcommands are for
+scripts: `lnmsg send` queues one message for an LXMF address; `lnmsg
+fetch` drains the propagation node's mailbox; `lnmsg address` prints this
+machine's own address.
 
 lnmsg attaches to a Reticulum shared instance that is already running,
 `lnsd` from the `leviculum` package or Python's `rnsd`, the way `lnomad`

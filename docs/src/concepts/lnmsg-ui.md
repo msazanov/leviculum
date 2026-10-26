@@ -122,7 +122,8 @@ palette. Everything free is free.
 
 ### Built 2026-10-25, slice one
 
-`lnmsg tui` (the `tui` cargo feature, off by default; 994, #232) is the
+`lnmsg tui` (the `tui` cargo feature, which the packages ship; 994, #232;
+since 1023 plain `lnmsg` with no subcommand, `tui` staying as its alias) is the
 first frontend on the shared widgets. The screen is a model in the
 messenger core, `lnmsg/src/ui.rs`, `no_std` like the rest of it (`just
 lnmsg-core-no-std` builds it): `UiModel` with the conversations, the
@@ -144,7 +145,7 @@ In:
   use; `Enter` sends, and on an empty line does nothing; `Alt-Enter`
   breaks the line (since 1002; crossterm reads the ESC CR a terminal sends
   for it as `Enter` with `ALT`, and `Shift-Enter` arrives only under the
-  keyboard enhancement protocol, which `lnmsg tui` does not switch on yet,
+  keyboard enhancement protocol, which `lnmsg` does not switch on yet,
   so it is bound but legacy terminals cannot send it); the pane grows to
   five rows and then scrolls; `Esc` goes back
   to the messages; `Ctrl-C` clears the line into the kill buffer
@@ -158,7 +159,7 @@ In:
   unread count on a conversation that is not open. A body with line
   breaks is drawn as its lines, wrapped to the pane at a space, the mark
   on the first row only and the rest set in by four.
-- `lnmsg tui --script <file>` runs a key script against the real engine and
+- `lnmsg --script <file>` runs a key script against the real engine and
   writes the frames it asks for to a file; `lnmsg/tests/tui_snapshot.rs`
   pins a session (open, type two lines, send, `○` to `✓`, a two-line
   reply) that way; a script's `newline` step is `Alt-Enter`. A script
@@ -295,7 +296,7 @@ spinner rows draw the shared loading spinner of `leviculum-ui/src/spinner.rs`,
 the one `lnomad` shows, so its frames are the ones the table lists. The
 tones are resolved against the palette by the frontend.
 
-`lnmsg tui` draws it since 2026-10-25 (994), and maps the router's states
+`lnmsg` draws it since 2026-10-25 (994), and maps the router's states
 onto the rows in `lnmsg::ui::delivery_of`: `Generating` and `Outbound` are
 queued `○`, `Sending` is in flight, `Sent` is `◇`, `AwaitingCollection` is
 `⌂`, `Delivered` is `✓`, `Rejected` is the red `✗`, `Failed` and

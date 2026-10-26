@@ -72,7 +72,7 @@ esac
 CRATES=(leviculum-cli lnomad lblogd lnpnd lnmsg)
 BINS=(lnsd lnstest lncp lnstatus lnprobe lnpath lnomad lblogd lnpnd lnmsg)
 # lnmsg's terminal frontend is off by default (lnmsg/Cargo.toml); the package
-# is what a person installs, so it ships `lnmsg tui`.
+# is what a person installs, so plain `lnmsg` opens the messenger.
 FEATURES=(--features lnmsg/tui)
 
 # The .deb is not always named after its crate: leviculum-cli ships as

@@ -75,6 +75,68 @@ fn help_exits_zero_and_documents_the_send_subcommand() {
     );
 }
 
+/// Plain `lnmsg` is the messenger (Lew, 2026-10-26), and its help says so
+/// first, then lists the commands for scripts.
+#[test]
+fn bare_help_names_the_messenger_first_then_the_subcommands() {
+    let run = run(&["--help"], b"");
+    assert_eq!(run.code, Some(0), "stderr: {}", run.stderr);
+    assert_eq!(
+        run.stdout.lines().next(),
+        Some("the Leviculum messenger; with no arguments it opens the conversation view"),
+        "{}",
+        run.stdout
+    );
+    for command in ["send", "fetch", "address"] {
+        assert!(
+            run.stdout.contains(&format!("  {command} ")),
+            "{command} missing: {}",
+            run.stdout
+        );
+    }
+}
+
+/// Without the `tui` feature a plain `lnmsg` has no messenger to open: one
+/// line on stderr and the usage exit code, never a silent success.
+#[cfg(not(feature = "tui"))]
+#[test]
+fn bare_lnmsg_without_the_tui_feature_is_a_usage_error() {
+    let run = run(&[], b"");
+    assert_eq!(run.code, Some(2), "stderr: {}", run.stderr);
+    assert!(run.stdout.is_empty(), "stdout: {}", run.stdout);
+    assert_eq!(run.stderr.lines().count(), 1, "stderr: {}", run.stderr);
+    assert!(run.stderr.contains("`tui` feature"), "{}", run.stderr);
+}
+
+/// With it, the bare form takes the messenger's options: a bad `--size`
+/// is rejected by the messenger's own check, exactly as under `lnmsg tui`.
+#[cfg(feature = "tui")]
+#[test]
+fn bare_lnmsg_takes_the_messenger_options() {
+    for args in [
+        &["--script", "/nonexistent", "--size", "3x3"][..],
+        &["tui", "--script", "/nonexistent", "--size", "3x3"][..],
+    ] {
+        let run = run(args, b"");
+        assert_eq!(run.code, Some(2), "{args:?} stderr: {}", run.stderr);
+        assert!(
+            run.stderr.contains("--size 3x3: want WxH"),
+            "{args:?}: {}",
+            run.stderr
+        );
+    }
+}
+
+/// The messenger's options and a subcommand do not mix: `--to` before
+/// `send` is an argument error, not a send with a stray flag.
+#[cfg(feature = "tui")]
+#[test]
+fn messenger_options_before_a_subcommand_are_a_usage_error() {
+    let run = run(&["--to", NOWHERE, "send", NOWHERE, "hi"], b"");
+    assert_eq!(run.code, Some(2), "stderr: {}", run.stderr);
+    assert!(run.stderr.contains("cannot be used with"), "{}", run.stderr);
+}
+
 #[test]
 fn a_malformed_address_is_a_usage_error() {
     let run = run(&["send", "not-an-address"], b"body\n");

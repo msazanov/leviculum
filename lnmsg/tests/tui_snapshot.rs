@@ -1,5 +1,5 @@
-//! `lnmsg tui` through the real binary, scripted, against a real daemon:
-//! open the conversation, type two lines (`Alt-Enter` between them), send,
+//! The messenger (`lnmsg`, and its `lnmsg tui` alias) through the real
+//! binary, scripted, against a real daemon: open the conversation, type two lines (`Alt-Enter` between them), send,
 //! watch the delivery mark move from `○` to `✓`, read the two-line reply. The frames the script asks for are pinned in
 //! `tests/fixtures/tui_session.frames`.
 //!
@@ -213,8 +213,9 @@ async fn a_late_recipient_shows_the_direct_leg_and_the_log_keeps_its_steps() {
     let script = home.path().join("late.script");
     let frames = home.path().join("late.frames");
     std::fs::write(&script, LATE_SCRIPT).expect("write the script");
+    // The bare form, plain `lnmsg` with the messenger's options; the session
+    // above runs the `tui` alias, so both spellings reach a daemon.
     let args: Vec<String> = vec![
-        "tui".into(),
         "--instance".into(),
         daemon.instance.clone(),
         "--config".into(),
