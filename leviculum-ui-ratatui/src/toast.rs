@@ -35,7 +35,7 @@ fn glyph(kind: ToastKind) -> char {
 
 /// Draw the transient toast: a small bordered box floated at the bottom-right of
 /// `content` (never over the status bar), in the `toast` token
-/// ([`leviculum_ui::tokens`]), an error's border in the `error` token and its
+/// ([`leviculum_ui::tokens`](mod@leviculum_ui::tokens)), an error's border in the `error` token and its
 /// text behind a `⚠`, a note's behind a `✓`. Where the toast token is reverse
 /// video (16 colours and monochrome) the whole box is, an error's border too.
 /// One row, the text cut to the room there is; [`render_rows`] draws a toast

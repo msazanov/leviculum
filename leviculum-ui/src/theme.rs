@@ -137,7 +137,7 @@ impl Theme {
     }
 
     /// The chrome-bar background (top-bar and status bar fill): the
-    /// truecolor value of the `chrome` token ([`crate::tokens`]).
+    /// truecolor value of the `chrome` token ([`crate::tokens`](mod@crate::tokens)).
     pub fn chrome_bg(self) -> (u8, u8, u8) {
         truecolor(tokens(Tier::Truecolor, self).chrome.bg)
     }
@@ -195,7 +195,7 @@ impl Theme {
 }
 
 /// An RGB value of the truecolor table, which holds nothing else (a test of
-/// [`crate::tokens`] says so for the chrome).
+/// [`crate::tokens`](mod@crate::tokens) says so for the chrome).
 fn truecolor(ink: Option<Ink>) -> (u8, u8, u8) {
     match ink {
         Some(Ink::Rgb(r, g, b)) => (r, g, b),

@@ -8,7 +8,7 @@
 //! mouse reads it too ([`super::hit`]): which cells of a row are a body's
 //! text, where a delivery mark is, which cells are a link.
 //!
-//! In the colour tokens of section 5, "Colour" ([`leviculum_ui::tokens`]),
+//! In the colour tokens of section 5, "Colour" ([`leviculum_ui::tokens`](mod@leviculum_ui::tokens)),
 //! which [`Draw`] carries for the model's tier and theme: a block is a
 //! rectangle of its tint, its text plus a margin cell either side; its time
 //! takes the block's time colour, its mark the tone of its state; the date

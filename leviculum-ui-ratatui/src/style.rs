@@ -49,7 +49,7 @@ fn ansi(n: u8) -> Color {
     }
 }
 
-/// The style a colour token ([`leviculum_ui::tokens`]) draws in.
+/// The style a colour token ([`leviculum_ui::tokens`](mod@leviculum_ui::tokens)) draws in.
 pub fn paint(paint: Paint) -> Style {
     let mut style = Style::default();
     if let Some(fg) = paint.fg {
