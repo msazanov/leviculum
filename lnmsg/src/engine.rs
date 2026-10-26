@@ -187,6 +187,10 @@ struct Resolve {
     /// frontend's own budget (`lnmsg send --timeout`) ends the run, the rule
     /// a fetch's path phase follows too (leviculum#719).
     next_path_request_ms: Option<u64>,
+    /// When the first path request went out, and how many have, for the
+    /// `PATH found` log line.
+    first_path_request_ms: Option<u64>,
+    path_requests: u32,
     /// Set once the answer has gone out, so a repeated ask is not answered
     /// twice.
     answered: bool,
@@ -503,6 +507,8 @@ impl Engine {
                 Command::Resolve { destination } => self.resolves.push(Resolve {
                     destination,
                     next_path_request_ms: None,
+                    first_path_request_ms: None,
+                    path_requests: 0,
                     answered: false,
                 }),
                 Command::Send(request) => self.send(ready, core, *request, out),
@@ -927,7 +933,16 @@ impl Engine {
                 continue;
             }
             if core.storage().get_identity(&destination).is_some() && core.has_path(&hash) {
-                self.resolves[index].answered = true;
+                let resolve = &mut self.resolves[index];
+                resolve.answered = true;
+                crate::events::path_found(
+                    &destination,
+                    core.hops_to(&hash),
+                    resolve.path_requests,
+                    resolve
+                        .first_path_request_ms
+                        .map_or(0, |first| now_ms.saturating_sub(first)),
+                );
                 self.emit(OutboxEvent::Resolved { destination });
                 continue;
             }
@@ -935,8 +950,10 @@ impl Engine {
                 .next_path_request_ms
                 .is_none_or(|due| now_ms >= due)
             {
-                self.resolves[index].next_path_request_ms =
-                    Some(now_ms.saturating_add(PATH_REQUEST_WAIT_MS));
+                let resolve = &mut self.resolves[index];
+                resolve.next_path_request_ms = Some(now_ms.saturating_add(PATH_REQUEST_WAIT_MS));
+                resolve.first_path_request_ms.get_or_insert(now_ms);
+                resolve.path_requests = resolve.path_requests.saturating_add(1);
                 // Through `absorb` rather than merged straight into `out`:
                 // `request_path` ends in `process_events_and_actions`, so its
                 // output can carry events, and every other core call made from

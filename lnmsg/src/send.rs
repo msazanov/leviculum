@@ -136,6 +136,15 @@ pub enum SendError {
         message_id: [u8; 32],
         last: Option<MessageState>,
     },
+    /// The message went onto a link to the peer (`Sending`), and no delivery
+    /// proof came back inside the budget, or the router gave up retrying it
+    /// there. The peer answered the link, so it is reachable: this is "sent,
+    /// not proven", and never a reason to hand a second copy to a mailbox
+    /// (leviculum 1002).
+    Unproven {
+        message_id: [u8; 32],
+        last: Option<MessageState>,
+    },
     /// No propagation node could be selected, so a propagated send had
     /// nowhere to go. The detail names which of the three sources (flag,
     /// config, announces) came up empty, or what the selection said.
@@ -195,6 +204,17 @@ impl core::fmt::Display for SendError {
                 "no propagation node: {detail}.\n  \
                  Name one with --pn <hash>, or set propagation_node in lnmsg's config."
             ),
+            Self::Unproven { message_id, last } => write!(
+                f,
+                "{} went onto a link to the peer and no delivery proof came back ({}); \
+                 the peer may have it.\n  \
+                 It is not handed to a mailbox as well, which would deliver it twice.",
+                crate::address::to_hex(message_id),
+                match last {
+                    Some(state) => format!("last state {state:?}"),
+                    None => "no state reported".to_string(),
+                }
+            ),
         }
     }
 }
@@ -215,6 +235,53 @@ fn given_up(state: MessageState) -> bool {
         state,
         MessageState::Failed | MessageState::Rejected | MessageState::Cancelled
     )
+}
+
+/// The error for a message the router gave up on. A plain `Failed` after the
+/// message was on a link is the router exhausting its retries against a peer
+/// that answered the link and never proved the packet: still "sent, not
+/// proven", for the reason [`SendError::Unproven`] gives. A refusal stays a
+/// refusal.
+fn gave_up(message_id: [u8; 32], state: MessageState, on_link: bool) -> SendError {
+    if on_link && state == MessageState::Failed {
+        SendError::Unproven {
+            message_id,
+            last: Some(state),
+        }
+    } else {
+        SendError::Rejected { message_id, state }
+    }
+}
+
+/// Which leg of a send is running, for the log and for a frontend that shows
+/// it ([`Effects::leg`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Leg {
+    /// Straight to the peer.
+    Direct,
+    /// Through a propagation node.
+    Propagated,
+}
+
+impl Leg {
+    /// The `leg=` word of the `SEND` log line.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::Propagated => "propagated",
+        }
+    }
+}
+
+/// The `state=` word of the `SEND` log line for a router state.
+fn leg_word(state: MessageState) -> &'static str {
+    match state {
+        MessageState::Generating | MessageState::Outbound => "queued",
+        MessageState::Sending => "sending",
+        MessageState::Sent | MessageState::AwaitingCollection => "sent",
+        MessageState::Delivered => "proof",
+        MessageState::Rejected | MessageState::Cancelled | MessageState::Failed => "failed",
+    }
 }
 
 /// What the run is waiting for.
@@ -243,11 +310,17 @@ pub async fn run_send<O: Outbox>(
     let destination = request.destination;
     let via = request.via;
     let body_len = request.body.len();
+    let leg =
+        |word: &str| events::send_leg(Leg::Direct, &destination, word, clock::since(clock, start));
 
     let mut phase = Phase::Ready;
     let mut address = None;
     let mut message_id = None;
     let mut last_state = None;
+    // Whether the message reached `Sending`: handed to a link (or a
+    // transfer on one) that the peer answered. From then on a missing
+    // proof is not a missing peer.
+    let mut on_link = false;
     let mut request = Some(request);
 
     loop {
@@ -259,6 +332,7 @@ pub async fn run_send<O: Outbox>(
                     if phase == Phase::Ready {
                         outbox.submit(Command::Resolve { destination })?;
                         phase = Phase::Resolved;
+                        leg("path_wait");
                     }
                 }
                 OutboxEvent::Broken { detail } => return Err(SendError::Broken(detail)),
@@ -289,7 +363,9 @@ pub async fn run_send<O: Outbox>(
                     state,
                 } if Some(id) == message_id => {
                     events::state(&id, &format!("{state:?}"));
+                    leg(leg_word(state));
                     last_state = Some(state);
+                    on_link |= state == MessageState::Sending;
                     if handed_on(state) {
                         return Ok(Queued {
                             message_id: id,
@@ -298,10 +374,7 @@ pub async fn run_send<O: Outbox>(
                         });
                     }
                     if given_up(state) {
-                        return Err(SendError::Rejected {
-                            message_id: id,
-                            state,
-                        });
+                        return Err(gave_up(id, state, on_link));
                     }
                 }
                 OutboxEvent::State { .. } => {}
@@ -314,10 +387,7 @@ pub async fn run_send<O: Outbox>(
                     // state's event and the removal arrived together.
                     let state = last.or(last_state).unwrap_or(MessageState::Failed);
                     return if given_up(state) {
-                        Err(SendError::Rejected {
-                            message_id: id,
-                            state,
-                        })
+                        Err(gave_up(id, state, on_link))
                     } else {
                         Ok(Queued {
                             message_id: id,
@@ -339,6 +409,10 @@ pub async fn run_send<O: Outbox>(
         }
 
         if clock::since(clock, start) >= options.budget {
+            if phase == Phase::Resolved {
+                events::path_not_found(&destination, clock::since(clock, start));
+            }
+            leg(if on_link { "no_proof" } else { "failed" });
             return Err(match (phase, message_id) {
                 (Phase::Ready, _) => SendError::NeverReady,
                 (Phase::Resolved, _) => SendError::Unreachable {
@@ -347,6 +421,10 @@ pub async fn run_send<O: Outbox>(
                 },
                 (Phase::Queued, _) => SendError::NoAnswer {
                     message_id: [0u8; 32],
+                },
+                (Phase::HandedOn, Some(id)) if on_link => SendError::Unproven {
+                    message_id: id,
+                    last: last_state,
                 },
                 (Phase::HandedOn, Some(id)) => SendError::Stranded {
                     message_id: id,
@@ -379,6 +457,16 @@ pub fn fallback_reason(error: &SendError) -> Option<&'static str> {
         SendError::Stranded { .. } => Some("stranded"),
         // The router gave up on the direct attempt.
         SendError::Rejected { .. } => Some("rejected"),
+        // The link came up and the message went onto it: the peer is there,
+        // and the reference never re-sends such a message through a
+        // propagation node on its own. It waits for the proof while the
+        // message is `SENDING` (`reference/LXMF/LXMF/LXMRouter.py:2796`,
+        // "Waiting for proof") and retries on a new link when the receipt
+        // times out (`reference/LXMF/LXMF/LXMessage.py:616-621`). A mailbox
+        // copy would reach the peer a second time; against a client that
+        // receives and never proves it turned a delivered message red and
+        // uploaded it to a foreign node (Lew's test, 2026-10-25).
+        SendError::Unproven { .. } => None,
         // Engine-level failures. `NoAnswer` is deliberately here too: an
         // engine that queued a message and then said nothing is wedged, and
         // handing a second message to the same wedged engine cannot help.
@@ -429,6 +517,14 @@ pub async fn run_send_propagated<O: Outbox>(
     let destination = request.destination;
     let via = request.via;
     let body_len = request.body.len();
+    let leg = |word: &str| {
+        events::send_leg(
+            Leg::Propagated,
+            &destination,
+            word,
+            clock::since(clock, start),
+        )
+    };
 
     if let Some(message_id) = cancel {
         outbox.submit(Command::Cancel { message_id })?;
@@ -437,6 +533,7 @@ pub async fn run_send_propagated<O: Outbox>(
         preferred: preferred_pn,
         mailbox: options.mailbox.input.clone(),
     })?;
+    leg("path_wait");
 
     let mut phase = PropagatedPhase::Selecting;
     let mut address = None;
@@ -484,6 +581,7 @@ pub async fn run_send_propagated<O: Outbox>(
                     state,
                 } if Some(id) == message_id => {
                     events::state(&id, &format!("{state:?}"));
+                    leg(leg_word(state));
                     last_state = Some(state);
                     if handed_on(state) {
                         return Ok(Queued {
@@ -525,6 +623,7 @@ pub async fn run_send_propagated<O: Outbox>(
         }
 
         if clock::since(clock, start) >= options.budget {
+            leg("failed");
             return Err(match (phase, message_id) {
                 (PropagatedPhase::Selecting, _) => SendError::NoPropagationNode(
                     "selecting a node did not finish inside the timeout".to_string(),
@@ -601,6 +700,7 @@ where
         via,
         ..request.clone()
     };
+    effects.leg(Leg::Direct);
     let direct_error = match run_send(outbox, leg(Via::Link), options, clock).await {
         Ok(queued) => {
             events::via("direct", "link-delivery");
@@ -621,6 +721,7 @@ where
         _ => None,
     };
     options.mailbox = mailbox().await;
+    effects.leg(Leg::Propagated);
     match run_send_propagated(
         outbox,
         leg(Via::Propagated),
@@ -938,9 +1039,124 @@ mod tests {
             SendError::Refused("QueueFull".into()),
             SendError::NoAnswer { message_id: ID },
             SendError::NoPropagationNode("none".into()),
+            SendError::Unproven {
+                message_id: ID,
+                last: Some(MessageState::Sending),
+            },
         ] {
             assert_eq!(fallback_reason(&stay), None, "{stay:?} must not fall back");
         }
+    }
+
+    /// What Lew's test against a client that receives and never proves came
+    /// to (leviculum 1002): the link came up, the message went onto it, and
+    /// no proof followed. That is "sent, not proven", and `--via auto` must
+    /// neither call it a failure nor upload a second copy to a mailbox. The
+    /// fallback would have run here before: the budget ended on `Stranded`,
+    /// whose reason word is `stranded`.
+    #[tokio::test(start_paused = true)]
+    async fn a_message_on_the_link_without_a_proof_is_unproven_and_never_falls_back() {
+        let mut outbox = FakeOutbox::new(vec![
+            OutboxEvent::Ready { address: [1; 16] },
+            OutboxEvent::Resolved { destination: DST },
+            OutboxEvent::Queued { message_id: ID },
+            OutboxEvent::State {
+                message_id: ID,
+                state: MessageState::Sending,
+            },
+        ]);
+        let mut effects = Recorded::default();
+        let mut asked_for_a_mailbox = false;
+
+        let outcome = run_send_auto(
+            &mut outbox,
+            request(),
+            Some(PN),
+            "flag",
+            &mut options(),
+            || {
+                asked_for_a_mailbox = true;
+                async { MailboxRun::default() }
+            },
+            &mut effects,
+            &Tokio::new(),
+        )
+        .await;
+
+        assert!(
+            matches!(
+                outcome,
+                Err(AutoError::Direct(SendError::Unproven {
+                    message_id: ID,
+                    last: Some(MessageState::Sending),
+                }))
+            ),
+            "{outcome:?}"
+        );
+        assert!(!asked_for_a_mailbox, "the mailbox leg must not start");
+        let commands = outbox.commands.borrow();
+        assert!(
+            !commands
+                .iter()
+                .any(|c| matches!(c, Command::SelectPn { .. } | Command::Cancel { .. })),
+            "no node selected, the direct copy not withdrawn: {commands:?}"
+        );
+        assert!(effects.notices.is_empty(), "{:?}", effects.notices);
+    }
+
+    /// The router retrying on new links after each receipt timeout, and then
+    /// giving up, inside the budget: the message was still on a link the peer
+    /// answered, so this is unproven too, not a reason to fall back. A
+    /// refusal by the peer stays a refusal.
+    #[tokio::test(start_paused = true)]
+    async fn giving_up_after_the_link_carried_it_is_unproven_and_a_refusal_is_not() {
+        let after_link = |end: MessageState| {
+            FakeOutbox::new(vec![
+                OutboxEvent::Ready { address: [1; 16] },
+                OutboxEvent::Resolved { destination: DST },
+                OutboxEvent::Queued { message_id: ID },
+                OutboxEvent::State {
+                    message_id: ID,
+                    state: MessageState::Sending,
+                },
+                OutboxEvent::State {
+                    message_id: ID,
+                    state: MessageState::Outbound,
+                },
+                OutboxEvent::State {
+                    message_id: ID,
+                    state: end,
+                },
+            ])
+        };
+        let failed = run_send(
+            &mut after_link(MessageState::Failed),
+            request(),
+            &options(),
+            &Tokio::new(),
+        )
+        .await;
+        assert_eq!(
+            failed,
+            Err(SendError::Unproven {
+                message_id: ID,
+                last: Some(MessageState::Failed),
+            })
+        );
+        let rejected = run_send(
+            &mut after_link(MessageState::Rejected),
+            request(),
+            &options(),
+            &Tokio::new(),
+        )
+        .await;
+        assert_eq!(
+            rejected,
+            Err(SendError::Rejected {
+                message_id: ID,
+                state: MessageState::Rejected,
+            })
+        );
     }
 
     const PN: [u8; 16] = [0x77; 16];

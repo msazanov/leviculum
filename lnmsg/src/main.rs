@@ -305,11 +305,23 @@ async fn read_routes(config_dir: &Path, instance: &str) -> Result<Vec<Route>, St
         .exists()
         .then(|| Config::load(&config_file).ok())
         .flatten();
-    let (authkey, _) = leviculum_std::daemon_rpc::resolve_authkey(config_dir, config.as_ref())?;
+    let (authkey, _) = leviculum_std::daemon_rpc::resolve_authkey(config_dir, config.as_ref())
+        .inspect_err(|error| tracing::info!("RPC path_table authkey failed: {error}"))?;
+    // Every RPC call lnmsg makes is this one, and each says how it went: a
+    // shared instance that logs "digest received was wrong" for a client
+    // can then be checked against this line (leviculum 1002).
     let table = leviculum_std::rpc_query(instance, &authkey, "path_table")
         .await
-        .map_err(|error| error.to_string())?;
-    Ok(mailbox_state::routes_from_path_table(&table))
+        .map_err(|error| error.to_string())
+        .inspect_err(|error| {
+            tracing::info!("RPC path_table instance={instance} failed: {error}")
+        })?;
+    let routes = mailbox_state::routes_from_path_table(&table);
+    tracing::info!(
+        "RPC path_table instance={instance} ok entries={}",
+        routes.len()
+    );
+    Ok(routes)
 }
 
 #[tokio::main]

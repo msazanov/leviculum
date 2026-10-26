@@ -284,6 +284,27 @@ giving-up state of one of its legs is not drawn, because `--via auto`
 cancels a stranded direct leg and carries the same text to a mailbox; the
 `✗` appears when the runner reports it gave up.
 
+A direct leg whose message went onto a link to the peer (`Sending`) and
+got no proof inside the leg's time is *unproven*, not failed (1002): the
+peer answered the link, so it is reachable, and a mailbox copy would reach
+it a second time. The reference never re-sends such a message through a
+propagation node on its own either; it waits for the proof and retries on
+a new link (`reference/LXMF/LXMF/LXMRouter.py:2796`,
+`reference/LXMF/LXMF/LXMessage.py:616-621`). So the row shows `◇` and
+stays there: only a proof (`✓`) or a refusal (`✗`) moves it, while the
+router's own retries go on underneath. Lew's test against a third-party
+client that receives and never proves turned a delivered message red and
+uploaded it to a foreign node before this.
+
+While a send waits, its row names the leg and how long it has been on it,
+`me (direct 12 s):` or `me (via mailbox 40 s):`, so a spinner that turns
+for a while has its reason on screen. `$LNMSG_HOME/tui.log` holds the same
+story in words, at `info` for lnmsg's targets (`RUST_LOG` replaces the
+filter): one `SEND leg= to= state= elapsed_ms=` line per step of each leg
+(`path_wait`, `queued`, `sending`, `sent`, `proof`, `no_proof`, `failed`),
+`PATH found to= hops= requests= wait_ms=` or `PATH not_found`, and one
+`RPC path_table` line per call to the daemon with its result.
+
 The timeline itself:
 
 ```

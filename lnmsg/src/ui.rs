@@ -49,10 +49,14 @@ use leviculum_ui::{RLine, RStyle, StyledChar};
 
 use crate::address::to_hex;
 use crate::outbox::OutboxEvent;
+use crate::send::Leg;
 
 /// How many ticks a toast stays up. The shell ticks every 250 ms, so three
 /// seconds.
 pub const TOAST_TICKS: u64 = 12;
+
+/// Shell ticks in a second, for the leg's elapsed time on a row.
+const TICKS_PER_SECOND: u64 = 4;
 
 /// Hex characters of an address a pane shows; the full address is in the
 /// title bar of the messages pane.
@@ -101,6 +105,15 @@ pub struct Message {
     pub delivery: Option<DeliveryState>,
     /// Whether a received message's signature verified.
     pub verified: bool,
+    /// The leg the send runner is on and the tick it began, while the runner
+    /// still works on the message: the row says `direct 12 s` or `via
+    /// mailbox 40 s` beside the spinner, so a wait has a reason on screen.
+    pub leg: Option<(Leg, u64)>,
+    /// The runner ended with the message on a link to the peer and no proof
+    /// ([`UiEvent::SendUnproven`]). It stays `◇` from then on: only a proof
+    /// (`✓`) or a refusal (`✗`) moves it, not the router's retries on new
+    /// links nor its giving up on them, since the peer may well have it.
+    pub unproven: bool,
 }
 
 /// One correspondent and this session's messages with them.
@@ -260,6 +273,12 @@ pub enum UiEvent {
     Engine(OutboxEvent),
     /// The oldest running send finished; the error text when it failed.
     SendDone(Result<(), String>),
+    /// The oldest running send ended with its message on a link to the peer
+    /// and no delivery proof (`SendError::Unproven`): shown `◇`, sent and
+    /// not proven, with the runner's text in a toast.
+    SendUnproven(String),
+    /// The oldest running send moved onto this leg.
+    SendLeg(Leg),
     /// The fetch finished: how many messages were new, or why it failed.
     FetchDone(Result<usize, String>),
     /// A line a runner or the stamp worker said along the way (the auto
@@ -306,6 +325,16 @@ pub fn update<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) 
             Vec::new()
         }
         UiEvent::SendDone(result) => on_send_done(model, result),
+        UiEvent::SendUnproven(detail) => on_send_unproven(model, detail),
+        UiEvent::SendLeg(leg) => {
+            let tick = model.tick;
+            if let Some(&(c, m)) = model.sending.front() {
+                if let Some(message) = model.message_mut(c, m) {
+                    message.leg = Some((leg, tick));
+                }
+            }
+            Vec::new()
+        }
         UiEvent::FetchDone(result) => {
             model.fetching = false;
             match result {
@@ -499,6 +528,8 @@ fn send<B: InputBuffer + Default>(model: &mut UiModel<B>) -> Vec<UiEffect> {
         id: None,
         delivery: Some(DeliveryState::Queued),
         verified: true,
+        leg: None,
+        unproven: false,
     });
     let to = conversation.peer;
     let index = conversation.messages.len() - 1;
@@ -584,6 +615,8 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
                 id: Some(message_id),
                 delivery: None,
                 verified,
+                leg: None,
+                unproven: false,
             });
             if index != selected {
                 conversation.unread += 1;
@@ -620,6 +653,11 @@ fn apply_state<B>(model: &mut UiModel<B>, id: [u8; 32], state: MessageState) {
                 // The runner may still carry it another way.
                 continue;
             }
+            if message.unproven
+                && !matches!(shown, DeliveryState::Delivered | DeliveryState::Rejected)
+            {
+                continue;
+            }
             message.delivery = Some(shown);
         }
     }
@@ -629,14 +667,45 @@ fn on_send_done<B>(model: &mut UiModel<B>, result: Result<(), String>) -> Vec<Ui
     let Some((c, m)) = model.sending.pop_front() else {
         return Vec::new();
     };
+    if let Some(message) = model.message_mut(c, m) {
+        message.leg = None;
+    }
     let Err(detail) = result else {
         return Vec::new();
     };
     if let Some(message) = model.message_mut(c, m) {
         message.delivery = Some(DeliveryState::Failed);
     }
-    let first = detail.lines().next().unwrap_or("").to_string();
-    model.toast(ToastKind::Error, format!("not sent: {first}"));
+    // Each leg's reason as the runner worded it, its continuation lines cut:
+    // an auto send that failed both ways says why each failed, not only why
+    // the direct one did.
+    let reasons: Vec<&str> = detail
+        .lines()
+        .filter(|line| !line.starts_with(' '))
+        .collect();
+    model.toast(
+        ToastKind::Error,
+        format!("not sent: {}", reasons.join("; ")),
+    );
+    vec![UiEffect::Notice(format!("send: {detail}"))]
+}
+
+fn on_send_unproven<B>(model: &mut UiModel<B>, detail: String) -> Vec<UiEffect> {
+    let Some((c, m)) = model.sending.pop_front() else {
+        return Vec::new();
+    };
+    if let Some(message) = model.message_mut(c, m) {
+        message.leg = None;
+        message.unproven = true;
+        // A proof that came in the same breath as the runner's end stays.
+        if message.delivery != Some(DeliveryState::Delivered) {
+            message.delivery = Some(DeliveryState::Sent);
+        }
+    }
+    model.toast(
+        ToastKind::Info,
+        "sent over a link, no delivery proof yet".to_string(),
+    );
     vec![UiEffect::Notice(format!("send: {detail}"))]
 }
 
@@ -811,6 +880,25 @@ pub fn view<B: InputBuffer>(model: &UiModel<B>) -> View {
     }
 }
 
+/// `direct 12 s` or `via mailbox 40 s`: which leg a waiting send is on and
+/// for how long, while its mark still says it is waiting. Gone the moment it
+/// is handed on, so the label never sits beside a `◇` or a `✓`.
+fn leg_label(message: &Message, state: DeliveryState, tick: u64) -> Option<String> {
+    let (leg, since) = message.leg?;
+    if !matches!(
+        state,
+        DeliveryState::Queued | DeliveryState::Stamping | DeliveryState::InFlight
+    ) {
+        return None;
+    }
+    let word = match leg {
+        Leg::Direct => "direct",
+        Leg::Propagated => "via mailbox",
+    };
+    let secs = tick.saturating_sub(since) / TICKS_PER_SECOND;
+    Some(format!("{word} {secs} s"))
+}
+
 fn message_line(message: &Message, here: bool, spin: usize, ascii: bool) -> RLine {
     let mut line = RLine::default();
     let st = if here { bold() } else { RStyle::default() };
@@ -823,7 +911,10 @@ fn message_line(message: &Message, here: bool, spin: usize, ascii: bool) -> RLin
                 ..st
             };
             push(&mut line, row.symbol(spin, ascii), mark);
-            push(&mut line, " me: ", st);
+            match leg_label(message, state, spin as u64) {
+                Some(label) => push(&mut line, &format!(" me ({label}): "), st),
+                None => push(&mut line, " me: ", st),
+            }
         }
         None => {
             push(&mut line, "  ", st);
@@ -1129,6 +1220,104 @@ mod tests {
             model.current_toast().map(|t| t.text.as_str()),
             Some("not sent: no route")
         );
+    }
+
+    #[test]
+    fn a_toast_quotes_both_legs_of_a_failed_auto_send() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        sent(&mut model, "hi");
+        update(
+            &mut model,
+            UiEvent::SendDone(Err(
+                "direct: no route after 30.0s\n  more\npropagated: no propagation node".to_string(),
+            )),
+        );
+        assert_eq!(
+            model.current_toast().map(|t| t.text.as_str()),
+            Some("not sent: direct: no route after 30.0s; propagated: no propagation node")
+        );
+    }
+
+    /// The policy half of leviculum 1002 on the screen: a message the runner
+    /// left on a link without a proof is `◇` and stays `◇` through the
+    /// router's retries and its giving up, with no red cross; a late proof
+    /// still turns it `✓`.
+    #[test]
+    fn an_unproven_send_stays_sent_until_a_proof_and_never_turns_red() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        sent(&mut model, "hi");
+        engine(&mut model, OutboxEvent::Queued { message_id: ID });
+        state(&mut model, ID, MessageState::Sending);
+        let effects = update(
+            &mut model,
+            UiEvent::SendUnproven("went onto a link".to_string()),
+        );
+        assert_eq!(last_delivery(&model), Some(DeliveryState::Sent));
+        assert!(model.sending.is_empty());
+        assert_eq!(
+            effects,
+            [UiEffect::Notice("send: went onto a link".to_string())]
+        );
+        for retry in [
+            MessageState::Outbound,
+            MessageState::Sending,
+            MessageState::Failed,
+        ] {
+            state(&mut model, ID, retry);
+            assert_eq!(
+                last_delivery(&model),
+                Some(DeliveryState::Sent),
+                "{retry:?}"
+            );
+        }
+        engine(
+            &mut model,
+            OutboxEvent::Left {
+                message_id: ID,
+                last: Some(MessageState::Failed),
+            },
+        );
+        assert_eq!(last_delivery(&model), Some(DeliveryState::Sent));
+
+        let mut late = UiModel::<Field>::new(&[PEER]);
+        sent(&mut late, "hi");
+        engine(&mut late, OutboxEvent::Queued { message_id: ID });
+        update(&mut late, UiEvent::SendUnproven(String::new()));
+        state(&mut late, ID, MessageState::Delivered);
+        assert_eq!(last_delivery(&late), Some(DeliveryState::Delivered));
+    }
+
+    /// The row names the leg and its seconds while the send waits, and drops
+    /// both once the message is handed on.
+    #[test]
+    fn a_waiting_send_shows_its_leg_and_the_seconds_on_it() {
+        let text = |model: &UiModel<Field>| -> String {
+            let line = view(model).messages.last().cloned().expect("a row");
+            line.cells.iter().map(|c| c.ch).collect()
+        };
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        sent(&mut model, "hi");
+        update(&mut model, UiEvent::SendLeg(Leg::Direct));
+        for _ in 0..12 {
+            update(&mut model, UiEvent::Tick);
+        }
+        assert!(
+            text(&model).contains("me (direct 3 s): hi"),
+            "{}",
+            text(&model)
+        );
+        update(&mut model, UiEvent::SendLeg(Leg::Propagated));
+        for _ in 0..8 {
+            update(&mut model, UiEvent::Tick);
+        }
+        assert!(
+            text(&model).contains("me (via mailbox 2 s): hi"),
+            "{}",
+            text(&model)
+        );
+        engine(&mut model, OutboxEvent::Queued { message_id: ID });
+        state(&mut model, ID, MessageState::AwaitingCollection);
+        assert!(text(&model).contains(" me: hi"), "{}", text(&model));
     }
 
     #[test]

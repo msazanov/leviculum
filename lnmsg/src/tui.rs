@@ -49,7 +49,7 @@ use lnmsg::fetch::{run_fetch, FetchOptions};
 use lnmsg::mailbox_state::Stored;
 use lnmsg::outbox::{SendRequest, Via};
 use lnmsg::seen::{SeenStore, SeenWrite};
-use lnmsg::send::{run_send_auto, AutoError, SendOptions};
+use lnmsg::send::{run_send_auto, AutoError, Leg, SendError, SendOptions};
 use lnmsg::ui::{self, help_groups, update, Pane, UiEffect, UiEvent, UiModel, View};
 use lnmsg::{display_name, identity};
 
@@ -62,6 +62,8 @@ const TICK_MS: u64 = 250;
 const PUMP_MS: u64 = 20;
 /// How long a script's `until` waits by default.
 const UNTIL_SECS: u64 = 30;
+/// `tui.log`'s filter without `RUST_LOG`.
+const TUI_LOG_FILTER: &str = "warn,lnmsg=info";
 
 /// Everything `lnmsg tui` was told on the command line.
 pub struct TuiOptions {
@@ -83,12 +85,18 @@ pub struct TuiOptions {
 #[derive(Clone)]
 struct ScreenEffects {
     notices: UnboundedSender<String>,
+    /// The send runner's leg changes, for the running send's row.
+    legs: UnboundedSender<Leg>,
     files: PathBuf,
 }
 
 impl Effects for ScreenEffects {
     fn notice(&mut self, line: &str) {
         let _ = self.notices.send(line.to_string());
+    }
+
+    fn leg(&mut self, leg: Leg) {
+        let _ = self.legs.send(leg);
     }
 
     fn print(&mut self, _rendered: &[u8]) -> Result<(), String> {
@@ -136,6 +144,7 @@ struct Shell {
     done_tx: UnboundedSender<UiEvent>,
     done_rx: UnboundedReceiver<UiEvent>,
     notices_rx: UnboundedReceiver<String>,
+    legs_rx: UnboundedReceiver<Leg>,
     /// Lines to print once the terminal is restored.
     afterwards: Vec<String>,
     /// The engine stopped answering.
@@ -172,6 +181,11 @@ impl Shell {
                 }
             }
         }
+        // Before the runner's end: a leg it moved onto belongs to the send
+        // that is still at the front of the model's queue.
+        while let Ok(leg) = self.legs_rx.try_recv() {
+            self.apply(UiEvent::SendLeg(leg));
+        }
         while let Ok(event) = self.done_rx.try_recv() {
             self.running = false;
             self.apply(event);
@@ -198,7 +212,7 @@ impl Shell {
         let done = self.done_tx.clone();
         tokio::spawn(async move {
             let event = match job {
-                Job::Send { to, body } => UiEvent::SendDone(send(tap, context, to, body).await),
+                Job::Send { to, body } => send(tap, context, to, body).await,
                 Job::Fetch => UiEvent::FetchDone(fetch(tap, context).await),
             };
             let _ = done.send(event);
@@ -207,7 +221,7 @@ impl Shell {
 }
 
 /// One compose-line send, exactly as `lnmsg send --via auto` runs it.
-async fn send(mut tap: Tap, context: RunContext, to: [u8; 16], body: String) -> Result<(), String> {
+async fn send(mut tap: Tap, context: RunContext, to: [u8; 16], body: String) -> UiEvent {
     let mut options = SendOptions::new(context.instance.clone(), context.timeout);
     let mut effects = context.effects.clone();
     let (home, config_dir, instance, pn) = (
@@ -234,10 +248,13 @@ async fn send(mut tap: Tap, context: RunContext, to: [u8; 16], body: String) -> 
     )
     .await;
     match outcome {
-        Ok(_) => Ok(()),
-        Err(AutoError::Direct(error)) => Err(error.to_string()),
+        Ok(_) => UiEvent::SendDone(Ok(())),
+        Err(AutoError::Direct(error @ SendError::Unproven { .. })) => {
+            UiEvent::SendUnproven(error.to_string())
+        }
+        Err(AutoError::Direct(error)) => UiEvent::SendDone(Err(error.to_string())),
         Err(AutoError::Both { direct, fallback }) => {
-            Err(format!("direct: {direct}\npropagated: {fallback}"))
+            UiEvent::SendDone(Err(format!("direct: {direct}\npropagated: {fallback}")))
         }
     }
 }
@@ -276,8 +293,14 @@ pub async fn run(options: TuiOptions) -> ExitCode {
         Err(error) => return super::failure(error, "no-home"),
     };
     // A full screen has no stderr to spare: the warnings a CLI run prints go
-    // to a file beside the identity instead.
-    leviculum_std::event_log::install_global_subscriber_to_file("warn", &home.join("tui.log"));
+    // to a file beside the identity instead, with lnmsg's own `info` lines,
+    // the `SEND` step of every leg, the `PATH` answers and the `RPC` calls,
+    // so a send that waits can be read back afterwards (leviculum 1002).
+    // `RUST_LOG` replaces the filter whole.
+    leviculum_std::event_log::install_global_subscriber_to_file(
+        TUI_LOG_FILTER,
+        &home.join("tui.log"),
+    );
     let (preferred_pn, pn_source) = match super::resolve_pn(options.pn.as_deref(), &home) {
         Ok(resolved) => resolved,
         Err(error) => return super::usage(error),
@@ -304,8 +327,10 @@ pub async fn run(options: TuiOptions) -> ExitCode {
     };
 
     let (notices_tx, notices_rx) = unbounded_channel();
+    let (legs_tx, legs_rx) = unbounded_channel();
     let effects = ScreenEffects {
         notices: notices_tx,
+        legs: legs_tx,
         files: home.clone(),
     };
     let attached = match attach(AttachConfig {
@@ -342,6 +367,7 @@ pub async fn run(options: TuiOptions) -> ExitCode {
         done_tx,
         done_rx,
         notices_rx,
+        legs_rx,
         afterwards: Vec::new(),
         gone: false,
     };

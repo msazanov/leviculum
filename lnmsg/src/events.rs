@@ -167,6 +167,57 @@ pub fn done_without_path(code: u8, path_requests: u32, path_wait_ms: u64) {
     );
 }
 
+// The debug log (leviculum 1002). Not structured events: plain `info` lines
+// for `${LNMSG_HOME}/tui.log`, which the TUI writes at `info` for lnmsg's own
+// targets, so a send that waits can be read back as what each leg did. No
+// `event` field, so they never reach the event-log file and need no catalog
+// entry; the `LNMSG_*` lines above stay the machine-readable record.
+
+/// One step of one send leg: `SEND leg=direct|propagated to=<8 hex>
+/// state=<word> elapsed_ms=<since the leg began>`. The state words are
+/// `path_wait`, `queued`, `sending`, `sent`, `proof`, `no_proof` and
+/// `failed`.
+pub fn send_leg(leg: crate::send::Leg, to: &[u8; 16], state: &str, elapsed: core::time::Duration) {
+    tracing::info!(
+        target: "lnmsg::send",
+        "SEND leg={} to={} state={} elapsed_ms={}",
+        leg.as_str(),
+        short_hex(to),
+        state,
+        elapsed.as_millis()
+    );
+}
+
+/// A destination's path arrived: `PATH found to=<8 hex> hops=<n|?>
+/// requests=<path requests sent> wait_ms=<since the first>`.
+pub fn path_found(to: &[u8; 16], hops: Option<u8>, requests: u32, wait_ms: u64) {
+    tracing::info!(
+        target: "lnmsg::send",
+        "PATH found to={} hops={} requests={} wait_ms={}",
+        short_hex(to),
+        hops.map(|h| h.to_string()).unwrap_or_else(|| "?".to_string()),
+        requests,
+        wait_ms
+    );
+}
+
+/// A send's budget ended with no path to its destination.
+pub fn path_not_found(to: &[u8; 16], waited: core::time::Duration) {
+    tracing::info!(
+        target: "lnmsg::send",
+        "PATH not_found to={} wait_ms={}",
+        short_hex(to),
+        waited.as_millis()
+    );
+}
+
+/// The first eight hex characters of an address, as the log lines carry it.
+fn short_hex(address: &[u8; 16]) -> String {
+    let mut hex = to_hex(address);
+    hex.truncate(8);
+    hex
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -15,7 +15,7 @@ lnmsg -- terminal LXMF messenger for Reticulum
 
 **lnmsg** sends and receives LXMF messages over Reticulum. It attaches to a shared instance that is already running -- **lnsd**(1), or Python's **rnsd** -- and runs its own LXMF router; it never starts a Reticulum stack of its own. Its address is a pure function of the identity in its state directory, minted on first use and never replaced silently.
 
-**send** queues one message. The body is the argument, or standard input when the argument is missing or `-`, one trailing newline removed. A send that worked prints nothing and exits 0, which means the message was queued and handed to the network, not that it was delivered. **--via auto**, the default, tries a direct delivery link first and falls back to a propagation node when none comes up; exit 3 says a propagation node holds the message.
+**send** queues one message. The body is the argument, or standard input when the argument is missing or `-`, one trailing newline removed. A send that worked prints nothing and exits 0, which means the message was queued and handed to the network, not that it was delivered. **--via auto**, the default, tries a direct delivery link first and falls back to a propagation node when none comes up; exit 3 says a propagation node holds the message. A message that went onto the link and got no delivery proof in time is not sent again through a propagation node, which would deliver it twice; the run says so and exits 1.
 
 **fetch** drains the propagation node's mailbox and prints what is new on standard output.
 
@@ -86,7 +86,7 @@ Everywhere: `Ctrl-P` opens the command palette, which matches what you type agai
 
 ## FILES
 
-`$LNMSG_HOME/identity` is your address; back it up. **tui** writes its warnings to `$LNMSG_HOME/tui.log` instead of the screen.
+`$LNMSG_HOME/identity` is your address; back it up. **tui** writes its warnings to `$LNMSG_HOME/tui.log` instead of the screen, with a line for each step of each send leg (`SEND`), each path answer (`PATH`) and each call to the daemon (`RPC`); **RUST_LOG** replaces its filter (default `warn,lnmsg=info`).
 
 ## SEE ALSO
 

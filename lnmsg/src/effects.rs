@@ -18,6 +18,7 @@ use alloc::string::String;
 
 use crate::mailbox_state::Stored;
 use crate::seen::SeenWrite;
+use crate::send::Leg;
 
 /// The host side of a run.
 pub trait Effects {
@@ -34,6 +35,10 @@ pub trait Effects {
     fn write_seen(&mut self, write: &SeenWrite) -> Result<(), String>;
     /// The wall clock in Unix milliseconds, the path table's timescale.
     fn unix_now_ms(&self) -> u64;
+    /// A send moved onto `leg`: the TUI shows it on the message's row while
+    /// it waits (leviculum 1002). The log has its own line for it, so a host
+    /// with no screen does nothing.
+    fn leg(&mut self, _leg: Leg) {}
 }
 
 /// The terminal's effects: stderr, and the files under `${LNMSG_HOME}`.
