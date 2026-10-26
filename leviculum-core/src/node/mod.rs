@@ -149,6 +149,8 @@ mod mvr_link_timing_reference;
 #[cfg(test)]
 mod mvr_link_up_reoffer;
 #[cfg(test)]
+mod mvr_linkproof_context_data_proof;
+#[cfg(test)]
 mod mvr_lnode_pathresolve;
 #[cfg(test)]
 mod mvr_local_client_announce_immediate;

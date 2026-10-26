@@ -1194,9 +1194,22 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             interface_index,
         );
 
-        // Check if this is a data proof (not a link establishment proof)
-        if proof_data.len() == PROOF_DATA_SIZE && packet.context == PacketContext::None {
-            self.handle_data_proof(&link_id, proof_data);
+        // A packet proof (hash + signature) is matched against the receipts
+        // whatever its context, except a link request proof or a resource
+        // proof, as the reference does (Transport.py:2171, :2238, :2244-2281).
+        // Python marks its packet proofs NONE (Link.py:392); Ratspeak marks
+        // them LINKPROOF (0xFD), and before #232 that one fell through to the
+        // link request proof path below and was refused on an established
+        // link. A LINKPROOF proof on a link still pending is offered to the
+        // receipts too, matches none and goes no further, which is what the
+        // reference does with it: only LRPROOF reaches `pending_links`.
+        if proof_data.len() == PROOF_DATA_SIZE
+            && !matches!(
+                packet.context,
+                PacketContext::Lrproof | PacketContext::ResourcePrf
+            )
+        {
+            self.handle_data_proof(&link_id, proof_data, packet.context);
             return;
         }
 
@@ -1399,7 +1412,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     }
 
     /// Handle a data proof packet (PROVE_ALL response)
-    fn handle_data_proof(&mut self, link_id: &LinkId, proof_data: &[u8]) {
+    fn handle_data_proof(&mut self, link_id: &LinkId, proof_data: &[u8], context: PacketContext) {
         if proof_data.len() != PROOF_DATA_SIZE {
             crate::tracing::debug!(
                 len = proof_data.len(),
@@ -1465,6 +1478,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             if let Some(sequence) = self.receipt_tracker.confirm_delivery(&truncated) {
                 crate::tracing::debug!(
                     receipts = self.receipt_tracker.len(),
+                    ctx = ?context,
                     "link_mgr: data proof validated — delivered"
                 );
 
