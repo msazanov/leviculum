@@ -164,7 +164,9 @@
 # prints the distribution per section. It asserts only that the load was
 # applied; it means something only in --release against a real disk (the
 # stores fsync, a tmpfs prices that at nothing), and a fill of 40 000
-# announces takes six seconds of release CPU. Run by hand with LNPND_LOAD_DIR on the disk under
+# announces takes six seconds of release CPU. The budget rule it found is
+# pinned deterministically by an_announce_dispatch_during_a_sync_stores_at_most_one_slice,
+# which runs in the suite. Run by hand with LNPND_LOAD_DIR on the disk under
 # test (see the module docs of lnpnd/src/engine_hook_load.rs) whenever the
 # engine's hooks or the stores' write paths change.
 1    -p lnpnd --lib

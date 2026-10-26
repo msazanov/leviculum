@@ -131,7 +131,7 @@ more candidates pressing on the 16-slot table (D1).
 Test: an mvr driving `handle_announce` at hops 5-6 asserting
 `Added`, board config — one assertion beside lnpnd's
 `a_sync_from_a_client_or_from_beyond_the_depth_peers_nobody`
-(`lnpnd/src/engine.rs:2658`).
+(`lnpnd/src/engine.rs:2668`).
 **Fixed in d2a9dcfb**: the board builds its table from
 `board_peering_config` (`leviculum-nrf/pn-store`), whose
 `BOARD_AUTOPEER_MAXDEPTH` is 6 with lxmd's generated config as its
@@ -268,7 +268,7 @@ Price to adopt: 0 B — the link is still up when
 `on_inbound_resource` runs on the board's synchronous event path, so
 its hop count is a read, not a new field.
 Test: the lnpnd rule's test shape
-(`lnpnd/src/engine.rs:2810-2817`) replayed through the board engine.
+(`lnpnd/src/engine.rs:2820-2827`) replayed through the board engine.
 **Fixed in 00ac770b**: the board reads the link's hop count at the
 resource advertisement, while the link certainly exists, into one slot
 (`AdvertisedHops`, `leviculum-nrf/sync-batch`; one because D14 admits
@@ -630,7 +630,7 @@ links reading `no_data_for_ms`, the lnpnd loop transplanted; a few
 hundred bytes of flash.
 Test: lnpnd's
 `an_idle_inbound_link_is_torn_down_after_the_reference_bound`
-(`lnpnd/src/engine.rs:3295`) through the board engine.
+(`lnpnd/src/engine.rs:3305`) through the board engine.
 **Fixed in 5c82832d**: one rule for both stacks, `link_idle_past_bound`
 (`leviculum-lxmf`), used by lnpnd's `close_idle_links` and by the
 board's sweep in `settle` (`tick_idle_links`, at most 15 s late on a

@@ -1430,7 +1430,7 @@ impl<S: PropagationStore + PropagationBodyStore> Engine<S> {
         ready: &mut Ready<S>,
         core: &mut StdNodeCoreRef<'_>,
         out: &mut TickOutput,
-    ) -> usize {
+    ) {
         self.collect_validated();
         let mut budget = PERSIST_PER_HOOK;
         while budget > 0 {
@@ -1448,7 +1448,6 @@ impl<S: PropagationStore + PropagationBodyStore> Engine<S> {
             budget -= spent.min(budget);
         }
         self.ask_back_if_queued(core, out);
-        PERSIST_PER_HOOK - budget
     }
 
     /// Whatever is left on the store queue asks the driver to come straight
@@ -1519,8 +1518,9 @@ impl<S: PropagationStore + PropagationBodyStore + Send + 'static>
         };
         self.profile.lap(Section::Ready);
         // Finished validations first: they are older traffic than this
-        // event, and applying them here keeps the per-link order.
-        let persisted = self.drain_pending(&mut ready, core, &mut out);
+        // event, and queueing them here keeps the per-link order.
+        self.collect_validated();
+        let queued = self.pending.len();
         self.profile.lap(Section::Drain);
         // The mailbox router sees every event and filters for its own
         // links, exactly as lnmsg's engine feeds it.
@@ -1744,12 +1744,22 @@ impl<S: PropagationStore + PropagationBodyStore + Send + 'static>
             _ => {}
         }
         self.profile.lap(Section::Event);
-        // What this event queued is stored now if the drain above left the
-        // hook's budget unspent: an upload proven in the hook that received
-        // it waits for no wake at all.
-        if persisted == 0 && !self.pending.is_empty() {
+        // Only an event that queued a payload stores one here: an upload
+        // proven in the hook that received it waits for no wake at all.
+        //
+        // Every other event leaves the queue to `on_tick`. The driver hands
+        // a dispatch's events to this hook one by one under ONE lock and
+        // ONE budget (`run_event_tap`), so a drain per event stored as many
+        // messages as the dispatch had events: an announce is two, its
+        // `AnnounceReceived` and its `PathFound`, and during an inbound sync
+        // every announce dispatch stored two messages against a budget that
+        // pays for one (order 1009,
+        // `an_announce_dispatch_during_a_sync_stores_at_most_one_slice`).
+        if self.pending.len() > queued {
             self.drain_pending(&mut ready, core, &mut out);
             self.profile.lap(Section::Drain);
+        } else {
+            self.ask_back_if_queued(core, &mut out);
         }
         self.state = State::Ready(ready);
         // A job queued for the worker, here or by an earlier hook, comes
@@ -4131,6 +4141,130 @@ mod inbound_sync_slices {
             sync_done,
             vec![("in", BATCH)],
             "one inbound round, reporting the whole batch"
+        );
+    }
+
+    /// mvr (order 1009): the slice is per driver dispatch, not per event.
+    ///
+    /// **The named failure mode:** the driver hands one dispatch's events to
+    /// `on_event` one by one under one core lock and one budget
+    /// (`run_event_tap`, `leviculum-std/src/driver/processor.rs`), and every
+    /// `on_event` call stored a message off the queue, whatever its event.
+    /// An announce is a dispatch of two events, `AnnounceReceived` and
+    /// `PathFound`, so while a peer's sync was being stored every announce
+    /// that arrived stored two messages under a budget that pays for one.
+    /// Measured on the coder host with the production stores
+    /// (`hook_load`, 40 000 known destinations, a 100-message sync): such
+    /// a dispatch held the lock p95 3.0 to 7.3 ms against 1.0 to 2.0 ms for
+    /// one append.
+    ///
+    /// Counted, not timed: the dispatch's appends against
+    /// [`PERSIST_PER_HOOK`], so the test asks nothing of the host's disk or
+    /// scheduler.
+    #[test]
+    fn an_announce_dispatch_during_a_sync_stores_at_most_one_slice() {
+        use leviculum_core::{Destination, DestinationType, Direction, InterfaceId};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = NodeCoreBuilder::new().enable_transport(false).build(
+            rand_core::OsRng,
+            StdClock::new(),
+            StdStorage::new(dir.path()).expect("storage under a fresh temp dir"),
+        );
+        // The daemon's uplink runs no ingress limiter (`spawn_local_client`).
+        core.set_interface_ingress_control(0, false);
+        let appends = Arc::new(AtomicUsize::new(0));
+        let (mut engine, _events) = Engine::new(EngineConfig {
+            identity: leviculum_std::generate_identity(),
+            node_config: cost_free(),
+            store: ModelledStore {
+                inner: MemoryPropagationStore::new(10_000_000),
+                appends: Arc::clone(&appends),
+            },
+            announce_interval_secs: 3600,
+            announce_delay_secs: 0,
+            announce_at_start: true,
+            peering: leviculum_lxmf::PeeringConfig::default(),
+            peer_store: Box::new(MemoryPeerStore::default()),
+            control_allowed: Vec::new(),
+            auth_allowed: None,
+            mailbox: None,
+            store_limit_bytes: 10_000_000,
+            delivery_limit_kb: 1000,
+        });
+        let now_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, now_ms);
+
+        let link_id = LinkId::new([0x42; 16]);
+        let mut ready = match std::mem::replace(&mut engine.state, State::Failed) {
+            State::Ready(ready) => ready,
+            _ => panic!("engine must be ready"),
+        };
+        ready.peering.validate_link_for_tests(link_id, [0x24u8; 16]);
+        let envelope = PeerSyncEnvelope {
+            timestamp: 1.0,
+            messages: (0..BATCH as u16).map(stamped).collect(),
+        }
+        .encode();
+        engine.on_inbound_resource_completed(&mut ready, &core, &link_id, &envelope);
+        engine.state = State::Ready(ready);
+        super::tests::await_validation(&mut engine);
+
+        let mut worst_dispatch = 0usize;
+        let mut widest_dispatch = 0usize;
+        for index in 0..(BATCH * 2 + 16) {
+            if appends.load(Ordering::Relaxed) == BATCH {
+                break;
+            }
+            // A fresh destination's announce, as it reaches the daemon.
+            let aspect = format!("d{index}");
+            let mut destination = Destination::new(
+                Some(leviculum_std::generate_identity()),
+                Direction::In,
+                DestinationType::Single,
+                "dispatch",
+                &[&aspect],
+            )
+            .expect("a destination");
+            let packet = destination
+                .announce(
+                    None,
+                    &mut rand_core::OsRng,
+                    core.now_ms(),
+                    core.emission_secs(),
+                )
+                .expect("announce");
+            let mut wire = vec![0u8; 600];
+            let len = packet.pack(&mut wire).expect("pack the announce");
+            let dispatch = core.handle_packet(InterfaceId(0), &wire[..len]).events;
+            widest_dispatch = widest_dispatch.max(dispatch.len());
+
+            let before = appends.load(Ordering::Relaxed);
+            for event in &dispatch {
+                let _ = engine.on_event(&mut core, event);
+            }
+            worst_dispatch = worst_dispatch.max(appends.load(Ordering::Relaxed) - before);
+
+            // The driver's poll, which the queue asked for.
+            let now_ms = core.now_ms();
+            let _ = engine.on_tick(&mut core, now_ms);
+        }
+
+        assert!(
+            widest_dispatch >= 2,
+            "an announce dispatch carried {widest_dispatch} event(s): with \
+             fewer than two, a drain per event cannot have stored more than \
+             a slice and this test describes nothing"
+        );
+        assert_eq!(
+            appends.load(Ordering::Relaxed),
+            BATCH,
+            "every message of the batch must be stored"
+        );
+        assert!(
+            worst_dispatch <= PERSIST_PER_HOOK,
+            "one dispatch of {widest_dispatch} events stored {worst_dispatch} \
+             messages under one lock; the budget pays for {PERSIST_PER_HOOK}"
         );
     }
 
