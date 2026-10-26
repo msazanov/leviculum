@@ -313,6 +313,14 @@ disappears.**
    `PENDING_IDENTITY` / `UNRESOLVED`, rather than a live lookup, so the
    list can be rendered without touching the network.
 
+**Built 2026-10-26 for `loquax tui`** (leviculum 1047): points 1 to 3 and
+the three trust states below, in `loquax/src/names.rs`, from the router's
+`PeerAnnounced` (the hash-to-name map is the client's, as this section
+asks). Petnames come from `${LNMSG_HOME}/contacts`. Where the build fills a
+gap this page leaves (the width cap, the collision glyph, what blocking
+does) is listed in [keys, mouse and layout](loquax-keys-and-layout.md),
+section 5, "Built 2026-10-26, names".
+
 ### Trust levels: how many?
 
 NomadNet has four — `WARNING`, `UNTRUSTED`, `UNKNOWN`, `TRUSTED` (its

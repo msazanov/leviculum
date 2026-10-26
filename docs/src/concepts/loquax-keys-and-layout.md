@@ -16,7 +16,9 @@ section 5 is Lew's (2026-10-26: Signal's shape in text mode, ours right,
 theirs left) and slice 2, the chat layout, is built in monochrome
 (leviculum 1033; section 5, "Built", names where it differs). Slice 4,
 the search, is built (leviculum 1041; section 5, "Built 2026-10-26, the
-search", names where it differs). The slice
+search", names where it differs). Slice 5, names from announces, is
+built (leviculum 1047; section 5, "Built 2026-10-26, names", names where
+it differs). The slice
 order in section 7 is the plan the later slices are ordered from. The
 colour part of section 5 ("Colour") is proposed, not decided.
 
@@ -538,7 +540,8 @@ daemon in `tui_chat.frames`. Where they differ from the mockups:
   slice 4 and its way in is on the list's bottom border ("Built
   2026-10-26, the search", below).
 - **Names are the address**, `<9c31e0a2…>`, everywhere a name stands, and
-  every peer is `unknown`, until slice 5.
+  every peer is `unknown`, until slice 5 (built since, "Built 2026-10-26,
+  names", below).
 - **The list's title is our own address** (`loquax afbda7b3`), as before,
   not `Chats`.
 - **The header's second row at 120 columns has the mailbox half only**
@@ -621,6 +624,71 @@ and the element text above:
   the field, and steps nothing.
 - **Times are this session's**, as everywhere on the screen, and the
   header's path half is still missing (section 5, "Built", above).
+
+### Built 2026-10-26, names (leviculum 1047)
+
+Names are built in `loquax/src/names.rs`, the model, and drawn everywhere a
+peer stood as its address: the list, the header, the compose box's
+border, the detail view, the toasts and the search. The engine forwards
+each `RouterEvent::PeerAnnounced` as `OutboxEvent::Announced` with the
+display name as the reference reads it from the app data
+(`LXMF.display_name_from_app_data`, `reference/LXMF/LXMF/LXMF.py:151-172`:
+the msgpack list of LXMF 0.5 and later, with or without a stamp cost, and
+the bare bytes before it); the screen sanitises it. The frames are pinned
+from a session against a daemon in `loquax/tests/fixtures/tui_names.frames`
+(three correspondents: one announced name, a look-alike of it, and a peer
+the contacts file names), and the sessions that already had an announcing
+correspondent show its name since. Where it differs from the text above and
+the mailbox page's decision, or fills a gap they leave:
+
+- **The display rule** is the mailbox page's: the petname, else the
+  announced name, then a space and the address's first four hex digits
+  after a `·` (`Alice ·4f2a`); with neither, the address form
+  `<9c31e0a2…>` as before. A name is cut before its hash, so the hash
+  always stays.
+- **Sanitising** removes control characters, the bidi embeddings,
+  overrides, isolates and marks, and the invisible code points (Unicode's
+  default-ignorables: zero-width characters, the soft hyphen, the Hangul
+  fillers, the variation selectors, the tags); folds every run of white
+  space to one space; replaces with `?` a glyph the screen draws as a mark
+  of its own (the delivery marks from the shared table, check marks, the
+  spinner's braille, `·` and its look-alikes, `…`, `«` `»`, `≈`, box
+  drawing and block elements); and caps the width at 32 cells, a wide
+  character two, cut with `…`. The pages name a cap and no number; 32 keeps
+  a first and last name. The pages also say "normalise": no Unicode
+  normalisation crate is in the tree, so a name is drawn as it came and the
+  look-alike folding happens only where names are compared.
+- **Look-alikes** are compared, not rewritten: two names collide when they
+  have one skeleton (lower case, full-width forms as ASCII, the Cyrillic,
+  Greek and digit letters that draw like a Latin one folded onto it, and
+  `i`, `l`, `I`, `1`, `|` one letter). Unicode's full confusables table is
+  not carried. "Ian" and "lan" collide; a mark can afford that.
+- **The collision mark** is `≈` after the hash, on both peers, wherever the
+  label stands, and the header says `same name as ·b7d0`. The pages say
+  "mark it" and name no glyph. It compares the shown names, so a stranger
+  announcing a contact's petname is marked with the contact.
+- **The name-change mark** is a centred line in the conversation,
+  `── was Alice, now announces Ally ──`, where it happened, said once a
+  change and only where there is a conversation with the peer: the pages'
+  "an address you have talked to", read as a conversation this session
+  holds. An announce with no name keeps the name heard before.
+- **Petnames and blocks come from a file**, `${LNMSG_HOME}/contacts`, one
+  `name <address> <petname>` or `block <address>` a line; a wrong line
+  stops the start with the file and line, as `config` does. The pages say
+  trust follows from naming someone and do not say where the naming
+  happens; a palette action that writes the file needs text input in the
+  palette, which it does not take yet.
+- **Trust** is the three words of the mailbox page in the header:
+  `known` with a petname, `blocked` with a block (over a petname),
+  `unknown` else. Beside a petname that differs from what the peer
+  announces the header adds `announces Ally`, the provenance of option C.
+  `blocked` is said, not yet acted on: what arrives from a blocked peer is
+  still shown, because neither page decides what blocking does to it.
+- **Names are this session's.** The store across restarts is the history
+  slice; a peer heard in an earlier run is its address until it announces
+  again.
+- **Our own announce**, if it comes back, names nobody.
+- **A script waits for names** with `until named <n> [secs]`.
 
 ### Colour
 
@@ -1204,7 +1272,9 @@ layout's.
    tests over the matcher and the result order; a snapshot of the 120 x 40
    search mockup's structure. *1001 phase:* Alice searches a word of Bob's
    reply and lands on that message.
-5. **Names from announces.** The display rule, sanitising, the collision
+5. **Names from announces.** *Done 2026-10-26, leviculum 1047; section 5,
+   "Built 2026-10-26, names", names the differences. Open: the 1001
+   phase, periculum's.* The display rule, sanitising, the collision
    and name-change marks, petnames, and with them the three trust states
    in the header. Depends on 2 (where names are drawn); the library side
    is there, `RouterEvent::PeerAnnounced` closed gap 1 of the triage on

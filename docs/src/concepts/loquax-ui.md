@@ -254,6 +254,18 @@ its block; `n`/`N` and `Ctrl-s`/`Ctrl-r` step the matches in place, and
 own, from the same table. Its section 5, "Built 2026-10-26, the search",
 lists where the screen differs from the mockup.
 
+### Built 2026-10-26, names
+
+1047 (#232) is slice 5 of [keys, mouse and layout](loquax-keys-and-layout.md),
+section 7: a peer is the name it announces, or the reader's petname from
+`${LNMSG_HOME}/contacts`, with the address's first four hex digits after
+it (`Alice ·4f2a`), in the list, the header, the compose box, the detail
+view, the toasts and the search. Names are sanitised for display, two that
+look alike are both marked `≈`, a changed name is said once in the
+conversation, and the header says the trust state in words: `known`,
+`unknown` or `blocked`. Its section 5, "Built 2026-10-26, names", lists
+where it differs from the decision in [the mailbox page](loquax-mailbox.md).
+
 The second round on the screen, the full key table (vi, Emacs, the mail
 and the chat programs side by side, per pane), the mouse, the chat layout
 in text mode and the slices after 1002, is
