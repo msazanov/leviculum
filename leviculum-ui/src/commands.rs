@@ -1,11 +1,17 @@
 //! The command palette's names: the one table a messenger frontend opens
-//! with `Ctrl-P` and filters as the reader types
+//! with `:` or `Alt-x` and filters as the reader types
 //! (`docs/src/concepts/lnmsg-ui.md`, section 1: "a command palette layered on
 //! top, no modes").
 //!
 //! One table, so the terminal palette and the desktop GUI's offer the same
 //! words for the same actions. The program maps a [`Command`] to what it
-//! does; this module only names them and filters them.
+//! does; this module only names them and filters them. Each name is also a
+//! row of the program's keymap ([`crate::keymap::Row::palette`]), which is
+//! where its keys come from.
+//!
+//! `quit` is the only name with a `q` in it, so `:`, `q`, `Enter` quits as a
+//! vi reader expects (`docs/src/concepts/lnmsg-keys-and-layout.md`, section
+//! 3); a test holds it.
 
 use alloc::vec::Vec;
 
@@ -26,6 +32,20 @@ pub enum Command {
     FocusMessages,
     /// Move the focus to the compose line.
     FocusCompose,
+    /// Select the next conversation.
+    NextConversation,
+    /// Select the previous conversation.
+    PreviousConversation,
+    /// Select the next conversation with unread messages.
+    NextUnread,
+    /// Select the previous conversation with unread messages.
+    PreviousUnread,
+    /// What is known about the message under the cursor.
+    Details,
+    /// Draw the whole screen again.
+    Redraw,
+    /// Swap what `Enter` does in compose: send, or break the line.
+    SendOnEnter,
 }
 
 /// One palette row: the words the reader filters on, and what it runs.
@@ -38,7 +58,7 @@ pub struct PaletteEntry {
 }
 
 /// The table, in the order the palette lists it unfiltered.
-pub const COMMANDS: [PaletteEntry; 7] = [
+pub const COMMANDS: [PaletteEntry; 14] = [
     entry("send", Command::Send),
     entry("fetch", Command::Fetch),
     entry("quit", Command::Quit),
@@ -46,7 +66,22 @@ pub const COMMANDS: [PaletteEntry; 7] = [
     entry("focus conversations", Command::FocusConversations),
     entry("focus messages", Command::FocusMessages),
     entry("focus compose", Command::FocusCompose),
+    entry("next conversation", Command::NextConversation),
+    entry("previous conversation", Command::PreviousConversation),
+    entry("next unread", Command::NextUnread),
+    entry("previous unread", Command::PreviousUnread),
+    entry("details", Command::Details),
+    entry("redraw", Command::Redraw),
+    entry("send on enter", Command::SendOnEnter),
 ];
+
+/// The entry that runs `command`.
+pub fn name_of(command: Command) -> Option<&'static str> {
+    COMMANDS
+        .iter()
+        .find(|e| e.command == command)
+        .map(|e| e.name)
+}
 
 const fn entry(name: &'static str, command: Command) -> PaletteEntry {
     PaletteEntry { name, command }
@@ -100,5 +135,13 @@ mod tests {
             ]
         );
         assert_eq!(filter("qu")[0].command, Command::Quit);
+    }
+
+    /// `:q` then `Enter` runs the first match, and `quit` is the only name
+    /// a `q` matches.
+    #[test]
+    fn q_alone_finds_quit_first() {
+        let hits: Vec<Command> = filter("q").iter().map(|e| e.command).collect();
+        assert_eq!(hits, [Command::Quit]);
     }
 }

@@ -11,10 +11,10 @@
 │                      ││                                                      │
 │                      ││                                                      │
 └──────────────────────┘└──────────────────────────────────────────────────────┘
-┌  compose─────────────────────────────────────────────────────────────────────┐
+┌  compose───────────────────────────────────── Enter send · Alt-Enter newline ┐
 │                                                                              │
 └──────────────────────────────────────────────────────────────────────────────┘
-j/k move │ Enter open │ q quit │ Tab pane │ ^P palette │ ? help
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 2: typed ---
 ┌  lnmsg afbda7b3──────┐┌  61ddb79ada973523799227bbaf41e204────────────────────┐
 │▸ 61ddb79ada973523    ││No history yet: this session's messages only.         │
@@ -27,11 +27,11 @@ j/k move │ Enter open │ q quit │ Tab pane │ ^P palette │ ? help
 │                      ││                                                      │
 │                      ││                                                      │
 └──────────────────────┘└──────────────────────────────────────────────────────┘
-┌● compose─────────────────────────────────────────────────────────────────────┐
+┌● compose───────────────────────────────────── Enter send · Alt-Enter newline ┐
 │hello from the tui                                                            │
 │on two lines                                                                  │
 └──────────────────────────────────────────────────────────────────────────────┘
-Enter send │ Esc messages │ Tab pane │ ^P palette │ ? help
+Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
 --- frame 3: queued ---
 ┌  lnmsg afbda7b3──────┐┌  61ddb79ada973523799227bbaf41e204────────────────────┐
 │▸ 61ddb79ada973523    ││▸ ○ me: hello from the tui                            │
@@ -45,10 +45,10 @@ Enter send │ Esc messages │ Tab pane │ ^P palette │ ? help
 │                      ││                                                      │
 │                      ││                                                      │
 └──────────────────────┘└──────────────────────────────────────────────────────┘
-┌● compose─────────────────────────────────────────────────────────────────────┐
+┌● compose───────────────────────────────────── Enter send · Alt-Enter newline ┐
 │                                                                              │
 └──────────────────────────────────────────────────────────────────────────────┘
-Enter send │ Esc messages │ Tab pane │ ^P palette │ ? help
+Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
 --- frame 4: delivered ---
 ┌  lnmsg afbda7b3──────┐┌  61ddb79ada973523799227bbaf41e204────────────────────┐
 │▸ 61ddb79ada973523    ││▸ ✓ me: hello from the tui                            │
@@ -62,10 +62,10 @@ Enter send │ Esc messages │ Tab pane │ ^P palette │ ? help
 │                      ││                                                      │
 │                      ││                                                      │
 └──────────────────────┘└──────────────────────────────────────────────────────┘
-┌● compose─────────────────────────────────────────────────────────────────────┐
+┌● compose───────────────────────────────────── Enter send · Alt-Enter newline ┐
 │                                                                              │
 └──────────────────────────────────────────────────────────────────────────────┘
-Enter send │ Esc messages │ Tab pane │ ^P palette │ ? help
+Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
 --- frame 5: reply ---
 ┌  lnmsg afbda7b3──────┐┌  61ddb79ada973523799227bbaf41e204────────────────────┐
 │▸ 61ddb79ada973523    ││  ✓ me: hello from the tui                            │
@@ -79,7 +79,7 @@ Enter send │ Esc messages │ Tab pane │ ^P palette │ ? help
 │                      ││                     ┌───────────────────────────────┐│
 │                      ││                     │✓ message from 61ddb79ada973523││
 └──────────────────────┘└─────────────────────└───────────────────────────────┘┘
-┌● compose─────────────────────────────────────────────────────────────────────┐
+┌● compose───────────────────────────────────── Enter send · Alt-Enter newline ┐
 │                                                                              │
 └──────────────────────────────────────────────────────────────────────────────┘
-Enter send │ Esc messages │ Tab pane │ ^P palette │ ? help
+Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit

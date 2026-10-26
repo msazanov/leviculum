@@ -1,0 +1,431 @@
+=== vi ===
+--- frame 1: attached ---
+┌● lnmsg afbda7b3──────┐┌  61ddb79ada973523799227bbaf41e204────────────────────┐
+│▸ 61ddb79ada973523    ││No history yet: this session's messages only.         │
+│  5ec0ea2ecbc35ac1    ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+└──────────────────────┘└──────────────────────────────────────────────────────┘
+┌  compose───────────────────────────────────── Enter send · Alt-Enter newline ┐
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+--- frame 2: second ---
+┌● lnmsg afbda7b3──────┐┌  5ec0ea2ecbc35ac16053c86cc29663ec────────────────────┐
+│  61ddb79ada973523    ││No history yet: this session's messages only.         │
+│▸ 5ec0ea2ecbc35ac1    ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+└──────────────────────┘└──────────────────────────────────────────────────────┘
+┌  compose───────────────────────────────────── Enter send · Alt-Enter newline ┐
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+--- frame 3: first ---
+┌● lnmsg afbda7b3──────┐┌  61ddb79ada973523799227bbaf41e204────────────────────┐
+│▸ 61ddb79ada973523    ││No history yet: this session's messages only.         │
+│  5ec0ea2ecbc35ac1    ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+└──────────────────────┘└──────────────────────────────────────────────────────┘
+┌  compose───────────────────────────────────── Enter send · Alt-Enter newline ┐
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+--- frame 4: messages ---
+┌  lnmsg afbda7b3──────┐┌● 61ddb79ada973523799227bbaf41e204────────────────────┐
+│▸ 61ddb79ada973523    ││No history yet: this session's messages only.         │
+│  5ec0ea2ecbc35ac1    ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+└──────────────────────┘└──────────────────────────────────────────────────────┘
+┌  compose───────────────────────────────────── Enter send · Alt-Enter newline ┐
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+--- frame 5: compose ---
+┌  lnmsg afbda7b3──────┐┌  61ddb79ada973523799227bbaf41e204────────────────────┐
+│▸ 61ddb79ada973523    ││No history yet: this session's messages only.         │
+│  5ec0ea2ecbc35ac1    ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+└──────────────────────┘└──────────────────────────────────────────────────────┘
+┌● compose───────────────────────────────────── Enter send · Alt-Enter newline ┐
+│hello                                                                         │
+└──────────────────────────────────────────────────────────────────────────────┘
+Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
+--- frame 6: list ---
+┌● lnmsg afbda7b3──────┐┌  61ddb79ada973523799227bbaf41e204────────────────────┐
+│▸ 61ddb79ada973523    ││No history yet: this session's messages only.         │
+│  5ec0ea2ecbc35ac1    ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+└──────────────────────┘└──────────────────────────────────────────────────────┘
+┌  compose───────────────────────────────────── Enter send · Alt-Enter newline ┐
+│hello                                                                         │
+└──────────────────────────────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+--- frame 7: help ---
+┌ lnmsg help ──────────────────────────────────────────────────────────────────┐
+│Move                                                                          █
+│  j / k   ↓ / ↑   Ctrl-n / Ctrl-p               scroll a line                 █
+│  Ctrl-f / Ctrl-b   Ctrl-v   PageDown / PageUp  page down / up                █
+│  Ctrl-d / Ctrl-u                               half a page                   █
+│  g / G   Home / End                            top / bottom                  ║
+│  Ctrl-↑ / Ctrl-↓                               top / bottom (Signal)         ║
+│  PageDown / PageUp                             page the messages (compose)   ║
+│                                                                              ║
+│Conversations                                                                 ║
+│  Enter                                         open the selected conversation║
+│  Alt-↑   Ctrl-Shift-Tab                        previous conversation         ║
+│  Alt-↓   Ctrl-Tab                              next conversation             ║
+│  Alt-Shift-↑                                   previous unread               ║
+│  Alt-Shift-↓                                   next unread                   ║
+└──────────────────────────────────────────────────────────────────────────────┘
+--- frame 8: closed ---
+┌● lnmsg afbda7b3──────┐┌  61ddb79ada973523799227bbaf41e204────────────────────┐
+│▸ 61ddb79ada973523    ││No history yet: this session's messages only.         │
+│  5ec0ea2ecbc35ac1    ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+└──────────────────────┘└──────────────────────────────────────────────────────┘
+┌  compose───────────────────────────────────── Enter send · Alt-Enter newline ┐
+│hello                                                                         │
+└──────────────────────────────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+=== emacs ===
+--- frame 1: attached ---
+┌● lnmsg afbda7b3──────┐┌  61ddb79ada973523799227bbaf41e204────────────────────┐
+│▸ 61ddb79ada973523    ││No history yet: this session's messages only.         │
+│  5ec0ea2ecbc35ac1    ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+└──────────────────────┘└──────────────────────────────────────────────────────┘
+┌  compose───────────────────────────────────── Enter send · Alt-Enter newline ┐
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+--- frame 2: second ---
+┌● lnmsg afbda7b3──────┐┌  5ec0ea2ecbc35ac16053c86cc29663ec────────────────────┐
+│  61ddb79ada973523    ││No history yet: this session's messages only.         │
+│▸ 5ec0ea2ecbc35ac1    ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+└──────────────────────┘└──────────────────────────────────────────────────────┘
+┌  compose───────────────────────────────────── Enter send · Alt-Enter newline ┐
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+--- frame 3: first ---
+┌● lnmsg afbda7b3──────┐┌  61ddb79ada973523799227bbaf41e204────────────────────┐
+│▸ 61ddb79ada973523    ││No history yet: this session's messages only.         │
+│  5ec0ea2ecbc35ac1    ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+└──────────────────────┘└──────────────────────────────────────────────────────┘
+┌  compose───────────────────────────────────── Enter send · Alt-Enter newline ┐
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+--- frame 4: messages ---
+┌  lnmsg afbda7b3──────┐┌● 61ddb79ada973523799227bbaf41e204────────────────────┐
+│▸ 61ddb79ada973523    ││No history yet: this session's messages only.         │
+│  5ec0ea2ecbc35ac1    ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+└──────────────────────┘└──────────────────────────────────────────────────────┘
+┌  compose───────────────────────────────────── Enter send · Alt-Enter newline ┐
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+--- frame 5: compose ---
+┌  lnmsg afbda7b3──────┐┌  61ddb79ada973523799227bbaf41e204────────────────────┐
+│▸ 61ddb79ada973523    ││No history yet: this session's messages only.         │
+│  5ec0ea2ecbc35ac1    ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+└──────────────────────┘└──────────────────────────────────────────────────────┘
+┌● compose───────────────────────────────────── Enter send · Alt-Enter newline ┐
+│hello                                                                         │
+└──────────────────────────────────────────────────────────────────────────────┘
+Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
+--- frame 6: list ---
+┌● lnmsg afbda7b3──────┐┌  61ddb79ada973523799227bbaf41e204────────────────────┐
+│▸ 61ddb79ada973523    ││No history yet: this session's messages only.         │
+│  5ec0ea2ecbc35ac1    ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+└──────────────────────┘└──────────────────────────────────────────────────────┘
+┌  compose───────────────────────────────────── Enter send · Alt-Enter newline ┐
+│hello                                                                         │
+└──────────────────────────────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+--- frame 7: help ---
+┌ lnmsg help ──────────────────────────────────────────────────────────────────┐
+│Move                                                                          █
+│  j / k   ↓ / ↑   Ctrl-n / Ctrl-p               scroll a line                 █
+│  Ctrl-f / Ctrl-b   Ctrl-v   PageDown / PageUp  page down / up                █
+│  Ctrl-d / Ctrl-u                               half a page                   █
+│  g / G   Home / End                            top / bottom                  ║
+│  Ctrl-↑ / Ctrl-↓                               top / bottom (Signal)         ║
+│  PageDown / PageUp                             page the messages (compose)   ║
+│                                                                              ║
+│Conversations                                                                 ║
+│  Enter                                         open the selected conversation║
+│  Alt-↑   Ctrl-Shift-Tab                        previous conversation         ║
+│  Alt-↓   Ctrl-Tab                              next conversation             ║
+│  Alt-Shift-↑                                   previous unread               ║
+│  Alt-Shift-↓                                   next unread                   ║
+└──────────────────────────────────────────────────────────────────────────────┘
+--- frame 8: closed ---
+┌● lnmsg afbda7b3──────┐┌  61ddb79ada973523799227bbaf41e204────────────────────┐
+│▸ 61ddb79ada973523    ││No history yet: this session's messages only.         │
+│  5ec0ea2ecbc35ac1    ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+└──────────────────────┘└──────────────────────────────────────────────────────┘
+┌  compose───────────────────────────────────── Enter send · Alt-Enter newline ┐
+│hello                                                                         │
+└──────────────────────────────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+=== enhanced ===
+--- frame 1: body ---
+┌  lnmsg afbda7b3──────┐┌  61ddb79ada973523799227bbaf41e204────────────────────┐
+│▸ 61ddb79ada973523    ││No history yet: this session's messages only.         │
+│  5ec0ea2ecbc35ac1    ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+└──────────────────────┘└──────────────────────────────────────────────────────┘
+┌● compose─────────────────────────────────── Enter send · Shift-Enter newline ┐
+│one                                                                           │
+│two                                                                           │
+└──────────────────────────────────────────────────────────────────────────────┘
+Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
+--- frame 2: sent ---
+┌  lnmsg afbda7b3──────┐┌  61ddb79ada973523799227bbaf41e204────────────────────┐
+│▸ 61ddb79ada973523    ││▸ ○ me: one                                           │
+│  5ec0ea2ecbc35ac1    ││    two                                               │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+└──────────────────────┘└──────────────────────────────────────────────────────┘
+┌● compose─────────────────────────────────── Enter send · Shift-Enter newline ┐
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
+--- frame 3: ctrl-c ---
+┌● lnmsg afbda7b3──────┐┌  61ddb79ada973523799227bbaf41e204────────────────────┐
+│▸ 61ddb79ada973523    ││▸ ○ me: one                                           │
+│  5ec0ea2ecbc35ac1    ││    two                                               │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                      ┌──────────────┐│
+│                      ││                                      │✓ Ctrl-q quits││
+└──────────────────────┘└──────────────────────────────────────└──────────────┘┘
+┌  compose─────────────────────────────────── Enter send · Shift-Enter newline ┐
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+--- frame 4: still here ---
+┌● lnmsg afbda7b3──────┐┌  5ec0ea2ecbc35ac16053c86cc29663ec────────────────────┐
+│  61ddb79ada973523    ││No history yet: this session's messages only.         │
+│▸ 5ec0ea2ecbc35ac1    ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                      ┌──────────────┐│
+│                      ││                                      │✓ Ctrl-q quits││
+└──────────────────────┘└──────────────────────────────────────└──────────────┘┘
+┌  compose─────────────────────────────────── Enter send · Shift-Enter newline ┐
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+=== plain-alt-enter ===
+--- frame 1: body ---
+┌  lnmsg afbda7b3──────┐┌  61ddb79ada973523799227bbaf41e204────────────────────┐
+│▸ 61ddb79ada973523    ││No history yet: this session's messages only.         │
+│  5ec0ea2ecbc35ac1    ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+└──────────────────────┘└──────────────────────────────────────────────────────┘
+┌● compose───────────────────────────────────── Enter send · Alt-Enter newline ┐
+│one                                                                           │
+│two                                                                           │
+└──────────────────────────────────────────────────────────────────────────────┘
+Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
+=== plain-ctrl-j ===
+--- frame 1: body ---
+┌  lnmsg afbda7b3──────┐┌  61ddb79ada973523799227bbaf41e204────────────────────┐
+│▸ 61ddb79ada973523    ││No history yet: this session's messages only.         │
+│  5ec0ea2ecbc35ac1    ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+└──────────────────────┘└──────────────────────────────────────────────────────┘
+┌● compose───────────────────────────────────── Enter send · Alt-Enter newline ┐
+│one                                                                           │
+│two                                                                           │
+└──────────────────────────────────────────────────────────────────────────────┘
+Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
+=== enter-off ===
+--- frame 1: switched ---
+┌● lnmsg afbda7b3──────┐┌  61ddb79ada973523799227bbaf41e204────────────────────┐
+│▸ 61ddb79ada973523    ││No history yet: this session's messages only.         │
+│  5ec0ea2ecbc35ac1    ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                    ┌────────────────────────────────┐│
+│                      ││                    │✓ Alt-Enter send · Enter newline││
+└──────────────────────┘└────────────────────└────────────────────────────────┘┘
+┌  compose───────────────────────────────────── Alt-Enter send · Enter newline ┐
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+--- frame 2: body ---
+┌  lnmsg afbda7b3──────┐┌  61ddb79ada973523799227bbaf41e204────────────────────┐
+│▸ 61ddb79ada973523    ││No history yet: this session's messages only.         │
+│  5ec0ea2ecbc35ac1    ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                    ┌────────────────────────────────┐│
+│                      ││                    │✓ Alt-Enter send · Enter newline││
+└──────────────────────┘└────────────────────└────────────────────────────────┘┘
+┌● compose───────────────────────────────────── Alt-Enter send · Enter newline ┐
+│one                                                                           │
+│two                                                                           │
+└──────────────────────────────────────────────────────────────────────────────┘
+Alt-Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
+--- frame 3: sent ---
+┌  lnmsg afbda7b3──────┐┌  61ddb79ada973523799227bbaf41e204────────────────────┐
+│▸ 61ddb79ada973523    ││▸ ○ me: one                                           │
+│  5ec0ea2ecbc35ac1    ││    two                                               │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                                                      │
+│                      ││                    ┌────────────────────────────────┐│
+│                      ││                    │✓ Alt-Enter send · Enter newline││
+└──────────────────────┘└────────────────────└────────────────────────────────┘┘
+┌● compose───────────────────────────────────── Alt-Enter send · Enter newline ┐
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+Alt-Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit

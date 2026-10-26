@@ -21,7 +21,10 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
-use crossterm::event::{Event, EventStream};
+use crossterm::event::{
+    Event, EventStream, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
+};
 use futures::StreamExt;
 use ratatui::backend::{CrosstermBackend, TestBackend};
 use ratatui::layout::{Constraint, Layout, Position, Rect};
@@ -38,7 +41,7 @@ use leviculum_ui::input::{KeyCode, KeyEvent, KeyModifiers};
 use leviculum_ui::theme::{resolve_theme, Theme, ThemeFlag};
 use leviculum_ui_ratatui::background::detect_background;
 use leviculum_ui_ratatui::event::{key_event, step_event, EventStep};
-use leviculum_ui_ratatui::terminal::install_panic_hook;
+use leviculum_ui_ratatui::terminal::{install_panic_hook, TerminalOps};
 use leviculum_ui_ratatui::{help, to_ratatui_text, toast, CrosstermTerminal, TerminalGuard};
 
 use lnmsg::clock::Tokio;
@@ -51,7 +54,7 @@ use lnmsg::outbox::{SendRequest, Via};
 use lnmsg::seen::{SeenStore, SeenWrite};
 use lnmsg::send::{run_send_auto, AutoError, Leg, SendError, SendOptions};
 use lnmsg::ui::{self, help_groups, update, Pane, UiEffect, UiEvent, UiModel, View};
-use lnmsg::{display_name, identity};
+use lnmsg::{display_name, identity, keys};
 
 /// The model as the terminal holds it: its text fields are `tui-input`'s.
 type Model = UiModel<Input>;
@@ -163,6 +166,8 @@ struct Shell {
     afterwards: Vec<String>,
     /// The engine stopped answering.
     gone: bool,
+    /// The reader asked for the screen to be drawn again from scratch.
+    redraw: bool,
 }
 
 impl Shell {
@@ -173,6 +178,7 @@ impl Shell {
                 UiEffect::Send { to, body } => self.jobs.push_back(Job::Send { to, body }),
                 UiEffect::Fetch => self.jobs.push_back(Job::Fetch),
                 UiEffect::Quit => {}
+                UiEffect::Redraw => self.redraw = true,
                 UiEffect::Notice(line) => self.afterwards.push(line),
             }
         }
@@ -388,8 +394,13 @@ pub async fn run(options: TuiOptions) -> ExitCode {
         Err(error) => return super::failure(error, "no-daemon"),
     };
 
+    let config = match lnmsg::config::load(&home) {
+        Ok(config) => config,
+        Err(error) => return super::usage(error.to_string()),
+    };
     let mut model = Model::new(&options.to);
     model.ascii = options.ascii;
+    model.send_on_enter = config.send_on_enter.unwrap_or(true);
     let (done_tx, done_rx) = unbounded_channel();
     let mut shell = Shell {
         model,
@@ -414,6 +425,7 @@ pub async fn run(options: TuiOptions) -> ExitCode {
         legs_rx,
         afterwards: Vec::new(),
         gone: false,
+        redraw: false,
     };
 
     let outcome = match &options.script {
@@ -442,13 +454,70 @@ pub async fn run(options: TuiOptions) -> ExitCode {
     }
 }
 
+/// The terminal with the keyboard enhancement protocol on top, where the
+/// terminal speaks it: `Shift-Enter` and `Ctrl-Enter` then arrive as
+/// themselves (lnmsg-keys-and-layout.md, section 3, "What the terminal can and
+/// cannot send"). Pushed after the screen is entered and popped before it is
+/// left, so the guard pops it on every way out; the panic hook pops it too.
+struct KeysTerminal {
+    inner: CrosstermTerminal,
+    enhanced: bool,
+}
+
+impl TerminalOps for KeysTerminal {
+    fn enter(&mut self) -> std::io::Result<()> {
+        self.inner.enter()?;
+        if self.enhanced {
+            crossterm::execute!(
+                std::io::stdout(),
+                PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+            )?;
+        }
+        Ok(())
+    }
+
+    fn restore(&mut self) -> std::io::Result<()> {
+        if self.enhanced {
+            let _ = crossterm::execute!(std::io::stdout(), PopKeyboardEnhancementFlags);
+        }
+        self.inner.restore()
+    }
+}
+
+/// The once-at-start `tui.log` line naming the chords live in this terminal.
+fn log_keys(model: &Model) {
+    let ctx = model.ctx();
+    tracing::info!(
+        "KEYS enhancement={} newline={} send={}",
+        if model.enhanced { "yes" } else { "no" },
+        keys::newline_chord(ctx),
+        keys::send_chord(ctx)
+    );
+}
+
 /// The real terminal: keys in, frames out, until the reader quits.
 async fn run_terminal(shell: &mut Shell, options: &TuiOptions) -> Result<(), String> {
     install_panic_hook();
     // Before the alternate screen, as lnomad does: the background query reads
-    // its answer on stdin, which raw mode would hand to the key handler.
+    // its answer on stdin, which raw mode would hand to the key handler. The
+    // keyboard query likewise.
     let theme = resolve_theme(detect_background(ThemeFlag::Auto), ThemeFlag::Auto);
-    let mut guard = TerminalGuard::new(CrosstermTerminal::new()).map_err(|e| e.to_string())?;
+    let enhanced = crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false);
+    if enhanced {
+        // Runs before install_panic_hook's restore, which leaves the screen.
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let _ = crossterm::execute!(std::io::stdout(), PopKeyboardEnhancementFlags);
+            previous(info);
+        }));
+    }
+    shell.model.enhanced = enhanced;
+    log_keys(&shell.model);
+    let mut guard = TerminalGuard::new(KeysTerminal {
+        inner: CrosstermTerminal::new(),
+        enhanced,
+    })
+    .map_err(|e| e.to_string())?;
     let mut terminal =
         Terminal::new(CrosstermBackend::new(std::io::stdout())).map_err(|e| e.to_string())?;
     let mut events = EventStream::new();
@@ -458,6 +527,12 @@ async fn run_terminal(shell: &mut Shell, options: &TuiOptions) -> Result<(), Str
     pump.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     let result = loop {
+        if shell.redraw {
+            shell.redraw = false;
+            if let Err(error) = terminal.clear() {
+                break Err(error.to_string());
+            }
+        }
         let view = ui::view(&shell.model);
         if let Err(error) = terminal.draw(|frame| draw(frame, &view, theme, options.no_color)) {
             break Err(error.to_string());
@@ -540,6 +615,8 @@ impl Until {
 #[derive(Debug)]
 enum Step {
     Key(KeyEvent),
+    /// The terminal world the script plays: enhanced or plain keyboard.
+    Keyboard(bool),
     Type(String),
     Tick(u32),
     Frame(String),
@@ -548,32 +625,60 @@ enum Step {
 }
 
 /// The script's key names: `tab`, `backtab`, `enter`, `esc`, `up`, `down`,
-/// `home`, `end`, `backspace`, `ctrl-<c>`, or one character.
+/// `left`, `right`, `home`, `end`, `pageup`, `pagedown`, `backspace`,
+/// `delete`, `space`, `f1` to `f12`, or one character, each after any of the
+/// prefixes `ctrl-`, `alt-` and `shift-` (`shift-enter`, `ctrl-enter`,
+/// `alt-<`, `ctrl-j`). An uppercase letter carries its Shift. A chord only an
+/// enhanced terminal sends is delivered as such whatever the host terminal
+/// is, so a script pins both worlds (`keyboard enhanced` sets which one the
+/// screen believes it is in).
 fn parse_key(name: &str) -> Result<KeyEvent, String> {
-    let plain = |code| Ok(KeyEvent::new(code, KeyModifiers::NONE));
-    match name {
-        "tab" => plain(KeyCode::Tab),
-        "backtab" => Ok(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT)),
-        "enter" => plain(KeyCode::Enter),
-        "esc" => plain(KeyCode::Esc),
-        "up" => plain(KeyCode::Up),
-        "down" => plain(KeyCode::Down),
-        "home" => plain(KeyCode::Home),
-        "end" => plain(KeyCode::End),
-        "backspace" => plain(KeyCode::Backspace),
-        other => {
-            if let Some(c) = other.strip_prefix("ctrl-").and_then(single) {
-                return Ok(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL));
-            }
-            match single(other) {
-                Some(c) if c.is_uppercase() => {
-                    Ok(KeyEvent::new(KeyCode::Char(c), KeyModifiers::SHIFT))
-                }
-                Some(c) => plain(KeyCode::Char(c)),
-                None => Err(format!("unknown key {other:?}")),
-            }
-        }
+    let mut mods = KeyModifiers::NONE;
+    let mut rest = name;
+    loop {
+        let (prefix, flag) = match rest {
+            r if r.starts_with("ctrl-") && r.len() > 5 => ("ctrl-", KeyModifiers::CONTROL),
+            r if r.starts_with("alt-") && r.len() > 4 => ("alt-", KeyModifiers::ALT),
+            r if r.starts_with("shift-") && r.len() > 6 => ("shift-", KeyModifiers::SHIFT),
+            _ => break,
+        };
+        mods |= flag;
+        rest = &rest[prefix.len()..];
     }
+    let code = match rest {
+        "tab" => KeyCode::Tab,
+        "backtab" => {
+            mods |= KeyModifiers::SHIFT;
+            KeyCode::BackTab
+        }
+        "enter" => KeyCode::Enter,
+        "esc" => KeyCode::Esc,
+        "up" => KeyCode::Up,
+        "down" => KeyCode::Down,
+        "left" => KeyCode::Left,
+        "right" => KeyCode::Right,
+        "home" => KeyCode::Home,
+        "end" => KeyCode::End,
+        "pageup" => KeyCode::PageUp,
+        "pagedown" => KeyCode::PageDown,
+        "backspace" => KeyCode::Backspace,
+        "delete" => KeyCode::Delete,
+        "space" => KeyCode::Char(' '),
+        other => match (single(other), other.strip_prefix('f')) {
+            (Some(c), _) => {
+                if c.is_uppercase() {
+                    mods |= KeyModifiers::SHIFT;
+                }
+                KeyCode::Char(c)
+            }
+            (None, Some(n)) => match n.parse::<u8>() {
+                Ok(n @ 1..=12) => KeyCode::F(n),
+                _ => return Err(format!("unknown key {name:?}")),
+            },
+            (None, None) => return Err(format!("unknown key {name:?}")),
+        },
+    };
+    Ok(KeyEvent::new(code, mods))
 }
 
 fn single(text: &str) -> Option<char> {
@@ -602,6 +707,9 @@ fn parse_state(name: &str) -> Result<DeliveryState, String> {
 /// key <name>                     one key (see parse_key)
 /// type <text>                    each character of the rest of the line
 /// newline                        Alt-Enter: a line break in compose
+/// keyboard <enhanced|plain>      the terminal world the screen is told it
+///                                is in (plain until said): its hints offer
+///                                Shift-Enter and Ctrl-Enter only when enhanced
 /// tick [n]                       n spinner/toast ticks (1)
 /// frame [label]                  dump the screen
 /// until ready [secs]             the engine is attached
@@ -636,6 +744,11 @@ fn parse_script(text: &str) -> Result<Vec<Step>, String> {
             "key" => Step::Key(parse_key(rest.trim()).map_err(at)?),
             "type" => Step::Type(rest.to_string()),
             "newline" => Step::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT)),
+            "keyboard" => match rest.trim() {
+                "enhanced" => Step::Keyboard(true),
+                "plain" => Step::Keyboard(false),
+                other => return Err(at(format!("unknown keyboard {other:?}"))),
+            },
             "tick" => Step::Tick(match rest.trim() {
                 "" => 1,
                 n => n.parse().map_err(|_| at(format!("bad tick count {n:?}")))?,
@@ -712,6 +825,7 @@ async fn run_script(
 ) -> Result<(), String> {
     let text = std::fs::read_to_string(script).map_err(|e| format!("{}: {e}", script.display()))?;
     let steps = parse_script(&text).map_err(|e| format!("{}: {e}", script.display()))?;
+    log_keys(&shell.model);
     let mut out =
         std::fs::File::create(frames).map_err(|e| format!("{}: {e}", frames.display()))?;
     let (width, height) = options.size;
@@ -731,6 +845,7 @@ async fn run_script(
     for step in steps {
         match step {
             Step::Key(key) => shell.apply(UiEvent::Key(key)),
+            Step::Keyboard(enhanced) => shell.model.enhanced = enhanced,
             Step::Type(text) => {
                 for c in text.chars() {
                     shell.apply(UiEvent::Key(KeyEvent::new(
@@ -744,7 +859,11 @@ async fn run_script(
                     shell.apply(UiEvent::Tick);
                 }
             }
-            Step::Frame(label) => dump(&mut terminal, &shell.model, &label)?,
+            Step::Frame(label) => {
+                // A script's screen is drawn whole every frame anyway.
+                shell.redraw = false;
+                dump(&mut terminal, &shell.model, &label)?
+            }
             Step::Until(until, within) => {
                 let deadline = tokio::time::Instant::now() + within;
                 loop {
@@ -846,7 +965,8 @@ pub fn draw(frame: &mut Frame, view: &View, theme: Theme, no_color: bool) {
     // The compose pane: one row a line, up to five, scrolled to the
     // cursor's line and, sideways, to its column.
     let focused = view.focus == Pane::Compose;
-    let block = pane_block("compose", focused);
+    let block = pane_block("compose", focused)
+        .title_top(Line::from(format!(" {} ", view.compose_hint)).right_aligned());
     let inner = block.inner(compose);
     frame.render_widget(block, compose);
     let (cursor_line, cursor_column) = line_and_column(&view.compose, view.compose_cursor);
@@ -1021,6 +1141,83 @@ mod tests {
         assert_eq!(model.compose.value(), "hi");
     }
 
+    /// The enhanced chords and the modifier prefixes parse, in any order of
+    /// prefixes, and the keyboard step names the world.
+    #[test]
+    fn script_keys_spell_the_enhanced_chords() {
+        let parsed = |name: &str| parse_key(name).expect(name);
+        assert_eq!(
+            parsed("shift-enter"),
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT)
+        );
+        assert_eq!(
+            parsed("ctrl-enter"),
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL)
+        );
+        assert_eq!(
+            parsed("alt-<"),
+            KeyEvent::new(KeyCode::Char('<'), KeyModifiers::ALT)
+        );
+        assert_eq!(
+            parsed("ctrl-shift-T"),
+            KeyEvent::new(
+                KeyCode::Char('T'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT
+            )
+        );
+        assert_eq!(
+            parsed("f5"),
+            KeyEvent::new(KeyCode::F(5), KeyModifiers::NONE)
+        );
+        assert_eq!(
+            parsed("f"),
+            KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE)
+        );
+        assert_eq!(
+            parsed("-"),
+            KeyEvent::new(KeyCode::Char('-'), KeyModifiers::NONE)
+        );
+        assert!(parse_key("ctrl-").is_err());
+        assert!(parse_key("f13").is_err());
+        let steps = parse_script("keyboard enhanced\nkeyboard plain\n").expect("parses");
+        assert!(matches!(steps[0], Step::Keyboard(true)));
+        assert!(matches!(steps[1], Step::Keyboard(false)));
+        assert!(parse_script("keyboard fancy\n").is_err());
+    }
+
+    /// In the terminal's field the Emacs line keys are line motions: after a
+    /// `Ctrl-j`, `Ctrl-a` goes to the second line's start, `Ctrl-p` up to
+    /// the first, `Alt->` to the body's end.
+    #[test]
+    fn compose_line_keys_move_by_line_in_the_real_field() {
+        let mut model = Model::new(&[[0xab; 16]]);
+        for name in ["tab", "tab", "a", "b", "ctrl-j", "c", "d", "ctrl-a"] {
+            update(&mut model, UiEvent::Key(parse_key(name).expect("key")));
+        }
+        assert_eq!(model.compose.value(), "ab\ncd");
+        assert_eq!(model.compose.cursor(), 3);
+        update(&mut model, UiEvent::Key(parse_key("ctrl-p").expect("key")));
+        assert_eq!(model.compose.cursor(), 0);
+        assert!(model.palette.is_none());
+        update(&mut model, UiEvent::Key(parse_key("alt->").expect("key")));
+        assert_eq!(model.compose.cursor(), 5);
+        update(&mut model, UiEvent::Key(parse_key("ctrl-n").expect("key")));
+        assert_eq!(model.compose.cursor(), 5, "no line below the last");
+    }
+
+    /// The compose pane's border carries the live chords.
+    #[test]
+    fn the_compose_border_shows_the_live_hint() {
+        let mut model = Model::new(&[[0xab; 16]]);
+        assert!(
+            render(&model).contains("Enter send · Alt-Enter newline"),
+            "{}",
+            render(&model)
+        );
+        model.enhanced = true;
+        assert!(render(&model).contains("Enter send · Shift-Enter newline"));
+    }
+
     #[test]
     fn the_newline_step_is_alt_enter() {
         let steps = parse_script("newline\n").expect("parses");
@@ -1135,7 +1332,7 @@ mod tests {
         update(&mut model, UiEvent::Key(parse_key("?").expect("key")));
         assert!(render(&model).contains("lnmsg help"));
         update(&mut model, UiEvent::Key(parse_key("esc").expect("key")));
-        update(&mut model, UiEvent::Key(parse_key("ctrl-p").expect("key")));
+        update(&mut model, UiEvent::Key(parse_key(":").expect("key")));
         let screen = render(&model);
         assert!(screen.contains("commands"), "{screen}");
         assert!(screen.contains("▸ send"), "{screen}");

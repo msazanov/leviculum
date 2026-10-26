@@ -10,10 +10,13 @@
 //! effects and the view directly.
 //!
 //! Three panes, focus follows the pane: conversations, messages, compose.
-//! `Tab` and `Shift-Tab` cycle; the two command panes take lnomad's keymap
-//! (`j`/`k`, `g`/`G`, `Enter`, `?`, `q`); compose takes plain typing; the
-//! palette (`Ctrl-P`) is layered on top over the shared table in
-//! [`leviculum_ui::commands`]. No modes.
+//! What a key does is one table, [`crate::keys`]: lnomad's scroll rows in
+//! the two command panes, lnmsg's own rows beside them, each chord with the
+//! panes it applies in. The key handler, the help overlay, the footer, the
+//! palette's keys and the compose pane's hint all read it
+//! (`docs/src/concepts/lnmsg-keys-and-layout.md`, section 4). Compose takes
+//! plain typing; the palette (`:` or `Alt-x`) is layered on top over the
+//! shared names in [`leviculum_ui::commands`]. No modes.
 //!
 //! # What a delivery glyph claims
 //!
@@ -42,12 +45,14 @@ use leviculum_lxmf::router::MessageState;
 use leviculum_ui::commands::{self, Command as PaletteCommand, PaletteEntry};
 use leviculum_ui::delivery::{glyph, DeliveryState, Tone};
 use leviculum_ui::footer::{FooterItem, FooterRole};
-use leviculum_ui::help::{HelpEntry, HelpGroup};
+use leviculum_ui::help::HelpGroup;
 use leviculum_ui::input::{InputBuffer, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use leviculum_ui::keymap::{Ctx, ScrollCmd};
 use leviculum_ui::toast::{Toast, ToastKind};
 use leviculum_ui::{RLine, RStyle, StyledChar};
 
 use crate::address::to_hex;
+use crate::keys::{self, Action};
 use crate::outbox::OutboxEvent;
 use crate::send::Leg;
 
@@ -61,6 +66,10 @@ const TICKS_PER_SECOND: u64 = 4;
 /// Hex characters of an address a pane shows; the full address is in the
 /// title bar of the messages pane.
 const SHORT_HEX: usize = 16;
+
+/// How far a page motion moves a list's cursor. The model does not know the
+/// pane's height; ten rows is a page at 80 x 24.
+const PAGE_ITEMS: usize = 10;
 
 /// A pane, and where the focus is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -187,6 +196,14 @@ pub struct UiModel<B> {
     pub sending: VecDeque<(usize, usize)>,
     /// Whether a fetch is running.
     pub fetching: bool,
+    /// Whether the terminal speaks the keyboard enhancement protocol, so
+    /// `Shift-Enter` and `Ctrl-Enter` arrive as themselves: the hint and the
+    /// footer offer them then.
+    pub enhanced: bool,
+    /// `Enter` in compose sends (the default). Off, it breaks the line and
+    /// the modifier chord sends: `Ctrl-Enter` with enhancement, `Alt-Enter`
+    /// without.
+    pub send_on_enter: bool,
 }
 
 impl<B: InputBuffer + Default> UiModel<B> {
@@ -208,6 +225,8 @@ impl<B: InputBuffer + Default> UiModel<B> {
             quit: false,
             sending: VecDeque::new(),
             fetching: false,
+            enhanced: false,
+            send_on_enter: true,
         };
         for peer in peers {
             model.conversation(*peer);
@@ -217,6 +236,19 @@ impl<B: InputBuffer + Default> UiModel<B> {
 }
 
 impl<B> UiModel<B> {
+    /// The keymap's context: the terminal's keyboard protocol and the
+    /// `send_on_enter` switch.
+    pub fn ctx(&self) -> Ctx {
+        let mut ctx = Ctx::NONE;
+        if self.enhanced {
+            ctx = ctx.with(Ctx::ENHANCED);
+        }
+        if !self.send_on_enter {
+            ctx = ctx.with(keys::ENTER_BREAKS);
+        }
+        ctx
+    }
+
     /// The selected conversation's messages.
     pub fn messages_of_selected(&self) -> &[Message] {
         self.conversations
@@ -299,6 +331,8 @@ pub enum UiEffect {
     Fetch,
     /// Leave.
     Quit,
+    /// Draw the whole screen again from scratch (`Ctrl-l`).
+    Redraw,
     /// A line worth keeping after the screen is gone: the shell prints it
     /// once the terminal is restored. A toast is cut to the screen's width,
     /// and a failure's full text is often longer.
@@ -350,142 +384,208 @@ pub fn update<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) 
     }
 }
 
-fn ctrl(key: &KeyEvent, c: char) -> bool {
-    key.code == KeyCode::Char(c) && key.modifiers == KeyModifiers::CONTROL
+fn on_key<B: InputBuffer + Default>(model: &mut UiModel<B>, key: KeyEvent) -> Vec<UiEffect> {
+    let ctx = model.ctx();
+    if model.help || model.palette.is_some() {
+        // Only `Ctrl-q`, `Ctrl-c` and backing out reach past an overlay.
+        match keys::resolve(&key, keys::OVERLAY, ctx) {
+            Some(Action::Run(PaletteCommand::Quit)) => return run(model, PaletteCommand::Quit),
+            Some(Action::QuitHint) => return quit_hint(model),
+            Some(Action::Back) => {
+                model.help = false;
+                model.palette = None;
+                return Vec::new();
+            }
+            _ => {}
+        }
+        return overlay_key(model, key);
+    }
+    let pane = model.focus;
+    match keys::resolve(&key, keys::panes_of(pane), ctx) {
+        Some(action) => act(model, action, key),
+        None => {
+            if pane == Pane::Compose {
+                model.compose.edit(&key);
+            }
+            Vec::new()
+        }
+    }
 }
 
-fn on_key<B: InputBuffer + Default>(model: &mut UiModel<B>, key: KeyEvent) -> Vec<UiEffect> {
-    // `Ctrl-Q` quits from anywhere. `Ctrl-C` does not in the compose pane:
-    // there it is a reflex that would throw a half-written message away
-    // (lnmsg-ui.md, section 1, "What must not be copied"), so it clears the
-    // line into the field's kill buffer, back with `Ctrl-Y`.
-    if ctrl(&key, 'q') {
-        return run(model, PaletteCommand::Quit);
-    }
-    if ctrl(&key, 'c') {
-        if model.focus == Pane::Compose && model.palette.is_none() && !model.help {
-            model
-                .compose
-                .edit(&KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
-            return Vec::new();
-        }
-        return run(model, PaletteCommand::Quit);
-    }
+/// A key while the help or the palette is up.
+fn overlay_key<B: InputBuffer + Default>(model: &mut UiModel<B>, key: KeyEvent) -> Vec<UiEffect> {
     if model.help {
         if matches!(
             key.code,
-            KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q') | KeyCode::Enter
+            KeyCode::Char('?') | KeyCode::Char('q') | KeyCode::Enter
         ) {
             model.help = false;
         }
         return Vec::new();
     }
-    if let Some(palette) = model.palette.as_mut() {
-        match key.code {
-            KeyCode::Esc => model.palette = None,
-            KeyCode::Enter => {
-                let chosen = palette.matches().get(palette.selected).map(|e| e.command);
-                model.palette = None;
-                if let Some(command) = chosen {
-                    return run(model, command);
-                }
-            }
-            KeyCode::Down => {
-                let last = palette.matches().len().saturating_sub(1);
-                palette.selected = (palette.selected + 1).min(last);
-            }
-            KeyCode::Up => palette.selected = palette.selected.saturating_sub(1),
-            _ => {
-                if palette.query.edit(&key) {
-                    palette.selected = 0;
-                }
-            }
-        }
+    let Some(palette) = model.palette.as_mut() else {
         return Vec::new();
-    }
-    // `Ctrl-P` everywhere, and `:` where a key is a command.
-    if ctrl(&key, 'p') || (key.code == KeyCode::Char(':') && model.focus != Pane::Compose) {
-        model.palette = Some(Palette::default());
-        return Vec::new();
-    }
+    };
     match key.code {
-        KeyCode::Tab => {
-            model.focus = model.focus.next();
-            return Vec::new();
+        KeyCode::Enter => {
+            let chosen = palette.matches().get(palette.selected).map(|e| e.command);
+            model.palette = None;
+            if let Some(command) = chosen {
+                return run(model, command);
+            }
         }
-        KeyCode::BackTab => {
-            model.focus = model.focus.prev();
-            return Vec::new();
+        KeyCode::Down => {
+            let last = palette.matches().len().saturating_sub(1);
+            palette.selected = (palette.selected + 1).min(last);
         }
-        _ => {}
+        KeyCode::Up => palette.selected = palette.selected.saturating_sub(1),
+        _ => {
+            if palette.query.edit(&key) {
+                palette.selected = 0;
+            }
+        }
     }
-    match model.focus {
-        Pane::Compose => match key.code {
-            // A line break where the terminal tells the chord from `Enter`:
-            // `Alt-Enter` always (ESC CR, which crossterm reads as `Enter`
-            // with `ALT`), `Shift-Enter` only under the keyboard enhancement
-            // protocol, which is not switched on yet.
-            KeyCode::Enter
-                if key.modifiers.contains(KeyModifiers::ALT)
-                    || key.modifiers.contains(KeyModifiers::SHIFT) =>
-            {
-                model.compose.newline();
-                Vec::new()
-            }
-            KeyCode::Enter => run(model, PaletteCommand::Send),
-            KeyCode::Esc => {
-                model.focus = Pane::Messages;
-                Vec::new()
-            }
-            _ => {
-                model.compose.edit(&key);
-                Vec::new()
-            }
-        },
-        pane => command_pane_key(model, pane, key),
+    Vec::new()
+}
+
+/// Run what a key resolved to.
+fn act<B: InputBuffer + Default>(
+    model: &mut UiModel<B>,
+    action: Action,
+    key: KeyEvent,
+) -> Vec<UiEffect> {
+    match action {
+        Action::Run(command) => return run(model, command),
+        Action::Scroll(cmd) => scroll(model, model.focus, cmd),
+        Action::ScrollMessages(cmd) => scroll(model, Pane::Messages, cmd),
+        Action::Newline => model.compose.newline(),
+        Action::Edit => {
+            model.compose.edit(&key);
+        }
+        // `Ctrl-c` in compose: a reflex that would throw a half-written
+        // message away (lnmsg-ui.md, section 1, "What must not be copied"),
+        // so it clears the line into the field's kill buffer, back with
+        // `Ctrl-y`.
+        Action::ClearDraft => {
+            model
+                .compose
+                .edit(&KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        }
+        Action::Back => {
+            model.focus = match model.focus {
+                Pane::Compose => Pane::Messages,
+                _ => Pane::Conversations,
+            };
+        }
+        Action::NextPane => model.focus = model.focus.next(),
+        Action::PreviousPane => model.focus = model.focus.prev(),
+        Action::Palette => model.palette = Some(Palette::default()),
+        Action::QuitHint => return quit_hint(model),
+    }
+    Vec::new()
+}
+
+/// `Ctrl-c` quits nowhere: outside compose it says what does.
+fn quit_hint<B>(model: &mut UiModel<B>) -> Vec<UiEffect> {
+    let quit = keys::row_named("quit")
+        .and_then(|row| {
+            row.chords()
+                .find(|c| c.in_force(keys::OVERLAY, Ctx::NONE))
+                .map(|c| c.label())
+        })
+        .unwrap_or("q");
+    model.toast(ToastKind::Info, format!("{quit} quits"));
+    Vec::new()
+}
+
+/// Move the cursor of the conversation list or the messages.
+fn scroll<B>(model: &mut UiModel<B>, pane: Pane, cmd: ScrollCmd) {
+    let (len, at) = match pane {
+        Pane::Conversations => (model.conversations.len(), model.selected),
+        _ => (model.messages_of_selected().len(), model.message_cursor),
+    };
+    let last = len.saturating_sub(1);
+    let to = match cmd {
+        ScrollCmd::LineDown => at + 1,
+        ScrollCmd::LineUp => at.saturating_sub(1),
+        ScrollCmd::PageDown => at + PAGE_ITEMS,
+        ScrollCmd::PageUp => at.saturating_sub(PAGE_ITEMS),
+        ScrollCmd::HalfPageDown => at + PAGE_ITEMS / 2,
+        ScrollCmd::HalfPageUp => at.saturating_sub(PAGE_ITEMS / 2),
+        ScrollCmd::Top => 0,
+        ScrollCmd::Bottom => last,
+    }
+    .min(last);
+    match pane {
+        Pane::Conversations if to != model.selected => model.select(to),
+        Pane::Conversations => {}
+        _ => model.message_cursor = to,
     }
 }
 
-/// lnomad's keymap, in the two panes that take commands.
-fn command_pane_key<B: InputBuffer + Default>(
-    model: &mut UiModel<B>,
-    pane: Pane,
-    key: KeyEvent,
-) -> Vec<UiEffect> {
-    if !(key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT) {
+/// Select the conversation `step` away, or the next one with unread
+/// messages that way.
+fn step_conversation<B>(model: &mut UiModel<B>, forward: bool, unread_only: bool) {
+    let count = model.conversations.len();
+    if count == 0 {
+        return;
+    }
+    if !unread_only {
+        let to = match forward {
+            true => (model.selected + 1).min(count - 1),
+            false => model.selected.saturating_sub(1),
+        };
+        if to != model.selected {
+            model.select(to);
+        }
+        return;
+    }
+    let order = (1..count).map(|step| match forward {
+        true => (model.selected + step) % count,
+        false => (model.selected + count - step) % count,
+    });
+    let found = order
+        .into_iter()
+        .find(|&i| model.conversations[i].unread > 0);
+    match found {
+        Some(index) => model.select(index),
+        None => model.toast(ToastKind::Info, "no unread conversation".to_string()),
+    }
+}
+
+/// The words a delivery state is said in.
+fn state_words(state: DeliveryState) -> &'static str {
+    match state {
+        DeliveryState::Queued => "queued",
+        DeliveryState::Stamping => "stamping",
+        DeliveryState::InFlight => "in flight",
+        DeliveryState::Sent => "sent, no proof yet",
+        DeliveryState::InMailbox => "in the mailbox",
+        DeliveryState::Delivered => "delivered",
+        DeliveryState::Rejected => "rejected",
+        DeliveryState::Failed => "not sent",
+    }
+}
+
+/// `Enter` on a message: what this session knows of it, in one line. The
+/// detail view with its ledger is the chat layout's slice
+/// (lnmsg-keys-and-layout.md, section 7, slice 2); until then the toast
+/// carries the same facts the row has room for only as a glyph.
+fn details<B>(model: &mut UiModel<B>) -> Vec<UiEffect> {
+    let Some(message) = model.messages_of_selected().get(model.message_cursor) else {
+        model.toast(ToastKind::Info, "no message here".to_string());
         return Vec::new();
-    }
-    let len = match pane {
-        Pane::Conversations => model.conversations.len(),
-        _ => model.messages_of_selected().len(),
     };
-    let at = match pane {
-        Pane::Conversations => model.selected,
-        _ => model.message_cursor,
+    let id = match message.id {
+        Some(id) => id[..4].iter().map(|b| format!("{b:02x}")).collect(),
+        None => "none yet".to_string(),
     };
-    let to = match key.code {
-        KeyCode::Char('j') | KeyCode::Down => Some((at + 1).min(len.saturating_sub(1))),
-        KeyCode::Char('k') | KeyCode::Up => Some(at.saturating_sub(1)),
-        KeyCode::Char('g') | KeyCode::Home => Some(0),
-        KeyCode::Char('G') | KeyCode::End => Some(len.saturating_sub(1)),
-        KeyCode::Enter => {
-            model.focus = match pane {
-                Pane::Conversations => Pane::Messages,
-                _ => Pane::Compose,
-            };
-            None
-        }
-        KeyCode::Char('?') => return run(model, PaletteCommand::Help),
-        KeyCode::Char('q') => return run(model, PaletteCommand::Quit),
-        _ => None,
+    let text = match message.delivery {
+        Some(state) => format!("from you · {} · id {id}", state_words(state)),
+        None if message.verified => format!("received · signature verified · id {id}"),
+        None => format!("received · signature NOT verified · id {id}"),
     };
-    if let Some(to) = to {
-        match pane {
-            Pane::Conversations if to != model.selected => model.select(to),
-            Pane::Conversations => {}
-            _ => model.message_cursor = to,
-        }
-    }
+    model.toast(ToastKind::Info, text);
     Vec::new()
 }
 
@@ -513,6 +613,30 @@ fn run<B: InputBuffer + Default>(model: &mut UiModel<B>, command: PaletteCommand
         PaletteCommand::FocusConversations => focus(model, Pane::Conversations),
         PaletteCommand::FocusMessages => focus(model, Pane::Messages),
         PaletteCommand::FocusCompose => focus(model, Pane::Compose),
+        PaletteCommand::NextConversation => {
+            step_conversation(model, true, false);
+            Vec::new()
+        }
+        PaletteCommand::PreviousConversation => {
+            step_conversation(model, false, false);
+            Vec::new()
+        }
+        PaletteCommand::NextUnread => {
+            step_conversation(model, true, true);
+            Vec::new()
+        }
+        PaletteCommand::PreviousUnread => {
+            step_conversation(model, false, true);
+            Vec::new()
+        }
+        PaletteCommand::Details => details(model),
+        PaletteCommand::Redraw => vec![UiEffect::Redraw],
+        PaletteCommand::SendOnEnter => {
+            model.send_on_enter = !model.send_on_enter;
+            let hint = keys::compose_hint(model.ctx());
+            model.toast(ToastKind::Info, hint);
+            Vec::new()
+        }
     }
 }
 
@@ -759,6 +883,9 @@ pub struct View {
     /// The compose line and its cursor, in characters.
     pub compose: String,
     pub compose_cursor: usize,
+    /// The compose pane's border hint: the chords that send and break the
+    /// line in this terminal and setting ([`keys::compose_hint`]).
+    pub compose_hint: String,
     /// Where the focus is: the renderer marks that pane.
     pub focus: Pane,
     /// The footer buttons.
@@ -860,6 +987,7 @@ pub fn view<B: InputBuffer>(model: &UiModel<B>) -> View {
         Some(address) => format!("lnmsg {}", &to_hex(&address)[..8]),
         None => "lnmsg (attaching)".to_string(),
     };
+    let ctx = model.ctx();
     let palette = model.palette.as_ref().map(|p| PaletteView {
         query: p.query.value().to_string(),
         cursor: p.query.cursor(),
@@ -868,10 +996,15 @@ pub fn view<B: InputBuffer>(model: &UiModel<B>) -> View {
             .iter()
             .enumerate()
             .map(|(i, e)| {
+                // The name, and the row's first chord this terminal sends.
+                let shown = match keys::palette_key(e.name, ctx) {
+                    Some(key) => format!("{}  {key}", e.name),
+                    None => e.name.to_string(),
+                };
                 let mut line = RLine::default();
                 match i == p.selected {
-                    true => push(&mut line, &format!("▸ {}", e.name), bold()),
-                    false => push(&mut line, &format!("  {}", e.name), RStyle::default()),
+                    true => push(&mut line, &format!("▸ {shown}"), bold()),
+                    false => push(&mut line, &format!("  {shown}"), RStyle::default()),
                 }
                 line
             })
@@ -885,6 +1018,7 @@ pub fn view<B: InputBuffer>(model: &UiModel<B>) -> View {
         message_cursor: model.message_cursor,
         compose: model.compose.value().to_string(),
         compose_cursor: model.compose.cursor(),
+        compose_hint: keys::compose_hint(ctx),
         focus: model.focus,
         footer: footer(model),
         toast: model.current_toast().cloned(),
@@ -1027,82 +1161,21 @@ fn message_line(message: &Message, here: bool, spin: usize, ascii: bool, first: 
     line
 }
 
+/// The footer: the palette's own two keys while it is open, else the rows
+/// with a footer label that have a chord in the focused pane.
 fn footer<B>(model: &UiModel<B>) -> Vec<FooterItem<FooterAct>> {
-    let mut items = Vec::new();
     if model.palette.is_some() {
-        items.push(FooterItem::action("Enter", "run", FooterAct(None)));
-        items.push(FooterItem::action("Esc", "close", FooterAct(None)));
-        return items;
+        return vec![
+            FooterItem::action("Enter", "run", FooterAct(None)),
+            FooterItem::action("Esc", "close", FooterAct(None)),
+        ];
     }
-    match model.focus {
-        Pane::Compose => {
-            items.push(FooterItem::action(
-                "Enter",
-                "send",
-                FooterAct(Some(PaletteCommand::Send)),
-            ));
-            items.push(FooterItem::action(
-                "Esc",
-                "messages",
-                FooterAct(Some(PaletteCommand::FocusMessages)),
-            ));
-        }
-        _ => {
-            items.push(FooterItem::droppable("j/k", "move", FooterAct(None), 1));
-            items.push(FooterItem::droppable("Enter", "open", FooterAct(None), 2));
-            items.push(FooterItem::action(
-                "q",
-                "quit",
-                FooterAct(Some(PaletteCommand::Quit)),
-            ));
-        }
-    }
-    items.push(FooterItem::action("Tab", "pane", FooterAct(None)));
-    items.push(FooterItem::droppable("^P", "palette", FooterAct(None), 3));
-    items.push(FooterItem::droppable(
-        "?",
-        "help",
-        FooterAct(Some(PaletteCommand::Help)),
-        4,
-    ));
-    items
+    keys::footer(keys::panes_of(model.focus), model.ctx(), FooterAct)
 }
 
-/// The help overlay's text, lnmsg's groups.
+/// The help overlay's text, every row of the keymap ([`keys::help_groups`]).
 pub fn help_groups() -> Vec<HelpGroup> {
-    let entry = |keys, desc| HelpEntry { keys, desc };
-    vec![
-        HelpGroup {
-            title: "Everywhere",
-            entries: [
-                entry("Tab / S-Tab", "next / previous pane"),
-                entry("Ctrl-P", "command palette (also : outside compose)"),
-                entry("Ctrl-Q", "quit"),
-            ]
-            .into(),
-        },
-        HelpGroup {
-            title: "Conversations and messages",
-            entries: [
-                entry("j / k / ↓ / ↑", "move"),
-                entry("g / G", "top / bottom"),
-                entry("Enter", "open / compose"),
-                entry("?", "this help"),
-                entry("q", "quit"),
-            ]
-            .into(),
-        },
-        HelpGroup {
-            title: "Compose",
-            entries: [
-                entry("Enter", "send (direct, else a propagation node)"),
-                entry("Alt-Enter", "new line"),
-                entry("Esc", "back to the messages"),
-                entry("Ctrl-C", "clear the line (Ctrl-Y brings it back)"),
-            ]
-            .into(),
-        },
-    ]
+    keys::help_groups()
 }
 
 #[cfg(test)]
@@ -1478,10 +1551,14 @@ mod tests {
         assert_eq!(model.message_cursor, 0, "a reader scrolled up stays put");
     }
 
+    fn alt_key(c: char) -> UiEvent {
+        UiEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT))
+    }
+
     #[test]
     fn the_palette_filters_runs_and_closes() {
         let mut model = UiModel::<Field>::new(&[PEER]);
-        update(&mut model, ctrl_key('p'));
+        update(&mut model, key(KeyCode::Char(':')));
         assert!(model.palette.is_some());
         typed(&mut model, "foc");
         update(&mut model, key(KeyCode::Down));
@@ -1489,13 +1566,237 @@ mod tests {
         update(&mut model, key(KeyCode::Enter));
         assert!(model.palette.is_none());
         assert_eq!(model.focus, Pane::Compose);
-        update(&mut model, ctrl_key('p'));
+        // From compose the palette is Alt-x.
+        update(&mut model, alt_key('x'));
         typed(&mut model, "fetch");
         assert_eq!(update(&mut model, key(KeyCode::Enter)), [UiEffect::Fetch]);
         assert!(model.fetching);
-        update(&mut model, ctrl_key('p'));
+        update(&mut model, alt_key('x'));
         update(&mut model, key(KeyCode::Esc));
         assert!(model.palette.is_none());
+        assert_eq!(
+            model.focus,
+            Pane::Compose,
+            "closing the palette keeps the pane"
+        );
+    }
+
+    /// `:` `q` `Enter` quits, as a vi reader expects.
+    #[test]
+    fn colon_q_enter_quits() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        update(&mut model, key(KeyCode::Char(':')));
+        typed(&mut model, "q");
+        assert_eq!(update(&mut model, key(KeyCode::Enter)), [UiEffect::Quit]);
+        assert!(model.quit);
+    }
+
+    /// Decided change 1: `Enter` on a message opens what is known of it, a
+    /// toast until the detail view (slice 2); compose is `i`, `a`, `r`.
+    #[test]
+    fn enter_on_a_message_shows_its_details_and_i_a_r_compose() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        sent(&mut model, "hi");
+        engine(&mut model, OutboxEvent::Queued { message_id: ID });
+        update(&mut model, key(KeyCode::Esc));
+        assert_eq!(model.focus, Pane::Messages);
+        assert!(update(&mut model, key(KeyCode::Enter)).is_empty());
+        assert_eq!(model.focus, Pane::Messages, "Enter no longer composes");
+        assert_eq!(
+            model.current_toast().map(|t| t.text.as_str()),
+            Some("from you · queued · id 11111111")
+        );
+        for c in ['i', 'a', 'r'] {
+            model.focus = Pane::Messages;
+            update(&mut model, key(KeyCode::Char(c)));
+            assert_eq!(model.focus, Pane::Compose, "{c}");
+        }
+        // From the list too, and Enter there opens the conversation.
+        model.focus = Pane::Conversations;
+        update(&mut model, key(KeyCode::Enter));
+        assert_eq!(model.focus, Pane::Messages);
+    }
+
+    /// Decided change 2: `Ctrl-p` and `Ctrl-n` in compose are the buffer's
+    /// (line motions), not the palette; in a command pane they move the
+    /// cursor, as in lnomad.
+    #[test]
+    fn ctrl_p_is_a_motion_everywhere_and_never_the_palette() {
+        let mut model = UiModel::<Field>::new(&[PEER, OTHER]);
+        update(&mut model, ctrl_key('n'));
+        assert_eq!(model.selected, 1);
+        update(&mut model, ctrl_key('p'));
+        assert_eq!(model.selected, 0);
+        assert!(model.palette.is_none());
+        update(&mut model, key(KeyCode::Tab));
+        update(&mut model, key(KeyCode::Tab));
+        typed(&mut model, "x");
+        update(&mut model, ctrl_key('p'));
+        assert!(model.palette.is_none());
+        assert_eq!(model.compose.value(), "x");
+    }
+
+    /// Decided change 3: `Ctrl-c` quits nowhere. Outside compose it says
+    /// what does, and over an overlay too.
+    #[test]
+    fn ctrl_c_quits_nowhere_and_says_ctrl_q_does() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        assert!(update(&mut model, ctrl_key('c')).is_empty());
+        assert!(!model.quit);
+        assert_eq!(
+            model.current_toast().map(|t| t.text.as_str()),
+            Some("Ctrl-q quits")
+        );
+        update(&mut model, key(KeyCode::Char('?')));
+        assert!(update(&mut model, ctrl_key('c')).is_empty());
+        assert!(!model.quit);
+        assert_eq!(update(&mut model, ctrl_key('q')), [UiEffect::Quit]);
+    }
+
+    /// Decided change 4: with `send_on_enter` off, `Enter` breaks the line
+    /// and `Alt-Enter` sends; the palette toggles it and says the new rule.
+    #[test]
+    fn send_on_enter_off_swaps_enter_and_alt_enter() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        update(&mut model, key(KeyCode::Char(':')));
+        typed(&mut model, "send on enter");
+        update(&mut model, key(KeyCode::Enter));
+        assert!(!model.send_on_enter);
+        assert_eq!(
+            model.current_toast().map(|t| t.text.as_str()),
+            Some("Alt-Enter send · Enter newline")
+        );
+        update(&mut model, key(KeyCode::Tab));
+        update(&mut model, key(KeyCode::Tab));
+        typed(&mut model, "one");
+        assert!(update(&mut model, key(KeyCode::Enter)).is_empty());
+        typed(&mut model, "two");
+        assert_eq!(view(&model).compose_hint, "Alt-Enter send · Enter newline");
+        let effects = update(
+            &mut model,
+            UiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT)),
+        );
+        assert_eq!(
+            effects,
+            [UiEffect::Send {
+                to: PEER,
+                body: "one\ntwo".to_string()
+            }]
+        );
+        model.enhanced = true;
+        assert_eq!(view(&model).compose_hint, "Ctrl-Enter send · Enter newline");
+    }
+
+    /// The Enter rule under the enhancement protocol: `Shift-Enter` breaks
+    /// the line, `Ctrl-Enter` sends and never breaks it, and the hint says
+    /// so; `Ctrl-j` breaks the line in every terminal.
+    #[test]
+    fn shift_enter_breaks_ctrl_enter_sends_and_ctrl_j_breaks_everywhere() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        model.enhanced = true;
+        assert_eq!(
+            view(&model).compose_hint,
+            "Enter send · Shift-Enter newline"
+        );
+        update(&mut model, key(KeyCode::Tab));
+        update(&mut model, key(KeyCode::Tab));
+        typed(&mut model, "a");
+        update(
+            &mut model,
+            UiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT)),
+        );
+        typed(&mut model, "b");
+        update(&mut model, ctrl_key('j'));
+        typed(&mut model, "c");
+        let effects = update(
+            &mut model,
+            UiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL)),
+        );
+        assert_eq!(
+            effects,
+            [UiEffect::Send {
+                to: PEER,
+                body: "a\nb\nc".to_string()
+            }]
+        );
+        model.enhanced = false;
+        assert_eq!(view(&model).compose_hint, "Enter send · Alt-Enter newline");
+    }
+
+    /// Signal's conversation keys: `Alt-↓`/`Alt-↑` step, `Alt-Shift-↓` jumps
+    /// to the next unread, from any pane.
+    #[test]
+    fn alt_arrows_step_conversations_and_alt_shift_finds_unread() {
+        let mut model = UiModel::<Field>::new(&[PEER, OTHER, [0xef; 16]]);
+        let alt = |code| UiEvent::Key(KeyEvent::new(code, KeyModifiers::ALT));
+        update(&mut model, key(KeyCode::Tab));
+        update(&mut model, key(KeyCode::Tab));
+        update(&mut model, alt(KeyCode::Down));
+        assert_eq!((model.selected, model.focus), (1, Pane::Compose));
+        update(&mut model, alt(KeyCode::Up));
+        assert_eq!(model.selected, 0);
+        model.conversations[2].unread = 1;
+        update(
+            &mut model,
+            UiEvent::Key(KeyEvent::new(
+                KeyCode::Down,
+                KeyModifiers::ALT | KeyModifiers::SHIFT,
+            )),
+        );
+        assert_eq!(model.selected, 2);
+        assert_eq!(model.conversations[2].unread, 0);
+    }
+
+    /// Help, footer and palette all read the table: the footer's keys move
+    /// with the pane, the palette shows each name's chord, the help lists
+    /// every row.
+    #[test]
+    fn help_footer_and_palette_derive_from_the_table() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        let footer_keys = |model: &UiModel<Field>| -> Vec<(&str, &str)> {
+            view(model)
+                .footer
+                .iter()
+                .map(|f| (f.key, f.label))
+                .collect()
+        };
+        assert_eq!(
+            footer_keys(&model),
+            [
+                ("Enter", "open"),
+                ("i", "write"),
+                ("Tab", "pane"),
+                (":", "commands"),
+                ("?", "help"),
+                ("q", "quit")
+            ]
+        );
+        update(&mut model, key(KeyCode::Tab));
+        update(&mut model, key(KeyCode::Tab));
+        assert_eq!(
+            footer_keys(&model),
+            [
+                ("Enter", "send"),
+                ("Tab", "pane"),
+                ("Esc", "back"),
+                ("Alt-x", "commands"),
+                ("F1", "help"),
+                ("Ctrl-q", "quit")
+            ]
+        );
+        update(&mut model, alt_key('x'));
+        let rows: Vec<String> = view(&model)
+            .palette
+            .map(|p| p.rows.iter().map(text).collect())
+            .unwrap_or_default();
+        assert_eq!(rows[0], "▸ send  Enter");
+        assert!(rows.contains(&"  quit  q".to_string()), "{rows:?}");
+        let help: Vec<&str> = help_groups()
+            .iter()
+            .flat_map(|g| g.entries.iter().map(|e| e.desc))
+            .collect();
+        assert!(help.contains(&"scroll a line"));
+        assert!(help.contains(&"the message's details"));
     }
 
     #[test]

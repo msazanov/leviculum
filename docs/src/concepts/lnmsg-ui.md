@@ -59,7 +59,7 @@ Concretely:
   (right, lower). `Tab` and `Shift-Tab` cycle; a click focuses.
 - **In the conversation and message panes**, `lnomad`'s keymap applies
   unchanged: the scroll rows verbatim
-  (`SCROLL_ROWS`, `leviculum-ui/src/keymap.rs:588`), so `j`/`k`, `Ctrl-n`/`Ctrl-p`, arrows,
+  (`SCROLL_ROWS`, `leviculum-ui/src/keymap.rs:594`), so `j`/`k`, `Ctrl-n`/`Ctrl-p`, arrows,
   `Ctrl-f`/`Ctrl-b`, `Ctrl-v`/`Alt-v`, `Ctrl-d`/`Ctrl-u`, `g`/`G`,
   `Home`/`End` and the wheel all work, in all four idioms, for free.
 - **In the compose pane**, plain keys type. Only `Ctrl-` and `Alt-` chords

@@ -71,6 +71,7 @@ pub mod fanout;
 pub mod fetch;
 #[cfg(feature = "std")]
 pub mod identity;
+pub mod keys;
 pub mod mailbox;
 pub mod mailbox_state;
 pub mod outbox;

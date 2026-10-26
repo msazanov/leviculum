@@ -3,6 +3,14 @@
 //! watch the delivery mark move from `○` to `✓`, read the two-line reply. The frames the script asks for are pinned in
 //! `tests/fixtures/tui_session.frames`.
 //!
+//! The keymap's sessions (`docs/src/concepts/lnmsg-keys-and-layout.md`,
+//! section 7, slice 1) need no correspondent: one driven only by vi
+//! spellings and one only by Emacs spellings reach the same frames, the
+//! enhanced and the plain keyboard reach the same two-line body, `Ctrl-c`
+//! outside compose says what quits and the session goes on, and
+//! `send_on_enter` off swaps `Enter` and `Alt-Enter`. Pinned in
+//! `tests/fixtures/tui_keys.frames`.
+//!
 //! The daemon is the in-process one `mailbox_cli.rs` uses. The correspondent
 //! is a second lnmsg engine attached to it in this process
 //! (`lnmsg::engine::attach`), a full LXMF router, so the proof that turns the
@@ -31,13 +39,14 @@ use support::daemon;
 const LNMSG: &str = env!("CARGO_BIN_EXE_lnmsg");
 const EXPECTED: &str = include_str!("fixtures/tui_session.frames");
 const EXPECTED_LATE: &str = include_str!("fixtures/tui_late.frames");
+const EXPECTED_KEYS: &str = include_str!("fixtures/tui_keys.frames");
 
 const SCRIPT: &str = "\
 until ready 20
 frame attached
 # conversations -> messages -> compose
 key enter
-key enter
+key i
 type hello from the tui
 newline
 type on two lines
@@ -59,7 +68,7 @@ const LATE_SCRIPT: &str = "\
 until ready 20
 frame attached
 key enter
-key enter
+key i
 type are you there
 key enter
 until leg direct 5
@@ -288,6 +297,285 @@ async fn a_late_recipient_shows_the_direct_leg_and_the_log_keeps_its_steps() {
         panic!(
             "the frames moved; this run's are in {}, the pinned ones in \
              lnmsg/tests/fixtures/tui_late.frames\n{got}",
+            kept.display()
+        );
+    }
+}
+
+/// The vi reader's session: `j`/`k`/`G`/`g`, `i` to write, arrows to edit,
+/// `Esc` back out, `:` for the palette.
+const VI_SCRIPT: &str = "\
+until ready 20
+frame attached
+key j
+frame second
+key k
+key G
+key g
+frame first
+key enter
+frame messages
+key i
+type helo
+key left
+type l
+frame compose
+key esc
+key esc
+frame list
+key :
+type help
+key enter
+frame help
+key esc
+frame closed
+key q
+";
+
+/// The same session in Emacs spellings: `Ctrl-n`/`Ctrl-p`, `Alt->`/`Alt-<`,
+/// `Ctrl-b` to edit, `Ctrl-g` back out, `Alt-x` for the palette. Compose is
+/// `Tab`, since Emacs has no key that means "start writing".
+const EMACS_SCRIPT: &str = "\
+until ready 20
+frame attached
+key ctrl-n
+frame second
+key ctrl-p
+key alt->
+key alt-<
+frame first
+key enter
+frame messages
+key tab
+type helo
+key ctrl-b
+type l
+frame compose
+key ctrl-g
+key ctrl-g
+frame list
+key alt-x
+type help
+key enter
+frame help
+key ctrl-g
+frame closed
+key ctrl-q
+";
+
+/// The enhanced world: `Shift-Enter` breaks the line, `Ctrl-Enter` sends,
+/// and `Ctrl-c` outside compose says what quits without quitting.
+const ENHANCED_SCRIPT: &str = "\
+until ready 20
+keyboard enhanced
+key enter
+key i
+type one
+key shift-enter
+type two
+frame body
+key ctrl-enter
+frame sent
+key esc
+key esc
+key ctrl-c
+frame ctrl-c
+key j
+frame still here
+key q
+";
+
+/// The plain world: `Alt-Enter` breaks the line.
+const PLAIN_ALT_SCRIPT: &str = "\
+until ready 20
+key enter
+key i
+type one
+key alt-enter
+type two
+frame body
+key esc
+key esc
+key q
+";
+
+/// The plain world: `Ctrl-j` breaks the line too.
+const PLAIN_CTRL_J_SCRIPT: &str = "\
+until ready 20
+key enter
+key i
+type one
+key ctrl-j
+type two
+frame body
+key esc
+key esc
+key q
+";
+
+/// `send_on_enter` off from the palette: `Enter` breaks the line,
+/// `Alt-Enter` sends, and the hint says so.
+const ENTER_OFF_SCRIPT: &str = "\
+until ready 20
+key :
+type send on enter
+key enter
+frame switched
+key enter
+key i
+type one
+key enter
+type two
+frame body
+key alt-enter
+frame sent
+key esc
+key esc
+key q
+";
+
+/// Run one script against `daemon` with two correspondents that never
+/// answer, and hand back its frames.
+async fn run_keys_script(daemon: &support::Daemon, name: &str, script: &str) -> String {
+    let home = tempfile::tempdir().expect("tui home");
+    std::fs::write(
+        home.path().join("identity"),
+        encode_identity(&fixed_identity(0x11)).expect("storable"),
+    )
+    .expect("write the identity");
+    let peer = |seed: u8| -> String {
+        let address = delivery_address(&fixed_identity(seed)).expect("an address");
+        address.iter().map(|b| format!("{b:02x}")).collect()
+    };
+    let script_path = home.path().join(format!("{name}.script"));
+    let frames = home.path().join(format!("{name}.frames"));
+    std::fs::write(&script_path, script).expect("write the script");
+    let args: Vec<String> = vec![
+        "--instance".into(),
+        daemon.instance.clone(),
+        "--config".into(),
+        daemon.config_dir.path().display().to_string(),
+        "--to".into(),
+        peer(0x22),
+        "--to".into(),
+        peer(0x33),
+        "--script".into(),
+        script_path.display().to_string(),
+        "--frames".into(),
+        frames.display().to_string(),
+        "--size".into(),
+        "80x16".into(),
+    ];
+    let child_home = home.path().to_path_buf();
+    let output = tokio::task::spawn_blocking(move || {
+        let mut command = Command::new(LNMSG);
+        command
+            .args(&args)
+            .env("LNMSG_HOME", &child_home)
+            .env("LNMSG_DISPLAY_NAME", "tui")
+            .env_remove("LEVICULUM_EVENT_LOG")
+            .env_remove("RUST_LOG")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let child = leviculum_std::process::spawn_supervised(command).expect("spawn lnmsg");
+        child.wait_with_output().expect("wait for lnmsg")
+    })
+    .await
+    .expect("the lnmsg child thread");
+    let got = std::fs::read_to_string(&frames).expect("read the frames");
+    let log = std::fs::read_to_string(home.path().join("tui.log")).unwrap_or_default();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{name}: stderr: {}\nframes:\n{got}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // The script runner says once which world it starts in.
+    assert!(
+        log.contains("KEYS enhancement=no newline=Alt-Enter send=Enter"),
+        "{name}: tui.log:\n{log}"
+    );
+    got
+}
+
+/// A frame without the compose pane's border, which carries the hint.
+fn without_hint(frame: &str) -> Vec<&str> {
+    frame
+        .lines()
+        .filter(|line| !line.contains(" send · "))
+        .collect()
+}
+
+/// The frame labelled `label` in a frames file.
+fn frame<'a>(frames: &'a str, label: &str) -> &'a str {
+    let marker = format!(": {label} ---\n");
+    let start = frames
+        .find(&marker)
+        .map(|at| at + marker.len())
+        .unwrap_or_else(|| panic!("no frame {label:?} in:\n{frames}"));
+    let end = frames[start..]
+        .find("--- frame ")
+        .map_or(frames.len(), |at| start + at);
+    &frames[start..end]
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_keymap_sessions_reach_the_same_screens_in_every_spelling() {
+    let daemon = daemon("tui-keys", |b| b).await;
+    let mut all = String::new();
+    let mut sessions = Vec::new();
+    for (name, script) in [
+        ("vi", VI_SCRIPT),
+        ("emacs", EMACS_SCRIPT),
+        ("enhanced", ENHANCED_SCRIPT),
+        ("plain-alt-enter", PLAIN_ALT_SCRIPT),
+        ("plain-ctrl-j", PLAIN_CTRL_J_SCRIPT),
+        ("enter-off", ENTER_OFF_SCRIPT),
+    ] {
+        let frames = run_keys_script(&daemon, name, script).await;
+        all.push_str(&format!("=== {name} ===\n{frames}"));
+        sessions.push(frames);
+    }
+    let [vi, emacs, enhanced, plain_alt, plain_ctrl_j, enter_off] = sessions
+        .try_into()
+        .unwrap_or_else(|_| panic!("six sessions"));
+
+    // vi and Emacs reach the same screens, frame for frame.
+    assert_eq!(vi, emacs, "the vi and the Emacs session differ");
+
+    // The two-line body is the same in both worlds; only the hint differs,
+    // and it names the world's own chord.
+    let body = frame(&enhanced, "body");
+    assert!(body.contains("Enter send · Shift-Enter newline"), "{body}");
+    let plain = frame(&plain_alt, "body");
+    assert!(plain.contains("Enter send · Alt-Enter newline"), "{plain}");
+    assert_eq!(without_hint(body), without_hint(plain));
+    assert_eq!(plain, frame(&plain_ctrl_j, "body"));
+    assert!(frame(&enhanced, "sent").contains("me: one"), "{enhanced}");
+
+    // Ctrl-c outside compose says what quits, and the session goes on.
+    assert!(
+        frame(&enhanced, "ctrl-c").contains("Ctrl-q quits"),
+        "{enhanced}"
+    );
+    assert!(
+        frame(&enhanced, "still here").contains("lnmsg"),
+        "{enhanced}"
+    );
+
+    // send_on_enter off: Enter broke the line, Alt-Enter sent.
+    let off = frame(&enter_off, "body");
+    assert!(off.contains("Alt-Enter send · Enter newline"), "{off}");
+    assert!(off.contains("│one"), "{off}");
+    assert!(frame(&enter_off, "sent").contains("me: one"), "{enter_off}");
+
+    if all != EXPECTED_KEYS {
+        let kept = std::env::temp_dir().join("lnmsg-tui-keys.frames");
+        let _ = std::fs::write(&kept, &all);
+        panic!(
+            "the frames moved; this run's are in {}, the pinned ones in \
+             lnmsg/tests/fixtures/tui_keys.frames\n{all}",
             kept.display()
         );
     }

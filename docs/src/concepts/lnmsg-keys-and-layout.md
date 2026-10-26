@@ -18,7 +18,7 @@ for Lew to confirm before any slice is ordered.
 `lnomad` is operable with the mouse like a classic browser, with the
 browser's keyboard, and with the typical Emacs and vi commands, all at
 once: one keymap whose rows carry the vi, Emacs and arrow spellings of the
-same motion side by side (`SCROLL_ROWS`, `leviculum-ui/src/keymap.rs:588`,
+same motion side by side (`SCROLL_ROWS`, `leviculum-ui/src/keymap.rs:594`,
 which were `lnomad`'s own `SCROLL_KEYS` until the keymap slice;
 the mechanism is described under [architecture](lnmsg-architecture.md),
 section 1). `lnmsg` takes the principle over, with three substitutions:
@@ -224,7 +224,7 @@ and the palette finds the action by the chat program's word too (`new
 chat`, `find`).
 
 **`:q` quits for free.** The palette's fuzzy match is a subsequence test
-(`fuzzy_match`, `leviculum-ui/src/commands.rs:57`), and `quit` is the only
+(`fuzzy_match`, `leviculum-ui/src/commands.rs:92`), and `quit` is the only
 palette name containing a `q`, so `:`, `q`, `Enter` quits as a vi user
 expects. That stays true only while it is tested, so the keymap slice
 pins it.
@@ -235,14 +235,14 @@ The table asks four things of slice one (lnmsg-ui.md, "Built 2026-10-25,
 slice one") that Lew decides before the keymap slice is ordered:
 
 1. **`Enter` on a message opens its detail view**, as in mutt and Signal;
-   today it moves to compose (`command_pane_key`, `lnmsg/src/ui.rs:450`).
+   today it moves to compose (`command_pane_key` in `lnmsg/src/ui.rs`).
    Compose is then `i`, `a`, `r`, `Tab` or a click.
 2. **`Ctrl-p` and `Ctrl-n` in compose become Emacs line motions**, now
    that a body has lines (1002); today `Ctrl-P` opens the palette from
-   every pane (`lnmsg/src/ui.rs:407`). The palette from compose
+   every pane (`on_key` in `lnmsg/src/ui.rs`). The palette from compose
    is `Alt-x`.
 3. **`Ctrl-c` quits nowhere.** Today it quits outside compose
-   (`lnmsg/src/ui.rs:365-372`); the reflex that throws a draft away in
+   (`on_key` in `lnmsg/src/ui.rs`); the reflex that throws a draft away in
    compose copies or quits elsewhere by habit, and a messenger that
    vanishes on a copy reflex loses the screen. Pressed outside compose it
    shows a toast, `Ctrl-q quits`.

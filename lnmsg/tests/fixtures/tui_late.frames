@@ -11,10 +11,10 @@
 │                      ││                                                      │
 │                      ││                                                      │
 └──────────────────────┘└──────────────────────────────────────────────────────┘
-┌  compose─────────────────────────────────────────────────────────────────────┐
+┌  compose───────────────────────────────────── Enter send · Alt-Enter newline ┐
 │                                                                              │
 └──────────────────────────────────────────────────────────────────────────────┘
-j/k move │ Enter open │ q quit │ Tab pane │ ^P palette │ ? help
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 2: waiting ---
 ┌  lnmsg afbda7b3──────┐┌  61ddb79ada973523799227bbaf41e204────────────────────┐
 │▸ 61ddb79ada973523    ││▸ ○ me (direct 2 s): are you there                    │
@@ -28,10 +28,10 @@ j/k move │ Enter open │ q quit │ Tab pane │ ^P palette │ ? help
 │                      ││                                                      │
 │                      ││                                                      │
 └──────────────────────┘└──────────────────────────────────────────────────────┘
-┌● compose─────────────────────────────────────────────────────────────────────┐
+┌● compose───────────────────────────────────── Enter send · Alt-Enter newline ┐
 │                                                                              │
 └──────────────────────────────────────────────────────────────────────────────┘
-Enter send │ Esc messages │ Tab pane │ ^P palette │ ? help
+Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
 --- frame 3: delivered ---
 ┌  lnmsg afbda7b3──────┐┌  61ddb79ada973523799227bbaf41e204────────────────────┐
 │▸ 61ddb79ada973523    ││▸ ✓ me: are you there                                 │
@@ -45,7 +45,7 @@ Enter send │ Esc messages │ Tab pane │ ^P palette │ ? help
 │                      ││                                                      │
 │                      ││                                                      │
 └──────────────────────┘└──────────────────────────────────────────────────────┘
-┌● compose─────────────────────────────────────────────────────────────────────┐
+┌● compose───────────────────────────────────── Enter send · Alt-Enter newline ┐
 │                                                                              │
 └──────────────────────────────────────────────────────────────────────────────┘
-Enter send │ Esc messages │ Tab pane │ ^P palette │ ? help
+Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit

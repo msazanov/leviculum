@@ -1,12 +1,16 @@
 //! `lnmsg`'s own tiny config file.
 //!
 //! `${LNMSG_HOME}/config` (the same directory as the identity — see
-//! [`crate::identity::home_dir`]) holds `key = value` lines. The one key this
-//! slice reads is `propagation_node`, the persisted default for `--pn`:
+//! [`crate::identity::home_dir`]) holds `key = value` lines. Two keys:
+//! `propagation_node`, the persisted default for `--pn`, and
+//! `send_on_enter`, whether `Enter` in the compose pane sends (`true`, the
+//! default) or breaks the line (`false`, and the modifier chord sends):
 //!
 //! ```text
 //! # the mailbox this machine uses when a direct delivery fails
 //! propagation_node = 76cff79ab2f43bebcb7398e08e56ee0f
+//! # Enter breaks the line; Alt-Enter (Ctrl-Enter where the terminal can) sends
+//! send_on_enter = false
 //! ```
 //!
 //! Deliberately not the Reticulum config file: that one belongs to the
@@ -54,6 +58,8 @@ impl core::error::Error for ConfigError {}
 pub struct Config {
     /// The persisted default propagation node, `--pn`'s fallback.
     pub propagation_node: Option<[u8; 16]>,
+    /// `send_on_enter`, when the file sets it; unset is on.
+    pub send_on_enter: Option<bool>,
 }
 
 /// Read the config file's text.
@@ -69,6 +75,19 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
         };
         // Unknown keys pass silently: a config written by a newer lnmsg
         // must not stop an older one from sending at all.
+        if key.trim() == "send_on_enter" {
+            config.send_on_enter = Some(match value.trim().trim_matches('"') {
+                "true" | "yes" | "on" => true,
+                "false" | "no" | "off" => false,
+                other => {
+                    return Err(ConfigError::BadValue {
+                        line: index + 1,
+                        key: "send_on_enter",
+                        detail: alloc::format!("{other:?} is not true or false"),
+                    });
+                }
+            });
+        }
         if key.trim() == "propagation_node" {
             let value = value.trim().trim_matches('"');
             match address::parse(value) {
@@ -183,6 +202,23 @@ mod tests {
             text.starts_with(&format!("{}:2: propagation_node: ", path.display())),
             "the error must name file, line and key: {text}"
         );
+    }
+
+    #[test]
+    fn send_on_enter_parses_and_a_typo_is_an_error() {
+        assert_eq!(parse_str("").expect("empty").send_on_enter, None);
+        let off = parse_str("send_on_enter = false\n").expect("off");
+        assert_eq!(off.send_on_enter, Some(false));
+        let on = parse_str("send_on_enter = yes\n").expect("on");
+        assert_eq!(on.send_on_enter, Some(true));
+        assert!(matches!(
+            parse_str("send_on_enter = maybe\n"),
+            Err(ConfigError::BadValue {
+                line: 1,
+                key: "send_on_enter",
+                ..
+            })
+        ));
     }
 
     #[test]

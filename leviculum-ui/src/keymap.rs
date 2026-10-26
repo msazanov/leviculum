@@ -362,8 +362,14 @@ const fn chord_label(code: KeyCode, mods: Mods) -> Label<24> {
     if held.contains(KeyModifiers::META) {
         label = label.push("Meta-");
     }
-    // An uppercase letter and `Shift-Tab` carry their Shift already.
-    let shift_shown = matches!(code, KeyCode::Char(_) | KeyCode::BackTab);
+    // A bare uppercase letter and `Shift-Tab` carry their Shift already; with
+    // Ctrl or Alt it is spelled out (`Ctrl-Shift-T`).
+    let chorded = held.contains(KeyModifiers::CONTROL) || held.contains(KeyModifiers::ALT);
+    let shift_shown = match code {
+        KeyCode::Char(_) => !chorded,
+        KeyCode::BackTab => true,
+        _ => false,
+    };
     if held.contains(KeyModifiers::SHIFT) && !shift_shown {
         label = label.push("Shift-");
     }
@@ -688,6 +694,15 @@ mod tests {
             "Shift-Enter"
         );
         assert_eq!(exact(KeyCode::F(12), KeyModifiers::NONE).label(), "F12");
+        assert_eq!(
+            exact(
+                KeyCode::Char('T'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT
+            )
+            .label(),
+            "Ctrl-Shift-T"
+        );
+        assert_eq!(Chord::new(KeyCode::Char('G'), Mods::Plain, ()).label(), "G");
         let palette_only: Row<()> = Row::new("focus", "Everywhere", &[]).palette("focus messages");
         assert_eq!(palette_only.keys(), ": focus messages");
     }
