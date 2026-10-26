@@ -13,6 +13,7 @@
 //! `leviculum_std::event_log::EVENT_CATALOG`, which is what makes a missing
 //! key a loud `EVENT_SCHEMA_VIOLATION` line rather than a quiet gap.
 
+use alloc::format;
 use alloc::string::{String, ToString};
 
 use crate::address::to_hex;
@@ -176,16 +177,23 @@ pub fn done_without_path(code: u8, path_requests: u32, path_wait_ms: u64) {
 /// One step of one send leg: `SEND leg=direct|propagated to=<8 hex>
 /// state=<word> elapsed_ms=<since the leg began>`. The state words are
 /// `path_wait`, `queued`, `sending`, `sent`, `proof`, `no_proof` and
-/// `failed`.
-pub fn send_leg(leg: crate::send::Leg, to: &[u8; 16], state: &str, elapsed: core::time::Duration) {
-    tracing::info!(
-        target: "lnmsg::send",
+/// `failed`. Returns the line it logged, for the runner's
+/// [`crate::effects::Effects::step`].
+pub fn send_leg(
+    leg: crate::send::Leg,
+    to: &[u8; 16],
+    state: &str,
+    elapsed: core::time::Duration,
+) -> String {
+    let line = format!(
         "SEND leg={} to={} state={} elapsed_ms={}",
         leg.as_str(),
         short_hex(to),
         state,
         elapsed.as_millis()
     );
+    tracing::info!(target: "lnmsg::send", "{line}");
+    line
 }
 
 /// A destination's path arrived: `PATH found to=<8 hex> hops=<n|?>

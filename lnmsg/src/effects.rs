@@ -39,6 +39,11 @@ pub trait Effects {
     /// it waits (leviculum 1002). The log has its own line for it, so a host
     /// with no screen does nothing.
     fn leg(&mut self, _leg: Leg) {}
+    /// One step of a send leg, the `SEND` line the log already holds
+    /// ([`crate::events::send_leg`]): `path_wait`, then the router's states
+    /// as the runner reads them. A host with a record of its own keeps it;
+    /// the log is enough for the others.
+    fn step(&mut self, _line: &str) {}
 }
 
 /// The terminal's effects: stderr, and the files under `${LNMSG_HOME}`.
@@ -103,6 +108,8 @@ pub(crate) mod fake {
         pub printed: Vec<u8>,
         pub mailboxes: Vec<Stored>,
         pub seen: Vec<SeenWrite>,
+        /// Every `SEND` line the runners reported, in order.
+        pub steps: Vec<String>,
         /// Refuse every seen write with this text, as a full disk would.
         pub seen_fails: Option<&'static str>,
         pub now_ms: u64,
@@ -133,6 +140,10 @@ pub(crate) mod fake {
 
         fn unix_now_ms(&self) -> u64 {
             self.now_ms
+        }
+
+        fn step(&mut self, line: &str) {
+            self.steps.push(line.to_string());
         }
     }
 }

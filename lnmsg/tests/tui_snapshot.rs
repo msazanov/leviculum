@@ -192,7 +192,10 @@ async fn a_scripted_session_sends_sees_the_proof_and_reads_the_reply() {
 
 /// The leg label's seconds come from the script's clock: `until leg` applies
 /// no tick and `sleep 2500` applies ten, one per 250 ms of its own length,
-/// so the row reads `direct 2 s` however long the host took.
+/// so the row reads `direct 2 s` however long the host took. And a script
+/// that quits on the proof still leaves the direct leg's `sending` and
+/// `proof` lines in `tui.log`: before leviculum 1014 the runner was cut off
+/// before it read them (the late-recipient arm of periculum 1013).
 #[tokio::test(flavor = "multi_thread")]
 async fn a_late_recipient_shows_the_direct_leg_and_the_log_keeps_its_steps() {
     let daemon = daemon("tui-late", |b| b).await;
@@ -263,6 +266,19 @@ async fn a_late_recipient_shows_the_direct_leg_and_the_log_keeps_its_steps() {
         output.status.code(),
         Some(0),
         "stderr: {stderr}\nframes:\n{got}\ntui.log:\n{log}"
+    );
+
+    let to = format!("to={}", &their_hex[..8]);
+    let steps: Vec<&str> = log
+        .lines()
+        .filter(|line| line.contains("SEND leg=direct") && line.contains(&to))
+        .filter_map(|line| line.split(" state=").nth(1))
+        .filter_map(|rest| rest.split(' ').next())
+        .collect();
+    assert_eq!(
+        steps,
+        ["path_wait", "sending", "proof"],
+        "the direct leg's steps in tui.log:\n{log}"
     );
 
     if got != EXPECTED_LATE {

@@ -64,6 +64,11 @@ const PUMP_MS: u64 = 20;
 const UNTIL_SECS: u64 = 30;
 /// The longest a script's `sleep` may ask for.
 const SLEEP_MAX_MS: u64 = 60_000;
+/// How long leaving waits for the running send or fetch to read what the
+/// engine already said. A runner reads its tap every 20 ms, so one with its
+/// final state in hand ends well inside this; one still waiting on the
+/// network is dropped after it, as before.
+const SETTLE_MS: u64 = 1_000;
 /// The compose pane grows with its text up to this many rows, then scrolls.
 const COMPOSE_MAX_ROWS: usize = 5;
 /// `tui.log`'s filter without `RUST_LOG`.
@@ -145,6 +150,8 @@ struct Shell {
     context: RunContext,
     jobs: VecDeque<Job>,
     running: bool,
+    /// The running job's task, so leaving can let it finish its last poll.
+    task: Option<tokio::task::JoinHandle<()>>,
     /// Every leg a runner reported, with the message it was for (the
     /// model's conversation and message index): a script's `until leg`.
     legs_seen: Vec<((usize, usize), Leg)>,
@@ -220,13 +227,38 @@ impl Shell {
         let tap = self.fanout.tap();
         let context = self.context.clone();
         let done = self.done_tx.clone();
-        tokio::spawn(async move {
+        self.task = Some(tokio::spawn(async move {
             let event = match job {
                 Job::Send { to, body } => send(tap, context, to, body).await,
                 Job::Fetch => UiEvent::FetchDone(fetch(tap, context).await),
             };
             let _ = done.send(event);
-        });
+        }));
+    }
+
+    /// Before leaving: hand the running job what the engine has said and give
+    /// it [`SETTLE_MS`] to read it. Without this a send whose proof the screen
+    /// had already shown was cut off before its runner logged `sending` and
+    /// `proof`: a script that quits on `until delivery delivered` leaves in
+    /// the same pump that delivered the proof (leviculum 1014).
+    async fn settle(&mut self) {
+        let Some(mut task) = self.task.take() else {
+            return;
+        };
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(SETTLE_MS);
+        loop {
+            if let Err(_gone) = self.fanout.pump(&mut self.attached.outbox) {
+                break;
+            }
+            tokio::select! {
+                _ = &mut task => return,
+                _ = tokio::time::sleep(Duration::from_millis(PUMP_MS)) => {}
+            }
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
+        }
+        task.abort();
     }
 }
 
@@ -374,6 +406,7 @@ pub async fn run(options: TuiOptions) -> ExitCode {
         },
         jobs: VecDeque::new(),
         running: false,
+        task: None,
         legs_seen: Vec::new(),
         done_tx,
         done_rx,
@@ -393,6 +426,7 @@ pub async fn run(options: TuiOptions) -> ExitCode {
         }
         None => run_terminal(&mut shell, &options).await,
     };
+    shell.settle().await;
     let Shell {
         attached,
         afterwards,

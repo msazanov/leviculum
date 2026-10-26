@@ -306,12 +306,30 @@ pub async fn run_send<O: Outbox>(
     options: &SendOptions,
     clock: &impl Clock,
 ) -> Result<Queued, SendError> {
+    run_send_steps(outbox, request, options, clock, &mut |_| {}).await
+}
+
+/// [`run_send`], each `SEND` line it logs also handed to `step`: the auto
+/// send passes them to its [`Effects::step`].
+async fn run_send_steps<O: Outbox>(
+    outbox: &mut O,
+    request: SendRequest,
+    options: &SendOptions,
+    clock: &impl Clock,
+    step: &mut impl FnMut(&str),
+) -> Result<Queued, SendError> {
     let start = clock.now_ms();
     let destination = request.destination;
     let via = request.via;
     let body_len = request.body.len();
-    let leg =
-        |word: &str| events::send_leg(Leg::Direct, &destination, word, clock::since(clock, start));
+    let mut leg = |word: &str| {
+        step(&events::send_leg(
+            Leg::Direct,
+            &destination,
+            word,
+            clock::since(clock, start),
+        ))
+    };
 
     let mut phase = Phase::Ready;
     let mut address = None;
@@ -503,27 +521,27 @@ enum PropagatedPhase {
 // Eight: the run's inputs and its three host seams (outbox, effects, clock),
 // each passed separately so a host can bring any one of its own.
 #[allow(clippy::too_many_arguments)]
-pub async fn run_send_propagated<O: Outbox>(
+pub async fn run_send_propagated<O: Outbox, E: Effects>(
     outbox: &mut O,
     request: SendRequest,
     preferred_pn: Option<[u8; 16]>,
     pn_source: &str,
     cancel: Option<[u8; 32]>,
     options: &SendOptions,
-    effects: &mut impl Effects,
+    effects: &mut E,
     clock: &impl Clock,
 ) -> Result<Queued, SendError> {
     let start = clock.now_ms();
     let destination = request.destination;
     let via = request.via;
     let body_len = request.body.len();
-    let leg = |word: &str| {
-        events::send_leg(
+    let leg = |effects: &mut E, word: &str| {
+        effects.step(&events::send_leg(
             Leg::Propagated,
             &destination,
             word,
             clock::since(clock, start),
-        )
+        ))
     };
 
     if let Some(message_id) = cancel {
@@ -533,7 +551,7 @@ pub async fn run_send_propagated<O: Outbox>(
         preferred: preferred_pn,
         mailbox: options.mailbox.input.clone(),
     })?;
-    leg("path_wait");
+    leg(effects, "path_wait");
 
     let mut phase = PropagatedPhase::Selecting;
     let mut address = None;
@@ -581,7 +599,7 @@ pub async fn run_send_propagated<O: Outbox>(
                     state,
                 } if Some(id) == message_id => {
                     events::state(&id, &format!("{state:?}"));
-                    leg(leg_word(state));
+                    leg(effects, leg_word(state));
                     last_state = Some(state);
                     if handed_on(state) {
                         return Ok(Queued {
@@ -623,7 +641,7 @@ pub async fn run_send_propagated<O: Outbox>(
         }
 
         if clock::since(clock, start) >= options.budget {
-            leg("failed");
+            leg(effects, "failed");
             return Err(match (phase, message_id) {
                 (PropagatedPhase::Selecting, _) => SendError::NoPropagationNode(
                     "selecting a node did not finish inside the timeout".to_string(),
@@ -701,7 +719,9 @@ where
         ..request.clone()
     };
     effects.leg(Leg::Direct);
-    let direct_error = match run_send(outbox, leg(Via::Link), options, clock).await {
+    let mut step = |line: &str| effects.step(line);
+    let direct = run_send_steps(outbox, leg(Via::Link), options, clock, &mut step).await;
+    let direct_error = match direct {
         Ok(queued) => {
             events::via("direct", "link-delivery");
             return Ok(AutoSent::Direct(queued));
@@ -1342,6 +1362,52 @@ mod tests {
                 } if id == ID
             ),
             "{error:?}"
+        );
+    }
+
+    /// A direct leg the peer proves leaves `path_wait`, `sending` and
+    /// `proof`, each with its `elapsed_ms`, in that order: the steps a
+    /// delivered message's log must show (leviculum 1014). Read off the
+    /// effects, which get the very lines the log writes: a capturing
+    /// tracing subscriber in a parallel test run loses lines to the
+    /// callsite interest another thread cached without it.
+    #[tokio::test(start_paused = true)]
+    async fn a_proven_direct_leg_logs_path_wait_sending_and_proof() {
+        let mut outbox = FakeOutbox::new(vec![
+            OutboxEvent::Ready { address: [1; 16] },
+            OutboxEvent::Resolved { destination: DST },
+            OutboxEvent::Queued { message_id: ID },
+            OutboxEvent::State {
+                message_id: ID,
+                state: MessageState::Sending,
+            },
+            OutboxEvent::State {
+                message_id: ID,
+                state: MessageState::Delivered,
+            },
+        ]);
+        let mut effects = Recorded::default();
+        let sent = run_send_auto(
+            &mut outbox,
+            request(),
+            None,
+            "none",
+            &mut options(),
+            || async { MailboxRun::default() },
+            &mut effects,
+            &Stepping::default(),
+        )
+        .await
+        .expect("a proven direct leg is a success");
+        assert!(matches!(sent, AutoSent::Direct(_)), "{sent:?}");
+        assert!(effects.notices.is_empty(), "{:?}", effects.notices);
+        assert_eq!(
+            effects.steps,
+            [
+                "SEND leg=direct to=abababab state=path_wait elapsed_ms=0",
+                "SEND leg=direct to=abababab state=sending elapsed_ms=0",
+                "SEND leg=direct to=abababab state=proof elapsed_ms=0",
+            ]
         );
     }
 }
