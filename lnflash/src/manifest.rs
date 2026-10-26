@@ -46,6 +46,7 @@
 //! ("Deliberately not").
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -978,6 +979,35 @@ fn exists(
     })
 }
 
+/// The roots [`locate`] walks after `--bundle`, in order. [`locate`] reads
+/// them from the process; a test builds them under a `TempDir`, so the
+/// outcome never depends on what the host has installed. The system root is
+/// deliberately not an environment variable: only this argument moves it,
+/// and the binary never passes one.
+#[derive(Debug, Clone)]
+pub struct BundleRoots {
+    /// `$LNFLASH_BUNDLE`.
+    pub env: Option<OsString>,
+    /// The directory holding the executable.
+    pub beside_binary: Option<PathBuf>,
+    /// [`SYSTEM_BUNDLE`] in production.
+    pub system: PathBuf,
+}
+
+impl BundleRoots {
+    /// The roots of this process: its environment, its executable, and the
+    /// distro path.
+    pub fn from_process() -> Self {
+        BundleRoots {
+            env: std::env::var_os(BUNDLE_ENV),
+            beside_binary: std::env::current_exe()
+                .ok()
+                .and_then(|exe| exe.parent().map(Path::to_path_buf)),
+            system: PathBuf::from(SYSTEM_BUNDLE),
+        }
+    }
+}
+
 /// Find the bundle: `--bundle`, then `$LNFLASH_BUNDLE`, then next to the
 /// executable, then the system path. Returns the directory holding
 /// `manifest.toml`.
@@ -986,20 +1016,23 @@ fn exists(
 /// and as the unpacked tarball root containing `firmware/`, because a user
 /// who points `--bundle` at the directory they just `cd`'d into is right.
 pub fn locate(explicit: Option<&Path>) -> Result<PathBuf, Error> {
+    locate_with(&BundleRoots::from_process(), explicit)
+}
+
+/// [`locate`] over the given roots instead of the process's own.
+pub fn locate_with(roots: &BundleRoots, explicit: Option<&Path>) -> Result<PathBuf, Error> {
     let mut tried = Vec::new();
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Some(path) = explicit {
         candidates.push(path.to_path_buf());
     }
-    if let Some(from_env) = std::env::var_os(BUNDLE_ENV) {
+    if let Some(from_env) = &roots.env {
         candidates.push(PathBuf::from(from_env));
     }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            candidates.push(dir.to_path_buf());
-        }
+    if let Some(dir) = &roots.beside_binary {
+        candidates.push(dir.clone());
     }
-    candidates.push(PathBuf::from(SYSTEM_BUNDLE));
+    candidates.push(roots.system.clone());
 
     for candidate in candidates {
         for dir in [candidate.clone(), candidate.join(FIRMWARE_DIR)] {
@@ -1795,29 +1828,68 @@ convert = "hex-to-uf2"
         );
     }
 
+    /// Roots under `base` where nothing exists yet, so a walk reads no path
+    /// the host owns (a host with the lnflash package has a real bundle at
+    /// [`SYSTEM_BUNDLE`]).
+    fn roots_under(base: &Path) -> BundleRoots {
+        BundleRoots {
+            env: Some(base.join("env").into_os_string()),
+            beside_binary: Some(base.join("beside")),
+            system: base.join("system"),
+        }
+    }
+
     #[test]
     fn the_bundle_is_found_both_as_the_manifest_dir_and_as_the_tarball_root() {
+        let roots = roots_under(TempDir::new().unwrap().path());
         let f = Fixture::new();
-        let found = locate(Some(f.dir.path())).unwrap();
+        let found = locate_with(&roots, Some(f.dir.path())).unwrap();
         assert_eq!(found, f.dir.path());
 
         let outer = TempDir::new().unwrap();
         let inner = outer.path().join(FIRMWARE_DIR);
         fs::create_dir(&inner).unwrap();
         fs::write(inner.join(MANIFEST_NAME), "").unwrap();
-        assert_eq!(locate(Some(outer.path())).unwrap(), inner);
+        assert_eq!(locate_with(&roots, Some(outer.path())).unwrap(), inner);
     }
 
     #[test]
     fn a_bundle_that_is_nowhere_names_everywhere_it_looked() {
-        let missing = TempDir::new().unwrap().path().join("gone");
-        match locate(Some(&missing)) {
+        let base = TempDir::new().unwrap();
+        let roots = roots_under(base.path());
+        let missing = base.path().join("gone");
+        match locate_with(&roots, Some(&missing)) {
             Err(Error::NoBundle(tried)) => {
-                assert!(tried.iter().any(|t| t.contains("gone")));
-                assert!(tried.iter().any(|t| t.contains(SYSTEM_BUNDLE)));
+                let spelled = |p: PathBuf| p.display().to_string();
+                let mut expected = Vec::new();
+                for root in ["gone", "env", "beside", "system"] {
+                    let dir = base.path().join(root);
+                    expected.push(spelled(dir.clone()));
+                    expected.push(spelled(dir.join(FIRMWARE_DIR)));
+                }
+                assert_eq!(tried, expected);
             }
             other => panic!("expected NoBundle, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn the_walk_reaches_the_system_root_last() {
+        // The positive control for the test above: the same roots with a
+        // bundle planted only under the system one. A host with the lnflash
+        // package installed is this case at /usr/share/lnflash.
+        let base = TempDir::new().unwrap();
+        let roots = roots_under(base.path());
+        fs::create_dir(&roots.system).unwrap();
+        fs::write(roots.system.join(MANIFEST_NAME), "").unwrap();
+        let missing = base.path().join("gone");
+        assert_eq!(locate_with(&roots, Some(&missing)).unwrap(), roots.system);
+
+        // And every earlier root still wins over it.
+        let beside = roots.beside_binary.clone().unwrap();
+        fs::create_dir(&beside).unwrap();
+        fs::write(beside.join(MANIFEST_NAME), "").unwrap();
+        assert_eq!(locate_with(&roots, Some(&missing)).unwrap(), beside);
     }
 
     // -----------------------------------------------------------------
