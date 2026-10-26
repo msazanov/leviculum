@@ -28,6 +28,7 @@ use leviculum_std::{Error as StdError, ReticulumNode};
 pub mod client;
 pub mod config;
 pub mod engine;
+pub(crate) mod hook_profile;
 pub mod identity;
 pub mod mailbox;
 pub(crate) mod peering;

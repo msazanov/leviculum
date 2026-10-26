@@ -156,3 +156,15 @@
 # anything in --release on the host it runs on, by hand. Run manually before
 # a release and whenever the stamp code changes (see the test's header).
 1    -p lnmsg --test stamp_timing
+
+# 0 -> 1 (2026-10-26, order 1009): hook_profile_under_field_load is the
+# measurement behind the LNPND_HOOK_PROFILE line: it drives the engine's
+# hooks under the miauhaus load (40 000 known destinations, a full peer
+# table, a 100-message inbound sync on the production file stores) and
+# prints the distribution per section. It asserts only that the load was
+# applied; it means something only in --release against a real disk (the
+# stores fsync, a tmpfs prices that at nothing), and a fill of 40 000
+# announces takes six seconds of release CPU. Run by hand with LNPND_LOAD_DIR on the disk under
+# test (see the module docs of lnpnd/src/engine_hook_load.rs) whenever the
+# engine's hooks or the stores' write paths change.
+1    -p lnpnd --lib

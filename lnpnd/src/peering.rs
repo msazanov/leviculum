@@ -854,6 +854,12 @@ impl PeeringRuntime {
         self.validated_links.insert(link_id, peer);
     }
 
+    /// Make the next tick run a rotation pass, whatever the cadence.
+    #[cfg(test)]
+    pub(crate) fn rotate_on_next_tick_for_tests(&mut self) {
+        self.next_rotation_at_ms = Some(0);
+    }
+
     /// Whether the `/offer` gate throttles `remote_hash` at `now`.
     #[cfg(test)]
     pub(crate) fn is_throttled_for_tests(&self, remote_hash: &[u8; 16], now: u64) -> bool {

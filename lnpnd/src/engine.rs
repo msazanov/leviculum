@@ -51,6 +51,7 @@ use leviculum_lxmf::{
     MESSAGE_GET_PATH,
 };
 
+use crate::hook_profile::{HookProfile, HookTimes, Section};
 use crate::mailbox::{MailboxConfig, MailboxRuntime};
 use crate::peering::{InboundSync, InboundSyncStart, PeeringRuntime, SyncSender};
 use crate::validation::{
@@ -300,6 +301,11 @@ pub struct Engine<S> {
     /// validate → append → prove the proof correlation relies on (module
     /// docs) is the order the payloads arrived in.
     pending: VecDeque<Pending>,
+    /// The clock of the hook invocation in progress (order 1009), kept on
+    /// the engine so the drain can charge sync slices apart from the rest.
+    profile: HookProfile,
+    /// What the last finished invocation spent, section by section.
+    last_profile: HookTimes,
 }
 
 /// One validated payload waiting for the store.
@@ -457,6 +463,8 @@ impl<S: PropagationStore + PropagationBodyStore> Engine<S> {
                 next_maintenance_at: 0,
                 validation: ValidationWorker::spawn(),
                 pending: VecDeque::new(),
+                profile: HookProfile::start("-"),
+                last_profile: HookTimes::default(),
             },
             receiver,
         )
@@ -1404,31 +1412,49 @@ impl<S: PropagationStore + PropagationBodyStore> Engine<S> {
     }
 
     /// Take the worker's finished validations onto the store queue, in
-    /// completion order (which is submission order — one worker), then
-    /// store as much of the queue as this hook's budget allows.
+    /// completion order (which is submission order — one worker).
+    fn collect_validated(&mut self) {
+        while let Some(done) = self.validation.try_recv() {
+            self.pending.push_back(Pending::from_validated(done));
+        }
+    }
+
+    /// [`Self::collect_validated`], then store as much of the queue as this
+    /// hook's budget allows.
     ///
     /// Queueing is cheap; storing is not, which is why only the second half
-    /// is bounded. Whatever is left asks the driver to come straight back:
-    /// the deadline is now, and the driver clamps that to its next
-    /// millisecond (`leviculum-std/src/driver/mod.rs`, "Advance next_poll").
+    /// is bounded. Whatever is left asks the driver to come straight back
+    /// ([`Self::ask_back_if_queued`]).
     fn drain_pending(
         &mut self,
         ready: &mut Ready<S>,
         core: &mut StdNodeCoreRef<'_>,
         out: &mut TickOutput,
     ) -> usize {
-        while let Some(done) = self.validation.try_recv() {
-            self.pending.push_back(Pending::from_validated(done));
-        }
+        self.collect_validated();
         let mut budget = PERSIST_PER_HOOK;
         while budget > 0 {
             let Some(pending) = self.pending.pop_front() else {
                 break;
             };
-            budget -= self
-                .store_one(ready, core, pending, budget, out)
-                .min(budget);
+            self.profile.lap(Section::Drain);
+            let section = match pending {
+                Pending::Sync { .. } => Section::Sync,
+                _ => Section::Drain,
+            };
+            let spent = self.store_one(ready, core, pending, budget, out);
+            self.profile.lap(section);
+            self.profile.add_appends(spent);
+            budget -= spent.min(budget);
         }
+        self.ask_back_if_queued(core, out);
+        PERSIST_PER_HOOK - budget
+    }
+
+    /// Whatever is left on the store queue asks the driver to come straight
+    /// back: the deadline is now, and the driver clamps that to its next
+    /// millisecond (`leviculum-std/src/driver/mod.rs`, "Advance next_poll").
+    fn ask_back_if_queued(&self, core: &StdNodeCoreRef<'_>, out: &mut TickOutput) {
         if !self.pending.is_empty() {
             let now_ms = core.now_ms();
             out.next_deadline_ms = Some(match out.next_deadline_ms {
@@ -1436,7 +1462,12 @@ impl<S: PropagationStore + PropagationBodyStore> Engine<S> {
                 None => now_ms,
             });
         }
-        PERSIST_PER_HOOK - budget
+    }
+
+    /// Close the hook invocation's profile; see [`crate::hook_profile`].
+    fn finish_profile(&mut self, rest: Section) {
+        let profile = std::mem::replace(&mut self.profile, HookProfile::start("-"));
+        self.last_profile = profile.finish(rest);
     }
 
     /// Whether a link packet's stamp is ground in the hook that received
@@ -1480,18 +1511,24 @@ impl<S: PropagationStore + PropagationBodyStore + Send + 'static>
         event: &NodeEvent,
     ) -> TickOutput {
         let mut out = TickOutput::empty();
+        self.profile = HookProfile::start("on_event");
+        self.profile.set_arm(event.variant_name());
         let Some(mut ready) = self.take_ready(core) else {
+            self.finish_profile(Section::Ready);
             return out;
         };
+        self.profile.lap(Section::Ready);
         // Finished validations first: they are older traffic than this
         // event, and applying them here keeps the per-link order.
         let persisted = self.drain_pending(&mut ready, core, &mut out);
+        self.profile.lap(Section::Drain);
         // The mailbox router sees every event and filters for its own
         // links, exactly as lnmsg's engine feeds it.
         if let Some(mut mailbox) = ready.mailbox.take() {
             mailbox.on_event(core, event, &mut out);
             ready.mailbox = Some(mailbox);
         }
+        self.profile.lap(Section::Mailbox);
         match event {
             // A propagation announce: the peer table's input
             // (`LXMFPropagationAnnounceHandler`,
@@ -1510,6 +1547,7 @@ impl<S: PropagationStore + PropagationBodyStore + Send + 'static>
                 ready
                     .node
                     .set_compute_stamp_value(ready.peering.requires_stamp_values());
+                self.profile.lap(Section::PeerTable);
             }
             // A client (or peer) opened a link to us: resources are
             // gated by the application, as the reference gates them
@@ -1705,11 +1743,13 @@ impl<S: PropagationStore + PropagationBodyStore + Send + 'static>
             }
             _ => {}
         }
+        self.profile.lap(Section::Event);
         // What this event queued is stored now if the drain above left the
         // hook's budget unspent: an upload proven in the hook that received
         // it waits for no wake at all.
         if persisted == 0 && !self.pending.is_empty() {
             self.drain_pending(&mut ready, core, &mut out);
+            self.profile.lap(Section::Drain);
         }
         self.state = State::Ready(ready);
         // A job queued for the worker, here or by an earlier hook, comes
@@ -1722,6 +1762,7 @@ impl<S: PropagationStore + PropagationBodyStore + Send + 'static>
                 None => due,
             });
         }
+        self.finish_profile(Section::Event);
         out
     }
 
@@ -1731,9 +1772,12 @@ impl<S: PropagationStore + PropagationBodyStore + Send + 'static>
         now_ms: u64,
     ) -> TickOutput {
         let mut out = TickOutput::empty();
+        self.profile = HookProfile::start("on_tick");
         let Some(mut ready) = self.take_ready(core) else {
+            self.finish_profile(Section::Ready);
             return out;
         };
+        self.profile.lap(Section::Ready);
 
         let next_announce = *self
             .next_announce_at
@@ -1750,6 +1794,7 @@ impl<S: PropagationStore + PropagationBodyStore + Send + 'static>
             };
             self.next_announce_at = Some(now_ms + wait_secs * 1000);
         }
+        self.profile.lap(Section::Announce);
 
         if now_ms >= self.next_maintenance_at {
             let evicted = ready.node.tick(unix_secs());
@@ -1767,18 +1812,23 @@ impl<S: PropagationStore + PropagationBodyStore + Send + 'static>
             );
             self.next_maintenance_at = now_ms + STORE_MAINTENANCE_SECS * 1000;
         }
+        self.profile.lap(Section::Tick);
 
         self.drain_pending(&mut ready, core, &mut out);
+        self.profile.lap(Section::Drain);
         self.close_idle_links(core, now_ms, &mut out);
+        self.profile.lap(Section::Links);
 
         if let Some(mut mailbox) = ready.mailbox.take() {
             mailbox.on_tick(core, now_ms, &mut out);
             ready.mailbox = Some(mailbox);
         }
+        self.profile.lap(Section::Mailbox);
 
         ready
             .peering
             .on_tick(core, &mut ready.node, now_ms, &mut out);
+        self.profile.lap(Section::Peering);
 
         self.state = State::Ready(ready);
 
@@ -1802,6 +1852,7 @@ impl<S: PropagationStore + PropagationBodyStore + Send + 'static>
             Some(existing) => existing.min(due),
             None => due,
         });
+        self.finish_profile(Section::Peering);
         out
     }
 }
@@ -4123,3 +4174,7 @@ mod inbound_sync_slices {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "engine_hook_load.rs"]
+mod hook_load;
