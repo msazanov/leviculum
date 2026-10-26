@@ -28,6 +28,8 @@ leviculum-std/event_log_subscriber standard cargo test -p leviculum-std --test e
 leviculum-std/event_log_multiprocess standard cargo test -p leviculum-std --test event_log_multiprocess
 leviculum-std/lnode_debug_log_format standard cargo test -p leviculum-std --test lnode_debug_log_format
 leviculum-lxmf-node/two_node_loopback standard cargo test -p leviculum-lxmf-node --test two_node_loopback
+# Needs the `tui` feature, which the computed run does not enable.
+lnmsg/tui_snapshot lnmsg-tui cargo test -p lnmsg --features tui --bins --test tui_snapshot
 # Run by `fast`, which `standard` depends on.
 leviculum-std/mvr mvr cargo test -p leviculum-std --test mvr
 leviculum-std/doc_citations citation-guard cargo test -p leviculum-std --test doc_citations

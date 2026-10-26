@@ -22,6 +22,11 @@ each of them:
      `standard` silently stopped running: the synthetic omission the
      fixtures below plant.
   3. The call. `standard` itself must run scripts/standard-integ.sh.
+  4. The features. The computed run is one plain `cargo test --test ...`
+     list with no `--features`, and cargo refuses the whole invocation when
+     one of its targets declares `required-features`. Every such target must
+     be claimed by a recipe that passes the feature (land gate 1f9036f8,
+     2026-10-26: lnmsg/tui_snapshot, 0 tests executed).
 
 Plus the prerequisite file both runners read (scripts/integ-prerequisites.txt):
 every target it names must exist, so a renamed suite cannot keep a skip
@@ -127,7 +132,8 @@ def enumerated_targets():
 
 
 def metadata_targets():
-    """cargo's answer: {`<dir>/<name>`} for every target of kind `test`."""
+    """cargo's answer: {`<dir>/<name>`: [required features]} for every target
+    of kind `test`."""
     proc = subprocess.run(
         ["cargo", "metadata", "--no-deps", "--format-version", "1"],
         cwd=REPO_DIR,
@@ -136,12 +142,12 @@ def metadata_targets():
     )
     if proc.returncode != 0:
         raise RuntimeError(proc.stderr.strip() or "cargo metadata failed")
-    out = set()
+    out = {}
     for package in json.loads(proc.stdout)["packages"]:
         member = os.path.relpath(os.path.dirname(package["manifest_path"]), REPO_DIR)
         for target in package["targets"]:
             if "test" in target["kind"]:
-                out.add(f"{member}/{target['name']}")
+                out[f"{member}/{target['name']}"] = target.get("required-features") or []
     return out
 
 
@@ -154,7 +160,8 @@ def claim_matches(claim, target):
 def findings(justfile, enumerated, metadata, elsewhere, prerequisites):
     """One line per way `standard` can miss a target.
 
-    `elsewhere` and `prerequisites` are (path shown in messages, data_lines).
+    `metadata` is {`<dir>/<name>`: [required features]}; `elsewhere` and
+    `prerequisites` are (path shown in messages, data_lines).
     """
     recipes = dump_recipes(justfile)
     with open(justfile, encoding="utf-8") as handle:
@@ -162,6 +169,8 @@ def findings(justfile, enumerated, metadata, elsewhere, prerequisites):
     if ROOT not in recipes:
         raise RuntimeError(f"no `{ROOT}` recipe in {justfile}")
     reach = reached(recipes, ROOT)
+    gated = {t: f for t, f in metadata.items() if f}
+    metadata = set(metadata)
     out = []
 
     # 1. The enumeration against cargo's own list.
@@ -208,6 +217,18 @@ def findings(justfile, enumerated, metadata, elsewhere, prerequisites):
                 f"takes the target."
             )
 
+    # 2b. A target with required features is claimed, never computed.
+    claims = [fields[0] for _, fields in lines if fields]
+    for target in sorted(gated):
+        if not any(claim_matches(claim, target) for claim in claims):
+            out.append(
+                f"{target} requires the feature(s) `{', '.join(gated[target])}`; "
+                f"the computed run of {RUNNER} enables none, so `cargo test "
+                f"--test` refuses the whole invocation (land gate 1f9036f8, "
+                f"2026-10-26). Claim it in {ELSEWHERE} from a recipe that "
+                f"passes the feature."
+            )
+
     # 3. The call itself.
     body = recipe_body(source, ROOT) or ""
     if RUNNER not in body:
@@ -244,51 +265,65 @@ orphan:
 
 standard: fast
     {{manifest}} x -- cargo test -p a --test interop
+    {{manifest}} g -- cargo test -p a --features tui --test gated
     bash scripts/standard-integ.sh
 """
 
 
 def selftest():
     """Plant each failure on a fixture and require the checker to name it."""
-    targets = {"a/mvr", "a/interop", "a/plain", "b/one", "b/two"}
+    targets = {"a/mvr", "a/interop", "a/plain", "b/one", "b/two", "a/gated"}
+    meta = {t: [] for t in targets}
+    gated = dict(meta, **{"a/gated": ["tui"]})
     good_claims = [
         (1, ["a/mvr", "mvr", "cargo", "test", "-p", "a", "--test", "mvr"]),
         (2, ["a/interop", "standard", "cargo", "test", "-p", "a", "--test", "interop"]),
     ]
     prereqs = [(1, ["reference/x", "a/interop"])]
     cases = [
-        ("clean fixture", FIXTURE_JUSTFILE, targets, targets, good_claims, prereqs, None),
+        ("clean fixture", FIXTURE_JUSTFILE, targets, meta, good_claims, prereqs, None),
         (
             "omission: the line a claim stands for is gone",
             FIXTURE_JUSTFILE.replace("    {{manifest}} x -- cargo test -p a --test interop\n", ""),
-            targets, targets, good_claims, prereqs, "no longer holds",
+            targets, meta, good_claims, prereqs, "no longer holds",
         ),
         (
             "standard stops calling the runner",
             FIXTURE_JUSTFILE.replace("    bash scripts/standard-integ.sh\n", ""),
-            targets, targets, good_claims, prereqs, "does not run scripts/standard-integ.sh",
+            targets, meta, good_claims, prereqs, "does not run scripts/standard-integ.sh",
         ),
         (
             "claim cites a recipe standard does not reach",
-            FIXTURE_JUSTFILE, targets, targets,
+            FIXTURE_JUSTFILE, targets, meta,
             good_claims + [(3, ["b/one", "orphan", "cargo", "test"])],
             prereqs, "does not run, so b/one",
         ),
         (
             "claim names a missing target",
-            FIXTURE_JUSTFILE, targets, targets,
+            FIXTURE_JUSTFILE, targets, meta,
             good_claims + [(3, ["c/*", "standard", "standard-integ.sh"])],
             prereqs, "matches no test target",
         ),
         (
             "cargo has a target the enumeration misses",
-            FIXTURE_JUSTFILE, targets, targets | {"b/declared"}, good_claims,
+            FIXTURE_JUSTFILE, targets, dict(meta, **{"b/declared": []}), good_claims,
             prereqs, "cargo knows the test target b/declared",
         ),
         (
             "prerequisite names a missing target",
-            FIXTURE_JUSTFILE, targets, targets, good_claims,
+            FIXTURE_JUSTFILE, targets, meta, good_claims,
             prereqs + [(2, ["reference/x", "a/gone"])], "names a/gone",
+        ),
+        (
+            "a target with required features is left to the computed run",
+            FIXTURE_JUSTFILE, targets, gated, good_claims, prereqs,
+            "a/gated requires the feature(s) `tui`",
+        ),
+        (
+            "the same target claimed by the recipe that passes the feature",
+            FIXTURE_JUSTFILE, targets, gated,
+            good_claims + [(3, ["a/gated", "standard", "cargo", "test", "-p", "a", "--features", "tui", "--test", "gated"])],
+            prereqs, None,
         ),
     ]
     failed = []
