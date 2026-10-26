@@ -5,8 +5,8 @@
 //! - Interface 1: SX1262 LoRa radio (module-internal SPI on P1.10–P1.15+P1.06)
 //! - Interface 2: BLE peripheral (Columba v2.2 protocol)
 //!
-//! Baseboard peripherals (display, GNSS, battery telemetry) land in Phase 3.
-//! Tracked under Codeberg #42.
+//! Baseboard peripherals (RAK19026 VC: display and button, GNSS, battery) are
+//! all wired, each behind its own cargo feature; the bare-module build has none.
 
 #![no_std]
 #![no_main]

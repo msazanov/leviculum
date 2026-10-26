@@ -21,8 +21,8 @@
 //! divider and puts the charge into telemetry. Since #457 it reads the
 //! QMA6100P accelerometer and prints `MOTION state=moving|still`, which
 //! nothing acts on yet. Since #459 a double press of the button announces.
-//! Not in it: the charger status lines and the buzzer, whose enable is held
-//! low.
+//! Since order 892 the buzzer plays the feedback grammar beside the LED.
+//! Not in it: the charger status lines (see `boards/t1000e.rs`).
 //! There is no display on this product.
 
 #![no_std]
