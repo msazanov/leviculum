@@ -458,7 +458,12 @@ pub async fn run(options: TuiOptions) -> ExitCode {
         Ok(config) => config,
         Err(error) => return super::usage(error.to_string()),
     };
+    let contacts = match loquax::names::load_contacts(&home) {
+        Ok(contacts) => contacts,
+        Err(error) => return super::usage(error.to_string()),
+    };
     let mut model = Model::new(&options.to);
+    model.names = loquax::names::Names::new(contacts);
     model.ascii = options.ascii;
     model.mouse = !options.no_mouse;
     model.send_on_enter = config.send_on_enter.unwrap_or(true);
@@ -683,6 +688,8 @@ enum Until {
     Delivery(DeliveryState),
     /// This many received messages, across every conversation.
     Received(usize),
+    /// This many peers' announces carried a name.
+    Named(usize),
     /// The send runner reported this leg for the newest message we wrote in
     /// the selected conversation.
     Leg(Leg),
@@ -710,6 +717,7 @@ impl Until {
                     .count()
                     >= *count
             }
+            Self::Named(count) => model.names.heard_count() >= *count,
             Self::Leg(leg) => {
                 let newest = model
                     .messages_of_selected()
@@ -914,6 +922,7 @@ fn parse_state(name: &str) -> Result<DeliveryState, String> {
 /// until ready [secs]             the engine is attached
 /// until delivery <state> [secs]  the newest sent message shows <state>
 /// until received <n> [secs]      n messages have arrived
+/// until named <n> [secs]         n peers have announced a name
 /// until leg <direct|propagated> [secs]
 ///                                the runner is on that leg for the newest
 ///                                sent message
@@ -1020,6 +1029,10 @@ fn parse_script(text: &str) -> Result<Vec<Step>, String> {
                             n.parse()
                                 .map_err(|_| at(format!("bad message count {n:?}")))?,
                         ),
+                        secs(tail.first().copied()).map_err(at)?,
+                    ),
+                    ["named", n, tail @ ..] => Step::Until(
+                        Until::Named(n.parse().map_err(|_| at(format!("bad peer count {n:?}")))?),
                         secs(tail.first().copied()).map_err(at)?,
                     ),
                     _ => return Err(at(format!("unknown condition {rest:?}"))),
@@ -1500,6 +1513,21 @@ mod tests {
         assert!(parse_script("sleep 60001\n").is_err());
         assert!(parse_script("sleep\n").is_err());
         assert!(parse_script("until leg sideways\n").is_err());
+    }
+
+    #[test]
+    fn until_named_parses_a_count_and_refuses_nonsense() {
+        let steps = parse_script("until named 2 9\nuntil named 1\n").expect("parses");
+        assert!(matches!(
+            steps[0],
+            Step::Until(Until::Named(2), d) if d == Duration::from_secs(9)
+        ));
+        assert!(matches!(
+            steps[1],
+            Step::Until(Until::Named(1), d) if d == Duration::from_secs(UNTIL_SECS)
+        ));
+        assert!(parse_script("until named\n").is_err());
+        assert!(parse_script("until named some\n").is_err());
     }
 
     /// `clock` names a local date and time at UTC; nonsense is refused.

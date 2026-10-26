@@ -425,6 +425,15 @@ impl Engine {
                     body: message.content,
                 });
             }
+            RouterEvent::PeerAnnounced {
+                destination,
+                announce,
+            } => {
+                self.emit(OutboxEvent::Announced {
+                    destination: destination.into_bytes(),
+                    name: announce.display_name(),
+                });
+            }
             RouterEvent::PropagationSyncComplete(result) => {
                 self.emit(OutboxEvent::SyncDone {
                     received: result.received,

@@ -33,8 +33,8 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
 --- frame 3: delivered ---
-┌  loquax afbda7b3───────┐┌  <61ddb79a…>  unknown────────────────── no mailbox ┐
-│▌<61ddb79a…>      12:00 ││                                                    │
+┌  loquax afbda7b3───────┐┌  them ·61dd  unknown─────────────────── no mailbox ┐
+│▌them ·61dd       12:00 ││                                                    │
 │▌you: are you there     ││                                                    │
 │                        ││                                                    │
 │                        ││                                                    │
@@ -45,7 +45,7 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 │                        ││           nothing earlier on this device           │
 │                        ││                    ── Today ──                     │
 │                        ││                             are you there  12:00 ✓ │
-│                        │├● to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
+│                        │├● to them ·61dd───── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit

@@ -74,6 +74,7 @@ pub mod identity;
 pub mod keys;
 pub mod mailbox;
 pub mod mailbox_state;
+pub mod names;
 pub mod outbox;
 pub mod seen;
 pub mod send;

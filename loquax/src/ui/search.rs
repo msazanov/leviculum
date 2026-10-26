@@ -3,8 +3,9 @@
 //! conversations, and the list pane it turns into.
 //!
 //! The matcher is a case-insensitive substring test over the conversation
-//! names (the short-hash form, [`super::name`], until names arrive in slice
-//! 5) and the message bodies. [`hits`] lists what it finds in two groups,
+//! names as the screen shows them ([`crate::names::Names::label`]: the name
+//! and its short hash, or the address while a peer has no name) and the
+//! message bodies. [`hits`] lists what it finds in two groups,
 //! the conversations first and then the messages, each most recent first;
 //! a message whose conversation also matches by name is in both. Until the
 //! history slice it searches what this session holds; with history it is
@@ -20,11 +21,12 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use leviculum_ui::text::truncate_to_cols;
+use leviculum_ui::text::{fit_width, truncate_to_cols};
 use leviculum_ui::{RLine, RStyle};
 
 use super::layout::{painted, BAR};
-use super::{bold, name, push, Conversation, UiModel};
+use super::{bold, push, Conversation, UiModel};
+use crate::names::Names;
 use crate::when::{list_time, WallTime};
 
 /// The mark before a match.
@@ -102,13 +104,18 @@ pub fn mark_first(text: &str, query: &str) -> String {
 /// What `query` finds among `conversations`: those whose name matches, in
 /// `order` (the list's, most recent first), then every message whose text
 /// matches, the most recent first. Nothing for an empty query.
-pub fn hits(conversations: &[Conversation], order: &[usize], query: &str) -> Vec<Hit> {
+pub fn hits(
+    conversations: &[Conversation],
+    names: &Names,
+    order: &[usize],
+    query: &str,
+) -> Vec<Hit> {
     if query.is_empty() {
         return Vec::new();
     }
     let mut out: Vec<Hit> = order
         .iter()
-        .filter(|&&c| find(&name(&conversations[c].peer), query).is_some())
+        .filter(|&&c| find(&names.label(&conversations[c].peer), query).is_some())
         .map(|&c| Hit::Conversation(c))
         .collect();
     let mut messages: Vec<(u64, Hit)> = Vec::new();
@@ -173,7 +180,7 @@ pub struct Laid {
 /// `query`'s results `width` cells wide, `selected` behind the bar and,
 /// with `focused`, in the selection's colours.
 pub fn rows<B>(model: &UiModel<B>, query: &str, width: usize) -> Laid {
-    let found = hits(&model.conversations, &model.order(), query);
+    let found = hits(&model.conversations, &model.names, &model.order(), query);
     let mut laid = Laid {
         rows: Vec::new(),
         starts: Vec::new(),
@@ -273,13 +280,14 @@ fn entry<B>(
         (Some(at), Some(now)) => list_time(&at, &now),
         _ => String::new(),
     };
+    let label = model.names.label(&conversation.peer);
     let who = match (message, shown) {
-        (None, _) => mark_first(&name(&conversation.peer), query),
-        (Some(_), Some(m)) if m.outbound => format!("you to {}", name(&conversation.peer)),
-        (Some(_), _) => name(&conversation.peer),
+        (None, _) => mark_first(&label, query),
+        (Some(_), Some(m)) if m.outbound => format!("you to {label}"),
+        (Some(_), _) => label,
     };
     let title = truncate_to_cols(&who, room.saturating_sub(time.chars().count() + 1));
-    let gap = room.saturating_sub(title.chars().count() + time.chars().count());
+    let gap = room.saturating_sub(fit_width(&title) + time.chars().count());
     let mut top = RLine::default();
     push(
         &mut top,

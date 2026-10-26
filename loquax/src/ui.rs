@@ -55,8 +55,16 @@
 //!
 //! History: loquax keeps no message store on disk (only the seen record's
 //! ids), so the conversations are this session's, and the top of the pane
-//! says so (`nothing earlier on this device`). Names and trust states and QR
-//! codes are later slices.
+//! says so (`nothing earlier on this device`), and the names heard are this
+//! session's. QR codes are a later slice.
+//!
+//! # Names
+//!
+//! A peer is drawn as [`crate::names::Names::label`] says, everywhere: the
+//! petname or the announced name with the short hash, `≈` when another
+//! peer's name looks the same, the address while it has none. The header
+//! adds the trust state in words, and a changed name is a line in the
+//! conversation ([`Note`]).
 //!
 //! # The search
 //!
@@ -91,6 +99,7 @@ use leviculum_ui::{RLine, RStyle, Rect, StyledChar, Theme, Tier};
 
 use crate::address::to_hex;
 use crate::keys::{self, Action};
+use crate::names::{Heard, Names};
 use crate::outbox::OutboxEvent;
 use crate::send::Leg;
 use crate::when::{list_time, WallTime};
@@ -331,6 +340,18 @@ pub struct Conversation {
     /// The model's activity count at the last message, for the list's order:
     /// most recent first, a conversation without messages by its place.
     pub activity: u64,
+    /// What the conversation says between its messages: the peer's name
+    /// changes, each once.
+    pub notes: Vec<Note>,
+}
+
+/// A line the conversation says between its messages, centred.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Note {
+    /// The message it stands before; the conversation's length for after the
+    /// last.
+    pub before: usize,
+    pub text: String,
 }
 
 impl Conversation {
@@ -341,6 +362,7 @@ impl Conversation {
             unread: 0,
             new_rule: None,
             activity: 0,
+            notes: Vec::new(),
         }
     }
 
@@ -450,6 +472,9 @@ pub struct UiModel<B> {
     pub theme: Theme,
     /// The search, when open: the list pane is its field and results.
     pub search: Option<search::Search<B>>,
+    /// The names this session heard and the reader's contacts: how every
+    /// pane names a peer ([`crate::names`]).
+    pub names: Names,
 }
 
 /// Text a drag selected in the open conversation, from where the button went
@@ -503,6 +528,7 @@ impl<B: InputBuffer + Default> UiModel<B> {
             tier: Tier::Mono,
             theme: Theme::Dark,
             search: None,
+            names: Names::default(),
         };
         for peer in peers {
             model.conversation(*peer);
@@ -546,7 +572,7 @@ impl<B> UiModel<B> {
         B: InputBuffer,
     {
         match self.query() {
-            Some(query) => search::hits(&self.conversations, &self.order(), query),
+            Some(query) => search::hits(&self.conversations, &self.names, &self.order(), query),
             None => Vec::new(),
         }
     }
@@ -1289,7 +1315,10 @@ fn follow<B: InputBuffer + Default>(model: &mut UiModel<B>, target: &str) -> Vec
                 let index = model.conversation(peer);
                 model.select(index);
                 model.focus = Pane::Compose;
-                model.toast(ToastKind::Info, format!("writing to {}", name(&peer)));
+                model.toast(
+                    ToastKind::Info,
+                    format!("writing to {}", model.names.label(&peer)),
+                );
                 Vec::new()
             }
             Err(_) => Vec::new(),
@@ -1713,6 +1742,24 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
             message_id,
             last: Some(state),
         } => apply_state(model, message_id, state),
+        // Our own announce, echoed back, names nobody.
+        OutboxEvent::Announced { destination, .. } if model.address == Some(destination) => {}
+        OutboxEvent::Announced { destination, name } => {
+            // Said once, in the conversation, where the reader has one with
+            // the peer: a peer nobody wrote to has nothing to compare with.
+            if let Heard::Changed { was, now } = model.names.heard(destination, name.as_deref()) {
+                if let Some(conversation) = model
+                    .conversations
+                    .iter_mut()
+                    .find(|c| c.peer == destination)
+                {
+                    conversation.notes.push(Note {
+                        before: conversation.messages.len(),
+                        text: format!("was {was}, now announces {now}"),
+                    });
+                }
+            }
+        }
         OutboxEvent::Received {
             message_id,
             source,
@@ -1765,7 +1812,7 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
                 // says where the new ones begin.
                 conversation.mark_new();
             }
-            let from = name(&source);
+            let from = model.names.label(&source);
             model.toast(ToastKind::Info, format!("message from {from}"));
         }
         _ => {}
@@ -2003,16 +2050,14 @@ pub fn short(address: &[u8; 16]) -> String {
     hex
 }
 
-/// A peer as the list, the header and the compose box name it until names
-/// arrive from announces: the address's first eight hex digits in angle
-/// brackets (section 5, "The elements").
-pub fn name(address: &[u8; 16]) -> String {
-    format!("<{}…>", to_hex(&address[..4]))
+/// The header's title: the peer as [`Names::label`] says it, its trust
+/// state in words, then whose name it shares and what it announces beside a
+/// petname.
+pub fn header_title(names: &Names, peer: &[u8; 16]) -> String {
+    let mut words = vec![names.trust(peer).as_str().to_string()];
+    words.extend(names.header_notes(peer));
+    format!("{}  {}", names.label(peer), words.join(" · "))
 }
-
-/// The trust state the header says in words. Every peer is `unknown` until
-/// names and petnames arrive (section 7, slice 5).
-pub const TRUST_UNKNOWN: &str = "unknown";
 
 fn push(line: &mut RLine, text: &str, st: RStyle) {
     line.cells.extend(text.chars().map(|ch| StyledChar {
@@ -2073,7 +2118,7 @@ fn mailbox_words<B>(model: &UiModel<B>) -> Vec<String> {
 fn detail_view<B>(model: &UiModel<B>, c: usize, m: usize) -> Option<DetailView> {
     let conversation = model.conversations.get(c)?;
     let message = conversation.messages.get(m)?;
-    let who = name(&conversation.peer);
+    let who = model.names.label(&conversation.peer);
     let mut rows = vec![
         match message.outbound {
             true => format!("from you to {who}"),
@@ -2120,7 +2165,7 @@ pub fn view<B: InputBuffer>(model: &UiModel<B>) -> View {
     let wide = sizes.messages.0 >= WIDE_HEADER;
     let peer = model.conversations.get(model.selected).map(|c| c.peer);
     let messages_title = match peer {
-        Some(peer) => format!("{}  {TRUST_UNKNOWN}", name(&peer)),
+        Some(peer) => header_title(&model.names, &peer),
         None => "messages".to_string(),
     };
     let mailbox = mailbox_words(model);
@@ -2129,7 +2174,7 @@ pub fn view<B: InputBuffer>(model: &UiModel<B>) -> View {
     let room = sizes
         .messages
         .0
-        .saturating_sub(messages_title.chars().count() + 6);
+        .saturating_sub(leviculum_ui::text::fit_width(&messages_title) + 6);
     let messages_title_right = match (wide, peer) {
         (true, Some(peer)) => to_hex(&peer),
         _ => mailbox
@@ -2173,7 +2218,7 @@ pub fn view<B: InputBuffer>(model: &UiModel<B>) -> View {
         messages.push(row);
     }
     let compose_title = match peer {
-        Some(peer) => format!("to {}", name(&peer)),
+        Some(peer) => format!("to {}", model.names.label(&peer)),
         None => "compose".to_string(),
     };
     let ctx = model.ctx();
@@ -4011,22 +4056,24 @@ mod tests {
     #[test]
     fn the_matcher_groups_conversations_then_messages_most_recent_first() {
         let mut model = searchable();
-        let tripod = search::hits(&model.conversations, &model.order(), "tripod");
+        let tripod = search::hits(&model.conversations, &model.names, &model.order(), "tripod");
         let m = |conversation, message| search::Hit::Message {
             conversation,
             message,
         };
         assert_eq!(tripod, [m(1, 0), m(0, 2), m(0, 1)]);
         assert_eq!(
-            search::hits(&model.conversations, &model.order(), "TRIPOD"),
+            search::hits(&model.conversations, &model.names, &model.order(), "TRIPOD"),
             tripod
         );
         // `abab` is PEER's name, and one of our messages says it.
         say(&mut model, "ask abababab about it");
-        let by_name = search::hits(&model.conversations, &model.order(), "ABAB");
+        let by_name = search::hits(&model.conversations, &model.names, &model.order(), "ABAB");
         assert_eq!(by_name, [search::Hit::Conversation(0), m(1, 1)]);
-        assert!(search::hits(&model.conversations, &model.order(), "").is_empty());
-        assert!(search::hits(&model.conversations, &model.order(), "drone").is_empty());
+        assert!(search::hits(&model.conversations, &model.names, &model.order(), "").is_empty());
+        assert!(
+            search::hits(&model.conversations, &model.names, &model.order(), "drone").is_empty()
+        );
     }
 
     #[test]
@@ -4237,5 +4284,151 @@ mod tests {
         let field = cells(&model, |t| *t == hit::Target::SearchField);
         press(&mut model, field[0]);
         assert_eq!(model.focus, Pane::Search);
+    }
+
+    fn announced(model: &mut UiModel<Field>, peer: [u8; 16], name: &str) {
+        engine(
+            model,
+            OutboxEvent::Announced {
+                destination: peer,
+                name: Some(name.to_string()),
+            },
+        );
+    }
+
+    /// Slice 5: a peer's announced name replaces its address in the list,
+    /// the header, the compose box, the detail view and the toasts, with
+    /// its short hash beside it.
+    #[test]
+    fn an_announced_name_is_drawn_with_its_short_hash_everywhere() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        model.screen = (80, 24);
+        announced(&mut model, PEER, "Alice\u{202e}\u{200b}");
+        let shown = view(&model);
+        assert_eq!(shown.messages_title, "Alice ·abab  unknown");
+        assert_eq!(shown.compose_title, "to Alice ·abab");
+        assert_eq!(text(&shown.conversations[0]).trim_end(), "▌Alice ·abab");
+        engine(
+            &mut model,
+            OutboxEvent::Received {
+                message_id: ID,
+                source: PEER,
+                title: Vec::new(),
+                body: b"hi".to_vec(),
+                verified: true,
+            },
+        );
+        assert_eq!(
+            model.current_toast().map(|t| t.text.as_str()),
+            Some("message from Alice ·abab")
+        );
+        let detail = detail_view(&model, 0, 0).expect("a message");
+        assert_eq!(detail.rows[0], "from Alice ·abab to you");
+    }
+
+    /// Two peers announcing names that look alike are both marked, and the
+    /// header says whose name the open one shares.
+    #[test]
+    fn a_shared_name_marks_both_peers() {
+        let mut model = UiModel::<Field>::new(&[PEER, OTHER]);
+        announced(&mut model, PEER, "Alice");
+        announced(&mut model, OTHER, "АLICE");
+        assert_eq!(
+            view(&model).messages_title,
+            "Alice ·abab ≈  unknown · same name as ·cdcd"
+        );
+        let rows: Vec<String> = view(&model).conversations.iter().map(text).collect();
+        assert!(
+            rows.iter().any(|r| r.contains("Alice ·abab ≈")),
+            "{rows:#?}"
+        );
+        assert!(
+            rows.iter().any(|r| r.contains("АLICE ·cdcd ≈")),
+            "{rows:#?}"
+        );
+    }
+
+    /// A name change is said once, in the conversation, where it happened;
+    /// a repeat of the same name says nothing more.
+    #[test]
+    fn a_changed_name_is_said_once_in_the_conversation() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        announced(&mut model, PEER, "Alice");
+        sent(&mut model, "hi");
+        announced(&mut model, PEER, "Ally");
+        announced(&mut model, PEER, "Ally");
+        assert_eq!(
+            shown(&model),
+            [
+                layout::EARLIEST,
+                "hi  ○",
+                "── was Alice, now announces Ally ──"
+            ]
+        );
+        assert_eq!(view(&model).messages_title, "Ally ·abab  unknown");
+        // Our own address names nobody.
+        model.address = Some(OTHER);
+        announced(&mut model, OTHER, "me");
+        assert_eq!(model.names.heard_count(), 1);
+        model.address = None;
+        // A peer with no conversation gets no note, and none is invented.
+        announced(&mut model, OTHER, "Carol");
+        announced(&mut model, OTHER, "Carla");
+        assert!(model.conversations.iter().all(|c| c.peer != OTHER));
+    }
+
+    /// The reader's name wins, the peer is `known`, and the header keeps
+    /// the announced name as provenance; a block says `blocked`.
+    #[test]
+    fn a_petname_wins_and_the_header_says_the_trust() {
+        let mut model = UiModel::<Field>::new(&[PEER, OTHER]);
+        model.names = Names::new(
+            crate::names::parse_contacts(&format!(
+                "name {} Mum\nblock {}\n",
+                to_hex(&PEER),
+                to_hex(&OTHER)
+            ))
+            .expect("contacts"),
+        );
+        assert_eq!(view(&model).messages_title, "Mum ·abab  known");
+        announced(&mut model, PEER, "Alice");
+        assert_eq!(
+            view(&model).messages_title,
+            "Mum ·abab  known · announces Alice"
+        );
+        assert_eq!(view(&model).compose_title, "to Mum ·abab");
+        model.selected = 1;
+        assert_eq!(view(&model).messages_title, "<cdcdcdcd…>  blocked");
+    }
+
+    /// The search matches the name as shown and the short hash beside it.
+    #[test]
+    fn the_search_matches_the_shown_name_and_the_short_hash() {
+        let mut model = UiModel::<Field>::new(&[PEER, OTHER]);
+        announced(&mut model, PEER, "Alice");
+        let order = model.order();
+        for query in ["alice", "ABAB", "e ·ab"] {
+            assert_eq!(
+                search::hits(&model.conversations, &model.names, &order, query),
+                [search::Hit::Conversation(0)],
+                "{query}"
+            );
+        }
+        // The other has no name: its address form still matches.
+        assert_eq!(
+            search::hits(&model.conversations, &model.names, &order, "cdcdcdcd"),
+            [search::Hit::Conversation(1)]
+        );
+    }
+
+    /// A wide name is cut in cells on a narrow list row, the hash kept.
+    #[test]
+    fn a_wide_name_is_cut_in_cells_and_keeps_its_hash() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        announced(&mut model, PEER, &"龙".repeat(16));
+        let row = text(&view(&model).conversations[0]);
+        let width = leviculum_ui::text::fit_width(&row);
+        assert_eq!(width, usize::from(list_width(model.screen.0)) - 2, "{row}");
+        assert!(row.trim_end().ends_with("… ·abab"), "{row}");
     }
 }

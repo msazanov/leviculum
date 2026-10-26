@@ -1,0 +1,68 @@
+--- frame 1: attached ---
+┌● loquax afbda7b3───────┐┌  <61ddb79a…>  unknown────────────────── no mailbox ┐
+│▌<61ddb79a…>            ││                                                    │
+│▌                       ││                                                    │
+│                        ││                                                    │
+│ <5ec0ea2e…>            ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│ Carol ·8f77            ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││           nothing earlier on this device           │
+│                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+--- frame 2: named ---
+┌● loquax afbda7b3───────┐┌  Bob ·61dd  unknown──────────────────── no mailbox ┐
+│▌Bob ·61dd              ││                                                    │
+│▌                       ││                                                    │
+│                        ││                                                    │
+│ <5ec0ea2e…>            ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│ Carol ·8f77            ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││           nothing earlier on this device           │
+│                        │├  to Bob ·61dd────── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+--- frame 3: collision ---
+┌● loquax afbda7b3───────┐┌  Bob ·61dd ≈  unknown · same name as ·5ec0─────────┐
+│▌Bob ·61dd ≈            ││                                                    │
+│▌                       ││                                                    │
+│                        ││                                                    │
+│ B0b ·5ec0 ≈            ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│ Carol ·8f77            ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││           nothing earlier on this device           │
+│                        │├  to Bob ·61dd ≈──── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
+--- frame 4: petname ---
+┌● loquax afbda7b3───────┐┌  Carol ·8f77  known · announces Caroline───────────┐
+│ Bob ·61dd ≈            ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│ B0b ·5ec0 ≈            ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│▌Carol ·8f77            ││                                                    │
+│▌                       ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││           nothing earlier on this device           │
+│                        │├  to Carol ·8f77──── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit

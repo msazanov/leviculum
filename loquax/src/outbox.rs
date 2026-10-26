@@ -159,6 +159,14 @@ pub enum OutboxEvent {
         /// Whether the signature verified against a known source identity.
         verified: bool,
     },
+    /// A peer announced its delivery destination. `name` is the display
+    /// name as the reference reads it from the app data
+    /// (`LXMF.display_name_from_app_data`; [`crate::names::from_app_data`]),
+    /// not yet sanitised: the screen does that ([`crate::names`]).
+    Announced {
+        destination: [u8; 16],
+        name: Option<String>,
+    },
     /// A [`Command::Fetch`] finished its round. `received` and `duplicates`
     /// are the router's own counts for the drain.
     SyncDone { received: usize, duplicates: usize },

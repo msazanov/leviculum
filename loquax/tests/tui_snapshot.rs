@@ -37,6 +37,14 @@
 //! `Esc` bringing the list back with the conversation as it was. Pinned in
 //! `tests/fixtures/tui_search_session.frames`.
 //!
+//! The names' session (section 7, slice 5) lists three correspondents by
+//! address, then each attaches and announces: Bob's name replaces his
+//! address in the list, the header and the compose box with its short hash;
+//! a second peer announcing `B0b` marks both with `≈` and the header says
+//! whose name it shares; and the third, whom the contacts file names
+//! `Carol`, keeps that name over the `Caroline` it announces and is `known`.
+//! Pinned in `tests/fixtures/tui_names.frames`.
+//!
 //! The daemon is the in-process one `mailbox_cli.rs` uses. The correspondent
 //! is a second loquax engine attached to it in this process
 //! (`loquax::engine::attach`), a full LXMF router, so the proof that turns the
@@ -71,6 +79,7 @@ const EXPECTED_CHAT: &str = include_str!("fixtures/tui_chat.frames");
 const EXPECTED_MOUSE: &str = include_str!("fixtures/tui_mouse.frames");
 const EXPECTED_STYLES: &str = include_str!("fixtures/tui_chat.styles");
 const EXPECTED_SEARCH: &str = include_str!("fixtures/tui_search_session.frames");
+const EXPECTED_NAMES: &str = include_str!("fixtures/tui_names.frames");
 
 const SCRIPT: &str = "\
 until ready 20
@@ -887,7 +896,7 @@ async fn the_chat_layout_draws_the_mockups_at_both_sizes() {
             detail.contains("delivered: proof received"),
             "{size}: {detail}"
         );
-        assert!(detail.contains("from you to <"), "{size}: {detail}");
+        assert!(detail.contains("from you to them ·"), "{size}: {detail}");
         all.push_str(&format!("=== {size} ===\n{}", without_ids(&frames)));
     }
     if all != EXPECTED_CHAT {
@@ -1192,6 +1201,132 @@ async fn the_search_finds_opens_and_steps_in_place_at_both_sizes() {
         panic!(
             "the frames moved; this run's are in {}, the pinned ones in \
              loquax/tests/fixtures/tui_search_session.frames\n{all}",
+            kept.display()
+        );
+    }
+}
+
+/// Each correspondent attaches only after the screen has drawn the frame
+/// before its own, so its one announce reaches an engine that is listening,
+/// and `until named` holds the script until the name is there.
+const NAMES_SCRIPT: &str = "\
+until ready 20
+frame attached
+until named 1 30
+frame named
+until named 2 30
+frame collision
+until named 3 30
+key j
+key j
+frame petname
+key q
+";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn names_from_announces_carry_their_hash_collide_and_yield_to_a_petname() {
+    let daemon = daemon("tui-names", |b| b).await;
+    let home = tempfile::tempdir().expect("tui home");
+    std::fs::write(
+        home.path().join("identity"),
+        encode_identity(&fixed_identity(0x11)).expect("storable"),
+    )
+    .expect("write the identity");
+    let hex = |seed: u8| -> String {
+        let address = delivery_address(&fixed_identity(seed)).expect("an address");
+        address.iter().map(|b| format!("{b:02x}")).collect()
+    };
+    std::fs::write(
+        home.path().join("contacts"),
+        format!("# the reader's own names\nname {} Carol\n", hex(0x44)),
+    )
+    .expect("write the contacts");
+    let script = home.path().join("names.script");
+    let frames = home.path().join("names.frames");
+    std::fs::write(&script, NAMES_SCRIPT).expect("write the script");
+    let mut args: Vec<String> = vec![
+        "--instance".into(),
+        daemon.instance.clone(),
+        "--config".into(),
+        daemon.config_dir.path().display().to_string(),
+    ];
+    for seed in [0x22, 0x33, 0x44] {
+        args.extend(["--to".into(), hex(seed)]);
+    }
+    args.extend([
+        "--script".into(),
+        script.display().to_string(),
+        "--frames".into(),
+        frames.display().to_string(),
+        "--size".into(),
+        "80x16".into(),
+    ]);
+    let child_home = home.path().to_path_buf();
+    let child = tokio::task::spawn_blocking(move || {
+        let mut command = Command::new(LNMSG);
+        command
+            .args(&args)
+            .env("LNMSG_HOME", &child_home)
+            .env("LNMSG_DISPLAY_NAME", "tui")
+            .env_remove("LEVICULUM_EVENT_LOG")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let child = leviculum_std::process::spawn_supervised(command).expect("spawn loquax");
+        child.wait_with_output().expect("wait for loquax")
+    });
+
+    let mut attached = Vec::new();
+    let mut storages = Vec::new();
+    for (seed, name, after) in [
+        (0x22, "Bob", "attached"),
+        (0x33, "B0b", "named"),
+        (0x44, "Caroline", "collision"),
+    ] {
+        wait_for_frame(&frames, after, Duration::from_secs(40)).await;
+        let storage = tempfile::tempdir().expect("their storage");
+        let them = attach(AttachConfig {
+            instance: daemon.instance.clone(),
+            storage_dir: storage.path().to_path_buf(),
+            identity: fixed_identity(seed),
+            display_name: name.as_bytes().to_vec(),
+            notices: Terminal::new(storage.path().to_path_buf()),
+        })
+        .await
+        .expect("a correspondent attaches");
+        attached.push(them);
+        storages.push(storage);
+    }
+
+    let output = child.await.expect("the loquax child thread");
+    for them in attached {
+        them.stop().await;
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let got = std::fs::read_to_string(&frames).expect("read the frames");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {stderr}\nframes:\n{got}"
+    );
+    let named = frame(&got, "named");
+    assert!(named.contains("Bob ·61dd  unknown"), "{named}");
+    assert!(named.contains("to Bob ·61dd"), "{named}");
+    let collision = frame(&got, "collision");
+    assert!(collision.contains("same name as ·"), "{collision}");
+    // Both list rows, the header and the compose box.
+    assert_eq!(collision.matches(" ≈").count(), 4, "{collision}");
+    let petname = frame(&got, "petname");
+    assert!(
+        petname.contains("Carol ·") && petname.contains("known · announces Caroline"),
+        "{petname}"
+    );
+    if got != EXPECTED_NAMES {
+        let kept = std::env::temp_dir().join("loquax-tui-names.frames");
+        let _ = std::fs::write(&kept, &got);
+        panic!(
+            "the frames moved; this run's are in {}, the pinned ones in \
+             loquax/tests/fixtures/tui_names.frames\n{got}",
             kept.display()
         );
     }

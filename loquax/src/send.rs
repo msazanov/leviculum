@@ -421,6 +421,7 @@ async fn run_send_steps<O: Outbox>(
                 | OutboxEvent::PnUnavailable { .. }
                 | OutboxEvent::Mailbox(_)
                 | OutboxEvent::Received { .. }
+                | OutboxEvent::Announced { .. }
                 | OutboxEvent::SyncDone { .. }
                 | OutboxEvent::SyncFailed { .. } => {}
             }

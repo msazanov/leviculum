@@ -25,10 +25,12 @@ use alloc::vec::Vec;
 use leviculum_ui::delivery::glyph;
 use leviculum_ui::input::InputBuffer;
 use leviculum_ui::link::find_links;
+use leviculum_ui::text::{fit_width, truncate_to_cols};
 use leviculum_ui::tokens::{Paint, Tokens};
 use leviculum_ui::{RLine, RStyle};
 
-use super::{leg_label, name, plain, push, wrap, Conversation, Message, UiModel};
+use super::{leg_label, plain, push, wrap, Conversation, Message, UiModel};
+use crate::names::Names;
 use crate::when::{date_label, list_time, WallTime};
 
 /// The top of what this device holds. Until the history slice that is the
@@ -151,6 +153,13 @@ pub fn conversation(conversation: &Conversation, width: usize, draw: &Draw<'_>) 
                 last = Last::Separator;
             }
         }
+        for note in conversation.notes.iter().filter(|n| n.before == index) {
+            if last == Last::Block {
+                laid.push(RLine::default());
+            }
+            laid.push(note_line(&note.text, width, draw.tokens));
+            last = Last::Separator;
+        }
         if let Some(rule) = conversation.new_rule.filter(|rule| rule.at == index) {
             if last == Last::Block {
                 laid.push(RLine::default());
@@ -179,12 +188,28 @@ pub fn conversation(conversation: &Conversation, width: usize, draw: &Draw<'_>) 
         });
         last = Last::Block;
     }
+    let after = conversation.messages.len();
+    for note in conversation.notes.iter().filter(|n| n.before >= after) {
+        if last == Last::Block {
+            laid.push(RLine::default());
+        }
+        laid.push(note_line(&note.text, width, draw.tokens));
+        last = Last::Separator;
+    }
     laid
+}
+
+/// `── was Alice, now announces Ally ──`, centred and muted: a peer's name
+/// changed, said once where it happened (`loquax-mailbox.md`, the naming
+/// decision, 2). Cut to the pane with `…` when it is wider.
+fn note_line(text: &str, width: usize, tokens: &Tokens) -> RLine {
+    let text = truncate_to_cols(&format!("── {text} ──"), width.saturating_sub(2));
+    centred(&text, width, painted(tokens.muted))
 }
 
 /// `text` centred in `width` cells, in `st`.
 fn centred(text: &str, width: usize, st: RStyle) -> RLine {
-    let pad = width.saturating_sub(text.chars().count()) / 2;
+    let pad = width.saturating_sub(fit_width(text)) / 2;
     let mut line = plain(&" ".repeat(pad));
     push(&mut line, text, st);
     line
@@ -436,7 +461,7 @@ pub fn list<B: InputBuffer>(model: &UiModel<B>, width: usize, height: usize) -> 
     for &index in &order[first..] {
         let conversation = &model.conversations[index];
         let here = index == model.selected;
-        let [top, bottom] = entry(conversation, width, model.now);
+        let [top, bottom] = entry(conversation, &model.names, width, model.now);
         for mut row in [top, bottom] {
             if here {
                 if let Some(cell) = row.cells.first_mut() {
@@ -486,7 +511,12 @@ pub fn badge_cells(conversation: &Conversation, width: usize) -> Option<(usize, 
 /// One conversation's two rows, `width` cells with the bar's margin first
 /// and one blank last: the name and the last message's time, the last line's
 /// preview (`you:` when ours) and the unread count in brackets, reversed.
-fn entry(conversation: &Conversation, width: usize, now: Option<WallTime>) -> [RLine; 2] {
+fn entry(
+    conversation: &Conversation,
+    names: &Names,
+    width: usize,
+    now: Option<WallTime>,
+) -> [RLine; 2] {
     let room = width.saturating_sub(2);
     let last = conversation.messages.last();
     let time = match (last.and_then(|m| m.at), now) {
@@ -495,11 +525,11 @@ fn entry(conversation: &Conversation, width: usize, now: Option<WallTime>) -> [R
     };
     let mut top = RLine::default();
     push(&mut top, " ", RStyle::default());
-    let title = leviculum_ui::text::truncate_to_cols(
-        &name(&conversation.peer),
+    let title = names.label_in(
+        &conversation.peer,
         room.saturating_sub(time.chars().count() + 1),
     );
-    let gap = room.saturating_sub(title.chars().count() + time.chars().count());
+    let gap = room.saturating_sub(fit_width(&title) + time.chars().count());
     push(
         &mut top,
         &format!("{title}{}{time} ", " ".repeat(gap)),
@@ -525,7 +555,7 @@ fn entry(conversation: &Conversation, width: usize, now: Option<WallTime>) -> [R
         false => room.saturating_sub(badge.chars().count() + 1),
     };
     let preview = leviculum_ui::text::truncate_to_cols(&preview, budget);
-    let gap = room.saturating_sub(preview.chars().count() + badge.chars().count());
+    let gap = room.saturating_sub(fit_width(&preview) + badge.chars().count());
     let mut bottom = RLine::default();
     push(&mut bottom, " ", RStyle::default());
     push(
