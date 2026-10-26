@@ -58,8 +58,8 @@ Concretely:
 - Three panes: conversations (left), messages (right, upper), compose
   (right, lower). `Tab` and `Shift-Tab` cycle; a click focuses.
 - **In the conversation and message panes**, `lnomad`'s keymap applies
-  unchanged: the `SCROLL_KEYS` table verbatim
-  (`lnomad/src/app/event.rs:1983-2115`), so `j`/`k`, `Ctrl-n`/`Ctrl-p`, arrows,
+  unchanged: the scroll rows verbatim
+  (`SCROLL_ROWS`, `leviculum-ui/src/keymap.rs:588`), so `j`/`k`, `Ctrl-n`/`Ctrl-p`, arrows,
   `Ctrl-f`/`Ctrl-b`, `Ctrl-v`/`Alt-v`, `Ctrl-d`/`Ctrl-u`, `g`/`G`,
   `Home`/`End` and the wheel all work, in all four idioms, for free.
 - **In the compose pane**, plain keys type. Only `Ctrl-` and `Alt-` chords
@@ -84,14 +84,14 @@ Concretely:
   all, and each entry shows its key if it has one. NomadNet's static
   shortcut bar is the failure mode to avoid.
 - **`f` hint mode from `lnomad`** (`hints`,
-  `lnomad/src/app/model.rs:969-1006`), extended to conversations. Its best
+  `lnomad/src/app/model.rs:952-989`), extended to conversations. Its best
   property is that it matches either the hint label *or* a substring of the
-  target's text (`hint_matches`, `lnomad/src/app/model.rs:996-1006`), so `f`
+  target's text (`hint_matches`, `lnomad/src/app/model.rs:979-989`), so `f`
   then typing part of a contact's name jumps to that conversation. That is
   a better contact switcher than anything in either prior-art program.
 
 **What must not be copied**: `lnomad` quits on `Ctrl-C` from any mode,
-before the mode dispatch (`lnomad/src/app/event.rs:398-401`). In a messenger
+before the mode dispatch (`lnomad/src/app/event.rs:399-402`). In a messenger
 that is a half-written message thrown away by a reflex. `Ctrl-C` in the
 compose pane clears the buffer to a recoverable draft; quitting needs
 `Ctrl-Q` or the palette.
@@ -112,7 +112,7 @@ count how often focus is in the compose pane.
 
 **The quiet keyboard, with its one exception** (decided 2026-08-08). The
 `lnomad` rule that single letters are reserved for cheap local actions
-(`lnomad/src/app/event.rs:759-762`) generalises here to: **no single keystroke
+(`lnomad/src/app/event.rs:760-763`) generalises here to: **no single keystroke
 may put bytes on the air — except `Enter` in the compose pane.** The
 exception is principled, not a leak: the deliberate act was typing the
 message into a deliberately focused pane, and `Enter` completes that act.
@@ -406,7 +406,7 @@ worse.
 
 Proposal: handle drag selection ourselves over the message IR, so selecting
 text across wrapped lines and across message boundaries works and copies
-via OSC 52 (`lnomad/src/app/event.rs:1348-1380`, which works over SSH). Plus a
+via OSC 52 (`lnomad/src/app/event.rs:1349-1381`, which works over SSH). Plus a
 `--no-mouse` flag and a runtime toggle for people who want the terminal's
 own selection back. The `StyledChar` IR already carries per-cell ownership
 (`leviculum-ui/src/style.rs:71-84`), so the hit-testing is a small extension

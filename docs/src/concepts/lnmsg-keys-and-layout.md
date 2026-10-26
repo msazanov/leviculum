@@ -18,7 +18,8 @@ for Lew to confirm before any slice is ordered.
 `lnomad` is operable with the mouse like a classic browser, with the
 browser's keyboard, and with the typical Emacs and vi commands, all at
 once: one keymap whose rows carry the vi, Emacs and arrow spellings of the
-same motion side by side (`SCROLL_KEYS`, `lnomad/src/app/event.rs:1983`;
+same motion side by side (`SCROLL_ROWS`, `leviculum-ui/src/keymap.rs:588`,
+which were `lnomad`'s own `SCROLL_KEYS` until the keymap slice;
 the mechanism is described under [architecture](lnmsg-architecture.md),
 section 1). `lnmsg` takes the principle over, with three substitutions:
 
@@ -256,7 +257,7 @@ slice one") that Lew decides before the keymap slice is ordered:
   (`src/event/sys/unix/parse.rs` in crossterm, branch 0.29: the `b'\n'`
   arm applies only outside raw mode), so it needs no enhancement.
 - `Alt-f`, `Alt-b` and `Alt-d` do not edit today. The editing table
-  (`input_request`, `leviculum-ui/src/input.rs:288`) accepts them with
+  (`input_request`, `leviculum-ui/src/input.rs:299`) accepts them with
   `META` only, which a terminal reports under the enhancement protocol and
   not otherwise, while the frontend passes crossterm's `ALT` through as
   `ALT`; and it maps `Meta-d` to deleting the word *back*, where Emacs
@@ -275,13 +276,13 @@ slice one") that Lew decides before the keymap slice is ordered:
 ## 4. One table, four readers
 
 The decision of 2026-08-08 asked for the keymap as one table read by the
-key handler, the help overlay, the palette and the footer hints. Today it
-is not: `lnmsg`'s keys are a `match` in `on_key` (`lnmsg/src/ui.rs:357`)
-and `command_pane_key` (`lnmsg/src/ui.rs:450`) beside a hand-written help text, and `lnomad`'s
-`SCROLL_KEYS` is private to `lnomad` (`pub(crate)`,
-`lnomad/src/app/event.rs:1983`) and typed over crossterm's `KeyCode`, so
-`lnmsg` cannot read it. Its rows also carry the keys twice, once as the
-displayed `keys` string and once as the `chords`, so the help can still
+key handler, the help overlay, the palette and the footer hints. Before
+the keymap slice it was not: `lnmsg`'s keys were a `match` in `on_key` and
+`command_pane_key` (`lnmsg/src/ui.rs`) beside a hand-written help text, and
+`lnomad`'s `SCROLL_KEYS` was private to `lnomad` (`pub(crate)`, in
+`lnomad/src/app/event.rs`) and typed over crossterm's `KeyCode`, so `lnmsg`
+could not read it. Its rows also carried the keys twice, once as the
+displayed `keys` string and once as the `chords`, so the help could still
 drift from the handler inside one row.
 
 The keymap slice therefore does three things in `leviculum-ui`, which is

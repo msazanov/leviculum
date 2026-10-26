@@ -260,7 +260,11 @@ impl InputBuffer for tui_input::Input {
     }
 
     fn edit(&mut self, key: &KeyEvent) -> bool {
-        match input_request(key) {
+        match line_request(
+            key,
+            tui_input::Input::value(self),
+            tui_input::Input::cursor(self),
+        ) {
             Some(request) => {
                 self.handle(request);
                 true
@@ -280,10 +284,17 @@ impl InputBuffer for tui_input::Input {
 
 /// The text-editing request a key makes of a [`tui_input::Input`], if any.
 ///
-/// The same table `tui-input`'s crossterm backend applies (its
-/// `to_input_request`, version 0.15), restated over this module's types so the
-/// address bar, the search bar and the form fields edit exactly as they did
-/// when the core called that backend directly. Releases edit nothing.
+/// `tui-input`'s crossterm backend table (its `to_input_request`, version
+/// 0.15), restated over this module's types, with the Emacs keys it gets
+/// wrong put right (`docs/src/concepts/lnmsg-keys-and-layout.md`, "What the
+/// terminal can and cannot send"): `Alt-f`, `Alt-b` and `Alt-d` edit under
+/// `ALT`, which is what a terminal reports without the enhancement protocol,
+/// as well as `META`; `Alt-d` kills the word forward, not back; `Ctrl-d`
+/// deletes the character forward. One table, so lnomad's address bar and
+/// lnmsg's compose pane edit alike. Releases edit nothing.
+///
+/// A buffer that holds lines edits through [`line_request`], which puts the
+/// line motions in front of this.
 #[cfg(feature = "std")]
 pub fn input_request(key: &KeyEvent) -> Option<InputRequest> {
     use InputRequest::*;
@@ -304,14 +315,15 @@ pub fn input_request(key: &KeyEvent) -> Option<InputRequest> {
         Left if mods == none => Some(GoToPrevChar),
         Char('b') if mods == ctrl => Some(GoToPrevChar),
         Left if mods == ctrl => Some(GoToPrevWord),
-        Char('b') if mods == meta => Some(GoToPrevWord),
+        Char('b') if mods == meta || mods == alt => Some(GoToPrevWord),
         Right if mods == none => Some(GoToNextChar),
         Char('f') if mods == ctrl => Some(GoToNextChar),
         Right if mods == ctrl => Some(GoToNextWord),
-        Char('f') if mods == meta => Some(GoToNextWord),
+        Char('f') if mods == meta || mods == alt => Some(GoToNextWord),
         Char('u') if mods == ctrl => Some(DeleteLine),
         Char('w') if mods == ctrl => Some(DeletePrevWord),
-        Char('d') if mods == meta => Some(DeletePrevWord),
+        Char('d') if mods == meta || mods == alt => Some(DeleteNextWord),
+        Char('d') if mods == ctrl => Some(DeleteNextChar),
         Backspace if mods == meta || mods == alt => Some(DeletePrevWord),
         Delete if mods == ctrl => Some(DeleteNextWord),
         Char('k') if mods == ctrl => Some(DeleteTillEnd),
@@ -325,6 +337,82 @@ pub fn input_request(key: &KeyEvent) -> Option<InputRequest> {
         }
         _ => None,
     }
+}
+
+/// The request a key makes of a buffer that may hold lines: the line motions
+/// over `value` with the cursor at `cursor` (in characters), else
+/// [`input_request`]'s.
+///
+/// `Ctrl-a`, `Ctrl-e`, `Home` and `End` go to the start and end of the
+/// cursor's line, `Alt-<` and `Alt->` to the start and end of the buffer, and
+/// `↑`, `↓`, `Ctrl-p` and `Ctrl-n` to the same column of the line above and
+/// below (`None` on the first and last line, so the key is free for the
+/// caller). On one line the start and end of the line are the buffer's, so a
+/// single-line field edits exactly as [`input_request`] has it.
+#[cfg(feature = "std")]
+pub fn line_request(key: &KeyEvent, value: &str, cursor: usize) -> Option<InputRequest> {
+    use InputRequest::*;
+    use KeyCode::*;
+    if key.kind == KeyEventKind::Release {
+        return None;
+    }
+    let none = KeyModifiers::NONE;
+    let ctrl = KeyModifiers::CONTROL;
+    let alt = KeyModifiers::ALT;
+    let mods = key.modifiers;
+    let chars: Vec<char> = value.chars().collect();
+    let cursor = cursor.min(chars.len());
+    let start = chars[..cursor]
+        .iter()
+        .rposition(|&c| c == '\n')
+        .map_or(0, |at| at + 1);
+    let end = chars[cursor..]
+        .iter()
+        .position(|&c| c == '\n')
+        .map_or(chars.len(), |at| cursor + at);
+    let column = cursor - start;
+    match key.code {
+        Char('a') if mods == ctrl => Some(SetCursor(start)),
+        Home if mods == none => Some(SetCursor(start)),
+        Char('e') if mods == ctrl => Some(SetCursor(end)),
+        End if mods == none => Some(SetCursor(end)),
+        Char('<') if mods == alt || mods == alt | KeyModifiers::SHIFT => Some(GoToStart),
+        Char('>') if mods == alt || mods == alt | KeyModifiers::SHIFT => Some(GoToEnd),
+        Up if mods == none => line_above(&chars, start, column),
+        Char('p') if mods == ctrl => line_above(&chars, start, column),
+        Down if mods == none => line_below(&chars, end, column),
+        Char('n') if mods == ctrl => line_below(&chars, end, column),
+        _ => input_request(key),
+    }
+}
+
+/// The cursor at `column` of the line that ends just before `start`.
+#[cfg(feature = "std")]
+fn line_above(chars: &[char], start: usize, column: usize) -> Option<InputRequest> {
+    let above_end = start.checked_sub(1)?;
+    let above_start = chars[..above_end]
+        .iter()
+        .rposition(|&c| c == '\n')
+        .map_or(0, |at| at + 1);
+    Some(InputRequest::SetCursor(
+        above_start + column.min(above_end - above_start),
+    ))
+}
+
+/// The cursor at `column` of the line that starts just after `end`.
+#[cfg(feature = "std")]
+fn line_below(chars: &[char], end: usize, column: usize) -> Option<InputRequest> {
+    if end >= chars.len() {
+        return None;
+    }
+    let below_start = end + 1;
+    let below_end = chars[below_start..]
+        .iter()
+        .position(|&c| c == '\n')
+        .map_or(chars.len(), |at| below_start + at);
+    Some(InputRequest::SetCursor(
+        below_start + column.min(below_end - below_start),
+    ))
 }
 
 #[cfg(all(test, feature = "std"))]
@@ -348,5 +436,100 @@ mod tests {
         assert_eq!(InputBuffer::cursor(&field), 4);
         field.edit(&KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
         assert_eq!(field.take(), "onetwo");
+    }
+
+    fn field(text: &str, cursor: usize) -> tui_input::Input {
+        tui_input::Input::new(text.to_string()).with_cursor(cursor)
+    }
+
+    fn press(field: &mut tui_input::Input, code: KeyCode, mods: KeyModifiers) {
+        field.edit(&KeyEvent::new(code, mods));
+    }
+
+    /// The Emacs word keys under `ALT`, as a terminal without the
+    /// enhancement protocol reports them, and under `META`: `Alt-d` kills the
+    /// word forward, `Ctrl-d` the character forward.
+    #[test]
+    fn alt_word_keys_edit_and_the_d_keys_delete_forward() {
+        for alt in [KeyModifiers::ALT, KeyModifiers::META] {
+            let mut f = field("one two three", 0);
+            // tui-input's word motion lands on the next word's start.
+            press(&mut f, KeyCode::Char('f'), alt);
+            assert_eq!(InputBuffer::cursor(&f), 4, "{alt:?}");
+            press(&mut f, KeyCode::Char('d'), alt);
+            assert_eq!(InputBuffer::value(&f), "one three", "{alt:?}");
+            assert_eq!(InputBuffer::cursor(&f), 4, "{alt:?}");
+            press(&mut f, KeyCode::Char('b'), alt);
+            assert_eq!(InputBuffer::cursor(&f), 0, "{alt:?}");
+        }
+        let mut f = field("abc", 1);
+        press(&mut f, KeyCode::Char('d'), KeyModifiers::CONTROL);
+        assert_eq!(InputBuffer::value(&f), "ac");
+        assert_eq!(InputBuffer::cursor(&f), 1);
+    }
+
+    /// In a buffer of lines, `Ctrl-a`/`Ctrl-e`/`Home`/`End` are the line's
+    /// ends, `Alt-<`/`Alt->` the buffer's, and the line motions keep the
+    /// column where the next line has it.
+    #[test]
+    fn line_motions_in_a_buffer_of_lines() {
+        let text = "first\nsecond line\nend";
+        let ctrl = KeyModifiers::CONTROL;
+        let none = KeyModifiers::NONE;
+        let cases = [
+            (9, KeyCode::Char('a'), ctrl, 6),
+            (9, KeyCode::Home, none, 6),
+            (9, KeyCode::Char('e'), ctrl, 17),
+            (9, KeyCode::End, none, 17),
+            (9, KeyCode::Char('<'), KeyModifiers::ALT, 0),
+            (9, KeyCode::Char('>'), KeyModifiers::ALT, 21),
+            (9, KeyCode::Char('p'), ctrl, 3),
+            (9, KeyCode::Up, none, 3),
+            (16, KeyCode::Char('n'), ctrl, 21),
+            (2, KeyCode::Down, none, 8),
+        ];
+        for (from, code, mods, to) in cases {
+            let mut f = field(text, from);
+            press(&mut f, code, mods);
+            assert_eq!(InputBuffer::cursor(&f), to, "{code:?} {mods:?} from {from}");
+        }
+        // No line above the first or below the last: the key is not an edit.
+        let up = KeyEvent::new(KeyCode::Up, none);
+        assert_eq!(line_request(&up, text, 2), None);
+        let down = KeyEvent::new(KeyCode::Down, none);
+        assert_eq!(line_request(&down, text, 19), None);
+    }
+
+    /// lnomad's address bar is one line, so the line rule changes nothing
+    /// for it: every line-start and line-end key lands where the plain table
+    /// puts it.
+    #[test]
+    fn on_one_line_the_line_rule_is_the_plain_table() {
+        let text = "lxmf@abc:/page/index.mu";
+        let ctrl = KeyModifiers::CONTROL;
+        let none = KeyModifiers::NONE;
+        for (code, mods) in [
+            (KeyCode::Char('a'), ctrl),
+            (KeyCode::Char('e'), ctrl),
+            (KeyCode::Home, none),
+            (KeyCode::End, none),
+        ] {
+            for at in [0, 5, text.len()] {
+                let key = KeyEvent::new(code, mods);
+                let mut plain = field(text, at);
+                if let Some(request) = input_request(&key) {
+                    plain.handle(request);
+                }
+                let mut lined = field(text, at);
+                if let Some(request) = line_request(&key, text, at) {
+                    lined.handle(request);
+                }
+                assert_eq!(
+                    (plain.value(), plain.cursor()),
+                    (lined.value(), lined.cursor()),
+                    "{code:?} {mods:?} at {at}"
+                );
+            }
+        }
     }
 }

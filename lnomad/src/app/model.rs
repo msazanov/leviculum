@@ -82,26 +82,9 @@ pub(crate) fn content_height(rows: u16) -> usize {
 }
 
 /// A vertical scroll motion, resolved against the current viewport height in
-/// [`Model::apply_scroll`]. Bound to both vi and emacs keys plus the wheel.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ScrollCmd {
-    /// Up one line.
-    LineUp,
-    /// Down one line.
-    LineDown,
-    /// Up half a viewport.
-    HalfPageUp,
-    /// Down half a viewport.
-    HalfPageDown,
-    /// Up one full viewport.
-    PageUp,
-    /// Down one full viewport.
-    PageDown,
-    /// To the very top.
-    Top,
-    /// To the very bottom.
-    Bottom,
-}
+/// [`Model::apply_scroll`]. Bound to both vi and emacs keys plus the wheel; the
+/// keys are the shared scroll rows of [`leviculum_ui::keymap::SCROLL_ROWS`].
+pub use leviculum_ui::keymap::ScrollCmd;
 
 /// The single scroll rule shared by every scrollable window — the content body
 /// and both overlays (help, places), and any future overlay. Resolve `cmd`

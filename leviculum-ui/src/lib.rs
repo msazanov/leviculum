@@ -4,7 +4,8 @@
 //!
 //! Code is shared where it is the same problem: a styled text model, one
 //! palette and its colour maths, the programs' own key and mouse events with
-//! the text-editing table over them, the chrome models (footer strip, help
+//! the text-editing table over them, the keymap table every reader of a
+//! key takes its chords from, the chrome models (footer strip, help
 //! overlay, toast), the loading spinner, and the delivery glyph table of
 //! `docs/src/concepts/lnmsg-ui.md`. No terminal crate is named here, which
 //! is what lets a program's core take these types and stay terminal-free;
@@ -30,6 +31,7 @@ pub mod footer;
 pub mod geometry;
 pub mod help;
 pub mod input;
+pub mod keymap;
 pub mod spinner;
 pub mod style;
 pub mod text;

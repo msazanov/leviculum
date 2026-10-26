@@ -17,6 +17,7 @@ use super::input::{
     input_request, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use super::model::*;
+pub(crate) use leviculum_ui::keymap::{self, Ctx, Panes, SCROLL_ROWS};
 
 /// A UI input event, decoupled from crossterm so [`update`] is trivially
 /// testable and the event source can be swapped later.
@@ -400,7 +401,7 @@ pub(crate) fn update_key(model: &mut Model, key: KeyEvent) -> Vec<Effect> {
     }
 
     // The help overlay swallows keys until dismissed. While it is open every
-    // scroll key from `SCROLL_KEYS` moves the OVERLAY's view (via the shared
+    // scroll key from `SCROLL_ROWS` moves the OVERLAY's view (via the shared
     // `scrolled` rule), not the page underneath.
     if model.show_help {
         if matches!(
@@ -1947,191 +1948,11 @@ pub(crate) fn update_hover(model: &mut Model, col: u16, row: u16) {
         .map(|vl| vl.index);
 }
 
-/// The modifier class a [`ScrollChord`] matches: any modifiers, none, Ctrl, or
-/// Alt. `Any` mirrors the bare arrow / paging keys, which scroll regardless of
-/// modifiers; `Plain` requires neither Ctrl nor Alt.
-#[derive(Clone, Copy)]
-pub(crate) enum ScrollMods {
-    Any,
-    Plain,
-    Ctrl,
-    Alt,
-}
-
-/// One key chord that produces a scroll motion: the key, the modifier class it
-/// needs, and the [`ScrollCmd`] it maps to.
-#[derive(Clone, Copy)]
-pub(crate) struct ScrollChord {
-    pub(crate) code: KeyCode,
-    pub(crate) mods: ScrollMods,
-    pub(crate) cmd: ScrollCmd,
-}
-
-/// One row of the scroll keymap: the keys as displayed in the help overlay, the
-/// description beside them, and every chord that triggers the row's motions.
-/// [`SCROLL_KEYS`] is the SINGLE source of truth read by BOTH [`key_to_scroll`]
-/// and the help overlay, so a scroll binding can never exist in one without
-/// appearing in the other.
-pub(crate) struct ScrollKey {
-    pub(crate) keys: &'static str,
-    pub(crate) desc: &'static str,
-    pub(crate) chords: &'static [ScrollChord],
-}
-
-/// The scroll keymap. Both the key handler and the help overlay read this table,
-/// so the two can never drift apart.
-pub(crate) const SCROLL_KEYS: &[ScrollKey] = &[
-    ScrollKey {
-        keys: "j / k   ↓ / ↑   Ctrl-n / Ctrl-p",
-        desc: "scroll a line",
-        chords: &[
-            ScrollChord {
-                code: KeyCode::Char('j'),
-                mods: ScrollMods::Plain,
-                cmd: ScrollCmd::LineDown,
-            },
-            ScrollChord {
-                code: KeyCode::Char('n'),
-                mods: ScrollMods::Ctrl,
-                cmd: ScrollCmd::LineDown,
-            },
-            ScrollChord {
-                code: KeyCode::Down,
-                mods: ScrollMods::Any,
-                cmd: ScrollCmd::LineDown,
-            },
-            ScrollChord {
-                code: KeyCode::Char('k'),
-                mods: ScrollMods::Plain,
-                cmd: ScrollCmd::LineUp,
-            },
-            ScrollChord {
-                code: KeyCode::Char('p'),
-                mods: ScrollMods::Ctrl,
-                cmd: ScrollCmd::LineUp,
-            },
-            ScrollChord {
-                code: KeyCode::Up,
-                mods: ScrollMods::Any,
-                cmd: ScrollCmd::LineUp,
-            },
-        ],
-    },
-    ScrollKey {
-        keys: "Ctrl-f / Ctrl-b   Ctrl-v   PageDown / PageUp",
-        desc: "page down / up",
-        chords: &[
-            ScrollChord {
-                code: KeyCode::Char('f'),
-                mods: ScrollMods::Ctrl,
-                cmd: ScrollCmd::PageDown,
-            },
-            ScrollChord {
-                code: KeyCode::Char('v'),
-                mods: ScrollMods::Ctrl,
-                cmd: ScrollCmd::PageDown,
-            },
-            ScrollChord {
-                code: KeyCode::Char(' '),
-                mods: ScrollMods::Plain,
-                cmd: ScrollCmd::PageDown,
-            },
-            ScrollChord {
-                code: KeyCode::PageDown,
-                mods: ScrollMods::Any,
-                cmd: ScrollCmd::PageDown,
-            },
-            ScrollChord {
-                code: KeyCode::Char('b'),
-                mods: ScrollMods::Ctrl,
-                cmd: ScrollCmd::PageUp,
-            },
-            ScrollChord {
-                code: KeyCode::Char('v'),
-                mods: ScrollMods::Alt,
-                cmd: ScrollCmd::PageUp,
-            },
-            ScrollChord {
-                code: KeyCode::PageUp,
-                mods: ScrollMods::Any,
-                cmd: ScrollCmd::PageUp,
-            },
-        ],
-    },
-    ScrollKey {
-        keys: "Ctrl-d / Ctrl-u",
-        desc: "half a page",
-        chords: &[
-            ScrollChord {
-                code: KeyCode::Char('d'),
-                mods: ScrollMods::Ctrl,
-                cmd: ScrollCmd::HalfPageDown,
-            },
-            ScrollChord {
-                code: KeyCode::Char('u'),
-                mods: ScrollMods::Ctrl,
-                cmd: ScrollCmd::HalfPageUp,
-            },
-        ],
-    },
-    ScrollKey {
-        keys: "g / G   Home / End",
-        desc: "top / bottom",
-        chords: &[
-            ScrollChord {
-                code: KeyCode::Char('g'),
-                mods: ScrollMods::Plain,
-                cmd: ScrollCmd::Top,
-            },
-            ScrollChord {
-                code: KeyCode::Char('<'),
-                mods: ScrollMods::Alt,
-                cmd: ScrollCmd::Top,
-            },
-            ScrollChord {
-                code: KeyCode::Home,
-                mods: ScrollMods::Any,
-                cmd: ScrollCmd::Top,
-            },
-            ScrollChord {
-                code: KeyCode::Char('G'),
-                mods: ScrollMods::Plain,
-                cmd: ScrollCmd::Bottom,
-            },
-            ScrollChord {
-                code: KeyCode::Char('>'),
-                mods: ScrollMods::Alt,
-                cmd: ScrollCmd::Bottom,
-            },
-            ScrollChord {
-                code: KeyCode::End,
-                mods: ScrollMods::Any,
-                cmd: ScrollCmd::Bottom,
-            },
-        ],
-    },
-];
-
-/// Map a key press to a [`ScrollCmd`], honouring both vi and emacs idioms, by
-/// scanning [`SCROLL_KEYS`]. Returns `None` for keys that are not scroll motions.
+/// Map a key press to a [`ScrollCmd`], honouring both vi and emacs idioms, from
+/// the shared scroll rows ([`SCROLL_ROWS`], in `leviculum-ui` so lnmsg reads the
+/// same ones). Returns `None` for keys that are not scroll motions.
 pub(crate) fn key_to_scroll(key: &KeyEvent) -> Option<ScrollCmd> {
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    let alt = key.modifiers.contains(KeyModifiers::ALT);
-    let plain = !ctrl && !alt;
-    for row in SCROLL_KEYS {
-        for chord in row.chords {
-            let mods_ok = match chord.mods {
-                ScrollMods::Any => true,
-                ScrollMods::Plain => plain,
-                ScrollMods::Ctrl => ctrl,
-                ScrollMods::Alt => alt,
-            };
-            if mods_ok && chord.code == key.code {
-                return Some(chord.cmd);
-            }
-        }
-    }
-    None
+    keymap::best(SCROLL_ROWS, key, Panes::SCROLL, Ctx::NONE).map(|(_, cmd)| cmd)
 }
 
 /// Run a footer button's action, mirroring the key it stands for.

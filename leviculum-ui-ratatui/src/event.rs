@@ -223,11 +223,25 @@ mod tests {
     }
 
     /// The shared text-editing table is the one `tui-input`'s crossterm
-    /// backend applied before lnomad's cut (#219): for every key, every modifier
-    /// set and every kind, the same edit or the same refusal.
+    /// backend applied before lnomad's cut (#219), for every key, every
+    /// modifier set and every kind, the same edit or the same refusal, but for
+    /// the Emacs keys the keymap slice put right
+    /// (`docs/src/concepts/lnmsg-keys-and-layout.md`, section 3, "What the
+    /// terminal can and cannot send"): `Alt-b`, `Alt-f` and `Alt-d` edit under
+    /// `ALT`, `Alt-d` and `Meta-d` kill the word forward, `Ctrl-d` deletes the
+    /// character forward. Nothing else moved.
     #[test]
-    fn the_core_edits_text_exactly_as_the_crossterm_backend_did() {
-        use crossterm::event::KeyEventKind as CtKind;
+    fn the_core_edits_text_as_the_crossterm_backend_did_but_the_emacs_fixes() {
+        use crossterm::event::{KeyCode as Ct, KeyEventKind as CtKind, KeyModifiers as M};
+        use tui_input::InputRequest::*;
+        let fixed = |code: Ct, mods: M| match (code, mods) {
+            (Ct::Char('b'), M::ALT) => Some(GoToPrevWord),
+            (Ct::Char('f'), M::ALT) => Some(GoToNextWord),
+            (Ct::Char('d'), M::ALT) | (Ct::Char('d'), M::META) => Some(DeleteNextWord),
+            (Ct::Char('d'), M::CONTROL) => Some(DeleteNextChar),
+            _ => None,
+        };
+        let mut moved = 0;
         for code in crossterm_codes() {
             for mods in crossterm_modifier_sets() {
                 for kind in [CtKind::Press, CtKind::Repeat, CtKind::Release] {
@@ -235,10 +249,18 @@ mod tests {
                     ct.kind = kind;
                     let reference =
                         tui_input::backend::crossterm::to_input_request(&Event::Key(ct));
-                    assert_eq!(input_request(&key_event(ct)), reference, "{ct:?}");
+                    let expected = match (kind, fixed(code, mods)) {
+                        (CtKind::Release, _) | (_, None) => reference,
+                        (_, Some(request)) => {
+                            moved += 1;
+                            Some(request)
+                        }
+                    };
+                    assert_eq!(input_request(&key_event(ct)), expected, "{ct:?}");
                 }
             }
         }
+        assert!(moved > 0, "the fixed chords were never exercised");
     }
 
     /// Mouse events cross with their button, position and modifiers intact.

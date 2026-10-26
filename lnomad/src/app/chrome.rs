@@ -401,15 +401,15 @@ pub fn focused_link_target(model: &Model) -> Option<String> {
 pub(crate) use leviculum_ui::help::{HelpEntry, HelpGroup};
 
 /// The keybinding groups shown in the help overlay. The Move group's scroll rows
-/// are pulled straight from [`SCROLL_KEYS`], so the overlay can never list a
+/// are pulled straight from [`SCROLL_ROWS`], so the overlay can never list a
 /// scroll binding that the key handler does not honour, nor omit one it does.
 pub(crate) fn help_groups() -> Vec<HelpGroup> {
     // The scroll rows come straight from the keymap table; the mouse wheel is the
     // one Move affordance that is not a key chord, so it is appended here.
-    let mut move_entries: Vec<HelpEntry> = SCROLL_KEYS
+    let mut move_entries: Vec<HelpEntry> = SCROLL_ROWS
         .iter()
         .map(|s| HelpEntry {
-            keys: s.keys,
+            keys: s.keys(),
             desc: s.desc,
         })
         .collect();

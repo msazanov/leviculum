@@ -3257,11 +3257,11 @@ mod tests {
         let mut m = loaded_model((120, 40));
         press(&mut m, KeyCode::Char('?'), KeyModifiers::NONE);
         let text = flat(&render(&m, 120, 40));
-        for row in SCROLL_KEYS {
+        for row in SCROLL_ROWS {
             assert!(
-                text.lines().any(|l| l.contains(row.keys)),
+                text.lines().any(|l| l.contains(row.keys())),
                 "scroll binding {:?} missing from help:\n{text}",
-                row.keys
+                row.keys()
             );
         }
     }
