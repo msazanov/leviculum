@@ -126,6 +126,8 @@ fn centred(text: &str, width: usize) -> RLine {
 
 /// `── Saturday 24 October ──`, centred.
 fn date_line(label: &str, width: usize) -> RLine {
+    // decision pending: lnmsg-keys-and-layout.md section 5, "Colour", item 6
+    // (3, the date as a pill): the rule alone, on the pane.
     centred(&format!("── {label} ──"), width)
 }
 
@@ -135,6 +137,8 @@ pub fn new_rule(count: usize, width: usize) -> RLine {
     let inner = width.saturating_sub(2);
     let dashes = inner.saturating_sub(label.chars().count());
     let left = dashes / 2;
+    // decision pending: lnmsg-keys-and-layout.md section 5, "Colour", item 6
+    // (1, the hues): the unread rule's accent; on the pane until then.
     plain(&format!(
         " {}{label}{} ",
         "─".repeat(left),
@@ -239,6 +243,11 @@ fn block(message: &Message, width: usize, draw: &Draw, selected: bool) -> Vec<RL
                 false => push(&mut line, " ", RStyle::default()),
             }
             let pad = inner - row.cells.len();
+            // decision pending: lnmsg-keys-and-layout.md section 5, "Colour",
+            // item 6 (1, the hues; 2, their blocks tinted or neutral): the
+            // block's tint and time colour. Monochrome: the pane, and reverse
+            // video for the selected block, which is that table's 16-colour
+            // and monochrome entry.
             let mut cells = row.cells;
             cells.extend(plain(&" ".repeat(pad)).cells);
             if selected {
