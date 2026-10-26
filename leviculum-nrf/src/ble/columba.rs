@@ -1491,16 +1491,11 @@ fn peer_link_up(
 ) -> bool {
     let peer_value = peer.value;
     let now_ms = Instant::now().as_millis();
-    let (up, live_peers) = LIVE_PEERS.lock(|peers| {
-        let mut peers = peers.borrow_mut();
-        let up = peers.link_up(slot_index, peer_id, origin, att_mtu, now_ms);
-        (up, peers.peer_count())
+    let up = LIVE_PEERS.lock(|peers| {
+        peers
+            .borrow_mut()
+            .link_up(slot_index, peer_id, origin, att_mtu, now_ms)
     });
-    // The mirror `BleInterface::peer_count` reads (999): recomputed under
-    // the same lock that mutated the registry and published before any
-    // event, so the main loop never observes a transition ahead of the
-    // count that caused it. A refusal republishes the unchanged count.
-    super::set_live_peer_count(live_peers);
     match up {
         LinkUp::Refused {
             old_slot,
@@ -1718,15 +1713,7 @@ fn displace_old_link(displaced: DisplacedOld) {
 /// slot (the displacement hand-over window) means the peer is still
 /// reachable: registry churn, not a loss, so no report.
 fn peer_link_down(slot_index: usize) {
-    let (lost, live_peers) = LIVE_PEERS.lock(|peers| {
-        let mut peers = peers.borrow_mut();
-        let lost = peers.link_down(slot_index);
-        (lost, peers.peer_count())
-    });
-    // Published before the loss report, for the same reason as in
-    // [`peer_link_up`]: the count never lags an event the main loop
-    // already holds.
-    super::set_live_peer_count(live_peers);
+    let lost = LIVE_PEERS.lock(|peers| peers.borrow_mut().link_down(slot_index));
     if let Some((identity, origin)) = lost {
         super::deliver(BleLinkEvent::PeerLost {
             identity,
@@ -1799,18 +1786,20 @@ fn meet_link(identity: &[u8; 16]) -> leviculum_ble_tx::Neighbour {
 
 // The number of distinct live peer identities (Codeberg #365) — what
 // the main loop mirrors into the core as the interface's peer count —
-// is a `ble_link` value since 999: [`peer_link_up`] and
-// [`peer_link_down`] publish `PeerRegistry::peer_count` under the same
-// lock that mutated the registry (`set_live_peer_count`), and
-// `BleInterface::peer_count` reads it above the seam. Counted from the
-// post-handshake registry, not the drain table: a link that has not
-// presented an identity yet is not a peer the transport can ask
-// anything of.
+// is the node's since 1003: `leviculum_firmware::ble_link::LinkTable`,
+// fed by the `PeerUp`/`PeerLost` reports [`peer_link_up`] and
+// [`peer_link_down`] make on an identity's first and last link, so it
+// counts what `PeerRegistry::peer_count` counted (999 published that
+// value; the table replaced the publish). Post-handshake identities, not
+// the drain table: a link that has not presented an identity yet is not
+// a peer the transport can ask anything of. `LIVE_PEERS` stays here as
+// the slot map, the one place that knows which link carries whom.
 
 /// Map the core's link statement onto link slots — the fan-out's one
-/// question to the registry. The rules and their peer-gone decisions
-/// are host-tested in [`leviculum_ble_tx::plan_fanout`]; this is the
-/// lock around the firmware's single registry instance.
+/// question to the slot map, asked by `SoftDeviceLink::send`. The rules
+/// and their peer-gone decisions are host-tested in
+/// [`leviculum_ble_tx::plan_fanout`]; this is the lock around the
+/// firmware's single registry instance.
 pub(crate) fn plan_fanout(aim: leviculum_ble_tx::TxAim) -> leviculum_ble_tx::TxFanout {
     LIVE_PEERS.lock(|peers| leviculum_ble_tx::plan_fanout(&peers.borrow(), aim))
 }

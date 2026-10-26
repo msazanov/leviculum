@@ -3,8 +3,9 @@
 //! One declaration per row of the seam table in
 //! `docs/src/concepts/firmware-layers.md`, "The seams, and their shape".
 //! Two shapes: a **message seam** where the backend is a task the
-//! orchestration talks to over channels it owns (Transceiver, BLE link), and
-//! a **trait seam** where the backend is called or awaited once (the rest).
+//! orchestration talks to over channels it owns (Transceiver, the BLE link's
+//! upward half), and a **trait seam** where the backend is called or awaited
+//! once (the rest, the BLE link's downward half since 1003).
 //! Where an ecosystem trait exists and has two implementers, the seam is
 //! that trait, re-exported (Flash, Entropy); a project trait is written only
 //! where none fits.
@@ -78,25 +79,16 @@ pub trait Transceiver {}
 /// the M9's single UART and over RP2350 USB CDC. The fork's cut is adopted.
 pub trait ControlPort {}
 
-/// What the orchestration asks of a BLE backend. Step 4's measurement
-/// (998) found no command that wants a channel: the three asks — carrier
-/// on/off, the inter-packet gap, the name to advertise — are idempotent
-/// latest-value states, pushed as [`crate::ble_link`] values
-/// (`set_active`, `set_tx_gap_ms`) or passed at registration (the name),
-/// and the backend reads them at its own cadence. The outbound packets
-/// themselves already ride the node-facing channel that moves here with
-/// the remaining slices; whether its `TxAim` envelope becomes this type
-/// is decided then.
-#[derive(Debug)]
-pub enum BleLinkCommand {}
-
 /// What a BLE backend reports — the genuine message half of the seam
 /// (998's measurement; the census facts it also publishes are
 /// [`crate::ble_link`] values, not messages). The backend constructs
 /// these and hands them to [`crate::ble_link::deliver`], which routes
 /// each variant onto the channel the node loop reads it from: the two
 /// peer transitions ride one ordered channel (a flap's `Lost` must land
-/// before its `Up`'s pull decision), the inbound packets their own.
+/// before its `Up`'s pull decision), the inbound packets their own. The
+/// peer transitions also feed the node's link table
+/// ([`crate::ble_link::LinkTable`], 1003) at that one entry, before they
+/// are queued.
 #[derive(Debug)]
 pub enum BleLinkEvent {
     /// The identity's FIRST link on this interface is up. The main loop
@@ -137,24 +129,51 @@ pub enum BleLinkEvent {
     },
 }
 
-/// BLE link, a message seam above GATT: the Columba link as the
-/// orchestration sees it, [`BleLinkCommand`] in and [`BleLinkEvent`] out.
-/// The node side is [`crate::ble_link`] (998, 999): the carrier gate,
-/// the pacing value, the drain/link table and the census facts the
-/// backend publishes — per-fragment work stays direct calls on those
-/// values (the per-packet decision of 998) — plus, since 999, the
-/// node-facing channels the [`BleLinkEvent`]s ride and the `Interface`
-/// implementation. The backend's remaining upward calls all go through
-/// `leviculum_firmware`; what is still below of step 4 is the
-/// identity-to-slot registry and the fan-out, whose split fills this
-/// trait (send to identities, advertise, scan on/off) and its host fake.
+/// BLE link, the seam above GATT: the Columba link as the orchestration
+/// sees it. Downward, this trait; upward, [`BleLinkEvent`] through
+/// [`crate::ble_link::deliver`].
+///
+/// The node side is [`crate::ble_link`] (998, 999, 1003): the carrier
+/// gate, the pacing value, the drain table and the census facts the
+/// backend publishes, which per-fragment work reads by direct call (the
+/// per-packet decision of 998); the node-facing channels the events ride
+/// and the `Interface` implementation; and since 1003 the node's link
+/// table ([`crate::ble_link::LinkTable`]), fed by the `PeerUp`/`PeerLost`
+/// events. What stays below is the slot map: which connection, drain
+/// slot and fragmenter carries which identity, and the duplicate rules
+/// (#360, #412) that decide which of two links a peer keeps.
+///
+/// Nothing on this trait is per fragment. Carrier on/off is not on it
+/// either: it is a pushed value ([`crate::ble_link::set_active`], 998)
+/// the backend's tasks wait on, and so is the pacing gap.
 ///
 /// Today: the S140 SoftDevice backend in `ble/` (`ble/mod.rs`,
-/// `ble/columba.rs`). The fork: TrouBLE over
+/// `ble/columba.rs`, `SoftDeviceLink`). The fork: TrouBLE over
 /// `bt_hci::Transport` (`leviculum-fw/src/ble/mod.rs`, lines 81 to 91) on
 /// the CYW43439 and the ESP32-S3 radio; its `HciTransport` stays inside its
-/// backend, because the SoftDevice is not an HCI controller.
-pub trait BleLink {}
+/// backend, because the SoftDevice is not an HCI controller. A BT5
+/// broadcast backend (extended advertising, Coded PHY) has the same shape:
+/// it resolves [`TxAim::Flood`](leviculum_ble_tx::TxAim::Flood) over its
+/// own carrier and reports peers through the same events.
+pub trait BleLink {
+    /// Place one outbound packet on the links `aim` names. The aim
+    /// crosses the seam as the core stated it, and the backend resolves
+    /// it over its own slot map: `Flood` reaches every link it holds,
+    /// one that has not presented its identity yet included (the
+    /// reviewer's decision on 999: an identity list could not name such
+    /// a link, and today's fan-out serves it); `Peer` and `FloodExcept`
+    /// name identities the backend maps to its links. A packet the aim
+    /// cannot place is the backend's to drop and to say so.
+    fn send(&mut self, aim: leviculum_ble_tx::TxAim, packet: alloc::vec::Vec<u8>);
+
+    /// The name the backend advertises and answers with. Called once at
+    /// bring-up, before the carrier first reads on; a backend that
+    /// builds an advertisement from the name builds it from this value.
+    /// A runtime rename is not part of the seam: the name module applies
+    /// a new name at the next boot (`leviculum_nrf::name`), so both BLE
+    /// surfaces always show one name.
+    fn set_advertised_name(&mut self, name: leviculum_core::node_name::NodeName);
+}
 
 /// Clock: monotonic time, and the calendar sources with their rank.
 ///

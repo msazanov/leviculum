@@ -90,9 +90,9 @@ the whole interface did, so every single-link carrier is unchanged and
 so is lnsd's BLE interface, whose peripheral role notifies its
 subscribed centrals as one group and cannot address a subset of them.
 The firmware implements it (`try_send_excluding_peer`,
-`leviculum-nrf/firmware/src/ble_link.rs:525`), where the decision is a pure
+`leviculum-nrf/firmware/src/ble_link.rs:683`), where the decision is a pure
 function of the registry (`TxAim`,
-`leviculum-nrf/ble-tx/src/registry.rs:915`). Without it a path request
+`leviculum-nrf/ble-tx/src/registry.rs:919`). Without it a path request
 from the phone died at the board: one `InterfaceId` covered both links,
 so excluding the arrival interface silenced the neighbour board that
 was the only node able to answer.
@@ -112,12 +112,12 @@ so both still send the announce to the whole interface.
 The firmware runs the same shape with fixed ids: serial 0, LoRa 1, BLE
 2, set once at startup (`set_interface_name`,
 `leviculum-nrf/src/bin/t114.rs:267`) and hardcoded in the interface
-itself (`BleInterface`, `leviculum-nrf/firmware/src/ble_link.rs:458`), with the
+itself (`BleInterface`, `leviculum-nrf/firmware/src/ble_link.rs:602`), with the
 announce gate naming the same constant (`BLE_IFACE`,
 `leviculum-nrf/src/announce.rs:89`). The fan-out is a task that maps
 the hint onto a per-link queue (`tx_fanout_task`,
-`leviculum-nrf/src/ble/mod.rs:227`; `LINK_OUT`,
-`leviculum-nrf/src/ble/mod.rs:191`).
+`leviculum-nrf/src/ble/mod.rs:301`; `LINK_OUT`,
+`leviculum-nrf/src/ble/mod.rs:194`).
 
 **The receive side is already peer-aware on both stacks.** The board
 reports which peer a packet came from and when a peer appears or
@@ -146,12 +146,12 @@ restarts the strict scan phase on that event (`CentralGone`,
 `leviculum-std/src/interfaces/ble/mod.rs:1266`, into `note_reset`,
 `leviculum-std/src/interfaces/ble/links.rs:1826`). The firmware restarts
 its strict phase only when a new neighbour links or the strict rule finds
-a target (`note_phase_event`, `leviculum-nrf/src/ble/columba.rs:1912`,
+a target (`note_phase_event`, `leviculum-nrf/src/ble/columba.rs:1901`,
 under the reset rule `PhaseEvent::resets_strict` in
 `leviculum-nrf/ble-tx/src/admission.rs`, narrowed by #504 so a known
 peer's reconnect and a teardown no longer reset it); a dial that timed
 out records at most a dead end and leaves the clock running
-(`note_dead_end`, `leviculum-nrf/src/ble/columba.rs:2020`).
+(`note_dead_end`, `leviculum-nrf/src/ble/columba.rs:2009`).
 
 Same protocol, same shared constant, different behaviour after a failed
 dial: lnsd owes another full 30 s strict bound, the board does not.
@@ -322,7 +322,7 @@ fan-out — an announce emits one action per entry in the routing map
 (`interface_names`, `leviculum-core/src/transport.rs:13413`), each
 carrying a cloned packet. With three BLE children an announce would
 allocate three ~500 B action buffers where today it allocates one that
-`tx_fanout_task` clones per link (`leviculum-nrf/src/ble/mod.rs:227`).
+`tx_fanout_task` clones per link (`leviculum-nrf/src/ble/mod.rs:301`).
 Same peak, moved one layer up.
 
 ### Which machinery is per medium, and which is per link

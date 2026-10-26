@@ -1,6 +1,7 @@
 //! The BLE link's node side (step 4 of
 //! `docs/src/concepts/firmware-layers.md`; the values 998, the messages
-//! and the `Interface` implementation 999).
+//! and the `Interface` implementation 999, the link table and the fan-out
+//! loop over `trait BleLink` 1003).
 //!
 //! The value half is what the measurement of step 4's call surface found
 //! to be the orchestration's half of the seam that is **not** a message:
@@ -15,10 +16,11 @@
 //! * **the pacing value** — the operator's inter-packet-gap override
 //!   ([`set_tx_gap_ms`]), pushed by the control task and read by the
 //!   backend's pumps at each packet.
-//! * **the link table** — the per-connection HVN drain table
+//! * **the drain table** — the per-connection HVN drain table
 //!   ([`HVN_DRAIN`]), whose claim index is the per-link identity
 //!   everything else is keyed by; its `claimed()` is the "live links"
-//!   fact the status page and the control report read.
+//!   fact the status page and the control report read, connections that
+//!   have not presented an identity yet included.
 //! * **the heap-census facts** — the per-link and per-channel held-bytes
 //!   mirrors the backend publishes and the census line reads
 //!   ([`session_census`], [`defrag_held_bytes`]).
@@ -27,8 +29,16 @@
 //! transitions and the completed inbound packets, which the backend
 //! hands to [`deliver`] and the node loop reads from [`channels`]; the
 //! outbound packets ride the same struct's sender, consumed by the
-//! backend's fan-out ([`outgoing_receiver`]). The BLE [`Interface`]
-//! implementation ([`BleInterface`]) lives beside the channels it feeds.
+//! backend through [`run_fanout`], which hands each one to the backend's
+//! [`BleLink::send`]. The BLE [`Interface`] implementation
+//! ([`BleInterface`]) lives beside the channels it feeds.
+//!
+//! The node's link table (1003) is [`LinkTable`]: the peers as the node
+//! sees them (identity, our role, since when), fed by the
+//! [`BleLinkEvent::PeerUp`]/[`BleLinkEvent::PeerLost`] reports at
+//! [`deliver`], read by [`BleInterface::peer_count`]. The slot map (which
+//! connection carries which identity, and the duplicate rules that pick
+//! one of two) stays in the backend, the one place that sees links.
 //!
 //! The backend below (`leviculum-nrf`'s `ble/`: the SoftDevice bring-up,
 //! advertising, scanning, GATT, the notify pump, the defragmenters)
@@ -36,20 +46,22 @@
 //! fragment on the hot path, which is why the value half is values and
 //! not channel messages (the per-packet decision of 998: every operation
 //! here is one atomic access, and the packets themselves already ride
-//! the node-facing channels). What is still to move in step 4's
-//! remaining slice: the identity-to-slot registry's split and the
-//! fan-out plan (`trait BleLink` and its host fake).
+//! the node-facing channels).
 
 extern crate alloc;
 
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU16, AtomicUsize, Ordering};
+use core::cell::RefCell;
+use core::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 
-use crate::seams::BleLinkEvent;
+use crate::seams::{BleLink, BleLinkEvent};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::blocking_mutex::Mutex as BlockingMutex;
 use embassy_sync::channel::{Channel, Receiver, Sender};
 use embassy_sync::signal::Signal;
-use leviculum_ble_tx::{CarrierPath, CarrierState, CarrierStep, Enqueue, Fill, StandDown, TxAim};
+use leviculum_ble_tx::{
+    BleRole, CarrierPath, CarrierState, CarrierStep, Enqueue, Fill, StandDown, TxAim,
+};
 use leviculum_core::traits::{Interface, InterfaceError};
 use leviculum_core::InterfaceId;
 use leviculum_heap_budget::{INTERFACE_MTU, MAX_LINKS, QUEUE_DEPTH};
@@ -196,16 +208,16 @@ pub fn tx_gap_ms() -> u16 {
     leviculum_ble_tx::effective_tx_gap_ms((raw != TX_GAP_OVERRIDE_NONE).then_some(raw))
 }
 
-/// Where `BLE_GATTS_EVT_HVN_TX_COMPLETE` goes — and the link table.
+/// Where `BLE_GATTS_EVT_HVN_TX_COMPLETE` goes — and the live connections.
 ///
 /// The HVN queue is per connection, so its drain edge is too. Routing it
 /// by connection handle is what keeps link A's drain out of link B's
 /// fragment pump; see [`leviculum_ble_tx::drain`] for the failure mode
 /// and its host tests. A connection claims its slot for its whole
-/// lifetime, so the drain table is also the link table as the node sees
-/// it — `claimed()` is the live-link count the status page and the
-/// control report read — and a second registry that could disagree with
-/// it is never built.
+/// lifetime, so `claimed()` is the live-connection count the status
+/// page, the control report and [`BleInterface::is_online`] read, one
+/// that has not presented an identity yet included. The peers behind
+/// those connections are [`LinkTable`]'s.
 pub static HVN_DRAIN: leviculum_ble_tx::DrainRouter<MAX_LINKS> =
     leviculum_ble_tx::DrainRouter::new();
 
@@ -318,7 +330,7 @@ static BLE_INCOMING: Channel<CriticalSectionRawMutex, BleLinkEvent, QUEUE_DEPTH>
 /// Outbound packets with what the core said about their links: the peer
 /// these bytes are FOR (the #376 delivery hint), the peer that already
 /// HEARD them (the #422 ingress link of a broadcast), or neither. The
-/// backend's fan-out ([`outgoing_receiver`]) turns the statement into
+/// backend's fan-out ([`run_fanout`], [`BleLink::send`]) turns the statement into
 /// links; see [`leviculum_ble_tx::TxAim`].
 static BLE_OUTGOING: Channel<CriticalSectionRawMutex, (TxAim, Vec<u8>), QUEUE_DEPTH> =
     Channel::new();
@@ -357,7 +369,19 @@ const PEER_EVENT_DEPTH: usize = 8;
 /// receive) and the interface's byte count. A refused `try_send` after a
 /// `Queue` verdict cannot happen on the one thread-mode executor every
 /// producer runs on; were it to, it is the same drop.
+///
+/// A peer transition enters the node's [`LinkTable`] here, before the
+/// verdict: the table states which peers are behind the interface, which
+/// stays true when the report about it is dropped, and a count read after
+/// the main loop took the report can never lag it (the guarantee the
+/// backend's publish under its registry lock gave until 1003).
 pub fn deliver(event: BleLinkEvent) -> bool {
+    deliver_with(&LINK_TABLE, event)
+}
+
+/// [`deliver`] against a given link table: the board's is
+/// [`LINK_TABLE`], each test owns one.
+fn deliver_with(table: &SharedLinkTable, event: BleLinkEvent) -> bool {
     match event {
         BleLinkEvent::Inbound { link, packet } => {
             let bytes = packet.capacity();
@@ -378,6 +402,7 @@ pub fn deliver(event: BleLinkEvent) -> bool {
             queued
         }
         BleLinkEvent::PeerUp { identity, .. } | BleLinkEvent::PeerLost { identity, .. } => {
+            note_peer(table, &event);
             let kind = match event {
                 BleLinkEvent::PeerUp { .. } => leviculum_ble_tx::PeerEventKind::Up,
                 _ => leviculum_ble_tx::PeerEventKind::Lost,
@@ -401,6 +426,128 @@ pub fn deliver(event: BleLinkEvent) -> bool {
             queued
         }
     }
+}
+
+/// Enter one peer transition into `table`, saying so when an arrival
+/// found it full. That cannot happen while the backend keeps its own
+/// rules (one entry per distinct identity, each holding at least one of
+/// at most `MAX_LINKS` links); the line is there so that a backend which
+/// breaks them is seen, not silently miscounted.
+fn note_peer(table: &SharedLinkTable, event: &BleLinkEvent) {
+    let now_ms = embassy_time::Instant::now().as_millis();
+    if table.lock(|table| table.borrow_mut().note(event, now_ms)) {
+        return;
+    }
+    if let BleLinkEvent::PeerUp { identity, .. } = event {
+        crate::log::log_fmt(
+            "[BLE ] ",
+            format_args!(
+                "BLE_LINK_TABLE_FULL peer={:02x}{:02x}{:02x}{:02x}",
+                identity[0], identity[1], identity[2], identity[3]
+            ),
+        );
+    }
+}
+
+/// One peer behind the BLE interface, as the node sees it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LinkedPeer {
+    /// The 16 bytes the Columba handshake exchanged: what the core names
+    /// the peer by, in a [`TxAim`] and on an inbound packet's link.
+    pub identity: [u8; 16],
+    /// OUR role on the link that brought the peer up.
+    pub role: BleRole,
+    /// When its first link came up, in milliseconds since boot.
+    pub since_ms: u64,
+}
+
+/// The node's BLE link table (1003): the distinct peers behind the
+/// interface, one entry per identity however many links it holds.
+///
+/// Fed by the peer transitions alone ([`note`](Self::note)), which the
+/// backend reports on an identity's FIRST link up and LAST link down, so
+/// the second link of a peer that redialled from a rotated address
+/// (#412), and the hand-over window of a displacement (#376), are one
+/// peer here as they were in the registry's distinct count. Which links
+/// carry the peer, and which of two it keeps, is the backend's slot map
+/// (`leviculum_ble_tx::PeerRegistry`, whose rules stay in that policy
+/// crate with their tests): the node never learns what a link is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkTable<const N: usize> {
+    peers: [Option<LinkedPeer>; N],
+}
+
+impl<const N: usize> Default for LinkTable<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<const N: usize> LinkTable<N> {
+    /// No peers.
+    pub const fn new() -> Self {
+        Self { peers: [None; N] }
+    }
+
+    /// Apply one backend report at `now_ms`: `PeerUp` enters the peer,
+    /// `PeerLost` removes it, an inbound packet changes nothing. A
+    /// second `PeerUp` for a peer already present keeps the first entry.
+    /// `false` only for an arrival the full table could not hold.
+    pub fn note(&mut self, event: &BleLinkEvent, now_ms: u64) -> bool {
+        match *event {
+            BleLinkEvent::PeerUp { identity, role } => {
+                if self.get(&identity).is_some() {
+                    return true;
+                }
+                match self.peers.iter_mut().find(|entry| entry.is_none()) {
+                    Some(free) => {
+                        *free = Some(LinkedPeer {
+                            identity,
+                            role,
+                            since_ms: now_ms,
+                        });
+                        true
+                    }
+                    None => false,
+                }
+            }
+            BleLinkEvent::PeerLost { identity, .. } => {
+                for entry in self.peers.iter_mut() {
+                    if entry.is_some_and(|peer| peer.identity == identity) {
+                        *entry = None;
+                    }
+                }
+                true
+            }
+            BleLinkEvent::Inbound { .. } => true,
+        }
+    }
+
+    /// The entry of a linked peer.
+    pub fn get(&self, identity: &[u8; 16]) -> Option<&LinkedPeer> {
+        self.iter().find(|peer| peer.identity == *identity)
+    }
+
+    /// The linked peers, in no particular order.
+    pub fn iter(&self) -> impl Iterator<Item = &LinkedPeer> {
+        self.peers.iter().flatten()
+    }
+
+    /// The number of distinct linked peers (Codeberg #365).
+    pub fn peer_count(&self) -> usize {
+        self.iter().count()
+    }
+}
+
+/// A link table behind the lock every producer and reader shares.
+pub type SharedLinkTable = BlockingMutex<CriticalSectionRawMutex, RefCell<LinkTable<MAX_LINKS>>>;
+
+/// The board's link table, fed at [`deliver`].
+static LINK_TABLE: SharedLinkTable = BlockingMutex::new(RefCell::new(LinkTable::new()));
+
+/// Read the board's link table.
+pub fn with_link_table<R>(read: impl FnOnce(&LinkTable<MAX_LINKS>) -> R) -> R {
+    LINK_TABLE.lock(|table| read(&table.borrow()))
 }
 
 /// The node loop's ends of the three channels.
@@ -427,28 +574,25 @@ pub fn channels() -> BleChannels {
     }
 }
 
-/// The backend's end of the outbound channel: its fan-out is the ONE
-/// consumer, because a Reticulum interface is a broadcast domain — one
-/// flooded packet must reach every live link, which two competing
-/// receivers would round-robin instead.
-pub fn outgoing_receiver(
-) -> Receiver<'static, CriticalSectionRawMutex, (TxAim, Vec<u8>), QUEUE_DEPTH> {
-    BLE_OUTGOING.receiver()
+/// The backend's fan-out: take each outbound packet off the node-facing
+/// channel and hand it to [`BleLink::send`] with the core's aim. The ONE
+/// consumer of that channel, because a Reticulum interface is a broadcast
+/// domain: one flooded packet must reach every live link, which two
+/// competing receivers would round-robin instead. The backend spawns a
+/// task that runs this over its implementation.
+pub async fn run_fanout<L: BleLink>(link: &mut L) -> ! {
+    let outgoing_rx = BLE_OUTGOING.receiver();
+    loop {
+        let (aim, packet) = outgoing_rx.receive().await;
+        forward(link, aim, packet);
+    }
 }
 
-/// Distinct live peer identities behind the interface (Codeberg #365),
-/// as the backend's registry last published it ([`set_live_peer_count`])
-/// — the fact [`BleInterface::peer_count`] reads until the registry
-/// split moves the link table itself up here (step 4's remaining
-/// slice). Distinct identities, not links: during a displacement's
-/// hand-over one peer briefly holds two links and is still one peer.
-static LIVE_PEER_COUNT: AtomicUsize = AtomicUsize::new(0);
-
-/// Publish the registry's distinct-peer count. Called by the backend
-/// under the same registry lock that mutated it, so the mirror never
-/// lags a transition the main loop can already observe.
-pub fn set_live_peer_count(count: usize) {
-    LIVE_PEER_COUNT.store(count, Ordering::Relaxed);
+/// One step of [`run_fanout`]: the packet leaves the channel's census
+/// custody and goes down.
+fn forward<L: BleLink>(link: &mut L, aim: TxAim, packet: Vec<u8>) {
+    outgoing_held_sub(packet.capacity());
+    link.send(aim, packet);
 }
 
 /// The BLE [`Interface`]: what the node core hands an outbound packet
@@ -457,6 +601,9 @@ pub fn set_live_peer_count(count: usize) {
 /// broadcast, on every live link (#376).
 pub struct BleInterface {
     sender: Sender<'static, CriticalSectionRawMutex, (TxAim, Vec<u8>), QUEUE_DEPTH>,
+    /// The link table [`peer_count`](Self::peer_count) reads: the
+    /// board's, or a test's own.
+    table: &'static SharedLinkTable,
     /// The carrier-off drop run — see the LoRa interface for why these
     /// are counted rather than logged one line per packet.
     drops: leviculum_media_state::DropRun,
@@ -466,20 +613,29 @@ impl BleInterface {
     pub fn new(
         sender: Sender<'static, CriticalSectionRawMutex, (TxAim, Vec<u8>), QUEUE_DEPTH>,
     ) -> Self {
+        Self::with_table(sender, &LINK_TABLE)
+    }
+
+    fn with_table(
+        sender: Sender<'static, CriticalSectionRawMutex, (TxAim, Vec<u8>), QUEUE_DEPTH>,
+        table: &'static SharedLinkTable,
+    ) -> Self {
         Self {
             sender,
+            table,
             drops: leviculum_media_state::DropRun::new(),
         }
     }
 
     /// Distinct live peer identities behind this interface (Codeberg
     /// #365), for the main loop's `set_interface_peer_count` mirror —
-    /// the sibling of the `is_online` mirror. Zero with the carrier
-    /// off: links torn down by a media switch cannot be asked anything,
-    /// whatever the registry still holds mid-teardown.
+    /// the sibling of the `is_online` mirror, read from the node's
+    /// [`LinkTable`]. Zero with the carrier off: links torn down by a
+    /// media switch cannot be asked anything, whatever the table still
+    /// holds mid-teardown.
     pub fn peer_count(&self) -> usize {
         if carrier().is_on() {
-            LIVE_PEER_COUNT.load(Ordering::Relaxed)
+            self.table.lock(|table| table.borrow().peer_count())
         } else {
             0
         }
@@ -585,8 +741,9 @@ impl BleInterface {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fakes::FakeBleLink;
     use embassy_futures::poll_once;
-    use leviculum_ble_tx::DEFAULT_TX_GAP_MS;
+    use leviculum_ble_tx::{Delivery, LinkUp, SlotMask, DEFAULT_TX_GAP_MS, LINK_ABANDONED_MS};
 
     // Each test owns one static family outright — the statics are shared
     // across the whole test binary and cargo runs tests in parallel.
@@ -597,11 +754,12 @@ mod tests {
     /// until the off-push and answers with the waiter's own stand-down.
     /// The interface obeys the same pushed value (999), so the gating is
     /// tested in the one test that owns the carrier static: off swallows
-    /// (`Ok`, nothing queued) and answers zero peers whatever the mirror
+    /// (`Ok`, nothing queued) and answers zero peers whatever the table
     /// holds, on queues toward the fan-out with the aim the core stated
-    /// and reads the published peer count, and online needs a claimed
-    /// link besides the carrier. Zero-length packets throughout, so the
-    /// census statics other tests own see only 0-byte adds.
+    /// and reads the link table's count, the fan-out hands the packet to
+    /// the backend with that aim, and online needs a claimed link besides
+    /// the carrier. Zero-length packets throughout, so the census statics
+    /// other tests own see only 0-byte adds.
     #[test]
     fn carrier_pushes_reach_a_waiter_and_gate_the_interface() {
         assert!(!carrier().is_on());
@@ -621,33 +779,42 @@ mod tests {
         );
         assert!(!carrier().is_on());
 
-        let fanout_rx = outgoing_receiver();
-        let mut iface = BleInterface::new(BLE_OUTGOING.sender());
-        set_live_peer_count(2);
+        static TABLE: SharedLinkTable = BlockingMutex::new(RefCell::new(LinkTable::new()));
+        for identity in [[0x01; 16], [0x02; 16]] {
+            let up = BleLinkEvent::PeerUp {
+                identity,
+                role: leviculum_ble_tx::BleRole::Central,
+            };
+            TABLE.lock(|table| assert!(table.borrow_mut().note(&up, 0)));
+        }
+        let fanout_rx = BLE_OUTGOING.receiver();
+        let mut iface = BleInterface::with_table(BLE_OUTGOING.sender(), &TABLE);
         assert_eq!(iface.peer_count(), 0, "a down carrier has no peers");
         assert!(!iface.is_online());
         assert!(iface.try_send(&[]).is_ok(), "a down carrier swallows");
         assert!(fanout_rx.try_receive().is_err(), "swallowed, not queued");
 
         set_active(true);
-        assert_eq!(iface.peer_count(), 2, "the published registry count");
+        assert_eq!(iface.peer_count(), 2, "the link table's count");
         assert!(!iface.is_online(), "online needs a claimed link too");
         assert!(HVN_DRAIN.claim_indexed(77).is_some());
         assert!(iface.is_online());
         assert!(iface
             .try_send_to_peer(&[], Some(&[0x33; 16]), false)
             .is_ok());
+        let mut backend = FakeBleLink::new();
         match fanout_rx.try_receive() {
-            Ok((aim, packet)) => {
-                assert_eq!(aim, TxAim::Peer([0x33; 16]));
-                assert!(packet.is_empty());
-            }
+            Ok((aim, packet)) => forward(&mut backend, aim, packet),
             Err(_) => panic!("an up carrier queues toward the fan-out"),
         }
+        assert_eq!(
+            backend.sent,
+            [(TxAim::Peer([0x33; 16]), Delivery::RouteMiss, 0)],
+            "the aim crosses the seam as the core stated it"
+        );
 
         HVN_DRAIN.release(77);
         assert!(!iface.is_online());
-        set_live_peer_count(0);
         set_active(false);
     }
 
@@ -722,9 +889,16 @@ mod tests {
     /// verdict refuses the newcomer (the caller's answer is `false`; the
     /// oldest pending report keeps its place). Zero-capacity packets, so
     /// the census statics the other tests own see only 0-byte adds.
+    ///
+    /// The peer transitions also enter the link table, a dropped one
+    /// included: the table says who is behind the interface, whether or
+    /// not the report about it found room.
     #[test]
     fn deliver_routes_each_variant_to_its_channel() {
         use leviculum_ble_tx::BleRole;
+        static TABLE: SharedLinkTable = BlockingMutex::new(RefCell::new(LinkTable::new()));
+        let deliver = |event| deliver_with(&TABLE, event);
+        let count = || TABLE.lock(|table| table.borrow().peer_count());
 
         let chans = channels();
         assert!(deliver(BleLinkEvent::Inbound {
@@ -735,10 +909,16 @@ mod tests {
             identity: [0x22; 16],
             role: BleRole::Peripheral,
         }));
+        assert_eq!(count(), 0);
         assert!(deliver(BleLinkEvent::PeerUp {
             identity: [0x22; 16],
             role: BleRole::Central,
         }));
+        assert_eq!(count(), 1);
+        assert_eq!(
+            TABLE.lock(|table| table.borrow().get(&[0x22; 16]).map(|peer| peer.role)),
+            Some(BleRole::Central)
+        );
 
         match chans.incoming_rx.try_receive() {
             Ok(BleLinkEvent::Inbound { link, packet }) => {
@@ -793,9 +973,145 @@ mod tests {
             }),
             "a full peer channel drops the newest report"
         );
+        assert!(!deliver(BleLinkEvent::PeerLost {
+            identity: [0x01; 16],
+            role: BleRole::Central,
+        }));
+        assert!(
+            TABLE.lock(|table| table.borrow().get(&[0x01; 16]).is_none()),
+            "a dropped Lost still leaves the table"
+        );
 
         // Leave the statics as this test found them.
         while chans.incoming_rx.try_receive().is_ok() {}
         while chans.peer_event_rx.try_receive().is_ok() {}
+    }
+
+    // The seam's four (1003): the node's table and the backend's slot map
+    // over the fake, whose `send` is today's `plan_fanout` then
+    // `resolve_fanout` over a real `PeerRegistry` and `DrainRouter`.
+
+    const A: [u8; 16] = [0xa1; 16];
+    const B: [u8; 16] = [0xb2; 16];
+
+    fn mask(slots: &[usize]) -> SlotMask {
+        slots
+            .iter()
+            .fold(SlotMask::EMPTY, |mask, &slot| mask.with(slot))
+    }
+
+    /// A flood reaches every link once: both linked peers, and the
+    /// connection that has not presented its identity yet, which an
+    /// identity list could not have named (the reviewer's decision on
+    /// 999: `Flood` crosses as "flood, no exclusion" and the backend
+    /// takes every claimed slot). The table counts the two peers only.
+    #[test]
+    fn a_flood_reaches_every_link_once_the_pre_handshake_one_included() {
+        let mut link = FakeBleLink::new();
+        let a = link.link_up(A, leviculum_ble_tx::BleRole::Central, 0);
+        let b = link.link_up(B, leviculum_ble_tx::BleRole::Peripheral, 0);
+        let pending = link.connect(0);
+        assert_eq!(link.table.peer_count(), 2);
+
+        link.send(TxAim::Flood, alloc::vec![0; 20]);
+        assert_eq!(
+            link.last_delivery(),
+            Some(Delivery::Flood(mask(&[a, b, pending])))
+        );
+
+        match link.frame_in(pending, Vec::new(), 1) {
+            BleLinkEvent::Inbound { link, .. } => assert_eq!(link, None),
+            other => panic!("an inbound packet, got {:?}", other),
+        }
+        match link.frame_in(b, Vec::new(), 1) {
+            BleLinkEvent::Inbound { link, .. } => assert_eq!(link, Some(B)),
+            other => panic!("an inbound packet, got {:?}", other),
+        }
+    }
+
+    /// A targeted send reaches its peer's link and no other; one at a
+    /// peer with no link is a miss, never a flood.
+    #[test]
+    fn a_targeted_send_reaches_one_link() {
+        let mut link = FakeBleLink::new();
+        link.link_up(A, leviculum_ble_tx::BleRole::Central, 0);
+        let b = link.link_up(B, leviculum_ble_tx::BleRole::Peripheral, 0);
+
+        link.send(TxAim::Peer(B), alloc::vec![0; 20]);
+        assert!(matches!(
+            link.last_delivery(),
+            Some(Delivery::Link { slot, .. }) if slot == b
+        ));
+        link.send(TxAim::Peer([0xcc; 16]), alloc::vec![0; 20]);
+        assert_eq!(link.last_delivery(), Some(Delivery::RouteMiss));
+    }
+
+    /// A lost link leaves the node's table and the next plan: the peer
+    /// is reported lost, the flood skips its slot, a send to it misses,
+    /// and a flood excluding it excludes nothing that is left.
+    #[test]
+    fn a_lost_link_leaves_the_table_and_the_next_plan() {
+        let mut link = FakeBleLink::new();
+        let a = link.link_up(A, leviculum_ble_tx::BleRole::Central, 0);
+        let b = link.link_up(B, leviculum_ble_tx::BleRole::Peripheral, 0);
+
+        link.link_down(a, 5);
+        assert!(matches!(
+            link.events.last(),
+            Some(BleLinkEvent::PeerLost { identity, .. }) if *identity == A
+        ));
+        assert!(link.table.get(&A).is_none());
+        assert_eq!(link.table.peer_count(), 1);
+
+        link.send(TxAim::Flood, alloc::vec![0; 20]);
+        assert_eq!(link.last_delivery(), Some(Delivery::Flood(mask(&[b]))));
+        link.send(TxAim::Peer(A), alloc::vec![0; 20]);
+        assert_eq!(link.last_delivery(), Some(Delivery::RouteMiss));
+        link.send(TxAim::FloodExcept(A), alloc::vec![0; 20]);
+        assert_eq!(link.last_delivery(), Some(Delivery::Flood(mask(&[b]))));
+    }
+
+    /// The #412 case: a peer that dialled again from a rotated address
+    /// holds a second slot while its abandoned first link is torn down,
+    /// and is one peer throughout. No second `PeerUp`, no `PeerLost` when
+    /// the old link goes. The placements are today's `plan_fanout`:
+    /// `TxAim::Peer(peer) => registry.slot_for(&peer)`, the lowest slot
+    /// the peer holds; `TxAim::FloodExcept(peer) =>
+    /// registry.slots_of(&peer)`, every slot it holds.
+    #[test]
+    fn a_duplicate_identity_on_a_second_slot_is_one_peer() {
+        let mut link = FakeBleLink::new();
+        let old = link.link_up(A, leviculum_ble_tx::BleRole::Central, 0);
+        let new = link.connect(LINK_ABANDONED_MS);
+        let up = link.handshake(
+            new,
+            A,
+            leviculum_ble_tx::BleRole::Peripheral,
+            LINK_ABANDONED_MS,
+        );
+        assert!(matches!(up, LinkUp::Displaced { old_slot, .. } if old_slot == old));
+        assert_eq!(link.events.len(), 1, "one PeerUp, the first link's");
+        assert_eq!(link.table.peer_count(), 1);
+
+        link.send(TxAim::Peer(A), alloc::vec![0; 20]);
+        assert!(matches!(
+            link.last_delivery(),
+            Some(Delivery::Link { slot, .. }) if slot == old.min(new)
+        ));
+        link.send(TxAim::FloodExcept(A), alloc::vec![0; 20]);
+        assert_eq!(link.last_delivery(), Some(Delivery::Flood(SlotMask::EMPTY)));
+
+        link.link_down(old, LINK_ABANDONED_MS + 1);
+        assert_eq!(
+            link.events.len(),
+            1,
+            "the old link's end is churn, not a loss"
+        );
+        assert_eq!(link.table.peer_count(), 1);
+        link.send(TxAim::Peer(A), alloc::vec![0; 20]);
+        assert!(matches!(
+            link.last_delivery(),
+            Some(Delivery::Link { slot, .. }) if slot == new
+        ));
     }
 }

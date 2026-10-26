@@ -12,8 +12,8 @@ src/bin/sd-ram-probe.rs (294):
 src/bin/solarnode.rs (1505):
 src/bin/t1000e.rs (1377): feedback
 src/bin/t114.rs (1415):
-src/ble/columba.rs (3236): info log radio_store warn
-src/ble/mod.rs (869): info log media radio_store transport_stats warn
+src/ble/columba.rs (3225): info log radio_store warn
+src/ble/mod.rs (891): info log media radio_store transport_stats warn
 src/ble/notify.rs (238): ble log
 src/boards/mod.rs (90): lora qspi radio_store telemetry
 src/boards/rak4631.rs (215):
@@ -54,7 +54,7 @@ src/transport_stats.rs (169): log lora
 src/usb.rs (1466): banner ble boards chtm heap_census log lora media mgmt name pn postmortem_query radio_store record_store reset_stack_watermark telemetry
 src/vext.rs (85): boards log
 firmware/src/battery.rs (468): board_state fakes log seams
-firmware/src/ble_link.rs (801): iface_bytes log media seams
+firmware/src/ble_link.rs (1117): fakes iface_bytes log media seams
 firmware/src/board_state.rs (138): display
 firmware/src/boot_count.rs (203): fakes log seams
 firmware/src/boot_trace.rs (120): log
@@ -63,7 +63,7 @@ firmware/src/clock.rs (115): seams
 firmware/src/dispatch.rs (49): log
 firmware/src/display.rs (409): board_state button fakes log seams
 firmware/src/entropy.rs (148): iface_bytes seams
-firmware/src/fakes.rs (476): feedback seams
+firmware/src/fakes.rs (644): ble_link feedback seams
 firmware/src/feedback.rs (453): board_state button entropy fakes log seams
 firmware/src/heap.rs (120): log
 firmware/src/identity.rs (119): log_critical
@@ -74,5 +74,5 @@ firmware/src/log.rs (402):
 firmware/src/media.rs (62): log
 firmware/src/postmortem.rs (437): boot_trace log
 firmware/src/record_store.rs (665): fakes log seams
-firmware/src/seams.rs (299): battery ble_link button clock display feedback
+firmware/src/seams.rs (318): battery ble_link button clock display feedback
 firmware/src/time_floor.rs (209): log seams

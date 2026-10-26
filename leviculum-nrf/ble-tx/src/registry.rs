@@ -882,11 +882,15 @@ impl<const N: usize> PeerRegistry<N> {
             .fold(SlotMask::EMPTY, |mask, (index, _)| mask.with(index))
     }
 
-    /// The number of DISTINCT live peer identities (Codeberg #365) —
-    /// the value the main loop mirrors into the core as the
-    /// interface's peer count. Distinct, not per-slot: during a
-    /// displacement's hand-over (#376) one peer briefly holds two links,
-    /// and it is still one peer.
+    /// The number of DISTINCT live peer identities (Codeberg #365).
+    /// Distinct, not per-slot: during a displacement's hand-over (#376)
+    /// one peer briefly holds two links, and it is still one peer.
+    ///
+    /// Since 1003 the count the main loop mirrors into the core is the
+    /// node's own (`leviculum_firmware::ble_link::LinkTable`), kept from
+    /// the first-link/last-link reports [`link_up`](Self::link_up) and
+    /// [`link_down`](Self::link_down) decide; this is the same number
+    /// read off the slot map, and its tests pin the rule both follow.
     pub fn peer_count(&self) -> usize {
         self.slots
             .iter()

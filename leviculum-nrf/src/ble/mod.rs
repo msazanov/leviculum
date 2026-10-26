@@ -25,8 +25,11 @@
 //!   and the fragment pump that walks [`leviculum_ble_tx::PacketTx`]
 //!   over a GATT notify handle. The node-facing channels and the
 //!   `Interface` implementation live above the seam since 999
-//!   (`leviculum_firmware::ble_link`); this backend reports through
-//!   [`leviculum_firmware::seams::BleLinkEvent`].
+//!   (`leviculum_firmware::ble_link`), the node's link table since 1003;
+//!   this backend reports through
+//!   [`leviculum_firmware::seams::BleLinkEvent`] and implements
+//!   [`leviculum_firmware::seams::BleLink`] ([`SoftDeviceLink`]) over its
+//!   slot map.
 //!
 //! The acceptance test for the split is that a sibling `ble_leviculum`
 //! could be added without touching [`columba`]. What such a sibling
@@ -135,14 +138,14 @@ const _: () = assert!(MAX_LINKS >= CONN_COUNT as usize);
 // the drain/link table and the held-bytes census this backend publishes
 // into — and, since 999 (the second slice), the node-facing channels,
 // the peer events and inbound packets as `seams::BleLinkEvent`
-// (`deliver`), the registry's distinct-peer count this backend publishes
-// (`set_live_peer_count`) and the `Interface` implementation. Re-imported
+// (`deliver`) and the `Interface` implementation, and since 1003 the
+// node's link table, which those peer events feed. Re-imported
 // here so the backend's own modules keep their `super::` paths; the
 // orchestration and the binaries name `ble_link` directly.
 pub use leviculum_firmware::ble_link::HVN_DRAIN;
 pub(crate) use leviculum_firmware::ble_link::{
     carrier, carrier_off, carrier_on, defrag_held_set, deliver, session_held_moved,
-    session_held_reset, session_held_sub, set_live_peer_count, tx_gap_ms, CarrierWaiter,
+    session_held_reset, session_held_sub, tx_gap_ms, CarrierWaiter,
 };
 pub(crate) use leviculum_firmware::seams::BleLinkEvent;
 
@@ -176,8 +179,8 @@ type PacketQueue = Channel<CriticalSectionRawMutex, Vec<u8>, QUEUE_DEPTH>;
 /// two connection tasks receiving from the single outbound channel
 /// (`leviculum_firmware::ble_link`'s, since 999) would round-robin it
 /// instead — each announce reaching one peer and not the other — so
-/// [`tx_fanout_task`] is its only consumer
-/// (`ble_link::outgoing_receiver`). Which links are live is read from
+/// [`tx_fanout_task`] is its only consumer (`ble_link::run_fanout`).
+/// Which links are live is read from
 /// [`HVN_DRAIN`]'s claims: a connection claims its slot for its whole
 /// lifetime, so the drain table is also the link table, and a second
 /// registry that could disagree with it is never built.
@@ -200,35 +203,37 @@ pub(crate) fn link_out(slot_index: usize) -> &'static PacketQueue {
     &LINK_OUT[slot_index]
 }
 
-/// Deliver one outbound packet: to the link of the peer the core
-/// addressed it to, or — with no addressee — to every live link (see
-/// [`LINK_OUT`]).
-///
-/// The hint is the core's `via_peer` (Codeberg #376), the same 16 bytes
-/// this interface reports on peer-up/peer-lost, and
-/// [`leviculum_ble_tx::plan_fanout`] maps it onto a drain slot. Before
-/// it, a routed packet was copied onto every link: a telemetry report
-/// addressed to the phone also went to the other board, which forwarded
-/// it back to the phone — double airtime per report, `TRANSPORT dup=` on
-/// both boards, and relayed copies racing the direct ones (the desk
-/// timeline on #376). A broadcast still reaches every peer, which is
-/// what a Reticulum interface owes it.
-///
-/// `try_send`, never `send`: a link whose queue is full — a peer that
-/// stopped draining — costs that link the packet and is told so in the
-/// log, but must not stall delivery to the healthy links or wedge the
-/// fan-out. With no live link at all a flooded packet is dropped
-/// silently; that is today's behaviour for an unconnected board, just
-/// moved from the connect-time drain to the moment of sending. A ROUTED
-/// packet whose peer has no live link is dropped loudly
-/// (`BLE_TX_ROUTE_MISS`) rather than flooded — see
-/// [`leviculum_ble_tx::TxFanout::NoLink`] for why.
-#[embassy_executor::task]
-async fn tx_fanout_task() -> ! {
-    let outgoing_rx = leviculum_firmware::ble_link::outgoing_receiver();
-    loop {
-        let (aim, packet) = outgoing_rx.receive().await;
-        leviculum_firmware::ble_link::outgoing_held_sub(packet.capacity());
+/// The S140 backend's side of [`leviculum_firmware::seams::BleLink`]:
+/// what the orchestration asks of the links below it.
+pub struct SoftDeviceLink;
+
+impl leviculum_firmware::seams::BleLink for SoftDeviceLink {
+    /// Deliver one outbound packet: to the link of the peer the core
+    /// addressed it to, or — with no addressee — to every live link (see
+    /// `LINK_OUT`).
+    ///
+    /// The hint is the core's `via_peer` (Codeberg #376), the same 16
+    /// bytes this interface reports on peer-up/peer-lost, and
+    /// [`leviculum_ble_tx::plan_fanout`] maps it onto a drain slot over
+    /// this backend's slot map. Before it, a routed packet was copied onto
+    /// every link: a telemetry report addressed to the phone also went to
+    /// the other board, which forwarded it back to the phone — double
+    /// airtime per report, `TRANSPORT dup=` on both boards, and relayed
+    /// copies racing the direct ones (the desk timeline on #376). A
+    /// broadcast still reaches every claimed slot, a connection that has
+    /// not presented its identity yet included, which is what a Reticulum
+    /// interface owes it.
+    ///
+    /// `try_send`, never `send`: a link whose queue is full — a peer that
+    /// stopped draining — costs that link the packet and is told so in the
+    /// log, but must not stall delivery to the healthy links or wedge the
+    /// fan-out. With no live link at all a flooded packet is dropped
+    /// silently; that is today's behaviour for an unconnected board, just
+    /// moved from the connect-time drain to the moment of sending. A ROUTED
+    /// packet whose peer has no live link is dropped loudly
+    /// (`BLE_TX_ROUTE_MISS`) rather than flooded — see
+    /// [`leviculum_ble_tx::TxFanout::NoLink`] for why.
+    fn send(&mut self, aim: leviculum_ble_tx::TxAim, packet: Vec<u8>) {
         // The registry plans, the drain table says which links are
         // still claimed; `leviculum_ble_tx::resolve_fanout` decides.
         match leviculum_ble_tx::resolve_fanout(&HVN_DRAIN, columba::plan_fanout(aim)) {
@@ -279,6 +284,22 @@ async fn tx_fanout_task() -> ! {
             }
         }
     }
+
+    /// The GAP device name (`set_gap_device_name`). The scan
+    /// response's Complete Local Name is built from the same value at
+    /// [`columba::spawn`], which [`init`] calls right after this, so the
+    /// two surfaces cannot disagree.
+    fn set_advertised_name(&mut self, name: NodeName) {
+        set_gap_device_name(name);
+    }
+}
+
+/// The fan-out task: [`leviculum_firmware::ble_link::run_fanout`] over
+/// [`SoftDeviceLink`], the one consumer of the node-facing outbound
+/// channel.
+#[embassy_executor::task]
+async fn tx_fanout_task() -> ! {
+    leviculum_firmware::ble_link::run_fanout(&mut SoftDeviceLink).await
 }
 
 /// Copy one packet onto every link in `targets`, answering how many got
@@ -792,7 +813,8 @@ async fn counters_task() -> ! {
 /// [`crate::radio_store`] are the current caller.
 ///
 /// `gap_name` is the boot name both BLE surfaces come up under (998):
-/// `set_gap_device_name` writes it into the GAP attribute and
+/// [`SoftDeviceLink`]'s `set_advertised_name` (the seam's call, 1003)
+/// writes it into the GAP attribute and
 /// [`columba::spawn`] builds the scan response's Complete Local Name
 /// from it, so neither surface can disagree with the other.
 ///
@@ -848,7 +870,7 @@ pub fn init(
 
     let sd = Softdevice::enable(&sd_config());
     leviculum_firmware::boot_trace::phase(leviculum_firmware::boot_trace::Phase::SdEnabled);
-    set_gap_device_name(gap_name);
+    leviculum_firmware::seams::BleLink::set_advertised_name(&mut SoftDeviceLink, gap_name);
 
     let sd = if columba_enabled {
         columba::spawn(spawner, sd, identity_hash, gap_name)
