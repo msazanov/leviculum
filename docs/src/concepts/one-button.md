@@ -50,13 +50,17 @@ for the life of the board.
 | short press | Status. The display wakes for one minute and goes dark by itself; there is no display switch. The LED blinks mode and battery, the buzzer joins where present. No announce. |
 | double press | Announce, both identities (what the short press did before 889, 869), plus one immediate position report when a recipient is configured (914). One short and one blip when the announces have left the radio (930); two short when the proof of the report comes back. |
 | long press, 2 s | Mode switch Mesh/Tracker ([Operating modes](operating-modes.md)). The board signals at 2 s, the user releases, the board confirms the new mode. |
-| very long press, 8 s | Power off. A press powers on. |
+| very long press, 8 s | **Sleep. A press wakes.** On every board (Lew, 2026-10-25): System OFF with the button as wake source on the nRF boards, deep sleep with a GPIO wake on the M9 in its stage one. |
 | any press in Tracker mode | Also opens the wake window: BLE on, listening. |
 | button held at boot, 10 s | Factory reset, pairing cleared. |
 
 The same table on every board means a user who knows one board knows all
 of them, and a gesture never does something on one board that it does
 not do on another.
+
+A sleeping board is no propagation node and no relay. The hard off is a
+board fact outside this grammar: a board with a power switch has one
+([Supported boards](../firmware/boards.md), "Hard off").
 
 This grammar is for boards with one button. A board with a keyboard,
 such as the ThinkNode M9, makes the mode switch, the status and the
@@ -284,8 +288,8 @@ press (2 s) and the very long press (8 s,
 nothing else yet; the moment a held button reaches each threshold is
 logged as `BTN_HOLD ms=2000` and `BTN_HOLD ms=8000`.
 
-The orders still to come follow this page: the mode switch once Tracker mode exists, then the power off once the
-board can sleep.
+The orders still to come follow this page: the mode switch once Tracker
+mode exists, then the 8 s sleep.
 
 ## Open
 
@@ -296,7 +300,7 @@ board can sleep.
 ## Not yet built
 
 The mode blink: `mode()` exists and nothing plays it, because there is
-no mode yet. The 2 s mode switch and the 8 s power off (both are
+no mode yet. The 2 s mode switch and the 8 s sleep (both are
 recognised and logged, `action=long` and `action=hold8`, and do
 nothing; the 8 s mark has no signal of its own), the boot-time factory
 reset, and the T114's display wake: its ST7789 has no power control yet

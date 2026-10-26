@@ -4,8 +4,10 @@ The messenger, and after it the browser and the map, get graphical
 frontends: on the Linux desktop first, Windows and macOS later, and on the
 ThinkNode M9's display and keyboard ([A messenger whose core runs
 anywhere](handheld-messenger.md)). This page asks which toolkit draws
-them, records what two time-boxed spikes measured on 2026-10-25, and ends
-in a recommendation that is a **proposal; Lew decides**.
+them and records what two time-boxed spikes measured on 2026-10-25.
+**Decided 2026-10-25 (Lew): option B.** iced on the desktop, ratatui
+through mousefood on the M9, the keymap and glyph tables in the core
+(`leviculum-ui`). See "Decision" below.
 
 It is stage two of the M9. Stage one has no GUI: the M9 behaves like the
 other boards, with the status screen and [one button](one-button.md) on
@@ -236,7 +238,8 @@ M9 through mousefood, sharing the terminal frontend's view code.
 
 ## The licence question
 
-*Needs a human legal read. Stated here, not decided.*
+*Moot since the decision for B (2026-10-25, Lew), kept as the record.
+If Slint ever came back, this would need a human legal read first.*
 
 Our work is `AGPL-3.0-or-later` (`Cargo.toml:89`). Slint offers three
 licences ([Slint's LICENSE.md, v1.18.1](https://github.com/slint-ui/slint/blob/v1.18.1/LICENSE.md)):
@@ -295,25 +298,28 @@ The questions for the legal read:
 iced and the ratatui path raise none of these: their licences are all
 permissive.
 
-## Recommendation
+## Decision
 
-*Proposal, Lew decides.*
+**Decided 2026-10-25 (Lew): option B, iced on the desktop, ratatui through
+mousefood on the M9, over the one core, with the keymap and glyph tables
+in the core (`leviculum-ui`) as the one interaction model.** No further
+toolkit spike; the egui spike is dropped. Accessibility is not a
+requirement. The safeguard: the desktop renderer is a frontend swap, so a
+later change of toolkit does not touch the core. The comparison above
+stays as the record of why. The decision is also recorded on [A messenger
+whose core runs anywhere](handheld-messenger.md), "The core/frontend
+cut".
 
-**B: iced on the desktop, ratatui through mousefood on the M9, over the
-one core, with the keymap and glyph tables in the core as the one
-interaction model.** The M9 frontend is then the terminal frontend's view
-code on a different backend, which is the most code shared at the least
-cost: it compiled for the target at full optimisation on the first try,
-in 106 KB of `.text`, and the desktop GUI is a single extra renderer that
-is less than half Slint's size, build time and dependency count, under
-MIT. The risks: two widget models where Lew asked for one interaction
-model, which the shared tables have to carry; the M9's font, where
-neither the delivery glyphs nor anti-aliasing come for free; iced has no
-accessibility yet and calls itself experimental; and the M9's keyboard
-input and display driver are ours to write. Slint stays the alternative
-if a single declaration across desktop and M9 matters more than these
-numbers. It would need the Xtensa backend error fixed, a declared
-character set, and the licence read above first.
+Why, as the proposal of 2026-10-25 put it: the M9 frontend is then the
+terminal frontend's view code on a different backend, which is the most
+code shared at the least cost: it compiled for the target at full
+optimisation on the first try, in 106 KB of `.text`, and the desktop GUI
+is a single extra renderer that is less than half Slint's size, build
+time and dependency count, under MIT. The risks carried with it: two
+widget models where Lew asked for one interaction model, which the shared
+tables have to carry; the M9's font, where neither the delivery glyphs
+nor anti-aliasing come for free; iced calls itself experimental; and the
+M9's keyboard input and display driver are ours to write.
 
 ## Not yet measured
 
@@ -325,7 +331,8 @@ character set, and the licence read above first.
 
 ## See also
 
-- [A messenger whose core runs anywhere](handheld-messenger.md)
+- [A messenger whose core runs anywhere](handheld-messenger.md), whose
+  "The core/frontend cut" records this decision
 - [The ThinkNode M9](thinknode-m9.md)
 - [lnmsg: the user interface](lnmsg-ui.md)
 - [lnmsg: architecture](lnmsg-architecture.md)

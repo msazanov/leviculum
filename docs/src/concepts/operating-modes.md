@@ -100,6 +100,11 @@ mode persists in flash across reboot and power-off. The default is Mesh,
 and `lnflash` sets the default at flash time the way it sets the
 propagation node's stamp cost (`lnflash/src/main.rs:159`).
 
+Decided 2026-10-25 (Lew): the 8 s press puts the board to sleep in
+either mode, and a press wakes it ([One button](one-button.md)). A
+sleeping board is no propagation node and no relay, so it is neither
+mode while it sleeps.
+
 ## Open
 
 Not decided yet, and marked as such:

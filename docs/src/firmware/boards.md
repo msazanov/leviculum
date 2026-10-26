@@ -59,6 +59,20 @@ Tracker mode ([Operating modes](../concepts/operating-modes.md)). The
 button, the LEDs, the buzzer and the display mean the same on every
 board ([One button](../concepts/one-button.md)).
 
+### Hard off
+
+The 8 s press puts a board to sleep, it does not cut power (Lew,
+2026-10-25, [One button](../concepts/one-button.md)). Whether a board
+can be switched off hard is a board fact:
+
+| Board | Hard off |
+|---|---|
+| RAK WisMesh Pocket V2 | an ON/OFF switch that disconnects the battery (RAK's WisMesh Pocket quick start: "battery disconnect switch"; this page cites no RAK19026 schematic for it, and whether it slides is not checked) |
+| ThinkNode M9 | a slide switch ([The ThinkNode M9](../concepts/thinknode-m9.md), "Power") |
+| Heltec T114 | none; power is the USB or battery lead |
+| SenseCAP T1000-E | none; power is the USB or battery lead |
+| SenseCAP Solar Node P1-Pro | none; power is the USB or battery lead |
+
 ## Hardware coverage
 
 We build one firmware per **pinout family**, not per product. A family is

@@ -192,6 +192,9 @@ Limits, measured and reasoned:
   picker covers it.
 - The replay costs up to 2 s of `--timeout` (`DISCOVERY_WINDOW_MS`) when
   entries do not answer.
+- The 32 entries and the 2 s are starting values, confirmed by Lew on
+  2026-10-25: the picker covers the gap, and a field finding raises the
+  number or pre-sorts the propagation node candidates.
 - A client attached over a non-loopback shared-instance TCP port counts as
   this device, because the daemon names it `LocalInterface[...]` too
   (`leviculum-std/src/interfaces/inventory.rs:102-107`). This is rare: the

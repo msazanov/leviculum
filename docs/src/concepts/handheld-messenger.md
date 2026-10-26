@@ -7,8 +7,8 @@ Lew decided on 2026-10-21 that it is written once, as a core, and
 reused: on the ThinkNode M9 ([The ThinkNode M9](thinknode-m9.md)), on
 the desktop, and later on Android. The map uses OpenStreetMap data and
 existing libraries, not a renderer of our own. This page records that
-decision, what exists to build it from, the reviewer's proposals for
-the core/frontend cut and for the map, and what is open.
+decision, what exists to build it from, the core/frontend cut and the
+map as decided on 2026-10-25, and what is open.
 
 ## Decided
 
@@ -86,7 +86,9 @@ the core/frontend cut and for the map, and what is open.
 
 ## The core/frontend cut
 
-*The reviewer's proposal, not yet decided.*
+*Decided 2026-10-25 (Lew).* The frontends: iced on the desktop, ratatui
+in the terminal and, through mousefood, on the M9 ([A GUI toolkit for
+the desktop and the M9](gui-toolkit.md), "Decision").
 
 **The core owns:**
 
@@ -100,8 +102,8 @@ It is `no_std + alloc` and tested on the host.
 **Frontends own only rendering and input:**
 
 - `lnmsg`'s terminal;
-- a desktop GUI (added 2026-10-25, see "Decided");
-- the M9's display and keyboard;
+- a desktop GUI in iced (added 2026-10-25, see "Decided");
+- the M9's display and keyboard, ratatui through mousefood;
 - an Android app over the C surface.
 
 Nothing a frontend draws is decided inside it.
@@ -110,8 +112,9 @@ Nothing a frontend draws is decided inside it.
 
 2026-10-25, Lew: the map is a product of its own as well as a view
 inside the messenger: OpenStreetMap vector data, on the desktop and on
-the M9, showing received telemetry positions. The measurement below
-decides the embedded renderer, not whether the map exists.
+the M9, showing received telemetry positions. The device measurement
+below decides whether the vector path holds or the PNG fallback is
+taken, not whether the map exists.
 
 2026-10-25, Lew: the embedded map is vector, drawn with a minimal
 polygon filler of our own on `embedded-graphics` and measured on the
@@ -120,36 +123,30 @@ fallback only (the filler is `leviculum-mapfill`, the measurement
 `docs/drafts/map-measurement-2026-10.md`, "Device measurement, prepared
 2026-10-25").
 
-*The reviewer's proposal, not yet decided, with its open measurement.*
+What the research found, in three sentences. No vector map renderer for
+microcontrollers exists off the shelf, though the tile formats (PMTiles,
+Mapbox Vector Tiles), a prost-based MVT decoder and `embedded-graphics`
+do. The gap is polygon filling: `embedded-graphics` 0.8 draws outlines
+but cannot fill an arbitrary polygon, so a scanline filler is the one
+renderer piece we write. Decoding, not drawing, is the clock: on the
+host the z15 view spent 4.93 ms of its 5.87 ms in decoding and clipping
+(`docs/drafts/map-measurement-2026-10.md`, "Table 3").
 
-The reviewer knows of no off-the-shelf vector map renderer for embedded
-targets. The candidate building blocks are:
+The shape: a desktop tool cuts an OSM extract, thins layers and
+simplifies geometry for each zoom level, and writes a compact tile set
+to the device's flash. The device draws filled areas, polylines, its own
+GNSS position, and the telemetry positions of other nodes.
 
-- **PMTiles**, an archive that holds a whole tile set in one file;
-- **Mapbox Vector Tiles**, the payload inside each tile;
-- the Rust readers for both;
-- **`embedded-graphics`** for drawing.
-
-The likely shape: a desktop tool cuts an OSM extract, simplifies lines
-and polygons for each zoom level, and writes a compact tile set to the
-device's flash. The device draws polylines, its own GNSS position, and
-the telemetry positions of other nodes.
-
-The measured precedent is raster, not vector: Meshtastic's device UI
+The fallback is raster, the measured precedent: Meshtastic's device UI
 on the M9 reads PNG raster tiles from the microSD card at
 `/maps/<style>/{z}/{x}/{y}.png` ([The ThinkNode M9](thinknode-m9.md),
-"Storage"). The vector idea stays the first-step measurement below,
-compared against that raster path.
+"Storage").
 
-**The first step is a measurement, not code.** Measure, for one city at
-three zoom levels:
-
-- the flash the tiles need;
-- the RAM used while rendering one 240x320 view;
-- the time it takes to draw that view.
-
-Whether we use an existing library or our own format is decided on
-those numbers, not before.
+**The first step is the device measurement, not product code.** For one
+city at three zoom levels: the flash the tiles need, the RAM used while
+rendering one 240x320 view, and the time it takes to draw that view.
+The host half is done (the draft above); the device half is prepared
+there under "Device measurement, prepared 2026-10-25".
 
 ## Order of work
 
@@ -188,7 +185,8 @@ interface](lnmsg-ui.md), section 2); each frontend maps them to its
 input. Code is shared where it is the same problem (model, update,
 layout), not for its own sake (rendering, input).
 
-2026-10-25 (984): on the terminal the shared code is two crates.
+2026-10-25, Lew: `lnomad` and `lnmsg` stay two programs with shared
+widgets. Since 984 the shared widgets are two crates.
 `leviculum-ui` is the terminal-free half (styled text, palette, the key
 and mouse events with the text-editing table, the footer, help and toast
 models, the spinner frames, and the delivery glyph table), so a core can
@@ -222,4 +220,4 @@ surface, the tile tool, the tile format, and the map view. Since
   architecture](lnmsg-architecture.md).
 - [Telemetry](telemetry.md), for the positions on the map.
 - [A GUI toolkit for the desktop and the M9](gui-toolkit.md), the
-  toolkit candidates measured and a proposal.
+  toolkit candidates measured and the decision for iced and ratatui.

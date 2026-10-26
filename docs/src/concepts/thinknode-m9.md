@@ -153,12 +153,9 @@ schematic: see its section "Worked example: ThinkNode M9 (incomplete)"
 - USB power detected on GPIO1, low when present (the wiki's 5V_TEST;
   `EXT_PWR_DETECT 1` in both variants).
 - A slide switch for on and off, a hidden RESET button, and BOOT on
-  GPIO0 (the wiki). The slide switch is one more reason the one-button
-  grammar does not apply (see "Decided").
-  Since 2026-10-25 stage one does apply the grammar, on one key (see
-  "Decided"); how its power-off row meets the slide switch is listed
-  under "Open". Proposal, Lew decides: on the M9 the 8 s gesture is deep
-  sleep, the slide switch is power.
+  GPIO0 (the wiki). Decided 2026-10-25 (Lew): the slide switch is the
+  hard off, a board fact and not part of the one-button grammar; the
+  8 s gesture on the M9 is sleep (see "Decided").
 
 ### USB and the rest
 
@@ -312,6 +309,10 @@ and `leviculum-esp/README.md` on that branch.
   carries the NomadNet browser, after the messenger. Concept work runs in
   parallel: a messenger GUI concept for the desktop and for a 240x320
   display.
+- **2026-10-25, Lew: the slide switch is the hard off, the 8 s gesture
+  is sleep.** The switch is a board fact, not part of the one-button
+  grammar. The 8 s gesture puts the M9 into deep sleep with a GPIO wake,
+  as on every board ([One button](one-button.md)).
 
 ## Bring-up plan
 
@@ -421,8 +422,10 @@ compared with the T1000-E's numbers.
   I2C address at the first boot. Closed 2026-10-25: V1.1, the probe build
   printed `[BOARD] m9_version=2` and found the keyboard controller at
   I2C 0x6D (build 7a699446 of the community fork, 00:30 CET).
-- **Which key carries the one-button grammar in stage one**, and how its
-  8 s power-off row meets the slide switch (2026-10-25, "Decided").
+- **Which key carries the one-button grammar in stage one** (2026-10-25,
+  "Decided"). How its 8 s row meets the slide switch is closed: the
+  switch is the hard off, the 8 s gesture is sleep (2026-10-25, Lew,
+  "Decided").
 - **The GNSS receiver:** AG3352, ATGM336H or L76K, identified on the
   device. Resolved by the community port's bench (cedrivard/Leviculum, rp2350-m9-net, 2026-10) in favour of the AG3352 (see "What the
   community port measured").
