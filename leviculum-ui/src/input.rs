@@ -228,7 +228,7 @@ pub struct MouseEvent {
 }
 
 /// A text field as a core holds it: what a key does to it, and what it holds.
-/// lnmsg's compose pane is one; it holds more than one line once
+/// loquax's compose pane is one; it holds more than one line once
 /// [`InputBuffer::newline`] has been called, and every other edit treats the
 /// line break as one character.
 pub trait InputBuffer {
@@ -242,7 +242,7 @@ pub trait InputBuffer {
     /// Empty the field and hand back what it held.
     fn take(&mut self) -> String;
     /// Insert a line break at the cursor. Not an [`InputBuffer::edit`] key:
-    /// which key means "newline" is the caller's keymap (lnmsg's compose
+    /// which key means "newline" is the caller's keymap (loquax's compose
     /// pane binds `Alt-Enter`, where `Enter` sends), not the field's.
     fn newline(&mut self);
     /// Put the cursor before the `at`th character, or at the end when the
@@ -294,12 +294,12 @@ impl InputBuffer for tui_input::Input {
 ///
 /// `tui-input`'s crossterm backend table (its `to_input_request`, version
 /// 0.15), restated over this module's types, with the Emacs keys it gets
-/// wrong put right (`docs/src/concepts/lnmsg-keys-and-layout.md`, "What the
+/// wrong put right (`docs/src/concepts/loquax-keys-and-layout.md`, "What the
 /// terminal can and cannot send"): `Alt-f`, `Alt-b` and `Alt-d` edit under
 /// `ALT`, which is what a terminal reports without the enhancement protocol,
 /// as well as `META`; `Alt-d` kills the word forward, not back; `Ctrl-d`
 /// deletes the character forward. One table, so lnomad's address bar and
-/// lnmsg's compose pane edit alike. Releases edit nothing.
+/// loquax's compose pane edit alike. Releases edit nothing.
 ///
 /// A buffer that holds lines edits through [`line_request`], which puts the
 /// line motions in front of this.

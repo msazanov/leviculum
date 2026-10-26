@@ -1,6 +1,6 @@
 [package]
 name = "lnpnd"
-# Versioned independently of the leviculum stack, like lnmsg and lnomad: a
+# Versioned independently of the leviculum stack, like loquax and lnomad: a
 # mailbox daemon's releases track its own storage format and operator
 # surface, not the protocol core it is built from.
 version = "0.1.0"
@@ -150,7 +150,7 @@ leviculum-lxmf = { path = "../leviculum-lxmf" }
 # The driver seam. Uploads arrive as `LinkDataReceived`, which is a
 # Data-class event the public receiver may drop under load, so the role runs
 # as a `CoreProcessor` inside the driver's tick — the same reasoning as
-# lnmsg's engine (docs/src/concepts/lnmsg-architecture.md §3). Default
+# loquax's engine (docs/src/concepts/loquax-architecture.md §3). Default
 # features off, see `[features]`.
 leviculum-std = { path = "../leviculum-std", default-features = false, features = ["compression"] }
 leviculum-core = { path = "../leviculum-core" }

@@ -2,7 +2,7 @@
 # scripts/standard-integ.sh leaves them out of its computed run. Everything
 # NOT named here is run there, selected from the tree, which is why a new
 # `tests/*.rs` cannot be left out of `standard` by forgetting to name it
-# (#194; 401 found lnmsg's python_interop red for eight commits that way).
+# (#194; 401 found loquax's python_interop red for eight commits that way).
 #
 # One line per claim:
 #
@@ -29,7 +29,7 @@ leviculum-std/event_log_multiprocess standard cargo test -p leviculum-std --test
 leviculum-std/lnode_debug_log_format standard cargo test -p leviculum-std --test lnode_debug_log_format
 leviculum-lxmf-node/two_node_loopback standard cargo test -p leviculum-lxmf-node --test two_node_loopback
 # Needs the `tui` feature, which the computed run does not enable.
-lnmsg/tui_snapshot lnmsg-tui cargo test -p lnmsg --features tui --bins --test tui_snapshot
+loquax/tui_snapshot loquax-tui cargo test -p loquax --features tui --bins --test tui_snapshot
 # Run by `fast`, which `standard` depends on.
 leviculum-std/mvr mvr cargo test -p leviculum-std --test mvr
 leviculum-std/doc_citations citation-guard cargo test -p leviculum-std --test doc_citations

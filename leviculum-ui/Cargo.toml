@@ -15,7 +15,7 @@ unsafe_code = "forbid"
 
 [features]
 # Without `std` the crate is `no_std` plus `alloc`, so a messenger core built
-# for a board (lnmsg's `ui` model, `just lnmsg-core-no-std`) takes the same
+# for a board (loquax's `ui` model, `just loquax-core-no-std`) takes the same
 # types. `std` adds what needs the standard library: the key-to-edit table
 # over `tui-input` (a std-only crate) and the spinner's colour, whose float
 # rounding core does not carry.

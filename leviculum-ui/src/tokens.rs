@@ -1,5 +1,5 @@
 //! The colour tokens: one table, a value for each [`Tier`] and [`Theme`]
-//! (`docs/src/concepts/lnmsg-keys-and-layout.md`, section 5, "Colour",
+//! (`docs/src/concepts/loquax-keys-and-layout.md`, section 5, "Colour",
 //! decided 2026-10-26).
 //!
 //! A token is a [`Paint`]: a foreground, a background, or reverse video,
@@ -9,7 +9,7 @@
 //! 256 and 16 tiers name their own indexes rather than the nearest ones of
 //! the truecolor values: the nearest index does not keep contrast.
 //!
-//! lnmsg reads every token; lnomad reads the shared ones (muted, selection,
+//! loquax reads every token; lnomad reads the shared ones (muted, selection,
 //! toast, error, the chrome bars) and keeps NomadNet's heading bands and its
 //! link colour in [`Theme`]. A GUI frontend takes its palette from the same
 //! table.

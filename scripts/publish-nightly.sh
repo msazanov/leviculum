@@ -158,18 +158,18 @@ https://codeberg.org/${CI_REPO}/releases/download/nightly/lnpnd-nightly-arm64.ta
 
 \`sudo apt install ./lnpnd-nightly-amd64.deb\` installs \`lnpnd\` as a systemd service that is enabled but not started: put the node's identity at \`/etc/lnpnd/identity\` first, or accept a fresh one, then \`sudo systemctl start lnpnd\`.
 
-**lnmsg — LXMF messenger** (separate package, no service; \`lnmsg send\` for scripts, \`lnmsg tui\` for people):
+**loquax — LXMF messenger** (separate package, no service; \`loquax send\` for scripts, \`loquax tui\` for people):
 
 \`\`\`
-https://codeberg.org/${CI_REPO}/releases/download/nightly/lnmsg-nightly-amd64.deb
-https://codeberg.org/${CI_REPO}/releases/download/nightly/lnmsg-nightly-arm64.deb
-https://codeberg.org/${CI_REPO}/releases/download/nightly/lnmsg-nightly-amd64.tar.gz
-https://codeberg.org/${CI_REPO}/releases/download/nightly/lnmsg-nightly-arm64.tar.gz
+https://codeberg.org/${CI_REPO}/releases/download/nightly/loquax-nightly-amd64.deb
+https://codeberg.org/${CI_REPO}/releases/download/nightly/loquax-nightly-arm64.deb
+https://codeberg.org/${CI_REPO}/releases/download/nightly/loquax-nightly-amd64.tar.gz
+https://codeberg.org/${CI_REPO}/releases/download/nightly/loquax-nightly-arm64.tar.gz
 \`\`\`
 
-\`sudo apt install ./lnmsg-nightly-amd64.deb\`, like \`lnomad\`, needs a running RNS instance.
+\`sudo apt install ./loquax-nightly-amd64.deb\`, like \`lnomad\`, needs a running RNS instance.
 
-\`lnomad\`, \`lblogd\`, \`lnpnd\` and \`lnmsg\` carry their own version numbers, independent of the \`leviculum\` packages above.
+\`lnomad\`, \`lblogd\`, \`lnpnd\` and \`loquax\` carry their own version numbers, independent of the \`leviculum\` packages above.
 
 **lnflash — firmware flasher for LNode boards** (self-contained bundle: the flasher, one prebuilt firmware image per supported board, and Nordic's S140 SoftDevice with its licence for the board that can need it):
 

@@ -621,7 +621,7 @@ fn scanner_finds_the_sites_it_is_meant_to_find() {
         "BLE_LINK_UP",       // leviculum-std/src/interfaces/ble/mod.rs
         "REENTRANT_LOCK",    // leviculum-std/src/sync_ext.rs
         "HELPER_TICK",       // leviculum-std/src/bin/event-log-helper.rs
-        "LNMSG_DONE",        // lnmsg/src/events.rs
+        "LNMSG_DONE",        // loquax/src/events.rs
         "PN_SYNC",           // lnpnd/src/peering.rs
     ] {
         assert!(

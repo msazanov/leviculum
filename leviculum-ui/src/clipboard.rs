@@ -1,10 +1,10 @@
 //! The system clipboard as a terminal reaches it: an OSC 52 sequence the
 //! shell writes to the terminal, which copies the payload. It works over SSH,
-//! where no local clipboard API would (`docs/src/concepts/lnmsg-ui.md`, "The
+//! where no local clipboard API would (`docs/src/concepts/loquax-ui.md`, "The
 //! mouse as a first-class citizen").
 //!
 //! Pure, so the encoding is tested without a terminal: lnomad's `y` and
-//! lnmsg's drag selection both copy through it.
+//! loquax's drag selection both copy through it.
 
 use alloc::format;
 use alloc::string::String;

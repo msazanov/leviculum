@@ -4,8 +4,8 @@
 //! [`classify_link`] is lnomad's rule for a NomadNet page's links, a security
 //! boundary as much as a parser: a link comes from an untrusted node or
 //! sender, so only a whitelisted scheme is ever handed to a system handler.
-//! lnmsg follows a link in a message body by the same rule
-//! (`docs/src/concepts/lnmsg-keys-and-layout.md`, section 5, "What the mouse
+//! loquax follows a link in a message body by the same rule
+//! (`docs/src/concepts/loquax-keys-and-layout.md`, section 5, "What the mouse
 //! does"); [`find_links`] is what finds them there, since a message body is
 //! text with no link markup.
 

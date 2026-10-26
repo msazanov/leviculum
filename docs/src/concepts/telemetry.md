@@ -572,7 +572,7 @@ their index stamps (there is no re-index).
 `lntd` (`leviculum-cli/src/lntd.rs`) is the endpoint side of the same
 contract: one announced LXMF delivery destination, whose hash is what
 `lnflash --set-telemetry` writes into a board. It attaches to a running
-shared instance the way `lnmsg` and `lnpnd` do, and every report it
+shared instance the way `loquax` and `lnpnd` do, and every report it
 accepts becomes one row in a SQLite file.
 
 The rule it is built around is the inverse of the decoder's tolerance.

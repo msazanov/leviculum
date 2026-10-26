@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # lnomad's browser core does not know it has a terminal (Codeberg #219,
-# docs/src/concepts/lnmsg-architecture.md, "the core must not know it has a
+# docs/src/concepts/loquax-architecture.md, "the core must not know it has a
 # terminal"). The core is `lnomad/src/app/`; the terminal frontend is the
 # `tui` cargo feature. Three checks, cheapest first; `--static` runs the
 # first two (and the positive control), `--build` the third:
@@ -26,7 +26,7 @@
 # graph check, naming the crate.
 #
 # The same two checks guard leviculum-ui, the terminal-free half of the UI
-# lnomad and lnmsg share (984, Codeberg #475): `--ui-static` runs source (over
+# lnomad and loquax share (984, Codeberg #475): `--ui-static` runs source (over
 # leviculum-ui/src/) and graph (leviculum-ui with every feature) after its own
 # positive control, an injected ratatui import and tui-input's default
 # features in leviculum-ui's copy; `--ui-build` lints the crate alone. Its

@@ -1,6 +1,6 @@
 //! The command palette's names: the one table a messenger frontend opens
 //! with `:` or `Alt-x` and filters as the reader types
-//! (`docs/src/concepts/lnmsg-ui.md`, section 1: "a command palette layered on
+//! (`docs/src/concepts/loquax-ui.md`, section 1: "a command palette layered on
 //! top, no modes").
 //!
 //! One table, so the terminal palette and the desktop GUI's offer the same
@@ -10,7 +10,7 @@
 //! where its keys come from.
 //!
 //! `quit` is the only name with a `q` in it, so `:`, `q`, `Enter` quits as a
-//! vi reader expects (`docs/src/concepts/lnmsg-keys-and-layout.md`, section
+//! vi reader expects (`docs/src/concepts/loquax-keys-and-layout.md`, section
 //! 3); a test holds it.
 
 use alloc::vec::Vec;

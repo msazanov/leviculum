@@ -1,7 +1,7 @@
 //! The colour tiers and the colours a token names.
 //!
 //! A program draws in one of four [`Tier`]s, resolved once at startup by the
-//! ladder of `docs/src/concepts/lnmsg-keys-and-layout.md`, section 5,
+//! ladder of `docs/src/concepts/loquax-keys-and-layout.md`, section 5,
 //! "Colour", part 1: monochrome, the sixteen ANSI colours, the xterm-256
 //! palette, or 24-bit true colour. [`resolve_tier`] is that ladder, pure over
 //! a snapshot of the environment ([`TierEnv`]) so a test feeds it every case.

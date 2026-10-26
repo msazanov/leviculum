@@ -1,0 +1,1907 @@
+//! The in-process message engine: an [`LxmfRouter`] driven from inside the
+//! driver's tick, and the [`Outbox`](crate::outbox::Outbox) the frontend
+//! sees it through.
+//!
+//! # Why the engine is a `CoreProcessor`
+//!
+//! `leviculum-std`'s public event stream classifies before it delivers, and
+//! seven of the event types LXMF needs — `PacketReceived` and
+//! `LinkDataReceived` among them, i.e. how a message *arrives* — are
+//! `EventClass::Data` and droppable under load
+//! (`leviculum-std/src/driver/processor.rs`, "Where the events come from").
+//! A client fed from there would silently lose messages with nothing
+//! underneath to retransmit them, so the tap is the only correct feed
+//! (`docs/src/concepts/loquax-architecture.md` §3). This slice only sends, but
+//! the feed is the same one the reading half will need, and picking the wrong
+//! one now would have to be undone later.
+//!
+//! # The rule this file is written against
+//!
+//! Both hooks run **with the core mutex held, and that mutex is not
+//! reentrant**. So this type owns no `ReticulumNode` and no handle derived
+//! from one, and every side effect is a push onto an unbounded queue. Nothing
+//! here does I/O, and the one unbounded computation in LXMF — proof-of-work
+//! for a stamp — leaves through a queue and is mined by the host, the
+//! terminal on a thread of its own ([`mine`] is what every host runs).
+//!
+//! # The core and the shell
+//!
+//! This file is the core, `no_std` plus `alloc`, and generic over the node
+//! core (`NodeCore<R, C, S>`). The `CoreProcessor` impl for the driver's
+//! `StdNodeCore`, the channels to the frontend ([`InProcessOutbox`]),
+//! [`attach`], the stamp worker thread, its tokio runtime and `OsRng` are
+//! the shell, in `engine/shell.rs` behind the `std` feature.
+//!
+//! # What it deliberately does not do
+//!
+//! No persistence. `LxmfRouter::persist` writes the outbound queue to an
+//! `LxmfStorage`, and a `FileLxmfStorage` for it exists
+//! (`leviculum-std/src/file_lxmf_store.rs:27`) — but in this slice nothing
+//! would ever drain a restored queue, since there is no daemon and no
+//! `loquax sync`. Persisting would buy a file on disk that no code reads, at
+//! the price of a write inside the core lock. The moment daemon mode or a
+//! resume path exists, this is where it goes.
+
+use alloc::boxed::Box;
+use alloc::collections::{BTreeMap, VecDeque};
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use core::future::Future;
+use core::pin::pin;
+use core::task::Poll;
+
+use leviculum_core::identity::Identity;
+use leviculum_core::node::NodeEvent;
+use leviculum_core::transport::TickOutput;
+use leviculum_core::{Clock as CoreClock, DestinationHash, NodeCore, Storage};
+use leviculum_lxmf::propagation_client::PropagationTransport;
+use leviculum_lxmf::router::{
+    LxmfRouter, MessageState, PropagationClientConfig, PropagationClientState,
+    PropagationStampRequest, RouterConfig, RouterError, RouterEvent, RouterOutput,
+    PATH_REQUEST_WAIT_MS,
+};
+use leviculum_lxmf::{
+    announce, CooperativeStamper, DeliveryMethod, DeliveryStampRequest, LxmfNode, LxmfNodeConfig,
+    StampCancel, StampError, Verification,
+};
+use rand_core::CryptoRngCore;
+
+use crate::clock::Clock;
+use crate::effects::Effects;
+use crate::mailbox::{self, Candidate, Previous, Selection};
+use crate::mailbox_state::{Decision, Route};
+use crate::outbox::{Command, MailboxInput, OutboxEvent, SendRequest, Via};
+
+#[cfg(feature = "std")]
+mod shell;
+#[cfg(feature = "std")]
+pub use shell::{attach, AttachConfig, AttachError, Attached, InProcessOutbox};
+
+/// How soon the engine asks the driver to come back.
+///
+/// The command queue needs a periodic slot — an event tap can never
+/// *initiate* anything, because it only fires when the core has something to
+/// say — and so does a pending resolve. 200 ms is what `leviculum-lxmf-node`
+/// uses for the same job, and it bounds command pickup latency at a fifth of
+/// the driver's 1 s idle cadence.
+const POLL_INTERVAL_MS: u64 = 200;
+
+/// How many path-table entries a selection asks the daemon to replay.
+///
+/// A client hears only the announces made while it is attached, and a node
+/// announces every few hours, so on a first run the router knows no
+/// propagation node at all. Asking the daemon for a path it already holds is
+/// answered from its cache with the announce (`Transport.py:2943`, local
+/// clients are served without transport), and that announce is what tells
+/// the router which entries are propagation nodes. The fewest-hops entries
+/// first; a mailbox is a near thing, and a transport node's table can hold
+/// thousands.
+const DISCOVERY_LIMIT: usize = 32;
+
+/// How long a selection waits for those replays. They cross one local
+/// socket, so anything not back by then is not coming from the cache.
+const DISCOVERY_WINDOW_MS: u64 = 2_000;
+
+/// How many times one hook call will re-feed router output into the router.
+///
+/// A core call made *inside* a hook can return events synchronously, and the
+/// driver never hands those back, so closing that loop is the consumer's job
+/// (Codeberg #204). An LXMF event that provokes an LXMF event is legitimate,
+/// so the fixpoint is not something the router can promise, and an unbounded
+/// loop under the core lock is a node hang rather than a bug report.
+const MAX_ABSORB_ROUNDS: usize = 8;
+
+/// Above this announced cost the mining worker reports its progress on
+/// stderr: a grind the operator cannot see ending is indistinguishable from a
+/// hang, and default propagation nodes announce 13 now.
+const STAMP_PROGRESS_COST: u8 = 10;
+
+/// How often a narrated grind says it is still going.
+const STAMP_PROGRESS_EVERY_MS: u64 = 5_000;
+
+/// One proof-of-work job on its way to the miner.
+///
+/// Each job carries the handle that calls it off. The terminal's miner is one
+/// thread and single-consumer, so an unfinishable grind does not only park
+/// its own message, it parks every stamp queued behind it (Codeberg #185) —
+/// the handle is what gets the miner back.
+pub enum StampJob {
+    /// A recipient delivery stamp, at the cost the recipient announced.
+    Delivery(DeliveryStampRequest, Arc<StampCancel>),
+    /// The independent propagation-node stamp over the transient ID, at the
+    /// cost the selected node announced.
+    Propagation(PropagationStampRequest, Arc<StampCancel>),
+}
+
+impl StampJob {
+    /// Which stamp of which message this is.
+    pub fn key(&self) -> (StampKind, [u8; 32]) {
+        match self {
+            Self::Delivery(request, _) => (StampKind::Delivery, request.message_id),
+            Self::Propagation(request, _) => (StampKind::Propagation, request.message_id),
+        }
+    }
+
+    /// The handle [`Engine`] fires when the message is cancelled.
+    pub fn cancel(&self) -> Arc<StampCancel> {
+        match self {
+            Self::Delivery(_, cancel) | Self::Propagation(_, cancel) => Arc::clone(cancel),
+        }
+    }
+}
+
+/// Which of a message's two possible stamps a mining job is for. A propagated
+/// message to a cost-announcing recipient legitimately mines both, one after
+/// the other, so the single-flight set is keyed by kind as well as id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum StampKind {
+    Delivery,
+    Propagation,
+}
+
+/// A stamp the miner has finished with.
+pub enum StampAnswer {
+    Delivery {
+        request: DeliveryStampRequest,
+        result: Result<[u8; 32], StampError>,
+    },
+    Propagation {
+        request: PropagationStampRequest,
+        result: Result<[u8; 32], StampError>,
+    },
+}
+
+/// A destination the frontend asked to have resolved.
+struct Resolve {
+    destination: [u8; 16],
+    /// When the path is next asked for, on the tick clock; `None` until the
+    /// first request. Repeated every `PATH_REQUEST_WAIT_MS` while no path has
+    /// come, the reference's wait between a path request and the next attempt
+    /// (`reference/LXMF/LXMF/LXMRouter.py:33`, `:1779`): one request is one
+    /// packet, and a packet lost to a daemon whose interface is still
+    /// reconnecting must not cost the whole send (leviculum#699).
+    ///
+    /// There is no deadline here on purpose: the repeat runs until the
+    /// frontend's own budget (`loquax send --timeout`) ends the run, the rule
+    /// a fetch's path phase follows too (leviculum#719).
+    next_path_request_ms: Option<u64>,
+    /// When the first path request went out, and how many have, for the
+    /// `PATH found` log line.
+    first_path_request_ms: Option<u64>,
+    path_requests: u32,
+    /// Set once the answer has gone out, so a repeated ask is not answered
+    /// twice.
+    answered: bool,
+}
+
+/// A selection waiting for the daemon's announce replays.
+struct PendingSelection {
+    routes: Vec<Route>,
+    previous: Option<Previous>,
+    /// The entries whose replay is awaited, removed as the engine's own
+    /// event hook sees each announce. Not "the core knows the identity":
+    /// the core stores that before the hook runs, and a tick in between
+    /// would select before the router had heard the node.
+    asked: Vec<[u8; 16]>,
+    deadline_ms: u64,
+}
+
+/// The router, once it exists.
+struct Ready {
+    router: LxmfRouter,
+    address: [u8; 16],
+}
+
+enum State {
+    /// The identity is loaded but nothing is registered: registering needs
+    /// `&mut StdNodeCore`, and a processor is installed on the *builder*,
+    /// before the node it will run inside exists.
+    Unregistered(Box<Identity>),
+    Ready(Box<Ready>),
+    /// Registration failed and was reported.
+    Failed,
+}
+
+/// The LXMF engine: the router glue, driven from the node core's two hooks.
+///
+/// Generic over the node core the way the router it holds is, so the driver's
+/// `StdNodeCore` and a board's core run the same engine. It reaches its host
+/// through four queues of its own, each a `VecDeque`: commands in, events
+/// out, stamp jobs out, stamp answers in. Unbounded on purpose, as the
+/// `mpsc` channels they replace were: the hooks run under the core lock and
+/// must neither block nor drop, and a dropped event can be a received
+/// message. The host drains them around every hook, so what they hold is one
+/// hook's worth; a bounded ring would add a drop policy and buy nothing.
+pub struct Engine {
+    display_name: Vec<u8>,
+    events: VecDeque<OutboxEvent>,
+    commands: VecDeque<Command>,
+    stamps: VecDeque<StampJob>,
+    stamp_answers: VecDeque<StampAnswer>,
+    state: State,
+    resolves: Vec<Resolve>,
+    /// Messages this run queued, and the last state seen for each. The router
+    /// forgets a message the moment it reaches a terminal state, so without
+    /// this the removal could not be attributed.
+    tracked: BTreeMap<[u8; 32], Option<MessageState>>,
+    /// Stamps being mined, so a re-offer does not queue a second mine for the
+    /// same work behind the first. Keyed by kind as well as id: a propagated
+    /// message can need a recipient stamp and a node stamp in one run.
+    ///
+    /// The value is the handle that calls that mine off (Codeberg #185). It
+    /// lives here rather than in the router because the router knows a stamp
+    /// is wanted, while only this side knows one is actually running.
+    mining: BTreeMap<(StampKind, [u8; 32]), Arc<StampCancel>>,
+    /// Whether our own delivery announce has gone out. See [`Engine::announce`].
+    announced: bool,
+    /// A [`Command::SelectPn`] without a preference, waiting for the
+    /// announces that tell it which path-table entries are propagation nodes.
+    pending_selection: Option<PendingSelection>,
+}
+
+impl Engine {
+    /// An engine that registers `identity`'s delivery destination on its
+    /// first hook and announces it under `display_name`.
+    pub fn new(identity: Identity, display_name: Vec<u8>) -> Self {
+        Self {
+            display_name,
+            events: VecDeque::new(),
+            commands: VecDeque::new(),
+            stamps: VecDeque::new(),
+            stamp_answers: VecDeque::new(),
+            state: State::Unregistered(Box::new(identity)),
+            resolves: Vec::new(),
+            tracked: BTreeMap::new(),
+            mining: BTreeMap::new(),
+            announced: false,
+            pending_selection: None,
+        }
+    }
+
+    /// Queue one frontend command for the next [`Engine::on_tick`].
+    pub fn submit(&mut self, command: Command) {
+        self.commands.push_back(command);
+    }
+
+    /// The oldest event the frontend has not been handed yet.
+    pub fn next_event(&mut self) -> Option<OutboxEvent> {
+        self.events.pop_front()
+    }
+
+    /// The oldest stamp job no miner has been handed yet.
+    pub fn next_stamp_job(&mut self) -> Option<StampJob> {
+        self.stamps.pop_front()
+    }
+
+    /// Hand back a finished stamp, for the next [`Engine::on_tick`].
+    pub fn stamp_answered(&mut self, answer: StampAnswer) {
+        self.stamp_answers.push_back(answer);
+    }
+
+    /// The miner is gone and `job` never reached it, so its answer will never
+    /// come: drop the marker, so a later re-offer is dispatched normally.
+    pub fn stamp_undelivered(&mut self, job: &StampJob) {
+        self.mining.remove(&job.key());
+    }
+
+    fn emit(&mut self, event: OutboxEvent) {
+        self.events.push_back(event);
+    }
+
+    /// Register the delivery destination on first use and announce readiness.
+    ///
+    /// Called from both hooks: the driver's timer branch normally fires first,
+    /// but nothing in the seam promises that.
+    fn register_if_needed<R: CryptoRngCore, C: CoreClock, S: Storage>(
+        &mut self,
+        core: &mut NodeCore<R, C, S>,
+    ) {
+        let identity = match core::mem::replace(&mut self.state, State::Failed) {
+            State::Unregistered(identity) => *identity,
+            other => {
+                self.state = other;
+                return;
+            }
+        };
+        self.state = match register(core, identity) {
+            Ok(ready) => {
+                self.emit(OutboxEvent::Ready {
+                    address: ready.address,
+                });
+                State::Ready(Box::new(ready))
+            }
+            Err(detail) => {
+                self.emit(OutboxEvent::Broken { detail });
+                State::Failed
+            }
+        };
+    }
+
+    /// Register if needed, then move the router out of `self` for the duration
+    /// of the hook, which is what lets the rest of the hook borrow the router
+    /// and `self` at once.
+    fn take_ready<R: CryptoRngCore, C: CoreClock, S: Storage>(
+        &mut self,
+        core: &mut NodeCore<R, C, S>,
+    ) -> Option<Box<Ready>> {
+        self.register_if_needed(core);
+        match core::mem::replace(&mut self.state, State::Failed) {
+            State::Ready(ready) => Some(ready),
+            other => {
+                self.state = other;
+                None
+            }
+        }
+    }
+
+    /// Route one router output: report its events, collect its wire actions,
+    /// and re-feed the core events it produced. See [`MAX_ABSORB_ROUNDS`].
+    fn absorb<R: CryptoRngCore, C: CoreClock, S: Storage>(
+        &mut self,
+        ready: &mut Ready,
+        core: &mut NodeCore<R, C, S>,
+        first: RouterOutput,
+        out: &mut TickOutput,
+    ) {
+        let mut queue = VecDeque::from([first]);
+        let mut rounds = 0usize;
+        while let Some(router_output) = queue.pop_front() {
+            for event in router_output.events {
+                self.report(ready, core, event);
+            }
+            let mut core_output = router_output.core;
+            let events = core::mem::take(&mut core_output.events);
+            out.merge(core_output);
+
+            rounds += 1;
+            let refeed = rounds <= MAX_ABSORB_ROUNDS;
+            for event in events {
+                if refeed {
+                    match ready.router.handle_event(core, &event) {
+                        Ok(next) => queue.push_back(next),
+                        Err(e) => self.emit(OutboxEvent::Broken {
+                            detail: format!("router handle_event: {e:?}"),
+                        }),
+                    }
+                }
+                out.events.push(event);
+            }
+        }
+    }
+
+    /// Turn one router event into something the frontend can act on.
+    fn report<R: CryptoRngCore, C: CoreClock, S: Storage>(
+        &mut self,
+        ready: &Ready,
+        core: &NodeCore<R, C, S>,
+        event: RouterEvent,
+    ) {
+        match event {
+            RouterEvent::MessageQueued(id) => {
+                self.tracked.insert(id, None);
+                self.emit(OutboxEvent::Queued { message_id: id });
+            }
+            RouterEvent::MessageState { message_id, state } => {
+                if let Some(slot) = self.tracked.get_mut(&message_id) {
+                    *slot = Some(state);
+                    self.emit(OutboxEvent::State { message_id, state });
+                }
+            }
+            RouterEvent::StampPending(request) => {
+                self.dispatch_stamp(StampJob::Delivery(request, Arc::default()));
+            }
+            RouterEvent::PropagationStampPending(request) => {
+                self.dispatch_stamp(StampJob::Propagation(request, Arc::default()));
+            }
+            RouterEvent::MessageReceived(message) => {
+                let message = *message;
+                self.emit(OutboxEvent::Received {
+                    message_id: message.message_id,
+                    source: message.source_hash,
+                    verified: message.verification == Verification::Valid,
+                    title: message.title,
+                    body: message.content,
+                });
+            }
+            RouterEvent::PropagationSyncComplete(result) => {
+                self.emit(OutboxEvent::SyncDone {
+                    received: result.received,
+                    duplicates: result.duplicates,
+                });
+            }
+            RouterEvent::PropagationSyncState(status) => {
+                if let Some(word) = sync_failure(status.state) {
+                    let path = (status.state == PropagationClientState::NoPath)
+                        .then(|| ready.router.propagation_client_path_attempts(core))
+                        .flatten();
+                    self.emit(OutboxEvent::SyncFailed {
+                        detail: word.to_string(),
+                        path,
+                    });
+                }
+            }
+            // Everything else is either inbound traffic this slice does not
+            // read or bookkeeping the router does for itself. Deliberately not
+            // forwarded: an event the frontend cannot act on is noise on a
+            // seam that a daemon protocol will one day have to carry.
+            _ => {}
+        }
+    }
+
+    /// Queue one proof-of-work job for the miner.
+    ///
+    /// Off the lock: mining is unbounded work at a cost the peer chooses, and
+    /// the generator is async. Both are things a hook body may least afford.
+    ///
+    /// Single-flight: the router re-offers a still-queued message every retry
+    /// interval, and a second mine for one job would queue behind the first
+    /// for the same answer.
+    fn dispatch_stamp(&mut self, job: StampJob) {
+        let key = job.key();
+        if self.mining.contains_key(&key) {
+            return;
+        }
+        self.mining.insert(key, job.cancel());
+        self.stamps.push_back(job);
+    }
+
+    /// Notice messages the router has forgotten. A terminal state removes the
+    /// entry from the outbound map (`leviculum-lxmf/src/router.rs:771-773`),
+    /// and the frontend has to be told, because the state event and the
+    /// removal can arrive in the same tick.
+    ///
+    /// The predicate is membership of `outbound()`, deliberately **not**
+    /// `LxmfRouter::has_message`: that one asks the delivered-id dedup cache
+    /// whether this id has already been *received*
+    /// (`leviculum-lxmf/src/router.rs:679-681`), which is false for every
+    /// message we send. Reading it as "is still queued" reported every message
+    /// as departed in the tick that queued it, with no state ever seen — see
+    /// the regression test below.
+    fn report_departures(&mut self, ready: &Ready) {
+        let gone: Vec<_> = self
+            .tracked
+            .keys()
+            .filter(|id| !ready.router.outbound().contains_key(*id))
+            .copied()
+            .collect();
+        for id in gone {
+            let last = self.tracked.remove(&id).flatten();
+            self.emit(OutboxEvent::Left {
+                message_id: id,
+                last,
+            });
+        }
+    }
+
+    /// Drain the frontend's command queue. Non-blocking by construction.
+    fn pump_commands<R: CryptoRngCore, C: CoreClock, S: Storage>(
+        &mut self,
+        ready: &mut Ready,
+        core: &mut NodeCore<R, C, S>,
+        out: &mut TickOutput,
+    ) {
+        while let Some(command) = self.commands.pop_front() {
+            match command {
+                Command::Resolve { destination } => self.resolves.push(Resolve {
+                    destination,
+                    next_path_request_ms: None,
+                    first_path_request_ms: None,
+                    path_requests: 0,
+                    answered: false,
+                }),
+                Command::Send(request) => self.send(ready, core, *request, out),
+                Command::SelectPn { preferred, mailbox } => {
+                    self.select_pn(ready, core, preferred, mailbox, out);
+                }
+                Command::Fetch { path_budget_ms } => {
+                    self.fetch(ready, core, path_budget_ms, out);
+                }
+                Command::Cancel { message_id } => self.cancel(ready, core, &message_id, out),
+            }
+        }
+    }
+
+    /// Pick the propagation node for this run's uploads and drains: the
+    /// preferred one when there is one, else the mailbox rule's answer.
+    fn select_pn<R: CryptoRngCore, C: CoreClock, S: Storage>(
+        &mut self,
+        ready: &mut Ready,
+        core: &mut NodeCore<R, C, S>,
+        preferred: Option<[u8; 16]>,
+        mailbox: Option<MailboxInput>,
+        out: &mut TickOutput,
+    ) {
+        if let Some(destination) = preferred {
+            self.commit_pn(ready, core, destination, out);
+            return;
+        }
+        let Some(input) = mailbox else {
+            self.emit(OutboxEvent::PnUnavailable {
+                detail: "no propagation node is known: none was given with --pn and none \
+                         is configured"
+                    .to_string(),
+            });
+            return;
+        };
+        let routes = match (input.routes, input.previous) {
+            (Ok(routes), _) => routes,
+            // A stored node stays without the table: it was vetted against
+            // the table when it was adopted, or the user chose it, and an
+            // identity does not move onto this device by itself. Only a new
+            // adoption needs the table.
+            (Err(_), Some(stored)) => {
+                self.emit(OutboxEvent::Mailbox(Decision::KeptWithoutTable {
+                    node: stored.node,
+                }));
+                self.commit_pn(ready, core, stored.node, out);
+                return;
+            }
+            (Err(why), None) => {
+                self.emit(OutboxEvent::PnUnavailable {
+                    detail: format!(
+                        "no mailbox chosen: the daemon's path table could not be read \
+                         ({why}), and without it a propagation node on this device cannot \
+                         be told from one elsewhere; name one with --pn"
+                    ),
+                });
+                return;
+            }
+        };
+        let previous = input.previous.map(|stored| stored.previous(&routes));
+        let selection = mailbox::select(&candidates(ready, &routes), previous);
+        if matches!(selection, Selection::Keep(_)) {
+            self.finish_selection(ready, core, selection, out);
+            return;
+        }
+        // Ask for the replays of what the router cannot classify yet.
+        let mut unknown: Vec<&Route> = routes
+            .iter()
+            .filter(|route| {
+                ready
+                    .router
+                    .known_propagation_node(&DestinationHash::new(route.node))
+                    .is_none()
+            })
+            .collect();
+        unknown.sort_by_key(|route| (route.hops, route.node));
+        unknown.truncate(DISCOVERY_LIMIT);
+        let asked: Vec<[u8; 16]> = unknown.iter().map(|route| route.node).collect();
+        if asked.is_empty() {
+            self.finish_selection(ready, core, selection, out);
+            return;
+        }
+        for node in &asked {
+            let output = core.request_path_unthrottled(&DestinationHash::new(*node));
+            self.absorb(
+                ready,
+                core,
+                RouterOutput {
+                    core: output,
+                    events: Vec::new(),
+                },
+                out,
+            );
+        }
+        self.pending_selection = Some(PendingSelection {
+            routes,
+            previous,
+            asked,
+            deadline_ms: core.now_ms().saturating_add(DISCOVERY_WINDOW_MS),
+        });
+    }
+
+    /// Finish a waiting selection once every replay is in or the window has
+    /// closed.
+    fn poll_pending_selection<R: CryptoRngCore, C: CoreClock, S: Storage>(
+        &mut self,
+        ready: &mut Ready,
+        core: &mut NodeCore<R, C, S>,
+        now_ms: u64,
+        out: &mut TickOutput,
+    ) {
+        let Some(pending) = &self.pending_selection else {
+            return;
+        };
+        if !pending.asked.is_empty() && now_ms < pending.deadline_ms {
+            return;
+        }
+        let Some(pending) = self.pending_selection.take() else {
+            return;
+        };
+        let selection = mailbox::select(&candidates(ready, &pending.routes), pending.previous);
+        self.finish_selection(ready, core, selection, out);
+    }
+
+    /// Report the rule's answer and select what it named.
+    fn finish_selection<R: CryptoRngCore, C: CoreClock, S: Storage>(
+        &mut self,
+        ready: &mut Ready,
+        core: &mut NodeCore<R, C, S>,
+        selection: Selection,
+        out: &mut TickOutput,
+    ) {
+        match selection {
+            Selection::Keep(node) => {
+                self.emit(OutboxEvent::Mailbox(Decision::Kept { node }));
+                self.commit_pn(ready, core, node, out);
+            }
+            Selection::Adopt(candidate, reason) => {
+                self.emit(OutboxEvent::Mailbox(Decision::Adopted {
+                    node: candidate.node,
+                    hops: candidate.hops,
+                    seen_ms: candidate.last_seen_ms,
+                    reason,
+                }));
+                self.commit_pn(ready, core, candidate.node, out);
+            }
+            Selection::None(reason) => self.emit(OutboxEvent::PnUnavailable {
+                detail: reason.as_str().to_string(),
+            }),
+        }
+    }
+
+    /// Make `destination` the router's propagation node.
+    fn commit_pn<R: CryptoRngCore, C: CoreClock, S: Storage>(
+        &mut self,
+        ready: &mut Ready,
+        core: &mut NodeCore<R, C, S>,
+        destination: [u8; 16],
+        out: &mut TickOutput,
+    ) {
+        let hash = DestinationHash::new(destination);
+        // The announced cost is read before `absorb` takes `ready` mutably;
+        // `None` means the node has not been heard yet this run, in which
+        // case the router requests its path and learns the cost from the
+        // replayed announce.
+        let stamp_cost = ready
+            .router
+            .known_propagation_node(&hash)
+            .map(|known| known.announce.stamp_cost);
+        match ready
+            .router
+            .select_outbound_propagation_node(core, Some(hash))
+        {
+            Ok(output) => {
+                self.absorb(ready, core, output, out);
+                self.emit(OutboxEvent::PnSelected {
+                    destination,
+                    stamp_cost,
+                });
+            }
+            Err(e) => self.emit(OutboxEvent::PnUnavailable {
+                detail: format!("{e:?}"),
+            }),
+        }
+    }
+
+    /// Start one mailbox drain against the selected node, asking for its path
+    /// for as long as `path_budget_ms` (leviculum#719).
+    fn fetch<R: CryptoRngCore, C: CoreClock, S: Storage>(
+        &mut self,
+        ready: &mut Ready,
+        core: &mut NodeCore<R, C, S>,
+        path_budget_ms: u64,
+        out: &mut TickOutput,
+    ) {
+        let started = ready
+            .router
+            .set_propagation_path_timeout_ms(path_budget_ms)
+            .and_then(|()| {
+                ready
+                    .router
+                    .request_messages_from_propagation_node(core, None)
+            });
+        match started {
+            Ok(output) => self.absorb(ready, core, output, out),
+            Err(e) => self.emit(OutboxEvent::SyncFailed {
+                detail: format!("{e:?}"),
+                path: None,
+            }),
+        }
+    }
+
+    /// Drop a queued message. `NotFound` is not an error here: the message
+    /// may have reached a terminal state between the frontend's decision and
+    /// this tick, which is exactly the outcome a cancel wants.
+    fn cancel<R: CryptoRngCore, C: CoreClock, S: Storage>(
+        &mut self,
+        ready: &mut Ready,
+        core: &mut NodeCore<R, C, S>,
+        message_id: &[u8; 32],
+        out: &mut TickOutput,
+    ) {
+        // Call off any proof-of-work for this message first, and do it
+        // whatever the router says: at a cost a peer announced the search can
+        // be unfinishable in practice, so a mine left running would hold the
+        // single mining thread — and every stamp queued behind it — for the
+        // rest of the run (Codeberg #185). The handles are fired, not
+        // removed: the entry goes when the worker's answer comes back, which
+        // is what keeps a re-offer from queueing a second mine meanwhile.
+        for kind in [StampKind::Delivery, StampKind::Propagation] {
+            if let Some(cancel) = self.mining.get(&(kind, *message_id)) {
+                cancel.cancel();
+            }
+        }
+        match ready.router.cancel(core, message_id) {
+            Ok(output) => self.absorb(ready, core, output, out),
+            Err(RouterError::NotFound) => {}
+            Err(e) => self.emit(OutboxEvent::Refused {
+                detail: format!("cancel: {e:?}"),
+            }),
+        }
+    }
+
+    /// Drain finished proof-of-work.
+    fn pump_stamps<R: CryptoRngCore, C: CoreClock, S: Storage>(
+        &mut self,
+        ready: &mut Ready,
+        core: &mut NodeCore<R, C, S>,
+        out: &mut TickOutput,
+    ) {
+        while let Some(answer) = self.stamp_answers.pop_front() {
+            match answer {
+                StampAnswer::Delivery { request, result } => {
+                    self.mining
+                        .remove(&(StampKind::Delivery, request.message_id));
+                    match result {
+                        Ok(stamp) => match ready.router.set_outbound_stamp_result(
+                            core,
+                            &request,
+                            stamp.to_vec(),
+                        ) {
+                            Ok(output) => self.absorb(ready, core, output, out),
+                            // The advertised cost moved while we mined; the
+                            // router re-offers the message and a fresh mine
+                            // runs at the current cost.
+                            Err(RouterError::StaleStampRequest) => {}
+                            Err(e) => self.emit(OutboxEvent::Refused {
+                                detail: format!("stamp rejected: {e:?}"),
+                            }),
+                        },
+                        // The frontend asked for this one to stop, and the
+                        // cancel already reported the message's state.
+                        Err(StampError::Cancelled) => {}
+                        Err(e) => self.emit(OutboxEvent::Refused {
+                            detail: format!("proof-of-work failed: {e}"),
+                        }),
+                    }
+                }
+                StampAnswer::Propagation { request, result } => {
+                    self.mining
+                        .remove(&(StampKind::Propagation, request.message_id));
+                    match result {
+                        Ok(stamp) => {
+                            let now_ms = core.now_ms();
+                            match ready
+                                .router
+                                .set_outbound_propagation_stamp_result(&request, stamp, now_ms)
+                            {
+                                Ok(output) => self.absorb(ready, core, output, out),
+                                Err(RouterError::StaleStampRequest) => {}
+                                Err(e) => self.emit(OutboxEvent::Refused {
+                                    detail: format!("propagation stamp rejected: {e:?}"),
+                                }),
+                            }
+                        }
+                        Err(StampError::Cancelled) => {}
+                        Err(e) => self.emit(OutboxEvent::Refused {
+                            detail: format!("proof-of-work failed: {e}"),
+                        }),
+                    }
+                }
+            }
+        }
+    }
+
+    fn send<R: CryptoRngCore, C: CoreClock, S: Storage>(
+        &mut self,
+        ready: &mut Ready,
+        core: &mut NodeCore<R, C, S>,
+        request: SendRequest,
+        out: &mut TickOutput,
+    ) {
+        let method = match request.via {
+            Via::Direct => delivery_method(request.body.len()),
+            Via::Link => DeliveryMethod::Direct,
+            Via::Propagated => {
+                // Guarded here rather than only in the CLI ordering, because
+                // the seam is what a daemon-mode frontend would speak and a
+                // send with nowhere to go must not sit silently in the queue.
+                if ready.router.outbound_propagation_node().is_none() {
+                    self.emit(OutboxEvent::Refused {
+                        detail: "no propagation node is selected; SelectPn must succeed first"
+                            .to_string(),
+                    });
+                    return;
+                }
+                DeliveryMethod::Propagated
+            }
+        };
+        let message = match ready.router.create_message(
+            core,
+            request.destination,
+            request.title,
+            request.body,
+            Vec::new(),
+            method,
+        ) {
+            Ok(message) => message,
+            Err(e) => {
+                self.emit(OutboxEvent::Refused {
+                    detail: format!("{e:?}"),
+                });
+                return;
+            }
+        };
+        match ready.router.enqueue(core, message) {
+            // `MessageQueued` comes out of `absorb`, which is what carries the
+            // id to the frontend: one path for the id, whoever queued it.
+            Ok(output) => self.absorb(ready, core, output, out),
+            Err(e) => self.emit(OutboxEvent::Refused {
+                detail: format!("{e:?}"),
+            }),
+        }
+    }
+
+    /// Announce our delivery destination, once per run.
+    ///
+    /// Not optional, and not politeness. A receiver validates an LXMF
+    /// signature against the source identity it has recalled; without an
+    /// announce from us the reference marks our message
+    /// `SOURCE_UNKNOWN`/unverified (`reference/LXMF/LXMF/LXMessage.py:815-816`)
+    /// even though it still delivers the body — and nobody can reply to an
+    /// address they have no key for.
+    ///
+    /// Once per run is a deliberate airtime choice. A cron job that sends
+    /// every five minutes spends one announce per send, which is the cost of
+    /// staying repliable; rate-limiting it against a stored last-announced
+    /// timestamp belongs with the sync policy of a later slice, not here,
+    /// where it would be a guess with no reader to justify it.
+    fn announce<R: CryptoRngCore, C: CoreClock, S: Storage>(
+        &mut self,
+        ready: &mut Ready,
+        core: &mut NodeCore<R, C, S>,
+        out: &mut TickOutput,
+    ) {
+        if self.announced {
+            return;
+        }
+        self.announced = true;
+        let app_data = announce::delivery(Some(&self.display_name), None);
+        match core.announce_destination(&DestinationHash::new(ready.address), Some(&app_data)) {
+            Ok(output) => self.absorb(
+                ready,
+                core,
+                RouterOutput {
+                    core: output,
+                    events: Vec::new(),
+                },
+                out,
+            ),
+            // Not fatal, and deliberately not an `OutboxEvent::Refused`: the
+            // message still goes out, it just arrives unverifiable at a peer
+            // that has never heard of us. Failing the send over it would turn
+            // a cosmetic problem into a lost status line.
+            Err(e) => tracing::warn!("loquax: could not announce our own address: {e:?}"),
+        }
+    }
+
+    /// Answer every resolve that can be answered now.
+    ///
+    /// A destination counts as resolved when its identity is known *and* a
+    /// path exists: the first is what a message is encrypted to, the second is
+    /// where it goes. Unlike `leviculum-lxmf-node`, the path is requested
+    /// without waiting for the identity to turn up first — a path request is
+    /// how an address nobody has announced near us becomes known at all, and a
+    /// messenger's whole job is sending to an address a user was given.
+    fn poll_resolves<R: CryptoRngCore, C: CoreClock, S: Storage>(
+        &mut self,
+        ready: &mut Ready,
+        core: &mut NodeCore<R, C, S>,
+        now_ms: u64,
+        out: &mut TickOutput,
+    ) {
+        if self.resolves.is_empty() {
+            return;
+        }
+        for index in 0..self.resolves.len() {
+            let destination = self.resolves[index].destination;
+            let hash = DestinationHash::new(destination);
+            if self.resolves[index].answered {
+                continue;
+            }
+            if core.storage().get_identity(&destination).is_some() && core.has_path(&hash) {
+                let resolve = &mut self.resolves[index];
+                resolve.answered = true;
+                crate::events::path_found(
+                    &destination,
+                    core.hops_to(&hash),
+                    resolve.path_requests,
+                    resolve
+                        .first_path_request_ms
+                        .map_or(0, |first| now_ms.saturating_sub(first)),
+                );
+                self.emit(OutboxEvent::Resolved { destination });
+                continue;
+            }
+            if self.resolves[index]
+                .next_path_request_ms
+                .is_none_or(|due| now_ms >= due)
+            {
+                let resolve = &mut self.resolves[index];
+                resolve.next_path_request_ms = Some(now_ms.saturating_add(PATH_REQUEST_WAIT_MS));
+                resolve.first_path_request_ms.get_or_insert(now_ms);
+                resolve.path_requests = resolve.path_requests.saturating_add(1);
+                // Through `absorb` rather than merged straight into `out`:
+                // `request_path` ends in `process_events_and_actions`, so its
+                // output can carry events, and every other core call made from
+                // a hook here has them re-fed to the router for the reason
+                // `MAX_ABSORB_ROUNDS` gives. Unthrottled, because the core's
+                // per-destination interval (20 s) would drop the repeat this
+                // resolve paces itself.
+                let output = core.request_path_unthrottled(&hash);
+                self.absorb(
+                    ready,
+                    core,
+                    RouterOutput {
+                        core: output,
+                        events: Vec::new(),
+                    },
+                    out,
+                );
+            }
+        }
+        self.resolves.retain(|resolve| !resolve.answered);
+    }
+}
+
+/// The candidates the mailbox rule chooses among: every enabled propagation
+/// node the router has heard, placed by the daemon's path table. A node the
+/// table does not hold has no route, and is also one whose place nobody can
+/// vouch for, so it is never adopted.
+fn candidates(ready: &Ready, routes: &[Route]) -> Vec<Candidate> {
+    ready
+        .router
+        .known_propagation_nodes()
+        .filter(|known| known.announce.enabled)
+        .map(|known| {
+            let node = *known.destination.as_bytes();
+            let route = routes.iter().find(|route| route.node == node);
+            Candidate {
+                node,
+                hops: route.map_or(u8::MAX, |route| route.hops),
+                last_seen_ms: route.map_or(0, |route| route.seen_ms),
+                reachable: route.is_some(),
+                is_own_device: route.is_some_and(|route| route.own_device),
+            }
+        })
+        .collect()
+}
+
+/// Which LXMF delivery method a body of this size should use.
+///
+/// Opportunistic delivery is one encrypted packet with no link setup, so for
+/// the status line this program was built for it is the whole exchange.
+/// Anything that cannot fit goes over a link instead. Airtime is the scarcest
+/// resource on these networks (`docs/src/concepts/loquax.md` §3), and a link
+/// handshake for twelve bytes spends it for nothing.
+///
+/// The threshold is the encrypted single-packet content limit less the LXMF
+/// header the message adds on top of the body; below it the packet form is
+/// certain to fit, and the router's own oversized fallback covers the margin
+/// either way.
+fn delivery_method(body_len: usize) -> DeliveryMethod {
+    let budget = leviculum_lxmf::constants::ENCRYPTED_PACKET_MAX_CONTENT
+        .saturating_sub(leviculum_lxmf::constants::LXMF_OVERHEAD);
+    if body_len <= budget {
+        DeliveryMethod::Opportunistic
+    } else {
+        DeliveryMethod::Direct
+    }
+}
+
+/// The delivery address `identity` registers as — what `loquax address`
+/// prints, and the same derivation the engine's registration performs, so
+/// the two cannot disagree.
+pub fn delivery_address(identity: &Identity) -> Result<[u8; 16], String> {
+    let bytes = identity
+        .private_key_bytes()
+        .map_err(|e| format!("the identity has no private key: {e:?}"))?;
+    let copy = Identity::from_private_key_bytes(&bytes)
+        .map_err(|e| format!("could not copy the identity: {e:?}"))?;
+    let destination =
+        LxmfNode::delivery_destination(copy).map_err(|e| format!("delivery destination: {e:?}"))?;
+    Ok(*destination.hash().as_bytes())
+}
+
+/// The mailbox-drain failure states, in the words the frontend reports.
+fn sync_failure(state: PropagationClientState) -> Option<&'static str> {
+    match state {
+        PropagationClientState::NoPath => Some("no path to the propagation node"),
+        PropagationClientState::LinkFailed => Some("the propagation node did not answer"),
+        PropagationClientState::TransferFailed => Some("the transfer failed"),
+        PropagationClientState::NoIdentity => Some("the node does not know our identity"),
+        PropagationClientState::NoAccess => Some("the node refused us access"),
+        PropagationClientState::Failed => Some("the sync failed"),
+        _ => None,
+    }
+}
+
+/// Mint the delivery destination and the router that drives it.
+fn register<R: CryptoRngCore, C: CoreClock, S: Storage>(
+    core: &mut NodeCore<R, C, S>,
+    identity: Identity,
+) -> Result<Ready, String> {
+    let identity_hash = *identity.hash();
+    // `delivery_destination` consumes the identity, so the private key is
+    // copied out first: the destination is what holds it afterwards, and the
+    // router is addressed by the *identity* hash while the wire is addressed
+    // by the destination hash.
+    let bytes = identity
+        .private_key_bytes()
+        .map_err(|e| format!("the identity has no private key: {e:?}"))?;
+    let copy = Identity::from_private_key_bytes(&bytes)
+        .map_err(|e| format!("could not copy the identity: {e:?}"))?;
+    let destination =
+        LxmfNode::delivery_destination(copy).map_err(|e| format!("delivery destination: {e:?}"))?;
+    let address = *destination.hash().as_bytes();
+    let node = LxmfNode::register(core, destination, LxmfNodeConfig::default())
+        .map_err(|e| format!("register delivery destination: {e:?}"))?;
+    let mut router = LxmfRouter::new(node, identity_hash, RouterConfig::default());
+    // The propagation client is always on, exactly as `leviculum-lxmf-node`
+    // has it (`leviculum-lxmf-node/src/processor.rs`, "The propagation
+    // *client* is always on"): `--via propagated`, the auto fallback and
+    // `loquax fetch` all need it, and it registers a second local destination
+    // that accepts no links, so a plain direct send cannot observe it.
+    let client_copy = Identity::from_private_key_bytes(&bytes)
+        .map_err(|e| format!("could not copy the propagation identity: {e:?}"))?;
+    let transport_destination = PropagationTransport::destination(client_copy)
+        .map_err(|e| format!("propagation destination: {e:?}"))?;
+    let transport = PropagationTransport::register(core, transport_destination)
+        .map_err(|e| format!("register propagation client: {e:?}"))?;
+    router
+        .enable_propagation_client(transport, PropagationClientConfig::default())
+        .map_err(|e| format!("enable propagation client: {e:?}"))?;
+    Ok(Ready { router, address })
+}
+
+/// The two hooks, in the shape of the driver's `CoreProcessor` and with the
+/// same contract: both run with the core lock held, and neither blocks.
+impl Engine {
+    /// Consume one event the core produced.
+    pub fn on_event<R: CryptoRngCore, C: CoreClock, S: Storage>(
+        &mut self,
+        core: &mut NodeCore<R, C, S>,
+        event: &NodeEvent,
+    ) -> TickOutput {
+        let mut out = TickOutput::empty();
+        let Some(mut ready) = self.take_ready(core) else {
+            return out;
+        };
+        if let (Some(pending), NodeEvent::AnnounceReceived { announce, .. }) =
+            (&mut self.pending_selection, event)
+        {
+            let heard = *announce.destination_hash().as_bytes();
+            pending.asked.retain(|node| *node != heard);
+        }
+        match ready.router.handle_event(core, event) {
+            Ok(output) => self.absorb(&mut ready, core, output, &mut out),
+            Err(e) => self.emit(OutboxEvent::Broken {
+                detail: format!("router handle_event: {e:?}"),
+            }),
+        }
+        // An announce arriving is exactly what a pending resolve is waiting
+        // for. Answering here rather than on the next timer tick puts the
+        // latency at the announce instead of `POLL_INTERVAL_MS` after it.
+        // The driver's tick clock is the core's, so the event reads it there.
+        let now_ms = core.now_ms();
+        self.poll_resolves(&mut ready, core, now_ms, &mut out);
+        self.poll_pending_selection(&mut ready, core, now_ms, &mut out);
+        self.report_departures(&ready);
+        self.state = State::Ready(ready);
+        out
+    }
+
+    /// The periodic slot: commands, finished stamps, resolves and the
+    /// router's own timers. Always asks to be called again within
+    /// `POLL_INTERVAL_MS`, because nothing else pokes the command queue.
+    pub fn on_tick<R: CryptoRngCore, C: CoreClock, S: Storage>(
+        &mut self,
+        core: &mut NodeCore<R, C, S>,
+        now_ms: u64,
+    ) -> TickOutput {
+        let mut out = TickOutput::empty();
+        let Some(mut ready) = self.take_ready(core) else {
+            return out;
+        };
+
+        self.announce(&mut ready, core, &mut out);
+        self.pump_commands(&mut ready, core, &mut out);
+        self.pump_stamps(&mut ready, core, &mut out);
+        self.poll_resolves(&mut ready, core, now_ms, &mut out);
+        self.poll_pending_selection(&mut ready, core, now_ms, &mut out);
+        match ready.router.tick(core) {
+            Ok(output) => self.absorb(&mut ready, core, output, &mut out),
+            Err(e) => self.emit(OutboxEvent::Broken {
+                detail: format!("router tick: {e:?}"),
+            }),
+        }
+        self.report_departures(&ready);
+        self.state = State::Ready(ready);
+
+        // Always a fresh future instant: the engine always has something to
+        // wake for, at minimum the command queue, which nothing else pokes.
+        let poll = now_ms.saturating_add(POLL_INTERVAL_MS);
+        out.next_deadline_ms = Some(match out.next_deadline_ms {
+            Some(existing) => existing.min(poll),
+            None => poll,
+        });
+        out
+    }
+}
+
+/// Mine one stamp job and say what came of it, the policy every host's miner
+/// shares: which generator, which RNG it draws from, and what the person
+/// waiting is told.
+///
+/// The executor is the cooperative one, so the future yields while it grinds
+/// and the progress timer below gets its turns on a single thread. `rng` is
+/// the host's (the terminal hands `OsRng`), `clock` measures the grind and
+/// paces the progress lines, and the lines are notices on `effects`.
+pub async fn mine<G, K, E>(job: StampJob, rng: G, clock: &K, effects: &mut E) -> StampAnswer
+where
+    G: CryptoRngCore + Send,
+    K: Clock,
+    E: Effects,
+{
+    match job {
+        StampJob::Delivery(request, cancel) => {
+            let cost = request.target_cost;
+            let result = mine_with_progress(clock, effects, cost, "delivery stamp", async {
+                let mut executor = CooperativeStamper::cooperative(rng);
+                request.generate_with(&mut executor, &cancel).await
+            })
+            .await;
+            StampAnswer::Delivery { request, result }
+        }
+        StampJob::Propagation(request, cancel) => {
+            let cost = request.target_cost;
+            let result = mine_with_progress(clock, effects, cost, "propagation stamp", async {
+                let mut executor = CooperativeStamper::cooperative(rng);
+                request.generate_with(&mut executor, &cancel).await
+            })
+            .await;
+            StampAnswer::Propagation { request, result }
+        }
+    }
+}
+
+/// Run one mining future to completion, narrating it when the cost is above
+/// [`STAMP_PROGRESS_COST`].
+///
+/// The narration is elapsed time, not a percentage: proof-of-work has no
+/// knowable fraction-done, and inventing one would be the progress-bar lie.
+/// The terminal writes the notices to stderr, so a scripted send's "success
+/// prints nothing" contract on stdout is untouched.
+async fn mine_with_progress<K, E, F>(
+    clock: &K,
+    effects: &mut E,
+    cost: u8,
+    what: &str,
+    future: F,
+) -> Result<[u8; 32], StampError>
+where
+    K: Clock,
+    E: Effects,
+    F: Future<Output = Result<[u8; 32], StampError>>,
+{
+    if cost <= STAMP_PROGRESS_COST {
+        return future.await;
+    }
+    let started_ms = clock.now_ms();
+    effects.notice(&format!("mining {what} at cost {cost}..."));
+    let mut mining = pin!(future);
+    let mut waited_ms = 0u64;
+    let result = loop {
+        // Whichever is ready first: the stamp, or the next progress line.
+        let mut tick = pin!(clock.sleep_ms(STAMP_PROGRESS_EVERY_MS));
+        let step = core::future::poll_fn(|cx| {
+            if let Poll::Ready(result) = mining.as_mut().poll(cx) {
+                return Poll::Ready(Some(result));
+            }
+            tick.as_mut().poll(cx).map(|()| None)
+        })
+        .await;
+        match step {
+            Some(result) => break result,
+            None => {
+                waited_ms += STAMP_PROGRESS_EVERY_MS;
+                effects.notice(&format!("still mining {what} ({}s)...", waited_ms / 1_000));
+            }
+        }
+    };
+    // A cancelled grind is a withdrawal, not an achievement: saying it was
+    // "mined" would be the one line an operator must not read here.
+    let outcome = match result {
+        Ok(_) => "mined",
+        Err(_) => "abandoned",
+    };
+    let elapsed_ms = clock.now_ms().saturating_sub(started_ms);
+    effects.notice(&format!(
+        "{what} {outcome} after {:.1}s",
+        elapsed_ms as f32 / 1_000.0
+    ));
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use leviculum_core::node::NodeCoreBuilder;
+    use leviculum_std::driver::{StdClock, StdNodeCore, StdStorage};
+
+    fn engine() -> Engine {
+        engine_named(b"loquax-test")
+    }
+
+    fn engine_named(display_name: &[u8]) -> Engine {
+        Engine::new(leviculum_std::generate_identity(), display_name.to_vec())
+    }
+
+    /// Every event the engine has queued for the frontend, oldest first.
+    fn drain(engine: &mut Engine) -> Vec<OutboxEvent> {
+        core::iter::from_fn(|| engine.next_event()).collect()
+    }
+
+    fn core(dir: &std::path::Path) -> StdNodeCore {
+        NodeCoreBuilder::new().enable_transport(false).build(
+            rand_core::OsRng,
+            StdClock::new(),
+            StdStorage::new(dir).expect("storage under a fresh temp dir"),
+        )
+    }
+
+    /// The first tick registers the delivery destination against a real core
+    /// and hands the frontend our address. A stub would not get this far.
+    #[test]
+    fn the_first_tick_registers_and_reports_our_address() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let mut engine = engine();
+
+        let now_ms = core.now_ms();
+        let out = engine.on_tick(&mut core, now_ms);
+
+        match engine.next_event() {
+            Some(OutboxEvent::Ready { address }) => {
+                assert_ne!(address, [0u8; 16], "the address must be a real hash")
+            }
+            other => panic!("the first tick must report readiness, got {other:?}"),
+        }
+        assert!(
+            out.next_deadline_ms.is_some(),
+            "on_tick always asks the driver back for the command queue"
+        );
+    }
+
+    /// Cancelling a message calls off the proof-of-work already running for
+    /// it (Codeberg #185).
+    ///
+    /// The mining thread is single-consumer, so a grind at a cost the peer
+    /// announced does not only hold its own message: every stamp queued
+    /// behind it waits too. At a legal-but-large cost that search never ends
+    /// on its own (`leviculum-lxmf/tests/stamp_cancellation.rs`), so the
+    /// handle fired here is the only thing that gets the thread back.
+    ///
+    /// The job is read back off the queue the miner is fed from, so this
+    /// asserts the handle the *miner* would mine under, not a copy kept here.
+    #[test]
+    fn cancelling_a_message_calls_off_the_stamp_being_mined_for_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let mut engine = engine();
+
+        let now_ms = core.now_ms();
+        // The tick's actions go nowhere: this test never puts a packet on an
+        // interface, it only needs the engine past registration.
+        let _ = engine.on_tick(&mut core, now_ms);
+
+        let message_id = [0x5au8; 32];
+        engine.dispatch_stamp(StampJob::Delivery(
+            DeliveryStampRequest {
+                message_id,
+                // Inside the window the reference announces, and unfinishable.
+                target_cost: 254,
+            },
+            Arc::default(),
+        ));
+        let job = engine
+            .next_stamp_job()
+            .expect("the miner is handed the job");
+        assert!(
+            !job.cancel().is_cancelled(),
+            "a freshly dispatched job is not cancelled"
+        );
+
+        engine.submit(Command::Cancel { message_id });
+        let now_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, now_ms);
+
+        assert!(
+            job.cancel().is_cancelled(),
+            "the cancel must reach the grind the worker is running"
+        );
+        assert!(
+            engine
+                .mining
+                .contains_key(&(StampKind::Delivery, message_id)),
+            "the marker stays until the worker answers, so a re-offer does \
+             not queue a second mine at the same cost"
+        );
+    }
+
+    /// The configured display name has to reach the wire, not just the struct.
+    ///
+    /// This is the assertion that would have caught the bug it was written for:
+    /// `main.rs` passed the literal `loquax` into [`AttachConfig`], so a test of
+    /// the config field alone would have been green while every recipient saw a
+    /// message from a tool rather than from a person. What matters is the
+    /// `app_data` of the announce that leaves here, so the announce is taken
+    /// out of the tick's actions and unpacked.
+    #[test]
+    fn the_display_name_reaches_the_announce_that_goes_out() {
+        use leviculum_core::packet::{Packet, PacketType};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let mut engine = engine_named(b"an-operator");
+
+        let now_ms = core.now_ms();
+        let out = engine.on_tick(&mut core, now_ms);
+
+        let announces: Vec<Packet> = out
+            .actions
+            .iter()
+            .filter_map(|action| match action {
+                leviculum_core::transport::Action::Broadcast { data, .. } => {
+                    Packet::unpack(data).ok()
+                }
+                _ => None,
+            })
+            .filter(|packet| packet.flags.packet_type == PacketType::Announce)
+            .collect();
+        assert_eq!(
+            announces.len(),
+            1,
+            "the first tick announces our delivery destination exactly once"
+        );
+
+        // `app_data` is the tail of an announce payload, so a payload ending in
+        // the encoding of this name is that name having been announced.
+        let payload = announces[0].data.as_slice();
+        let expected = announce::delivery(Some(b"an-operator"), None);
+        assert!(
+            payload.ends_with(&expected),
+            "the announce must carry the configured display name: {payload:02x?}"
+        );
+        assert!(
+            !payload.ends_with(&announce::delivery(
+                Some(crate::display_name::FALLBACK.as_bytes()),
+                None
+            )),
+            "the tool's own name must not be what recipients see"
+        );
+    }
+
+    /// A propagated send with no node selected is refused at the seam, not
+    /// only in the CLI ordering: a daemon-mode frontend speaks this seam and
+    /// must get the same answer instead of a message that sits forever.
+    #[test]
+    fn a_propagated_send_without_a_selected_node_is_refused_at_the_seam() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let mut engine = engine();
+
+        engine.submit(Command::Send(Box::new(SendRequest {
+            destination: [0x11; 16],
+            title: Vec::new(),
+            body: b"body".to_vec(),
+            via: Via::Propagated,
+        })));
+        let now_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, now_ms);
+
+        let refusals: Vec<_> = drain(&mut engine)
+            .into_iter()
+            .filter_map(|event| match event {
+                OutboxEvent::Refused { detail } => Some(detail),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(refusals.len(), 1, "exactly one refusal: {refusals:?}");
+        assert!(
+            refusals[0].contains("no propagation node is selected"),
+            "the refusal must name the missing selection: {}",
+            refusals[0]
+        );
+    }
+
+    /// `SelectPn` with nothing to select from must say so, and must not
+    /// invent a node.
+    #[test]
+    fn selecting_a_node_with_none_known_reports_unavailable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let mut engine = engine();
+
+        engine.submit(Command::SelectPn {
+            preferred: None,
+            mailbox: None,
+        });
+        let now_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, now_ms);
+
+        let seen: Vec<_> = drain(&mut engine);
+        assert!(
+            seen.iter()
+                .any(|event| matches!(event, OutboxEvent::PnUnavailable { .. })),
+            "no known node and no preference must be reported: {seen:?}"
+        );
+        assert!(
+            !seen
+                .iter()
+                .any(|event| matches!(event, OutboxEvent::PnSelected { .. })),
+            "nothing may be selected out of thin air: {seen:?}"
+        );
+    }
+
+    /// A `--pn`/configured node is selectable before any announce from it has
+    /// been heard — the router requests its path and learns the announced
+    /// cost from the replay, exactly as Python accepts a configured hash
+    /// before a route is known.
+    #[test]
+    fn selecting_a_preferred_node_works_before_its_announce_arrives() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let mut engine = engine();
+
+        let node = [0x7e; 16];
+        engine.submit(Command::SelectPn {
+            preferred: Some(node),
+            mailbox: None,
+        });
+        let now_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, now_ms);
+
+        let selected = drain(&mut engine)
+            .into_iter()
+            .find_map(|event| match event {
+                OutboxEvent::PnSelected {
+                    destination,
+                    stamp_cost,
+                } => Some((destination, stamp_cost)),
+                _ => None,
+            });
+        assert_eq!(
+            selected,
+            Some((node, None)),
+            "the preferred node is selected as given, with no cost known yet"
+        );
+    }
+
+    fn select_without_preference(input: MailboxInput) -> Vec<OutboxEvent> {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let mut engine = engine();
+        engine.submit(Command::SelectPn {
+            preferred: None,
+            mailbox: Some(input),
+        });
+        let now_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, now_ms);
+        drain(&mut engine)
+    }
+
+    /// A stored selection the path table still holds is kept without
+    /// asking the daemon for anything, and selected.
+    #[test]
+    fn a_stored_reachable_selection_is_kept_at_once() {
+        let node = [0x3c; 16];
+        let seen = select_without_preference(MailboxInput {
+            routes: Ok(vec![Route {
+                node,
+                hops: 2,
+                own_device: false,
+                seen_ms: 1,
+            }]),
+            previous: Some(crate::mailbox_state::Stored {
+                node,
+                chosen_by_user: false,
+            }),
+        });
+        assert!(
+            seen.contains(&OutboxEvent::Mailbox(Decision::Kept { node })),
+            "{seen:?}"
+        );
+        assert!(
+            seen.iter().any(|event| matches!(
+                event,
+                OutboxEvent::PnSelected { destination, .. } if *destination == node
+            )),
+            "{seen:?}"
+        );
+    }
+
+    /// Without the path table nothing new is adopted: whether a node is on
+    /// this device is exactly what cannot be told.
+    #[test]
+    fn an_unreadable_path_table_selects_nothing() {
+        let seen = select_without_preference(MailboxInput {
+            routes: Err("no authkey".to_string()),
+            previous: None,
+        });
+        assert!(
+            seen.iter().any(|event| matches!(
+                event,
+                OutboxEvent::PnUnavailable { detail } if detail.contains("path table could not be read")
+            )),
+            "{seen:?}"
+        );
+        assert!(
+            !seen
+                .iter()
+                .any(|event| matches!(event, OutboxEvent::PnSelected { .. })),
+            "{seen:?}"
+        );
+    }
+
+    /// Without the path table a stored node is kept and selected, adopted or
+    /// chosen alike: it was vetted when it was written, and an identity does
+    /// not move onto this device by itself.
+    #[test]
+    fn an_unreadable_path_table_keeps_a_stored_node() {
+        for chosen_by_user in [false, true] {
+            let node = [0x3c; 16];
+            let seen = select_without_preference(MailboxInput {
+                routes: Err("no authkey".to_string()),
+                previous: Some(crate::mailbox_state::Stored {
+                    node,
+                    chosen_by_user,
+                }),
+            });
+            assert!(
+                seen.contains(&OutboxEvent::Mailbox(Decision::KeptWithoutTable { node })),
+                "{seen:?}"
+            );
+            assert!(
+                seen.iter().any(|event| matches!(
+                    event,
+                    OutboxEvent::PnSelected { destination, .. } if *destination == node
+                )),
+                "{seen:?}"
+            );
+            assert!(
+                !seen
+                    .iter()
+                    .any(|event| matches!(event, OutboxEvent::PnUnavailable { .. })),
+                "{seen:?}"
+            );
+        }
+    }
+
+    /// A first run waits for the replays it asked for, and with none coming
+    /// back it says nothing was heard once the window closes.
+    #[test]
+    fn a_first_run_waits_for_the_replays_then_reports_none_heard() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let mut engine = engine();
+        engine.submit(Command::SelectPn {
+            preferred: None,
+            mailbox: Some(MailboxInput {
+                routes: Ok(vec![Route {
+                    node: [0x44; 16],
+                    hops: 1,
+                    own_device: false,
+                    seen_ms: 1,
+                }]),
+                previous: None,
+            }),
+        });
+        let now_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, now_ms);
+        let early: Vec<_> = drain(&mut engine);
+        assert!(
+            !early
+                .iter()
+                .any(|event| matches!(event, OutboxEvent::PnUnavailable { .. })),
+            "the selection must wait for the replays: {early:?}"
+        );
+        // Read after the first tick: the deadline was taken from the core's
+        // clock inside it, so `now_ms` from before it can fall short of the
+        // window by however long that tick took.
+        let later_ms = core.now_ms() + DISCOVERY_WINDOW_MS;
+        let _ = engine.on_tick(&mut core, later_ms);
+        let late: Vec<_> = drain(&mut engine);
+        assert!(
+            late.iter().any(|event| matches!(
+                event,
+                OutboxEvent::PnUnavailable { detail }
+                    if detail == mailbox::NoneReason::NoCandidates.as_str()
+            )),
+            "{late:?}"
+        );
+    }
+
+    /// A resolve for an address nobody has announced must stay unanswered.
+    /// Answering it would send a message into a hole.
+    #[test]
+    fn an_unknown_destination_is_not_reported_as_resolved() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let mut engine = engine();
+
+        engine.submit(Command::Resolve {
+            destination: [0x22; 16],
+        });
+        for _ in 0..3 {
+            let now_ms = core.now_ms();
+            let _ = engine.on_tick(&mut core, now_ms);
+        }
+
+        let resolved = drain(&mut engine)
+            .into_iter()
+            .any(|event| matches!(event, OutboxEvent::Resolved { .. }));
+        assert!(
+            !resolved,
+            "an address with no identity and no path is not resolved"
+        );
+    }
+
+    /// A resolve repeats its path request while the path is missing
+    /// (leviculum#699). One request is one packet, and a packet sent while the
+    /// daemon's interface is still reconnecting is gone; a resolve that never
+    /// asks again waits out its whole budget for an answer nobody was asked
+    /// for. The ticks carry their own clock, so the wait is stepped, not slept.
+    #[test]
+    fn an_unanswered_resolve_asks_for_the_path_again() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let mut engine = engine();
+        let destination = [0x22; 16];
+        // A path request carries the destination it asks for in its payload.
+        let requests = |out: &TickOutput| {
+            out.actions
+                .iter()
+                .filter(|action| match action {
+                    leviculum_core::Action::SendPacket { data, .. }
+                    | leviculum_core::Action::Broadcast { data, .. } => {
+                        data.windows(16).any(|window| window == destination)
+                    }
+                })
+                .count()
+        };
+
+        engine.submit(Command::Resolve { destination });
+        let start = core.now_ms();
+        let first = engine.on_tick(&mut core, start);
+        assert_eq!(requests(&first), 1, "the resolve asks once at once");
+
+        let early = engine.on_tick(&mut core, start + 1_000);
+        assert_eq!(requests(&early), 0, "not again before the wait is over");
+
+        let repeat = engine.on_tick(&mut core, start + PATH_REQUEST_WAIT_MS);
+        assert_eq!(requests(&repeat), 1, "the unanswered resolve asks again");
+    }
+
+    /// A queued message must not be reported as having left the queue in the
+    /// same breath.
+    ///
+    /// Regression test. `report_departures` first asked
+    /// `LxmfRouter::has_message`, whose name reads like "is this message in the
+    /// router" and whose body is a lookup in the *delivered-id* cache — always
+    /// false for an outbound message. Every send therefore reported a departure
+    /// with no state attached, which the frontend can only read as a failure.
+    /// Sending to an address with no route reaches exactly the same code path,
+    /// so no network is needed to hold the invariant.
+    #[test]
+    fn a_freshly_queued_message_is_not_reported_as_departed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let mut engine = engine();
+
+        // Register first: `create_message` needs our own delivery destination.
+        let now_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, now_ms);
+
+        engine.submit(Command::Send(Box::new(SendRequest {
+            destination: [0x33; 16],
+            title: b"t".to_vec(),
+            body: b"a short status line".to_vec(),
+            via: Via::Direct,
+        })));
+        let now_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, now_ms);
+
+        let seen: Vec<_> = drain(&mut engine);
+        assert!(
+            seen.iter()
+                .any(|event| matches!(event, OutboxEvent::Queued { .. })),
+            "the message must be queued: {seen:?}"
+        );
+        assert!(
+            !seen
+                .iter()
+                .any(|event| matches!(event, OutboxEvent::Left { .. })),
+            "a message still in the outbound queue has not left it: {seen:?}"
+        );
+    }
+
+    /// A short status line must not pay for a link handshake; a body that
+    /// cannot fit in one packet must not try.
+    #[test]
+    fn short_bodies_go_by_packet_and_long_ones_by_link() {
+        assert_eq!(delivery_method(8), DeliveryMethod::Opportunistic);
+        assert_eq!(delivery_method(64_000), DeliveryMethod::Direct);
+    }
+
+    /// Mine `job` with the test clock and recorded effects, on a runtime
+    /// with no timer: the stepping clock never needs one.
+    fn mine_recorded(job: StampJob) -> (StampAnswer, Vec<String>) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("a current-thread runtime");
+        let clock = crate::clock::fake::Stepping::default();
+        let mut effects = crate::effects::fake::Recorded::default();
+        let answer = runtime.block_on(mine(job, rand_core::OsRng, &clock, &mut effects));
+        (answer, effects.notices)
+    }
+
+    /// A grind above the narration threshold is narrated through
+    /// `Effects::notice`, the same lines the stamp worker wrote to stderr
+    /// before the engine lost std, and a cancelled one says it was abandoned,
+    /// never mined. Cancelled up front, so the search returns at its first
+    /// check and the test costs nothing.
+    #[test]
+    fn a_costly_grind_is_narrated_through_the_effects() {
+        let cancel = Arc::new(StampCancel::new());
+        cancel.cancel();
+        let (answer, notices) = mine_recorded(StampJob::Delivery(
+            DeliveryStampRequest {
+                message_id: [0x5a; 32],
+                target_cost: 254,
+            },
+            cancel,
+        ));
+        assert!(matches!(
+            answer,
+            StampAnswer::Delivery {
+                result: Err(StampError::Cancelled),
+                ..
+            }
+        ));
+        assert_eq!(
+            notices,
+            [
+                "mining delivery stamp at cost 254...",
+                "delivery stamp abandoned after 0.0s",
+            ]
+        );
+    }
+
+    /// The progress lines come every five seconds of the given clock while
+    /// the grind runs, and the grind still ends when it is called off. The
+    /// effects here fire the cancel on the second line, the way a frontend's
+    /// cancel would; the search observes it at its first yield after the
+    /// workblock, so the lines go on until then. The stepping clock moves
+    /// only when the progress timer is polled, so every line is exact and
+    /// the closing time is five seconds per line.
+    #[test]
+    fn a_running_grind_says_it_is_still_going() {
+        struct CancelOnSecondLine {
+            recorded: crate::effects::fake::Recorded,
+            cancel: Arc<StampCancel>,
+        }
+        impl Effects for CancelOnSecondLine {
+            fn notice(&mut self, line: &str) {
+                if line.contains("(10s)") {
+                    self.cancel.cancel();
+                }
+                self.recorded.notice(line);
+            }
+            fn print(&mut self, rendered: &[u8]) -> Result<(), String> {
+                self.recorded.print(rendered)
+            }
+            fn save_mailbox(
+                &mut self,
+                stored: &crate::mailbox_state::Stored,
+            ) -> Result<(), String> {
+                self.recorded.save_mailbox(stored)
+            }
+            fn write_seen(&mut self, write: &crate::seen::SeenWrite) -> Result<(), String> {
+                self.recorded.write_seen(write)
+            }
+            fn unix_now_ms(&self) -> u64 {
+                self.recorded.unix_now_ms()
+            }
+        }
+
+        let cancel = Arc::new(StampCancel::new());
+        let mut effects = CancelOnSecondLine {
+            recorded: crate::effects::fake::Recorded::default(),
+            cancel: Arc::clone(&cancel),
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("a current-thread runtime");
+        let clock = crate::clock::fake::Stepping::default();
+        let job = StampJob::Delivery(
+            DeliveryStampRequest {
+                message_id: [0x5a; 32],
+                target_cost: 254,
+            },
+            cancel,
+        );
+        let answer = runtime.block_on(mine(job, rand_core::OsRng, &clock, &mut effects));
+        assert!(matches!(
+            answer,
+            StampAnswer::Delivery {
+                result: Err(StampError::Cancelled),
+                ..
+            }
+        ));
+        let notices = effects.recorded.notices;
+        let (last, still) = notices[1..].split_last().expect("more than one line");
+        assert_eq!(notices[0], "mining delivery stamp at cost 254...");
+        assert!(still.len() >= 2, "{notices:?}");
+        for (index, line) in still.iter().enumerate() {
+            assert_eq!(
+                *line,
+                format!("still mining delivery stamp ({}s)...", (index + 1) * 5)
+            );
+        }
+        assert_eq!(
+            *last,
+            format!("delivery stamp abandoned after {}.0s", still.len() * 5)
+        );
+    }
+
+    /// At or below the threshold a grind is silent.
+    #[test]
+    fn a_cheap_grind_says_nothing() {
+        let cancel = Arc::new(StampCancel::new());
+        cancel.cancel();
+        let (_, notices) = mine_recorded(StampJob::Propagation(
+            PropagationStampRequest {
+                message_id: [0x5a; 32],
+                transient_id: [0x11; 32],
+                target_cost: STAMP_PROGRESS_COST,
+            },
+            cancel,
+        ));
+        assert!(notices.is_empty(), "{notices:?}");
+    }
+}

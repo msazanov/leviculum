@@ -34,7 +34,7 @@ impl CrosstermTerminal {
 
     /// The same, capturing the mouse only when `mouse` is set: without
     /// capture the terminal's own selection and copy work as in any other
-    /// program (lnmsg's `--no-mouse`).
+    /// program (loquax's `--no-mouse`).
     pub fn with_mouse(mouse: bool) -> Self {
         Self {
             out: io::stdout(),

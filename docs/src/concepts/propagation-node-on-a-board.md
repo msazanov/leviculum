@@ -37,7 +37,7 @@ ours to design, and a board in a pocket is not a server in a basement.
 A board's own propagation node is not its own mailbox: a messenger on the
 board never adopts the node beside it, because both are off at the same
 time, while a stationary board that stays on is a fine mailbox for the
-phones and laptops around it ([lnmsg: the mailbox](lnmsg-mailbox.md),
+phones and laptops around it ([loquax: the mailbox](loquax-mailbox.md),
 amended 2026-10-25).
 
 ## 1. What the role obliges us to
@@ -54,7 +54,7 @@ hang off it, and they are the entire public protocol:
 | Verb | Path | Who calls it | Handler |
 |---|---|---|---|
 | offer | `/offer` | another propagation node | `offer_request` (`LXMRouter.py:2266`) |
-| get | `/get` | a client (Sideband, `lnmsg`, `rnsd`) | `message_get_request` (`LXMRouter.py:1482`) |
+| get | `/get` | a client (Sideband, `loquax`, `rnsd`) | `message_get_request` (`LXMRouter.py:1482`) |
 
 The paths are constants on the peer
 (`OFFER_REQUEST_PATH`, `LXMPeer.py:14`; `MESSAGE_GET_PATH`,
@@ -778,7 +778,7 @@ LoRa in half an hour of wall clock at the duty cap, which is the
 difference between a store and a museum. None of those conclusions is
 about LXMF; all of them are about the store, which is why the store came
 first and is why it is worth having whether or not the propagation node
-ever exists — `lnmsg`'s mailbox and telemetry retention want the same
+ever exists — `loquax`'s mailbox and telemetry retention want the same
 16 pages.
 
 What stands between here and the role is not arithmetic. It is three

@@ -3,7 +3,7 @@
 # own (#408).
 #
 # `standard` used to name its integration suites one at a time, and a suite
-# nobody named ran in no tier below the nightly: on 2026-10-04 lnmsg's
+# nobody named ran in no tier below the nightly: on 2026-10-04 loquax's
 # python_interop was red on master for eight commits, the land gate's
 # `just standard` passed the red through twice, and only `just complete` on
 # origin/master saw it (401). That is the shape #194 describes, one tier up.
@@ -22,7 +22,7 @@
 # this selects on the land host hold 189 s of test time, 62 s of it
 # leviculum-lxmf-node/peering_loopback, 31 s leviculum-std/discovery_autoconnect,
 # 16 s leviculum-lxmf-node/deferred_resource_builds, 11 s each
-# leviculum-cli/selftest_ratchet_message_count and lnmsg/python_interop,
+# leviculum-cli/selftest_ratchet_message_count and loquax/python_interop,
 # 10 s leviculum-cli/client_tools, and under 9 s each for the other 86.
 # Cargo runs the binaries one after another, so that is wall time, plus
 # linking the test binaries on the first run after a change.

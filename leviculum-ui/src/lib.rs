@@ -1,4 +1,4 @@
-//! `leviculum-ui`: the terminal-free half of the UI that lnomad and lnmsg
+//! `leviculum-ui`: the terminal-free half of the UI that lnomad and loquax
 //! share (Codeberg #475, `docs/src/concepts/handheld-messenger.md`, "One
 //! interaction model").
 //!
@@ -8,7 +8,7 @@
 //! them, the keymap table every reader of a
 //! key takes its chords from, the chrome models (footer strip, help
 //! overlay, toast), the loading spinner, the delivery glyph table of
-//! `docs/src/concepts/lnmsg-ui.md`, the OSC 52 clipboard sequence, and the
+//! `docs/src/concepts/loquax-ui.md`, the OSC 52 clipboard sequence, and the
 //! rule for following a link, with the finder for links in a message's
 //! text. No terminal crate is named here, which is what lets a program's
 //! core take these types and stay terminal-free;
@@ -20,8 +20,8 @@
 //! state.
 //!
 //! Without the default `std` feature the crate is `no_std` plus `alloc`: a
-//! messenger core built for a board takes these types too (lnmsg's `ui`
-//! model, checked by `just lnmsg-core-no-std`).
+//! messenger core built for a board takes these types too (loquax's `ui`
+//! model, checked by `just loquax-core-no-std`).
 
 #![cfg_attr(not(feature = "std"), no_std)]
 

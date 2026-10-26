@@ -6,7 +6,7 @@
 //! config directory alone — the instance name from the config file, the
 //! authkey as `SHA256(storage/transport_identity)` — so they live here rather
 //! than in whichever command needed them first (Codeberg #190). Here means
-//! this crate since lnmsg reads the path table too (#471): the client tools
+//! this crate since loquax reads the path table too (#471): the client tools
 //! in `leviculum-cli` re-export it unchanged.
 //!
 //! The identity file is opened only to hash it. Its bytes never leave these

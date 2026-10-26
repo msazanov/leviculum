@@ -1,6 +1,6 @@
 //! The keymap: one table of rows, each an action with its chords, read by a
 //! program's key handler, its help overlay, its footer and its palette
-//! (`docs/src/concepts/lnmsg-keys-and-layout.md`, section 4).
+//! (`docs/src/concepts/loquax-keys-and-layout.md`, section 4).
 //!
 //! A [`Chord`] is a key, the modifiers it asks for, the action it runs, the
 //! panes it applies in and the contexts it needs. A [`Row`] is one action as
@@ -21,7 +21,7 @@
 //! not move; a program's tests hold that no chord resolves to two actions in
 //! one pane ([`canonical`] is the event to check a chord with).
 //!
-//! The scroll rows lnomad and lnmsg share are [`SCROLL_ROWS`].
+//! The scroll rows lnomad and loquax share are [`SCROLL_ROWS`].
 
 use crate::input::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -144,7 +144,7 @@ pub struct Panes(pub u16);
 
 impl Panes {
     /// The panes the shared scroll rows apply in: lnomad's content and its
-    /// overlays, lnmsg's conversation list and messages.
+    /// overlays, loquax's conversation list and messages.
     pub const SCROLL: Self = Self(1);
     /// Every pane.
     pub const ALL: Self = Self(u16::MAX);
@@ -587,7 +587,7 @@ const fn scroll(code: KeyCode, mods: Mods, cmd: ScrollCmd) -> Chord<ScrollCmd> {
     Chord::new(code, mods, cmd).panes(Panes::SCROLL)
 }
 
-/// The scroll rows lnomad and lnmsg share: vi, Emacs and the arrows side by
+/// The scroll rows lnomad and loquax share: vi, Emacs and the arrows side by
 /// side, in [`Panes::SCROLL`]. The bare arrows and paging keys take any
 /// modifiers, as lnomad's always did; a program that gives `Ctrl-↑` or
 /// `Alt-↑` a meaning of its own binds it with exact modifiers, which win.

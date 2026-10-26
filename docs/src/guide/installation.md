@@ -43,7 +43,7 @@ with `sudo apt install ./<file>.deb`.
 |---------|-------|----------|------------|
 | `leviculum` | `leviculum-nightly-{amd64,arm64}.deb` | `lnsd`, `lnstatus`, `lnstest`, `lncp`, `lnprobe`, `lnpath` | starts `lnsd` as a systemd service, sets up `/etc/reticulum` |
 | `lnpnd` | `lnpnd-nightly-{amd64,arm64}.deb` | `lnpnd`, the LXMF propagation node | enables its service but does not start it |
-| `lnmsg` | `lnmsg-nightly-{amd64,arm64}.deb` | `lnmsg`, the LXMF messenger; plain `lnmsg` opens it, `send` and `fetch` are for scripts | nothing; no service |
+| `loquax` | `loquax-nightly-{amd64,arm64}.deb` | `loquax`, the LXMF messenger; plain `loquax` opens it, `send` and `fetch` are for scripts | nothing; no service |
 | `lnomad` | `lnomad-nightly-{amd64,arm64}.deb` | `lnomad`, the NomadNet browser | nothing; no service |
 | `lblogd` | `lblogd-nightly-{amd64,arm64}.deb` | `lblogd`, the blog server | starts its service on `127.0.0.1:8180` |
 | `lnflash` | `lnflash-nightly-amd64.deb` | `lnflash`, and the firmware bundle under `/usr/share/lnflash` | nothing; run it as root |
@@ -52,7 +52,7 @@ Each package carries the manual pages of its programs. Every program but
 `lnsd`'s clients needs a running shared instance for its mesh side: `lnsd`
 from `leviculum`, or the Python `rnsd`. `lnflash` exists for amd64 only, like
 the `lnflash-nightly-amd64.tar.gz` bundle it is packaged from. Every binary
-names its build: `lnsd --version`, `lnmsg --version` and the others print the
+names its build: `lnsd --version`, `loquax --version` and the others print the
 version and, in parentheses, the commit it was built from.
 
 ## Build from source

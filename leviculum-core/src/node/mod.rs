@@ -6515,7 +6515,7 @@ mod tests {
         )));
     }
 
-    /// Regression (lnmsg propagated-upload interop, 2026-09-12): on a 1 ms-RTT
+    /// Regression (loquax propagated-upload interop, 2026-09-12): on a 1 ms-RTT
     /// link the literal Python formula gives a 6 ms receipt deadline, and a
     /// Python LXMF propagation node validates the upload's PoW stamp *before*
     /// proving — 10-15 ms. Exact enforcement failed the receipt, the LXMF

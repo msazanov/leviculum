@@ -28,30 +28,30 @@ map as decided on 2026-10-25, and what is open.
   modern phone app sets, with mail-like features where LXMF carries them
   (threads, replies, long-form, attachments). Columba remains the
   reference for wire behaviour, not the ceiling for scope. One core, four
-  frontends: the terminal (`lnmsg`), a desktop GUI, the M9's display and
+  frontends: the terminal (`loquax`), a desktop GUI, the M9's display and
   keyboard, later Android; the TUI and the GUI ship side by side on the
   desktop.
 
 ## What exists today
 
-- **`lnmsg`, the terminal messenger.** It sends (direct, propagated, or
+- **`loquax`, the terminal messenger.** It sends (direct, propagated, or
   `auto` with the fallback to a propagation node) and drains the
-  mailbox, and since 2026-10-25 (994) plain `lnmsg` opens its terminal
-  frontend (`lnmsg tui` under its old name), slice one ([lnmsg: the user interface](lnmsg-ui.md), "Built
+  mailbox, and since 2026-10-25 (994) plain `loquax` opens its terminal
+  frontend (`loquax tui` under its old name), slice one ([loquax: the user interface](loquax-ui.md), "Built
   2026-10-25"): the first frontend on the shared widgets, over a screen
   model that lives in the `no_std` core. Its frontend already
-  talks to the backend only through `Outbox` (`lnmsg/src/outbox.rs:194`),
+  talks to the backend only through `Outbox` (`loquax/src/outbox.rs:194`),
   but the crate is `std`. It depends on `leviculum-std` and tokio
-  (`lnmsg/Cargo.toml:88`, `lnmsg/Cargo.toml:92`), since 2026-10-25 behind its `std` feature,
-  and `just lnmsg-core-no-std` holds the core to `no_std` (green since
-  993; the pass order is in [lnmsg: architecture](lnmsg-architecture.md),
-  "Plan: the lnmsg core without std").
+  (`loquax/Cargo.toml:92`, `loquax/Cargo.toml:96`), since 2026-10-25 behind its `std` feature,
+  and `just loquax-core-no-std` holds the core to `no_std` (green since
+  993; the pass order is in [loquax: architecture](loquax-architecture.md),
+  "Plan: the loquax core without std").
 - **#232's rule:** the messenger's core must be `std`-free, not merely
   terminal-free, because the next frontend after the TUI is firmware. The
   shape #232 asks for is a `no_std + alloc` core crate, a store behind a
   trait the core owns, effects as data, and a cross-compile gate. That
-  core crate does not exist yet. [lnmsg:
-  architecture](lnmsg-architecture.md), section 4, has the terminal-free
+  core crate does not exist yet. [loquax:
+  architecture](loquax-architecture.md), section 4, has the terminal-free
   requirement it extends.
 - **`lnomad`'s core/frontend boundary (#219).** It is the same
   requirement for the browser, cut on 2026-10-25: model, `update` and the
@@ -101,7 +101,7 @@ It is `no_std + alloc` and tested on the host.
 
 **Frontends own only rendering and input:**
 
-- `lnmsg`'s terminal;
+- `loquax`'s terminal;
 - a desktop GUI in iced (added 2026-10-25, see "Decided");
 - the M9's display and keyboard, ratatui through mousefood;
 - an Android app over the C surface.
@@ -161,7 +161,7 @@ the reviewer's proposal of 2026-10-21, steps 1, 2 and 4 to 7 below.*
    node ([The ThinkNode M9](thinknode-m9.md), "Decided"). The keyboard UI
    follows only when that is stable. Concept work for the GUI, on the
    desktop and on a 240x320 display, may run in parallel.
-4. The messenger core is taken out of `lnmsg` and tested on the host.
+4. The messenger core is taken out of `loquax` and tested on the host.
 5. The M9 frontend, with messages.
 6. Positions on a map.
 7. The map itself.
@@ -170,8 +170,8 @@ the reviewer's proposal of 2026-10-21, steps 1, 2 and 4 to 7 below.*
 
 2026-10-25, Lew: `lnomad` is the terminal frontend of a browser whose
 core (fetch, micron model, layout) also drives a desktop GUI and the
-M9's display. The `lxmf@` handoff (browser to messenger, [lnmsg:
-architecture](lnmsg-architecture.md)) becomes an in-process call once
+M9's display. The `lxmf@` handoff (browser to messenger, [loquax:
+architecture](loquax-architecture.md)) becomes an in-process call once
 both share a shell. #219's core/frontend boundary ("What exists today")
 is the refactor this needs; its first step, the module boundary, landed
 on 2026-10-25.
@@ -180,23 +180,23 @@ on 2026-10-25.
 
 2026-10-25, Lew: one interaction concept across the terminal, the
 desktop GUI and the M9: the same commands, the same names in the
-palette, the same delivery glyph table ([lnmsg: the user
-interface](lnmsg-ui.md), section 2); each frontend maps them to its
+palette, the same delivery glyph table ([loquax: the user
+interface](loquax-ui.md), section 2); each frontend maps them to its
 input. Code is shared where it is the same problem (model, update,
 layout), not for its own sake (rendering, input).
-lnflash is the third user of the shared widgets, after `lnmsg` and
+lnflash is the third user of the shared widgets, after `loquax` and
 `lnomad` (decided 2026-10-26, Lew, Codeberg #476), and its rule "start,
 it flashes, done" is the zero config form of this model ([Flashing an
 LNode](lnode-flashing.md), "Product goal").
 
-2026-10-25, Lew: `lnomad` and `lnmsg` stay two programs with shared
+2026-10-25, Lew: `lnomad` and `loquax` (then lnmsg) stay two programs with shared
 widgets. Since 984 the shared widgets are two crates.
 `leviculum-ui` is the terminal-free half (styled text, palette, the key
 and mouse events with the text-editing table, the footer, help and toast
 models, the spinner frames, and the delivery glyph table), so a core can
 take it and stay terminal-free; `leviculum-ui-ratatui` is the ratatui half
 (the widgets, the terminal lifecycle, the event mapping, inline pictures).
-`lnomad` draws through them already; `lnmsg`'s TUI is built on them
+`lnomad` draws through them already; `loquax`'s TUI is built on them
 (994). The palette's names landed with it, in `leviculum_ui::commands`,
 and `leviculum-ui` builds `no_std` without its `std` feature, so the
 messenger core holds the same types a board will.
@@ -220,8 +220,8 @@ surface, the tile tool, the tile format, and the map view. Since
 ## See also
 
 - [The ThinkNode M9](thinknode-m9.md), the first device this is for.
-- [lnmsg: a terminal LXMF messenger](lnmsg.md) and [lnmsg:
-  architecture](lnmsg-architecture.md).
+- [loquax: a terminal LXMF messenger](loquax.md) and [loquax:
+  architecture](loquax-architecture.md).
 - [Telemetry](telemetry.md), for the positions on the map.
 - [A GUI toolkit for the desktop and the M9](gui-toolkit.md), the
   toolkit candidates measured and the decision for iced and ratatui.

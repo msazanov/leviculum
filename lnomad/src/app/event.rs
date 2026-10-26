@@ -1343,7 +1343,7 @@ pub(crate) fn full_hex(dest: &[u8; 16]) -> String {
 }
 
 /// The OSC 52 clipboard-set sequence the IO shell writes for a copy: shared
-/// with lnmsg's drag selection, in `leviculum-ui`.
+/// with loquax's drag selection, in `leviculum-ui`.
 pub use leviculum_ui::clipboard::osc52;
 
 /// Whether `target` is a non-idempotent form submit: it carries at least one
@@ -1919,7 +1919,7 @@ pub(crate) fn update_hover(model: &mut Model, col: u16, row: u16) {
 }
 
 /// Map a key press to a [`ScrollCmd`], honouring both vi and emacs idioms, from
-/// the shared scroll rows ([`SCROLL_ROWS`], in `leviculum-ui` so lnmsg reads the
+/// the shared scroll rows ([`SCROLL_ROWS`], in `leviculum-ui` so loquax reads the
 /// same ones). Returns `None` for keys that are not scroll motions.
 pub(crate) fn key_to_scroll(key: &KeyEvent) -> Option<ScrollCmd> {
     keymap::best(SCROLL_ROWS, key, Panes::SCROLL, Ctx::NONE).map(|(_, cmd)| cmd)

@@ -55,7 +55,7 @@ wrong value, and it fails silently — see
   `rnprobe` is implemented in `leviculum-std/src/rpc/` (it speaks
   Python's `multiprocessing.connection` framing with pickle payloads,
   see `rpc/connection.rs` and `rpc/pickle.rs`). A client on that socket
-  — `lxmf-node`, `lnmsg`, `lnomad`, every `ln*` tool — keeps its own
+  — `lxmf-node`, `loquax`, `lnomad`, every `ln*` tool — keeps its own
   known-destination table rather than delegating it, so a peer it has
   used stays recallable for `KNOWN_DEST_USED_LINGER_MS`
   (`leviculum-core/src/constants.rs:176`) after the daemon stops

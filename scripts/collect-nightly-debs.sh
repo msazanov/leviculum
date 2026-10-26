@@ -6,7 +6,7 @@
 # runs.
 #
 # Expects, for both musl triples under target/<triple>/release/:
-#   lnsd, lnstest, lncp, lnstatus, lnprobe, lnpath, lnomad, lblogd, lnpnd, lnmsg
+#   lnsd, lnstest, lncp, lnstatus, lnprobe, lnpath, lnomad, lblogd, lnpnd, loquax
 # and one .deb per package and arch under target/debian/:
 #   leviculum_*_{amd64,arm64}.deb
 #   lnomad_*_{amd64,arm64}.deb
@@ -32,7 +32,7 @@
 # no python3, no curl, no jq. `scripts/test-collect-nightly-debs.sh` holds
 # that list by running this script with a PATH that has nothing else on it.
 #
-# Produces, for each of leviculum, lnomad, lblogd, lnpnd and lnmsg, and each of
+# Produces, for each of leviculum, lnomad, lblogd, lnpnd and loquax, and each of
 # amd64 and arm64:
 #   dist/<pkg>-nightly-<arch>.deb          + .sha256
 #   dist/<pkg>-nightly-<arch>.tar.gz       + .sha256   (just the binaries)
@@ -128,8 +128,8 @@ collect_deb lblogd amd64
 collect_deb lblogd arm64
 collect_deb lnpnd amd64
 collect_deb lnpnd arm64
-collect_deb lnmsg amd64
-collect_deb lnmsg arm64
+collect_deb loquax amd64
+collect_deb loquax arm64
 # amd64 only, like the bundle it is packaged from. The stable name is spelled
 # out because there is no arm64 one: `just check-firmware-images` reads a
 # two-argument line as a package staged for both architectures.
@@ -145,7 +145,7 @@ collect_deb leviculum-heapacct arm64 leviculum-nightly-arm64-heapacct.deb
 # README/LICENSE and a VERSION pointer. Drop-in for users who want the
 # tools without root, system service, or .deb tooling.
 pack_bin_tarball() {
-    local pkg="$1"          # leviculum | lnomad | lblogd | lnpnd | lnmsg
+    local pkg="$1"          # leviculum | lnomad | lblogd | lnpnd | loquax
     local arch_dash="$2"    # amd64 | arm64
     local rust_triple="$3"  # x86_64-unknown-linux-musl | aarch64-unknown-linux-musl
     local readme_src="$4"   # per-package README, path relative to repo root
@@ -231,8 +231,8 @@ pack_bin_tarball lblogd amd64 x86_64-unknown-linux-musl lblogd/README.md lblogd
 pack_bin_tarball lblogd arm64 aarch64-unknown-linux-musl lblogd/README.md lblogd
 pack_bin_tarball lnpnd amd64 x86_64-unknown-linux-musl README.md lnpnd
 pack_bin_tarball lnpnd arm64 aarch64-unknown-linux-musl README.md lnpnd
-pack_bin_tarball lnmsg amd64 x86_64-unknown-linux-musl lnmsg/README.md lnmsg
-pack_bin_tarball lnmsg arm64 aarch64-unknown-linux-musl lnmsg/README.md lnmsg
+pack_bin_tarball loquax amd64 x86_64-unknown-linux-musl loquax/README.md loquax
+pack_bin_tarball loquax arm64 aarch64-unknown-linux-musl loquax/README.md loquax
 
 # The lnflash bundle is already a finished tarball — binary, firmware
 # UF2, SoftDevice, licences and a manifest of checksums over all of it —

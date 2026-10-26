@@ -2,7 +2,7 @@
 //!
 //! A propagation node's destination hash is what every client configures as
 //! its outbound node, so the identity is minted once and kept — and, like
-//! `lnmsg`'s address (`lnmsg/src/identity.rs`), an unreadable file is a
+//! `loquax`'s address (`loquax/src/identity.rs`), an unreadable file is a
 //! fatal error rather than a silent re-mint: a re-minted identity would
 //! strand every client pointing at the old hash.
 //!

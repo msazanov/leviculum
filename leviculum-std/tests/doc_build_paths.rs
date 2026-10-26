@@ -48,8 +48,8 @@ const SOURCE_BUILD_DOCS: &[&str] = &["README.md", "docs/src/guide/installation.m
 /// (a different workspace, a different target) and the rig scripts name
 /// periculum's own `target/release/periculum` (a different repository).
 const HOST_BINS: &[&str] = &[
-    "lnsd", "lnstest", "lncp", "lnstatus", "lnprobe", "lnpath", "lntd", "lnmsg", "lnomad", "lnpnd",
-    "lblogd", "lndecode", "lnflash",
+    "lnsd", "lnstest", "lncp", "lnstatus", "lnprobe", "lnpath", "lntd", "loquax", "lnomad",
+    "lnpnd", "lblogd", "lndecode", "lnflash",
 ];
 
 /// Triples a document may name besides the pin, because we tell readers to

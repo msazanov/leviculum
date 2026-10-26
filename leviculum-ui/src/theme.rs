@@ -1,6 +1,6 @@
 //! The light/dark theme model and the pure detection decision.
 //!
-//! One palette for every Leviculum terminal program, so lnomad and lnmsg read
+//! One palette for every Leviculum terminal program, so lnomad and loquax read
 //! as one family. A [`Theme`] carries the accent colours: the section heading
 //! bands and the link colour lnomad draws a page with, the hint-badge colours,
 //! and the fixed chrome bars. It does NOT carry the page's own micron foreground/background colours,

@@ -23,7 +23,7 @@
 //! # How it attaches
 //!
 //! As a shared-instance client of a daemon that is already running — `lnsd`,
-//! or Python's `rnsd` — exactly as `lnmsg`, `lnpnd` and `lblogd` do. It
+//! or Python's `rnsd` — exactly as `loquax`, `lnpnd` and `lblogd` do. It
 //! starts no Reticulum stack of its own, so the interfaces a board is reached
 //! over are configured once, in the daemon's config file.
 
@@ -45,7 +45,7 @@ mod lntd_store;
 
 use lntd_store::{ingest, Ingest, Report, Store, StoreError};
 
-/// Environment override for the state directory, the same lever `lnmsg`
+/// Environment override for the state directory, the same lever `loquax`
 /// offers under `LNMSG_HOME`. A test gets an isolated address per run from
 /// it; an operator has no reason to touch it.
 const HOME_ENV: &str = "LNTD_HOME";
@@ -85,7 +85,7 @@ const POLL_INTERVAL_MS: u64 = 1_000;
     long_about = "Runs an LXMF destination that receives telemetry reports and \
                   writes them to a SQLite file.\n\n\
                   lntd attaches to a Reticulum daemon that is already running \
-                  (lnsd, or Python's rnsd) the way lnmsg and lnpnd do; it does \
+                  (lnsd, or Python's rnsd) the way loquax and lnpnd do; it does \
                   not start a stack of its own. It prints its LXMF address at \
                   startup: hand that to `lnflash --set-telemetry` (or to the \
                   telemetry prompt during a flash) and the board reports here.\n\n\
@@ -130,7 +130,7 @@ struct Args {
 }
 
 /// `${LNTD_HOME:-${XDG_CONFIG_HOME:-~/.config}/lntd}` — identity, database
-/// and node storage in one directory, the way `lnmsg` and `lnomad` keep
+/// and node storage in one directory, the way `loquax` and `lnomad` keep
 /// theirs.
 fn home_dir() -> Result<PathBuf, String> {
     if let Some(explicit) = std::env::var_os(HOME_ENV)
@@ -149,7 +149,7 @@ fn home_dir() -> Result<PathBuf, String> {
     Ok(base.join("lntd"))
 }
 
-/// Same derivation `lnmsg`, `lncp`, `lnstatus` and `lnpnd` use: the instance
+/// Same derivation `loquax`, `lncp`, `lnstatus` and `lnpnd` use: the instance
 /// name comes from the daemon's own config file unless overridden.
 fn instance_name(config_dir: &Path) -> String {
     let config_file = config_dir.join("config");
@@ -163,7 +163,7 @@ fn instance_name(config_dir: &Path) -> String {
 
 /// Load the identity, minting one only when the file is not there at all.
 ///
-/// A corrupt record is fatal, for `lnmsg`'s reason applied to a collector:
+/// A corrupt record is fatal, for `loquax`'s reason applied to a collector:
 /// this identity is the address every board in the field was flashed with,
 /// and a silent re-mint would strand all of them at once with no trace.
 fn load_or_create_identity(path: &Path) -> Result<Identity, String> {

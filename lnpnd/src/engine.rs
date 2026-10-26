@@ -11,8 +11,8 @@
 //! propagation destination runs `ProofStrategy::App`, the proof is sent
 //! only after the store append returned, and both the data event and the
 //! `LinkProofRequested` it must answer ride the tap. This is the same
-//! reasoning that put lnmsg's engine on the tap
-//! (`docs/src/concepts/lnmsg-architecture.md` §3).
+//! reasoning that put loquax's engine on the tap
+//! (`docs/src/concepts/loquax-architecture.md` §3).
 //!
 //! # Event order the proof correlation relies on
 //!
@@ -83,7 +83,7 @@ pub const DEFAULT_ANNOUNCE_INTERVAL_SECS: u64 = 360 * 60;
 const STORE_MAINTENANCE_SECS: u64 = 480;
 
 /// How soon the engine asks the driver back when nothing else is due; the
-/// value lnmsg's engine settled on for the same job.
+/// value loquax's engine settled on for the same job.
 const POLL_INTERVAL_MS: u64 = 200;
 
 /// How soon the engine asks the driver back while the validation worker
@@ -1523,7 +1523,7 @@ impl<S: PropagationStore + PropagationBodyStore + Send + 'static>
         let queued = self.pending.len();
         self.profile.lap(Section::Drain);
         // The mailbox router sees every event and filters for its own
-        // links, exactly as lnmsg's engine feeds it.
+        // links, exactly as loquax's engine feeds it.
         if let Some(mut mailbox) = ready.mailbox.take() {
             mailbox.on_event(core, event, &mut out);
             ready.mailbox = Some(mailbox);

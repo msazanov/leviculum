@@ -301,8 +301,8 @@ fn a_link_request_reaches_the_returned_client() {
 /// path response is our own emission and installs nothing, but it is the
 /// only way the asking client learns the identity. RED on 1fb5f4d4: the
 /// echo returned before the local-client hand-off, the sibling never heard
-/// the announce, and `lnmsg send --via propagated` timed out after 60 s
-/// against a Python propagation node (`lnmsg/tests/python_interop.rs`).
+/// the announce, and `loquax send --via propagated` timed out after 60 s
+/// against a Python propagation node (`loquax/tests/python_interop.rs`).
 #[test]
 fn a_stale_echo_still_reaches_a_sibling_client() {
     let (mut node, serial, client) = make_daemon();

@@ -155,7 +155,7 @@
 # an assertion: its runtime is a coin-flip distribution and only means
 # anything in --release on the host it runs on, by hand. Run manually before
 # a release and whenever the stamp code changes (see the test's header).
-1    -p lnmsg --test stamp_timing
+1    -p loquax --test stamp_timing
 
 # 0 -> 1 (2026-10-26, order 1009): hook_profile_under_field_load is the
 # measurement behind the LNPND_HOOK_PROFILE line: it drives the engine's

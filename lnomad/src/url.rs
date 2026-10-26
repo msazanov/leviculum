@@ -131,7 +131,7 @@ pub fn parse_url(input: &str, current_dest: Option<[u8; 16]>) -> Result<Target, 
     })
 }
 
-/// How a followed link is handled, shared with lnmsg's links in message
+/// How a followed link is handled, shared with loquax's links in message
 /// bodies: in `leviculum-ui`, where both programs read it.
 pub use leviculum_ui::link::{classify_link, LinkKind};
 

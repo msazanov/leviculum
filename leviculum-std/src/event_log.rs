@@ -742,7 +742,10 @@ pub const EVENT_CATALOG: &[EventSchema] = &[
         name: "AUTO_PEER_REFUSED",
         required_keys: &["reason", "src", "port", "nic", "peers", "suppressed"],
     },
-    // `lnmsg`, the LXMF messenger. Its emitting sites are in `lnmsg/src/events.rs`
+    // `loquax`, the LXMF messenger. The program was called lnmsg until #232
+    // renamed it; its events keep the `LNMSG_` prefix until a later order
+    // renames them here, in the emitters and in periculum's cells together.
+    // Its emitting sites are in `loquax/src/events.rs`
     // rather than in this workspace member: the catalogue is one global list by
     // design (the layer looks a name up here whatever crate raised it), and a
     // second per-crate catalogue would mean two places to keep a name's required
@@ -1839,7 +1842,7 @@ extern "C" fn flush_event_log_at_exit() {
 /// or until `timeout` expires.
 ///
 /// Public because a process that writes an event log and then asserts on
-/// the file (the multi-process event-log tests, `lnmsg`'s CLI tests)
+/// the file (the multi-process event-log tests, `loquax`'s CLI tests)
 /// needs a point where "written" is a fact rather than a race.  A no-op
 /// when no event log is configured or when the blocking mode is in
 /// force, because in both cases the write already happened on the
@@ -1927,11 +1930,11 @@ fn parse_t(line: &str) -> Option<u128> {
 /// # The fmt layer writes to stderr, not stdout
 ///
 /// `tracing_subscriber`'s default writer is stdout, and stdout is the
-/// data channel of every binary that installs this: `lnmsg` prints
+/// data channel of every binary that installs this: `loquax` prints
 /// message bodies there, `lncp` its progress, `lnprobe` its reply
 /// lines.  A WARN on stdout splices a log line into that payload the
 /// moment something goes wrong — which is exactly when a caller is
-/// least able to cope with it.  `lnmsg`'s interop suite asserts a
+/// least able to cope with it.  `loquax`'s interop suite asserts a
 /// byte-empty stdout for a successful send and went red under load for
 /// precisely this reason (`CORE_PROCESSOR_OVER_BUDGET` from
 /// `driver::processor::report_budget`).
@@ -2278,7 +2281,7 @@ fn field_value_problem(value: &str) -> Option<&'static str> {
 /// so a value reads identically whichever produced it.
 ///
 /// The type itself lives in `leviculum-core` (`event_scalar`), so that a
-/// `no_std` emission site (the core, the `lnmsg` core) renders through the
+/// `no_std` emission site (the core, the `loquax` core) renders through the
 /// same definition; this is a re-export, not a second copy.
 pub use leviculum_core::event_scalar::Scalar;
 

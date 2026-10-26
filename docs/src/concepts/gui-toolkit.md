@@ -32,11 +32,11 @@ interaction model across all three?
 
 | constraint | source |
 |---|---|
-| the core knows no frontend; a GUI is a frontend swap | [lnmsg: architecture](lnmsg-architecture.md), "Requirement: the core must not know it has a terminal" |
-| one interaction model: same commands, same palette names, same delivery glyphs | [A messenger whose core runs anywhere](handheld-messenger.md), "One interaction model"; [lnmsg: the user interface](lnmsg-ui.md), sections 1 and 2 |
-| keyboard first: the palette, no modes, `Enter` sends | [lnmsg: the user interface](lnmsg-ui.md), section 1 |
-| the delivery glyphs `○ ◇ ⌂ ✓ ✗` and the braille spinner, with an ASCII fallback | [lnmsg: the user interface](lnmsg-ui.md), section 2 |
-| one palette: the GUI takes its colours from the token table of `leviculum-ui/src/tokens.rs`, the truecolor values of each theme, as both terminal programs do | [keys, mouse and layout](lnmsg-keys-and-layout.md), section 5, "Colour" |
+| the core knows no frontend; a GUI is a frontend swap | [loquax: architecture](loquax-architecture.md), "Requirement: the core must not know it has a terminal" |
+| one interaction model: same commands, same palette names, same delivery glyphs | [A messenger whose core runs anywhere](handheld-messenger.md), "One interaction model"; [loquax: the user interface](loquax-ui.md), sections 1 and 2 |
+| keyboard first: the palette, no modes, `Enter` sends | [loquax: the user interface](loquax-ui.md), section 1 |
+| the delivery glyphs `○ ◇ ⌂ ✓ ✗` and the braille spinner, with an ASCII fallback | [loquax: the user interface](loquax-ui.md), section 2 |
+| one palette: the GUI takes its colours from the token table of `leviculum-ui/src/tokens.rs`, the truecolor values of each theme, as both terminal programs do | [keys, mouse and layout](loquax-keys-and-layout.md), section 5, "Colour" |
 | licence compatible with `AGPL-3.0-or-later` | `Cargo.toml:89`, [Licensing and third-party notices](licensing-and-notices.md) |
 | German and Polish text, in the UI and in received messages | Lew, 2026-10-25 |
 | Rust only, no webview | Lew, 2026-10-25 |
@@ -86,7 +86,7 @@ Both desktop spikes draw the same screen: a title line with German and
 Polish text (`Grüße aus Köln · Łódź: łąka, ściana, żółw`), a message
 list with a coloured delivery glyph per row, an input line where `Enter`
 sends, and a palette on `Ctrl+P` that filters six command names taken
-from [lnmsg: the user interface](lnmsg-ui.md) (send, sync, announce, new
+from [loquax: the user interface](loquax-ui.md) (send, sync, announce, new
 conversation, message details, quit) and runs the first match on
 `Enter`; `Escape` closes it. A script drove each window by keyboard only
 with xdotool: type `Grüße łąka żółw`, `Enter`, `Ctrl+P`, `syn`,
@@ -194,7 +194,7 @@ to an image:
 - mousefood's default 6x10 atlas gives 53x24 cells. German and Polish
   render; `✓` and `◇` render as blanks. The delivery glyphs need a
   different font or the ASCII fallback set
-  ([lnmsg: the user interface](lnmsg-ui.md), section 2).
+  ([loquax: the user interface](loquax-ui.md), section 2).
 - Slint's embedded glyphs render anti-aliased, but only for the
   characters the compiler saw at build time: printable ASCII, `●`, `…`
   and the characters in the `.slint` file's string literals
@@ -228,8 +228,8 @@ M9 through mousefood, sharing the terminal frontend's view code.
   model. ratatui 0.30.2 is what `lnomad` already uses
   (`lnomad/Cargo.toml:95`). Only the desktop GUI is a renderer of its
   own.
-- One interaction model then lives where [lnmsg: the user
-  interface](lnmsg-ui.md) already put it: the one keymap table and the
+- One interaction model then lives where [loquax: the user
+  interface](loquax-ui.md) already put it: the one keymap table and the
   one glyph table, read by every frontend. It does not come from a
   shared widget toolkit.
 - Leaves open: two widget models (ratatui and iced) to keep in step; a
@@ -310,7 +310,7 @@ later change of toolkit does not touch the core. The comparison above
 stays as the record of why. The decision is also recorded on [A messenger
 whose core runs anywhere](handheld-messenger.md), "The core/frontend
 cut".
-lnflash is the third user of the shared widgets, after `lnmsg` and
+lnflash is the third user of the shared widgets, after `loquax` and
 `lnomad` (decided 2026-10-26, Lew, Codeberg #476; [Flashing an
 LNode](lnode-flashing.md), "Product goal").
 
@@ -338,7 +338,7 @@ M9's keyboard input and display driver are ours to write.
 - [A messenger whose core runs anywhere](handheld-messenger.md), whose
   "The core/frontend cut" records this decision
 - [The ThinkNode M9](thinknode-m9.md)
-- [lnmsg: the user interface](lnmsg-ui.md)
-- [lnmsg: architecture](lnmsg-architecture.md)
+- [loquax: the user interface](loquax-ui.md)
+- [loquax: architecture](loquax-architecture.md)
 - [Licensing and third-party notices](licensing-and-notices.md)
 - [One button](one-button.md)

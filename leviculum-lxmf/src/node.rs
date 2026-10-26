@@ -475,7 +475,7 @@ impl LxmfNode {
     /// session stays free for the propagation role and the BLE sessions
     /// that the same cap has to afford.
     ///
-    /// Every caller that DOES have an inbox — `lntd`, `lnmsg`, `lnpnd` and
+    /// Every caller that DOES have an inbox — `lntd`, `loquax`, `lnpnd` and
     /// everything else going through [`Self::register`] — keeps
     /// [`Self::delivery_destination`] with its `ProofStrategy::All` and its
     /// `accepts_links`, and `register` sets both explicitly, so a node with

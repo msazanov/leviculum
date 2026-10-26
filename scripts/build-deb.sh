@@ -69,11 +69,11 @@ esac
 # them. Kept in the same order as deb-stamp.sh's CRATES, which writes the
 # version files read below; its last entry, lnflash, is packaged from the
 # firmware bundle by scripts/build-lnflash-deb.sh instead.
-CRATES=(leviculum-cli lnomad lblogd lnpnd lnmsg)
-BINS=(lnsd lnstest lncp lnstatus lnprobe lnpath lnomad lblogd lnpnd lnmsg)
-# lnmsg's terminal frontend is off by default (lnmsg/Cargo.toml); the package
-# is what a person installs, so plain `lnmsg` opens the messenger.
-FEATURES=(--features lnmsg/tui)
+CRATES=(leviculum-cli lnomad lblogd lnpnd loquax)
+BINS=(lnsd lnstest lncp lnstatus lnprobe lnpath lnomad lblogd lnpnd loquax)
+# loquax's terminal frontend is off by default (loquax/Cargo.toml); the package
+# is what a person installs, so plain `loquax` opens the messenger.
+FEATURES=(--features loquax/tui)
 
 # The .deb is not always named after its crate: leviculum-cli ships as
 # "leviculum". Same mapping as deb-stamp.sh's pkg_name; it is spelled

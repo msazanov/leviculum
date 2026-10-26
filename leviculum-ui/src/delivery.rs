@@ -1,9 +1,9 @@
-//! The delivery glyph table of `docs/src/concepts/lnmsg-ui.md`, section 2: the
+//! The delivery glyph table of `docs/src/concepts/loquax-ui.md`, section 2: the
 //! one place that maps a message's delivery state to its glyph, its colour,
 //! its motion and its ASCII fallback.
 //!
 //! One table, so the conversation glyph, the detail view and anything else
-//! that shows delivery read the same row and cannot disagree. lnmsg is its
+//! that shows delivery read the same row and cannot disagree. loquax is its
 //! first user; lnomad does not draw delivery. The rules the table encodes:
 //! green and a check mark appear only on proof ([`DeliveryState::Delivered`]);
 //! the mailbox state is a blue house, not a second check; amber hollow `◇`
@@ -95,7 +95,7 @@ impl DeliveryGlyph {
 }
 
 /// The table, one row per [`DeliveryState`], in the order of
-/// `lnmsg-ui.md`, section 2.
+/// `loquax-ui.md`, section 2.
 pub const DELIVERY_GLYPHS: [DeliveryGlyph; 8] = [
     row(
         DeliveryState::Queued,

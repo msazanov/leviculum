@@ -2318,29 +2318,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "lnmsg"
-version = "0.1.0"
-dependencies = [
- "clap",
- "crossterm",
- "futures",
- "hex",
- "leviculum-core",
- "leviculum-lxmf",
- "leviculum-std",
- "leviculum-ui",
- "leviculum-ui-ratatui",
- "open",
- "rand_core 0.6.4",
- "ratatui",
- "serde_json",
- "tempfile",
- "tokio",
- "tracing",
- "tui-input",
-]
-
-[[package]]
 name = "lnomad"
 version = "0.1.1"
 dependencies = [
@@ -2399,6 +2376,29 @@ name = "log"
 version = "0.4.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
+
+[[package]]
+name = "loquax"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "crossterm",
+ "futures",
+ "hex",
+ "leviculum-core",
+ "leviculum-lxmf",
+ "leviculum-std",
+ "leviculum-ui",
+ "leviculum-ui-ratatui",
+ "open",
+ "rand_core 0.6.4",
+ "ratatui",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tui-input",
+]
 
 [[package]]
 name = "lru"

@@ -74,8 +74,8 @@ Four programs ship as their own nightly packages, so none of them drags in the a
 # lnomad — Nomadnet terminal browser
 sudo apt install ./lnomad-nightly-amd64.deb
 
-# lnmsg — LXMF messenger: plain `lnmsg` for people, `lnmsg send` for scripts
-sudo apt install ./lnmsg-nightly-amd64.deb
+# loquax — LXMF messenger: plain `loquax` for people, `loquax send` for scripts
+sudo apt install ./loquax-nightly-amd64.deb
 
 # lnpnd — LXMF propagation node, drop-in for Python's lxmd
 sudo apt install ./lnpnd-nightly-amd64.deb
@@ -84,7 +84,7 @@ sudo apt install ./lnpnd-nightly-amd64.deb
 sudo apt install ./lblogd-nightly-amd64.deb
 ```
 
-Download them from the same [nightly directory](https://leviculum.network/releases/nightly/latest/) (mirror: the [Codeberg release](https://codeberg.org/Lew_Palm/leviculum/releases/tag/nightly)), as `.deb` or as a userspace `.tar.gz`, for amd64 and arm64. `lnomad` and `lnmsg` are plain terminal programs. `lnpnd` installs a systemd service that is enabled but not started, so you can put the node's identity at `/etc/lnpnd/identity` before it first goes on the air. `lblogd` installs and starts a systemd service that serves on `http://127.0.0.1:8180/` until you point it at a domain in `/etc/lblogd/config.toml`. All four need a running Reticulum instance for their mesh side — `lnsd` from the package above, or the Python `rnsd`.
+Download them from the same [nightly directory](https://leviculum.network/releases/nightly/latest/) (mirror: the [Codeberg release](https://codeberg.org/Lew_Palm/leviculum/releases/tag/nightly)), as `.deb` or as a userspace `.tar.gz`, for amd64 and arm64. `lnomad` and `loquax` are plain terminal programs. `lnpnd` installs a systemd service that is enabled but not started, so you can put the node's identity at `/etc/lnpnd/identity` before it first goes on the air. `lblogd` installs and starts a systemd service that serves on `http://127.0.0.1:8180/` until you point it at a domain in `/etc/lblogd/config.toml`. All four need a running Reticulum instance for their mesh side — `lnsd` from the package above, or the Python `rnsd`.
 
 The sixth package, `lnflash`, is the firmware flasher; see [Flashing LoRa hardware](#flashing-lora-hardware-optional) below.
 

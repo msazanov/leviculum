@@ -49,7 +49,7 @@ const VERSION: &str = env!("LEVICULUM_VERSION");
     long_about = "Runs an LXMF propagation node (a store-and-forward mailbox) \
                   on a running Reticulum shared instance.\n\n\
                   lnpnd attaches to a daemon that is already running (lnsd, or \
-                  Python's rnsd) the way lnmsg and lblogd do; it does not start \
+                  Python's rnsd) the way loquax and lblogd do; it does not start \
                   a Reticulum stack of its own. Clients (Sideband, meshchat, \
                   lxmd-based tools) configure the destination hash this prints \
                   at startup as their propagation node.\n\n\
@@ -214,7 +214,7 @@ struct Args {
     from_static_only: bool,
 }
 
-/// Same derivation `lnmsg`, `lncp` and `lnstatus` use: the instance name
+/// Same derivation `loquax`, `lncp` and `lnstatus` use: the instance name
 /// comes from the daemon's own config file unless overridden.
 fn instance_name(config_dir: &Path) -> String {
     let config_file = config_dir.join("config");
@@ -410,14 +410,14 @@ fn peering_config(effective: &Effective) -> leviculum_lxmf::PeeringConfig {
 
 fn resolve(args: &Args, file: &RawConfig) -> Result<Effective, lnpnd::config::ConfigError> {
     // `enable_node = no` would ask for an lxmd that is only a mailbox;
-    // that job is lnmsg's. Refusing beats silently running the role the
+    // that job is loquax's. Refusing beats silently running the role the
     // config said not to run.
     if file.get_bool("propagation", "enable_node")? == Some(false) {
         return Err(lnpnd::config::ConfigError::BadValue {
             section: "propagation",
             key: "enable_node",
             value: "no (lnpnd is the propagation node; for a mailbox-only \
-                    daemon use lxmd, or lnmsg for a client)"
+                    daemon use lxmd, or loquax for a client)"
                 .to_string(),
         });
     }

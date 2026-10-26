@@ -489,6 +489,12 @@ Toolchain: Rust 1.97.1
 
 ### Changed
 
+- lnmsg is now loquax (#232): crate, binary, package (it replaces the lnmsg
+  package), man page and concept pages. The config directory moves on first
+  start: `~/.config/lnmsg` becomes `~/.config/loquax` when only the old one
+  exists. The `LNMSG_HOME` and `LNMSG_DISPLAY_NAME` variables and the
+  `LNMSG_*` event names keep their names.
+
 - The boards' build banner (`[FW_BUILD]` with `[TIME_SOURCE]`, `[MEDIA]`,
   `[NAME ]` and `[IDENTITY]`) repeats every 5 s only for the first two
   minutes after boot, where every post-flash reader reads it, and every

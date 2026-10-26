@@ -38,7 +38,7 @@ use crate::{
 /// [`PATH_REQUEST_WAIT_MS`](super::PATH_REQUEST_WAIT_MS), the reference's own
 /// wait between a path request and the next attempt (`LXMRouter.py:33`,
 /// `:1779`), and the window holds two of those waits so the repeat is given
-/// as long to be answered as the first was (leviculum#699: `lnmsg fetch` at
+/// as long to be answered as the first was (leviculum#699: `loquax fetch` at
 /// boot lost its only request to a daemon whose interface was still
 /// reconnecting). Wire-neutral: a repeated path request is an ordinary one.
 ///
@@ -49,7 +49,7 @@ use crate::{
 /// and the drain keeps asking every `PATH_REQUEST_WAIT_MS` until that budget
 /// ends, as the reference client re-requests on every attempt until its
 /// attempts run out (`LXMRouter.py:1776-1781`). leviculum#719: a 60 s
-/// `lnmsg fetch` gave up after this window with 46 s of its budget unused.
+/// `loquax fetch` gave up after this window with 46 s of its budget unused.
 pub const PROPAGATION_PATH_TIMEOUT_MS: u64 = 2 * super::PATH_REQUEST_WAIT_MS;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1378,7 +1378,7 @@ impl LxmfRouter {
 
     /// Give the next drains a path budget of their own instead of the one
     /// the client was enabled with: the drain repeats its path request for
-    /// all of it. `lnmsg fetch` passes what is left of its `--timeout`.
+    /// all of it. `loquax fetch` passes what is left of its `--timeout`.
     pub fn set_propagation_path_timeout_ms(
         &mut self,
         path_timeout_ms: u64,

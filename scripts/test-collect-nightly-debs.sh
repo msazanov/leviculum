@@ -91,13 +91,13 @@ LNFLASH_VERSION="7.7.7"
 # stamp says, not what the host running this test happens to have installed.
 FIXTURE_RUSTC="rustc 9.9.9 (fixturec0de 2026-01-01)"
 
-BINS_AMD=(lnsd lnstest lncp lnstatus lnprobe lnpath lnomad lblogd lnpnd lnmsg)
+BINS_AMD=(lnsd lnstest lncp lnstatus lnprobe lnpath lnomad lblogd lnpnd loquax)
 
 setup() {  # <case> [stamp-mode: ok | missing | bogus | empty-target] [rustc-stamp: yes | no]
     local case_name="$1" stamp_mode="${2:-ok}" rustc_stamp="${3:-yes}"
     TREE="$WORK/$case_name/tree"
     EXT_TARGET="$WORK/$case_name/cargo-target"
-    mkdir -p "$TREE/scripts" "$TREE/lnomad" "$TREE/lblogd" "$TREE/lnmsg" \
+    mkdir -p "$TREE/scripts" "$TREE/lnomad" "$TREE/lblogd" "$TREE/loquax" \
         "$TREE/target/lnflash" "$TREE/target/debian" \
         "$EXT_TARGET/debian"
 
@@ -108,7 +108,7 @@ setup() {  # <case> [stamp-mode: ok | missing | bogus | empty-target] [rustc-sta
     echo "fixture README" > "$TREE/README.md"
     echo "fixture lnomad README" > "$TREE/lnomad/README.md"
     echo "fixture lblogd README" > "$TREE/lblogd/README.md"
-    echo "fixture lnmsg README" > "$TREE/lnmsg/README.md"
+    echo "fixture loquax README" > "$TREE/loquax/README.md"
     echo "fixture LICENSE" > "$TREE/LICENSE"
     echo "fixture THIRD-PARTY-NOTICES" > "$TREE/THIRD-PARTY-NOTICES"
     echo "fixture CHANGELOG" > "$TREE/CHANGELOG.md"
@@ -123,7 +123,7 @@ EOF
     echo "${VER_LNOMAD}${NIGHTLY_SUFFIX}" > "$TREE/.deb-version-lnomad"
     echo "${VER_LBLOGD}${NIGHTLY_SUFFIX}" > "$TREE/.deb-version-lblogd"
     echo "${DEB_LNPND}${NIGHTLY_SUFFIX}" > "$TREE/.deb-version-lnpnd"
-    echo "${VER_LNMSG}${NIGHTLY_SUFFIX}" > "$TREE/.deb-version-lnmsg"
+    echo "${VER_LNMSG}${NIGHTLY_SUFFIX}" > "$TREE/.deb-version-loquax"
     echo "nightly.20260918-abc1234" > "$TREE/.build-id"
     # Which compiler built the binaries, stamped in the rust:bookworm step
     # because this one has no rustc to ask (Codeberg #305).
@@ -137,7 +137,7 @@ EOF
     # The artefacts cargo and cargo-deb wrote, in the external target dir.
     if [ "$stamp_mode" != empty-target ]; then
         local pkg arch triple
-        for pkg in leviculum lnomad lblogd lnpnd lnmsg; do
+        for pkg in leviculum lnomad lblogd lnpnd loquax; do
             for arch in amd64 arm64; do
                 echo "real ${pkg} ${arch} deb" \
                     > "$EXT_TARGET/debian/${pkg}_1.0.0${NIGHTLY_SUFFIX}_${arch}.deb"
@@ -214,7 +214,7 @@ run_collect
 # 404 under a URL the README hardcodes.
 expected="$WORK/expected"
 : > "$expected"
-for pkg in leviculum lnomad lblogd lnpnd lnmsg; do
+for pkg in leviculum lnomad lblogd lnpnd loquax; do
     for arch in amd64 arm64; do
         printf '%s\n' "${pkg}-nightly-${arch}.deb" "${pkg}-nightly-${arch}.deb.sha256" \
             "${pkg}-nightly-${arch}.tar.gz" "${pkg}-nightly-${arch}.tar.gz.sha256" >> "$expected"
@@ -300,17 +300,17 @@ got="$(cat "$TREE/dist/lnflash-nightly-amd64.tar.gz" 2>/dev/null)"
 got="$(cat "$TREE/dist/lnflash-nightly-amd64.deb" 2>/dev/null)"
 [ "$got" = "real lnflash amd64 deb" ] || fail "lnflash .deb asset holds '${got}'"
 
-# lnmsg's tarball carries lnmsg and names its own version (1000).
+# loquax's tarball carries loquax and names its own version (1000).
 rm -rf "$stage"; mkdir -p "$stage"
-tar -C "$stage" -xzf "$TREE/dist/lnmsg-nightly-arm64.tar.gz" 2>/dev/null \
-    || fail "lnmsg-nightly-arm64.tar.gz is not a readable gzip tarball"
-lms="$stage/lnmsg-nightly-arm64"
-got="$(cat "$lms/bin/lnmsg" 2>/dev/null)"
-[ "$got" = "real lnmsg aarch64-unknown-linux-musl" ] || fail "lnmsg tarball carries '${got}' as bin/lnmsg"
+tar -C "$stage" -xzf "$TREE/dist/loquax-nightly-arm64.tar.gz" 2>/dev/null \
+    || fail "loquax-nightly-arm64.tar.gz is not a readable gzip tarball"
+lms="$stage/loquax-nightly-arm64"
+got="$(cat "$lms/bin/loquax" 2>/dev/null)"
+[ "$got" = "real loquax aarch64-unknown-linux-musl" ] || fail "loquax tarball carries '${got}' as bin/loquax"
 grep -q "^version: ${VER_LNMSG}\$" "$lms/VERSION" 2>/dev/null \
-    || fail "lnmsg VERSION does not name its own version ${VER_LNMSG}"
+    || fail "loquax VERSION does not name its own version ${VER_LNMSG}"
 got="$(cat "$lms/doc/README.md" 2>/dev/null)"
-[ "$got" = "fixture lnmsg README" ] || fail "lnmsg tarball carries the wrong README: '${got}'"
+[ "$got" = "fixture loquax README" ] || fail "loquax tarball carries the wrong README: '${got}'"
 
 # The book is copied, not rebuilt: this step has no mdbook.
 got="$(cat "$TREE/dist/leviculum-docs-nightly.tar.gz" 2>/dev/null)"

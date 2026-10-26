@@ -100,7 +100,7 @@ fi
 # may be named differently (leviculum-cli ships as "leviculum"). lnflash is
 # packaged by scripts/build-lnflash-deb.sh from the firmware bundle, every
 # other one by scripts/build-deb.sh.
-CRATES=(leviculum-cli lnomad lblogd lnpnd lnmsg lnflash)
+CRATES=(leviculum-cli lnomad lblogd lnpnd loquax lnflash)
 
 # The .deb is not always named after its crate: leviculum-cli ships as
 # "leviculum". The changelog's first token must be the *binary package*

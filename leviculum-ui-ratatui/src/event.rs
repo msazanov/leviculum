@@ -226,7 +226,7 @@ mod tests {
     /// backend applied before lnomad's cut (#219), for every key, every
     /// modifier set and every kind, the same edit or the same refusal, but for
     /// the Emacs keys the keymap slice put right
-    /// (`docs/src/concepts/lnmsg-keys-and-layout.md`, section 3, "What the
+    /// (`docs/src/concepts/loquax-keys-and-layout.md`, section 3, "What the
     /// terminal can and cannot send"): `Alt-b`, `Alt-f` and `Alt-d` edit under
     /// `ALT`, `Alt-d` and `Meta-d` kill the word forward, `Ctrl-d` deletes the
     /// character forward. Nothing else moved.

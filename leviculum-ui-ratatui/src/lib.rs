@@ -1,5 +1,5 @@
 //! `leviculum-ui-ratatui`: the ratatui and crossterm half of the UI that
-//! lnomad and lnmsg share (Codeberg #475), over the terminal-free model of
+//! lnomad and loquax share (Codeberg #475), over the terminal-free model of
 //! `leviculum-ui`.
 //!
 //! The widgets every keyboard program here draws the same way: the chrome

@@ -366,30 +366,32 @@ fi
 rm -rf "$CTRL_DIR"
 echo
 
-check_package lnmsg lnmsg lnmsg
+check_package loquax loquax loquax
 # Like lnomad, a client of a running shared instance: no unit, and the
 # terminal frontend built in (1000), which is what the package is for. The
 # subcommand's help line is read off the bytes, so an arm64 package is
 # checked from an amd64 host too.
 if printf '%s' "$CONTENTS" | grep -q 'systemd'; then
-    fail "lnmsg ships a systemd unit, which it must not"
+    fail "loquax ships a systemd unit, which it must not"
 else
     pass "ships no systemd unit"
 fi
-check_lnmsg_tui() {
+# The marker is the `Tui` subcommand's doc comment in loquax/src/main.rs,
+# compiled in only with the feature; it has to follow that comment.
+check_loquax_tui() {
     local deb tmp
-    deb="$(find_deb lnmsg)"
+    deb="$(find_deb loquax)"
     [ -n "$deb" ] || return 0
     tmp="$(mktemp -d)"
     dpkg-deb -x "$deb" "$tmp"
-    if grep -qaF 'The terminal messenger: conversations, messages and a compose line' "$tmp/usr/bin/lnmsg"; then
-        pass "lnmsg is built with its tui"
+    if grep -qaF 'The terminal messenger, as plain `loquax`: conversations, messages and a compose line' "$tmp/usr/bin/loquax"; then
+        pass "loquax is built with its tui"
     else
-        fail "lnmsg is built without --features tui; \`lnmsg tui\` is missing"
+        fail "loquax is built without --features tui; \`loquax tui\` is missing"
     fi
     rm -rf "$tmp"
 }
-check_lnmsg_tui
+check_loquax_tui
 rm -rf "$CTRL_DIR"
 echo
 

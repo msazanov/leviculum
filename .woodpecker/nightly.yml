@@ -34,12 +34,12 @@
 #   https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/lblogd-nightly-arm64.deb
 #
 # And the lnpnd propagation node daemon (enabled, not started on install),
-# and the lnmsg messenger with its terminal UI (no service):
+# and the loquax messenger with its terminal UI (no service):
 #
 #   https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/lnpnd-nightly-amd64.deb
-#   https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/lnmsg-nightly-amd64.deb
+#   https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/loquax-nightly-amd64.deb
 #
-# and the arm64 builds beside them. lnomad, lblogd, lnpnd and lnmsg carry
+# and the arm64 builds beside them. lnomad, lblogd, lnpnd and loquax carry
 # their own version numbers, independent of the leviculum stack's;
 # scripts/deb-stamp.sh derives one Debian version per package.
 #
@@ -120,7 +120,7 @@ when:
         - 'lnomad/Cargo.toml'
         - 'lblogd/Cargo.toml'
         - 'lnpnd/Cargo.toml'
-        - 'lnmsg/Cargo.toml'
+        - 'loquax/Cargo.toml'
         # Codeberg #288: every .deb, every userspace tarball and the
         # lnflash bundle install this file. It is generated (see
         # scripts/gen-notices.py) but tracked, so from this pipeline's

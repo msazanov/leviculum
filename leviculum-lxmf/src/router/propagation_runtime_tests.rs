@@ -1402,7 +1402,7 @@ fn in_memory_mailbox_client_discovers_downloads_delivers_and_purges() {
 /// mvr for leviculum#699: a drain whose first path request is lost still
 /// reaches the node inside the path window.
 ///
-/// `lnmsg fetch` right after its daemon starts sent its one path request in
+/// `loquax fetch` right after its daemon starts sent its one path request in
 /// the same second the daemon's TCP interface reconnected to the node; the
 /// daemon had no interface to send it on, dropped it, and the client waited
 /// out the whole window for an answer to a request nobody received, then
@@ -1485,7 +1485,7 @@ fn a_drain_survives_losing_its_first_path_request() {
 /// leviculum#719: with a budget of its own, a drain keeps asking for the path
 /// until that budget ends, not for a fixed two requests.
 ///
-/// A 60 s `lnmsg fetch` sent its requests at 0 and 7 s and reported `NoPath`
+/// A 60 s `loquax fetch` sent its requests at 0 and 7 s and reported `NoPath`
 /// at 14 s with 46 s unused. Here the first three requests (0, 7, 14 s) are
 /// lost and the fourth, at 21 s, is answered inside a 60 s budget.
 #[test]

@@ -38,7 +38,7 @@
 # The run below is one `cargo test --workspace --test ...` with no
 # `--features`, and cargo refuses the WHOLE invocation when one of its targets
 # needs a feature it does not enable (forge pipeline 573, 2026-10-26: red on
-# lnmsg/tui_snapshot since 994 added it). scripts/standard-integ.sh had the
+# loquax/tui_snapshot since 994 added it). scripts/standard-integ.sh had the
 # same wall and the same remedy: such a target is run by the recipe that
 # passes the feature, named in scripts/standard-integ-elsewhere.txt. The rule
 # is read from `cargo metadata` by scripts/check-standard-integ.py `--gated`,

@@ -12,7 +12,7 @@ the existing Reticulum or LXMF infrastructure, why that is possible at
 all, and where the sharp edges are.
 
 Two crates are involved, neither of which exists yet: a propagation node
-server, and channel support in `lnmsg`. The lnmsg design record currently
+server, and channel support in `loquax`. The loquax design record currently
 states that hosting a propagation node is out of scope. That changes here:
 the channel feature only works if we host nodes, because the retrieval
 side is ours.
@@ -409,7 +409,7 @@ Our node advertises channel support under a namespaced key there:
 protocol version, which channel types it serves, directory size, and the
 minimum stamp cost it requires for channel posts. Because propagation
 node announces travel over the ordinary announce mechanism, every client
-in the mesh sees them. `lnmsg` collects them, filters on the capability
+in the mesh sees them. `loquax` collects them, filters on the capability
 key, and selects by `hops_to`. That is the automatic discovery the
 feature needs, and it costs nothing upstream.
 

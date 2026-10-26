@@ -2,7 +2,7 @@
 """`just standard` runs every integration-test target in the tree (#408).
 
 `standard` named its integration suites one at a time until 408, and 94 of
-the workspace's 139 `tests/` targets were in no line of it. lnmsg's
+the workspace's 139 `tests/` targets were in no line of it. loquax's
 python_interop among them went red on master for eight commits while the land
 gate's `just standard` passed it twice (401). The repair is
 scripts/standard-integ.sh, which computes its selection from the tree and
@@ -26,10 +26,10 @@ each of them:
      list with no `--features`, and cargo refuses the whole invocation when
      one of its targets declares `required-features`. Every such target must
      be claimed by a recipe that passes the feature (land gate 1f9036f8,
-     2026-10-26: lnmsg/tui_snapshot, 0 tests executed).
+     2026-10-26: loquax/tui_snapshot, 0 tests executed).
   5. The forge gate. scripts/ci-gate-integ.sh computes its own selection
      and refuses the same targets for the same reason (forge pipeline 573,
-     2026-10-26: red on lnmsg/tui_snapshot since 994). It must exclude them
+     2026-10-26: red on loquax/tui_snapshot since 994). It must exclude them
      by the rule this script serves it (`--gated`), and `ci-gate` must run
      the recipe each one is claimed by, or the forge tests it nowhere.
 

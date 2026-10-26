@@ -90,16 +90,16 @@ target the tree has, every bin unittest target and the doctests. Out
 of that it leaves exactly what needs a `reference/` submodule at run
 time, because those fail rather than skip without it: three whole
 targets (`rnsd_interop`, `leviculum-lxmf`'s `reference_lock`,
-`lnmsg`'s `python_interop`) and seven tests by exact name inside `mvr`,
+`loquax`'s `python_interop`) and seven tests by exact name inside `mvr`,
 which includes the rnsd_interop harness by `#[path]` and so runs the
 harness's own tests and the four tests that spawn a Python peer
 through it. The script's header holds the
 list, one written reason per entry, and checks every entry against the
 tree so a stale one is a red gate. A target that declares
-`required-features` (`lnmsg`'s `tui_snapshot`) is left out of that
+`required-features` (`loquax`'s `tui_snapshot`) is left out of that
 featureless run too, because cargo refuses the whole invocation over
 it, and `ci-gate` runs the recipe that passes the feature
-(`just lnmsg-tui`) right after; `check-standard-integ` holds both
+(`just loquax-tui`) right after; `check-standard-integ` holds both
 halves. The citation guard runs in full but
 skips the citations into the absent references and prints how many
 (about 2600). Everything left out runs on the tier-2 nightly with the
@@ -117,7 +117,7 @@ pipeline and cannot: it needs the `reference/Reticulum` submodule and a
 which is the property `just check-plain-clone` exists to hold (Codeberg
 #300). Fetching the submodule into the release path would undo exactly
 that. The other two are `leviculum-lxmf`'s `reference_lock` and
-`lnmsg`'s `python_interop`, for the same reason;
+`loquax`'s `python_interop`, for the same reason;
 `scripts/ci-gate-integ.sh` holds the list, one written reason per
 entry, and computes everything else it runs from the tree.
 

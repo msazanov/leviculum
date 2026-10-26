@@ -25,7 +25,7 @@
 //!
 //! [`Scalar`] is public because emission sites outside this crate need the
 //! same rendering without `std`: `leviculum-std` re-exports it as
-//! `event_log::Scalar`, and the `lnmsg` core renders its user-chosen fields
+//! `event_log::Scalar`, and the `loquax` core renders its user-chosen fields
 //! through it on the firmware target too.
 
 /// Display wrapper that renders any string as a single event-log token:

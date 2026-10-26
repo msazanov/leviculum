@@ -1,7 +1,7 @@
 //! The browser's core: the model, [`update()`], the [`Effect`]s, and the
 //! browser's own input and geometry types.
 //!
-//! The rule this module exists for (`docs/src/concepts/lnmsg-architecture.md`,
+//! The rule this module exists for (`docs/src/concepts/loquax-architecture.md`,
 //! "the core must not know it has a terminal", Codeberg #219): nothing in here
 //! imports `crossterm`, `ratatui` or any other terminal crate. Events come in
 //! as [`AppEvent`], effects go out as [`Effect`], and a frontend is a

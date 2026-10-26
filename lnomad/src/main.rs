@@ -196,7 +196,7 @@ async fn main() -> ExitCode {
         },
     };
 
-    // Resolve the colour tier once, by the ladder of lnmsg-keys-and-layout.md
+    // Resolve the colour tier once, by the ladder of loquax-keys-and-layout.md
     // section 5, "Colour": `--no-color` and `NO_COLOR`, then `--color`, then
     // `COLORTERM` and `TERM`. Threaded into both the print sink and the
     // interactive TUI.

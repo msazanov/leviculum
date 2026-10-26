@@ -53,7 +53,7 @@ With a picture focused (`Tab`), `Enter` saves it to the download directory and `
 :   Disable ANSI colour in the rendered output. Also suppresses inline images: a picture painted out of coloured blocks is not what a reader asking for no colour had in mind. **NO_COLOR** set and not empty does the same.
 
 **--theme** *theme*
-:   Colour theme for the interactive UI: `auto` detects the terminal background (dark when it does not answer), `light` and `dark` force a theme; `t` swaps them while browsing. Ignored with **--print** and when output is not a terminal (default: `auto`). **lnomad** has no settings file, so unlike **lnmsg**(1) there is no `theme` key.
+:   Colour theme for the interactive UI: `auto` detects the terminal background (dark when it does not answer), `light` and `dark` force a theme; `t` swaps them while browsing. Ignored with **--print** and when output is not a terminal (default: `auto`). **lnomad** has no settings file, so unlike **loquax**(1) there is no `theme` key.
 
 **--color** *tier*
 :   Terminal colour tier. `auto` picks true colour when `COLORTERM` is `truecolor` or `24bit`, the xterm-256 palette when `TERM` contains `256color`, no colour when `TERM` is `dumb` or unset, and the sixteen ANSI colours otherwise; `truecolor`, `256` and `16` force the tier. A page's own colours are drawn at the nearest the tier has; in 16 colours inline pictures fall back to their text line. **--no-color** and **NO_COLOR** still override this (default: `auto`).

@@ -89,7 +89,7 @@ GRAPHS = [
         # published crates (leviculum-cli, lnomad, lblogd, lnflash) share
         # nearly their whole graph, and four runs would have to be merged
         # by hand afterwards. The extra members this pulls in
-        # (leviculum-proxy, leviculum-lxmf-node, lnmsg, leviculum-ffi) add
+        # (leviculum-proxy, leviculum-lxmf-node, loquax, leviculum-ffi) add
         # crates that are not in any published binary today — an
         # over-inclusive notice list, which is harmless, and which stays
         # correct on the day one of them starts shipping.

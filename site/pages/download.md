@@ -21,12 +21,12 @@ Each file has a `.sha256` beside it. The second link is the same file on Codeber
 - [lnomad-nightly-amd64.deb](https://leviculum.network/releases/nightly/latest/lnomad-nightly-amd64.deb) ([sha256](https://leviculum.network/releases/nightly/latest/lnomad-nightly-amd64.deb.sha256)), mirror: [Codeberg](https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/lnomad-nightly-amd64.deb) ([sha256](https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/lnomad-nightly-amd64.deb.sha256))
 - [lnomad-nightly-arm64.deb](https://leviculum.network/releases/nightly/latest/lnomad-nightly-arm64.deb) ([sha256](https://leviculum.network/releases/nightly/latest/lnomad-nightly-arm64.deb.sha256)), mirror: [Codeberg](https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/lnomad-nightly-arm64.deb) ([sha256](https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/lnomad-nightly-arm64.deb.sha256))
 
-## Messenger: `lnmsg`
+## Messenger: `loquax`
 
-`lnmsg send` for scripts, `lnmsg tui` for people.
+`loquax send` for scripts, `loquax tui` for people.
 
-- [lnmsg-nightly-amd64.deb](https://leviculum.network/releases/nightly/latest/lnmsg-nightly-amd64.deb) ([sha256](https://leviculum.network/releases/nightly/latest/lnmsg-nightly-amd64.deb.sha256)), mirror: [Codeberg](https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/lnmsg-nightly-amd64.deb) ([sha256](https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/lnmsg-nightly-amd64.deb.sha256))
-- [lnmsg-nightly-arm64.deb](https://leviculum.network/releases/nightly/latest/lnmsg-nightly-arm64.deb) ([sha256](https://leviculum.network/releases/nightly/latest/lnmsg-nightly-arm64.deb.sha256)), mirror: [Codeberg](https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/lnmsg-nightly-arm64.deb) ([sha256](https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/lnmsg-nightly-arm64.deb.sha256))
+- [loquax-nightly-amd64.deb](https://leviculum.network/releases/nightly/latest/loquax-nightly-amd64.deb) ([sha256](https://leviculum.network/releases/nightly/latest/loquax-nightly-amd64.deb.sha256)), mirror: [Codeberg](https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/loquax-nightly-amd64.deb) ([sha256](https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/loquax-nightly-amd64.deb.sha256))
+- [loquax-nightly-arm64.deb](https://leviculum.network/releases/nightly/latest/loquax-nightly-arm64.deb) ([sha256](https://leviculum.network/releases/nightly/latest/loquax-nightly-arm64.deb.sha256)), mirror: [Codeberg](https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/loquax-nightly-arm64.deb) ([sha256](https://codeberg.org/Lew_Palm/leviculum/releases/download/nightly/loquax-nightly-arm64.deb.sha256))
 
 ## Blog server: `lblogd`
 
