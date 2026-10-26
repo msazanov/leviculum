@@ -59,7 +59,7 @@ Concretely:
   (right, lower). `Tab` and `Shift-Tab` cycle; a click focuses.
 - **In the conversation and message panes**, `lnomad`'s keymap applies
   unchanged: the scroll rows verbatim
-  (`SCROLL_ROWS`, `leviculum-ui/src/keymap.rs:594`), so `j`/`k`, `Ctrl-n`/`Ctrl-p`, arrows,
+  (`SCROLL_ROWS`, `leviculum-ui/src/keymap.rs:646`), so `j`/`k`, `Ctrl-n`/`Ctrl-p`, arrows,
   `Ctrl-f`/`Ctrl-b`, `Ctrl-v`/`Alt-v`, `Ctrl-d`/`Ctrl-u`, `g`/`G`,
   `Home`/`End` and the wheel all work, in all four idioms, for free.
 - **In the compose pane**, plain keys type. Only `Ctrl-` and `Alt-` chords
@@ -240,6 +240,19 @@ the terminal its own selection back. The OSC 52 sequence and the rule a
 link is followed by are `lnomad`'s, moved to `leviculum-ui` so both
 programs read one copy. Its section 5, "What the mouse does", lists where
 the screen differs from the table.
+
+### Built 2026-10-26, the search
+
+1041 (#232) is slice 4 of [keys, mouse and layout](loquax-keys-and-layout.md),
+section 7: `/` or `Ctrl-s` turns the list pane into the search, its field
+on top and the results under it as the query is typed, conversations by
+name and then this session's messages by text, each most recent first,
+the first match marked between `«` and `»`. A result opens with `Enter` or
+a click, a message's conversation at that message with the match marked in
+its block; `n`/`N` and `Ctrl-s`/`Ctrl-r` step the matches in place, and
+`Esc` brings the list back. The footer while it is open is the search's
+own, from the same table. Its section 5, "Built 2026-10-26, the search",
+lists where the screen differs from the mockup.
 
 The second round on the screen, the full key table (vi, Emacs, the mail
 and the chat programs side by side, per pane), the mouse, the chat layout

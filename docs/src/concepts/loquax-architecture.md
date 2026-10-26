@@ -16,7 +16,7 @@ them is table-driven.
 
 **What is table-driven.** The scroll rows. When this page was written they
 were `SCROLL_KEYS` in `lnomad/src/app/event.rs`; since leviculum 1030 they are
-`SCROLL_ROWS` (`leviculum-ui/src/keymap.rs:594`), shared with `loquax`. A row
+`SCROLL_ROWS` (`leviculum-ui/src/keymap.rs:646`), shared with `loquax`. A row
 is a `Row { desc, group, spellings }` whose chords each carry a modifier
 class (`Mods::{Any, Plain, Ctrl, Alt, Exact}`,
 `leviculum-ui/src/keymap.rs:92`). One row carries the vi and the emacs and
@@ -30,7 +30,7 @@ shows are derived from those chords:
 
 Resolution takes the most specific matching chord, the first among equals,
 which for these rows is the first-match scan `lnomad` always had
-(`best`, `leviculum-ui/src/keymap.rs:517`; `key_to_scroll`,
+(`best`, `leviculum-ui/src/keymap.rs:569`; `key_to_scroll`,
 `lnomad/src/app/event.rs:1924`). The table is read by both the key handler
 and the help overlay (`lnomad/src/app/chrome.rs:406`).
 

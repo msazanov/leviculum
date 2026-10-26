@@ -14,7 +14,9 @@ The table in section 3, the four changes to slice one it asks for
 1 of section 7, the keymap, is built (leviculum 1030). The layout in
 section 5 is Lew's (2026-10-26: Signal's shape in text mode, ours right,
 theirs left) and slice 2, the chat layout, is built in monochrome
-(leviculum 1033; section 5, "Built", names where it differs). The slice
+(leviculum 1033; section 5, "Built", names where it differs). Slice 4,
+the search, is built (leviculum 1041; section 5, "Built 2026-10-26, the
+search", names where it differs). The slice
 order in section 7 is the plan the later slices are ordered from. The
 colour part of section 5 ("Colour") is proposed, not decided.
 
@@ -23,7 +25,7 @@ colour part of section 5 ("Colour") is proposed, not decided.
 `lnomad` is operable with the mouse like a classic browser, with the
 browser's keyboard, and with the typical Emacs and vi commands, all at
 once: one keymap whose rows carry the vi, Emacs and arrow spellings of the
-same motion side by side (`SCROLL_ROWS`, `leviculum-ui/src/keymap.rs:594`,
+same motion side by side (`SCROLL_ROWS`, `leviculum-ui/src/keymap.rs:646`,
 which were `lnomad`'s own `SCROLL_KEYS` until the keymap slice;
 the mechanism is described under [architecture](loquax-architecture.md),
 section 1). `loquax` takes the principle over, with three substitutions:
@@ -244,7 +246,7 @@ and the palette finds the action by the chat program's word too (`new
 chat`, `find`).
 
 **`:q` quits for free.** The palette's fuzzy match is a subsequence test
-(`fuzzy_match`, `leviculum-ui/src/commands.rs:99`), and `quit` is the only
+(`fuzzy_match`, `leviculum-ui/src/commands.rs:103`), and `quit` is the only
 palette name containing a `q`, so `:`, `q`, `Enter` quits as a vi user
 expects. That stays true only while it is tested, so the keymap slice
 pins it.
@@ -532,7 +534,9 @@ frames are pinned at both mockup sizes: from the model in
 daemon in `tui_chat.frames`. Where they differ from the mockups:
 
 - **No search row and no pinned rule.** The list starts at its first
-  conversation. Search is slice 4, pinning needs history (slice 6).
+  conversation. Pinning needs history (slice 6); the search came with
+  slice 4 and its way in is on the list's bottom border ("Built
+  2026-10-26, the search", below).
 - **Names are the address**, `<9c31e0a2…>`, everywhere a name stands, and
   every peer is `unknown`, until slice 5.
 - **The list's title is our own address** (`loquax afbda7b3`), as before,
@@ -562,6 +566,61 @@ daemon in `tui_chat.frames`. Where they differ from the mockups:
   until the history slice the device holds no other time, and a peer's
   clock is not ours to show. A key script pins the clock with a `clock`
   step.
+
+### Built 2026-10-26, the search (leviculum 1041)
+
+The search is built (c065767c, 7a4f57f8) in `loquax/src/ui/search.rs`:
+the matcher, a case-insensitive substring test over the conversation names
+(the short-hash form until slice 5) and this session's message bodies,
+and the list pane it turns into. `/` in the list and the messages,
+`Ctrl-s` everywhere and `Ctrl-Shift-F` under the enhancement protocol
+open it with the cursor in its field; every keystroke there runs the
+matcher again, and an empty field shows the plain list under it. The
+results are two groups, `CONVERSATIONS` and `MESSAGES` with their counts,
+each most recent first, two rows a result: who and when, then the preview
+with the first match between `«` and `»`, cut from the left where the
+match lies past the row. `Tab` goes from the field to the results, `Enter`
+or a click opens one, and while the search is open `n`/`N` and
+`Ctrl-s`/`Ctrl-r` step the matches: rows in the field and the results,
+messages of the open conversation in the conversation, round its ends with
+a toast. `Esc` from the field or the results closes it. The frames are
+pinned from the model at both mockup sizes in
+`loquax/tests/fixtures/tui_search.frames` and from a session against a
+daemon in `tui_search_session.frames`. Where it differs from the mockup
+and the element text above:
+
+- **`/ search` is on the list's bottom border**, right-aligned, not the
+  list's top row: at 80 columns the title has no room for it beside our
+  own address, and a row would cost the list a row. A click on it opens
+  the search. While the search is open the pane's title is `Search` with
+  `esc closes` on its border, as the mockup has it, and the hint is gone.
+- **A conversation matches by its name only.** The mockup's
+  `CONVERSATIONS` rows show the term in their last line, which a name
+  match does not give; a conversation result marks the match in its name
+  (`<«4f4f»4f4f…>`) over its last line unmarked. A message whose
+  conversation also matches by name is in both groups.
+- **Moving through the results does not open the conversation**; `Enter`
+  or a click does, and the search stays open, so `n` goes on in the
+  opened conversation. `Esc` there goes back to the results, as it backs
+  out of every pane, and `Esc` in the results or the field closes the
+  search; the conversation keeps what it shows.
+- **Every matching block is marked in place**, its first match, while the
+  search is open: the marks are part of the drawn text, so a drag over a
+  marked block copies them with it.
+- **The footer is the table's, per focus.** In the field it is `Enter
+  open`, `Ctrl-s / Ctrl-r next, previous`, `Tab to the results`, `Esc
+  close search`, then the palette, the help and `Ctrl-q quit` as room
+  allows; in the results `n / N next, previous` joins it. A row shows a
+  pair of directions as one button (`footer_spelled`,
+  `leviculum-ui/src/keymap.rs`); a second live spelling and `Tab to the
+  results` are the first to drop, so at 80 columns the field's footer is
+  `Enter open │ Ctrl-s / Ctrl-r next, previous │ Esc close search │
+  Ctrl-q quit`.
+- **`Ctrl-r` fetches only outside a search**, because inside one it is the
+  previous match; `F5` fetches always. `Ctrl-s` in compose goes back to
+  the field, and steps nothing.
+- **Times are this session's**, as everywhere on the screen, and the
+  header's path half is still missing (section 5, "Built", above).
 
 ### Colour
 
@@ -689,7 +748,7 @@ first rung it is.
 - a palette action `theme` toggles for the session, the way `t` calls
   `toggle_theme` in lnomad (`lnomad/src/app/event.rs:697`); no key, the
   keymap is decided. Its toast names the theme it turned to
-  (`loquax/src/ui.rs:1394`).
+  (`loquax/src/ui.rs:1616`).
 
 #### 3. What colour carries and what it must not carry alone
 
@@ -1016,8 +1075,10 @@ answers what a cell is from the rectangles, the view and the laid-out
 rows the renderer draws, so the model's tests click the cells a reader
 sees. Where it differs from the table:
 
-- **Not there yet:** `+` in the list's title and `/ search`, whose
-  targets are slices 4 and 5 below; `f` hints for links.
+- **Not there yet:** `+` in the list's title, whose target is slice 5
+  below; `f` hints for links. `/ search` came with slice 4, on the list's
+  bottom border, and a click on a result opens it ("Built 2026-10-26, the
+  search", above).
 - **The wheel over the list** steps the conversation, a notch at a time:
   the list has no view of its own, it scrolls just far enough to show the
   selected one. Over the conversation it moves the view three rows and
@@ -1134,9 +1195,12 @@ layout's.
    conversation, a mark and `send`. *1001 phase:* none of its own; the
    send by click is the same send, so a script variant of phase 1 that
    sends with `click` on `send` is enough.
-4. **Search.** The search field, results over conversations and this
-   session's messages, `n`/`N`, `Ctrl-s`/`Ctrl-r`, the hit marked in
-   place. Depends on 2 (the results take the list pane). *Acceptance:* unit
+4. **Search.** *Done 2026-10-26, leviculum 1041 (c065767c, 7a4f57f8);
+   section 5, "Built 2026-10-26, the search", names the differences.
+   Open: the 1001 phase, periculum's.* The search field, results over
+   conversations and this session's messages, `n`/`N`,
+   `Ctrl-s`/`Ctrl-r`, the hit marked in place. Depends on 2 (the results
+   take the list pane). *Acceptance:* unit
    tests over the matcher and the result order; a snapshot of the 120 x 40
    search mockup's structure. *1001 phase:* Alice searches a word of Bob's
    reply and lands on that message.
