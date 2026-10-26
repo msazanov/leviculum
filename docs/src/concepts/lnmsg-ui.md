@@ -161,7 +161,14 @@ In:
 - `lnmsg tui --script <file>` runs a key script against the real engine and
   writes the frames it asks for to a file; `lnmsg/tests/tui_snapshot.rs`
   pins a session (open, type two lines, send, `○` to `✓`, a two-line
-  reply) that way; a script's `newline` step is `Alt-Enter`.
+  reply) that way; a script's `newline` step is `Alt-Enter`. A script
+  ticks only when it says so: `tick [n]`, or `sleep <ms>` (up to 60000),
+  which reads the engine every 20 ms as the idle terminal does and applies
+  one tick per 250 ms of its own length, however long the host took.
+  `until leg <direct|propagated> [secs]` waits for the runner to report
+  that leg for the newest sent message, so `until leg direct 5` then
+  `sleep 2500` draws `me (direct 2 s):` on every run (1014, the second
+  pinned session in `tui_snapshot.rs`).
 
 Not in, and open: history (lnmsg keeps no message store yet, so the
 screen holds this session's messages and says so), trust states, the
@@ -317,7 +324,14 @@ story in words, at `info` for lnmsg's targets (`RUST_LOG` replaces the
 filter): one `SEND leg= to= state= elapsed_ms=` line per step of each leg
 (`path_wait`, `queued`, `sending`, `sent`, `proof`, `no_proof`, `failed`),
 `PATH found to= hops= requests= wait_ms=` or `PATH not_found`, and one
-`RPC path_table` line per call to the daemon with its result.
+`RPC path_table` line per call to the daemon with its result. Leaving
+gives a running send up to a second to read what the engine already said,
+so a script that quits on the proof still logs the leg's `sending` and
+`proof` (1014); a send still waiting on the network is dropped after it.
+
+A toast too long for one row wraps at the words to up to three rows, the
+box growing upward from the footer, and cuts what is left with `…`: a send
+that failed both ways names both legs' reasons on an 80-column screen.
 
 The timeline itself:
 
