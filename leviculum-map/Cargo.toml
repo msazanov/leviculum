@@ -1,0 +1,28 @@
+[package]
+name = "leviculum-map"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "The map core: region files, Web Mercator, the viewport, tile selection, layer profiles and pins, drawn through leviculum-mapfill (#474)"
+# A library for the workspace's own programs, not published on its own.
+publish = false
+
+[lints.rust]
+unsafe_code = "deny"
+
+[features]
+# `std` adds only a `Storage` for `std::fs::File`, so a desktop frontend
+# reads a region from disk without loading it whole. The rest is `no_std`
+# with `alloc`, held there by `just map-core-no-std`.
+std = []
+
+[dependencies]
+leviculum-mapfill = { path = "../leviculum-mapfill" }
+embedded-graphics = "0.8"
+# Pure-Rust f64 maths for the latitude half of the projection (`tan`, `log`,
+# `atan`, `sinh`), which `core` does not have. Already in the lock through
+# num-traits. Used per pin and per viewport change, never per vertex.
+libm = "0.2"

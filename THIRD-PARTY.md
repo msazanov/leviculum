@@ -74,4 +74,5 @@ and repository URL; this table is where the difference is recorded.
 
 | Path | Origin | Licence | Role |
 |---|---|---|---|
+| `leviculum-map/fixtures/firenze.lmr` | OpenStreetMap, © OpenStreetMap contributors, via the Protomaps Florence sample archive (six tiles, z11 to z15) | ODbL 1.0, attribution in `leviculum-map/fixtures/README.md` and inside the file | Test fixture of the map core's region reader and draw |
 | `leviculum-mapfill/fixtures/firenze-z15.lmf` | OpenStreetMap, © OpenStreetMap contributors, via the Protomaps Florence sample archive (four z15 tiles) | ODbL 1.0, attribution in `leviculum-mapfill/fixtures/README.md` | Test fixture of the map filler, and the geometry the M9 measurement binary (`leviculum-mapfill/m9`, never shipped) carries in flash |

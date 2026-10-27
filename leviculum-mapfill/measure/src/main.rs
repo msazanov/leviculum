@@ -1,6 +1,7 @@
 //! Host harness of the map measurement (#474).
 //!
-//! `extract <tiles> <fixture>` decodes the z15 Protomaps tiles a 240x320
+//! `extract <tiles> <fixture>` decodes, through the map tool's MVT decoder
+//! (`leviculum-map-tool`, `mvt`), the z15 Protomaps tiles a 240x320
 //! view centred on Santa Maria del Fiore touches (`<tiles>/15_<x>_<y>.mvt.gz`,
 //! fetched as in `docs/drafts/map-measurement-2026-10.md`) and writes the
 //! flat fixture the device binary carries in flash.
@@ -11,21 +12,19 @@
 //! number: the counts, one phase-timed run and the median of 50 untimed
 //! runs.
 
-use std::io::Read;
 use std::path::Path;
 use std::time::Instant;
 
 use embedded_graphics::pixelcolor::raw::RawU16;
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::*;
+use leviculum_map_tool::mvt;
+use leviculum_map_tool::pmtiles::decompress;
 use leviculum_mapfill::fill::{Edge, Scratch};
-use leviculum_mapfill::fixture::{write, Fixture, Kind};
+use leviculum_mapfill::fixture::{write, Fixture};
 use leviculum_mapfill::frame::Frame;
 use leviculum_mapfill::render::{render, Clock, NoClock, RenderStats, Work};
-use leviculum_mapfill::style::{Class, Profile};
-use prost::Message;
-use tinymvt::geometry::GeometryDecoder;
-use tinymvt::vector_tile::Tile;
+use leviculum_mapfill::style::Profile;
 
 type Res<T> = Result<T, Box<dyn std::error::Error>>;
 
@@ -35,41 +34,14 @@ const ZOOM: u8 = 15;
 /// Santa Maria del Fiore, the first measurement's view centre.
 const CENTRE: (f64, f64) = (43.77310, 11.25600);
 const EXTENT: i64 = 4096;
+/// PMTiles' compression code for gzip, what the fetched `.mvt.gz` tiles carry.
+const GZIP: u8 = 2;
 const TILE_PX: i64 = 256;
 
 /// Capacities the device binary uses as well (`m9/src/main.rs`).
 const EDGES: usize = 4096;
 const POINTS: usize = 4096;
 const RINGS: usize = 1024;
-
-fn class_of(layer: &str, kind: &str) -> Option<(Kind, Class)> {
-    use Class::*;
-    Some(match layer {
-        "earth" => (Kind::Area, Earth),
-        "landuse" => (
-            Kind::Area,
-            match kind {
-                "garden" | "grass" | "park" | "playground" | "pitch" | "greenfield" => Park,
-                "pedestrian" => Pedestrian,
-                _ => Urban,
-            },
-        ),
-        "natural" => (Kind::Area, if kind == "sand" { Sand } else { Park }),
-        "water" => (Kind::Area, Water),
-        "buildings" => (Kind::Area, Building),
-        "roads" => (
-            Kind::Line,
-            match kind {
-                "highway" | "major_road" | "medium_road" => MajorRoad,
-                "path" => Path,
-                _ => MinorRoad,
-            },
-        ),
-        "transit" => (Kind::Line, Rail),
-        "physical_line" => (Kind::Line, Waterway),
-        _ => return None,
-    })
-}
 
 /// The view's top-left corner in global tile units at [`ZOOM`].
 fn view_origin_units() -> (i64, i64) {
@@ -105,61 +77,29 @@ fn extract(tiles: &Path, out: &Path) -> Res<()> {
     let mut feats: Vec<write::Feature> = Vec::new();
     let (mut verts, mut skipped) = (0usize, 0usize);
     for (ti, (tx, ty, p)) in names.iter().enumerate() {
-        let gz = std::fs::read(p)?;
-        let mut raw = Vec::new();
-        flate2::read::GzDecoder::new(&gz[..]).read_to_end(&mut raw)?;
-        let tile = Tile::decode(&raw[..])?;
+        let raw = decompress(&std::fs::read(p)?, GZIP).map_err(|e| e.to_string())?;
         offsets.push((
             i32::try_from(i64::from(*tx) * EXTENT - ox)?,
             i32::try_from(i64::from(*ty) * EXTENT - oy)?,
         ));
-        for l in &tile.layers {
-            if i64::from(l.extent.unwrap_or(4096)) != EXTENT {
-                return Err(format!("layer {} extent {:?}", l.name, l.extent).into());
+        let decoded = mvt::decode(&raw).map_err(|e| e.to_string())?;
+        skipped += decoded.skipped;
+        for f in decoded.features {
+            let mut rs = Vec::new();
+            for r in f.parts.into_iter().flatten() {
+                verts += r.len();
+                rs.push(
+                    r.iter()
+                        .map(|p| Ok((i16_of(p[0])?, i16_of(p[1])?)))
+                        .collect::<Res<Vec<_>>>()?,
+                );
             }
-            let kidx = l.keys.iter().position(|k| k == "pmap:kind");
-            for f in &l.features {
-                let mut kind = "";
-                if let Some(ki) = kidx {
-                    for c in f.tags.chunks(2) {
-                        if c[0] as usize == ki {
-                            kind = l
-                                .values
-                                .get(c[1] as usize)
-                                .and_then(|v| v.string_value.as_deref())
-                                .unwrap_or("");
-                        }
-                    }
-                }
-                let Some((k, class)) = class_of(&l.name, kind) else {
-                    skipped += 1;
-                    continue;
-                };
-                let mut d = GeometryDecoder::new(&f.geometry);
-                let rings: Vec<Vec<[i32; 2]>> = match (f.r#type, k) {
-                    (Some(3), Kind::Area) => d.decode_polygons()?.into_iter().flatten().collect(),
-                    (Some(2), Kind::Line) => d.decode_linestrings()?,
-                    _ => {
-                        skipped += 1;
-                        continue;
-                    }
-                };
-                let mut rs = Vec::new();
-                for r in rings {
-                    verts += r.len();
-                    rs.push(
-                        r.iter()
-                            .map(|p| Ok((i16_of(p[0])?, i16_of(p[1])?)))
-                            .collect::<Res<Vec<_>>>()?,
-                    );
-                }
-                feats.push(write::Feature {
-                    kind: k,
-                    class,
-                    tile: u8::try_from(ti)?,
-                    rings: rs,
-                });
-            }
+            feats.push(write::Feature {
+                kind: f.kind,
+                class: f.class,
+                tile: u8::try_from(ti)?,
+                rings: rs,
+            });
         }
     }
     // Draw order: by class, stable, so tile order holds within a class.

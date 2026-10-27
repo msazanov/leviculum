@@ -1,0 +1,37 @@
+//! `leviculum-map`: the map core every frontend draws through (Codeberg
+//! #474, `docs/src/concepts/loquax-map.md`, section 3).
+//!
+//! - [`region`]: the region file, a tile pyramid of `leviculum-mapfill`'s
+//!   flat geometry behind an index, read in place through a [`Storage`].
+//! - [`mercator`]: Web Mercator between degrees and a 32-bit world
+//!   coordinate.
+//! - [`viewport`]: centre, zoom, pan, fit, and the tiles a view needs.
+//! - [`profile`]: which classes each zoom of a region keeps, and how its
+//!   geometry was simplified.
+//! - [`pins`]: pins and their labels placed in a view, as data.
+//! - [`draw`]: the tiles of one view drawn into any `DrawTarget`, class by
+//!   class across the tiles, through `leviculum-mapfill`.
+//! - [`style`]: the colour tables, `leviculum-mapfill`'s own.
+//!
+//! `no_std` with `alloc`; the feature `std` adds only a [`Storage`] for a
+//! file. Text is never drawn here: labels are data a frontend places.
+
+#![no_std]
+
+extern crate alloc;
+#[cfg(feature = "std")]
+extern crate std;
+
+pub mod draw;
+pub mod mercator;
+pub mod pins;
+pub mod profile;
+pub mod region;
+pub mod viewport;
+
+/// The colour tables and classes, one table for the map and the filler.
+pub use leviculum_mapfill::style;
+
+pub use mercator::{LatLon, World};
+pub use region::{Region, RegionError, Storage, TileId};
+pub use viewport::Viewport;

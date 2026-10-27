@@ -33,18 +33,18 @@ Linked into lnsd, lnstest, lncp, lnstatus, lnomad, lblogd and
 lnflash. Built for x86_64-unknown-linux-musl and
 aarch64-unknown-linux-musl.
 
-368 third-party crates, by licence:
+380 third-party crates, by licence:
 
-  Apache-2.0                   253
+  Apache-2.0                   263
   BSD-2-Clause                 1
   BSD-3-Clause                 6
   CC0-1.0                      1
   CDLA-Permissive-2.0          2
   ISC                          5
-  MIT                          98
+  MIT                          99
   MPL-2.0                      2
   Unicode-3.0                  1
-  Zlib                         1
+  Zlib                         2
   bzip2-1.0.6                  1
 
 ------------------------------------------------------------------------
@@ -506,6 +506,7 @@ Applies to:
   pin-project 1.1.13
   pin-project-internal 1.1.13
   pin-project-lite 0.2.16
+  prettyplease 0.2.37
   proc-macro2 1.0.105
   quantette 0.5.1
   quote 1.0.43
@@ -885,12 +886,14 @@ Applies to:
   event-listener-strategy 0.5.4
   fastrand 2.3.0
   find-msvc-tools 0.1.9
+  fixedbitset 0.5.7
   flate2 1.1.9
   fnv 1.0.7
   form_urlencoded 1.2.2
   fs-err 3.3.1
   futures-lite 2.6.1
   hash32 0.3.1
+  hashbrown 0.15.5
   hashbrown 0.16.1
   hashbrown 0.17.1
   heapless 0.8.0
@@ -907,6 +910,7 @@ Applies to:
   mime 0.3.17
   mockall 0.13.1
   mockall_derive 0.13.1
+  multimap 0.10.1
   num-bigint 0.4.6
   num-derive 0.4.2
   num-integer 0.1.46
@@ -919,12 +923,18 @@ Applies to:
   parking_lot 0.12.5
   parking_lot_core 0.9.12
   percent-encoding 2.3.2
+  petgraph 0.8.3
   piper 0.2.5
   pkg-config 0.3.34
   png 0.18.1
   polling 3.11.0
+  prost 0.14.4
+  prost-build 0.14.4
+  prost-derive 0.14.4
+  prost-types 0.14.4
   rayon 1.12.0
   rayon-core 1.13.0
+  regex 1.12.3
   regex-automata 0.4.13
   regex-syntax 0.8.8
   ring 0.17.14
@@ -11147,6 +11157,23 @@ MIT — MIT License
 ------------------------------------------------------------------------
 
 Applies to:
+  tinymvt 0.3.0
+
+MIT License
+
+Copyright (c) 2024 Taku Fukada
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+------------------------------------------------------------------------
+MIT — MIT License
+------------------------------------------------------------------------
+
+Applies to:
   tokio 1.49.0
   tokio-stream 0.1.19
   tokio-util 0.7.18
@@ -12230,6 +12257,7 @@ Zlib — zlib License
 ------------------------------------------------------------------------
 
 Applies to:
+  foldhash 0.1.5
   foldhash 0.2.0
 
 Copyright (c) 2024 Orson Peters

@@ -42,8 +42,9 @@ when its centre is.
 
 ## Host harness: `measure/`
 
-Its own workspace, so its protobuf decoder stays out of the shipping
-graph.
+Its own workspace. It decodes tiles through `leviculum-map-tool`'s MVT
+decoder, the tree's only one, which it carried itself until the region
+tool needed it too (#474, 1062); `extract` still writes the same bytes.
 
 ```sh
 cd leviculum-mapfill/measure
