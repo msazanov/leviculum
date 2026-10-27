@@ -7,6 +7,10 @@
 //! class across all the tiles of the view, the order a single fixture of
 //! the whole view had in the measurement. That needs every tile of the view
 //! at hand at once, a few tens of kilobytes at z15 under profile 1.
+//!
+//! The line widths follow the view zoom ([`crate::profile::line_widths`]),
+//! and [`Ink::Lines`] draws the lines alone in one colour, for a terminal
+//! that has one colour a cell and no fill (braille).
 
 use alloc::vec::Vec;
 
@@ -14,7 +18,7 @@ use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::*;
 use leviculum_mapfill::fill::Scratch;
 use leviculum_mapfill::fixture::Fixture;
-use leviculum_mapfill::render::{Clock, Pass, Placement, RenderStats, Work};
+use leviculum_mapfill::render::{Clock, Look, Pass, Placement, RenderStats, Work};
 use leviculum_mapfill::style::{Class, Profile};
 
 use crate::region::{check_tile, Region, RegionError, Storage};
@@ -27,11 +31,35 @@ pub struct DrawTile<'a> {
     pub tile: ViewTile,
 }
 
-/// Draw `tiles` under `profile` into `target`, which is cleared first.
-/// `scratch` and `work` as `leviculum_mapfill::render::render` takes them.
+/// How a view is inked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ink {
+    /// Areas filled, lines in the colour table.
+    Colour,
+    /// Lines only, all in this colour, on the background.
+    Lines(Rgb565),
+}
+
+impl Ink {
+    /// The mapfill look of this ink for a view at zoom `z`.
+    pub fn look(self, z: u8) -> Look {
+        Look {
+            widths: crate::profile::line_widths(z),
+            mono: match self {
+                Self::Colour => None,
+                Self::Lines(c) => Some(c),
+            },
+        }
+    }
+}
+
+/// Draw `tiles` under `profile` into `target`, which is cleared first, in
+/// `ink` at the widths of the view's zoom. `scratch` and `work` as
+/// `leviculum_mapfill::render::render` takes them.
 pub fn draw<D, C>(
     tiles: &[DrawTile<'_>],
     profile: Profile,
+    ink: Ink,
     target: &mut D,
     scratch: &mut Scratch<'_>,
     work: &mut Work<'_>,
@@ -41,7 +69,11 @@ where
     D: DrawTarget<Color = Rgb565>,
     C: Clock,
 {
-    let mut pass = Pass::begin(target, scratch, clock)?;
+    // Every tile of one view is at the view's zoom less its overzoom.
+    let zoom = tiles
+        .first()
+        .map_or(0, |t| t.tile.id.z.saturating_add(t.tile.overzoom));
+    let mut pass = Pass::begin(target, scratch, clock)?.with_look(ink.look(zoom));
     let mut cursors: Vec<_> = tiles
         .iter()
         .map(|t| {

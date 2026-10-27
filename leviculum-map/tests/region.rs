@@ -4,7 +4,7 @@
 //! single-view fixture.
 
 use embedded_graphics::prelude::*;
-use leviculum_map::draw::{draw, draw_tiles};
+use leviculum_map::draw::{draw, draw_tiles, Ink};
 use leviculum_map::mercator::{project, LatLon};
 use leviculum_map::region::{Entry, Region, RegionError, TileId, ENTRY_LEN, HEADER_LEN};
 use leviculum_map::viewport::Viewport;
@@ -42,6 +42,7 @@ fn render(region: &Region<&[u8]>, zoom: u8, fb: &mut [u16]) -> (usize, RenderSta
     let Ok(st) = draw(
         &tiles,
         Profile::Full,
+        Ink::Colour,
         &mut frame,
         &mut scratch,
         &mut work,
@@ -83,9 +84,12 @@ fn the_fixture_opens_and_verifies() {
     assert!(r.fixture(z15).expect("tile").is_some());
 }
 
-/// The numbers a change to the cut, the filler, the stroker or the draw
-/// order moves. Background is the earth colour, so a pixel counted in the
-/// last column is one some feature other than earth painted.
+/// The numbers a change to the cut, the filler, the stroker, the draw
+/// order or the line widths moves. Background is the earth colour, so a
+/// pixel counted in the last column is one some feature other than earth
+/// painted. The per-zoom widths (1065) left z15 alone and thinned z13 from
+/// (10_732, 15_986, 40_763) stroked and 36_187 painted, z11 from
+/// (3044, 4717, 21_777) and 22_397.
 #[test]
 fn florence_region_draws_three_zooms() {
     let r = Region::from_bytes(FLORENCE).expect("open");
@@ -125,8 +129,8 @@ fn florence_region_draws_three_zooms() {
                 126,
                 10_301,
                 (1260, 2266, 78_167),
-                (10_732, 15_986, 40_763),
-                36_187
+                (10_651, 15_332, 33_138),
+                36_072
             ),
             (
                 11,
@@ -135,8 +139,8 @@ fn florence_region_draws_three_zooms() {
                 79,
                 5365,
                 (1832, 2809, 59_154),
-                (3044, 4717, 21_777),
-                22_397
+                (2952, 3632, 9574),
+                20_279
             ),
         ]
     );
@@ -196,6 +200,7 @@ fn survives(bytes: &[u8]) -> Result<(), RegionError> {
             let Ok(_) = draw(
                 &tiles,
                 Profile::Full,
+                Ink::Colour,
                 &mut frame,
                 &mut scratch,
                 &mut work,

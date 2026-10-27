@@ -96,6 +96,18 @@ impl Viewport {
         (i64::from(self.centre.x >> s), i64::from(self.centre.y >> s))
     }
 
+    /// The view's top-left corner in sub-pixels of the world at this zoom,
+    /// x not wrapped: it may be negative or past the world's width, which
+    /// is `1 << (12 + zoom)`. A drawer that places whole copies of the
+    /// world (the outline) starts here.
+    pub fn top_left_sub(&self) -> (i64, i64) {
+        let (cx, cy) = self.centre_sub();
+        (
+            cx - i64::from(self.width) * SUB / 2,
+            cy - i64::from(self.height) * SUB / 2,
+        )
+    }
+
     /// Where `w` lands, in sub-pixels from the view's top-left corner; x
     /// is the copy of `w` nearest the centre.
     pub fn to_screen_sub(&self, w: World) -> (i64, i64) {

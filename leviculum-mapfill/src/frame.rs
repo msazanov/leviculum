@@ -9,6 +9,20 @@ use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::*;
 use embedded_graphics::primitives::Rectangle;
 
+/// `c` as 8-bit red, green and blue, each channel's top bits repeated
+/// into its bottom ones so full intensity stays 255: the one conversion
+/// every consumer of a frame outside the panel (a PPM, a terminal picture)
+/// goes through.
+pub fn rgb888(c: Rgb565) -> [u8; 3] {
+    let v = RawU16::from(c).into_inner();
+    let (r, g, b) = ((v >> 11) & 31, (v >> 5) & 63, v & 31);
+    [
+        ((r << 3) | (r >> 2)) as u8,
+        ((g << 2) | (g >> 4)) as u8,
+        ((b << 3) | (b >> 2)) as u8,
+    ]
+}
+
 /// A `width` x `height` Rgb565 frame, rows top to bottom.
 pub struct Frame<'a> {
     px: &'a mut [u16],
@@ -31,6 +45,20 @@ impl<'a> Frame<'a> {
         // SAFETY: a `u16` slice is a valid byte slice of twice the length,
         // and `u8` has alignment 1.
         unsafe { core::slice::from_raw_parts(self.px.as_ptr().cast::<u8>(), self.px.len() * 2) }
+    }
+
+    /// Width and height in pixels.
+    pub fn dimensions(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+
+    /// The frame as packed 8-bit RGB, rows top to bottom, through
+    /// [`rgb888`], appended to `out`.
+    pub fn rgb888_into(&self, out: &mut impl Extend<u8>) {
+        for &px in self.px.iter() {
+            let c = Rgb565::from(RawU16::new(u16::from_be(px)));
+            out.extend(rgb888(c));
+        }
     }
 
     /// The colour at `(x, y)`, or `None` outside the frame.

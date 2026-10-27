@@ -6,9 +6,8 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use clap::{Parser, Subcommand};
-use embedded_graphics::pixelcolor::raw::RawU16;
 use embedded_graphics::prelude::*;
-use leviculum_map::draw::{draw, draw_tiles};
+use leviculum_map::draw::{draw, draw_tiles, Ink};
 use leviculum_map::mercator::{project, LatLon};
 use leviculum_map::region::{Bounds, Region};
 use leviculum_map::viewport::Viewport;
@@ -231,6 +230,7 @@ fn cmd_render(path: &Path, out: &Path, at: LatLon, zoom: u8, w: u32, h: u32) -> 
     let st = draw(
         &tiles,
         Profile::Full,
+        Ink::Colour,
         &mut frame,
         &mut scratch,
         &mut work,
@@ -242,18 +242,7 @@ fn cmd_render(path: &Path, out: &Path, at: LatLon, zoom: u8, w: u32, h: u32) -> 
         tiles.len(), st.features, st.culled, st.vertices, st.overflows, st.fill.pixels, st.stroke.pixels
     );
     let mut ppm = format!("P6\n{w} {h}\n255\n").into_bytes();
-    for y in 0..h {
-        for x in 0..w {
-            let c = frame.pixel(x, y).ok_or("pixel")?;
-            let v = RawU16::from(c).into_inner();
-            let (r, g, b) = ((v >> 11) & 31, (v >> 5) & 63, v & 31);
-            ppm.extend_from_slice(&[
-                ((r << 3) | (r >> 2)) as u8,
-                ((g << 2) | (g >> 4)) as u8,
-                ((b << 3) | (b >> 2)) as u8,
-            ]);
-        }
-    }
+    frame.rgb888_into(&mut ppm);
     std::fs::write(out, ppm)?;
     Ok(())
 }

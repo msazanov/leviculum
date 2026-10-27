@@ -90,6 +90,29 @@ pub fn area_color(c: Class) -> Rgb565 {
     }
 }
 
+/// A width in sub-pixels for each line class, waterway to rail in class
+/// order; 0 leaves the class out. The map core picks one per zoom band
+/// (`leviculum_map::profile::line_widths`).
+pub type LineWidths = [i32; 5];
+
+/// The widths of [`line_style`], the deep zooms' and every fixture's.
+pub const LINE_WIDTHS: LineWidths = [
+    3 * SUBPIXEL / 2,
+    SUBPIXEL,
+    5 * SUBPIXEL / 2,
+    4 * SUBPIXEL,
+    SUBPIXEL,
+];
+
+/// Class `c`'s width in `widths`; 0 for an area class.
+pub fn line_width(widths: &LineWidths, c: Class) -> i32 {
+    (c as usize)
+        .checked_sub(Class::Waterway as usize)
+        .and_then(|i| widths.get(i))
+        .copied()
+        .unwrap_or(0)
+}
+
 /// Line colours and widths in sub-pixels, the second table.
 pub fn line_style(c: Class) -> (Rgb565, i32) {
     match c {

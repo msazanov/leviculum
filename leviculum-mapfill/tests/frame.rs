@@ -28,3 +28,34 @@ fn pixels_go_out_high_byte_first() {
     assert_eq!(f.pixel(4, 0), None);
     assert!(Frame::new(&mut [0u16; 11], 4, 3).is_none());
 }
+
+/// The one RGB888 conversion: full channels stay 255, the colour tables'
+/// background comes back as the bytes it was written from, and a frame
+/// converts pixel by pixel in row order.
+#[test]
+fn rgb888_keeps_full_intensity_and_row_order() {
+    use leviculum_mapfill::frame::rgb888;
+    use leviculum_mapfill::style::BACKGROUND;
+    assert_eq!(rgb888(Rgb565::WHITE), [255, 255, 255]);
+    assert_eq!(rgb888(Rgb565::BLACK), [0, 0, 0]);
+    // 242, 239, 233 lose their low bits in Rgb565 and get them back from
+    // the top ones.
+    assert_eq!(rgb888(BACKGROUND), [247, 239, 239]);
+    let mut px = [0u16; 2];
+    let mut frame = Frame::new(&mut px, 2, 1).expect("frame");
+    let Ok(()) = Pixel(Point::new(1, 0), Rgb565::RED).draw(&mut frame);
+    let mut out = Vec::new();
+    frame.rgb888_into(&mut out);
+    assert_eq!(out, [0, 0, 0, 255, 0, 0]);
+}
+
+/// The width table the map core picks per zoom starts from the one
+/// `line_style` carries.
+#[test]
+fn the_default_widths_are_line_styles() {
+    use leviculum_mapfill::style::{line_style, line_width, Class, LINE_WIDTHS};
+    for c in Class::ALL {
+        let want = if c.is_area() { 0 } else { line_style(c).1 };
+        assert_eq!(line_width(&LINE_WIDTHS, c), want, "{c:?}");
+    }
+}

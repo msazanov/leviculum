@@ -15,8 +15,6 @@
 use std::path::Path;
 use std::time::Instant;
 
-use embedded_graphics::pixelcolor::raw::RawU16;
-use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::*;
 use leviculum_map_tool::mvt;
 use leviculum_map_tool::pmtiles::decompress;
@@ -176,18 +174,7 @@ impl Buffers {
 fn write_png(fb: &mut [u16], path: &Path) -> Res<()> {
     let frame = Frame::new(fb, W, H).ok_or("frame")?;
     let mut rgb = Vec::with_capacity((W * H * 3) as usize);
-    for y in 0..H {
-        for x in 0..W {
-            let c: Rgb565 = frame.pixel(x, y).ok_or("pixel")?;
-            let v = RawU16::from(c).into_inner();
-            let (r, g, b) = ((v >> 11) & 31, (v >> 5) & 63, v & 31);
-            rgb.extend_from_slice(&[
-                ((r << 3) | (r >> 2)) as u8,
-                ((g << 2) | (g >> 4)) as u8,
-                ((b << 3) | (b >> 2)) as u8,
-            ]);
-        }
-    }
+    frame.rgb888_into(&mut rgb);
     let file = std::io::BufWriter::new(std::fs::File::create(path)?);
     let mut enc = png::Encoder::new(file, W, H);
     enc.set_color(png::ColorType::Rgb);

@@ -9,8 +9,14 @@
 //! extent of 512 instead of 4096, Douglas-Peucker at one pixel and the
 //! landuse, natural and landcover areas under 16 square pixels dropped.
 //! From zoom 13 the extent stays 4096 and the tolerance is half a pixel.
+//!
+//! The line widths are not the cut's but the draw's, so they go by the view
+//! zoom, not the tile's ([`line_widths`]): the fixtures' widths are right at
+//! z15 and wrong at a region zoom, where a 4-pixel major road covers most
+//! of a 240-pixel view (leviculum 1062, the Frankfurt z10 and Germany z7
+//! renders).
 
-use crate::style::Class;
+use crate::style::{Class, LineWidths, LINE_WIDTHS};
 
 /// The profile of the first cut.
 pub const CUT_1: u8 = 1;
@@ -87,5 +93,31 @@ pub fn layers(id: u8, z: u8) -> Option<ZoomLayers> {
             thin_px2: 0,
         }),
         _ => None,
+    }
+}
+
+const PX: i32 = leviculum_mapfill::SUBPIXEL;
+
+/// The line widths a view at zoom `z` draws with, waterway to rail
+/// (`leviculum_mapfill::style::LineWidths`); 0 leaves the class out.
+///
+/// | view zoom | waterway | path | minor road | major road | rail |
+/// |---|---|---|---|---|---|
+/// | up to 8 | 1 | - | - | 1 | - |
+/// | 9, 10 | 1 | - | - | 1.5 | 1 |
+/// | 11, 12 | 1 | - | 1 | 2 | 1 |
+/// | 13, 14 | 1.5 | 1 | 2 | 3 | 1 |
+/// | 15 and deeper | 1.5 | 1 | 2.5 | 4 | 1 |
+///
+/// In pixels. Paths and minor roads go at the region zooms, where they
+/// were a white mesh over the whole Florence view at z11 and z12; nothing
+/// is thinner than one pixel, which the stroker would draw broken.
+pub fn line_widths(z: u8) -> LineWidths {
+    match z {
+        0..=8 => [PX, 0, 0, PX, 0],
+        9..=10 => [PX, 0, 0, 3 * PX / 2, PX],
+        11..=12 => [PX, 0, PX, 2 * PX, PX],
+        13..=14 => [3 * PX / 2, PX, 2 * PX, 3 * PX, PX],
+        _ => LINE_WIDTHS,
     }
 }

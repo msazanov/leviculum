@@ -10,7 +10,12 @@
 //!   geometry was simplified.
 //! - [`pins`]: pins and their labels placed in a view, as data.
 //! - [`draw`]: the tiles of one view drawn into any `DrawTarget`, class by
-//!   class across the tiles, through `leviculum-mapfill`.
+//!   class across the tiles, through `leviculum-mapfill`, in colour or as
+//!   lines alone, at the line widths of the view's zoom.
+//! - [`outline`]: the world outline, Natural Earth 1:110m land, where no
+//!   region covers the view.
+//! - [`choice`]: which installed region a view draws, and the zooms a
+//!   frontend offers.
 //! - [`style`]: the colour tables, `leviculum-mapfill`'s own.
 //!
 //! `no_std` with `alloc`; the feature `std` adds only a [`Storage`] for a
@@ -22,8 +27,10 @@ extern crate alloc;
 #[cfg(feature = "std")]
 extern crate std;
 
+pub mod choice;
 pub mod draw;
 pub mod mercator;
+pub mod outline;
 pub mod pins;
 pub mod profile;
 pub mod region;

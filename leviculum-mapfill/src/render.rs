@@ -11,7 +11,9 @@ use embedded_graphics::prelude::*;
 use crate::fill::{FillRule, FillStats, Filler, Scratch};
 use crate::fixture::{Feature, Fixture, Kind};
 use crate::stroke::stroke;
-use crate::style::{area_color, line_style, Profile, BACKGROUND};
+use crate::style::{
+    area_color, line_style, line_width, LineWidths, Profile, BACKGROUND, LINE_WIDTHS,
+};
 
 /// A free-running tick counter; differences are taken wrapping.
 pub trait Clock {
@@ -126,6 +128,31 @@ fn project_feature(
     Some((nr, (x0, y0, x1, y1), n))
 }
 
+/// How a pass inks what it draws: the line widths per class, and whether
+/// areas are filled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Look {
+    /// Each line class's width; 0 leaves the class out.
+    pub widths: LineWidths,
+    /// `Some`: lines only, all in this colour, and no area filled: the
+    /// terminal's braille backend, which has one colour a cell and no fill.
+    pub mono: Option<Rgb565>,
+}
+
+impl Look {
+    /// The colour tables at the fixtures' widths.
+    pub const DEFAULT: Self = Self {
+        widths: LINE_WIDTHS,
+        mono: None,
+    };
+}
+
+impl Default for Look {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
 /// One frame being drawn feature by feature: the filler, the view in
 /// sub-pixels, the clock's last reading and the counts so far.
 ///
@@ -136,6 +163,7 @@ pub struct Pass<'s, 'a> {
     filler: Filler<'s, 'a>,
     view: Bbox,
     prev: u32,
+    look: Look,
     /// What the pass drew so far.
     pub stats: RenderStats,
 }
@@ -169,8 +197,15 @@ impl<'s, 'a> Pass<'s, 'a> {
             filler: Filler::new(scratch, clip),
             view: (vl, vt, vr, vb),
             prev,
+            look: Look::DEFAULT,
             stats,
         })
+    }
+
+    /// The same pass inked by `look` instead of [`Look::DEFAULT`].
+    pub fn with_look(mut self, look: Look) -> Self {
+        self.look = look;
+        self
     }
 
     /// Draw one feature placed at `at`, if `profile` includes its class
@@ -188,17 +223,21 @@ impl<'s, 'a> Pass<'s, 'a> {
         D: DrawTarget<Color = Rgb565>,
         C: Clock,
     {
-        if !profile.includes(f.class) {
+        // A class the look leaves out is skipped as one the profile does:
+        // a line class at width 0, every area in the lines-only look.
+        let width = match f.kind {
+            Kind::Area if self.look.mono.is_some() => return Ok(()),
+            Kind::Area => 0,
+            Kind::Line => line_width(&self.look.widths, f.class),
+        };
+        if !profile.includes(f.class) || (f.kind == Kind::Line && width == 0) {
             return Ok(());
         }
         let st = &mut self.stats;
         let (vl, vt, vr, vb) = self.view;
         st.features += 1;
         let projected = project_feature(f, at, work);
-        let pad = match f.kind {
-            Kind::Area => 0,
-            Kind::Line => line_style(f.class).1,
-        };
+        let pad = width;
         let visible = projected.map(|(_, (x0, y0, x1, y1), n)| {
             n > 0 && x1 + pad >= vl && x0 - pad < vr && y1 + pad >= vt && y0 - pad < vb
         });
@@ -239,7 +278,7 @@ impl<'s, 'a> Pass<'s, 'a> {
                 self.prev = now;
             }
             Kind::Line => {
-                let (color, width) = line_style(f.class);
+                let color = self.look.mono.unwrap_or(line_style(f.class).0);
                 for &end in &work.ring_ends[..nr] {
                     let end = usize::from(end);
                     st.stroke += stroke(filler, &work.points[start..end], width, target, color)?;
