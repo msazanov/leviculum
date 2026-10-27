@@ -594,6 +594,10 @@ async fn main(spawner: Spawner) {
         cortex_m::asm::nop();
     }
     led.set_level(Level::High);
+    // How long the busy wait above held the executor, and with it the USB
+    // task, which has not run yet (order 1053): `[STACK] tag=post-init`
+    // is its start.
+    leviculum_firmware::boot_trace::log_stage("blink_done");
     // From here the LED is the feedback grammar's (order 892): a short
     // press blinks the battery, a held button blips at 2 s, a message for
     // this board blinks once. Active low (`boards/t114.rs`). The board has

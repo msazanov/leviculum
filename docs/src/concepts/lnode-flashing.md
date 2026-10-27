@@ -114,7 +114,7 @@ No estimate yet:
 `leviculum-nrf/src/boards/rak4631.rs:183`. Two CDC ports: interface 00
 is the debug log, interface 02 the Reticulum transport. Both IDs are
 squatted pid.codes test IDs, flagged as a TODO at
-`leviculum-nrf/src/usb.rs:126`. Heltec stock firmware uses `239a:8071`.
+`leviculum-nrf/src/usb.rs:127`. Heltec stock firmware uses `239a:8071`.
 Meshtastic on the SenseCAP Solar Node uses `2886:0059`, and calls itself
 "XIAO-BOOT" while doing so. Nothing stops an application from naming
 itself after a bootloader, which is the sharpest available argument for
@@ -143,7 +143,7 @@ Two mechanisms, and only one of them is ours to control.
 
 **1200-baud touch.** The host opens a CDC port at exactly 1200 baud.
 Our firmware answers the resulting `SET_LINE_CODING` in
-`leviculum-nrf/src/usb.rs:196`, writes `DFU_MAGIC_UF2_RESET` (`0x57`) to
+`leviculum-nrf/src/usb.rs:197`, writes `DFU_MAGIC_UF2_RESET` (`0x57`) to
 `GPREGRET` at `0x4000_051C` and resets. The bootloader reads that
 retained register on the next boot and stays in mass-storage mode.
 Measured latency from `stty ... 1200` to the bootloader appearing on

@@ -11,7 +11,7 @@ src/bin/rak4631.rs (1470):
 src/bin/sd-ram-probe.rs (294):
 src/bin/solarnode.rs (1503):
 src/bin/t1000e.rs (1375): feedback
-src/bin/t114.rs (1412):
+src/bin/t114.rs (1416):
 src/ble/columba.rs (3225): info log radio_store warn
 src/ble/mod.rs (891): info log media radio_store transport_stats warn
 src/ble/notify.rs (238): ble log
@@ -51,13 +51,13 @@ src/sx1262.rs (1704): chtm log lora
 src/telemetry.rs (2062): ble flash log lora media name pn radio_store
 src/time_floor.rs (74): boot_count flash radio_store record_store
 src/transport_stats.rs (169): log lora
-src/usb.rs (1466): banner ble boards chtm heap_census log lora media mgmt name pn postmortem_query radio_store record_store reset_stack_watermark telemetry
+src/usb.rs (1487): banner ble boards chtm heap_census log lora media mgmt name pn postmortem_query radio_store record_store reset_stack_watermark telemetry
 src/vext.rs (87): boards log
 firmware/src/battery.rs (468): board_state fakes log seams
 firmware/src/ble_link.rs (1117): fakes iface_bytes log media seams
 firmware/src/board_state.rs (138): display
 firmware/src/boot_count.rs (203): fakes log seams
-firmware/src/boot_trace.rs (120): log
+firmware/src/boot_trace.rs (137): log
 firmware/src/button.rs (380): board_state display fakes feedback log seams
 firmware/src/clock.rs (115): seams
 firmware/src/dispatch.rs (49): log

@@ -9,6 +9,7 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, Ordering};
 use embassy_time::Duration;
 
 use embassy_executor::Spawner;
@@ -263,7 +264,27 @@ impl Handler for BaudTouchHandler {
         // appropriate.
         None
     }
+
+    // The two moments a reset's `back_ms` ends on, stamped once per boot
+    // (#469, order 1053). `usb_enabled` is when `usb_task` first ran and
+    // pulled D+ up: the executor reaches it only at main's first real
+    // await, so it measures how long the synchronous boot held the bus
+    // dark. `usb_up` is when the host finished enumerating us.
+    fn enabled(&mut self, enabled: bool) {
+        if enabled && !USB_ENABLED_STAMPED.swap(true, Ordering::Relaxed) {
+            leviculum_firmware::boot_trace::log_stage("usb_enabled");
+        }
+    }
+
+    fn configured(&mut self, configured: bool) {
+        if configured && !USB_UP_STAMPED.swap(true, Ordering::Relaxed) {
+            leviculum_firmware::boot_trace::log_stage("usb_up");
+        }
+    }
 }
+
+static USB_ENABLED_STAMPED: AtomicBool = AtomicBool::new(false);
+static USB_UP_STAMPED: AtomicBool = AtomicBool::new(false);
 
 #[embassy_executor::task]
 async fn usb_task(mut usb: UsbDevice<'static, UsbDriver>) {

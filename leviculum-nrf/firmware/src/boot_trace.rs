@@ -118,3 +118,20 @@ pub fn log_prev(c: &Captured) {
         ),
     );
 }
+
+/// Stamp one boot stage on the debug port (#469, order 1053):
+///
+/// ```text
+/// [BOOT_TRACE] stage=usb_up t=3712
+/// ```
+///
+/// The phase byte above says how far a boot got; this says WHEN, on the
+/// board's own clock, so a reset's `back_ms` can be split into the stages
+/// that spend it. Critical, because the runtime-drain gate opens only once
+/// a host holds DTR, which is after every stage worth timing. The tag is
+/// bracketed on purpose: `BOOT_TRACE ` with a space is the previous boot's
+/// record ([`log_prev`]), which capture readers take as a boot landmark
+/// and parse for `reset_reason=`; a stage line must not be read as one.
+pub fn log_stage(stage: &str) {
+    crate::log::log_fmt_critical("[BOOT_TRACE] ", format_args!("stage={}", stage));
+}
