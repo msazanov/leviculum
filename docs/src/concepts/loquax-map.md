@@ -11,8 +11,10 @@ messenger, on the desktop and embedded. This page plans it in slices.
 
 **Status: decided 2026-10-27 (Lew), all five points of section 7 as
 proposed.** Slice (a), positions in the model shown as text, is built
-(2026-10-27, leviculum 1059, commit `230c5e4d`); the rest of the page is
-not. The measurement it rests on is
+(2026-10-27, leviculum 1059, commit `230c5e4d`); slice (b), the map core
+`leviculum-map`, the region tool `leviculum-map-tool`, the region file and
+its size measurement, is built (2026-10-27, leviculum 1062); the rest of
+the page is not. The measurement it rests on is
 `docs/drafts/map-measurement-2026-10.md`; the decisions it rests on are the
 toolkit ([A GUI toolkit for the desktop and the M9](gui-toolkit.md),
 option B) and the vector path with our own filler (handheld-messenger.md,
@@ -185,9 +187,9 @@ cut" on handheld-messenger.md.
 
 | crate | what | `no_std` | used by |
 |---|---|---|---|
-| `leviculum-mapfill` (exists) | scanline filler, wide lines, the flat geometry reader, the render pipeline into any `DrawTarget` | yes, no `alloc` | the core, all three frontends |
-| `leviculum-map` (new) | the region file reader, Web Mercator projection, the viewport (centre, zoom, pan, fit), tile selection and feature culling, the layer profile per zoom, the style tables, pins and labels as data | yes, `alloc` | all three frontends |
-| `leviculum-map-tool` (new, `std`) | cuts a region file from an OSM extract (section 4); prost and the MVT decoder stay here, out of the shipping graph, as `leviculum-mapfill/measure/` keeps them today | no | the desktop, by hand |
+| `leviculum-mapfill` (exists) | scanline filler, wide lines, the flat geometry reader, the render pipeline into any `DrawTarget`, and since 1062 a per-feature `Pass` that draws one feature at a placement, so several fixtures share one frame | yes, no `alloc` | the core, all three frontends |
+| `leviculum-map` (built, 1062) | the region file reader, Web Mercator projection, the viewport (centre, zoom, pan, fit), tile selection and feature culling, the layer profile per zoom, the style tables (`leviculum-mapfill`'s, re-exported), pins and labels as data, the class-by-class draw of a view's tiles | yes, `alloc` | all three frontends |
+| `leviculum-map-tool` (built, 1062, `std`) | cuts a region file from Protomaps PMTiles archives (section 4); prost and the tree's one MVT decoder live here, and `leviculum-mapfill/measure/` reads its tiles through it; no package ships it | no | the desktop, by hand |
 | loquax core | positions in the model, the map view's state (open, viewport, selected pin), the events | yes, `alloc` | all three frontends |
 
 The frontends:
@@ -227,10 +229,65 @@ cost the measurement found to dominate, and the region file removes it.
 The desktop could read MVT, but one format for all three is one thing to
 test.
 
-**Where it comes from.** `leviculum-map-tool cut` reads an OSM extract,
-either an OSM PBF (Geofabrik's regional downloads) or a Protomaps
-PMTiles archive, for a bounding box or a named region, and writes the
-region file. Attribution and licence travel inside the file: the data is
+**Region file** (built, 1062; the reader is `leviculum-map/src/region.rs`,
+whose module comment is the normative layout). All integers little-endian,
+offsets from the start of the file:
+
+- a 64-byte header: `LMR1`, version 1, header length, the bounds in
+  degrees x 10^7 (west, south, east, north; west greater than east means
+  across the antimeridian), the zoom range (at most 16, so x and y fit a
+  `u16`), the layer profile id, where the attribution and the notice lie,
+  the tile count, where the index lies and the file's length;
+- the two texts, UTF-8 and both required: the attribution, one line every
+  map view shows ("© OpenStreetMap contributors"), and the notice, the
+  ODbL text, the derived-database sentence and the source the region was
+  cut from (name, schema version, OSM replication time);
+- one `.lmf` blob per tile, the fixture layout `leviculum-mapfill` reads,
+  written for a 256 x 256 view with one tile at offset (0, 0) and the shift
+  that takes its extent to 4,096 sub-pixels;
+- the index last, 20 bytes per tile ascending by (z, x, y): z, x, y,
+  offset, length. Last, so the cut can stream tiles and learn their count
+  at the end.
+
+A tile with nothing left under the profile has no entry; a reader draws
+the background there. Two entries may share a blob (the cut stores
+identical tiles up to 4 KB once: 99,799 of Germany's 948,560 z15 tiles).
+The reader never loads the file or the index: it opens through a `Storage`
+(a slice in flash or memory, a file, later a card), checks the header
+against the length, and finds a tile by binary search over the index in
+place, 20 bytes a probe, because Germany's index alone is 25 MB. Every
+entry and every blob is checked when it is used, so a truncated or
+corrupt file is an error, never a panic; `verify` walks the whole index
+once for a file a frontend did not make.
+
+**Layer profile 1** (`leviculum-map/src/profile.rs`): no buildings at any
+zoom (points, `pois` among them, are not in the flat format at all); from
+z13 the extent stays 4,096 and the Douglas-Peucker tolerance is half a
+pixel; z12 and shallower, the region zooms, are quantised to an extent of
+512, simplified at one pixel and lose the landuse, natural and landcover
+areas under 16 square pixels. A part (an outer ring with its holes) the
+device could not hold whole (4,096 vertices, 1,024 rings, the M9's
+capacities) is simplified again at doubled tolerance up to four pixels,
+long lines are cut into pieces, and parts are packed into as few features
+as fit, so no feature is skipped as an overflow on the device.
+
+**Projection.** The world coordinate is two `u32`, 2^32 units around the
+world: 9.3 mm at the equator; at z15 a pixel is 512 units (4.78 m at the
+equator) and a sub-pixel 32. Longitude to x is integer and exact; latitude
+to y uses `f64` through `libm` (software on the M9's single-precision FPU),
+once per pin and per viewport change, never per vertex, since the region
+holds geometry already projected. Both round-trip to the same 10^-7 degree
+step. x wraps, so the antimeridian is wrapping arithmetic.
+
+**Where it comes from.** `leviculum-map-tool cut` reads Protomaps PMTiles
+archives (one, or the parts of one build downloaded separately) for a
+bounding box and writes the region file; the output does not depend on the
+thread count or on the order the archive lists its tiles, and the same
+input gives the same bytes. A named region and an OSM PBF are later steps:
+a PBF reader exists (`osmpbf`, MIT OR Apache-2.0), but a PBF holds raw
+nodes, ways and relations, and turning them into tiles (assembling
+multipolygons, the coastline, generalising per zoom) is what planetiler does
+for Protomaps; it is not cheap, so the PMTiles path stays the one input. Attribution and licence travel inside the file: the data is
 ODbL ("© OpenStreetMap contributors"), every frontend shows the line on
 the map view, and the region file's notice is what the open licence item
 of handheld-messenger.md asks for.
@@ -255,12 +312,37 @@ config, #471) says the map works without a step. Decided 2026-10-27
 3. The Debian package ships no region; a board's flash image may carry
    one cut for its deployment.
 
-**Size per region.** Not measured. What is measured: the Protomaps sample
-of Florence centre (about 5 x 5 km, z0 to z15, all layers, gzip MVT) is
-6,601,156 bytes; one z15 view of it, decoded to flat geometry without
-points, is 278,236 bytes for four tiles. A size per region for the cut
-profile is slice (b)'s first measurement, for one city, one German
-Bundesland and Germany, before the default zoom range is fixed.
+**Size per region**, measured 2026-10-27 (leviculum 1062) for layer profile
+1, z0 to z15, from the Protomaps daily build of 2026-10-26 (Basemap 4.15.2,
+OSM of 2026-10-26), cut on the coder host (10 vCPUs) with all threads. Each
+region is a bounding box, so it holds more than the place: Frankfurt's box
+is about 576 km² (the city 248), Hessen's about 44,000 (the state 21,100),
+Germany's about 554,000 (the country 357,600). Germany's box was fetched
+as three latitude bands of one build and cut as one source. Bytes include
+each zoom's share of the index.
+
+| Region | bbox (W, S, E, N) | PMTiles in | region | z0-10 | z11-12 | z13 | z14 | z15 | tiles | cut |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Frankfurt am Main | 8.47, 50.01, 8.80, 50.23 | 27,400,758 | 9,878,095 | 461,584 | 839,112 | 2,011,232 | 2,783,328 | 3,782,294 | 1,363 | 0.18 s |
+| Hessen | 7.77, 49.39, 10.24, 51.66 | 730,833,102 | 390,597,291 | 4,447,086 | 37,684,014 | 81,945,712 | 113,293,282 | 153,226,652 | 98,767 | 3.4 s |
+| Germany | 5.87, 47.27, 15.04, 55.06 | 7,253,481,102 | 3,914,890,897 | 42,762,388 | 372,151,372 | 798,104,326 | 1,124,204,042 | 1,577,668,224 | 1,266,178 | 40 s |
+
+What it says for the default zoom range: the region is a third (the city)
+to a half (the state, the country) of the PMTiles archive it was cut from,
+and z14 and z15 are two thirds of it.
+Without z15 Germany's box is 2.34 GB, without z14 too 1.21 GB; a Bundesland
+to z15 is 0.4 GB, a city 10 MB. So a city or a state fits the M9's card at
+every zoom, and a whole country fits a card but not the 16 MB NOR, where
+only a city-sized cut does. A view never reads more than its four to six
+tiles, so the file's size costs disk, not drawing time. The z15 tiles of
+these cuts are smaller per tile than the measurement's Florence centre
+(1.6 KB a tile in Germany's box against 13 KB in Florence), because most
+of a country is fields and forest.
+
+Earlier, unchanged: the Protomaps sample of Florence centre (about 5 x 5
+km, z0 to z15, all layers, gzip MVT) is 6,601,156 bytes, and cut under
+profile 1 it is 1,724,066; one z15 view of it, decoded to flat geometry
+without points, is 278,236 bytes for four tiles.
 
 ## 5. Slices
 
@@ -286,7 +368,12 @@ telemetry today (`lxmf_node.py` has `send` and `send_propagated`), so the
 phase needs a `send_telemetry` twin of `lxmf-node`'s verb, packing a
 `Telemeter` blob the way `Location.pack` does: a periculum companion order.
 
-**(b) The map core and the region tool.** `leviculum-map` and
+**(b) The map core and the region tool.** Built 2026-10-27 (leviculum
+1062): the region file and the size table of section 4; the committed
+fixture region `leviculum-map/fixtures/firenze.lmr`, pinned at z15, z13 and
+z11 by `leviculum-map/tests/region.rs`; the deterministic cut by
+`leviculum-map-tool/tests/cut.rs`; `just map-core-no-std` in `guards`.
+`leviculum-map` and
 `leviculum-map-tool`, the region format, the size measurement of section 4,
 a region of the test area committed as a small fixture. Depends on nothing
 open; it can run beside (a). *Acceptance:* the cut is deterministic (same
