@@ -320,8 +320,13 @@ pub fn header_words(fix: &Fix, now: Option<&WallTime>) -> Vec<String> {
 /// 11.25600 E`. The block's own time beside it says when it arrived; the
 /// fix's age is the header's. A report without a position, or one that did
 /// not decode, says so on the same line.
+///
+/// The conversation is with the sender, so the line names the sender's own
+/// fix where the message carries one beside a collector's rows; a message
+/// of rows alone names its last row, as before.
 pub fn report_line(read: &Read) -> String {
-    match read.fixes.last() {
+    let own = read.fixes.iter().rev().find(|f| f.peer == f.via);
+    match own.or(read.fixes.last()) {
         Some(fix) => {
             let more = match read.fixes.len() {
                 1 => String::new(),
@@ -617,6 +622,53 @@ mod tests {
             "33.86880 S 151.20930 E"
         );
         assert_eq!(accuracy(&read.fixes[1].location), None, "none given");
+    }
+
+    fn stream(rows: &[([u8; 16], Location)]) -> Vec<u8> {
+        let rows: Vec<StreamEntry> = rows
+            .iter()
+            .map(|(peer, l)| StreamEntry {
+                source: peer.to_vec(),
+                timestamp: Number::Int(l.last_update),
+                telemetry: report(*l).encode(),
+                appearance: None,
+            })
+            .collect();
+        encode_stream_field_value(&rows)
+    }
+
+    /// A message with the sender's own reading and a collector's rows: the
+    /// line names the sender's fix, whichever field came first.
+    #[test]
+    fn the_report_line_names_the_senders_own_fix_beside_a_stream() {
+        let rows = stream(&[
+            (CAROL, location(43_776_000, 11_266_000, 0, NOW - 180)),
+            (COLLECTOR, location(43_774_000, 11_258_000, 0, NOW - 1)),
+        ]);
+        let own = (
+            FIELD_TELEMETRY,
+            report(location(43_775_000, 11_261_000, 0, NOW - 4)).encode_field_value(),
+        );
+        let line = "◎ position 43.77500 N 11.26100 E (+2 more)";
+        let fields = vec![own.clone(), (FIELD_TELEMETRY_STREAM, rows.clone())];
+        assert_eq!(report_line(&read(BOB, &fields, Some(NOW))), line);
+        let fields = vec![(FIELD_TELEMETRY_STREAM, rows), own];
+        assert_eq!(report_line(&read(BOB, &fields, Some(NOW))), line);
+    }
+
+    /// Rows alone: none is the sender's, the line names the last row as it
+    /// did before the sender's own fix was preferred.
+    #[test]
+    fn the_report_line_of_a_stream_alone_names_its_last_row() {
+        let rows = stream(&[
+            (CAROL, location(43_776_000, 11_266_000, 0, NOW - 180)),
+            (BOB, location(43_774_000, 11_258_000, 0, NOW - 1)),
+        ]);
+        let fields = vec![(FIELD_TELEMETRY_STREAM, rows)];
+        assert_eq!(
+            report_line(&read(COLLECTOR, &fields, Some(NOW))),
+            "◎ position 43.77400 N 11.25800 E (+1 more)"
+        );
     }
 
     #[test]

@@ -118,7 +118,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││                                                    │
 │                        ││           nothing earlier on this device           │
 │                        ││                    ── Today ──                     │
-│                        ││▌◎ position 43.77400 N 11.25800 E (+2               │
+│                        ││▌◎ position 43.77500 N 11.26100 E (+2               │
 │                        ││▌more)  14:00                                       │
 │                        │├  to them ·61dd───── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
@@ -143,7 +143,7 @@ Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help �
 │                        ││                                                    │
 │                        ││           nothing earlier on this device           │
 │                        ││                    ── Today ──                     │
-│                        ││▌◎ position 43.77400 N 11.25800 E (+2               │
+│                        ││▌◎ position 43.77500 N 11.26100 E (+2               │
 │                        ││▌more)  14:00                                       │
 │                        │├  to them ·61dd───── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
@@ -269,7 +269,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        ││                                                    │
 │                        ││           nothing earlier on this device           │
 │                        ││                    ── Today ──                     │
-│                        ││▌◎ position 43.77400 N 11.25800 E (+2               │
+│                        ││▌◎ position 43.77500 N 11.26100 E (+2               │
 │                        ││▌more)  14:00                                       │
 │                        │├  to them ·61dd───── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
@@ -294,7 +294,7 @@ Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help �
 │                        ││                                                    │
 │                        ││           nothing earlier on this device           │
 │                        ││                    ── Today ──                     │
-│                        ││▌◎ position 43.77400 N 11.25800 E (+2               │
+│                        ││▌◎ position 43.77500 N 11.26100 E (+2               │
 │                        ││▌more)  14:00                                       │
 │                        │├  to them ·61dd───── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
