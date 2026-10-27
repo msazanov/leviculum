@@ -29,7 +29,7 @@ use crossterm::event::{
     Event, EventStream, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
     PushKeyboardEnhancementFlags,
 };
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 use ratatui::backend::{CrosstermBackend, TestBackend};
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Modifier, Style};
@@ -81,11 +81,6 @@ type Model = UiModel<Input>;
 const TICK_MS: u64 = 250;
 /// How often the engine's queue is read: the send runner's own poll.
 const PUMP_MS: u64 = 20;
-/// How often a map being dragged is drawn: at the tick, not at every
-/// motion the terminal reports, which comes far faster than a sixel picture
-/// is encoded. The motions between two frames only move the model's view;
-/// the frame after the release is drawn at once.
-const DRAG_FRAME_MS: u64 = TICK_MS;
 /// How long a script's `until` waits by default.
 const UNTIL_SECS: u64 = 30;
 /// The longest a script's `sleep` may ask for.
@@ -1032,7 +1027,10 @@ async fn run_terminal(
     };
     let detected = picker.as_ref().map(Picker::protocol_type);
     let chosen = map::choose_graphics(graphics, detected, shell.model.tier);
-    let mut painter = map::MapPainter::new(std::mem::take(&mut shell.regions), chosen, picker);
+    // The map is drawn on its own thread: a key is read while the last
+    // one's view is painted and encoded (1075).
+    let mut painter =
+        map::MapPainter::new(std::mem::take(&mut shell.regions), chosen, picker).threaded();
     log_graphics(&painter, detected);
     shell.apply(UiEvent::MapSetup(painter.setup()));
     let mut events = EventStream::new();
@@ -1049,7 +1047,6 @@ async fn run_terminal(
     // The wall clock against the monotonic one, read on every tick: the
     // wall running ahead is a suspend the monotonic clock slept through.
     let mut clocks = (local_now().unix_secs, shell.elapsed_ms());
-    let mut drawn_at = tokio::time::Instant::now();
 
     let result = loop {
         for output in std::mem::take(&mut shell.outputs) {
@@ -1063,24 +1060,24 @@ async fn run_terminal(
                 break Err(error.to_string());
             }
         }
-        let held =
-            shell.model.map_dragging() && drawn_at.elapsed() < Duration::from_millis(DRAG_FRAME_MS);
-        if !held {
-            let view = ui::view(&shell.model);
-            if let Err(error) = terminal.draw(|frame| draw(frame, &view, Some(&mut painter))) {
-                break Err(error.to_string());
-            }
-            drawn_at = tokio::time::Instant::now();
+        let view = ui::view(&shell.model);
+        if let Err(error) = terminal.draw(|frame| draw(frame, &view, Some(&mut painter))) {
+            break Err(error.to_string());
         }
         if shell.model.quit {
             break Ok(());
         }
         tokio::select! {
-            item = events.next() => match step_event(item, map_event) {
-                EventStep::Apply(event) => shell.apply(event),
-                EventStep::Ignore => {}
-                EventStep::End(result) => break result.map_err(|e| e.to_string()),
-            },
+            item = events.next() => {
+                // A held key's repeats and a drag's motions that queued
+                // while the last frame was drawn are one frame at the
+                // newest view, not a frame each (1075).
+                let ended = apply_waiting(item, &mut events, |event| shell.apply(event));
+                if let Some(result) = ended {
+                    break result;
+                }
+            }
+            _ = painter.ready() => {}
             _ = pump.tick() => shell.poll(),
             _ = tick.tick() => {
                 let now = local_now();
@@ -1095,8 +1092,32 @@ async fn run_terminal(
             }
         }
     };
+    // How many map pictures went up, beside the GRAPHICS line: a held key
+    // that drew far fewer than it pressed was coalesced (1075).
+    tracing::info!("GRAPHICS paints={}", painter.paints());
     guard.restore_now().map_err(|e| e.to_string())?;
     result
+}
+
+/// `first` and every event already waiting behind it on `events`, applied
+/// in order without waiting for more; `Some` when the stream ended.
+fn apply_waiting<S>(
+    first: Option<std::io::Result<Event>>,
+    events: &mut S,
+    mut apply: impl FnMut(UiEvent),
+) -> Option<Result<(), String>>
+where
+    S: futures::Stream<Item = std::io::Result<Event>> + Unpin,
+{
+    let mut item = first;
+    loop {
+        match step_event(item, map_event) {
+            EventStep::Apply(event) => apply(event),
+            EventStep::Ignore => {}
+            EventStep::End(result) => return Some(result.map_err(|e| e.to_string())),
+        }
+        item = events.next().now_or_never()?;
+    }
 }
 
 /// What the model asked of the terminal, done: the copy as OSC 52, the URL
@@ -2787,5 +2808,55 @@ mod tests {
             LOAD_WINDOW,
             "no second block"
         );
+    }
+
+    /// Ten pans queued behind the one that woke the loop, as a held arrow
+    /// leaves them while a frame is drawn, are applied in one go: the next
+    /// frame is the only one, at the sum of all ten (1075).
+    #[test]
+    fn ten_queued_pans_are_one_frame_at_their_sum() {
+        let mut model = Model::new(&[[0x22; 16]]);
+        let mut painter = map::MapPainter::new(Vec::new(), map::Graphics::Braille, None);
+        update(&mut model, UiEvent::MapSetup(painter.setup()));
+        update(
+            &mut model,
+            UiEvent::Resize {
+                width: 80,
+                height: 24,
+            },
+        );
+        update(
+            &mut model,
+            UiEvent::Key(KeyEvent::new(KeyCode::Char('M'), KeyModifiers::NONE)),
+        );
+        let start = model.map.expect("the map is open");
+        let mut want = ui::map::viewport(&start, model.map_area(), &model.map_setup);
+        let (w, _) = want.size();
+        for _ in 0..10 {
+            want.pan((w / 8) as i32, 0);
+        }
+        let right = || {
+            Ok(Event::Key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Right,
+                crossterm::event::KeyModifiers::NONE,
+            )))
+        };
+        // Nine waiting behind the first, then nothing more: the drain must
+        // not wait for an eleventh.
+        let mut events =
+            futures::stream::iter((0..9).map(|_| right())).chain(futures::stream::pending());
+        let mut applied = 0;
+        let ended = apply_waiting(Some(right()), &mut events, |event| {
+            applied += 1;
+            update(&mut model, event);
+        });
+        assert!(ended.is_none(), "the stream goes on");
+        assert_eq!(applied, 10);
+        let state = model.map.expect("open");
+        assert_eq!(state.centre, want.centre, "ten eighths east");
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+        let Ok(_) = terminal.draw(|f| draw(f, &ui::view(&model), Some(&mut painter)));
+        assert_eq!(painter.paints(), 1, "one frame for the ten");
+        assert_eq!(painter.painted_view(), Some(want));
     }
 }

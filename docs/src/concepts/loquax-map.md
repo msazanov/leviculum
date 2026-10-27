@@ -400,7 +400,11 @@ left of its marker at the picture's right edge; fit on open and with `0`,
 `Enter` or a click to open the peer's conversation, `Esc` back; the ladder
 kitty or sixel, half-blocks, braille, forced with `--graphics` and named
 in `tui.log` as `GRAPHICS backend=`; the attribution line under the
-picture. Pinned by `loquax/tests/tui_snapshot.rs`
+picture. Since 1075 a key pans an eighth of the view, `H` `J` `K` `L` and
+Shift with an arrow a half, and the picture is painted and encoded on a
+thread of its own while the loop reads keys: the keys that queued behind
+a frame are applied together, and the newest view wins (section 6,
+Sixel). Pinned by `loquax/tests/tui_snapshot.rs`
 (`the_map_shows_the_pins_on_the_region_and_the_outline_in_braille_and_halfblocks`,
 frames in `loquax/tests/fixtures/tui_map.frames`), the model's tests in
 `loquax/src/ui.rs`, the ladder and the protocol bytes in
@@ -462,7 +466,23 @@ documentation; only foot is checked here. `ratatui-image` encodes it through `ic
 kitty keyboard flags (query, push, pop, set) and no kitty graphics escape.
 So a terminal that speaks the kitty keyboard protocol need not speak kitty
 graphics: foot speaks the one and not the other, and draws the map by
-sixel. Lew's terminal is foot (the reviewer checked on his machine,
+sixel.
+
+`ratatui-image` hands every sixel to `icy_sixel`'s Wu quantiser with
+Floyd-Steinberg dithering at its defaults, and offers no setting for
+either. A map frame has eight or nine colours, so that was most of a
+frame's cost and bought nothing: measured 2026-10-27 (1075) on a 1395 x
+1235 pixel pane over Frankfurt, the encode took 43 to 52 ms of a 49 to 71
+ms frame. The painter now writes a sixel of the frame's own colours
+itself (`leviculum_ui_ratatui::images::sixel_indexed`, `ratatui-image`'s
+path stays for tmux and past 256 colours): 1.4 to 4.2 ms, frames of 6 to
+22 ms, and at z14 304 KB to the terminal instead of 473 KB, each band
+painting its commonest colour as one run. No visual cost: the colours are
+the style's, not a quantiser's. Zoom stays in whole steps: a fractional
+zoom would scale every tile by a non-power of two, which the viewport,
+the tile selection and the draw transform of `leviculum-map` do not
+carry today, a change to the core of all three frontends rather than to
+the terminal. Lew's terminal is foot (the reviewer checked on his machine,
 2026-10-27), which is why the ladder must not assume kitty graphics. The
 `KEYS` line in `tui.log` names the keyboard, and slice (c) adds a
 `GRAPHICS backend=` line beside it, so `tui.log` names the backend on
