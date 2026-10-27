@@ -105,8 +105,8 @@ enum SubCommand {
 #[derive(clap::Args, Debug)]
 struct TuiArgs {
     /// A correspondent to list from the start: 32 hex characters, repeatable.
-    /// loquax keeps no history yet, so without one the screen lists only the
-    /// people who write to you during the session.
+    /// The history restores every conversation already held, so this is for
+    /// writing first to someone it does not hold yet.
     #[arg(long, value_name = "ADDRESS")]
     to: Vec<String>,
 

@@ -22,7 +22,7 @@ loquax -- terminal LXMF messenger for Reticulum
 
 **address** prints this machine's LXMF address.
 
-**loquax** without a subcommand, or **loquax tui** under its old name, is the interactive messenger: conversations on the left, the open conversation on the right with a compose box under it (see THE SCREEN). A message sent from it travels the way **send --via auto** sends it, and each sent message carries a delivery mark (see DELIVERY MARKS). loquax keeps no message history yet, so the screen holds the messages of this session only; **--to** lists a correspondent from the start. The packages ship it; a build from source without the `tui` cargo feature has only the script commands, and a plain **loquax** there says so and exits 2.
+**loquax** without a subcommand, or **loquax tui** under its old name, is the interactive messenger: conversations on the left, the open conversation on the right with a compose box under it (see THE SCREEN). A message sent from it travels the way **send --via auto** sends it, and each sent message carries a delivery mark (see DELIVERY MARKS). A restart shows every conversation again from the history (see HISTORY); **--to** lists a correspondent the history does not hold yet, to write first. The packages ship it; a build from source without the `tui` cargo feature has only the script commands, and a plain **loquax** there says so and exits 2.
 
 ## OPTIONS
 
@@ -45,7 +45,7 @@ loquax -- terminal LXMF messenger for Reticulum
 :   **send** only: the LXMF title, and the name recipients see as the sender (default: `LNMSG_DISPLAY_NAME`, then the account name).
 
 **--to** *address*
-:   **tui** only, repeatable: a correspondent to list from the start.
+:   **tui** only, repeatable: a correspondent to list from the start, for writing first to someone the history (see HISTORY) does not hold yet.
 
 **--ascii**
 :   **tui** only: draw the delivery marks in ASCII.
