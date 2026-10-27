@@ -80,7 +80,7 @@ Enter open │ Ctrl-s / Ctrl-r next, previous │ Tab to the results │ Esc clo
 │                                  │├  to <61ddb79a…>────────────────────────────────── Enter send · Alt-Enter newline ┤
 │                                  ││                                                                                  │
 └──────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────┘
-Enter details │ i write │ n / N next, previous │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+Enter open │ i write │ n / N next, previous │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 3: next ---
 ┌  Search────────────── esc closes ┐┌● <61ddb79a…>  unknown────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
 │ / tripod                         ││                                                                       no mailbox │
@@ -121,7 +121,7 @@ Enter details │ i write │ n / N next, previous │ Tab pane │ Esc back │
 │                                  │├  to <61ddb79a…>────────────────────────────────── Enter send · Alt-Enter newline ┤
 │                                  ││                                                                                  │
 └──────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────┘
-Enter details │ i write │ n / N next, previous │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+Enter open │ i write │ n / N next, previous │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 4: previous ---
 ┌  Search────────────── esc closes ┐┌● <61ddb79a…>  unknown────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
 │ / tripod                         ││                                                                       no mailbox │
@@ -162,7 +162,7 @@ Enter details │ i write │ n / N next, previous │ Tab pane │ Esc back │
 │                                  │├  to <61ddb79a…>────────────────────────────────── Enter send · Alt-Enter newline ┤
 │                                  ││                                                                                  │
 └──────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────┘
-Enter details │ i write │ n / N next, previous │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+Enter open │ i write │ n / N next, previous │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 5: both groups ---
 ┌● Search────────────── esc closes ┐┌  <61ddb79a…>  unknown────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
 │ / 61dd                           ││                                                                       no mailbox │
@@ -295,7 +295,7 @@ Enter open │ Ctrl-s / Ctrl-r next, previous │ Esc close search │ Ctrl-q qu
 │                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────────────────┘└────────────────────────────────────────────────────┘
-Enter details │ i write │ n / N next, previous │ Tab pane │ Esc back │ q quit
+Enter open │ i write │ n / N next, previous │ Tab pane │ Esc back │ q quit
 --- frame 3: next ---
 ┌  Search──── esc closes ┐┌● <61ddb79a…>  unknown────────────────── no mailbox ┐
 │ / tripod               ││                                                    │
@@ -320,7 +320,7 @@ Enter details │ i write │ n / N next, previous │ Tab pane │ Esc back │
 │                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────────────────┘└────────────────────────────────────────────────────┘
-Enter details │ i write │ n / N next, previous │ Tab pane │ Esc back │ q quit
+Enter open │ i write │ n / N next, previous │ Tab pane │ Esc back │ q quit
 --- frame 4: previous ---
 ┌  Search──── esc closes ┐┌● <61ddb79a…>  unknown────────────────── no mailbox ┐
 │ / tripod               ││                                                    │
@@ -345,7 +345,7 @@ Enter details │ i write │ n / N next, previous │ Tab pane │ Esc back │
 │                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────────────────┘└────────────────────────────────────────────────────┘
-Enter details │ i write │ n / N next, previous │ Tab pane │ Esc back │ q quit
+Enter open │ i write │ n / N next, previous │ Tab pane │ Esc back │ q quit
 --- frame 5: both groups ---
 ┌● Search──── esc closes ┐┌  <61ddb79a…>  unknown────────────────── no mailbox ┐
 │ / 61dd                 ││                                                    │

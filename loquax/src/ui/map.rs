@@ -327,10 +327,21 @@ fn pixels(area: Rect, setup: &MapSetup) -> (u32, u32) {
 /// outline's, and `+` goes on into the overzoom. The whole world at the
 /// shallowest when there is no pin.
 pub fn fit(pins: &[MapPin], area: Rect, setup: &MapSetup) -> (World, u8) {
-    let (w, h) = pixels(area, setup);
     let points: Vec<World> = pins.iter().map(|p| p.at).collect();
+    fit_points(&points, area, setup)
+}
+
+/// The view centred on one point, at the zoom [`fit`] gives a single pin
+/// there: the deepest the region under it has data for, or the outline's
+/// without one. Where a report's fix opens the map (1076).
+pub fn fit_at(at: World, area: Rect, setup: &MapSetup) -> (World, u8) {
+    fit_points(&[at], area, setup)
+}
+
+fn fit_points(points: &[World], area: Rect, setup: &MapSetup) -> (World, u8) {
+    let (w, h) = pixels(area, setup);
     let margin = FIT_MARGIN_CELLS * u32::from(setup.cell_px.0.max(1));
-    match Viewport::fit(&points, w, h, margin, setup.zooms.0..=setup.zooms.1) {
+    match Viewport::fit(points, w, h, margin, setup.zooms.0..=setup.zooms.1) {
         Some(view) => {
             let ceiling = fit_ceiling(&setup.regions, view.centre).max(setup.zooms.0);
             (view.centre, view.zoom().min(ceiling))

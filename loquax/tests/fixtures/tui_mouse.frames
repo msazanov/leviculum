@@ -123,7 +123,7 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 │                        │├  to <5ec0ea2e…>──── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
-Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 6: detail ---
 ┌  loquax afbda7b3───────┐┌● <5ec0ea2e…>  unknown────────────────── no mailbox ┐
 │▌<5ec0ea2e…>      12:00 ││                                                    │
@@ -148,7 +148,7 @@ Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help �
 │                        │├  to <5ec0ea2e…>──── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
-Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 7: closed ---
 ┌  loquax afbda7b3───────┐┌● <5ec0ea2e…>  unknown────────────────── no mailbox ┐
 │▌<5ec0ea2e…>      12:00 ││                                                    │
@@ -173,7 +173,7 @@ Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help �
 │                        │├  to <5ec0ea2e…>──── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
-Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 8: help ---
 ┌ loquax help ─────────────────────────────────────────────────────────────────┐
 │Move                                                                          █
@@ -300,7 +300,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
-Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- osc52 \e]52;c;Zmlyc3QgbGluZQpzZWNvbmQgbGluZQ==\e\ ---
 --- frame 2: dragged ---
 ┌  loquax afbda7b3───────┐┌● <61ddb79a…>  unknown────────────────── no mailbox ┐
@@ -326,7 +326,7 @@ Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help �
 │                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
-Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 3: selected ---
 ┌  loquax afbda7b3───────┐┌● <61ddb79a…>  unknown────────────────── no mailbox ┐
 │▌<61ddb79a…>      12:00 ││                                                    │
@@ -351,4 +351,4 @@ Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help �
 │                        │├  to <61ddb79a…>──── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
-Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit

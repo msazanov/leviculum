@@ -59,7 +59,8 @@
 //! position reports with no text, as Sideband and Columba do. The header
 //! carries the position, at 120 columns with its accuracy and age, at 80
 //! only `pos` and the age; the two reports fold into one `◎ position` line
-//! and no empty block is drawn; the detail view lists the sensors. Pinned in
+//! and no empty block is drawn; `v` opens the detail view (`Enter` on a
+//! report opens the map), which lists the sensors. Pinned in
 //! `tests/fixtures/tui_telemetry.frames`.
 //!
 //! The mailbox schedule's session (`docs/src/concepts/loquax-mailbox.md`,
@@ -1596,7 +1597,7 @@ until received 3 60
 tick 12
 frame folded
 key enter
-key enter
+key v
 frame detail
 key esc
 key q
@@ -1836,6 +1837,10 @@ frame opened
 key M
 key esc
 frame back
+key enter
+frame from the report
+key esc
+frame report closed
 key q
 ";
 
@@ -1962,6 +1967,13 @@ async fn the_map_shows_the_pins_on_the_region_and_the_outline_in_braille_and_hal
             !back.contains("Natural Earth") && !back.contains("OpenStreetMap"),
             "{back}"
         );
+        // Enter on the report: the map at its fix, the region's deepest
+        // zoom, the sender's pin selected; Esc brings the conversation back.
+        let reported = frame(&frames, "from the report");
+        assert!(reported.contains("● map"), "{reported}");
+        assert!(reported.contains("z15 ·"), "{reported}");
+        assert!(reported.contains("◉ them"), "{reported}");
+        assert_eq!(frame(&frames, "report closed"), back);
         all.push_str(&format!("=== {graphics} ===\n{frames}"));
     }
     if all != EXPECTED_MAP {

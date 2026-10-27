@@ -57,6 +57,8 @@ pub enum Target {
     },
     /// The mailbox state in the header. Transmits: a fetch.
     Mailbox,
+    /// The peer's position in the header: the peer on the map.
+    Position,
     /// The compose box's text, at this character of it.
     Compose { at: usize },
     /// The word `send` on the compose box's border. Transmits: a send.
@@ -335,6 +337,9 @@ fn messages_target<B: InputBuffer>(
     let wide = model.sizes().messages.0 >= WIDE_HEADER;
     if !wide {
         let (x, len) = right_title(pane, &shown.messages_title_right);
+        if on(col, row, x, pane.y, shown.position_len as u16) {
+            return Target::Position;
+        }
         if len > 0 && on(col, row, x, pane.y, len) {
             return Target::Mailbox;
         }
@@ -347,9 +352,19 @@ fn messages_target<B: InputBuffer>(
     let r = usize::from(row - at.area.y);
     let c = usize::from(col - at.area.x);
     if r < at.header {
-        // The mailbox row: its words, flush right.
+        // The mailbox row: the peer's position from its second cell, the
+        // mailbox's words flush right after it.
+        let position = 1..1 + shown.position_len;
+        if r == 0 && position.contains(&c) {
+            return Target::Position;
+        }
         let words = shown.messages.first().map(|line| {
-            let first = line.cells.iter().position(|cell| cell.ch != ' ');
+            let first = line
+                .cells
+                .iter()
+                .skip(position.end)
+                .position(|cell| cell.ch != ' ')
+                .map(|at| position.end + at);
             (first, line.cells.len())
         });
         return match words {

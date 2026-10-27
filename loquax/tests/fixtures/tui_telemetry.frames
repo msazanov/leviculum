@@ -73,7 +73,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │ └────────────────────────────────────────────────────────────── Esc closes ┘ ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
-Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 === 120x40 ===
 --- frame 1: attached ---
 ┌● loquax afbda7b3─────────────────┐┌  <61ddb79a…>  unknown────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
@@ -197,4 +197,4 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                                  │├  to them ·61dd─────────────────────────────────── Enter send · Alt-Enter newline ┤
 │                                  ││                                                                                  │
 └──────────────────────── / search ┘└──────────────────────────────────────────────────────────────────────────────────┘
-Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit

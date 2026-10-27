@@ -1224,8 +1224,59 @@ fn act<B: InputBuffer + Default>(
         },
         Action::CloseSearch => close_search(model),
         Action::Map(cmd) => return map_key(model, cmd),
+        Action::OpenMessage => return open_message(model),
+        Action::PeerOnMap => peer_on_map(model),
     }
     Vec::new()
+}
+
+/// `Enter` on a message: a position report opens the map at the fix its
+/// line names, any other message (and a report without a position) its
+/// detail view. A folded run of reports is drawn as its latest, which is
+/// where the cursor stands, so its line opens the latest fix of the run.
+fn open_message<B: InputBuffer>(model: &mut UiModel<B>) -> Vec<UiEffect> {
+    match model.report_fix(model.selected, model.message_cursor) {
+        Some(fix) => {
+            open_map_at(model, &fix);
+            Vec::new()
+        }
+        None => details(model),
+    }
+}
+
+/// `L`, `Alt-l` or a click on the header's position: the open
+/// conversation's peer on the map, at its latest fix.
+fn peer_on_map<B: InputBuffer>(model: &mut UiModel<B>) {
+    let Some(peer) = model.conversations.get(model.selected).map(|c| c.peer) else {
+        model.toast(ToastKind::Info, "no conversation open".to_string());
+        return;
+    };
+    match model.positions.get(&peer).cloned() {
+        Some(fix) => open_map_at(model, &fix),
+        None => {
+            let who = model.names.label(&peer);
+            model.toast(ToastKind::Info, format!("no position from {who}"));
+        }
+    }
+}
+
+/// The map in the conversation's place, centred on `fix` at the deepest
+/// zoom of the region under it ([`map::fit_at`]), its peer's pin selected.
+/// `Esc` brings the conversation back with the cursor where it was.
+fn open_map_at<B: InputBuffer>(model: &mut UiModel<B>, fix: &Fix) {
+    let at = leviculum_map::mercator::project(leviculum_map::mercator::LatLon::from_e6(
+        fix.location.latitude_e6,
+        fix.location.longitude_e6,
+    ));
+    let (centre, zoom) = map::fit_at(at, model.map_area(), &model.map_setup);
+    model.map = Some(map::MapState {
+        centre,
+        zoom,
+        selected: Some(fix.peer),
+    });
+    model.map_press = None;
+    model.focus = Pane::Map;
+    model.selection = None;
 }
 
 /// The palette's `map`: the map in the conversation's place, every pin in
@@ -1530,6 +1581,7 @@ fn click<B: InputBuffer + Default>(model: &mut UiModel<B>, col: u16, row: u16) -
             });
         }
         Target::Mailbox => return run(model, PaletteCommand::Fetch),
+        Target::Position => peer_on_map(model),
         Target::Compose { at } => {
             model.focus = Pane::Compose;
             model.compose.set_cursor(at);
@@ -1641,8 +1693,8 @@ fn map_drag<B: InputBuffer>(model: &mut UiModel<B>, col: u16, row: u16) {
 
 /// The left button came up: on the map a drag ends where the pointer is
 /// and a click on a pin opens it; in the conversation a drag copies what
-/// it selected, a click on a mark opens the detail view and one on a link
-/// follows it.
+/// it selected, a click on a mark opens the detail view, one on a link
+/// follows it and one on a position report opens the map at its fix.
 fn release<B: InputBuffer + Default>(model: &mut UiModel<B>, col: u16, row: u16) -> Vec<UiEffect> {
     if model.map_press.is_some() {
         // A terminal may report the release in a cell no motion reached.
@@ -1677,10 +1729,14 @@ fn release<B: InputBuffer + Default>(model: &mut UiModel<B>, col: u16, row: u16)
         model.detail = Some((model.selected, message));
         return Vec::new();
     }
-    match link.and_then(|link| model.laid().links.get(link).cloned()) {
-        Some(target) => follow(model, &target),
-        None => Vec::new(),
+    if let Some(target) = link.and_then(|link| model.laid().links.get(link).cloned()) {
+        return follow(model, &target);
     }
+    // A click on a position report opens the map at its fix, as `Enter`.
+    if let Some(fix) = model.report_fix(model.selected, message) {
+        open_map_at(model, &fix);
+    }
+    Vec::new()
 }
 
 /// A link in a body, followed as lnomad follows one ([`classify_link`]): a
@@ -2333,6 +2389,20 @@ impl<B> UiModel<B> {
         )
     }
 
+    /// The fix the line of report `m` of conversation `c` names
+    /// ([`telemetry::shown_fix`]); `None` for any other message and for a
+    /// report without a position.
+    pub fn report_fix(&self, c: usize, m: usize) -> Option<Fix> {
+        let conversation = self.conversations.get(c)?;
+        let message = conversation.messages.get(m)?;
+        if !message.is_report() {
+            return None;
+        }
+        let received = message.at.map(|at| at.unix_secs);
+        let read = telemetry::read(conversation.peer, &message.fields, received);
+        telemetry::shown_fix(&read).cloned()
+    }
+
     /// The cells the map's picture covers.
     pub fn map_area(&self) -> Rect
     where
@@ -2551,6 +2621,11 @@ pub struct View {
     /// The header's right end: the mailbox state, or the peer's full address
     /// on a wide pane, where the mailbox has a row of its own.
     pub messages_title_right: String,
+    /// How many characters the peer's position takes at the start of where
+    /// the header draws it: the row under the title past its one blank on a
+    /// wide pane, the title's right end on a narrow one. A click there puts
+    /// the peer on the map.
+    pub position_len: usize,
     /// The conversation pane's rows, exactly its height: the header's rows on
     /// a wide pane, then the blocks, the newest at the bottom unless the
     /// reader scrolled up.
@@ -2798,12 +2873,12 @@ pub fn view<B: InputBuffer>(model: &UiModel<B>) -> View {
         .messages
         .0
         .saturating_sub(leviculum_ui::text::fit_width(&messages_title) + 6);
+    let short = position.as_ref().and_then(|words| words.last().cloned());
     let messages_title_right = match (wide, peer) {
         (true, Some(peer)) => to_hex(&peer),
         // Narrow: the position's age before the mailbox, so the reader
         // knows there is one, then the mailbox alone where both do not fit.
         _ => {
-            let short = position.as_ref().and_then(|words| words.last().cloned());
             let mut choices: Vec<String> = Vec::new();
             if let Some(short) = &short {
                 choices.extend(mailbox.iter().map(|words| format!("{short} · {words}")));
@@ -2815,6 +2890,12 @@ pub fn view<B: InputBuffer>(model: &UiModel<B>) -> View {
                 .find(|words| words.chars().count() <= room)
                 .unwrap_or_default()
         }
+    };
+    let mut position_len = match (&short, wide) {
+        (Some(short), false) if messages_title_right.starts_with(short.as_str()) => {
+            short.chars().count()
+        }
+        _ => 0,
     };
     let mut laid = model.laid();
     let texts = core::mem::take(&mut laid.texts);
@@ -2832,6 +2913,7 @@ pub fn view<B: InputBuffer>(model: &UiModel<B>) -> View {
             .and_then(|all| all.iter().find(|w| w.chars().count() <= left_room))
             .cloned()
             .unwrap_or_default();
+        position_len = at.chars().count();
         let mut row = plain(" ");
         let st = match stale {
             true => layout::painted(model.tokens().muted),
@@ -2924,6 +3006,10 @@ pub fn view<B: InputBuffer>(model: &UiModel<B>) -> View {
         conversations,
         messages_title,
         messages_title_right,
+        position_len: match map {
+            Some(_) => 0,
+            None => position_len,
+        },
         messages,
         compose_title,
         compose: model.compose.value().to_string(),
@@ -6342,5 +6428,183 @@ mod tests {
         update(&mut model, key(KeyCode::Tab));
         update(&mut model, key(KeyCode::Enter));
         assert!(model.map.is_some());
+    }
+
+    /// The peer's conversation with a text, an older report, a text and
+    /// the latest report, on the Florence region at braille's cell (1076).
+    fn reported() -> UiModel<Field> {
+        let mut model = UiModel::<Field>::new(&[PEER, OTHER]);
+        clock(&mut model, 26, 14, 0);
+        update(
+            &mut model,
+            UiEvent::MapSetup(map::MapSetup {
+                cell_px: (2, 4),
+                zooms: (0, 20),
+                regions: vec![florence()],
+            }),
+        );
+        arrive(&mut model, PEER, 1, "on my way", Vec::new());
+        let older = fix_at(43_773_100, 11_256_000, two_pm() - 600);
+        arrive(&mut model, PEER, 2, "", report_of(&older));
+        arrive(&mut model, PEER, 3, "here", Vec::new());
+        let latest = fix_at(43_775_000, 11_261_000, two_pm() - 60);
+        arrive(&mut model, PEER, 4, "", report_of(&latest));
+        model.toasts.clear();
+        model
+    }
+
+    fn projected(lat: i32, lon: i32) -> leviculum_map::mercator::World {
+        leviculum_map::mercator::project(leviculum_map::mercator::LatLon::from_e6(lat, lon))
+    }
+
+    /// `Enter` on a report opens the map centred on that report's fix, not
+    /// the peer's latest, at the region's deepest zoom with the peer's pin
+    /// selected; `Esc` brings the conversation back with the cursor where
+    /// it was. `Enter` on a text still opens its detail view, and `v` opens
+    /// a report's.
+    #[test]
+    fn enter_on_a_report_opens_the_map_at_its_fix_and_esc_returns() {
+        let mut model = reported();
+        update(&mut model, key(KeyCode::Tab));
+        assert_eq!(model.focus, Pane::Messages);
+        assert_eq!(model.message_cursor, 3);
+        update(&mut model, key(KeyCode::Up));
+        update(&mut model, key(KeyCode::Up));
+        assert_eq!(model.message_cursor, 1, "the older report");
+        update(&mut model, key(KeyCode::Enter));
+        assert_eq!(model.focus, Pane::Map);
+        assert_eq!(model.detail, None);
+        let state = model.map.expect("the map is open");
+        assert_eq!(state.centre, projected(43_773_100, 11_256_000));
+        assert_eq!(state.zoom, florence().max_zoom);
+        assert_eq!(state.selected, Some(PEER));
+        update(&mut model, key(KeyCode::Esc));
+        assert!(model.map.is_none());
+        assert_eq!(model.focus, Pane::Messages);
+        assert_eq!(model.message_cursor, 1);
+        // The latest report, from the cursor's place at the bottom.
+        update(&mut model, key(KeyCode::Char('G')));
+        update(&mut model, key(KeyCode::Enter));
+        let state = model.map.expect("open");
+        assert_eq!(state.centre, projected(43_775_000, 11_261_000));
+        update(&mut model, ctrl_key('g'));
+        // A text opens its detail view, as before.
+        update(&mut model, key(KeyCode::Char('g')));
+        assert_eq!(model.message_cursor, 0);
+        update(&mut model, key(KeyCode::Enter));
+        assert_eq!(model.detail, Some((0, 0)));
+        assert!(model.map.is_none());
+        update(&mut model, key(KeyCode::Esc));
+        // `v` opens a report's detail view, with its sensor rows.
+        update(&mut model, key(KeyCode::Down));
+        assert_eq!(model.message_cursor, 1);
+        update(&mut model, key(KeyCode::Char('v')));
+        assert_eq!(model.detail, Some((0, 1)));
+        assert!(model.map.is_none());
+        let detail = detail_view(&model, 0, 1).expect("a detail view");
+        assert!(
+            detail.rows.iter().any(|r| r.starts_with("  position")),
+            "{:?}",
+            detail.rows
+        );
+    }
+
+    /// Outside the map, outside a fix: the map is somewhere else. Without a
+    /// region the zoom is the outline's deepest.
+    #[test]
+    fn a_report_outside_every_region_opens_at_the_outlines_deepest_zoom() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        clock(&mut model, 26, 14, 0);
+        arrive(
+            &mut model,
+            PEER,
+            1,
+            "",
+            report_of(&fix_at(50_110_600, 8_682_100, two_pm() - 60)),
+        );
+        update(&mut model, key(KeyCode::Tab));
+        update(&mut model, key(KeyCode::Enter));
+        let state = model.map.expect("open");
+        assert_eq!(state.centre, projected(50_110_600, 8_682_100));
+        assert_eq!(state.zoom, leviculum_map::outline::MAX_ZOOM);
+    }
+
+    /// A click on a report row opens the map at its fix; a click on the
+    /// header's position, narrow or wide, and `L` or `Alt-l` put the peer
+    /// on the map at its latest fix. The header's position is not the
+    /// mailbox: a click there fetches nothing. A peer without a position
+    /// says so.
+    #[test]
+    fn a_click_on_a_report_or_the_header_position_opens_the_map() {
+        let mut model = reported();
+        let older = cell_of(&model, "◎ position 43.77310", 3);
+        let effects = press(&mut model, older);
+        assert!(effects.is_empty(), "{effects:?}");
+        let state = model.map.expect("open");
+        assert_eq!(state.centre, projected(43_773_100, 11_256_000));
+        assert_eq!(state.selected, Some(PEER));
+        update(&mut model, key(KeyCode::Esc));
+        assert_eq!(model.message_cursor, 1, "the click selected it");
+        // Narrow: `pos 1 min` at the title's right end.
+        assert!(view(&model).messages_title_right.starts_with("pos 1 min"));
+        let narrow = cells(&model, |t| *t == hit::Target::Position);
+        assert_eq!(narrow.len(), "pos 1 min".len(), "{narrow:?}");
+        assert!(!cells(&model, |t| *t == hit::Target::Mailbox).is_empty());
+        let effects = press(&mut model, narrow[0]);
+        assert!(effects.is_empty(), "no fetch: {effects:?}");
+        let latest = projected(43_775_000, 11_261_000);
+        assert_eq!(model.map.expect("open").centre, latest);
+        update(&mut model, key(KeyCode::Esc));
+        // Wide: the row under the title, from its second cell.
+        update(
+            &mut model,
+            UiEvent::Resize {
+                width: 120,
+                height: 40,
+            },
+        );
+        let shown = view(&model);
+        let words = text(&shown.messages[0]);
+        assert_eq!(
+            shown.position_len,
+            "at 43.77500 N 11.26100 E · ±5 m · 1 min ago"
+                .chars()
+                .count(),
+            "{words:?}"
+        );
+        let wide = cells(&model, |t| *t == hit::Target::Position);
+        assert_eq!(wide.len(), shown.position_len, "{wide:?}");
+        let mailbox = cells(&model, |t| *t == hit::Target::Mailbox);
+        assert_eq!(mailbox.len(), "no mailbox".len(), "{mailbox:?}");
+        let effects = press(&mut model, wide[wide.len() - 1]);
+        assert!(effects.is_empty(), "no fetch: {effects:?}");
+        assert_eq!(model.map.expect("open").centre, latest);
+        update(&mut model, key(KeyCode::Esc));
+        // `L` from the conversation, `Alt-l` from compose.
+        update(&mut model, key(KeyCode::Char('L')));
+        assert_eq!(model.map.expect("open").centre, latest);
+        update(&mut model, key(KeyCode::Esc));
+        update(&mut model, key(KeyCode::Char('i')));
+        assert_eq!(model.focus, Pane::Compose);
+        update(
+            &mut model,
+            UiEvent::Key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::ALT)),
+        );
+        assert_eq!(model.focus, Pane::Map);
+        assert_eq!(model.map.expect("open").selected, Some(PEER));
+        update(&mut model, key(KeyCode::Esc));
+        // A peer without a position.
+        update(
+            &mut model,
+            UiEvent::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::ALT)),
+        );
+        assert_eq!(model.conversations[model.selected].peer, OTHER);
+        update(&mut model, key(KeyCode::Char('L')));
+        assert!(model.map.is_none());
+        assert_eq!(
+            model.toasts.last().map(|t| t.text.as_str()),
+            Some("no position from <cdcdcdcd…>")
+        );
+        assert!(cells(&model, |t| *t == hit::Target::Position).is_empty());
     }
 }

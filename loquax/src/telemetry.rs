@@ -316,6 +316,14 @@ pub fn header_words(fix: &Fix, now: Option<&WallTime>) -> Vec<String> {
     vec![long.join(" · "), format!("{at} · {when}"), short]
 }
 
+/// The fix a report's line names, and the one `Enter` on it opens the map
+/// at: the sender's own where the message carries one beside a collector's
+/// rows, else its last row.
+pub fn shown_fix(read: &Read) -> Option<&Fix> {
+    let own = read.fixes.iter().rev().find(|f| f.peer == f.via);
+    own.or(read.fixes.last())
+}
+
 /// The conversation's line for a telemetry report: `◎ position 43.77310 N
 /// 11.25600 E`. The block's own time beside it says when it arrived; the
 /// fix's age is the header's. A report without a position, or one that did
@@ -325,8 +333,7 @@ pub fn header_words(fix: &Fix, now: Option<&WallTime>) -> Vec<String> {
 /// fix where the message carries one beside a collector's rows; a message
 /// of rows alone names its last row, as before.
 pub fn report_line(read: &Read) -> String {
-    let own = read.fixes.iter().rev().find(|f| f.peer == f.via);
-    match own.or(read.fixes.last()) {
+    match shown_fix(read) {
         Some(fix) => {
             let more = match read.fixes.len() {
                 1 => String::new(),

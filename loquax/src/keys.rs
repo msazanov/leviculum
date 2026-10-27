@@ -29,6 +29,11 @@
 //! conversation and `Esc` or `Ctrl-g` closes it. `m` stays free for a new
 //! conversation (section 3).
 //!
+//! `Enter` on a message opens it (1076): a position report opens the map at
+//! its fix, any other message its detail view, which `v` opens for every
+//! message. `L` in the two command panes and `Alt-l` from every pane put the
+//! open conversation's peer on the map.
+//!
 //! Not here yet, because what they run is a later slice: new conversation
 //! (`m`, `C`), hints (`f`),
 //! and `Ctrl-x Ctrl-c` (a two-key sequence, which the table does not
@@ -111,6 +116,11 @@ pub enum Action {
     CloseSearch,
     /// Something the map does.
     Map(MapCmd),
+    /// Open the message under the cursor: a position report the map at its
+    /// fix, any other message its detail view.
+    OpenMessage,
+    /// The open conversation's peer on the map, at its latest fix.
+    PeerOnMap,
 }
 
 /// What a key does on the map.
@@ -207,13 +217,18 @@ pub const ROWS: &[Row<Action>] = {
         .footer("open"),
         // Messages; listed here so its footer leads the messages pane's.
         Row::new(
+            "open the message: a position on the map, any other its details",
+            MESSAGES_GROUP,
+            &[&[key(Enter, NONE, OpenMessage, MESSAGES)]],
+        )
+        .footer("open"),
+        Row::new(
             "the message's details",
             MESSAGES_GROUP,
-            &[&[key(Enter, NONE, run(C::Details), MESSAGES)]],
+            &[&[key(Char('v'), Mods::Plain, run(C::Details), MESSAGES)]],
         )
         .palette("details")
-        .footer("details")
-        .note("Ctrl-D in Signal: here Enter"),
+        .note("Ctrl-D in Signal: here v"),
         Row::new(
             "copy the message's text, or what a drag selected",
             MESSAGES_GROUP,
@@ -464,6 +479,14 @@ pub const ROWS: &[Row<Action>] = {
             ],
         )
         .palette("map"),
+        Row::new(
+            "this conversation's peer on the map",
+            MAP_GROUP,
+            &[
+                &[key(Char('L'), Mods::Plain, PeerOnMap, COMMAND_PANES)],
+                &[key(Char('l'), ALT, PeerOnMap, EVERY)],
+            ],
+        ),
         Row::new(
             "zoom in / out",
             MAP_GROUP,

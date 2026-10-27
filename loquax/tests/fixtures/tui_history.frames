@@ -124,7 +124,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        │├  to <5ec0ea2e…>──── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
-Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 3: bob ---
 ┌● loquax afbda7b3───────┐┌  Bob ·61dd  unknown──────────────────── no mailbox ┐
 │ <5ec0ea2e…>      12:00 ││                                                    │
@@ -199,7 +199,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        │├  to Bob ·61dd────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
-Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 6: deleted ---
 ┌  loquax afbda7b3───────┐┌● Bob ·61dd  unknown──────────────────── no mailbox ┐
 │▌Bob ·61dd        12:00 ││                                                    │
@@ -224,7 +224,7 @@ Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help �
 │                        │├  to Bob ·61dd────── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
-Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 === third ===
 --- frame 1: again ---
 ┌● loquax afbda7b3───────┐┌  Bob ·61dd  unknown──────────────────── no mailbox ┐

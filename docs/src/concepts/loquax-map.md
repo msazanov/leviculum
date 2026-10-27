@@ -31,7 +31,7 @@ fields beside id, source, title, body and the verification
 the two telemetry fields into positions (`telemetry::read`,
 `loquax/src/telemetry.rs:130`), the screen model keeps each peer's latest
 and hands every one to the store (`take_telemetry`,
-`loquax/src/ui.rs:2296`), and the store keeps the fields whole in its
+`loquax/src/ui.rs:2352`), and the store keeps the fields whole in its
 `fields` column (`loquax/src/store.rs:741`) and the positions in a table of
 their own (`SCHEMA_V2`, `loquax/src/store.rs:144`). The sender's timestamp
 is still not carried: `OutboxEvent`, the screen's `Message` and every type
@@ -64,7 +64,11 @@ What the core reads them with, all in `leviculum-lxmf`, `no_std + alloc`:
 header, at 120 columns on the header's second row beside how the peer is
 reached: `at 43.77310 N 11.25600 E · ±5 m · 4 min ago`. At 80 columns the
 header shows only the age, `pos 4 min`, so the reader knows there is one.
-The detail view (`Enter` on a message, slice 2 of [keys, mouse and
+`Enter` on a report's line, or a click on it, opens the map at that
+report's fix with the sender's pin selected, and a click on the header's
+position, `L` or `Alt-l` puts the peer on the map at its latest fix
+(1076). The detail view (`v` on any message, `Enter` on one that is not
+a report, slice 2 of [keys, mouse and
 layout](loquax-keys-and-layout.md)) of a telemetry message lists every
 sensor the codec decoded: position with altitude, speed, bearing and
 accuracy where given, the fix time, battery, link and temperature. A

@@ -79,7 +79,7 @@ Enter open │ Ctrl-s / Ctrl-r next, previous │ Tab to the results │ Esc clo
 │                                  │├  to <4f4f4f4f…>────────────────────────────────── Enter send · Alt-Enter newline ┤
 │                                  ││                                                                                  │
 └──────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────┘
-Enter details │ i write │ n / N next, previous │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+Enter open │ i write │ n / N next, previous │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- 120 x 40: both groups ---
 ┌● Search────────────── esc closes ┐┌  <4f4f4f4f…>  unknown────────────────────────── 4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f ┐
 │ / 4f4f                           ││                                                         mailbox 9c9c9c9c adopted │
@@ -211,7 +211,7 @@ Enter open │ Ctrl-s / Ctrl-r next, previous │ Esc close search │ Ctrl-q qu
 │                        │├  to <4f4f4f4f…>──── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────────────────┘└────────────────────────────────────────────────────┘
-Enter details │ i write │ n / N next, previous │ Tab pane │ Esc back │ q quit
+Enter open │ i write │ n / N next, previous │ Tab pane │ Esc back │ q quit
 --- 80 x 24: both groups ---
 ┌● Search──── esc closes ┐┌  <4f4f4f4f…>  unknown──── mailbox 9c9c9c9c adopted ┐
 │ / 4f4f                 ││                                                    │

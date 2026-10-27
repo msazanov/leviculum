@@ -48,7 +48,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        │├  to them ·61dd───── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
-Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 3: first reply ---
 ┌  loquax afbda7b3───────┐┌● them ·61dd  unknown─────────────────── no mailbox ┐
 │▌them ·61dd       14:04 ││                                                    │
@@ -73,7 +73,7 @@ Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help �
 │                        │├  to them ·61dd───── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
-Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 4: new while reading ---
 ┌  loquax afbda7b3───────┐┌● them ·61dd  unknown─────────────────── no mailbox ┐
 │▌them ·61dd       14:05 ││                                                    │
@@ -98,7 +98,7 @@ Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help �
 │                        │├  to them ·61dd───── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
-Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 5: newest ---
 ┌  loquax afbda7b3───────┐┌● them ·61dd  unknown─────────────────── no mailbox ┐
 │▌them ·61dd       14:05 ││                                                    │
@@ -123,7 +123,7 @@ Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help �
 │                        │├  to them ·61dd───── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
-Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 6: replied ---
 ┌  loquax afbda7b3───────┐┌  them ·61dd  unknown─────────────────── no mailbox ┐
 │▌them ·61dd       14:06 ││                                                    │
@@ -173,7 +173,7 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 │                        │├  to them ·61dd───── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
-Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 === 120x40 ===
 --- frame 1: attached ---
 ┌● loquax afbda7b3─────────────────┐┌  <61ddb79a…>  unknown────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
@@ -256,7 +256,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                                  │├  to them ·61dd─────────────────────────────────── Enter send · Alt-Enter newline ┤
 │                                  ││                                                                                  │
 └──────────────────────── / search ┘└──────────────────────────────────────────────────────────────────────────────────┘
-Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 3: first reply ---
 ┌  loquax afbda7b3─────────────────┐┌● them ·61dd  unknown─────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
 │▌them ·61dd                 14:04 ││                                                                       no mailbox │
@@ -297,7 +297,7 @@ Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help �
 │                                  │├  to them ·61dd─────────────────────────────────── Enter send · Alt-Enter newline ┤
 │                                  ││                                                                                  │
 └──────────────────────── / search ┘└──────────────────────────────────────────────────────────────────────────────────┘
-Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 4: new while reading ---
 ┌  loquax afbda7b3─────────────────┐┌● them ·61dd  unknown─────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
 │▌them ·61dd                 14:05 ││                                                                       no mailbox │
@@ -338,7 +338,7 @@ Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help �
 │                                  │├  to them ·61dd─────────────────────────────────── Enter send · Alt-Enter newline ┤
 │                                  ││                                                                                  │
 └──────────────────────── / search ┘└──────────────────────────────────────────────────────────────────────────────────┘
-Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 5: newest ---
 ┌  loquax afbda7b3─────────────────┐┌● them ·61dd  unknown─────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
 │▌them ·61dd                 14:05 ││                                                                       no mailbox │
@@ -379,7 +379,7 @@ Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help �
 │                                  │├  to them ·61dd─────────────────────────────────── Enter send · Alt-Enter newline ┤
 │                                  ││                                                                                  │
 └──────────────────────── / search ┘└──────────────────────────────────────────────────────────────────────────────────┘
-Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 6: replied ---
 ┌  loquax afbda7b3─────────────────┐┌  them ·61dd  unknown─────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
 │▌them ·61dd                 14:06 ││                                                                       no mailbox │
@@ -461,4 +461,4 @@ Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q q
 │                                  │├  to them ·61dd─────────────────────────────────── Enter send · Alt-Enter newline ┤
 │                                  ││                                                                                  │
 └──────────────────────── / search ┘└──────────────────────────────────────────────────────────────────────────────────┘
-Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit

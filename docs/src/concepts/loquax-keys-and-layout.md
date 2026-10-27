@@ -164,7 +164,8 @@ chord `loquax` adds to them.
 
 | Action | vi | Emacs | mail, chat | mouse | where |
 |---|---|---|---|---|---|
-| the message's detail view and ledger | `Enter` | | `Enter` (mutt display, Signal default action) | click its delivery mark | M |
+| open the message: a position report the map at its fix, any other its detail view | `Enter` | | `Enter` (mutt display, Signal default action) | click a report; click a delivery mark for the detail | M |
+| the message's detail view and ledger, any message | `v` | | palette `details` (Signal `Ctrl-D`, vi's half page here) | click its delivery mark | M |
 | copy the message's text | `y` | `Alt-w` | | drag selects, release copies (OSC 52) | M |
 | follow a link in the body | `f`, then its label | | | click the link, as in `lnomad` | M |
 | delete from this device | `d`, then confirm | | `d` (mutt; aerc asks first) | | M, from the history slice on |
@@ -204,6 +205,7 @@ compose too.
 | Action | vi | Emacs | mail, chat | mouse | where |
 |---|---|---|---|---|---|
 | the map | `M` | `Alt-m` | palette `map` | | `M` L M; `Alt-m` all |
+| this conversation's peer on the map, at its latest fix | `L` | `Alt-l` | | click the position in the header | `L` L M; `Alt-l` all |
 | zoom in / out | | | `+` (`=`) / `-` | wheel | P |
 | pan | `h` `j` `k` `l` | | arrows | | P |
 | every pin in view again | | | `0` | | P |
@@ -213,6 +215,16 @@ compose too.
 
 The palette (`:` and `Alt-x`), the help (`?` and `F1`), `F5`, `Ctrl-l`,
 `Ctrl-q` and the conversation steps of **all** reach the map too.
+
+Built with 1076: `Enter` on a position report, or a click on its line,
+opens the map centred on that report's fix (a folded line is the latest
+report of its run) at the deepest zoom the region under it has, the
+sender's pin selected; `Esc` returns to the conversation with the cursor
+where it was. The detail view moved to `v`, which opens it for every
+message, a report too; `Enter` on any other message still opens it. `L`
+is free in L and M (vi's screen-bottom has no meaning in a list of
+blocks) and `Alt-l` is held by no compose edit, so the peer's position
+is reachable from vi and Emacs hands alike.
 
 ### Everywhere
 
@@ -900,7 +912,7 @@ first rung it is.
 - a palette action `theme` toggles for the session, the way `t` calls
   `toggle_theme` in lnomad (`lnomad/src/app/event.rs:697`); no key, the
   keymap is decided. Its toast names the theme it turned to
-  (`loquax/src/ui.rs:2086`).
+  (`loquax/src/ui.rs:2142`).
 
 #### 3. What colour carries and what it must not carry alone
 

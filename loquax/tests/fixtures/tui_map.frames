@@ -148,7 +148,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        │├  to them ·61dd───── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
-Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 7: back ---
 ┌  loquax afbda7b3───────┐┌● them ·61dd  unknown─────── pos 4 min · no mailbox ┐
 │▌them ·61dd       14:00 ││                                                    │
@@ -173,7 +173,57 @@ Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help �
 │                        │├  to them ·61dd───── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
-Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+--- frame 8: from the report ---
+┌  loquax afbda7b3───────┐┌● map────────────────────────────── z15 · 1 in view ┐
+│▌them ·61dd       14:00 ││⠻⢷⣤⣀          ⢀⣼⠟⠁  ⢹⡟               ⠈⠛⢷⣦⣀       ⠈⠛⢶│
+│▌◎ position             ││  ⠈⠛⠿⣦⣄⡀    ⢀⣴⡿⠃   ⣴⠏                   ⠈⠻⢷⣤⡀       │
+│                        ││     ⠈⠙⠻⢶⣤⡀⣠⣿⠋   ⢠⡾⠁                       ⠉⠻⢷⣤⡀    │
+│                        ││         ⢩⣿⢿⣥⡀  ⣴⠏                            ⠙⠻⣶⣄⡀ │
+│                        ││       ⢀⣴⡿⠁ ⠈⠛⢷⣾⣁                                ⠙⠻⣶│
+│                        ││      ⣠⡿⠋    ⢀⣼⠟⠛⢷⣦⣀                               ⠈│
+│                        ││    ⢠⣾⠟     ⣠⣾⠋   ⠈⠛⠷⣦⣀                           ⢠⣾│
+│                        ││  ⢀⣴⡟⠁     ⣴⡟⠹⣷⣄     ⠈⠙⠷⣦⣀                       ⣴⡟⠁│
+│                        ││ ⣠⡿⠋     ⢀⣾⠏ ⣼⠟⡰⠁       ⠈⠙⠷⣦⣄                  ⢀⣾⠏  │
+│                        ││⣾⠟      ⣰⡿⠁  ⣿⡷⠁          ◉ them ·61dd · 4 min⣰⡿⠃   │
+│                        ││⠁     ⢀⣼⣿⣄ ⢀⣴⡿                ⠈⠙⠿⣦⣄         ⢀⣾⠟     │
+│                        ││    ⣠⣴⡾⠋⠈⠻⣷⡿⠋                    ⠈⠙⠿⣦⣄⡀    ⣰⡿⠋      │
+│                        ││⢀⣠⣶⠟⠋⠁    ⠈                         ⣴⠟⠻⣦⣄⢀⣼⡟⠁       │
+│                        ││⠟⠉                                ⢀⣾⠏   ⣹⣿⣿⣄⡀       │
+│                        ││                            ⣠⡀   ⢠⡿⠃  ⢀⣼⡟⠁ ⠙⠻⣶⣄⡀    │
+│                        ││                            ⠉⠻⣶⣄⣰⡟⠁  ⣠⣿⠋      ⠙⠻⣶⣄⡀ │
+│                        ││                               ⠙⠟  ⢀⣴⡟⠻⢷⣄⡀       ⠙⠻⣶│
+│                        ││                                  ⣠⣾⠋   ⠉⠻⣶⣄⡀       │
+│                        ││                       © OpenStreetMap contributors │
+│                        │├  to them ·61dd───── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
++ zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
+--- frame 9: report closed ---
+┌  loquax afbda7b3───────┐┌● them ·61dd  unknown─────── pos 4 min · no mailbox ┐
+│▌them ·61dd       14:00 ││                                                    │
+│▌◎ position             ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││           nothing earlier on this device           │
+│                        ││                    ── Today ──                     │
+│                        ││▌◎ position 43.77500 N 11.26100 E (+2               │
+│                        ││▌more)  14:00                                       │
+│                        │├  to them ·61dd───── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 === halfblocks ===
 --- frame 1: attached ---
 ┌● loquax afbda7b3───────┐┌  <61ddb79a…>  unknown────────────────── no mailbox ┐
@@ -324,7 +374,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 │                        │├  to them ·61dd───── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
-Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 7: back ---
 ┌  loquax afbda7b3───────┐┌● them ·61dd  unknown─────── pos 4 min · no mailbox ┐
 │▌them ·61dd       14:00 ││                                                    │
@@ -349,4 +399,54 @@ Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help �
 │                        │├  to them ·61dd───── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
 └────────────── / search ┘└────────────────────────────────────────────────────┘
-Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
+--- frame 8: from the report ---
+┌  loquax afbda7b3───────┐┌● map────────────────────────────── z15 · 1 in view ┐
+│▌them ·61dd       14:00 ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
+│▌◎ position             ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
+│                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
+│                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
+│                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
+│                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
+│                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
+│                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
+│                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
+│                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀◉ them ·61dd · 4 min▀▀▀▀▀▀│
+│                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
+│                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
+│                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
+│                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
+│                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
+│                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
+│                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
+│                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
+│                        ││                       © OpenStreetMap contributors │
+│                        │├  to them ·61dd───── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
++ zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
+--- frame 9: report closed ---
+┌  loquax afbda7b3───────┐┌● them ·61dd  unknown─────── pos 4 min · no mailbox ┐
+│▌them ·61dd       14:00 ││                                                    │
+│▌◎ position             ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││                                                    │
+│                        ││           nothing earlier on this device           │
+│                        ││                    ── Today ──                     │
+│                        ││▌◎ position 43.77500 N 11.26100 E (+2               │
+│                        ││▌more)  14:00                                       │
+│                        │├  to them ·61dd───── Enter send · Alt-Enter newline ┤
+│                        ││                                                    │
+└────────────── / search ┘└────────────────────────────────────────────────────┘
+Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
