@@ -2312,7 +2312,10 @@ site-unpack-docs-selftest:
 # binaries build unconstrained first: the question is the tests, not rustc.
 #
 # `only` narrows both runs to the target keys containing it (the script's
-# `--only`); `report` still reads the whole survey directory. just 1.40 has no
+# `--only`), a target with required-features included (1067); `report` still
+# reads the whole survey directory. A run's exit 1 (red) and 3 (budget) are
+# left to `report`, but 2 (an `only` that matches nothing, or a usage error)
+# ends the recipe: a narrowed run over nothing read green twice (1059, 1065). just 1.40 has no
 # named recipe arguments and hands `quota=25%` to the recipe as a literal
 # positional value (895 ran the whole survey that way), so the body reads
 # `quota=` and `only=` by name in either slot and takes a bare value by
@@ -2335,9 +2338,10 @@ test-under-quota quota="25%" only="":
     done
     narrow=()
     if [ -n "$o" ]; then narrow=(--only "$o"); fi
+    survey() { python3 scripts/test-under-quota.py run "$@" || { rc=$?; [ "$rc" != 2 ] || exit 2; }; }
     {{just_executable()}} build-integ-bins
-    python3 scripts/test-under-quota.py run --quota none "${narrow[@]}" || true
-    python3 scripts/test-under-quota.py run --quota "$q" "${narrow[@]}" || true
+    survey --quota none "${narrow[@]}"
+    survey --quota "$q" "${narrow[@]}"
     python3 scripts/test-under-quota.py report --quota "$q"
 
 # 730: `cargo test --workspace` leaves nothing behind in the temp directory.
