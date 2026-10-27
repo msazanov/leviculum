@@ -158,23 +158,6 @@ graded_from_source() {
     printf '%s\n' "$names" | sort -u
 }
 
-# Graded names periculum resolves to a binary of another name. The messenger
-# was renamed lnmsg -> loquax (#232); periculum 1025 grades it under the old
-# name and finds whichever of the two the target directory holds
-# (`paths::MESSENGER_NAMES`), so a graded `lnmsg` is satisfied by a built
-# `loquax`. Drop the entry once periculum's preflight lists `loquax` itself.
-GRADED_ALIASES=( "lnmsg loquax" )
-
-# Rewrite each graded alias to the name the recipe builds.
-canonical_graded() {
-    local pair from to script=""
-    for pair in "${GRADED_ALIASES[@]}"; do
-        read -r from to <<<"$pair"
-        script="${script}s/^${from}\$/${to}/;"
-    done
-    sed "$script"
-}
-
 # Drop the names that are graded but are nobody's cargo bin.
 drop_not_cargo_bins() {
     grep -vxF "$(printf '%s\n' "${NOT_CARGO_BINS[@]}")" || true
@@ -187,7 +170,7 @@ compare_sets() {
     local graded_f built_f rc=0 name
     graded_f="$(mktemp)"
     built_f="$(mktemp)"
-    printf '%s\n' "$1" | canonical_graded | drop_not_cargo_bins | sort -u > "$graded_f"
+    printf '%s\n' "$1" | drop_not_cargo_bins | sort -u > "$graded_f"
     printf '%s\n' "$2" | drop_not_cargo_bins | sort -u > "$built_f"
     while read -r name; do
         [ -n "$name" ] || continue
@@ -303,17 +286,6 @@ fi
 # Identical sets, c-lnsd excluded on the graded side only, must be silent.
 if ! compare_sets "$(printf 'lnsd\nc-lnsd\n')" "$(printf 'lnsd\n')" >/dev/null; then
     selftest_fail "identical sets were reported as drift."
-fi
-
-# The rename alias: periculum grading the old name is satisfied by the new
-# one, and still reports it missing when nothing builds it.
-if ! compare_sets "$(printf 'lnsd\nlnmsg\n')" "$(printf 'lnsd\nloquax\n')" >/dev/null; then
-    selftest_fail "a graded alias was reported as drift against the name it resolves to."
-fi
-if drift="$(compare_sets "$(printf 'lnsd\nlnmsg\n')" "$(printf 'lnsd\n')")"; then
-    selftest_fail "a graded alias nothing builds was called no drift at all."
-elif [[ "$drift" != *"MISSING  loquax"* ]]; then
-    selftest_fail "a graded alias nothing builds was misreported: '$drift'"
 fi
 
 if [ "$selftest_failed" -ne 0 ]; then

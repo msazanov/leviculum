@@ -1279,7 +1279,7 @@ per side, ours tinted and theirs neutral (Lew, 2026-10-26; section 5,
 Dated 2026-10-26. Order and dependencies only. Each has its acceptance,
 and where it changes what goes over the wire or what the screen shows of
 a real exchange, a phase in the 1001 cell (periculum's
-`regression/lnmsg_tui_chat_session.toml`, the `lnmsg_tui_chat` step: `loquax
+`regression/loquax_tui_chat_session.toml`, the `loquax_tui_chat` step: `loquax
 tui` against the stock LXMF client on one `lnsd`). The order differs from
 the one in the order text in one place: the mouse comes after the layout,
 because its targets (the delivery mark, the badge, the blocks) are the

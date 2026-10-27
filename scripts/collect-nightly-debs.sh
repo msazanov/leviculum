@@ -12,7 +12,7 @@
 #   lnomad_*_{amd64,arm64}.deb
 #   lblogd_*_{amd64,arm64}.deb
 #   lnpnd_*_{amd64,arm64}.deb
-#   lnmsg_*_{amd64,arm64}.deb
+#   loquax_*_{amd64,arm64}.deb
 #   lnflash_*_amd64.deb (scripts/build-lnflash-deb.sh)
 #   leviculum-heapacct_*_arm64.deb
 # and the lnflash firmware bundle from scripts/lnflash-bundle.sh:

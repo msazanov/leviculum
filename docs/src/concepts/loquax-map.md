@@ -347,7 +347,7 @@ without points, is 278,236 bytes for four tiles.
 ## 5. Slices
 
 In order. Each has its acceptance; where it touches a real exchange, a
-phase in the 1001 cell (periculum's `regression/lnmsg_tui_chat_session.toml`,
+phase in the 1001 cell (periculum's `regression/loquax_tui_chat_session.toml`,
 `loquax` against the stock Python LXMF client `lxmf_node.py` on one
 `lnsd`).
 
