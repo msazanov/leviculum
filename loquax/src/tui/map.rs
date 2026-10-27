@@ -164,6 +164,20 @@ pub fn load(dir: &Path) -> (Vec<Installed>, Vec<String>) {
     (regions, problems)
 }
 
+/// A no-op the terminal carries out before a picture sent again only to
+/// erase stale labels: save and restore the cursor, which makes the
+/// picture's cell differ from the last frame's so ratatui sends it.
+const NUDGE: &str = "\u{1b}7\u{1b}8";
+
+/// One label drawn over the picture.
+#[derive(Clone, Debug, PartialEq)]
+struct Label {
+    col: u16,
+    row: u16,
+    text: String,
+    style: Style,
+}
+
 /// One view drawn: its pixels, what to credit, and the encoded picture of
 /// a graphics protocol once it was asked for.
 struct Painted {
@@ -183,6 +197,11 @@ pub struct MapPainter {
     font: FontSize,
     painted: Option<Painted>,
     read: Vec<(ViewTile, Vec<u8>)>,
+    /// The labels of the last frame, and whether its picture carried
+    /// [`NUDGE`]: flipped when the labels change, so the picture is sent
+    /// again then and only then.
+    labels: Vec<Label>,
+    nudge: bool,
 }
 
 impl MapPainter {
@@ -216,6 +235,8 @@ impl MapPainter {
             font,
             painted: None,
             read: Vec::new(),
+            labels: Vec::new(),
+            nudge: false,
         }
     }
 
@@ -351,7 +372,7 @@ impl MapPainter {
                 }
             }
         }
-        let buf = frame.buffer_mut();
+        let mut labels = Vec::new();
         for pin in &shown.pins {
             let mut style = Style::default();
             if pin.stale {
@@ -360,19 +381,52 @@ impl MapPainter {
             if pin.selected {
                 style = style.add_modifier(Modifier::REVERSED);
             }
-            let apart = pin.apart.iter().map(|a| (a.col, a.row, &a.text));
-            for (col, row, text) in std::iter::once((pin.col, pin.row, &pin.text)).chain(apart) {
-                let room = usize::from((area.x + area.width).saturating_sub(col));
-                let (end, _) = buf.set_stringn(col, row, text, room, style);
-                // A graphics protocol marks the cells under its picture as
-                // skipped; the pin's own cells are drawn over it.
-                for x in col..end {
-                    if let Some(cell) = buf.cell_mut((x, row)) {
-                        cell.set_diff_option(CellDiffOption::None);
+            let apart = pin.apart.iter().map(|a| (a.col, a.row, a.text.clone()));
+            labels.extend(
+                std::iter::once((pin.col, pin.row, pin.text.clone()))
+                    .chain(apart)
+                    .map(|(col, row, text)| Label {
+                        col,
+                        row,
+                        text,
+                        style,
+                    }),
+            );
+        }
+        let buf = frame.buffer_mut();
+        if matches!(graphics, Graphics::Kitty | Graphics::Sixel) {
+            // A graphics protocol marks the cells under its picture as
+            // skipped, so ratatui never rewrites the cells a label left:
+            // the terminal keeps the old text there. When the labels moved,
+            // the picture is sent again, its erase clearing them (1074).
+            if labels != self.labels {
+                self.nudge = !self.nudge;
+            }
+            if self.nudge {
+                for row in area.y..area.y + area.height {
+                    if let Some(cell) = buf.cell_mut((area.x, row)) {
+                        if matches!(cell.diff_option, CellDiffOption::ForcedWidth(_)) {
+                            let nudged = format!("{NUDGE}{}", cell.symbol());
+                            cell.set_symbol(&nudged);
+                        }
                     }
                 }
             }
         }
+        for label in &labels {
+            let (col, row) = (label.col, label.row);
+            let room = usize::from((area.x + area.width).saturating_sub(col));
+            let (end, _) = buf.set_stringn(col, row, &label.text, room, label.style);
+            // Drawn over the picture every frame: a picture sent again
+            // erased the label even where its cells did not change, and
+            // a blank in it is the same blank as last frame's.
+            for x in col..end {
+                if let Some(cell) = buf.cell_mut((x, row)) {
+                    cell.set_diff_option(CellDiffOption::AlwaysUpdate);
+                }
+            }
+        }
+        self.labels = labels;
         // The region's own line, "© OpenStreetMap contributors", or the
         // outline's; always on the view.
         let credit = format!("{} ", painted.attribution);
@@ -456,7 +510,7 @@ fn region_into(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use leviculum_map::mercator::{project, LatLon};
+    use leviculum_map::mercator::{project, LatLon, World};
     use loquax::ui::map::PinCell;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
@@ -578,6 +632,173 @@ mod tests {
         let (_, text) = drawn(Graphics::Braille, None);
         assert!(text.chars().any(|c| ('\u{2801}'..='\u{28ff}').contains(&c)));
         assert!(text.contains("● bob · 4 min"));
+    }
+
+    /// What a terminal shows after the frames ratatui sent it: each
+    /// frame's diff against the one before applied in order, as
+    /// `Terminal::flush` sends it. A sixel's leading erase is carried out,
+    /// `ECH` of its width on each of its rows, and the picture's cells are
+    /// `▒`; a kitty row writes its placeholders across the row, also `▒`.
+    /// A `TestBackend` alone keeps text an erase would remove.
+    struct Screen {
+        shown: ratatui::buffer::Buffer,
+        last: ratatui::buffer::Buffer,
+    }
+
+    impl Screen {
+        fn new(area: Rect) -> Self {
+            Self {
+                shown: ratatui::buffer::Buffer::empty(area),
+                last: ratatui::buffer::Buffer::empty(area),
+            }
+        }
+
+        fn frame(
+            &mut self,
+            terminal: &mut Terminal<TestBackend>,
+            painter: &mut MapPainter,
+            shown: &MapView,
+        ) {
+            let next = terminal
+                .draw(|f| painter.render(f, shown, Style::default()))
+                .expect("draw")
+                .buffer
+                .clone();
+            let updates: Vec<(u16, u16, ratatui::buffer::Cell)> = self
+                .last
+                .diff(&next)
+                .into_iter()
+                .map(|(x, y, cell)| (x, y, cell.clone()))
+                .collect();
+            for (x, y, cell) in updates {
+                self.write(x, y, &cell);
+            }
+            self.last = next;
+        }
+
+        fn write(&mut self, x: u16, y: u16, cell: &ratatui::buffer::Cell) {
+            let symbol = cell.symbol();
+            let mut picture = |x: u16, y: u16| {
+                if let Some(c) = self.shown.cell_mut((x, y)) {
+                    c.reset();
+                    c.set_symbol("▒");
+                }
+            };
+            if symbol.contains("\u{1b}P") {
+                let width: u16 = symbol
+                    .split_once("\u{1b}[")
+                    .and_then(|(_, rest)| rest.split_once('X'))
+                    .and_then(|(n, _)| n.parse().ok())
+                    .expect("a sixel opens with an erase");
+                let rows = symbol.matches("X\u{1b}[1B").count().max(1) as u16;
+                for dy in 0..rows {
+                    for dx in 0..width {
+                        picture(x + dx, y + dy);
+                    }
+                }
+            } else if symbol.contains('\u{10EEEE}') {
+                let width = symbol.chars().filter(|&c| c == '\u{10EEEE}').count() as u16;
+                for dx in 0..width {
+                    picture(x + dx, y);
+                }
+            } else if let Some(c) = self.shown.cell_mut((x, y)) {
+                *c = cell.clone();
+            }
+        }
+
+        fn row(&self, y: u16) -> String {
+            (0..self.shown.area.width)
+                .filter_map(|x| self.shown.cell((x, y)).map(|c| c.symbol().to_string()))
+                .collect()
+        }
+    }
+
+    /// A 30 x 8 picture at (1, 1) of `centre` at `zoom`, with one pin at
+    /// `(col, 5)`.
+    fn one_pin(painter: &MapPainter, centre: World, zoom: u8, col: u16, text: &str) -> MapView {
+        let cell_px = painter.setup().cell_px;
+        let mut view = shown(cell_px);
+        view.viewport = Viewport::new(
+            centre,
+            zoom,
+            30 * u32::from(cell_px.0),
+            8 * u32::from(cell_px.1),
+        );
+        view.pins[0].col = col;
+        view.pins[0].text = text.to_string();
+        view.pins[0].selected = false;
+        view
+    }
+
+    fn graphics_painters() -> [MapPainter; 2] {
+        [
+            MapPainter::new(Vec::new(), Graphics::Sixel, Some(Picker::halfblocks())),
+            MapPainter::new(Vec::new(), Graphics::Kitty, None),
+        ]
+    }
+
+    /// A drag over open sea: the picture is the same plain colour before
+    /// and after, so it is not sent again, and the label moved three cells
+    /// left. Its old cells must not keep the old text (1074, Lew's foot:
+    /// two labels of one peer).
+    #[test]
+    fn a_label_dragged_over_an_unchanged_picture_leaves_no_old_cells() {
+        let sea = project(LatLon::from_degrees(40.0, -40.0));
+        for mut painter in graphics_painters() {
+            let name = painter.graphics().name();
+            let (cw, _) = painter.setup().cell_px;
+            let mut terminal = Terminal::new(TestBackend::new(32, 10)).expect("terminal");
+            let mut screen = Screen::new(Rect::new(0, 0, 32, 10));
+            let before = one_pin(&painter, sea, 8, 16, "● bob · 4 min");
+            screen.frame(&mut terminal, &mut painter, &before);
+            assert_eq!(screen.row(5).matches("bob").count(), 1, "{name}");
+            let mut dragged = before.viewport;
+            dragged.pan(3 * i32::from(cw), 0);
+            let after = one_pin(&painter, dragged.centre, 8, 13, "● bob · 4 min");
+            screen.frame(&mut terminal, &mut painter, &after);
+            let row = screen.row(5);
+            assert_eq!(row.matches("bob").count(), 1, "{name}: {row}");
+            assert_eq!(row.matches("min").count(), 1, "{name}: {row}");
+            assert!(row.contains("▒● bob · 4 min▒"), "{name}: {row}");
+        }
+    }
+
+    /// The age shortens over a view that did not move: the picture is the
+    /// one drawn last, and the cell the longer text took must not keep its
+    /// last letter.
+    #[test]
+    fn a_label_that_shortens_over_the_same_view_leaves_no_old_cells() {
+        let at = project(LatLon::from_degrees(48.0, 10.0));
+        for mut painter in graphics_painters() {
+            let name = painter.graphics().name();
+            let mut terminal = Terminal::new(TestBackend::new(32, 10)).expect("terminal");
+            let mut screen = Screen::new(Rect::new(0, 0, 32, 10));
+            let long = one_pin(&painter, at, 1, 16, "● bob · 14 min");
+            screen.frame(&mut terminal, &mut painter, &long);
+            let short = one_pin(&painter, at, 1, 16, "● bob · 4 min");
+            screen.frame(&mut terminal, &mut painter, &short);
+            let row = screen.row(5);
+            assert!(row.contains("▒● bob · 4 min▒"), "{name}: {row}");
+        }
+    }
+
+    /// A zoom about the pin: the picture changes and is sent again, which
+    /// erases what was under it, and the label stays on the same cells. It
+    /// must be drawn again over the new picture.
+    #[test]
+    fn a_label_on_the_same_cells_over_a_new_picture_is_drawn_again() {
+        let at = project(LatLon::from_degrees(48.0, 10.0));
+        for mut painter in graphics_painters() {
+            let name = painter.graphics().name();
+            let mut terminal = Terminal::new(TestBackend::new(32, 10)).expect("terminal");
+            let mut screen = Screen::new(Rect::new(0, 0, 32, 10));
+            let out = one_pin(&painter, at, 1, 16, "● bob · 4 min");
+            screen.frame(&mut terminal, &mut painter, &out);
+            let zoomed = one_pin(&painter, at, 2, 16, "● bob · 4 min");
+            screen.frame(&mut terminal, &mut painter, &zoomed);
+            let row = screen.row(5);
+            assert!(row.contains("▒● bob · 4 min▒"), "{name}: {row}");
+        }
     }
 
     #[test]
