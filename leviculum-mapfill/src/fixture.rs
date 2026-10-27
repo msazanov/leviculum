@@ -139,6 +139,11 @@ impl<'a> Fixture<'a> {
         self.shift
     }
 
+    /// Number of tiles the header holds.
+    pub fn tile_count(&self) -> usize {
+        self.tiles.len() / TILE
+    }
+
     /// Number of features.
     pub fn len(&self) -> usize {
         self.count as usize

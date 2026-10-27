@@ -27,6 +27,23 @@ pub enum Class {
 }
 
 impl Class {
+    /// Every class in draw order, which is also the order of the class
+    /// bytes: areas from earth up to buildings, then lines.
+    pub const ALL: [Class; 12] = [
+        Self::Earth,
+        Self::Urban,
+        Self::Park,
+        Self::Pedestrian,
+        Self::Sand,
+        Self::Water,
+        Self::Building,
+        Self::Waterway,
+        Self::Path,
+        Self::MinorRoad,
+        Self::MajorRoad,
+        Self::Rail,
+    ];
+
     /// The class for a fixture byte, `None` for an unknown one.
     pub fn from_u8(v: u8) -> Option<Self> {
         Some(match v {
