@@ -547,6 +547,14 @@ The reviewer decided three more for slice (c), 2026-10-27 (leviculum 1065):
   past its deepest), two alike by file name; the outline where none does.
   The zoom range offered is from the world down to the deepest a region
   draws at, and at least to zoom 10.
+- **A region ends at its box.** The cut writes every tile that touches
+  the box, so its data covers the box rounded out to each zoom's tile
+  grid: at z8 Frankfurt's reaches 1.04 degrees east of the box, at z15
+  none. Drawn whole, those tiles moved the region's edge as the reader
+  zoomed. The core draws a region into its box alone (`Region::area`,
+  `draw::draw_in`), so the edge is the same place on the earth at every
+  zoom, within half a pixel, and the outline is drawn under the rest of
+  the view (1077).
 
 ## See also
 

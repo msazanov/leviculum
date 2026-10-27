@@ -22,8 +22,10 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use embedded_graphics::pixelcolor::Rgb565;
+use embedded_graphics::prelude::Dimensions;
+use embedded_graphics::primitives::Rectangle;
 use leviculum_map::choice::{choose, view_zooms};
-use leviculum_map::draw::{draw, draw_tiles, Ink};
+use leviculum_map::draw::{draw_in, draw_tiles, Ink};
 use leviculum_map::outline;
 use leviculum_map::region::Region;
 use leviculum_map::viewport::{ViewTile, Viewport};
@@ -282,7 +284,20 @@ impl MapPainter {
         let drawn = match chosen.and_then(|i| self.regions.get(i)) {
             Some(installed) => {
                 let drawn = Frame::new(&mut fb, w, h).is_some_and(|mut frame| {
-                    region_into(&installed.region, view, ink, &mut self.read, &mut frame)
+                    // The region ends at its box at every zoom; the
+                    // outline goes under the rest of the view (1077).
+                    let area = installed.region.area(view);
+                    if area != frame.bounding_box() {
+                        let Ok(_) = outline::draw(outline::WORLD_50M, view, ink, &mut frame);
+                    }
+                    region_into(
+                        &installed.region,
+                        view,
+                        area,
+                        ink,
+                        &mut self.read,
+                        &mut frame,
+                    )
                 });
                 if drawn {
                     attribution = installed.region.attribution().to_string();
@@ -466,11 +481,12 @@ fn braille(ink: impl Fn(u32, u32) -> bool) -> char {
     }
 }
 
-/// Draw `region`'s tiles of `view` into `frame`; `false` when a tile could
-/// not be read, and the outline is drawn instead.
+/// Draw `region`'s tiles of `view` into `area` of `frame`; `false` when a
+/// tile could not be read, and the outline is drawn instead.
 fn region_into(
     region: &Region<File>,
     view: &Viewport,
+    area: Rectangle,
     ink: Ink,
     read: &mut Vec<(ViewTile, Vec<u8>)>,
     frame: &mut Frame<'_>,
@@ -496,8 +512,9 @@ fn region_into(
         points: &mut points,
         ring_ends: &mut ring_ends,
     };
-    let Ok(_) = draw(
+    let Ok(_) = draw_in(
         &tiles,
+        area,
         Profile::Full,
         ink,
         frame,

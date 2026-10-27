@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use clap::{Parser, Subcommand};
 use embedded_graphics::prelude::*;
-use leviculum_map::draw::{draw, draw_tiles, Ink};
+use leviculum_map::draw::{draw_in, draw_tiles, Ink};
 use leviculum_map::mercator::{project, LatLon};
 use leviculum_map::region::{Bounds, Region};
 use leviculum_map::viewport::Viewport;
@@ -17,7 +17,7 @@ use leviculum_map_tool::{Res, ATTRIBUTION};
 use leviculum_mapfill::fill::{Edge, Scratch};
 use leviculum_mapfill::frame::Frame;
 use leviculum_mapfill::render::{NoClock, Work};
-use leviculum_mapfill::style::Profile;
+use leviculum_mapfill::style::{Profile, BACKGROUND};
 
 /// See the manifest: musl's allocator made the cut kernel-bound.
 #[global_allocator]
@@ -226,9 +226,14 @@ fn cmd_render(path: &Path, out: &Path, at: LatLon, zoom: u8, w: u32, h: u32) -> 
         points: &mut points,
         ring_ends: &mut ring_ends,
     };
+    // Drawn as a frontend draws it: into the region's box, the rest of
+    // the view left at the background (1077).
+    frame.clear(BACKGROUND)?;
+    let area = region.area(&view);
     let t = Instant::now();
-    let st = draw(
+    let st = draw_in(
         &tiles,
+        area,
         Profile::Full,
         Ink::Colour,
         &mut frame,

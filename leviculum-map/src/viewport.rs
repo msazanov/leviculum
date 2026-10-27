@@ -15,10 +15,11 @@
 use alloc::vec::Vec;
 use core::ops::RangeInclusive;
 
-use embedded_graphics::prelude::Point;
+use embedded_graphics::prelude::{Point, Size};
+use embedded_graphics::primitives::Rectangle;
 
-use crate::mercator::World;
-use crate::region::TileId;
+use crate::mercator::{x_of_lon, y_of_lat, World};
+use crate::region::{Bounds, TileId};
 
 /// The deepest view zoom: a sub-pixel is one world unit there.
 pub const MAX_VIEW_ZOOM: u8 = 20;
@@ -170,6 +171,49 @@ impl Viewport {
             x: (i64::from(self.centre.x) + dx).rem_euclid(1 << 32) as u32,
             y: (i64::from(self.centre.y) + dy).clamp(0, i64::from(u32::MAX)) as u32,
         };
+    }
+
+    /// The pixels of the view that the box `b` covers: those whose centre
+    /// lies inside it, the filler's rule, so the edge is within half a
+    /// pixel of the box at every zoom. Empty when the box is out of view.
+    /// A region is drawn into this and no further (1077): its tiles cover
+    /// the box rounded out to each zoom's tile grid, wider and lopsided at
+    /// the shallow zooms, and drawn whole they moved the edge on zoom.
+    ///
+    /// x is the copy of the box that holds the view's centre, or the one
+    /// nearest it; a view wider than the world shows that copy only.
+    pub fn area_of(&self, b: &Bounds) -> Rectangle {
+        let s = self.sub_shift();
+        let world = self.world_sub();
+        let (xw, xe) = (x_of_lon(b.west), x_of_lon(b.east));
+        let span_e7 = (i64::from(b.east) - i64::from(b.west)).rem_euclid(3_600_000_000);
+        let span = match b.west < b.east && span_e7 == 0 {
+            // West 180 W and east 180 E: the whole world.
+            true => world,
+            false => (i64::from(xe >> s) - i64::from(xw >> s)).rem_euclid(world),
+        };
+        let (mut west, north) = self.to_screen_sub(World {
+            x: xw,
+            y: y_of_lat(b.north),
+        });
+        let (_, south) = self.to_screen_sub(World {
+            x: xw,
+            y: y_of_lat(b.south),
+        });
+        let mid = i64::from(self.width) * SUB / 2;
+        if west > mid && west - world + span > mid {
+            west -= world;
+        }
+        // The pixels whose centre, at sub-pixel 16 n + 8, is in [a, b).
+        let pixels = |a: i64, b: i64, of: u32| {
+            let first = |v: i64| (v - SUB / 2 + SUB - 1).div_euclid(SUB);
+            let max = i64::from(of);
+            let (p0, p1) = (first(a).clamp(0, max), first(b).clamp(0, max));
+            (p0 as i32, (p1 - p0).max(0) as u32)
+        };
+        let (x, w) = pixels(west, west + span, self.width);
+        let (y, h) = pixels(north, south, self.height);
+        Rectangle::new(Point::new(x, y), Size::new(w, h))
     }
 
     /// The view that shows every point in `points` with `margin` pixels to

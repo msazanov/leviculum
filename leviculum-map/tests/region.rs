@@ -4,8 +4,9 @@
 //! single-view fixture.
 
 use embedded_graphics::prelude::*;
-use leviculum_map::draw::{draw, draw_tiles, Ink};
-use leviculum_map::mercator::{project, LatLon};
+use embedded_graphics::primitives::Rectangle;
+use leviculum_map::draw::{draw, draw_in, draw_tiles, Ink};
+use leviculum_map::mercator::{project, x_of_lon, y_of_lat, LatLon};
 use leviculum_map::region::{Entry, Region, RegionError, TileId, ENTRY_LEN, HEADER_LEN};
 use leviculum_map::viewport::Viewport;
 use leviculum_mapfill::fill::{Edge, Scratch};
@@ -23,13 +24,27 @@ const CENTRE: LatLon = LatLon {
 
 fn render(region: &Region<&[u8]>, zoom: u8, fb: &mut [u16]) -> (usize, RenderStats) {
     let view = Viewport::new(project(CENTRE), zoom, 240, 320);
-    let tiles = region.view(&view).expect("tiles");
+    let area = region.area(&view);
+    draw_view(region, &view, area, fb)
+}
+
+/// `view` of `region` drawn into `area` of a frame cleared to the
+/// background, as a frontend draws it over the outline.
+fn draw_view(
+    region: &Region<&[u8]>,
+    view: &Viewport,
+    area: Rectangle,
+    fb: &mut [u16],
+) -> (usize, RenderStats) {
+    let (w, h) = view.size();
+    let tiles = region.view(view).expect("tiles");
     let mut edges = vec![Edge::default(); 4096];
     let mut active = vec![0u16; 4096];
-    let mut heads = vec![0u16; 320];
+    let mut heads = vec![0u16; h as usize];
     let mut points = vec![Point::zero(); 4096];
     let mut ring_ends = vec![0u16; 1024];
-    let mut frame = Frame::new(fb, 240, 320).expect("frame");
+    let mut frame = Frame::new(fb, w, h).expect("frame");
+    let Ok(()) = frame.clear(BACKGROUND);
     let mut scratch = Scratch {
         edges: &mut edges,
         heads: &mut heads,
@@ -39,8 +54,9 @@ fn render(region: &Region<&[u8]>, zoom: u8, fb: &mut [u16]) -> (usize, RenderSta
         points: &mut points,
         ring_ends: &mut ring_ends,
     };
-    let Ok(st) = draw(
+    let Ok(st) = draw_in(
         &tiles,
+        area,
         Profile::Full,
         Ink::Colour,
         &mut frame,
@@ -89,7 +105,12 @@ fn the_fixture_opens_and_verifies() {
 /// pixel counted in the last column is one some feature other than earth
 /// painted. The per-zoom widths (1065) left z15 alone and thinned z13 from
 /// (10_732, 15_986, 40_763) stroked and 36_187 painted, z11 from
-/// (3044, 4717, 21_777) and 22_397.
+/// (3044, 4717, 21_777) and 22_397. The draw into the region's box (1077)
+/// culls what lies past the box and paints nothing there: z15 from 282
+/// culled, (1220, 3200, 151_645) filled, (2353, 7415, 14_735) stroked and
+/// 63_842 painted; z13 from 126, (1260, 2266, 78_167), (10_651, 15_332,
+/// 33_138) and 36_072; z11 from 79, (1832, 2809, 59_154), (2952, 3632,
+/// 9574) and 20_279, the box being about 28 x 12 pixels there.
 #[test]
 fn florence_region_draws_three_zooms() {
     let r = Region::from_bytes(FLORENCE).expect("open");
@@ -116,34 +137,92 @@ fn florence_region_draws_three_zooms() {
                 15,
                 2,
                 617,
-                282,
+                435,
                 4868,
-                (1220, 3200, 151_645),
-                (2353, 7415, 14_735),
-                63_842
+                (727, 2160, 106_801),
+                (1513, 4992, 9348),
+                44_160
             ),
             (
                 13,
                 1,
                 528,
-                126,
+                458,
                 10_301,
-                (1260, 2266, 78_167),
-                (10_651, 15_332, 33_138),
-                36_072
+                (282, 375, 11_509),
+                (1375, 1654, 3313),
+                5198
             ),
-            (
-                11,
-                1,
-                325,
-                79,
-                5365,
-                (1832, 2809, 59_154),
-                (2952, 3632, 9574),
-                20_279
-            ),
+            (11, 1, 325, 310, 5365, (8, 26, 627), (21, 20, 40), 308),
         ]
     );
+}
+
+/// The drawn data ends at the region's box, the bbox it was cut with, at
+/// every zoom, within one pixel of that zoom: its tiles cover the box
+/// rounded out to each zoom's grid, one z11 tile reaching far past it, and
+/// drawn whole they moved the edge as the reader zoomed (1077, Lew: the
+/// Frankfurt rectangle wandered and changed shape). Drawn whole, the z11
+/// edge is off by tens of pixels, which the test checks too, so it can
+/// tell the two apart.
+#[test]
+fn the_data_edge_is_the_regions_box_at_every_zoom() {
+    let r = Region::from_bytes(FLORENCE).expect("open");
+    let b = r.header().bounds;
+    let box_centre = LatLon {
+        lat_e7: (b.north + b.south) / 2,
+        lon_e7: (b.west + b.east) / 2,
+    };
+    // West, north, east, south of the box in world units.
+    let edges = [
+        x_of_lon(b.west),
+        y_of_lat(b.north),
+        x_of_lon(b.east),
+        y_of_lat(b.south),
+    ];
+    let (w, h) = (600u32, 400u32);
+    let mut fb = vec![0u16; (w * h) as usize];
+    // The inked pixels' outer edges in world units: west, north, east,
+    // south.
+    let drawn = |fb: &mut [u16], view: &Viewport| {
+        let frame = Frame::new(fb, w, h).expect("frame");
+        let inked = |x: u32, y: u32| frame.pixel(x, y) != Some(BACKGROUND);
+        let col = |x: &u32| (0..h).any(|y| inked(*x, y));
+        let row = |y: &u32| (0..w).any(|x| inked(x, *y));
+        let left = (0..w).find(col).expect("ink") as i32;
+        let right = (0..w).rev().find(col).expect("ink") as i32 + 1;
+        let top = (0..h).find(row).expect("ink") as i32;
+        let bottom = (0..h).rev().find(row).expect("ink") as i32 + 1;
+        let (nw, se) = (view.to_world(left, top), view.to_world(right, bottom));
+        [nw.x, nw.y, se.x, se.y]
+    };
+    for zoom in [11, 13, 15] {
+        let view = Viewport::new(project(box_centre), zoom, w, h);
+        let pixel = 1i64 << (24 - u32::from(zoom));
+        let area = r.area(&view);
+        assert!(area.size.width < w && area.size.height < h, "z{zoom}");
+        draw_view(&r, &view, area, &mut fb);
+        let got = drawn(&mut fb, &view);
+        for (side, (g, e)) in got.iter().zip(edges).enumerate() {
+            let off = (i64::from(*g) - i64::from(e)).abs();
+            assert!(
+                off <= pixel,
+                "z{zoom} side {side}: {off} units, a pixel is {pixel}"
+            );
+        }
+        if zoom == 11 {
+            let all = Rectangle::new(Point::zero(), Size::new(w, h));
+            draw_view(&r, &view, all, &mut fb);
+            let whole = drawn(&mut fb, &view);
+            let worst = whole
+                .iter()
+                .zip(edges)
+                .map(|(g, e)| (i64::from(*g) - i64::from(e)).abs())
+                .max()
+                .unwrap_or(0);
+            assert!(worst > 10 * pixel, "unclipped z11 edge off by {worst}");
+        }
+    }
 }
 
 /// The same view read through `Storage` into buffers, as a file or a card

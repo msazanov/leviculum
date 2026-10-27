@@ -16,6 +16,7 @@ use alloc::vec::Vec;
 
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::*;
+use embedded_graphics::primitives::Rectangle;
 use leviculum_mapfill::fill::Scratch;
 use leviculum_mapfill::fixture::Fixture;
 use leviculum_mapfill::render::{Clock, Look, Pass, Placement, RenderStats, Work};
@@ -69,6 +70,32 @@ where
     D: DrawTarget<Color = Rgb565>,
     C: Clock,
 {
+    let all = target.bounding_box();
+    draw_in(tiles, all, profile, ink, target, scratch, work, clock)
+}
+
+/// [`draw`] into the part `area` of `target` alone, which is cleared
+/// first; the rest of `target` is left as it is. A region's view goes into
+/// its box, [`Region::area`], so its edge is the same place on the earth
+/// at every zoom, and the frontend draws the outline under the rest
+/// (1077). The filler's clip is `area`, so a tile outside it costs its
+/// bounding box test and no more.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_in<D, C>(
+    tiles: &[DrawTile<'_>],
+    area: Rectangle,
+    profile: Profile,
+    ink: Ink,
+    target: &mut D,
+    scratch: &mut Scratch<'_>,
+    work: &mut Work<'_>,
+    clock: &mut C,
+) -> Result<RenderStats, D::Error>
+where
+    D: DrawTarget<Color = Rgb565>,
+    C: Clock,
+{
+    let target = &mut target.clipped(&area);
     // Every tile of one view is at the view's zoom less its overzoom.
     let zoom = tiles
         .first()
@@ -93,6 +120,16 @@ where
         }
     }
     Ok(pass.stats)
+}
+
+impl<S: Storage> Region<S> {
+    /// The pixels of `view` this region's box covers, which [`draw_in`]
+    /// draws its tiles into: whether the view covers it whole is
+    /// `area == view's size`, and where it does not, the outline goes
+    /// under the rest.
+    pub fn area(&self, view: &Viewport) -> Rectangle {
+        view.area_of(&self.header().bounds)
+    }
 }
 
 impl<'a> Region<&'a [u8]> {
