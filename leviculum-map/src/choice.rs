@@ -43,6 +43,22 @@ pub fn view_zooms<'a>(headers: impl IntoIterator<Item = &'a Header>) -> RangeInc
     0..=deepest
 }
 
+/// The deepest zoom a fit centred on `centre` goes to: the deepest max
+/// zoom of the regions whose box holds it, their own data and not the
+/// overzoom past it, which the reader reaches by zooming in; the outline's
+/// [`outline::MAX_ZOOM`] where none does. A fit to one point would
+/// otherwise land at the deepest view zoom, a few metres of plain colour
+/// (1074).
+pub fn fit_ceiling<'a>(headers: impl IntoIterator<Item = &'a Header>, centre: World) -> u8 {
+    let at = unproject(centre);
+    headers
+        .into_iter()
+        .filter(|h| h.bounds.contains(at))
+        .map(|h| h.max_zoom)
+        .max()
+        .unwrap_or(outline::MAX_ZOOM)
+}
+
 /// The region a view at `centre` and `zoom` draws, as an index into
 /// `regions` (file name, header); `None` for the outline.
 pub fn choose<'a>(

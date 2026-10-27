@@ -251,6 +251,7 @@ impl MapPainter {
         MapSetup {
             cell_px: self.graphics.cell_px(self.font),
             zooms: (*zooms.start(), *zooms.end()),
+            regions: self.regions.iter().map(|r| *r.region.header()).collect(),
         }
     }
 

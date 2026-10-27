@@ -92,7 +92,10 @@ its name by the display rule of [the mailbox page](loquax-mailbox.md)
 the age beside each name. A stale fix (below) is drawn dimmed with its age.
 Selecting a pin, by `Tab` through the pins or by click, opens that peer's
 conversation. The view fits all pins on open; `+`, `-` and the arrows zoom
-and pan, `0` fits again.
+and pan, `0` fits again. A fit goes no deeper than the region under its
+centre has data for (its max zoom, the outline's z10 where no region is),
+so one pin is not shown as a few metres of plain colour; `+` goes on into
+the overzoom.
 
 ## 2. The data path
 

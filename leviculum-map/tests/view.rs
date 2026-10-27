@@ -5,7 +5,7 @@
 
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::*;
-use leviculum_map::choice::{choose, useful_zooms, view_zooms};
+use leviculum_map::choice::{choose, fit_ceiling, useful_zooms, view_zooms};
 use leviculum_map::draw::{draw, Ink};
 use leviculum_map::mercator::{project, LatLon, World};
 use leviculum_map::outline::{self, OutlineStats, WORLD_50M};
@@ -239,6 +239,32 @@ fn the_region_with_the_deepest_zoom_at_the_centre_is_drawn() {
         choose([("a.lmr", &florence), ("b.lmr", &twin)], at, 13),
         Some(0)
     );
+}
+
+/// A fit goes no deeper than the deepest region whose box holds its
+/// centre has data for, its max zoom without the overzoom; the outline's
+/// deepest where no box does (1074).
+#[test]
+fn a_fit_goes_no_deeper_than_the_region_under_it_has_data() {
+    let florence = *Region::from_bytes(FLORENCE).expect("open").header();
+    let tuscany = header(
+        7,
+        13,
+        Bounds {
+            west: 96_000_000,
+            south: 424_000_000,
+            east: 124_000_000,
+            north: 442_000_000,
+        },
+    );
+    let at = project(CENTRE);
+    let siena = project(LatLon::from_degrees(43.318, 11.331));
+    let both = [&tuscany, &florence];
+    assert_eq!(fit_ceiling(both, at), florence.max_zoom);
+    assert_eq!(fit_ceiling(both, siena), tuscany.max_zoom);
+    let nowhere = project(LatLon::from_degrees(0.0, 0.0));
+    assert_eq!(fit_ceiling(both, nowhere), outline::MAX_ZOOM);
+    assert_eq!(fit_ceiling([], at), outline::MAX_ZOOM);
 }
 
 /// A box across the antimeridian holds both sides of it.

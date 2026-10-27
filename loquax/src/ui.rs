@@ -935,10 +935,10 @@ pub fn update<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) 
 fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec<UiEffect> {
     match event {
         UiEvent::MapSetup(setup) => {
-            model.map_setup = setup;
             if let Some(state) = model.map.as_mut() {
                 state.zoom = state.zoom.clamp(setup.zooms.0, setup.zooms.1);
             }
+            model.map_setup = setup;
             Vec::new()
         }
         UiEvent::Key(key) if key.kind == KeyEventKind::Release => Vec::new(),
@@ -1245,7 +1245,7 @@ fn open_map<B: InputBuffer>(model: &mut UiModel<B>) {
 /// A key on the open map.
 fn map_key<B: InputBuffer>(model: &mut UiModel<B>, cmd: keys::MapCmd) -> Vec<UiEffect> {
     use keys::MapCmd;
-    let setup = model.map_setup;
+    let setup = model.map_setup.clone();
     let area = model.map_area();
     let pins = model.map_pins();
     let Some(state) = model.map.as_mut() else {
@@ -1631,7 +1631,7 @@ fn drag<B: InputBuffer>(model: &mut UiModel<B>, col: u16, row: u16) {
 /// the pointer is from where the button went down. Nothing moves until the
 /// press is a drag ([`map::DRAG_CELLS`]).
 fn map_drag<B: InputBuffer>(model: &mut UiModel<B>, col: u16, row: u16) {
-    let setup = model.map_setup;
+    let setup = model.map_setup.clone();
     let (Some(press), Some(state)) = (model.map_press.as_mut(), model.map.as_mut()) else {
         return;
     };
@@ -1755,7 +1755,7 @@ fn wheel<B: InputBuffer>(model: &mut UiModel<B>, col: u16, row: u16, down: bool)
         // The wheel zooms the map about the pointer, toward the reader as
         // it rolls back.
         Some(Pane::Map) => {
-            let (setup, area) = (model.map_setup, model.map_area());
+            let (setup, area) = (model.map_setup.clone(), model.map_area());
             if let Some(state) = model.map.as_mut() {
                 let zoom = match down {
                     true => state.zoom.saturating_sub(1).max(setup.zooms.0),
@@ -5964,8 +5964,18 @@ mod tests {
         assert!(model.positions.is_empty());
     }
 
+    /// The Florence fixture's header, z11 to z15: the region the map
+    /// tests' pins lie in.
+    fn florence() -> leviculum_map::region::Header {
+        const FLORENCE: &[u8] = include_bytes!("../../leviculum-map/fixtures/firenze.lmr");
+        *leviculum_map::region::Region::from_bytes(FLORENCE)
+            .expect("open")
+            .header()
+    }
+
     /// A model with three peers' positions around Florence, ours among them,
-    /// at 14:00, on an 80 x 24 screen drawn with braille.
+    /// at 14:00, on an 80 x 24 screen drawn with braille, the Florence
+    /// region installed.
     fn mapped() -> UiModel<Field> {
         let mut model = UiModel::<Field>::new(&[PEER]);
         clock(&mut model, 26, 14, 0);
@@ -5992,6 +6002,7 @@ mod tests {
             UiEvent::MapSetup(map::MapSetup {
                 cell_px: (2, 4),
                 zooms: (0, 20),
+                regions: vec![florence()],
             }),
         );
         model
@@ -6139,6 +6150,7 @@ mod tests {
                 UiEvent::MapSetup(map::MapSetup {
                     cell_px,
                     zooms: (0, 20),
+                    regions: vec![florence()],
                 }),
             );
             update(&mut model, key(KeyCode::Char('M')));

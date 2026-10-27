@@ -18,8 +18,10 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use leviculum_map::choice::fit_ceiling;
 use leviculum_map::mercator::{project, LatLon, World};
 use leviculum_map::pins::{self, Pin};
+use leviculum_map::region::Header;
 use leviculum_map::viewport::Viewport;
 use leviculum_ui::Rect;
 
@@ -27,13 +29,16 @@ use crate::telemetry;
 
 /// What the shell drew with: image pixels per cell, and the zooms the
 /// installed regions and the outline reach.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MapSetup {
     /// Pixels across and down one cell: (1, 2) for half-blocks, (2, 4) for
     /// braille, the font's cell for a graphics protocol.
     pub cell_px: (u16, u16),
     /// The shallowest and the deepest zoom the reader may go to.
     pub zooms: (u8, u8),
+    /// The installed regions' headers, which say how deep a fit goes
+    /// ([`fit`]).
+    pub regions: Vec<Header>,
 }
 
 impl Default for MapSetup {
@@ -43,6 +48,7 @@ impl Default for MapSetup {
         Self {
             cell_px: (2, 4),
             zooms: (0, leviculum_map::outline::MAX_ZOOM),
+            regions: Vec::new(),
         }
     }
 }
@@ -316,13 +322,19 @@ fn pixels(area: Rect, setup: &MapSetup) -> (u32, u32) {
 }
 
 /// The view that shows every pin, at the deepest zoom of `setup` that
-/// does; the whole world at the shallowest when there is none.
+/// does, but no deeper than the region under its centre has data for
+/// ([`fit_ceiling`]): one pin fits at that region's max zoom, or at the
+/// outline's, and `+` goes on into the overzoom. The whole world at the
+/// shallowest when there is no pin.
 pub fn fit(pins: &[MapPin], area: Rect, setup: &MapSetup) -> (World, u8) {
     let (w, h) = pixels(area, setup);
     let points: Vec<World> = pins.iter().map(|p| p.at).collect();
     let margin = FIT_MARGIN_CELLS * u32::from(setup.cell_px.0.max(1));
     match Viewport::fit(&points, w, h, margin, setup.zooms.0..=setup.zooms.1) {
-        Some(view) => (view.centre, view.zoom()),
+        Some(view) => {
+            let ceiling = fit_ceiling(&setup.regions, view.centre).max(setup.zooms.0);
+            (view.centre, view.zoom().min(ceiling))
+        }
         None => (
             World {
                 x: 1 << 31,
@@ -618,5 +630,44 @@ mod tests {
         let (marker, row) = (cells[1].col, cells[1].row);
         assert_eq!(pin_at(&cells, area, marker, row), Some([2; 16]), "on top");
         assert_eq!(pin_at(&cells, area, marker - 4, row), Some([1; 16]));
+    }
+
+    /// `0` with one pin fits at the deepest zoom the region under it has
+    /// data for, the Florence fixture's z15, not at the overzoom the
+    /// setup offers past it (1074, Lew: one pin in Frankfurt fitted at z20,
+    /// plain land); `+` still goes on. Without a region under the pin, at
+    /// the outline's z10.
+    #[test]
+    fn one_pin_fits_at_the_regions_max_zoom_not_past_it() {
+        use leviculum_map::choice::view_zooms;
+        use leviculum_map::region::Region;
+        const FLORENCE: &[u8] = include_bytes!("../../../leviculum-map/fixtures/firenze.lmr");
+        let header = *Region::from_bytes(FLORENCE).expect("open").header();
+        let zooms = view_zooms([&header]);
+        let setup = MapSetup {
+            cell_px: (9, 19),
+            zooms: (*zooms.start(), *zooms.end()),
+            regions: vec![header],
+        };
+        assert!(setup.zooms.1 > header.max_zoom, "overzoom is offered");
+        let area = Rect::new(1, 1, 60, 20);
+        let pin = |lat: f64, lon: f64| MapPin {
+            peer: [1; 16],
+            at: project(LatLon::from_degrees(lat, lon)),
+            label: "bob".to_string(),
+            age: None,
+            stale: false,
+        };
+        let (_, zoom) = fit(&[pin(43.7731, 11.2560)], area, &setup);
+        assert_eq!(zoom, header.max_zoom);
+        // Frankfurt, outside the fixture: the outline's deepest.
+        let (_, zoom) = fit(&[pin(50.1106, 8.6821)], area, &setup);
+        assert_eq!(zoom, leviculum_map::outline::MAX_ZOOM);
+        let none = MapSetup {
+            regions: Vec::new(),
+            ..setup.clone()
+        };
+        let (_, zoom) = fit(&[pin(43.7731, 11.2560)], area, &none);
+        assert_eq!(zoom, leviculum_map::outline::MAX_ZOOM);
     }
 }
