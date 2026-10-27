@@ -2246,6 +2246,7 @@ name = "leviculum-ui-ratatui"
 version = "0.10.0-dev"
 dependencies = [
  "crossterm",
+ "icy_sixel",
  "image",
  "leviculum-ui",
  "ratatui",

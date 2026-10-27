@@ -450,7 +450,7 @@ not checked here. The crate is
 (`leviculum-ui-ratatui/Cargo.toml:34`), built without its default
 `chafa-dyn` so no C library comes in; `lnomad` draws pictures through it.
 Its terminal query (`Pictures::detect`,
-`leviculum-ui-ratatui/src/images.rs:109`) picks the protocol at start and
+`leviculum-ui-ratatui/src/images.rs:113`) picks the protocol at start and
 falls back to half-blocks.
 
 **Sixel.** The DEC bitmap format, palette-based (so a map's flat colours

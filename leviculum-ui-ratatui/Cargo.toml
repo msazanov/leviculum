@@ -38,3 +38,6 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 # The crossterm backend, for the test that holds `leviculum_ui::input`'s
 # key-to-edit table to the one this backend carries.
 tui-input = { version = "0.15", default-features = false, features = ["crossterm"] }
+# The decoder of the sixel encoder ratatui-image already pulls in, to read
+# back what `images::sixel_indexed` writes.
+icy_sixel = "0.5"
