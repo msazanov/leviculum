@@ -13,8 +13,33 @@
 //! not "not our node". A user may still choose the own node explicitly, and
 //! then it is kept.
 //!
+//! "Unreachable" is two things. A node with no route in the path table is
+//! unreachable at once. A node with a route that does not answer is
+//! unreachable after [`UNANSWERED_LIMIT`] syncs in a row that failed before
+//! a link to it came up ([`Unanswered`]); it is then passed over for
+//! [`UNANSWERED_EXCLUSION_MS`]. A node the user chose is never replaced.
+//!
 //! This module is the rule alone, with no I/O: the caller says which
-//! candidates exist and which of them live on this device.
+//! candidates exist, which of them live on this device and which stopped
+//! answering.
+
+use alloc::vec::Vec;
+
+/// Syncs in a row that fail before a link comes up, after which an adopted
+/// node counts as unreachable. One failure is no verdict: on a path of
+/// several hops a link request or its proof is lost now and then (of nine
+/// link requests to a node five hops out, measured 2026-10-27, at most three
+/// were answered), and the next sync's retry answers it. Three in a row, at
+/// the schedule's retries of 30 s and 60 s (`crate::sync::RETRY_FIRST_MS`)
+/// with each failure taking up to the fetch's budget, is three to five
+/// minutes of a node that answers nothing; a node that answers one link in
+/// three is replaced after three misses about once in four tries, which is
+/// the right call for a mailbox that loses two collections in three.
+pub const UNANSWERED_LIMIT: u32 = 3;
+/// How long a node that stopped answering is passed over: an hour, four
+/// bounds of the default schedule. After it the node is a candidate again,
+/// and is only adopted when the node that replaced it fails in turn.
+pub const UNANSWERED_EXCLUSION_MS: u64 = 60 * 60_000;
 
 /// A propagation node the messenger could use as its mailbox.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,6 +78,9 @@ pub enum AdoptReason {
     SelectedUnreachable,
     /// The selected node runs on this device and nobody chose it explicitly.
     SelectedOnThisDevice,
+    /// The selected node has a route and did not answer
+    /// [`UNANSWERED_LIMIT`] syncs in a row.
+    SelectedDidNotAnswer,
 }
 
 impl AdoptReason {
@@ -67,6 +95,9 @@ impl AdoptReason {
             }
             Self::SelectedOnThisDevice => {
                 "the selected mailbox runs on this device and holds nothing while it is off"
+            }
+            Self::SelectedDidNotAnswer => {
+                "the selected mailbox did not answer; it is the most recently heard eligible node"
             }
         }
     }
@@ -107,34 +138,101 @@ pub enum Selection {
     None(NoneReason),
 }
 
-/// Decide the mailbox. The previous selection is kept while it is reachable
-/// and not a node on this device the user never chose. Otherwise the most
-/// recently heard reachable node not on this device is adopted, fewer hops
-/// breaking a tie and the hash breaking the rest, so the answer is the same
-/// whatever order the candidates arrive in.
-pub fn select(candidates: &[Candidate], previous: Option<Previous>) -> Selection {
+/// Decide the mailbox. The previous selection is kept while it is reachable,
+/// answering, and not a node on this device the user never chose. Otherwise
+/// the most recently heard reachable node not on this device and not
+/// `excluded` is adopted, fewer hops breaking a tie and the hash breaking the
+/// rest, so the answer is the same whatever order the candidates arrive in.
+/// A previous node that stopped answering is kept when no other node can
+/// replace it: a mailbox that might answer later beats none.
+pub fn select(
+    candidates: &[Candidate],
+    previous: Option<Previous>,
+    excluded: &[[u8; 16]],
+) -> Selection {
     let reason = match previous {
         None => AdoptReason::NoneSelected,
         Some(p) if !p.reachable => AdoptReason::SelectedUnreachable,
         Some(p) if p.is_own_device && !p.chosen_by_user => AdoptReason::SelectedOnThisDevice,
+        Some(p) if !p.chosen_by_user && excluded.contains(&p.node) => {
+            AdoptReason::SelectedDidNotAnswer
+        }
         Some(p) => return Selection::Keep(p.node),
     };
     let best = candidates
         .iter()
-        .filter(|c| c.reachable && !c.is_own_device)
+        .filter(|c| c.reachable && !c.is_own_device && !excluded.contains(&c.node))
         .min_by(|a, b| {
             b.last_seen_ms
                 .cmp(&a.last_seen_ms)
                 .then(a.hops.cmp(&b.hops))
                 .then(a.node.cmp(&b.node))
         });
-    match best {
-        Some(candidate) => Selection::Adopt(*candidate, reason),
-        None if candidates.is_empty() => Selection::None(NoneReason::NoCandidates),
-        None if candidates.iter().all(|c| c.is_own_device) => {
+    match (best, previous) {
+        (Some(candidate), _) => Selection::Adopt(*candidate, reason),
+        (None, Some(p)) if reason == AdoptReason::SelectedDidNotAnswer => Selection::Keep(p.node),
+        (None, _) if candidates.is_empty() => Selection::None(NoneReason::NoCandidates),
+        (None, _) if candidates.iter().all(|c| c.is_own_device) => {
             Selection::None(NoneReason::OnlyOnThisDevice)
         }
-        None => Selection::None(NoneReason::NoneReachable),
+        (None, _) => Selection::None(NoneReason::NoneReachable),
+    }
+}
+
+/// The streak of syncs that failed before a link to the mailbox came up, and
+/// the nodes it has excluded. The caller's clock, in milliseconds, monotonic.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Unanswered {
+    /// The node of the current streak and its length.
+    streak: Option<([u8; 16], u32)>,
+    /// Excluded nodes and when each exclusion ends.
+    excluded: Vec<([u8; 16], u64)>,
+}
+
+impl Unanswered {
+    /// A sync with `node` completed: its streak ends.
+    pub fn answered(&mut self, node: [u8; 16]) {
+        if self.streak.is_some_and(|(n, _)| n == node) {
+            self.streak = None;
+        }
+    }
+
+    /// A sync with `node` failed. `before_link` says no link to it came up;
+    /// a failure after the link (the transfer, a refusal) is an answer and
+    /// ends the streak. True when this failure is the [`UNANSWERED_LIMIT`]th
+    /// in a row: the node counts as unreachable, and the streak starts over.
+    pub fn failed(&mut self, node: [u8; 16], before_link: bool) -> bool {
+        if !before_link {
+            self.answered(node);
+            return false;
+        }
+        let count = match self.streak {
+            Some((n, count)) if n == node => count + 1,
+            _ => 1,
+        };
+        if count >= UNANSWERED_LIMIT {
+            self.streak = None;
+            true
+        } else {
+            self.streak = Some((node, count));
+            false
+        }
+    }
+
+    /// Pass `node` over from `now_ms` for [`UNANSWERED_EXCLUSION_MS`].
+    pub fn exclude(&mut self, node: [u8; 16], now_ms: u64) {
+        self.excluded.retain(|(n, _)| *n != node);
+        self.excluded
+            .push((node, now_ms.saturating_add(UNANSWERED_EXCLUSION_MS)));
+    }
+
+    /// The nodes passed over at `now_ms`.
+    pub fn excluded(&self, now_ms: u64) -> Vec<[u8; 16]> {
+        self.excluded
+            .iter()
+            .filter(|(_, until)| now_ms < *until)
+            .map(|(node, _)| *node)
+            .collect()
     }
 }
 
@@ -264,10 +362,115 @@ mod tests {
             ),
         ];
         for (name, candidates, prev, want) in cases {
-            assert_eq!(select(&candidates, prev), want, "{name}");
+            assert_eq!(select(&candidates, prev, &[]), want, "{name}");
             let mut reversed = candidates.clone();
             reversed.reverse();
-            assert_eq!(select(&reversed, prev), want, "{name}, reversed order");
+            assert_eq!(select(&reversed, prev, &[]), want, "{name}, reversed order");
         }
+    }
+
+    #[test]
+    fn a_node_that_stopped_answering_is_replaced_and_not_adopted() {
+        let a = candidate(0xaa, 1, 1_000);
+        let b = candidate(0xbb, 5, 2_000);
+        let silent = [node(0xbb)];
+        let cases: Vec<(&str, Vec<Candidate>, Option<Previous>, Selection)> = vec![
+            (
+                "adopted node stopped answering: the next one",
+                vec![a, b],
+                Some(previous(0xbb, true)),
+                Selection::Adopt(a, AdoptReason::SelectedDidNotAnswer),
+            ),
+            (
+                "first run passes over a node that stopped answering though it is newest",
+                vec![a, b],
+                None,
+                Selection::Adopt(a, AdoptReason::NoneSelected),
+            ),
+            (
+                "no other node: the silent one is kept",
+                vec![b],
+                Some(previous(0xbb, true)),
+                Selection::Keep(node(0xbb)),
+            ),
+            (
+                "a node the user chose is never replaced",
+                vec![a, b],
+                Some(Previous {
+                    chosen_by_user: true,
+                    ..previous(0xbb, true)
+                }),
+                Selection::Keep(node(0xbb)),
+            ),
+            (
+                "no route outranks not answering",
+                vec![a],
+                Some(previous(0xbb, false)),
+                Selection::Adopt(a, AdoptReason::SelectedUnreachable),
+            ),
+        ];
+        for (name, candidates, prev, want) in cases {
+            assert_eq!(select(&candidates, prev, &silent), want, "{name}");
+            let mut reversed = candidates.clone();
+            reversed.reverse();
+            assert_eq!(
+                select(&reversed, prev, &silent),
+                want,
+                "{name}, reversed order"
+            );
+        }
+    }
+
+    #[test]
+    fn three_failures_before_a_link_in_a_row_make_a_node_unreachable() {
+        let (x, y) = (node(0x0a), node(0x0b));
+        let mut unanswered = Unanswered::default();
+        assert!(!unanswered.failed(x, true));
+        assert!(!unanswered.failed(x, true));
+        assert!(unanswered.failed(x, true), "the third in a row");
+        assert!(!unanswered.failed(x, true), "the streak starts over");
+
+        // A completed sync ends the streak.
+        let mut unanswered = Unanswered::default();
+        unanswered.failed(x, true);
+        unanswered.failed(x, true);
+        unanswered.answered(x);
+        assert!(!unanswered.failed(x, true));
+
+        // A failure after the link is an answer, and ends it too.
+        let mut unanswered = Unanswered::default();
+        unanswered.failed(x, true);
+        unanswered.failed(x, true);
+        assert!(!unanswered.failed(x, false));
+        assert!(!unanswered.failed(x, true));
+
+        // Another node's failure starts its own streak.
+        let mut unanswered = Unanswered::default();
+        unanswered.failed(x, true);
+        unanswered.failed(x, true);
+        assert!(!unanswered.failed(y, true));
+        assert!(!unanswered.failed(x, true));
+    }
+
+    #[test]
+    fn an_exclusion_ends_after_its_window() {
+        let x = node(0x0a);
+        let mut unanswered = Unanswered::default();
+        unanswered.exclude(x, 1_000);
+        assert_eq!(unanswered.excluded(1_000), vec![x]);
+        assert_eq!(
+            unanswered.excluded(1_000 + UNANSWERED_EXCLUSION_MS - 1),
+            vec![x]
+        );
+        assert!(unanswered
+            .excluded(1_000 + UNANSWERED_EXCLUSION_MS)
+            .is_empty());
+        // Excluded again, the window starts again and the node is listed once.
+        unanswered.exclude(x, 5_000);
+        unanswered.exclude(x, 6_000);
+        assert_eq!(
+            unanswered.excluded(6_000 + UNANSWERED_EXCLUSION_MS - 1),
+            vec![x]
+        );
     }
 }

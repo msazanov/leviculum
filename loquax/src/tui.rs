@@ -10,7 +10,9 @@
 //! - [`Shell`] holds the engine, the fan-out and the job queue: it folds
 //!   events into the model and runs the effects that come back. A send is
 //!   [`run_send_auto`] and a fetch is [`run_fetch`], the CLI's own runners,
-//!   one job at a time on a [`Tap`]; the screen reads the same events.
+//!   each on a [`Tap`]: sends one at a time, and a fetch alongside them, so a
+//!   send never waits for a mailbox that does not answer (leviculum 1072).
+//!   The screen reads the same events.
 //! - [`run`] is the loop: the real terminal (`run_terminal`), or a key script
 //!   that dumps frames to a file (`run_script`), which is how the snapshot
 //!   test in `tests/tui_snapshot.rs` drives a session against a daemon.
@@ -58,9 +60,10 @@ use loquax::clock::Tokio;
 use loquax::effects::{Effects, Terminal as Files};
 use loquax::engine::{attach, AttachConfig, Attached};
 use loquax::fanout::{Fanout, Tap};
-use loquax::fetch::{run_fetch, FetchOptions};
-use loquax::mailbox_state::{self, Stored};
-use loquax::outbox::{OutboxEvent, SendRequest, Via};
+use loquax::fetch::{run_fetch, FetchError, FetchOptions};
+use loquax::mailbox::{Unanswered, UNANSWERED_EXCLUSION_MS, UNANSWERED_LIMIT};
+use loquax::mailbox_state::{self, short, Stored};
+use loquax::outbox::{Command, Outbox, OutboxEvent, OutboxGone, SendRequest, Via};
 use loquax::seen::{SeenStore, SeenWrite};
 use loquax::send::{run_send_auto, AutoError, Leg, SendError, SendOptions};
 use loquax::store::Store;
@@ -192,11 +195,45 @@ struct RunContext {
     pn_source: &'static str,
     timeout: Duration,
     effects: ScreenEffects,
+    /// The nodes that stopped answering when the job started, for its
+    /// mailbox selection.
+    excluded: Vec<[u8; 16]>,
 }
 
-enum Job {
-    Send { to: [u8; 16], body: String },
-    Fetch,
+/// A runner that ended, as its task hands it to the shell.
+enum Finished {
+    /// The running send, as the event the model folds.
+    Send(UiEvent),
+    /// The running fetch.
+    Fetch(FetchEnd),
+}
+
+/// How a fetch ended, for the screen, `tui.log` and the mailbox's streak.
+struct FetchEnd {
+    result: Result<usize, FetchError>,
+    /// The node the drain was pointed at: the first selection it saw.
+    node: Option<[u8; 16]>,
+    elapsed_ms: u64,
+}
+
+/// A runner's tap that notes the first node a selection named.
+struct Watched {
+    tap: Tap,
+    node: Option<[u8; 16]>,
+}
+
+impl Outbox for Watched {
+    fn submit(&self, command: Command) -> Result<(), OutboxGone> {
+        self.tap.submit(command)
+    }
+
+    fn try_next_event(&mut self) -> Result<Option<OutboxEvent>, OutboxGone> {
+        let event = self.tap.try_next_event()?;
+        if let Some(OutboxEvent::PnSelected { destination, .. }) = &event {
+            self.node.get_or_insert(*destination);
+        }
+        Ok(event)
+    }
 }
 
 /// The engine, the fan-out, the job queue, the store, and the model they
@@ -212,15 +249,26 @@ struct Shell {
     attached: Attached,
     fanout: Fanout,
     context: RunContext,
-    jobs: VecDeque<Job>,
-    running: bool,
-    /// The running job's task, so leaving can let it finish its last poll.
-    task: Option<tokio::task::JoinHandle<()>>,
+    /// Sends not yet started, oldest first. They run one at a time: the
+    /// model names a queued message after the oldest running send.
+    sends: VecDeque<([u8; 16], String)>,
+    /// A fetch asked for and not yet started, with its reason's word. The
+    /// model asks for one at a time.
+    fetch_owed: Option<&'static str>,
+    /// The running send's task, so leaving can let it finish its last poll.
+    send_task: Option<tokio::task::JoinHandle<()>>,
+    /// The running fetch's task and its reason's word.
+    fetch_task: Option<(tokio::task::JoinHandle<()>, &'static str)>,
+    /// The mailbox's syncs that failed before a link, and the nodes they
+    /// excluded.
+    unanswered: Unanswered,
+    /// A node just excluded, named beside the node that replaces it.
+    replacing: Option<[u8; 16]>,
     /// Every leg a runner reported, with the message it was for (the
     /// model's conversation and message index): a script's `until leg`.
     legs_seen: Vec<((usize, usize), Leg)>,
-    done_tx: UnboundedSender<UiEvent>,
-    done_rx: UnboundedReceiver<UiEvent>,
+    done_tx: UnboundedSender<Finished>,
+    done_rx: UnboundedReceiver<Finished>,
     notices_rx: UnboundedReceiver<String>,
     legs_rx: UnboundedReceiver<Leg>,
     mailbox_rx: UnboundedReceiver<Stored>,
@@ -261,11 +309,11 @@ impl Shell {
         for effect in effects {
             match effect {
                 UiEffect::Store(read) => answers.extend(self.read(read)),
-                UiEffect::Send { to, body } => self.jobs.push_back(Job::Send { to, body }),
+                UiEffect::Send { to, body } => self.sends.push_back((to, body)),
                 UiEffect::Fetch => {
                     let reason = self.model.fetch_reason.map_or("key", |r| r.word());
                     tracing::info!("SYNC reason={reason}");
-                    self.jobs.push_back(Job::Fetch);
+                    self.fetch_owed = Some(reason);
                 }
                 UiEffect::Quit => {}
                 UiEffect::Redraw => self.redraw = true,
@@ -381,14 +429,20 @@ impl Shell {
             }
             self.apply(UiEvent::SendLeg(leg));
         }
-        while let Ok(event) = self.done_rx.try_recv() {
-            self.running = false;
-            self.apply(event);
+        while let Ok(finished) = self.done_rx.try_recv() {
+            match finished {
+                Finished::Send(event) => {
+                    self.send_task = None;
+                    self.apply(event);
+                }
+                Finished::Fetch(end) => self.fetch_done(end),
+            }
         }
         while let Ok(line) = self.notices_rx.try_recv() {
             self.apply(UiEvent::Notice(line));
         }
         while let Ok(stored) = self.mailbox_rx.try_recv() {
+            self.replaced(&stored);
             self.apply(chosen(&stored));
         }
         self.apply(UiEvent::Elapsed(self.elapsed_ms()));
@@ -400,52 +454,156 @@ impl Shell {
         u64::try_from(self.origin.elapsed().as_millis()).unwrap_or(u64::MAX)
     }
 
-    /// Run the next job if none is running. One at a time: the runners each
-    /// read every event, and the model names a queued message after the
-    /// oldest running send.
+    /// Start the oldest send if no send is running, and the owed fetch if no
+    /// fetch is. A send and a fetch run alongside: each runner reads every
+    /// event and acts only on its own (a send on its message id, a fetch on
+    /// the drain's `Sync*` events), and both select the mailbox by the same
+    /// rule from the same input, so a selection either asks for is the one
+    /// the other uses. Sends stay one at a time, because the model names a
+    /// queued message after the oldest running send.
     fn start_next(&mut self) {
-        if self.running {
-            return;
+        if self.send_task.is_none() {
+            if let Some((to, body)) = self.sends.pop_front() {
+                let tap = self.fanout.tap();
+                let context = self.job_context();
+                let done = self.done_tx.clone();
+                self.send_task = Some(tokio::spawn(async move {
+                    let event = send(tap, context, to, body).await;
+                    let _ = done.send(Finished::Send(event));
+                }));
+            }
         }
-        let Some(job) = self.jobs.pop_front() else {
-            return;
-        };
-        self.running = true;
-        let tap = self.fanout.tap();
-        let context = self.context.clone();
-        let done = self.done_tx.clone();
-        self.task = Some(tokio::spawn(async move {
-            let event = match job {
-                Job::Send { to, body } => send(tap, context, to, body).await,
-                Job::Fetch => UiEvent::FetchDone(fetch(tap, context).await),
-            };
-            let _ = done.send(event);
-        }));
+        if self.fetch_task.is_none() {
+            if let Some(reason) = self.fetch_owed.take() {
+                let tap = self.fanout.tap();
+                let context = self.job_context();
+                let done = self.done_tx.clone();
+                let task = tokio::spawn(async move {
+                    let end = fetch(tap, context).await;
+                    let _ = done.send(Finished::Fetch(end));
+                });
+                self.fetch_task = Some((task, reason));
+            }
+        }
     }
 
-    /// Before leaving: hand the running job what the engine has said and give
-    /// it [`SETTLE_MS`] to read it. Without this a send whose proof the screen
+    /// What a job starting now runs with: the nodes excluded at this moment.
+    fn job_context(&self) -> RunContext {
+        let mut context = self.context.clone();
+        context.excluded = self.unanswered.excluded(self.elapsed_ms());
+        context
+    }
+
+    /// The fetch ended: said in `tui.log`, judged for the mailbox's streak,
+    /// and folded.
+    fn fetch_done(&mut self, end: FetchEnd) {
+        let reason = self.fetch_task.take().map_or("key", |(_, reason)| reason);
+        match &end.result {
+            Ok(new) => tracing::info!(
+                "SYNC done reason={reason} result=ok new={new} elapsed_ms={}",
+                end.elapsed_ms
+            ),
+            Err(error) => {
+                let text = error.to_string();
+                let detail = text.lines().next().unwrap_or_default();
+                tracing::info!(
+                    "SYNC done reason={reason} result=failed detail={detail:?} elapsed_ms={}",
+                    end.elapsed_ms
+                );
+            }
+        }
+        self.judge(&end);
+        self.apply(UiEvent::FetchDone(end.result.map_err(|e| e.to_string())));
+    }
+
+    /// Count the fetch toward its node's streak. A node that did not answer
+    /// [`UNANSWERED_LIMIT`] syncs in a row is excluded, and the next
+    /// selection replaces it; one the user chose is only reported
+    /// (`docs/src/concepts/loquax-mailbox.md`, section 1, "Which node").
+    fn judge(&mut self, end: &FetchEnd) {
+        let Some(node) = end.node else {
+            return;
+        };
+        let error = match &end.result {
+            Ok(_) => {
+                self.unanswered.answered(node);
+                return;
+            }
+            Err(error) => error,
+        };
+        if !self.unanswered.failed(node, error.before_link()) {
+            return;
+        }
+        let by_user = self.context.preferred_pn.is_some()
+            || mailbox_state::load(&self.context.home)
+                .is_some_and(|stored| stored.node == node && stored.chosen_by_user);
+        if by_user {
+            tracing::info!(
+                "MAILBOX unanswered node={} syncs={UNANSWERED_LIMIT} kept=user",
+                loquax::address::to_hex(&node)
+            );
+            self.apply(UiEvent::Notice(format!(
+                "mailbox {} did not answer {UNANSWERED_LIMIT} syncs in a row; you chose it, \
+                 so it stays",
+                short(&node)
+            )));
+            return;
+        }
+        tracing::info!(
+            "MAILBOX unanswered node={} syncs={UNANSWERED_LIMIT} excluded_ms={UNANSWERED_EXCLUSION_MS}",
+            loquax::address::to_hex(&node)
+        );
+        self.unanswered.exclude(node, self.elapsed_ms());
+        self.replacing = Some(node);
+    }
+
+    /// A runner kept a selection: when it adopted a node in place of one
+    /// that stopped answering, say both.
+    fn replaced(&mut self, stored: &Stored) {
+        let Some(old) = self.replacing else {
+            return;
+        };
+        if stored.chosen_by_user || stored.node == old {
+            return;
+        }
+        self.replacing = None;
+        let line = format!(
+            "mailbox {} adopted, {} did not answer",
+            short(&stored.node),
+            short(&old)
+        );
+        tracing::info!("{line}");
+        self.apply(UiEvent::Notice(line));
+    }
+
+    /// Before leaving: hand the running send and fetch what the engine has
+    /// said and give them [`SETTLE_MS`] to read it. Without this a send whose proof the screen
     /// had already shown was cut off before its runner logged `sending` and
     /// `proof`: a script that quits on `until delivery delivered` leaves in
     /// the same pump that delivered the proof (leviculum 1014).
     async fn settle(&mut self) {
-        let Some(mut task) = self.task.take() else {
+        let mut tasks: Vec<tokio::task::JoinHandle<()>> =
+            self.send_task.take().into_iter().collect();
+        tasks.extend(self.fetch_task.take().map(|(task, _)| task));
+        if tasks.is_empty() {
             return;
-        };
+        }
         let deadline = tokio::time::Instant::now() + Duration::from_millis(SETTLE_MS);
         loop {
             if let Err(_gone) = self.fanout.pump(&mut self.attached.outbox) {
                 break;
             }
-            tokio::select! {
-                _ = &mut task => return,
-                _ = tokio::time::sleep(Duration::from_millis(PUMP_MS)) => {}
+            if tasks.iter().all(|task| task.is_finished()) {
+                return;
             }
+            tokio::time::sleep(Duration::from_millis(PUMP_MS)).await;
             if tokio::time::Instant::now() >= deadline {
                 break;
             }
         }
-        task.abort();
+        for task in tasks {
+            task.abort();
+        }
     }
 }
 
@@ -476,11 +634,12 @@ fn local_now() -> WallTime {
 async fn send(mut tap: Tap, context: RunContext, to: [u8; 16], body: String) -> UiEvent {
     let mut options = SendOptions::new(context.instance.clone(), context.timeout);
     let mut effects = context.effects.clone();
-    let (home, config_dir, instance, pn) = (
+    let (home, config_dir, instance, pn, excluded) = (
         context.home.clone(),
         context.config_dir.clone(),
         context.instance.clone(),
         context.preferred_pn,
+        context.excluded.clone(),
     );
     let request = SendRequest {
         destination: to,
@@ -495,7 +654,7 @@ async fn send(mut tap: Tap, context: RunContext, to: [u8; 16], body: String) -> 
         context.preferred_pn,
         context.pn_source,
         &mut options,
-        || async move { super::mailbox_run(&home, &config_dir, &instance, pn).await },
+        || async move { super::mailbox_run(&home, &config_dir, &instance, pn, excluded).await },
         &mut effects,
         &Tokio::new(),
     )
@@ -513,8 +672,20 @@ async fn send(mut tap: Tap, context: RunContext, to: [u8; 16], body: String) -> 
 }
 
 /// One mailbox drain, exactly as `loquax fetch` runs it.
-async fn fetch(mut tap: Tap, context: RunContext) -> Result<usize, String> {
-    let mut seen = SeenStore::load(&context.home).map_err(|e| format!("seen store: {e}"))?;
+async fn fetch(tap: Tap, context: RunContext) -> FetchEnd {
+    let started = tokio::time::Instant::now();
+    let mut watched = Watched { tap, node: None };
+    let result = drain(&mut watched, context).await;
+    FetchEnd {
+        result,
+        node: watched.node,
+        elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+    }
+}
+
+async fn drain(outbox: &mut Watched, context: RunContext) -> Result<usize, FetchError> {
+    let mut seen = SeenStore::load(&context.home)
+        .map_err(|e| FetchError::SyncFailed(format!("seen store: {e}")))?;
     // A drain gets twice a send's budget, as on the command line.
     let mut options = FetchOptions::new(context.instance.clone(), context.timeout * 2);
     options.mailbox = super::mailbox_run(
@@ -522,11 +693,12 @@ async fn fetch(mut tap: Tap, context: RunContext) -> Result<usize, String> {
         &context.config_dir,
         &context.instance,
         context.preferred_pn,
+        context.excluded.clone(),
     )
     .await;
     let mut effects = context.effects.clone();
     run_fetch(
-        &mut tap,
+        outbox,
         context.preferred_pn,
         context.pn_source,
         &options,
@@ -536,7 +708,6 @@ async fn fetch(mut tap: Tap, context: RunContext) -> Result<usize, String> {
     )
     .await
     .map(|fetched| fetched.new)
-    .map_err(|error| error.to_string())
 }
 
 /// `loquax tui`.
@@ -709,10 +880,14 @@ pub async fn run(options: TuiOptions) -> ExitCode {
             pn_source,
             timeout: Duration::from_secs(options.timeout),
             effects,
+            excluded: Vec::new(),
         },
-        jobs: VecDeque::new(),
-        running: false,
-        task: None,
+        sends: VecDeque::new(),
+        fetch_owed: None,
+        send_task: None,
+        fetch_task: None,
+        unanswered: Unanswered::default(),
+        replacing: None,
         legs_seen: Vec::new(),
         done_tx,
         done_rx,

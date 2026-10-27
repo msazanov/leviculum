@@ -132,8 +132,10 @@ selection, the compose field, the focus, the toasts and the palette;
 renderer each pane's lines. The terminal half is the binary's
 `loquax/src/tui.rs`. A send is the CLI's `--via auto` runner
 (`send::run_send_auto`, which `loquax send` runs too) and a fetch is
-`loquax fetch`'s, one at a time, each on a tap of the one engine
-(`loquax/src/fanout.rs`) while the screen reads the same events.
+`loquax fetch`'s, each on a tap of the one engine
+(`loquax/src/fanout.rs`) while the screen reads the same events. Sends run
+one at a time; a fetch runs alongside them, so a send never waits for a
+mailbox that does not answer (order 1072).
 
 In:
 

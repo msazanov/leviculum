@@ -243,6 +243,28 @@ Limits, measured and reasoned:
   reference binds the shared-instance port to loopback
   (`LocalInterface.py:408`).
 
+**What "unreachable" means (order 1072, 2026-10-27).** Two things. A
+selected node with no entry in the daemon's path table is unreachable at
+once, as before. A node with an entry that does not answer is unreachable
+after **three syncs in a row that failed before a link to it came up**: no
+path, or the link not established before the link timeout or the fetch's
+budget (`UNANSWERED_LIMIT`, `loquax/src/mailbox.rs`). A failure after the
+link, a refused request or a broken transfer, is an answer and ends the
+streak, as does a completed sync. One miss is no verdict: on a path of
+several hops a link request or its proof is lost now and then (of nine
+link requests to a node five hops out, measured on hamster 2026-10-27, at
+most three were answered). Three in a row, at the schedule's retries of
+30 s and 60 s, is three to five minutes in which the node answered nothing.
+The node is then passed over for an hour (`UNANSWERED_EXCLUSION_MS`): the
+next selection adopts the most recently heard other candidate by the rule
+above, and the messenger shows `mailbox <new> adopted, <old> did not
+answer` as a toast and in `tui.log`. With no other candidate the silent
+node is kept; a mailbox that might answer later beats none. A node the user
+chose (`--pn`, the config, or `user` in the mailbox file) is never
+replaced; the messenger only says it did not answer. The streak lives in
+the running messenger, which syncs again and again; a single CLI run has
+no streak.
+
 Note that NomadNet's trust propagation makes this worse: trusting a person
 auto-trusts their node (its `Directory.py`, lines 198-202), which makes it
 eligible as your mailbox. Do not inherit that.

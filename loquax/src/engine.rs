@@ -200,6 +200,8 @@ struct Resolve {
 struct PendingSelection {
     routes: Vec<Route>,
     previous: Option<Previous>,
+    /// The nodes that stopped answering ([`MailboxInput::excluded`]).
+    excluded: Vec<[u8; 16]>,
     /// The entries whose replay is awaited, removed as the engine's own
     /// event hook sees each announce. Not "the core knows the identity":
     /// the core stores that before the hook runs, and a tick in between
@@ -442,6 +444,9 @@ impl Engine {
                 });
             }
             RouterEvent::PropagationSyncState(status) => {
+                if status.state == PropagationClientState::LinkEstablished {
+                    self.emit(OutboxEvent::SyncLinked);
+                }
                 if let Some(word) = sync_failure(status.state) {
                     let path = (status.state == PropagationClientState::NoPath)
                         .then(|| ready.router.propagation_client_path_attempts(core))
@@ -580,7 +585,8 @@ impl Engine {
             }
         };
         let previous = input.previous.map(|stored| stored.previous(&routes));
-        let selection = mailbox::select(&candidates(ready, &routes), previous);
+        let excluded = input.excluded;
+        let selection = mailbox::select(&candidates(ready, &routes), previous, &excluded);
         if matches!(selection, Selection::Keep(_)) {
             self.finish_selection(ready, core, selection, out);
             return;
@@ -617,6 +623,7 @@ impl Engine {
         self.pending_selection = Some(PendingSelection {
             routes,
             previous,
+            excluded,
             asked,
             deadline_ms: core.now_ms().saturating_add(DISCOVERY_WINDOW_MS),
         });
@@ -640,7 +647,11 @@ impl Engine {
         let Some(pending) = self.pending_selection.take() else {
             return;
         };
-        let selection = mailbox::select(&candidates(ready, &pending.routes), pending.previous);
+        let selection = mailbox::select(
+            &candidates(ready, &pending.routes),
+            pending.previous,
+            &pending.excluded,
+        );
         self.finish_selection(ready, core, selection, out);
     }
 
@@ -1569,6 +1580,7 @@ mod tests {
                 node,
                 chosen_by_user: false,
             }),
+            excluded: Vec::new(),
         });
         assert!(
             seen.contains(&OutboxEvent::Mailbox(Decision::Kept { node })),
@@ -1590,6 +1602,7 @@ mod tests {
         let seen = select_without_preference(MailboxInput {
             routes: Err("no authkey".to_string()),
             previous: None,
+            excluded: Vec::new(),
         });
         assert!(
             seen.iter().any(|event| matches!(
@@ -1619,6 +1632,7 @@ mod tests {
                     node,
                     chosen_by_user,
                 }),
+                excluded: Vec::new(),
             });
             assert!(
                 seen.contains(&OutboxEvent::Mailbox(Decision::KeptWithoutTable { node })),
@@ -1657,6 +1671,7 @@ mod tests {
                     seen_ms: 1,
                 }]),
                 previous: None,
+                excluded: Vec::new(),
             }),
         });
         let now_ms = core.now_ms();

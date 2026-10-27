@@ -111,6 +111,9 @@ pub struct MailboxInput {
     pub routes: Result<Vec<Route>, String>,
     /// What an earlier run selected (`${LNMSG_HOME}/mailbox`).
     pub previous: Option<Stored>,
+    /// Nodes that stopped answering ([`crate::mailbox::Unanswered`]): an
+    /// adopted one among them is replaced, and none is adopted.
+    pub excluded: Vec<[u8; 16]>,
 }
 
 /// What the engine reports back.
@@ -179,6 +182,9 @@ pub enum OutboxEvent {
     /// screen's mailbox schedule syncs on its own node's
     /// (`crate::sync::SyncEvent::Announce`).
     NodeAnnounced { destination: [u8; 16] },
+    /// A [`Command::Fetch`]'s link to the node came up: from here a failure
+    /// is the node's answer or the transfer, not a node that never answered.
+    SyncLinked,
     /// A [`Command::Fetch`] finished its round. `received` and `duplicates`
     /// are the router's own counts for the drain.
     SyncDone { received: usize, duplicates: usize },

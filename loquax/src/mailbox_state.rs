@@ -237,7 +237,8 @@ pub fn unix_now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-fn short(node: &[u8; 16]) -> String {
+/// A node as the `mailbox:` lines name it: its first four bytes in hex.
+pub fn short(node: &[u8; 16]) -> String {
     crate::address::to_hex(&node[..4])
 }
 

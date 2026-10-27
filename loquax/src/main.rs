@@ -367,18 +367,21 @@ fn resolve_pn(
 /// How this run selects its mailbox. A run that names a node with `--pn` or
 /// the config needs no input; one that does not reads the daemon's path
 /// table once, here, because the engine runs under the core lock and may not
-/// make a round trip.
+/// make a round trip. `excluded` are the nodes that stopped answering, which
+/// only the TUI, running sync after sync, keeps; a CLI run has none.
 async fn mailbox_run(
     home: &Path,
     config_dir: &Path,
     instance: &str,
     preferred: Option<[u8; 16]>,
+    excluded: Vec<[u8; 16]>,
 ) -> MailboxRun {
     let input = match preferred {
         Some(_) => None,
         None => Some(MailboxInput {
             routes: read_routes(config_dir, instance).await,
             previous: mailbox_state::load(home),
+            excluded,
         }),
     };
     MailboxRun { input }
@@ -598,7 +601,8 @@ async fn run(args: SendArgs) -> ExitCode {
     let clock = Tokio::new();
     // `--via auto` reads the path table only if its direct leg fails.
     if args.via == ViaArg::Propagated {
-        options.mailbox = mailbox_run(&home, &config_dir, &instance, preferred_pn).await;
+        options.mailbox =
+            mailbox_run(&home, &config_dir, &instance, preferred_pn, Vec::new()).await;
     }
     let request = |via: Via| SendRequest {
         destination,
@@ -656,7 +660,7 @@ async fn run(args: SendArgs) -> ExitCode {
                 preferred_pn,
                 pn_source,
                 &mut options,
-                || mailbox_run(&home, &config_dir, &instance, preferred_pn),
+                || mailbox_run(&home, &config_dir, &instance, preferred_pn, Vec::new()),
                 &mut effects,
                 &clock,
             )
@@ -734,7 +738,7 @@ async fn run_fetch_command(args: FetchArgs) -> ExitCode {
 
     let mut options = FetchOptions::new(instance.clone(), Duration::from_secs(args.timeout));
     let mut effects = Terminal::new(home.clone());
-    options.mailbox = mailbox_run(&home, &config_dir, &instance, preferred_pn).await;
+    options.mailbox = mailbox_run(&home, &config_dir, &instance, preferred_pn, Vec::new()).await;
     // `Terminal::print` deliberately does NOT hold `stdout().lock()` across
     // the run: the engine's driver thread logs through tracing, and with
     // `RUST_LOG=debug` (how the conformance rig runs every tool) the fmt

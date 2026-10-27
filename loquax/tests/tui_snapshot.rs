@@ -2197,4 +2197,260 @@ async fn a_message_left_at_the_mailbox_arrives_without_a_key() {
         "no key, no announce: {log}"
     );
     assert!(syncs.len() >= 2, "{log}");
+    // Every sync's end is in the log, with what it brought (leviculum 1072).
+    assert!(
+        log.contains("SYNC done reason=start result=ok new=1 elapsed_ms="),
+        "{log}"
+    );
+}
+
+/// A propagation node that is announced and never answers a link: a bare
+/// `lxmf.propagation` destination on a client of `daemon`, registered with
+/// inbound links declined. A drain against it asks for the link until the
+/// link's establishment timeout, as against a node five hops out whose link
+/// proofs are lost. The hash, and what keeps it alive.
+async fn silent_propagation_node(
+    daemon: &support::Daemon,
+) -> ([u8; 16], leviculum_std::ReticulumNode, tempfile::TempDir) {
+    use leviculum_core::{Destination, DestinationHash, DestinationType, Direction};
+    let storage = tempfile::tempdir().expect("silent pn storage");
+    let mut node = leviculum_std::driver::ReticulumNodeBuilder::new()
+        .enable_transport(false)
+        .connect_to_shared_instance(&daemon.instance)
+        .storage_path(storage.path().to_path_buf())
+        .build_sync()
+        .expect("build the silent pn client");
+    node.start().await.expect("attach the silent pn client");
+    let mut destination = Destination::new(
+        Some(leviculum_std::generate_identity()),
+        Direction::In,
+        DestinationType::Single,
+        "lxmf",
+        &["propagation"],
+    )
+    .expect("propagation destination");
+    destination.set_accepts_links(false);
+    let hash: DestinationHash = *destination.hash();
+    node.register_destination(destination);
+    let app_data = leviculum_lxmf::propagation::PropagationNodeAnnounce {
+        legacy_support: false,
+        timebase: 0,
+        enabled: true,
+        transfer_limit_kb: 256,
+        sync_limit_kb: 10_240,
+        stamp_cost: 0,
+        stamp_cost_flexibility: 0,
+        peering_cost: 0,
+        metadata: Vec::new(),
+    }
+    .encode()
+    .expect("encode the announce");
+    node.announce_destination(&hash, Some(&app_data))
+        .await
+        .expect("announce");
+    (*hash.as_bytes(), node, storage)
+}
+
+/// A fetch against a node that never answers is running when a message is
+/// sent: the send's direct leg must start at once, not when the fetch gives
+/// up (leviculum 1072). `until leg direct 3` is the bound: the link to the
+/// silent node takes its establishment timeout, over ten seconds, to fail.
+const STALLED_FETCH_SCRIPT: &str = "\
+until ready 20
+key :
+type fetch
+key enter
+key enter
+key i
+type while the mailbox stalls
+key enter
+until leg direct 3
+frame sending
+until delivery delivered 30
+frame delivered
+key esc
+key q
+";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_send_does_not_wait_behind_a_fetch_that_stalls() {
+    let daemon = daemon("tui-stall", |b| b).await;
+    let (silent, _silent_node, _silent_storage) = silent_propagation_node(&daemon).await;
+    let silent_hex: String = silent.iter().map(|b| format!("{b:02x}")).collect();
+    let home = tempfile::tempdir().expect("tui home");
+    std::fs::write(
+        home.path().join("identity"),
+        encode_identity(&fixed_identity(0x11)).expect("storable"),
+    )
+    .expect("write the identity");
+    let theirs = fixed_identity(0x22);
+    let their_hex: String = delivery_address(&theirs)
+        .expect("their address")
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+
+    let script = home.path().join("stall.script");
+    let frames = home.path().join("stall.frames");
+    std::fs::write(&script, STALLED_FETCH_SCRIPT).expect("write the script");
+    let args: Vec<String> = vec![
+        "--instance".into(),
+        daemon.instance.clone(),
+        "--config".into(),
+        daemon.config_dir.path().display().to_string(),
+        "--to".into(),
+        their_hex.clone(),
+        "--pn".into(),
+        silent_hex,
+        "--timeout".into(),
+        "15".into(),
+        "--script".into(),
+        script.display().to_string(),
+        "--frames".into(),
+        frames.display().to_string(),
+        "--size".into(),
+        "80x16".into(),
+    ];
+    let child_home = home.path().to_path_buf();
+    let child = tokio::task::spawn_blocking(move || {
+        let mut command = Command::new(LNMSG);
+        command
+            .args(&args)
+            .env("LNMSG_HOME", &child_home)
+            .env("LNMSG_DISPLAY_NAME", "tui")
+            .env_remove("LEVICULUM_EVENT_LOG")
+            .env_remove("RUST_LOG")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let child = leviculum_std::process::spawn_supervised(command).expect("spawn loquax");
+        child.wait_with_output().expect("wait for loquax")
+    });
+
+    // The correspondent appears once the send runs, as in the late session.
+    let storage = tempfile::tempdir().expect("their storage");
+    let mut them = None;
+    let deadline = Instant::now() + Duration::from_secs(40);
+    while !child.is_finished() && Instant::now() < deadline {
+        let text = std::fs::read_to_string(&frames).unwrap_or_default();
+        if text.contains(": sending ---") {
+            them = Some(
+                attach(AttachConfig {
+                    instance: daemon.instance.clone(),
+                    storage_dir: storage.path().to_path_buf(),
+                    identity: theirs,
+                    display_name: b"them".to_vec(),
+                    notices: Terminal::new(storage.path().to_path_buf()),
+                })
+                .await
+                .expect("the correspondent attaches"),
+            );
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    let output = child.await.expect("the loquax child thread");
+    if let Some(them) = them {
+        them.stop().await;
+    }
+    let got = std::fs::read_to_string(&frames).unwrap_or_default();
+    let log = std::fs::read_to_string(home.path().join("tui.log")).unwrap_or_default();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "the send waited behind the fetch: stderr: {}\nframes:\n{got}\ntui.log:\n{log}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // The fetch was still running when the send went: it began before the
+    // send and had not ended when the send's direct leg started.
+    let fetch_at = log.find("SYNC reason=key").expect("the fetch began");
+    let send_at = log.find("SEND leg=direct").expect("the send began");
+    assert!(fetch_at < send_at, "{log}");
+    assert!(
+        log.find("SYNC done").is_none_or(|done| done > send_at),
+        "the fetch had ended before the send began: {log}"
+    );
+}
+
+/// A fetch that fails says so in `tui.log`, with the reason it began for,
+/// the failure's first line and how long it took (leviculum 1072): before,
+/// only the start was logged, and a sync that ran its whole budget into a
+/// failure left no trace. A node never heard has no path, and the drain asks
+/// for one until its budget, four seconds at `--timeout 2`, runs out.
+const FAILED_FETCH_SCRIPT: &str = "\
+until ready 20
+key :
+type fetch
+key enter
+sleep 7000
+key q
+";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_fetch_leaves_its_end_in_the_log() {
+    let daemon = daemon("tui-fail", |b| b).await;
+    let home = tempfile::tempdir().expect("tui home");
+    std::fs::write(
+        home.path().join("identity"),
+        encode_identity(&fixed_identity(0x11)).expect("storable"),
+    )
+    .expect("write the identity");
+    let script = home.path().join("fail.script");
+    let frames = home.path().join("fail.frames");
+    std::fs::write(&script, FAILED_FETCH_SCRIPT).expect("write the script");
+    let args: Vec<String> = vec![
+        "--instance".into(),
+        daemon.instance.clone(),
+        "--config".into(),
+        daemon.config_dir.path().display().to_string(),
+        "--pn".into(),
+        "5e".repeat(16),
+        "--timeout".into(),
+        "2".into(),
+        "--script".into(),
+        script.display().to_string(),
+        "--frames".into(),
+        frames.display().to_string(),
+        "--size".into(),
+        "80x16".into(),
+    ];
+    let child_home = home.path().to_path_buf();
+    let output = tokio::task::spawn_blocking(move || {
+        let mut command = Command::new(LNMSG);
+        command
+            .args(&args)
+            .env("LNMSG_HOME", &child_home)
+            .env("LNMSG_DISPLAY_NAME", "tui")
+            .env_remove("LEVICULUM_EVENT_LOG")
+            .env_remove("RUST_LOG")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let child = leviculum_std::process::spawn_supervised(command).expect("spawn loquax");
+        child.wait_with_output().expect("wait for loquax")
+    })
+    .await
+    .expect("the loquax child thread");
+    let log = std::fs::read_to_string(home.path().join("tui.log")).unwrap_or_default();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}\ntui.log:\n{log}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let done = log
+        .lines()
+        .find_map(|line| line.split("SYNC done ").nth(1))
+        .unwrap_or_else(|| panic!("no SYNC done line: {log}"));
+    assert!(
+        done.starts_with("reason=key result=failed detail=\"the mailbox sync failed: no path"),
+        "{done}"
+    );
+    let elapsed: u64 = done
+        .rsplit("elapsed_ms=")
+        .next()
+        .and_then(|ms| ms.trim().parse().ok())
+        .unwrap_or_else(|| panic!("no elapsed_ms: {done}"));
+    assert!((2_000..7_000).contains(&elapsed), "{done}");
 }

@@ -89,13 +89,27 @@ pub enum FetchError {
     Broken(String),
     /// No propagation node could be selected.
     NoPropagationNode(String),
-    /// The drain started and then failed, in the state's own words.
+    /// The drain started and then failed after its link to the node came up,
+    /// in the state's own words.
     SyncFailed(String),
+    /// The drain started and the node never answered it: it failed, in the
+    /// state's own words, or the budget ran out, before a link came up.
+    Unanswered(String),
     /// The drain asked for a path to the node until its budget ended, and
     /// none came.
     NoPath(PropagationPathAttempts),
-    /// The budget ran out before the round completed.
+    /// The budget ran out after the link came up and before the round
+    /// completed.
     Timeout,
+}
+
+impl FetchError {
+    /// The node never answered: no path to it, or no link to it came up.
+    /// What counts toward a mailbox being replaced
+    /// ([`crate::mailbox::Unanswered`]).
+    pub fn before_link(&self) -> bool {
+        matches!(self, Self::NoPath(_) | Self::Unanswered(_))
+    }
 }
 
 impl From<OutboxGone> for FetchError {
@@ -115,6 +129,11 @@ impl core::fmt::Display for FetchError {
                  Name one with --pn <hash>, or set propagation_node in loquax's config."
             ),
             Self::SyncFailed(detail) => write!(f, "the mailbox sync failed: {detail}"),
+            Self::Unanswered(detail) => write!(
+                f,
+                "the mailbox sync failed: {detail}.\n  \
+                 Raise --timeout, or check that the node is reachable."
+            ),
             Self::NoPath(attempts) => write!(
                 f,
                 "the mailbox sync failed: no path to the propagation node after {} path \
@@ -204,6 +223,7 @@ pub async fn run_fetch<O: Outbox, E: Effects>(
     })?;
 
     let mut fetching = false;
+    let mut linked = false;
     let mut new = 0usize;
 
     loop {
@@ -287,12 +307,16 @@ pub async fn run_fetch<O: Outbox, E: Effects>(
                         new,
                     });
                 }
+                OutboxEvent::SyncLinked if fetching => linked = true,
                 OutboxEvent::SyncFailed {
                     path: Some(attempts),
                     ..
                 } if fetching => return Err(FetchError::NoPath(attempts)),
-                OutboxEvent::SyncFailed { detail, .. } if fetching => {
+                OutboxEvent::SyncFailed { detail, .. } if fetching && linked => {
                     return Err(FetchError::SyncFailed(detail));
+                }
+                OutboxEvent::SyncFailed { detail, .. } if fetching => {
+                    return Err(FetchError::Unanswered(detail));
                 }
                 // Send-side traffic; a fetch has none in flight.
                 _ => {}
@@ -300,8 +324,12 @@ pub async fn run_fetch<O: Outbox, E: Effects>(
         }
 
         if clock::since(clock, start) >= options.budget {
-            return Err(if fetching {
+            return Err(if linked {
                 FetchError::Timeout
+            } else if fetching {
+                FetchError::Unanswered(
+                    "the propagation node did not answer a link inside the timeout".to_string(),
+                )
             } else {
                 FetchError::NoPropagationNode(
                     "selecting a node did not finish inside the timeout".to_string(),
@@ -558,8 +586,45 @@ mod tests {
         .expect_err("a failed sync is a failure");
         assert_eq!(
             error,
-            FetchError::SyncFailed("the propagation node did not answer".to_string())
+            FetchError::Unanswered("the propagation node did not answer".to_string())
         );
+        assert!(error.before_link());
+    }
+
+    /// A failure after the link came up is the node's answer or the
+    /// transfer, never a node that stopped answering.
+    #[tokio::test(start_paused = true)]
+    async fn a_failure_after_the_link_is_not_unanswered() {
+        let mut outbox = FakeOutbox::new(vec![
+            OutboxEvent::PnSelected {
+                destination: PN,
+                stamp_cost: None,
+            },
+            OutboxEvent::SyncLinked,
+            OutboxEvent::SyncFailed {
+                detail: "the transfer failed".to_string(),
+                path: None,
+            },
+        ]);
+        let mut seen = SeenStore::default();
+        let mut effects = effects();
+
+        let error = run_fetch(
+            &mut outbox,
+            None,
+            "mailbox",
+            &options(),
+            &mut effects,
+            &mut seen,
+            &Tokio::new(),
+        )
+        .await
+        .expect_err("a failed sync is a failure");
+        assert_eq!(
+            error,
+            FetchError::SyncFailed("the transfer failed".to_string())
+        );
+        assert!(!error.before_link());
     }
 
     /// leviculum#719: a missing path names how many requests the drain sent
@@ -595,6 +660,7 @@ mod tests {
         .await
         .expect_err("no path is a failure");
         assert_eq!(error, FetchError::NoPath(attempts));
+        assert!(error.before_link());
         assert!(
             error
                 .to_string()
@@ -623,7 +689,42 @@ mod tests {
         )
         .await
         .expect_err("no SyncDone inside the budget is a failure");
+        assert_eq!(
+            error,
+            FetchError::Unanswered(
+                "the propagation node did not answer a link inside the timeout".to_string()
+            )
+        );
+        assert!(error.before_link());
+    }
+
+    /// The budget running out once the link is up is a plain timeout: the
+    /// node answered.
+    #[tokio::test(start_paused = true)]
+    async fn a_drain_that_links_and_never_finishes_times_out() {
+        let mut outbox = FakeOutbox::new(vec![
+            OutboxEvent::PnSelected {
+                destination: PN,
+                stamp_cost: None,
+            },
+            OutboxEvent::SyncLinked,
+        ]);
+        let mut seen = SeenStore::default();
+        let mut effects = effects();
+
+        let error = run_fetch(
+            &mut outbox,
+            None,
+            "mailbox",
+            &options(),
+            &mut effects,
+            &mut seen,
+            &Tokio::new(),
+        )
+        .await
+        .expect_err("no SyncDone inside the budget is a failure");
         assert_eq!(error, FetchError::Timeout);
+        assert!(!error.before_link());
     }
 
     /// The budget runs on the clock the fetch is given: on a stepping clock
@@ -650,7 +751,7 @@ mod tests {
         )
         .await
         .expect_err("no SyncDone inside the budget is a failure");
-        assert_eq!(error, FetchError::Timeout);
+        assert!(error.before_link(), "{error:?}");
         assert_eq!(clock.sleeps.get(), 5_000);
         assert_eq!(
             outbox.commands.borrow()[1],
