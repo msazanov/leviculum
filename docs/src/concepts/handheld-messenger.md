@@ -114,13 +114,15 @@ Nothing a frontend draws is decided inside it.
 inside the messenger: OpenStreetMap vector data, on the desktop and on
 the M9, showing received telemetry positions. The device measurement
 below decides whether the vector path holds or the PNG fallback is
-taken, not whether the map exists.
+taken, not whether the map exists. (Decided 2026-10-27, Lew: the vector
+path holds, the PNG fallback is dropped; [loquax: the map](loquax-map.md),
+section 7.)
 
 2026-10-27, Lew: the map is part of loquax, on the desktop (the terminal
 and the iced GUI) as well as on the board, because the positions arrive
 over the same LXMF channel as the messages. The plan, the renderer split
-and the slices are on [loquax: the map](loquax-map.md), proposed for
-Lew's decision.
+and the slices are on [loquax: the map](loquax-map.md), decided by Lew on
+2026-10-27.
 
 2026-10-25, Lew: the embedded map is vector, drawn with a minimal
 polygon filler of our own on `embedded-graphics` and measured on the
@@ -143,10 +145,12 @@ simplifies geometry for each zoom level, and writes a compact tile set
 to the device's flash. The device draws filled areas, polylines, its own
 GNSS position, and the telemetry positions of other nodes.
 
-The fallback is raster, the measured precedent: Meshtastic's device UI
-on the M9 reads PNG raster tiles from the microSD card at
-`/maps/<style>/{z}/{x}/{y}.png` ([The ThinkNode M9](thinknode-m9.md),
-"Storage").
+*Superseded 2026-10-27 (Lew):* the fallback was raster, the measured
+precedent: Meshtastic's device UI on the M9 reads PNG raster tiles from
+the microSD card at `/maps/<style>/{z}/{x}/{y}.png` ([The ThinkNode
+M9](thinknode-m9.md), "Storage"). That layout is not our plan; the one
+format for the desktop and the board is the region file of [loquax: the
+map](loquax-map.md), section 4.
 
 **The first step is the device measurement, not product code.** For one
 city at three zoom levels: the flash the tiles need, the RAM used while
@@ -212,8 +216,6 @@ messenger core holds the same types a board will.
 - **The licence text for the map data.** OSM data is ODbL: which notice
   ships with the tiles, and where the device shows it ([Licensing and
   third-party notices](licensing-and-notices.md)).
-- **How other nodes' positions age out of the map.** Proposed on
-  [loquax: the map](loquax-map.md), section 2, "Stale".
 - **Whether the M9 frontend and the terminal share a text layout
   engine.** Since 2026-10-25 the rule for answering it is "One
   interaction model" above: shared where it is the same problem.

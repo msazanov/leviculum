@@ -9,9 +9,10 @@ board. [A messenger whose core runs anywhere](handheld-messenger.md), "The
 map", already calls the map a product of its own and a view inside the
 messenger, on the desktop and embedded. This page plans it in slices.
 
-**Status: proposed 2026-10-27, for Lew's decision.** Slice (a), positions
-in the model shown as text, is built (2026-10-27, leviculum 1059); the
-rest of the page is not. The measurement it rests on is
+**Status: decided 2026-10-27 (Lew), all five points of section 7 as
+proposed.** Slice (a), positions in the model shown as text, is built
+(2026-10-27, leviculum 1059, commit `230c5e4d`); the rest of the page is
+not. The measurement it rests on is
 `docs/drafts/map-measurement-2026-10.md`; the decisions it rests on are the
 toolkit ([A GUI toolkit for the desktop and the M9](gui-toolkit.md),
 option B) and the vector path with our own filler (handheld-messenger.md,
@@ -155,13 +156,13 @@ a fix stamped ahead of our clock sorts at receive time and shows its claimed
 time with a mark. Without the clamp, one wrong clock would pin a peer's
 pin at "now" forever.
 
-**Stale.** Proposed: a fix is drawn as current up to 2 h old and dimmed
+**Stale.** Decided 2026-10-27 (Lew): a fix is drawn as current up to 2 h old and dimmed
 after that, with its age always beside it. Two hours is twice the station
 profile's heartbeat (`max_interval_ms`, 60 min,
 `leviculum-nrf/telemetry-policy/src/lib.rs:190`; the tracker's is 15 min,
 `leviculum-nrf/telemetry-policy/src/lib.rs:175`), so a board that misses
 one report stays current and one that misses two goes dim. A fix is never
-removed for its age alone; it goes with a delete. This answers
+removed for its age alone; it goes with a delete. This closes
 handheld-messenger.md's open "how other nodes' positions age out of the
 map".
 
@@ -170,7 +171,8 @@ map".
 `TELEMETRY_REQUEST` with a timebase ([Telemetry](telemetry.md), "A request
 from the target triggers one report"); sending one is a palette action
 `request position` on the open conversation. Answering one needs a
-position of our own and the privacy decision below, so it waits for that.
+position of our own and the user's per-peer switch of section 7, so it
+waits for that.
 Its command id must first be pinned against a captured Sideband request,
 as the codec's own comment says.
 
@@ -234,7 +236,8 @@ the map view, and the region file's notice is what the open licence item
 of handheld-messenger.md asks for.
 
 **How a user gets one, zero config.** The 90 % rule (Lew, 2026-10-25; zero
-config, #471) says the map works without a step. Proposed:
+config, #471) says the map works without a step. Decided 2026-10-27
+(Lew):
 
 1. Without any region file, the map view still works: pins on a plain
    grid with the coastlines of the world at low detail. ratatui's canvas
@@ -348,10 +351,11 @@ documentation; only foot is checked here. `ratatui-image` encodes it through `ic
 kitty keyboard flags (query, push, pop, set) and no kitty graphics escape.
 So a terminal that speaks the kitty keyboard protocol need not speak kitty
 graphics: foot speaks the one and not the other, and draws the map by
-sixel. Which terminal Lew uses could not be read from the coder host; the
+sixel. Lew's terminal is foot (the reviewer checked on his machine,
+2026-10-27), which is why the ladder must not assume kitty graphics. The
 `KEYS` line in `tui.log` names the keyboard, and slice (c) adds a
-`GRAPHICS backend=` line beside it, so `tui.log` answers it on Lew's
-machine.
+`GRAPHICS backend=` line beside it, so `tui.log` names the backend on
+any machine.
 
 **Half-blocks.** `▀` with a foreground and a background colour gives two
 pixels per cell, in truecolor or 256 colours: the 80 x 24 layout's
@@ -369,33 +373,40 @@ outline of section 4. It is the backend for a terminal with neither
 graphics nor 256 colours, and for `NO_COLOR`: roads and coastlines as
 lines, pins as text.
 
-The ladder, proposed: kitty or sixel where the query finds one, else
+The ladder, decided 2026-10-27 (Lew): kitty or sixel where the query finds one, else
 half-blocks in colour, else braille. It is the ladder `lnomad`'s pictures
 already climb, plus braille at the bottom.
 
-## 7. Open for Lew
+## 7. Decided
 
-- **Decision 6, does the vector path hold.** The device measurement says
-  yes for the stripped profile: 90 ms to draw plus 31 ms to flush on the
-  M9, 177 ms plus 31 ms with buildings
+Lew, 2026-10-27, accepted the five proposals of this section as written.
+Each alternative stays as one line, rejected, so the reasoning stays.
+
+- **Decision 6: the vector path holds.** The device measurement says yes
+  for the stripped profile: 90 ms to draw plus 31 ms to flush on the M9,
+  177 ms plus 31 ms with buildings
   (`docs/drafts/map-measurement-2026-10.md`, "Device rows, measured
-  2026-10-26"). The proposal: the vector path holds, the PNG fallback is
-  dropped, and the region format of section 4 is the one format for the
-  desktop and the board.
-- **The TUI graphics choice.** The proposal is the ladder of section 6:
-  kitty or sixel, half-blocks, braille. The alternative is braille only,
-  which needs no `ratatui-image` in loquax and gives no filled areas.
-- **The default region.** The proposal is section 4: no region shipped,
-  the world outline until one is added, one explicit action to add one,
-  no download of its own. The alternative is a small default region in
-  the package, which would have to be chosen for someone.
-- **Whether our own position is sent by default.** The proposal is no:
-  loquax sends no position until the user switches it on per peer, and
-  answers no telemetry request until then. A messenger that broadcasts
-  where its user is because nobody changed a default is the failure this
-  avoids. The cost is that two loquax users see each other on the map
-  only after one step each.
-- **The stale threshold**, proposed at 2 h (section 2).
+  2026-10-26"). The PNG raster fallback is dropped, and the region format
+  of section 4 is the one format for the desktop and the board.
+  *Rejected:* the PNG raster tiles of Meshtastic's layout, a second format
+  to cut, ship and test that the measurement does not need.
+- **TUI graphics: the ladder of section 6.** Kitty or sixel, then
+  half-blocks, then braille. Lew's terminal is foot, which draws by sixel
+  and speaks no kitty graphics, so the ladder must not assume kitty.
+  *Rejected:* braille only, which needs no `ratatui-image` in loquax but
+  gives no filled areas.
+- **No default region in the package.** The world outline until the user
+  adds one, one explicit action to add one, no download of loquax's own
+  (section 4). *Rejected:* a small default region in the package, which
+  would have to be chosen for someone.
+- **Our own position is not sent by default.** loquax sends no position
+  until the user switches it on per peer, and answers no telemetry
+  request until then. A messenger that broadcasts where its user is
+  because nobody changed a default is the failure this avoids; the cost
+  is that two loquax users see each other on the map only after one step
+  each. *Rejected:* sending by default.
+- **Stale threshold 2 h** (section 2): dimmed after that, never removed
+  for age alone. *Rejected:* removing a fix when it ages out.
 
 ## See also
 

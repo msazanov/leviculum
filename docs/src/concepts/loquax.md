@@ -32,7 +32,7 @@ daemon" has to re-derive the argument from nothing.
   policy, trust, contacts and names.
 - [The map](loquax-map.md): telemetry positions in the conversation and
   on a map, the renderer shared by the terminal, the GUI and the M9, and
-  the slices (a proposal of 2026-10-27).
+  the slices (decided 2026-10-27, Lew).
 
 ## 1. What the program is
 
