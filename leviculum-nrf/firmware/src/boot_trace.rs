@@ -19,7 +19,7 @@
 //! await. It is legal from any context, including between
 //! `Softdevice::enable` and the first task spawn.
 
-pub use leviculum_boot_trace::Phase;
+pub use leviculum_boot_trace::{LoraPhase, Phase};
 use leviculum_boot_trace::{PrevBoot, RawRecord, TraceLine, MAGIC};
 
 /// Survives `sys_reset` because `.retained` (memory.x) is NOLOAD —
@@ -67,6 +67,7 @@ pub fn capture(read_reset_reason: impl FnOnce() -> u32) -> Captured {
             magic: read_volatile(addr_of!((*p).magic)),
             boot: read_volatile(addr_of!((*p).boot)),
             phase: read_volatile(addr_of!((*p).phase)),
+            lora: read_volatile(addr_of!((*p).lora)),
         };
         let prev = leviculum_boot_trace::decode(&raw);
 
@@ -75,6 +76,7 @@ pub fn capture(read_reset_reason: impl FnOnce() -> u32) -> Captured {
         // Arm this boot's record: body first, magic last, so a reset
         // mid-sequence can never leave a valid record with a stale body.
         write_volatile(addr_of_mut!((*p).phase), Phase::EnterMain as u8);
+        write_volatile(addr_of_mut!((*p).lora), LoraPhase::None as u8);
         write_volatile(
             addr_of_mut!((*p).boot),
             leviculum_boot_trace::next_boot(&prev),
@@ -96,11 +98,24 @@ pub fn phase(p: Phase) {
     }
 }
 
+/// Record the LoRa bring-up step about to be taken (#469, order 1056).
+/// Same discipline as [`phase`], on the record's second byte: the LoRa
+/// task runs on an interrupt executor beside `main`, so it must not write
+/// `main`'s byte. Written BEFORE the step, so a hang leaves its name.
+pub fn lora_phase(p: LoraPhase) {
+    // SAFETY: as in `phase`; this byte has the LoRa task as its only
+    // writer after `capture`.
+    unsafe {
+        let r = core::ptr::addr_of_mut!(BOOT_TRACE).cast::<RawRecord>();
+        core::ptr::write_volatile(core::ptr::addr_of_mut!((*r).lora), p as u8);
+    }
+}
+
 /// Emit the previous boot's breadcrumbs as one structured line on the
 /// debug port (if00):
 ///
 /// ```text
-/// BOOT_TRACE prev_magic=ok prev_phase=main-loop prev_boot=17 reset_reason=0x00000004 t=12
+/// BOOT_TRACE prev_magic=ok prev_phase=main-loop prev_boot=17 reset_reason=0x00000004 prev_lora=lora-ready t=12
 /// ```
 ///
 /// Critical path: rides the boot-banner ring, so it is replayed from the

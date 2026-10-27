@@ -864,10 +864,18 @@ pub fn init(
     // Measure first, enable second: the probe leaves the BLE stack
     // uninitialised, so a configuration that would eat our stack is
     // refused before it can.
+    //
+    // Each step names itself in the boot record before it is taken
+    // (#469, order 1056): two boots of the Pocket hung after
+    // `lora-task` and before `SD_RAM_FLOOR`, and `lora-task` alone
+    // could not say whether the probe, the settle or the enable held them.
+    leviculum_firmware::boot_trace::phase(leviculum_firmware::boot_trace::Phase::SdProbe);
     let wanted = required_app_ram_base();
+    leviculum_firmware::boot_trace::phase(leviculum_firmware::boot_trace::Phase::SdSettle);
     cortex_m::asm::delay(PROBE_SETTLE_CYCLES);
     assert_sd_fits_below_retained(wanted);
 
+    leviculum_firmware::boot_trace::phase(leviculum_firmware::boot_trace::Phase::SdEnable);
     let sd = Softdevice::enable(&sd_config());
     leviculum_firmware::boot_trace::phase(leviculum_firmware::boot_trace::Phase::SdEnabled);
     leviculum_firmware::seams::BleLink::set_advertised_name(&mut SoftDeviceLink, gap_name);

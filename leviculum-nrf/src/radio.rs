@@ -105,9 +105,14 @@ mod part {
         }
     }
 
-    /// Reset and initialise the chip.
+    /// Reset and initialise the chip. Each step names itself in the boot
+    /// record before it is taken (`LoraPhase`, #469); `init_radio` names
+    /// its own.
     pub async fn bring_up(radio: &mut Radio, freq_hz: u32) -> Result<Ready, Error> {
+        use leviculum_firmware::boot_trace::{lora_phase, LoraPhase};
+        lora_phase(LoraPhase::Reset);
         radio.reset().await;
+        lora_phase(LoraPhase::BusyWait);
         let _ = radio.wait_busy().await;
         radio.init_radio(freq_hz).await.map(Ready)
     }
@@ -173,8 +178,13 @@ mod part {
 
     /// Reset and initialise the chip. The frequency is not needed here: the
     /// LR11xx calibrates its image band in `configure_lora`.
+    /// The driver's steps are its own crate's, so the boot record gets the
+    /// two this side can see (`LoraPhase`, #469).
     pub async fn bring_up(radio: &mut Radio, _freq_hz: u32) -> Result<Ready, Error> {
+        use leviculum_firmware::boot_trace::{lora_phase, LoraPhase};
+        lora_phase(LoraPhase::Reset);
         radio.reset().await?;
+        lora_phase(LoraPhase::Init);
         radio.init_radio().await.map(Ready)
     }
 

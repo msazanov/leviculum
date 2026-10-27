@@ -13,7 +13,7 @@ src/bin/solarnode.rs (1494):
 src/bin/t1000e.rs (1367): feedback
 src/bin/t114.rs (1407):
 src/ble/columba.rs (3225): info log radio_store warn
-src/ble/mod.rs (891): info log media radio_store transport_stats warn
+src/ble/mod.rs (899): info log media radio_store transport_stats warn
 src/ble/notify.rs (238): ble log
 src/boards/mod.rs (84): lora qspi radio_store telemetry
 src/boards/rak4631.rs (208):
@@ -32,7 +32,7 @@ src/gnss.rs (587): boards log vext
 src/heap_census.rs (398): log pn
 src/led.rs (48): feedback log
 src/lib.rs (734): log log_critical
-src/lora.rs (2708): announce chtm events log media pn radio radio_store set_irq_priorities
+src/lora.rs (2710): announce chtm events log media pn radio radio_store set_irq_priorities
 src/media.rs (288): log telemetry
 src/mgmt.rs (259): log name telemetry usb
 src/motion.rs (177): log
@@ -40,14 +40,14 @@ src/name.rs (259): ble log media telemetry
 src/panel_facts.rs (30): lora pn
 src/pn.rs (3759): announce events heap_census log lora name record_store telemetry usb
 src/qspi.rs (1188): log
-src/radio.rs (208): boards log lora sx1262
+src/radio.rs (218): boards log lora sx1262
 src/radio_store.rs (197): boards flash log telemetry
 src/record_store.rs (216): ble flash pn usb
 src/remote_status.rs (138): log lora
 src/rng.rs (214): log
 src/st7789.rs (408): log log_stack panel_facts vext
 src/store_spike.rs (164): flash log record_store
-src/sx1262.rs (1704): chtm log lora
+src/sx1262.rs (1713): chtm log lora
 src/telemetry.rs (2062): ble flash log lora media name pn radio_store
 src/time_floor.rs (74): boot_count flash radio_store record_store
 src/transport_stats.rs (169): log lora
@@ -57,7 +57,7 @@ firmware/src/battery.rs (468): board_state fakes log seams
 firmware/src/ble_link.rs (1117): fakes iface_bytes log media seams
 firmware/src/board_state.rs (138): display
 firmware/src/boot_count.rs (203): fakes log seams
-firmware/src/boot_trace.rs (137): log
+firmware/src/boot_trace.rs (152): log
 firmware/src/button.rs (380): board_state display fakes feedback log seams
 firmware/src/clock.rs (115): seams
 firmware/src/dispatch.rs (49): log

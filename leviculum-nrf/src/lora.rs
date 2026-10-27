@@ -1951,6 +1951,7 @@ async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: u32)
     // runtime path cannot come to disagree about what a config means.
     let mut mute_lease = leviculum_mute_lease::MuteLease::new();
 
+    leviculum_firmware::boot_trace::lora_phase(leviculum_firmware::boot_trace::LoraPhase::Config);
     match crate::radio::configure_lora(
         &mut radio,
         config.frequency_hz,
@@ -1978,6 +1979,7 @@ async fn lora_task(mut radio: Radio, mut config: RadioConfig, channel_seed: u32)
     }
 
     crate::log::log_fmt("[LORA] ", format_args!("task started"));
+    leviculum_firmware::boot_trace::lora_phase(leviculum_firmware::boot_trace::LoraPhase::Ready);
 
     let mut rx_buf = [0u8; 255];
     let mut rx_timeout_count: u32 = 0;

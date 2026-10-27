@@ -515,8 +515,14 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
     /// Full initialization sequence (SX1262 + TCXO + LDO regulator).
     /// Order follows the datasheet init summary (§9.2.1, §13).
     /// Call after reset().
+    ///
+    /// Each step names itself in the boot record before it is taken
+    /// (`LoraPhase`, #469), so a boot that hangs here says in which.
     pub async fn init_radio(&mut self, freq_hz: u32) -> Result<ChipStatus, Error> {
+        use leviculum_firmware::boot_trace::{lora_phase, LoraPhase};
+        lora_phase(LoraPhase::Standby);
         self.set_standby_rc().await?;
+        lora_phase(LoraPhase::Setup);
         self.write_command(opcode::SET_REGULATOR_MODE, &[0x00])
             .await?; // LDO: RNode firmware sx126x.cpp begin() never calls
                      // OP_REGULATOR_MODE, leaving the SX1262 at its LDO default.
@@ -527,8 +533,11 @@ impl<SPI: SpiDeviceTrait> Sx1262<SPI> {
         // Timeout 0x0000FF (~4 ms) is the value RNode firmware uses.
         self.set_dio3_as_tcxo_ctrl(self.tcxo_voltage_reg, 0x0000FF)
             .await?;
+        lora_phase(LoraPhase::Calib);
         self.calibrate(0x7F).await?;
+        lora_phase(LoraPhase::CalibImage);
         self.calibrate_image(freq_hz).await?;
+        lora_phase(LoraPhase::Init);
         // LoRa packet type.
         self.write_command(opcode::SET_PACKET_TYPE, &[0x01]).await?;
         // Boosted receive gain, and the read-back that makes it observable.
