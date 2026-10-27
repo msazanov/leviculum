@@ -422,6 +422,7 @@ async fn run_send_steps<O: Outbox>(
                 | OutboxEvent::Mailbox(_)
                 | OutboxEvent::Received { .. }
                 | OutboxEvent::Announced { .. }
+                | OutboxEvent::NodeAnnounced { .. }
                 | OutboxEvent::SyncDone { .. }
                 | OutboxEvent::SyncFailed { .. } => {}
             }

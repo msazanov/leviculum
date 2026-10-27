@@ -62,6 +62,15 @@
 //! and no empty block is drawn; the detail view lists the sensors. Pinned in
 //! `tests/fixtures/tui_telemetry.frames`.
 //!
+//! The mailbox schedule's session (`docs/src/concepts/loquax-mailbox.md`,
+//! section 1, "When to sync") runs against a real propagation node, lnpnd's
+//! engine on the same daemon: one message waits there before the start and
+//! the start's sync collects it, a second is deposited while loquax runs and
+//! arrives without a key, inside the activity cadence and well before the
+//! bound. `--sync-interval 30s` scales the schedule down: a four-second
+//! cadence for twenty seconds after the first message. No frames are pinned;
+//! the counts and `tui.log`'s `SYNC` lines are what is under test.
+//!
 //! The daemon is the in-process one `mailbox_cli.rs` uses. The correspondent
 //! is a second loquax engine attached to it in this process
 //! (`loquax::engine::attach`), a full LXMF router, so the proof that turns the
@@ -1947,4 +1956,245 @@ async fn the_map_shows_the_pins_on_the_region_and_the_outline_in_braille_and_hal
             kept.display()
         );
     }
+}
+
+/// A propagation node on `daemon`: lnpnd's engine at stamp cost 0, no
+/// mailbox of its own, announced at once. The hash, and what keeps it alive.
+async fn propagation_node(
+    daemon: &support::Daemon,
+) -> (
+    [u8; 16],
+    leviculum_std::ReticulumNode,
+    std::sync::mpsc::Receiver<lnpnd::engine::EngineEvent>,
+    tempfile::TempDir,
+) {
+    use lnpnd::engine::{Engine, EngineConfig, EngineEvent};
+    let (engine, events) = Engine::new(EngineConfig {
+        identity: leviculum_std::generate_identity(),
+        node_config: leviculum_lxmf::PropagationNodeConfig {
+            stamp_cost: 0,
+            always_compute_stamp_value: false,
+            ..leviculum_lxmf::PropagationNodeConfig::default()
+        },
+        store: leviculum_lxmf::MemoryPropagationStore::new(64_000),
+        announce_interval_secs: 3600,
+        announce_delay_secs: 0,
+        announce_at_start: false,
+        peering: leviculum_lxmf::PeeringConfig::default(),
+        peer_store: Box::new(leviculum_lxmf::MemoryPeerStore::default()),
+        control_allowed: Vec::new(),
+        auth_allowed: None,
+        mailbox: None,
+        store_limit_bytes: 64_000,
+        delivery_limit_kb: 1000,
+    });
+    let storage = tempfile::tempdir().expect("pn storage");
+    let mut node = lnpnd::node_builder(engine, storage.path().to_path_buf())
+        .connect_to_shared_instance(&daemon.instance)
+        .build()
+        .await
+        .expect("build the propagation node");
+    node.start().await.expect("attach the propagation node");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let hash = loop {
+        match events.try_recv() {
+            Ok(EngineEvent::Ready { destination_hash }) => break destination_hash,
+            Ok(_) => {}
+            Err(_) => {
+                assert!(
+                    Instant::now() < deadline,
+                    "the propagation node never got ready"
+                );
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+    };
+    (hash, node, events, storage)
+}
+
+/// One `loquax` CLI run against `daemon` from `home`, with `stdin`.
+async fn cli(
+    daemon: &support::Daemon,
+    home: &Path,
+    args: &[&str],
+    stdin: &[u8],
+) -> std::process::Output {
+    let mut all: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+    all.extend([
+        "--instance".into(),
+        daemon.instance.clone(),
+        "--config".into(),
+        daemon.config_dir.path().display().to_string(),
+    ]);
+    let (home, stdin) = (home.to_path_buf(), stdin.to_vec());
+    tokio::task::spawn_blocking(move || {
+        let mut command = Command::new(LNMSG);
+        command
+            .args(&all)
+            .env("LNMSG_HOME", &home)
+            .env("LEVICULUM_EVENT_LOG", home.join("events.log"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = leviculum_std::process::spawn_supervised(command).expect("spawn loquax");
+        if let Some(mut pipe) = child.stdin.take() {
+            std::io::Write::write_all(&mut pipe, &stdin).expect("write stdin");
+        }
+        child.wait_with_output().expect("wait for loquax")
+    })
+    .await
+    .expect("the loquax child thread")
+}
+
+/// Leave `body` at the node for `to`, as `loquax send --via propagated`
+/// does: exit 3, the node holds it.
+async fn deposit(daemon: &support::Daemon, home: &Path, to: &str, pn: &str, body: &str) {
+    let args = [
+        "send",
+        to,
+        "--via",
+        "propagated",
+        "--pn",
+        pn,
+        "--timeout",
+        "20",
+    ];
+    let sent = cli(daemon, home, &args, body.as_bytes()).await;
+    assert_eq!(
+        sent.status.code(),
+        Some(3),
+        "the node must hold {body:?}: {}\nevents:\n{}",
+        String::from_utf8_lossy(&sent.stderr),
+        std::fs::read_to_string(home.join("events.log")).unwrap_or_default()
+    );
+}
+
+/// The window the second message must arrive in, from the first one's
+/// frame: well inside the thirty-second bound, which the start's sync set
+/// running before the first frame, and above the four-second cadence plus a
+/// deposit and a drain on a loaded host.
+const ACTIVITY_SCRIPT: &str = "\
+until ready 20
+until received 1 30
+frame first
+until received 2 20
+frame second
+key q
+";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_left_at_the_mailbox_arrives_without_a_key() {
+    let daemon = daemon("sync", |b| b).await;
+    let (pn, _node, _events, _pn_storage) = propagation_node(&daemon).await;
+    let pn_hex: String = pn.iter().map(|b| format!("{b:02x}")).collect();
+    let home = tempfile::tempdir().expect("tui home");
+    let ours = fixed_identity(0x11);
+    std::fs::write(
+        home.path().join("identity"),
+        encode_identity(&ours).expect("storable"),
+    )
+    .expect("write the identity");
+    let our_hex: String = delivery_address(&ours)
+        .expect("our address")
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let sender = tempfile::tempdir().expect("sender home");
+
+    // We, attached in this process for the first deposit: the sender needs
+    // our announce to encrypt to us, and the daemon forgets the path of a
+    // client that has gone, so a CLI run of ours that announced and left
+    // would not do.
+    let storage = tempfile::tempdir().expect("our storage");
+    let early = attach(AttachConfig {
+        instance: daemon.instance.clone(),
+        storage_dir: storage.path().to_path_buf(),
+        identity: fixed_identity(0x11),
+        display_name: b"tui".to_vec(),
+        notices: Terminal::new(storage.path().to_path_buf()),
+    })
+    .await
+    .expect("we attach");
+    deposit(
+        &daemon,
+        sender.path(),
+        &our_hex,
+        &pn_hex,
+        "waiting before the start",
+    )
+    .await;
+    early.stop().await;
+
+    let script = home.path().join("sync.script");
+    let frames = home.path().join("sync.frames");
+    std::fs::write(&script, ACTIVITY_SCRIPT).expect("write the script");
+    let args: Vec<String> = vec![
+        "--instance".into(),
+        daemon.instance.clone(),
+        "--config".into(),
+        daemon.config_dir.path().display().to_string(),
+        "--pn".into(),
+        pn_hex.clone(),
+        "--timeout".into(),
+        "5".into(),
+        "--sync-interval".into(),
+        "30s".into(),
+        "--script".into(),
+        script.display().to_string(),
+        "--frames".into(),
+        frames.display().to_string(),
+        "--size".into(),
+        "120x24".into(),
+    ];
+    let child_home = home.path().to_path_buf();
+    let child = tokio::task::spawn_blocking(move || {
+        let mut command = Command::new(LNMSG);
+        command
+            .args(&args)
+            .env("LNMSG_HOME", &child_home)
+            .env("LNMSG_DISPLAY_NAME", "tui")
+            .env_remove("LEVICULUM_EVENT_LOG")
+            .env_remove("RUST_LOG")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let child = leviculum_std::process::spawn_supervised(command).expect("spawn loquax");
+        child.wait_with_output().expect("wait for loquax")
+    });
+
+    wait_for_frame(&frames, "first", Duration::from_secs(60)).await;
+    deposit(
+        &daemon,
+        sender.path(),
+        &our_hex,
+        &pn_hex,
+        "left while it runs",
+    )
+    .await;
+
+    let output = child.await.expect("the loquax child thread");
+    let got = std::fs::read_to_string(&frames).expect("read the frames");
+    let log = std::fs::read_to_string(home.path().join("tui.log")).unwrap_or_default();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}\nframes:\n{got}\ntui.log:\n{log}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let second = frame(&got, "second");
+    assert!(
+        second.contains("waiting before the start") && second.contains("left while it runs"),
+        "{second}"
+    );
+    let syncs: Vec<&str> = log
+        .lines()
+        .filter_map(|line| line.split("SYNC reason=").nth(1))
+        .collect();
+    assert!(log.contains("SYNC bound=30s"), "{log}");
+    assert_eq!(syncs.first(), Some(&"start"), "{log}");
+    assert!(
+        syncs[1..].iter().all(|r| *r == "timer"),
+        "no key, no announce: {log}"
+    );
+    assert!(syncs.len() >= 2, "{log}");
 }

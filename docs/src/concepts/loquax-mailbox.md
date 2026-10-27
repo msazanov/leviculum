@@ -51,6 +51,48 @@ rather than in seconds (on LoRa a fifteen-minute poll is not cheap), and
 the status line always shows when the next sync is due — the current
 cadence is visible, never inferred.
 
+### The schedule as built (order 1068, 2026-10-27)
+
+The rule above lives in `loquax/src/sync.rs`, a pure function of events
+and a monotonic clock in the `no_std` core; the terminal hands it the
+clock and runs the fetch it finds due, one at a time. The constants:
+
+- **Bound** fifteen minutes (`DEFAULT_BOUND_MS`), from `sync_interval` in
+  the config file or `--sync-interval`; `off` leaves start, resume and the
+  key. The next sync begins no later than the bound after the last one
+  *began*, whatever else happened; only a sync that itself runs longer
+  than the bound gets past it.
+- **Activity** every two minutes for ten minutes after a sync that
+  returned something or an outbound send (`FAST_MS`,
+  `ACTIVITY_WINDOW_MS`), then the bound. Two minutes is the shortest wait
+  in which a reply to what was just sent is plausibly back at the node,
+  since the peer has to read and answer it first; ten minutes covers a
+  conversation's quick exchanges and then lets go, so a burst is five
+  syncs, about 11 s of airtime on LoRa at SF8 (loquax(1), MAILBOX). A step
+  rather than a gradual decay, because the cadence the header shows must
+  be one a reader can predict. Below the default bound both constants
+  shrink with it at the same ratio, so a burst stays five syncs whatever
+  the bound, and the bound is never undercut by its own "faster" mode.
+  The activity cadence never pushes a sync past the bound: a send a
+  minute before the bound keeps the bound.
+- **Announce** of the selected node syncs, unless a sync began within
+  sixty seconds (`ANNOUNCE_GAP_MS`): a node that re-announces on every
+  interface change cannot drive syncs. It is a timer sync, off with the
+  timer.
+- **Failure** retries after thirty seconds, doubling, never later than
+  the bound (`RETRY_FIRST_MS`); a success ends the backoff. The reader is
+  told the first failure of a row, not every retry's.
+- **Resume** from suspend is a wall clock that ran thirty seconds or more
+  ahead of the monotonic one between two ticks (`RESUME_GAP_MS`): Linux's
+  monotonic clock stands still in suspend.
+
+The node's announce reaches the screen as `OutboxEvent::NodeAnnounced`,
+which the engine emits for every `lxmf.propagation` announce it sees; the
+screen compares it with the mailbox it shows. The rule "never sync while
+a direct link to the peer is up" is not built yet: a sync is per mailbox,
+not per peer, and the engine does not report its direct links to the
+screen.
+
 ### What the user sees
 
 The library hands over a fourteen-state machine

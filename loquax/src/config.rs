@@ -1,12 +1,14 @@
 //! `loquax`'s own tiny config file.
 //!
 //! `${LNMSG_HOME}/config` (the same directory as the identity — see
-//! [`crate::identity::home_dir`]) holds `key = value` lines. Three keys:
+//! [`crate::identity::home_dir`]) holds `key = value` lines. Four keys:
 //! `propagation_node`, the persisted default for `--pn`; `send_on_enter`,
 //! whether `Enter` in the compose pane sends (`true`, the default) or breaks
-//! the line (`false`, and the modifier chord sends); and `theme`, `auto`
+//! the line (`false`, and the modifier chord sends); `theme`, `auto`
 //! (the default: ask the terminal), `dark` or `light`, which `--theme`
-//! overrides:
+//! overrides; and `sync_interval`, the longest the messenger leaves the
+//! mailbox unsynced (`15m` by default, `off` for start and the key only),
+//! which `--sync-interval` overrides:
 //!
 //! ```text
 //! # the mailbox this machine uses when a direct delivery fails
@@ -15,6 +17,8 @@
 //! send_on_enter = false
 //! # a light terminal that does not answer the background query
 //! theme = light
+//! # sync the mailbox at least every half hour, not every fifteen minutes
+//! sync_interval = 30m
 //! ```
 //!
 //! Deliberately not the Reticulum config file: that one belongs to the
@@ -68,6 +72,10 @@ pub struct Config {
     pub send_on_enter: Option<bool>,
     /// `theme`, when the file sets it; unset is `auto`.
     pub theme: Option<ThemeFlag>,
+    /// `sync_interval`, when the file sets it: the mailbox schedule's bound
+    /// in milliseconds, `None` inside for the timer off
+    /// ([`crate::sync::parse_interval`]); unset is fifteen minutes.
+    pub sync_interval: Option<Option<u64>>,
 }
 
 /// Read the config file's text.
@@ -109,6 +117,18 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
                     });
                 }
             });
+        }
+        if key.trim() == "sync_interval" {
+            match crate::sync::parse_interval(value.trim().trim_matches('"')) {
+                Ok(bound) => config.sync_interval = Some(bound),
+                Err(detail) => {
+                    return Err(ConfigError::BadValue {
+                        line: index + 1,
+                        key: "sync_interval",
+                        detail,
+                    });
+                }
+            }
         }
         if key.trim() == "propagation_node" {
             let value = value.trim().trim_matches('"');
@@ -258,6 +278,23 @@ mod tests {
             Err(ConfigError::BadValue {
                 line: 2,
                 key: "theme",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn sync_interval_parses_and_a_typo_is_an_error() {
+        assert_eq!(parse_str("").expect("empty").sync_interval, None);
+        let half = parse_str("sync_interval = 30m\n").expect("30m");
+        assert_eq!(half.sync_interval, Some(Some(30 * 60_000)));
+        let off = parse_str("sync_interval = \"off\"\n").expect("off");
+        assert_eq!(off.sync_interval, Some(None));
+        assert!(matches!(
+            parse_str("\nsync_interval = often\n"),
+            Err(ConfigError::BadValue {
+                line: 2,
+                key: "sync_interval",
                 ..
             })
         ));

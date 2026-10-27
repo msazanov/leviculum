@@ -118,6 +118,7 @@ use crate::keys::{self, Action};
 use crate::names::{Heard, Names};
 use crate::outbox::OutboxEvent;
 use crate::send::Leg;
+use crate::sync::{Reason, Schedule, SyncEvent};
 use crate::telemetry::{self, Fix};
 use crate::when::{list_time, WallTime};
 use leviculum_lxmf::Field;
@@ -479,6 +480,16 @@ pub struct UiModel<B> {
     pub sending: VecDeque<(usize, usize)>,
     /// Whether a fetch is running.
     pub fetching: bool,
+    /// What started the running fetch, or the last one.
+    pub fetch_reason: Option<Reason>,
+    /// The mailbox's own schedule (`crate::sync`): the terminal's. A model
+    /// without one syncs only when asked, as a key script's does unless it
+    /// names `--sync-interval`, so no frame shows a fetch the script did not
+    /// ask for.
+    pub sync: Option<Schedule>,
+    /// The shell's monotonic clock in milliseconds, the schedule's
+    /// ([`UiEvent::Elapsed`]).
+    pub elapsed_ms: u64,
     /// Whether the terminal speaks the keyboard enhancement protocol, so
     /// `Shift-Enter` and `Ctrl-Enter` arrive as themselves: the hint and the
     /// footer offer them then.
@@ -577,6 +588,9 @@ impl<B: InputBuffer + Default> UiModel<B> {
             quit: false,
             sending: VecDeque::new(),
             fetching: false,
+            fetch_reason: None,
+            sync: None,
+            elapsed_ms: 0,
             enhanced: false,
             send_on_enter: true,
             now: None,
@@ -823,6 +837,12 @@ pub enum UiEvent {
     /// The time of day: before the first frame and on every tick in the
     /// terminal, whenever a key script says so.
     Clock(WallTime),
+    /// The shell's monotonic clock, in milliseconds from an origin of its
+    /// choosing: the mailbox schedule runs on it, and a sync it finds due
+    /// starts here.
+    Elapsed(u64),
+    /// The machine woke from suspend (`crate::sync::resumed`).
+    Resumed,
     /// The screen's size in cells.
     Resize { width: u16, height: u16 },
     /// A click, a wheel turn, a drag or a move, at a screen cell.
@@ -930,6 +950,11 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
             model.now = Some(now);
             Vec::new()
         }
+        UiEvent::Elapsed(ms) => {
+            model.elapsed_ms = ms;
+            auto_sync(model)
+        }
+        UiEvent::Resumed => schedule(model, SyncEvent::Resume),
         UiEvent::Resize { width, height } => {
             model.screen = (width, height);
             model.selection = None;
@@ -972,22 +997,71 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
             }
             Vec::new()
         }
-        UiEvent::FetchDone(result) => {
-            model.fetching = false;
-            if result.is_ok() {
-                model.mailbox.synced = model.now;
-            }
-            match result {
-                Ok(0) => model.toast(ToastKind::Info, "no new messages".to_string()),
-                Ok(new) => model.toast(ToastKind::Info, format!("{new} new message(s)")),
-                Err(detail) => {
-                    model.toast(ToastKind::Error, format!("fetch failed: {detail}"));
-                    return vec![UiEffect::Notice(format!("fetch: {detail}"))];
-                }
-            }
-            Vec::new()
-        }
+        UiEvent::FetchDone(result) => on_fetch_done(model, result),
     }
+}
+
+/// The fetch ended. One the reader asked for says how it went either way;
+/// one the schedule started says only what the reader must know: new
+/// messages, and the first failure in a row, not every retry's.
+fn on_fetch_done<B>(model: &mut UiModel<B>, result: Result<usize, String>) -> Vec<UiEffect> {
+    model.fetching = false;
+    let now = model.elapsed_ms;
+    let failures = model.sync.as_mut().map_or(1, |sync| {
+        sync.on(
+            match &result {
+                Ok(new) => SyncEvent::Done { new: *new },
+                Err(_) => SyncEvent::Failed,
+            },
+            now,
+        );
+        sync.failures()
+    });
+    if result.is_ok() {
+        model.mailbox.synced = model.now;
+    }
+    let asked = model.fetch_reason.is_none_or(|r| r == Reason::Key);
+    match result {
+        Ok(0) if asked => model.toast(ToastKind::Info, "no new messages".to_string()),
+        Ok(0) => {}
+        Ok(new) => model.toast(ToastKind::Info, format!("{new} new message(s)")),
+        Err(detail) if asked || failures == 1 => {
+            model.toast(ToastKind::Error, format!("fetch failed: {detail}"));
+            return vec![UiEffect::Notice(format!("fetch: {detail}"))];
+        }
+        Err(_) => {}
+    }
+    Vec::new()
+}
+
+/// Tell the schedule, and start the sync it then finds due.
+fn schedule<B>(model: &mut UiModel<B>, event: SyncEvent) -> Vec<UiEffect> {
+    let now = model.elapsed_ms;
+    match model.sync.as_mut() {
+        Some(sync) => {
+            sync.on(event, now);
+            auto_sync(model)
+        }
+        None => Vec::new(),
+    }
+}
+
+/// The sync the schedule finds due now, started; one at a time.
+fn auto_sync<B>(model: &mut UiModel<B>) -> Vec<UiEffect> {
+    let now = model.elapsed_ms;
+    if model.fetching {
+        return Vec::new();
+    }
+    let Some(sync) = model.sync.as_mut() else {
+        return Vec::new();
+    };
+    let Some(reason) = sync.due(now) else {
+        return Vec::new();
+    };
+    sync.begin(now);
+    model.fetching = true;
+    model.fetch_reason = Some(reason);
+    vec![UiEffect::Fetch]
 }
 
 fn on_key<B: InputBuffer + Default>(model: &mut UiModel<B>, key: KeyEvent) -> Vec<UiEffect> {
@@ -1880,7 +1954,13 @@ fn run<B: InputBuffer + Default>(model: &mut UiModel<B>, command: PaletteCommand
                 model.toast(ToastKind::Info, "a fetch is already running".to_string());
                 return Vec::new();
             }
+            let now = model.elapsed_ms;
+            if let Some(sync) = model.sync.as_mut() {
+                sync.on(SyncEvent::Key, now);
+                sync.begin(now);
+            }
             model.fetching = true;
+            model.fetch_reason = Some(Reason::Key);
             model.toast(ToastKind::Info, "fetching the mailbox".to_string());
             vec![UiEffect::Fetch]
         }
@@ -1993,6 +2073,10 @@ fn send<B: InputBuffer + Default>(model: &mut UiModel<B>) -> Vec<UiEffect> {
     model.message_cursor = index;
     model.scroll_top = None;
     model.sending.push_back((model.selected, index));
+    let now = model.elapsed_ms;
+    if let Some(sync) = model.sync.as_mut() {
+        sync.on(SyncEvent::Sent, now);
+    }
     vec![UiEffect::Send { to, body }]
 }
 
@@ -2028,7 +2112,16 @@ fn gives_up(state: DeliveryState) -> bool {
 
 fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
     match event {
-        OutboxEvent::Ready { address } => model.address = Some(address),
+        OutboxEvent::Ready { address } => {
+            model.address = Some(address);
+            return schedule(model, SyncEvent::Start);
+        }
+        // Free evidence that the mailbox is reachable now.
+        OutboxEvent::NodeAnnounced { destination } => {
+            if model.mailbox.node == Some(destination) {
+                return schedule(model, SyncEvent::Announce);
+            }
+        }
         OutboxEvent::Broken { detail } => {
             model.toast(ToastKind::Error, format!("engine: {detail}"));
             return vec![UiEffect::Notice(format!("the message engine: {detail}"))];
@@ -2536,19 +2629,41 @@ fn mailbox_words<B>(model: &UiModel<B>) -> Vec<String> {
         (false, Some(at), None) => Some(format!("synced {}", at.hh_mm())),
         (false, None, _) => None,
     };
-    match sync {
-        Some(sync) => vec![
-            format!("mailbox {node} {how} · {sync}"),
-            format!("mailbox · {sync}"),
-            format!("mailbox {node}"),
-            "mailbox".to_string(),
-        ],
-        None => vec![
-            format!("mailbox {node} {how}"),
-            format!("mailbox {node}"),
-            "mailbox".to_string(),
-        ],
+    let next = next_sync(model).map(|at| format!("next {}", at.hh_mm()));
+    let mut words = Vec::new();
+    match (&sync, &next) {
+        (Some(sync), Some(next)) => {
+            words.push(format!("mailbox {node} {how} · {sync} · {next}"));
+            words.push(format!("mailbox · {sync} · {next}"));
+            words.push(format!("mailbox · {next}"));
+        }
+        (Some(only), None) | (None, Some(only)) => {
+            words.push(format!("mailbox {node} {how} · {only}"));
+            words.push(format!("mailbox · {only}"));
+        }
+        (None, None) => words.push(format!("mailbox {node} {how}")),
     }
+    words.push(format!("mailbox {node}"));
+    words.push("mailbox".to_string());
+    words
+}
+
+/// When the schedule's next sync is due, as a time of day, up to the whole
+/// minute: none without a
+/// schedule, with its timer off, before the first sync or while one runs.
+fn next_sync<B>(model: &UiModel<B>) -> Option<WallTime> {
+    let next = model.sync.as_ref()?.next_ms()?;
+    let now = model.now?;
+    let ahead_secs = next.saturating_sub(model.elapsed_ms).div_ceil(1000);
+    let at = now
+        .unix_secs
+        .saturating_add(i64::try_from(ahead_secs).unwrap_or(i64::MAX));
+    // Up to the minute the header shows: `next 14:20` for a sync due at
+    // 14:19:59, never a minute that has already gone.
+    Some(WallTime {
+        unix_secs: at.saturating_add(59).div_euclid(60).saturating_mul(60),
+        offset_secs: now.offset_secs,
+    })
 }
 
 /// The detail view of message `m` of conversation `c`.
@@ -4118,6 +4233,150 @@ mod tests {
         );
         assert!(text(&wide.messages[1]).trim().chars().all(|c| c == '─'));
         assert_eq!(wide.compose_title, "to <abababab…>");
+    }
+
+    fn engine_says(model: &mut UiModel<Field>, event: OutboxEvent) -> Vec<UiEffect> {
+        update(model, UiEvent::Engine(event))
+    }
+
+    /// The mailbox schedule through the model: the engine's `Ready` starts
+    /// the first sync, the header names the next one, an empty automatic
+    /// sync says nothing, a full one says what came, and the timer starts
+    /// the next sync without a key.
+    #[test]
+    fn the_schedule_syncs_at_start_and_on_its_timer_and_the_header_says_when() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        model.sync = Some(Schedule::new(Some(crate::sync::DEFAULT_BOUND_MS)));
+        update(
+            &mut model,
+            UiEvent::MailboxChosen {
+                node: [0x9c; 16],
+                by_user: false,
+            },
+        );
+        clock(&mut model, 26, 14, 5);
+        let effects = engine_says(
+            &mut model,
+            OutboxEvent::Ready {
+                address: [0xee; 16],
+            },
+        );
+        assert_eq!(effects, [UiEffect::Fetch], "start syncs");
+        assert_eq!(model.fetch_reason, Some(Reason::Start));
+        assert_eq!(view(&model).messages_title_right, "mailbox · fetching");
+        update(&mut model, UiEvent::Elapsed(1_000));
+        assert!(
+            update(&mut model, UiEvent::Run(PaletteCommand::Fetch)).is_empty(),
+            "one at a time"
+        );
+        let toasts = model.toasts.len();
+        update(&mut model, UiEvent::FetchDone(Ok(0)));
+        assert_eq!(
+            model.toasts.len(),
+            toasts,
+            "an empty automatic sync is quiet"
+        );
+        // At 80 columns only the next sync fits: it is kept before the
+        // last one and the node.
+        assert_eq!(view(&model).messages_title_right, "mailbox · next 14:20");
+        update(
+            &mut model,
+            UiEvent::Resize {
+                width: 120,
+                height: 40,
+            },
+        );
+        assert_eq!(
+            text(&view(&model).messages[0]).trim(),
+            "mailbox 9c9c9c9c adopted · synced 14:05 · next 14:20"
+        );
+        assert!(update(&mut model, UiEvent::Elapsed(899_999)).is_empty());
+        let effects = update(&mut model, UiEvent::Elapsed(900_000));
+        assert_eq!(effects, [UiEffect::Fetch], "the bound, without a key");
+        assert_eq!(model.fetch_reason, Some(Reason::Timer));
+        update(&mut model, UiEvent::Elapsed(901_000));
+        update(&mut model, UiEvent::FetchDone(Ok(2)));
+        assert_eq!(
+            model.toasts.last().map(|t| t.text.as_str()),
+            Some("2 new message(s)")
+        );
+        // Activity: two minutes, not fifteen.
+        assert!(update(&mut model, UiEvent::Elapsed(1_020_999)).is_empty());
+        assert_eq!(
+            update(&mut model, UiEvent::Elapsed(1_021_000)),
+            [UiEffect::Fetch]
+        );
+    }
+
+    /// An announce of the selected node syncs; another node's does not.
+    #[test]
+    fn the_mailbox_announcing_syncs_and_another_node_does_not() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        model.sync = Some(Schedule::new(Some(crate::sync::DEFAULT_BOUND_MS)));
+        update(
+            &mut model,
+            UiEvent::MailboxChosen {
+                node: [0x9c; 16],
+                by_user: true,
+            },
+        );
+        engine_says(
+            &mut model,
+            OutboxEvent::Ready {
+                address: [0xee; 16],
+            },
+        );
+        update(&mut model, UiEvent::Elapsed(1_000));
+        update(&mut model, UiEvent::FetchDone(Ok(0)));
+        update(&mut model, UiEvent::Elapsed(120_000));
+        let other = OutboxEvent::NodeAnnounced {
+            destination: [0x42; 16],
+        };
+        assert!(engine_says(&mut model, other).is_empty());
+        let ours = OutboxEvent::NodeAnnounced {
+            destination: [0x9c; 16],
+        };
+        assert_eq!(engine_says(&mut model, ours), [UiEffect::Fetch]);
+        assert_eq!(model.fetch_reason, Some(Reason::Announce));
+    }
+
+    /// A failed automatic sync says so once, not on every retry; one the
+    /// reader asked for always says so.
+    #[test]
+    fn automatic_failures_are_said_once_in_a_row() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        model.sync = Some(Schedule::new(Some(crate::sync::DEFAULT_BOUND_MS)));
+        engine_says(
+            &mut model,
+            OutboxEvent::Ready {
+                address: [0xee; 16],
+            },
+        );
+        let first = update(&mut model, UiEvent::FetchDone(Err("no route".into())));
+        assert_eq!(first, [UiEffect::Notice("fetch: no route".into())]);
+        update(&mut model, UiEvent::Elapsed(30_000));
+        assert_eq!(model.fetch_reason, Some(Reason::Timer), "the retry");
+        let second = update(&mut model, UiEvent::FetchDone(Err("no route".into())));
+        assert!(second.is_empty(), "{second:?}");
+        update(&mut model, UiEvent::Run(PaletteCommand::Fetch));
+        let asked = update(&mut model, UiEvent::FetchDone(Err("no route".into())));
+        assert_eq!(asked, [UiEffect::Notice("fetch: no route".into())]);
+    }
+
+    /// Without a schedule nothing syncs by itself: what every key script
+    /// without `--sync-interval` relies on.
+    #[test]
+    fn without_a_schedule_only_the_key_syncs() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        assert!(engine_says(
+            &mut model,
+            OutboxEvent::Ready {
+                address: [0xee; 16]
+            }
+        )
+        .is_empty());
+        assert!(update(&mut model, UiEvent::Elapsed(24 * 3_600_000)).is_empty());
+        assert!(update(&mut model, UiEvent::Resumed).is_empty());
     }
 
     // The mouse (section 5, "What the mouse does"), fed to the model as the

@@ -127,6 +127,13 @@ struct TuiArgs {
     #[arg(long, default_value_t = DEFAULT_TIMEOUT_SECS)]
     timeout: u64,
 
+    /// The longest the mailbox goes unsynced: `15m` (the default, over the
+    /// config file's `sync_interval`), `90s`, `1h`, minutes without a unit;
+    /// `off` or `0` syncs only at start and on Ctrl-r. After a message in or
+    /// out it syncs more often for a while, never less often.
+    #[arg(long, value_name = "INTERVAL")]
+    sync_interval: Option<String>,
+
     /// Draw the delivery marks in ASCII (`.` `*` `o` `^` `v` `x`).
     #[arg(long)]
     ascii: bool,
@@ -480,7 +487,17 @@ async fn run_tui(args: TuiArgs) -> ExitCode {
     let Some(size) = size else {
         return usage(format!("--size {}: want WxH, at least 20x8", args.size));
     };
+    let sync_interval = match args
+        .sync_interval
+        .as_deref()
+        .map(loquax::sync::parse_interval)
+    {
+        None => None,
+        Some(Ok(bound)) => Some(bound),
+        Some(Err(error)) => return usage(format!("--sync-interval {error}")),
+    };
     tui::run(tui::TuiOptions {
+        sync_interval,
         to,
         pn: args.pn,
         instance: args.instance,

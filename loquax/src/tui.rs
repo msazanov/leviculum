@@ -96,6 +96,9 @@ const TUI_LOG_FILTER: &str = "warn,loquax=info";
 
 /// Everything `loquax tui` was told on the command line.
 pub struct TuiOptions {
+    /// `--sync-interval`, when given: the schedule's bound in milliseconds,
+    /// `None` inside for the timer off.
+    pub sync_interval: Option<Option<u64>>,
     pub to: Vec<[u8; 16]>,
     pub pn: Option<String>,
     pub instance: Option<String>,
@@ -211,6 +214,8 @@ struct Shell {
     /// The region files found at start, for the map painter the loop
     /// makes once it knows the backend.
     regions: Vec<map::Installed>,
+    /// The origin of the monotonic clock the mailbox schedule runs on.
+    origin: tokio::time::Instant,
 }
 
 /// What the model asks of the terminal beyond drawing.
@@ -235,7 +240,11 @@ impl Shell {
             match effect {
                 UiEffect::Store(read) => answers.extend(self.read(read)),
                 UiEffect::Send { to, body } => self.jobs.push_back(Job::Send { to, body }),
-                UiEffect::Fetch => self.jobs.push_back(Job::Fetch),
+                UiEffect::Fetch => {
+                    let reason = self.model.fetch_reason.map_or("key", |r| r.word());
+                    tracing::info!("SYNC reason={reason}");
+                    self.jobs.push_back(Job::Fetch);
+                }
                 UiEffect::Quit => {}
                 UiEffect::Redraw => self.redraw = true,
                 UiEffect::Notice(line) => self.afterwards.push(line),
@@ -357,7 +366,13 @@ impl Shell {
         while let Ok(stored) = self.mailbox_rx.try_recv() {
             self.apply(chosen(&stored));
         }
-        self.start_next();
+        self.apply(UiEvent::Elapsed(self.elapsed_ms()));
+    }
+
+    /// The schedule's clock: tokio's, which on Linux stands still in
+    /// suspend, as `crate::sync::resumed` needs.
+    fn elapsed_ms(&self) -> u64 {
+        u64::try_from(self.origin.elapsed().as_millis()).unwrap_or(u64::MAX)
     }
 
     /// Run the next job if none is running. One at a time: the runners each
@@ -609,6 +624,25 @@ pub async fn run(options: TuiOptions) -> ExitCode {
     model.ascii = options.ascii;
     model.mouse = !options.no_mouse;
     model.send_on_enter = config.send_on_enter.unwrap_or(true);
+    // The mailbox's schedule: the flag, else the config file, else fifteen
+    // minutes. A script runs one only when its command line names the flag,
+    // as it ticks only when it says so.
+    let bound = match (&options.script, options.sync_interval) {
+        (_, Some(bound)) => Some(bound),
+        (None, None) => Some(
+            config
+                .sync_interval
+                .unwrap_or(Some(loquax::sync::DEFAULT_BOUND_MS)),
+        ),
+        (Some(_), None) => None,
+    };
+    model.sync = bound.map(loquax::sync::Schedule::new);
+    if let Some(bound) = bound {
+        tracing::info!(
+            "SYNC bound={}",
+            bound.map_or("off".to_string(), |ms| format!("{}s", ms / 1000))
+        );
+    }
     // A script plays its own terminal: monochrome and dark until its `tier`
     // and `theme` steps say otherwise, whatever the host's.
     let theme_flag = options.theme.or(config.theme).unwrap_or_default();
@@ -665,6 +699,7 @@ pub async fn run(options: TuiOptions) -> ExitCode {
         redraw: false,
         outputs: Vec::new(),
         regions,
+        origin: tokio::time::Instant::now(),
     };
 
     let outcome = match &options.script {
@@ -806,6 +841,9 @@ async fn run_terminal(
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut pump = tokio::time::interval(Duration::from_millis(PUMP_MS));
     pump.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // The wall clock against the monotonic one, read on every tick: the
+    // wall running ahead is a suspend the monotonic clock slept through.
+    let mut clocks = (local_now().unix_secs, shell.elapsed_ms());
 
     let result = loop {
         for output in std::mem::take(&mut shell.outputs) {
@@ -834,7 +872,14 @@ async fn run_terminal(
             },
             _ = pump.tick() => shell.poll(),
             _ = tick.tick() => {
-                shell.apply(UiEvent::Clock(local_now()));
+                let now = local_now();
+                let read = (now.unix_secs, shell.elapsed_ms());
+                shell.apply(UiEvent::Clock(now));
+                if loquax::sync::resumed(clocks, read) {
+                    tracing::info!("SYNC resumed after {}s", read.0 - clocks.0);
+                    shell.apply(UiEvent::Resumed);
+                }
+                clocks = read;
                 shell.apply(UiEvent::Tick);
             }
         }

@@ -147,6 +147,10 @@ tempfile = "3"
 # measured on tokio's clock precisely so they can be tested without waiting.
 tokio = { version = "1", features = ["full", "test-util"] }
 hex = "0.4"
+# A propagation node for `tests/tui_snapshot.rs`, the mailbox schedule's
+# session: lnpnd's own engine on the test's daemon, so a sync drains a real
+# node's store.
+lnpnd = { path = "../lnpnd" }
 
 [lib]
 name = "loquax"

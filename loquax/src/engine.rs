@@ -1097,6 +1097,16 @@ fn register<R: CryptoRngCore, C: CoreClock, S: Storage>(
     Ok(Ready { router, address })
 }
 
+/// Whether an announce's name hash is `lxmf.propagation`'s, which tells a
+/// propagation node's announce from a peer's.
+fn is_propagation_node(name_hash: &[u8]) -> bool {
+    name_hash
+        == leviculum_core::Destination::compute_name_hash(
+            leviculum_lxmf::node::APP_NAME,
+            &[leviculum_lxmf::propagation_client::PROPAGATION_ASPECT],
+        )
+}
+
 /// The two hooks, in the shape of the driver's `CoreProcessor` and with the
 /// same contract: both run with the core lock held, and neither blocks.
 impl Engine {
@@ -1115,6 +1125,13 @@ impl Engine {
         {
             let heard = *announce.destination_hash().as_bytes();
             pending.asked.retain(|node| *node != heard);
+        }
+        if let NodeEvent::AnnounceReceived { announce, .. } = event {
+            if is_propagation_node(announce.name_hash()) {
+                self.emit(OutboxEvent::NodeAnnounced {
+                    destination: *announce.destination_hash().as_bytes(),
+                });
+            }
         }
         match ready.router.handle_event(core, event) {
             Ok(output) => self.absorb(&mut ready, core, output, &mut out),

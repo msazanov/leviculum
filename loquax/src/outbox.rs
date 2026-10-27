@@ -175,6 +175,10 @@ pub enum OutboxEvent {
         destination: [u8; 16],
         name: Option<String>,
     },
+    /// A propagation node announced its `lxmf.propagation` destination: the
+    /// screen's mailbox schedule syncs on its own node's
+    /// (`crate::sync::SyncEvent::Announce`).
+    NodeAnnounced { destination: [u8; 16] },
     /// A [`Command::Fetch`] finished its round. `received` and `duplicates`
     /// are the router's own counts for the drain.
     SyncDone { received: usize, duplicates: usize },
