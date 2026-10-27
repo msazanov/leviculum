@@ -155,6 +155,13 @@ impl Pictures {
     }
 }
 
+/// A picture from packed 8-bit RGB rows, as a program that draws its own
+/// pixels (loquax's map) hands them over; `None` when `rgb` is not
+/// `width * height * 3` bytes.
+pub fn rgb_image(width: u32, height: u32, rgb: Vec<u8>) -> Option<DynamicImage> {
+    image::RgbImage::from_raw(width, height, rgb).map(DynamicImage::ImageRgb8)
+}
+
 /// Draw an encoded picture into `area` with its top-left cell at `(x, y)`
 /// relative to it, cropped to the area: a picture half-scrolled off the top is
 /// drawn from its middle rather than jumping or spilling over what is above.

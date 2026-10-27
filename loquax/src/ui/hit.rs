@@ -69,6 +69,9 @@ pub enum Target {
     /// help is closed by any click, as in lnomad, because it fills an 80 x
     /// 24 screen and leaves no outside to click.
     OutsideOverlay,
+    /// A pin on the open map, its marker or its name: opens the peer's
+    /// conversation.
+    Pin([u8; 16]),
 }
 
 /// The screen's parts for the model's screen and compose box.
@@ -103,9 +106,13 @@ fn on(col: u16, row: u16, x: u16, y: u16, len: u16) -> bool {
 /// The pane under the cell, overlays aside.
 pub fn pane_at<B: InputBuffer>(model: &UiModel<B>, col: u16, row: u16) -> Option<Pane> {
     let screen = screen(model);
+    let messages = match model.map.is_some() {
+        true => Pane::Map,
+        false => Pane::Messages,
+    };
     [
         (screen.list, Pane::Conversations),
-        (screen.messages, Pane::Messages),
+        (screen.messages, messages),
         (screen.compose, Pane::Compose),
     ]
     .into_iter()
@@ -165,6 +172,12 @@ pub fn target_at<B: InputBuffer>(model: &UiModel<B>, col: u16, row: u16) -> Targ
         return list_target(model, screen.list, col, row);
     }
     if rect_contains(screen.messages, col, row) {
+        if let Some(map) = &shown.map {
+            return match super::map::pin_at(&map.pins, map.area, col, row) {
+                Some(peer) => Target::Pin(peer),
+                None => Target::Pane(Pane::Map),
+            };
+        }
         return messages_target(model, &shown, screen.messages, col, row);
     }
     if rect_contains(screen.compose, col, row) {

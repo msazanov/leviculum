@@ -21,6 +21,14 @@
 //! Delete (`d`, then `y`) and the palette's `delete conversation` and `pin`
 //! came with the history (slice 6).
 //!
+//! The map (`docs/src/concepts/loquax-map.md`, slice (c)) adds a pane,
+//! [`MAP`], in the conversation's place: `M` from the two command panes and
+//! `Alt-m` from every pane open it, as does the palette's `map`. In it the
+//! arrows and vi's `h` `j` `k` `l` pan, `+` and `-` zoom, `0` fits every
+//! pin again, `Tab` steps the pins, `Enter` opens the selected peer's
+//! conversation and `Esc` or `Ctrl-g` closes it. `m` stays free for a new
+//! conversation (section 3).
+//!
 //! Not here yet, because what they run is a later slice: new conversation
 //! (`m`, `C`), hints (`f`),
 //! and `Ctrl-x Ctrl-c` (a two-key sequence, which the table does not
@@ -49,12 +57,14 @@ pub const OVERLAY: Panes = Panes(1 << 4);
 /// The search field, the design page's **S**: it takes plain typing, as
 /// compose does.
 pub const SEARCH: Panes = Panes(1 << 5);
+/// The map, in the conversation pane's place.
+pub const MAP: Panes = Panes(1 << 6);
 /// The two command panes.
 pub const COMMAND_PANES: Panes = Panes(LIST.0 | MESSAGES.0);
 /// The three panes `Tab` cycles through outside a search.
 pub const THREE_PANES: Panes = Panes(LIST.0 | MESSAGES.0 | COMPOSE.0);
 /// Every pane outside an overlay, the design page's **all**.
-pub const EVERY: Panes = Panes(THREE_PANES.0 | SEARCH.0);
+pub const EVERY: Panes = Panes(THREE_PANES.0 | SEARCH.0 | MAP.0);
 /// Where the results of an open search are stepped: the field, and the list
 /// which shows them.
 const RESULTS: Panes = Panes(SEARCH.0 | LIST.0);
@@ -99,6 +109,25 @@ pub enum Action {
     Match(bool),
     /// Close the search; the list comes back.
     CloseSearch,
+    /// Something the map does.
+    Map(MapCmd),
+}
+
+/// What a key does on the map.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MapCmd {
+    ZoomIn,
+    ZoomOut,
+    /// Move the view a quarter of its size: west, east, north, south.
+    Pan(i8, i8),
+    /// Every pin in view again, as on open.
+    Fit,
+    /// The next pin in `Tab` order (`true`) or the previous one.
+    Step(bool),
+    /// The selected pin's conversation.
+    Open,
+    /// The conversation comes back.
+    Close,
 }
 
 const fn key(code: KeyCode, mods: Mods, action: Action, panes: Panes) -> Chord<Action> {
@@ -122,14 +151,16 @@ const fn run(command: Command) -> Action {
 
 /// The help group titles, in the overlay's order. The first is the shared
 /// rows' group.
-pub const GROUPS: [&str; 5] = [
+pub const GROUPS: [&str; 6] = [
     MOVE,
     CONVERSATIONS,
     MESSAGES_GROUP,
     COMPOSE_GROUP,
+    MAP_GROUP,
     EVERYWHERE,
 ];
 const CONVERSATIONS: &str = "Conversations";
+const MAP_GROUP: &str = "Map";
 const MESSAGES_GROUP: &str = "Messages";
 const COMPOSE_GROUP: &str = "Compose";
 const EVERYWHERE: &str = "Everywhere";
@@ -423,6 +454,76 @@ pub const ROWS: &[Row<Action>] = {
             COMPOSE_GROUP,
             &[&[key(Char('c'), CTRL, ClearDraft, COMPOSE)]],
         ),
+        // The map.
+        Row::new(
+            "the map of the peers' positions",
+            MAP_GROUP,
+            &[
+                &[key(Char('M'), Mods::Plain, run(C::Map), COMMAND_PANES)],
+                &[key(Char('m'), ALT, run(C::Map), EVERY)],
+            ],
+        )
+        .palette("map"),
+        Row::new(
+            "zoom in / out",
+            MAP_GROUP,
+            &[
+                &[
+                    key(Char('+'), Mods::Plain, Map(MapCmd::ZoomIn), MAP),
+                    key(Char('-'), Mods::Plain, Map(MapCmd::ZoomOut), MAP),
+                ],
+                &[key(Char('='), Mods::Plain, Map(MapCmd::ZoomIn), MAP).quiet()],
+            ],
+        )
+        .footer_droppable("zoom", 3),
+        Row::new(
+            "pan",
+            MAP_GROUP,
+            &[
+                &[
+                    key(Left, NONE, Map(MapCmd::Pan(-1, 0)), MAP),
+                    key(Down, NONE, Map(MapCmd::Pan(0, 1)), MAP),
+                    key(Up, NONE, Map(MapCmd::Pan(0, -1)), MAP),
+                    key(Right, NONE, Map(MapCmd::Pan(1, 0)), MAP),
+                ],
+                &[
+                    key(Char('h'), Mods::Plain, Map(MapCmd::Pan(-1, 0)), MAP),
+                    key(Char('j'), Mods::Plain, Map(MapCmd::Pan(0, 1)), MAP),
+                    key(Char('k'), Mods::Plain, Map(MapCmd::Pan(0, -1)), MAP),
+                    key(Char('l'), Mods::Plain, Map(MapCmd::Pan(1, 0)), MAP),
+                ],
+            ],
+        ),
+        Row::new(
+            "every pin in view again",
+            MAP_GROUP,
+            &[&[key(Char('0'), Mods::Plain, Map(MapCmd::Fit), MAP)]],
+        )
+        .footer_droppable("fit", 4),
+        Row::new(
+            "next / previous pin",
+            MAP_GROUP,
+            &[&[
+                key(Tab, NONE, Map(MapCmd::Step(true)), MAP),
+                key(BackTab, Mods::Any, Map(MapCmd::Step(false)), MAP),
+            ]],
+        )
+        .footer("pin"),
+        Row::new(
+            "open the pin's conversation",
+            MAP_GROUP,
+            &[&[key(Enter, NONE, Map(MapCmd::Open), MAP)]],
+        )
+        .footer("open"),
+        Row::new(
+            "close the map",
+            MAP_GROUP,
+            &[
+                &[key(Esc, NONE, Map(MapCmd::Close), MAP)],
+                &[key(Char('g'), CTRL, Map(MapCmd::Close), MAP)],
+            ],
+        )
+        .footer("close"),
         // Everywhere.
         Row::new(
             "next / previous pane",
@@ -456,7 +557,12 @@ pub const ROWS: &[Row<Action>] = {
             "command palette",
             EVERYWHERE,
             &[
-                &[key(Char(':'), Mods::Plain, Palette, COMMAND_PANES)],
+                &[key(
+                    Char(':'),
+                    Mods::Plain,
+                    Palette,
+                    COMMAND_PANES.with(MAP),
+                )],
                 &[key(Char('x'), ALT, Palette, EVERY)],
             ],
         )
@@ -466,7 +572,12 @@ pub const ROWS: &[Row<Action>] = {
             "help",
             EVERYWHERE,
             &[
-                &[key(Char('?'), Mods::Plain, run(C::Help), COMMAND_PANES)],
+                &[key(
+                    Char('?'),
+                    Mods::Plain,
+                    run(C::Help),
+                    COMMAND_PANES.with(MAP),
+                )],
                 &[key(F(1), Mods::Any, run(C::Help), EVERY)],
             ],
         )
@@ -510,7 +621,7 @@ pub const ROWS: &[Row<Action>] = {
                 Char('c'),
                 CTRL,
                 QuitHint,
-                Panes(LIST.0 | MESSAGES.0 | SEARCH.0 | OVERLAY.0),
+                Panes(LIST.0 | MESSAGES.0 | SEARCH.0 | MAP.0 | OVERLAY.0),
             )]],
         ),
         Row::new("Enter sends, or breaks the line", EVERYWHERE, &[]).palette("send on enter"),
@@ -537,6 +648,7 @@ pub fn panes_of(pane: crate::ui::Pane) -> Panes {
         crate::ui::Pane::Messages => MESSAGES.with(Panes::SCROLL),
         crate::ui::Pane::Compose => COMPOSE,
         crate::ui::Pane::Search => SEARCH,
+        crate::ui::Pane::Map => MAP,
     }
 }
 
@@ -671,12 +783,13 @@ mod tests {
     use leviculum_ui::commands::{filter, COMMANDS};
     use leviculum_ui::keymap::{all_best, canonical};
 
-    const PANES: [Panes; 5] = [
+    const PANES: [Panes; 6] = [
         Panes(LIST.0 | Panes::SCROLL.0),
         Panes(MESSAGES.0 | Panes::SCROLL.0),
         COMPOSE,
         OVERLAY,
         SEARCH,
+        MAP,
     ];
     const CTXS: [Ctx; 8] = [
         Ctx::NONE,

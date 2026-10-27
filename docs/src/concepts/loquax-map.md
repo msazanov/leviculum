@@ -31,7 +31,7 @@ fields beside id, source, title, body and the verification
 the two telemetry fields into positions (`telemetry::read`,
 `loquax/src/telemetry.rs:130`), the screen model keeps each peer's latest
 and hands every one to the store (`take_telemetry`,
-`loquax/src/ui.rs:2003`), and the store keeps the fields whole in its
+`loquax/src/ui.rs:2151`), and the store keeps the fields whole in its
 `fields` column (`loquax/src/store.rs:724`) and the positions in a table of
 their own (`SCHEMA_V2`, `loquax/src/store.rs:144`). The sender's timestamp
 is still not carried: `OutboxEvent`, the screen's `Message` and every type
@@ -385,7 +385,24 @@ cross-compile gate that holds `leviculum-map` to `no_std`, as `just
 loquax-core-no-std` holds the core. *1001
 phase:* none, no exchange.
 
-**(c) The TUI map view.** The `map` action, the pins with names and ages,
+**(c) The TUI map view.** Built 2026-10-27 (leviculum 1065): the palette's
+`map`, `M` in the list and the conversation and `Alt-m` everywhere; the
+pins by the display rule with their ages, the selected one `◉`, a name set
+left of its marker at the picture's right edge; fit on open and with `0`,
+`+`/`-` and the arrows or `h` `j` `k` `l`, `Tab` through the pins by name,
+`Enter` or a click to open the peer's conversation, `Esc` back; the ladder
+kitty or sixel, half-blocks, braille, forced with `--graphics` and named
+in `tui.log` as `GRAPHICS backend=`; the attribution line under the
+picture. Pinned by `loquax/tests/tui_snapshot.rs`
+(`the_map_shows_the_pins_on_the_region_and_the_outline_in_braille_and_halfblocks`,
+frames in `loquax/tests/fixtures/tui_map.frames`), the model's tests in
+`loquax/src/ui.rs`, the ladder and the protocol bytes in
+`loquax/src/tui/map.rs`, and the core's in `leviculum-map/tests/view.rs`.
+The core gained per-zoom line widths, a lines-only ink, the world outline,
+region choice and the zoom range for it. Left for later: label collisions
+between pins (the later-drawn name covers the earlier), and how text over a
+sixel picture looks in foot, which no test here can see.
+As planned: the `map` action, the pins with names and ages,
 fit, zoom and pan, the three drawing backends, the attribution line.
 Depends on (a) for positions and (b) for the core. *Acceptance:* a
 `tui_snapshot` of the map view in the half-block and braille backends
@@ -494,6 +511,31 @@ Each alternative stays as one line, rejected, so the reasoning stays.
   each. *Rejected:* sending by default.
 - **Stale threshold 2 h** (section 2): dimmed after that, never removed
   for age alone. *Rejected:* removing a fix when it ages out.
+
+The reviewer decided three more for slice (c), 2026-10-27 (leviculum 1065):
+
+- **The world outline is Natural Earth**, public domain, the 1:110m land
+  polygons of version 5.1.2, baked by `scripts/bake-world-outline.py`
+  into `leviculum-map/data/ne_110m_land.lwo` (21,298 bytes, 128 rings,
+  5,003 points) and built into the binary; source and checksum in
+  `leviculum-map/fixtures/README.md` and THIRD-PARTY.md. Drawn as land
+  over water in colour and as coasts in braille, down to zoom 10.
+  *Rejected:* the world file ratatui's `Map` shape draws, whose licence
+  is unsettled.
+- **`loquax map add` is not in slice (c).** Regions are placed by hand:
+  loquax reads every `*.lmr` in `${XDG_DATA_HOME:-~/.local/share}/loquax/maps/`,
+  or in `$LNMSG_HOME/maps/` when `LNMSG_HOME` is set. That variable
+  replaces the whole default base for the identity and the store, so it
+  replaces this one too, and a test or a second profile sees only its own
+  maps. The man page says how to cut a region with
+  `leviculum-map-tool cut`. Spawning the tool or a library feature is
+  decided with `map add`.
+- **One region or the outline, never a patchwork.** A view draws the
+  installed region of the deepest max zoom whose box holds the view's
+  centre and whose zooms reach the view's (its shallowest down to eight
+  past its deepest), two alike by file name; the outline where none does.
+  The zoom range offered is from the world down to the deepest a region
+  draws at, and at least to zoom 10.
 
 ## See also
 

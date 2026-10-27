@@ -80,6 +80,12 @@ tui = [
     "history",
     "leviculum-ui/std",
     "dep:leviculum-ui-ratatui",
+    # The map's sixel and kitty pictures go through ratatui-image, the
+    # crate lnomad's inline pictures use (loquax-map.md, section 6).
+    "leviculum-ui-ratatui/images",
+    "leviculum-map/std",
+    "dep:leviculum-mapfill",
+    "dep:embedded-graphics",
     "dep:ratatui",
     "dep:crossterm",
     "dep:futures",
@@ -103,6 +109,14 @@ tokio = { workspace = true, optional = true }
 # key events, the styled lines. `no_std` without its `std` feature, so the
 # model stays core.
 leviculum-ui = { path = "../leviculum-ui", default-features = false }
+# The map's model (`ui::map`): the projection, the viewport, fitting and
+# placing the pins. `no_std` with `alloc` without its `std` feature, held
+# there by `just map-core-no-std`, so the model stays core.
+leviculum-map = { path = "../leviculum-map" }
+# The terminal's map picture (`tui`): the frame the map core draws into and
+# its colours, the crates leviculum-map draws through.
+leviculum-mapfill = { path = "../leviculum-mapfill", optional = true }
+embedded-graphics = { version = "0.8", optional = true }
 # The terminal frontend (`tui`), lnomad's crates at lnomad's versions.
 leviculum-ui-ratatui = { path = "../leviculum-ui-ratatui", optional = true }
 ratatui = { version = "0.30.2", optional = true }

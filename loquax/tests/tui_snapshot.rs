@@ -99,6 +99,7 @@ const EXPECTED_SEARCH: &str = include_str!("fixtures/tui_search_session.frames")
 const EXPECTED_NAMES: &str = include_str!("fixtures/tui_names.frames");
 const EXPECTED_HISTORY: &str = include_str!("fixtures/tui_history.frames");
 const EXPECTED_TELEMETRY: &str = include_str!("fixtures/tui_telemetry.frames");
+const EXPECTED_MAP: &str = include_str!("fixtures/tui_map.frames");
 
 const SCRIPT: &str = "\
 until ready 20
@@ -1619,8 +1620,34 @@ fn position_report(minutes_ago: i64, lat_e6: i32) -> Vec<(i64, Vec<u8>)> {
 }
 
 async fn telemetry_session(size: &str) -> String {
-    let daemon = daemon(&format!("tui-telemetry-{size}"), |b| b).await;
+    let messages = |_: [u8; 16]| {
+        vec![
+            ("leaving the hut now", Vec::new()),
+            ("", position_report(10, 43_770_000)),
+            ("", position_report(4, 43_773_100)),
+        ]
+    };
+    peer_session("telemetry", size, TELEMETRY_SCRIPT, &[], |_| {}, messages)
+        .await
+        .0
+}
+
+/// A scripted session against a fresh daemon in which one peer, `0x22`,
+/// sends us `messages(our_address)` directly once the frame `attached` is
+/// written: the bodies and fields of each. `prepare` fills the home before
+/// loquax starts; `extra` are more arguments. The frames, ids masked, and
+/// the session's `tui.log`.
+async fn peer_session(
+    name: &str,
+    size: &str,
+    script_text: &str,
+    extra: &[&str],
+    prepare: impl FnOnce(&Path),
+    messages: impl FnOnce([u8; 16]) -> Vec<(&'static str, Vec<(i64, Vec<u8>)>)>,
+) -> (String, String) {
+    let daemon = daemon(&format!("tui-{name}-{size}"), |b| b).await;
     let home = tempfile::tempdir().expect("tui home");
+    prepare(home.path());
     let ours = fixed_identity(0x11);
     std::fs::write(
         home.path().join("identity"),
@@ -1634,10 +1661,10 @@ async fn telemetry_session(size: &str) -> String {
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
-    let script = home.path().join("telemetry.script");
-    let frames = home.path().join("telemetry.frames");
-    std::fs::write(&script, TELEMETRY_SCRIPT).expect("write the script");
-    let args: Vec<String> = vec![
+    let script = home.path().join(format!("{name}.script"));
+    let frames = home.path().join(format!("{name}.frames"));
+    std::fs::write(&script, script_text).expect("write the script");
+    let mut args: Vec<String> = vec![
         "--instance".into(),
         daemon.instance.clone(),
         "--config".into(),
@@ -1651,6 +1678,7 @@ async fn telemetry_session(size: &str) -> String {
         "--size".into(),
         size.into(),
     ];
+    args.extend(extra.iter().map(|a| a.to_string()));
     let child_home = home.path().to_path_buf();
     let child = tokio::task::spawn_blocking(move || {
         let mut command = Command::new(LNMSG);
@@ -1680,11 +1708,7 @@ async fn telemetry_session(size: &str) -> String {
     .expect("the correspondent attaches");
     let options = SendOptions::new(daemon.instance.clone(), Duration::from_secs(20));
     let mut fanout = Fanout::default();
-    for (body, fields) in [
-        ("leaving the hut now", Vec::new()),
-        ("", position_report(10, 43_770_000)),
-        ("", position_report(4, 43_773_100)),
-    ] {
+    for (body, fields) in messages(our_address) {
         let mut tap = fanout.tap();
         let clock = Tokio::new();
         let send = run_send(
@@ -1720,7 +1744,8 @@ async fn telemetry_session(size: &str) -> String {
         "{size}: stderr: {}\nframes:\n{got}",
         String::from_utf8_lossy(&output.stderr)
     );
-    without_ids(&got)
+    let log = std::fs::read_to_string(home.path().join("tui.log")).unwrap_or_default();
+    (without_ids(&got), log)
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1759,6 +1784,166 @@ async fn a_peers_position_shows_in_the_header_and_its_reports_fold_into_one_line
         panic!(
             "the frames moved; this run's are in {}, the pinned ones in \
              loquax/tests/fixtures/tui_telemetry.frames\n{all}",
+            kept.display()
+        );
+    }
+}
+
+/// The map session (`docs/src/concepts/loquax-map.md`, slice (c)): the
+/// peer reports its own position and, as a collector, a stream row for a
+/// third peer three hours old and one for us. With the Florence fixture
+/// installed as the only region, `M` fits the three pins on it; `Tab`
+/// moves the selection; zooming out past the region's shallowest zoom
+/// to z5 draws the world outline, the coast of Italy; `0` fits again; `Enter` opens the selected
+/// peer's conversation; the map again and `Esc` bring the conversation
+/// back.
+const MAP_SCRIPT: &str = "\
+clock 2026-10-26 14:00
+until ready 20
+frame attached
+until received 1 60
+tick 12
+key M
+frame map
+key tab
+frame next pin
+key -
+key -
+key -
+key -
+key -
+key -
+key -
+key -
+key -
+frame outline
+key 0
+key enter
+frame opened
+key M
+key esc
+frame back
+key q
+";
+
+/// The third peer the stream reports.
+const CAROL: [u8; 16] = [0x33; 16];
+
+fn located(minutes_ago: i64, lat_e6: i32, lon_e6: i32) -> leviculum_lxmf::telemetry::Telemetry {
+    use leviculum_lxmf::telemetry::{Location, Telemetry};
+    let at = TELEMETRY_NOW - minutes_ago * 60;
+    Telemetry {
+        time: Some(at),
+        location: Some(Location {
+            latitude_e6: lat_e6,
+            longitude_e6: lon_e6,
+            altitude_e2: 5_120,
+            speed_e2: 0,
+            bearing_e2: 0,
+            accuracy_e2: 500,
+            last_update: at,
+        }),
+        ..Telemetry::default()
+    }
+}
+
+async fn map_session(graphics: &str) -> (String, String) {
+    use leviculum_lxmf::msgpack::Number;
+    use leviculum_lxmf::telemetry::{encode_stream_field_value, StreamEntry};
+    let install = |home: &Path| {
+        let maps = home.join("maps");
+        std::fs::create_dir_all(&maps).expect("maps dir");
+        std::fs::copy(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../leviculum-map/fixtures/firenze.lmr"
+            ),
+            maps.join("firenze.lmr"),
+        )
+        .expect("install the fixture region");
+    };
+    let messages = |ours: [u8; 16]| {
+        let row = |source: [u8; 16], telemetry: Vec<u8>| StreamEntry {
+            source: source.to_vec(),
+            timestamp: Number::Int(TELEMETRY_NOW),
+            telemetry,
+            appearance: None,
+        };
+        let stream = encode_stream_field_value(&[
+            row(CAROL, located(180, 43_776_000, 11_266_000).encode()),
+            row(ours, located(1, 43_774_000, 11_258_000).encode()),
+        ]);
+        let own = vec![
+            (
+                leviculum_lxmf::constants::FIELD_TELEMETRY,
+                located(4, 43_775_000, 11_261_000).encode_field_value(),
+            ),
+            (leviculum_lxmf::constants::FIELD_TELEMETRY_STREAM, stream),
+        ];
+        vec![("", own)]
+    };
+    let flag = format!("--graphics={graphics}");
+    peer_session("map", "80x24", MAP_SCRIPT, &[&flag], install, messages).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_map_shows_the_pins_on_the_region_and_the_outline_in_braille_and_halfblocks() {
+    let mut all = String::new();
+    for graphics in ["braille", "halfblocks"] {
+        let (frames, log) = map_session(graphics).await;
+        let line = log
+            .lines()
+            .find_map(|l| l.find("GRAPHICS ").map(|at| &l[at..]))
+            .unwrap_or_default();
+        assert_eq!(
+            line,
+            format!(
+                "GRAPHICS backend={graphics} detected=none cell={} zooms=0-20",
+                match graphics {
+                    "braille" => "2x4",
+                    _ => "1x2",
+                }
+            ),
+            "{log}"
+        );
+        let map = frame(&frames, "map");
+        assert!(
+            map.contains("● map"),
+            "the map has the pane and the focus\n{map}"
+        );
+        assert!(map.contains("© OpenStreetMap contributors"), "{map}");
+        assert_eq!(
+            map.matches('●').count(),
+            3,
+            "the title's mark and two pins\n{map}"
+        );
+        assert_eq!(map.matches('◉').count(), 1, "the selected pin\n{map}");
+        assert!(map.contains("● you · 1 min"), "{map}");
+        // Tab: the selection moves from the first pin by name to the next.
+        let next = frame(&frames, "next pin");
+        assert!(map.contains("· 3 h ◉") && next.contains("◉ them"), "{next}");
+        assert!(map.contains("· 3 h"), "the stale one with its age\n{map}");
+        assert!(map.contains("· 4 min"), "{map}");
+        let outline = frame(&frames, "outline");
+        assert!(outline.contains("Natural Earth"), "{outline}");
+        let opened = frame(&frames, "opened");
+        assert!(
+            !opened.contains("● map"),
+            "the conversation is back\n{opened}"
+        );
+        let back = frame(&frames, "back");
+        assert!(
+            !back.contains("Natural Earth") && !back.contains("OpenStreetMap"),
+            "{back}"
+        );
+        all.push_str(&format!("=== {graphics} ===\n{frames}"));
+    }
+    if all != EXPECTED_MAP {
+        let kept = std::env::temp_dir().join("loquax-tui-map.frames");
+        let _ = std::fs::write(&kept, &all);
+        panic!(
+            "the frames moved; this run's are in {}, the pinned ones in \
+             loquax/tests/fixtures/tui_map.frames\n{all}",
             kept.display()
         );
     }

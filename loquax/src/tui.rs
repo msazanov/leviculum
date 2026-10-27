@@ -14,6 +14,8 @@
 //! - [`run`] is the loop: the real terminal (`run_terminal`), or a key script
 //!   that dumps frames to a file (`run_script`), which is how the snapshot
 //!   test in `tests/tui_snapshot.rs` drives a session against a daemon.
+//! - [`map`] draws the map's picture in the conversation pane's place, by
+//!   sixel, kitty, half-blocks or braille.
 
 use std::collections::VecDeque;
 use std::io::Write;
@@ -47,6 +49,7 @@ use leviculum_ui::tokens::Tokens;
 use leviculum_ui_ratatui::background::detect_background;
 use leviculum_ui_ratatui::event::{key_event, mouse_event, step_event, EventStep};
 use leviculum_ui_ratatui::geometry::to_ratatui;
+use leviculum_ui_ratatui::images::{Picker, ProtocolType};
 use leviculum_ui_ratatui::style::downgrade_buffer;
 use leviculum_ui_ratatui::terminal::{install_panic_hook, set_mouse_capture, TerminalOps};
 use leviculum_ui_ratatui::{help, to_ratatui_text, toast, CrosstermTerminal, TerminalGuard};
@@ -65,6 +68,8 @@ use loquax::ui::history::StoreRead;
 use loquax::ui::{self, help_groups, update, Pane, UiEffect, UiEvent, UiModel, View};
 use loquax::when::WallTime;
 use loquax::{display_name, identity, keys};
+
+pub mod map;
 
 /// The model as the terminal holds it: its text fields are `tui-input`'s.
 type Model = UiModel<Input>;
@@ -105,6 +110,8 @@ pub struct TuiOptions {
     /// Start with the mouse not captured, so the terminal's own selection
     /// works; the palette's `mouse` turns capture on.
     pub no_mouse: bool,
+    /// `--graphics`: how the map is drawn.
+    pub graphics: map::GraphicsFlag,
     pub script: Option<PathBuf>,
     pub frames: Option<PathBuf>,
     pub size: (u16, u16),
@@ -201,6 +208,9 @@ struct Shell {
     /// What the screen asked of the terminal and not yet done: the real
     /// terminal does it, a script writes it into its frames.
     outputs: Vec<Output>,
+    /// The region files found at start, for the map painter the loop
+    /// makes once it knows the backend.
+    regions: Vec<map::Installed>,
 }
 
 /// What the model asks of the terminal beyond drawing.
@@ -617,6 +627,14 @@ pub async fn run(options: TuiOptions) -> ExitCode {
     if let Some(event) = mailbox {
         update(&mut model, event);
     }
+    // The map's regions, read once: a file that does not open is named in
+    // tui.log and left out.
+    let (regions, problems) = map::maps_dir()
+        .map(|dir| map::load(&dir))
+        .unwrap_or_default();
+    for problem in problems {
+        tracing::warn!("{problem}");
+    }
     let (done_tx, done_rx) = unbounded_channel();
     let mut shell = Shell {
         model,
@@ -646,6 +664,7 @@ pub async fn run(options: TuiOptions) -> ExitCode {
         gone: false,
         redraw: false,
         outputs: Vec::new(),
+        regions,
     };
 
     let outcome = match &options.script {
@@ -656,7 +675,7 @@ pub async fn run(options: TuiOptions) -> ExitCode {
                 .unwrap_or_else(|| script.with_extension("frames"));
             run_script(&mut shell, script, &frames, &options).await
         }
-        None => run_terminal(&mut shell, theme_flag).await,
+        None => run_terminal(&mut shell, theme_flag, options.graphics).await,
     };
     shell.settle().await;
     let Shell {
@@ -715,8 +734,27 @@ fn log_keys(model: &Model) {
     );
 }
 
+/// The once-at-start `tui.log` line naming how the map is drawn, beside
+/// the `KEYS` line.
+fn log_graphics(painter: &map::MapPainter, detected: Option<ProtocolType>) {
+    let setup = painter.setup();
+    tracing::info!(
+        "GRAPHICS backend={} detected={} cell={}x{} zooms={}-{}",
+        painter.graphics().name(),
+        detected.map_or("none".to_string(), |p| format!("{p:?}").to_lowercase()),
+        setup.cell_px.0,
+        setup.cell_px.1,
+        setup.zooms.0,
+        setup.zooms.1
+    );
+}
+
 /// The real terminal: keys in, frames out, until the reader quits.
-async fn run_terminal(shell: &mut Shell, theme: ThemeFlag) -> Result<(), String> {
+async fn run_terminal(
+    shell: &mut Shell,
+    theme: ThemeFlag,
+    graphics: map::GraphicsFlag,
+) -> Result<(), String> {
     install_panic_hook();
     // Before the alternate screen, as lnomad does: the background query reads
     // its answer on stdin, which raw mode would hand to the key handler. The
@@ -740,6 +778,23 @@ async fn run_terminal(shell: &mut Shell, theme: ThemeFlag) -> Result<(), String>
     .map_err(|e| e.to_string())?;
     let mut terminal =
         Terminal::new(CrosstermBackend::new(std::io::stdout())).map_err(|e| e.to_string())?;
+    // The map's backend, asked of the terminal in raw mode, before the
+    // event stream reads stdin. Only when a protocol may be taken: braille
+    // and half-blocks need no answer, and `--no-color` sends no query.
+    let ask = match graphics {
+        map::GraphicsFlag::Auto => shell.model.tier != Tier::Mono,
+        map::GraphicsFlag::Kitty | map::GraphicsFlag::Sixel => true,
+        map::GraphicsFlag::Halfblocks | map::GraphicsFlag::Braille => false,
+    };
+    let picker = match ask {
+        true => Picker::from_query_stdio().ok(),
+        false => None,
+    };
+    let detected = picker.as_ref().map(Picker::protocol_type);
+    let chosen = map::choose_graphics(graphics, detected, shell.model.tier);
+    let mut painter = map::MapPainter::new(std::mem::take(&mut shell.regions), chosen, picker);
+    log_graphics(&painter, detected);
+    shell.apply(UiEvent::MapSetup(painter.setup()));
     let mut events = EventStream::new();
     shell.apply(UiEvent::Clock(local_now()));
     let size = terminal.size().map_err(|e| e.to_string())?;
@@ -765,7 +820,7 @@ async fn run_terminal(shell: &mut Shell, theme: ThemeFlag) -> Result<(), String>
             }
         }
         let view = ui::view(&shell.model);
-        if let Err(error) = terminal.draw(|frame| draw(frame, &view)) {
+        if let Err(error) = terminal.draw(|frame| draw(frame, &view, Some(&mut painter))) {
             break Err(error.to_string());
         }
         if shell.model.quit {
@@ -1275,6 +1330,11 @@ async fn run_script(
     let text = std::fs::read_to_string(script).map_err(|e| format!("{}: {e}", script.display()))?;
     let steps = parse_script(&text).map_err(|e| format!("{}: {e}", script.display()))?;
     log_keys(&shell.model);
+    // A script asks no terminal: `auto` climbs the ladder on its tier.
+    let chosen = map::choose_graphics(options.graphics, None, shell.model.tier);
+    let mut painter = map::MapPainter::new(std::mem::take(&mut shell.regions), chosen, None);
+    log_graphics(&painter, None);
+    shell.apply(UiEvent::MapSetup(painter.setup()));
     let mut out =
         std::fs::File::create(frames).map_err(|e| format!("{}: {e}", frames.display()))?;
     let styles_path = {
@@ -1290,7 +1350,10 @@ async fn run_script(
     let mut count = 0usize;
     // A frame of the model, or without one a line of what the screen asked
     // of the terminal.
-    let mut dump = |terminal: &mut Terminal<TestBackend>, model: Option<&Model>, label: &str| {
+    let mut dump = |terminal: &mut Terminal<TestBackend>,
+                    painter: &mut map::MapPainter,
+                    model: Option<&Model>,
+                    label: &str| {
         let Some(model) = model else {
             return writeln!(out, "--- {label} ---")
                 .and_then(|()| out.flush())
@@ -1298,7 +1361,7 @@ async fn run_script(
         };
         let view = ui::view(model);
         terminal
-            .draw(|frame| draw(frame, &view))
+            .draw(|frame| draw(frame, &view, Some(painter)))
             .map_err(|e| e.to_string())?;
         count += 1;
         let text = frame_text(terminal.backend());
@@ -1320,7 +1383,7 @@ async fn run_script(
             Step::Styles(label) => {
                 let view = ui::view(&shell.model);
                 terminal
-                    .draw(|frame| draw(frame, &view))
+                    .draw(|frame| draw(frame, &view, Some(&mut painter)))
                     .map_err(|e| e.to_string())?;
                 let map = styles_text(terminal.backend(), shell.model.tokens());
                 let file = match styles.as_mut() {
@@ -1351,7 +1414,7 @@ async fn run_script(
             Step::Frame(label) => {
                 // A script's screen is drawn whole every frame anyway.
                 shell.redraw = false;
-                dump(&mut terminal, Some(&shell.model), &label)?
+                dump(&mut terminal, &mut painter, Some(&shell.model), &label)?
             }
             Step::Until(until, within) => {
                 let deadline = tokio::time::Instant::now() + within;
@@ -1363,6 +1426,7 @@ async fn run_script(
                     if tokio::time::Instant::now() >= deadline {
                         dump(
                             &mut terminal,
+                            &mut painter,
                             Some(&shell.model),
                             &format!("timeout: {until:?}"),
                         )?;
@@ -1397,7 +1461,7 @@ async fn run_script(
                 Output::Open(url) => format!("open {url}"),
                 Output::Mouse(on) => format!("mouse {}", if on { "on" } else { "off" }),
             };
-            dump(&mut terminal, None, &line)?;
+            dump(&mut terminal, &mut painter, None, &line)?;
         }
         if shell.model.quit {
             break;
@@ -1432,7 +1496,7 @@ const COMPOSE_BORDER: border::Set = border::Set {
 /// Draw the screen: the list left the full height, the conversation and the
 /// compose box under it right, the footer at the bottom; the toast, the
 /// palette, the detail view and the help on top.
-pub fn draw(frame: &mut Frame, view: &View) {
+pub fn draw(frame: &mut Frame, view: &View, painter: Option<&mut map::MapPainter>) {
     let (theme, tier) = (view.theme, view.tier);
     let no_color = tier == Tier::Mono;
     let tokens = leviculum_ui::tokens(tier, theme);
@@ -1474,7 +1538,7 @@ pub fn draw(frame: &mut Frame, view: &View) {
     // The model laid the rows out at this pane's size: drawn as they come.
     let mut block = pane_block(
         &view.messages_title,
-        view.focus == Pane::Messages,
+        matches!(view.focus, Pane::Messages | Pane::Map),
         Borders::TOP | Borders::LEFT | Borders::RIGHT,
     );
     if !view.messages_title_right.is_empty() {
@@ -1483,16 +1547,37 @@ pub fn draw(frame: &mut Frame, view: &View) {
     }
     let inner = block.inner(messages);
     frame.render_widget(block, messages);
-    // Laid out for a taller pane than this frame has (a resize the model has
-    // not heard of yet): the bottom rows, where the newest are.
-    let excess = view
-        .messages
-        .len()
-        .saturating_sub(usize::from(inner.height));
-    frame.render_widget(
-        Paragraph::new(to_ratatui_text(&view.messages[excess..])),
-        inner,
-    );
+    match (&view.map, painter) {
+        // The map in the conversation's place: the picture, the pins and
+        // the attribution, all inside the pane.
+        (Some(shown), Some(painter)) => {
+            painter.render(frame, shown, Style::default().add_modifier(Modifier::DIM));
+        }
+        (Some(shown), None) => {
+            for pin in &shown.pins {
+                frame.buffer_mut().set_stringn(
+                    pin.col,
+                    pin.row,
+                    &pin.text,
+                    usize::from(inner.width),
+                    Style::default(),
+                );
+            }
+        }
+        (None, _) => {
+            // Laid out for a taller pane than this frame has (a resize the
+            // model has not heard of yet): the bottom rows, where the newest
+            // are.
+            let excess = view
+                .messages
+                .len()
+                .saturating_sub(usize::from(inner.height));
+            frame.render_widget(
+                Paragraph::new(to_ratatui_text(&view.messages[excess..])),
+                inner,
+            );
+        }
+    }
 
     // The compose pane: one row a line, up to five, scrolled to the
     // cursor's line and, sideways, to its column.
@@ -1703,7 +1788,9 @@ mod tests {
         );
         let mut terminal = Terminal::new(TestBackend::new(80, 16)).expect("terminal");
         let view = ui::view(&model);
-        terminal.draw(|frame| draw(frame, &view)).expect("draw");
+        terminal
+            .draw(|frame| draw(frame, &view, None))
+            .expect("draw");
         frame_text(terminal.backend())
     }
 
@@ -1721,7 +1808,9 @@ mod tests {
         );
         let mut terminal = Terminal::new(TestBackend::new(80, 16)).expect("terminal");
         let view = ui::view(&model);
-        terminal.draw(|frame| draw(frame, &view)).expect("draw");
+        terminal
+            .draw(|frame| draw(frame, &view, None))
+            .expect("draw");
         styles_text(terminal.backend(), model.tokens())
     }
 
@@ -1995,7 +2084,9 @@ mod tests {
         );
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
         let view = ui::view(&model);
-        terminal.draw(|frame| draw(frame, &view)).expect("draw");
+        terminal
+            .draw(|frame| draw(frame, &view, None))
+            .expect("draw");
         let screen = frame_text(terminal.backend());
         assert!(screen.contains("not sent: direct: no route to"), "{screen}");
         assert!(
@@ -2158,7 +2249,9 @@ mod tests {
     fn screen(model: &Model, width: u16, height: u16) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
         let view = ui::view(model);
-        terminal.draw(|frame| draw(frame, &view)).expect("draw");
+        terminal
+            .draw(|frame| draw(frame, &view, None))
+            .expect("draw");
         frame_text(terminal.backend())
     }
 

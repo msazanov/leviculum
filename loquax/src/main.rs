@@ -153,6 +153,12 @@ struct TuiArgs {
     #[arg(long)]
     no_mouse: bool,
 
+    /// How the map is drawn: `auto` asks the terminal and climbs the
+    /// ladder, kitty or sixel, else half-blocks in colour, else braille;
+    /// the others force one.
+    #[arg(long, value_enum, default_value_t = tui::map::GraphicsFlag::Auto)]
+    graphics: tui::map::GraphicsFlag,
+
     /// Run a key script instead of reading the keyboard, and write every
     /// `frame` it asks for to --frames. For tests and demos.
     #[arg(long, value_name = "FILE")]
@@ -485,6 +491,7 @@ async fn run_tui(args: TuiArgs) -> ExitCode {
         color: args.color.into(),
         theme: args.theme.map(Into::into),
         no_mouse: args.no_mouse,
+        graphics: args.graphics,
         script: args.script,
         frames: args.frames,
         size,

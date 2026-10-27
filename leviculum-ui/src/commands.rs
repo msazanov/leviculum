@@ -60,6 +60,8 @@ pub enum Command {
     DeleteConversation,
     /// Pin the open conversation above the others, or unpin it.
     Pin,
+    /// Show the peers' positions on the map, in the conversation's place.
+    Map,
 }
 
 /// One palette row: the words the reader filters on, and what it runs.
@@ -72,7 +74,7 @@ pub struct PaletteEntry {
 }
 
 /// The table, in the order the palette lists it unfiltered.
-pub const COMMANDS: [PaletteEntry; 20] = [
+pub const COMMANDS: [PaletteEntry; 21] = [
     entry("send", Command::Send),
     entry("fetch", Command::Fetch),
     entry("quit", Command::Quit),
@@ -93,6 +95,7 @@ pub const COMMANDS: [PaletteEntry; 20] = [
     entry("delete message", Command::DeleteMessage),
     entry("delete conversation", Command::DeleteConversation),
     entry("pin", Command::Pin),
+    entry("map", Command::Map),
 ];
 
 /// The entry that runs `command`.

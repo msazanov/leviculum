@@ -81,6 +81,16 @@
 //! while the search is open `n`/`N` and `Ctrl-s`/`Ctrl-r` step the matches
 //! of the open conversation in place. `Esc` closes it and the list comes
 //! back; the conversation keeps what it showed.
+//!
+//! # The map
+//!
+//! The palette's `map`, `M` or `Alt-m` puts the map in the conversation
+//! pane's place ([`map`]): a pin per peer with a known position, fitted on
+//! open, zoomed with `+` and `-`, panned with the arrows or `h` `j` `k`
+//! `l`, refitted with `0`. `Tab` steps the pins, `Enter` or a click on one
+//! opens its conversation, `Esc` brings the conversation back. The list
+//! stays beside it. The shell draws the picture for the view the model
+//! makes; the model places the pins, so what a click hits is what is drawn.
 
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::format;
@@ -117,6 +127,7 @@ use history::{Confirm, StoreRead, StoreWrite, StoredHit};
 pub mod history;
 pub mod hit;
 pub mod layout;
+pub mod map;
 pub mod search;
 
 /// How many ticks a toast stays up. The shell ticks every 250 ms, so three
@@ -223,6 +234,8 @@ pub enum Pane {
     /// The search's field, at the top of the list pane while a search is
     /// open; the list under it is its results.
     Search,
+    /// The map, in the conversation pane's place while it is open.
+    Map,
 }
 
 impl Pane {
@@ -230,6 +243,7 @@ impl Pane {
     /// list while a search is open.
     fn next(self, searching: bool) -> Self {
         match (self, searching) {
+            (Self::Map, _) => Self::Map,
             (Self::Search, _) => Self::Conversations,
             (Self::Conversations, _) => Self::Messages,
             (Self::Messages, _) => Self::Compose,
@@ -240,6 +254,7 @@ impl Pane {
 
     fn prev(self, searching: bool) -> Self {
         match (self, searching) {
+            (Self::Map, _) => Self::Map,
             (Self::Search, _) => Self::Compose,
             (Self::Conversations, true) => Self::Search,
             (Self::Conversations, false) => Self::Compose,
@@ -520,6 +535,10 @@ pub struct UiModel<B> {
     pub positions: BTreeMap<[u8; 16], Fix>,
     /// Positions received since the store last wrote, in arrival order.
     fixes_received: Vec<Fix>,
+    /// The map, when open: it takes the conversation pane.
+    pub map: Option<map::MapState>,
+    /// What the shell draws the map with ([`UiEvent::MapSetup`]).
+    pub map_setup: map::MapSetup,
 }
 
 /// Text a drag selected in the open conversation, from where the button went
@@ -581,6 +600,8 @@ impl<B: InputBuffer + Default> UiModel<B> {
             reveal_pending: None,
             positions: BTreeMap::new(),
             fixes_received: Vec::new(),
+            map: None,
+            map_setup: map::MapSetup::default(),
         };
         for peer in peers {
             model.conversation(*peer);
@@ -834,6 +855,9 @@ pub enum UiEvent {
     },
     /// The store's answer to [`StoreRead::Search`].
     StoredHits { query: String, hits: Vec<StoredHit> },
+    /// How the shell draws the map: the cell's pixels and the zooms its
+    /// regions reach.
+    MapSetup(map::MapSetup),
 }
 
 /// What the shell is asked to do.
@@ -870,7 +894,27 @@ pub enum UiEffect {
 
 /// Fold one event into the model.
 pub fn update<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec<UiEffect> {
+    let effects = fold(model, event);
+    // The map holds the conversation's place: the focus going to the
+    // conversation or compose takes it away, and without it there is no
+    // map to focus.
+    match (model.map.is_some(), model.focus) {
+        (true, Pane::Messages | Pane::Compose) => model.map = None,
+        (false, Pane::Map) => model.focus = Pane::Messages,
+        _ => {}
+    }
+    effects
+}
+
+fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec<UiEffect> {
     match event {
+        UiEvent::MapSetup(setup) => {
+            model.map_setup = setup;
+            if let Some(state) = model.map.as_mut() {
+                state.zoom = state.zoom.clamp(setup.zooms.0, setup.zooms.1);
+            }
+            Vec::new()
+        }
         UiEvent::Key(key) if key.kind == KeyEventKind::Release => Vec::new(),
         UiEvent::Key(key) => on_key(model, key),
         UiEvent::Run(command) => run(model, command),
@@ -1082,7 +1126,13 @@ fn act<B: InputBuffer + Default>(
                 _ => Pane::Conversations,
             };
         }
-        Action::NextPane => model.focus = model.focus.next(model.search.is_some()),
+        Action::NextPane => {
+            model.focus = match model.focus.next(model.search.is_some()) {
+                // The map is in the conversation's place in the cycle.
+                Pane::Messages if model.map.is_some() => Pane::Map,
+                next => next,
+            };
+        }
         Action::PreviousPane => model.focus = model.focus.prev(model.search.is_some()),
         Action::Palette => model.palette = Some(Palette::default()),
         Action::QuitHint => return quit_hint(model),
@@ -1093,7 +1143,89 @@ fn act<B: InputBuffer + Default>(
             _ => step_result(model, if forward { 1 } else { -1 }),
         },
         Action::CloseSearch => close_search(model),
+        Action::Map(cmd) => return map_key(model, cmd),
     }
+    Vec::new()
+}
+
+/// The palette's `map`: the map in the conversation's place, every pin in
+/// view, the first in `Tab` order selected.
+fn open_map<B: InputBuffer>(model: &mut UiModel<B>) {
+    let pins = model.map_pins();
+    let (centre, zoom) = map::fit(&pins, model.map_area(), &model.map_setup);
+    model.map = Some(map::MapState {
+        centre,
+        zoom,
+        selected: pins.first().map(|p| p.peer),
+    });
+    model.focus = Pane::Map;
+    model.selection = None;
+}
+
+/// A key on the open map.
+fn map_key<B: InputBuffer>(model: &mut UiModel<B>, cmd: keys::MapCmd) -> Vec<UiEffect> {
+    use keys::MapCmd;
+    let setup = model.map_setup;
+    let area = model.map_area();
+    let pins = model.map_pins();
+    let Some(state) = model.map.as_mut() else {
+        return Vec::new();
+    };
+    match cmd {
+        MapCmd::ZoomIn => state.zoom = state.zoom.saturating_add(1).min(setup.zooms.1),
+        MapCmd::ZoomOut => state.zoom = state.zoom.saturating_sub(1).max(setup.zooms.0),
+        MapCmd::Pan(dx, dy) => {
+            let mut view = map::viewport(state, area, &setup);
+            let (w, h) = view.size();
+            let step = |n: i8, of: u32| i32::from(n) * (of / 4).max(1) as i32;
+            view.pan(step(dx, w), step(dy, h));
+            state.centre = view.centre;
+        }
+        MapCmd::Fit => {
+            let (centre, zoom) = map::fit(&pins, area, &setup);
+            state.centre = centre;
+            state.zoom = zoom;
+        }
+        MapCmd::Step(forward) => {
+            let at = pins.iter().position(|p| Some(p.peer) == state.selected);
+            let n = pins.len();
+            let next = match (at, forward) {
+                _ if n == 0 => None,
+                (None, _) => Some(0),
+                (Some(i), true) => Some((i + 1) % n),
+                (Some(i), false) => Some((i + n - 1) % n),
+            };
+            if let Some(pin) = next.and_then(|i| pins.get(i)) {
+                state.selected = Some(pin.peer);
+                // A pin out of view is brought to the centre.
+                if !map::viewport(state, area, &setup).contains(pin.at) {
+                    state.centre = pin.at;
+                }
+            }
+        }
+        MapCmd::Open => {
+            if let Some(peer) = state.selected {
+                return open_pin(model, peer);
+            }
+        }
+        MapCmd::Close => {
+            model.map = None;
+            model.focus = Pane::Messages;
+        }
+    }
+    Vec::new()
+}
+
+/// A pin chosen by `Enter` or a click: that peer's conversation, opened.
+fn open_pin<B: InputBuffer>(model: &mut UiModel<B>, peer: [u8; 16]) -> Vec<UiEffect> {
+    if Some(peer) == model.address {
+        model.toast(ToastKind::Info, "that pin is you".to_string());
+        return Vec::new();
+    }
+    let index = model.conversation(peer);
+    model.select(index);
+    model.map = None;
+    model.focus = Pane::Messages;
     Vec::new()
 }
 
@@ -1312,6 +1444,7 @@ fn click<B: InputBuffer + Default>(model: &mut UiModel<B>, col: u16, row: u16) -
             model.focus = Pane::Compose;
             return run(model, PaletteCommand::Send);
         }
+        Target::Pin(peer) => return open_pin(model, peer),
     }
     Vec::new()
 }
@@ -1495,6 +1628,16 @@ fn wheel<B: InputBuffer>(model: &mut UiModel<B>, col: u16, row: u16, down: bool)
             };
             model.compose.edit(&KeyEvent::new(code, KeyModifiers::NONE));
         }
+        // The wheel zooms the map, toward the reader as it rolls back.
+        Some(Pane::Map) => {
+            return map_key(
+                model,
+                match down {
+                    true => keys::MapCmd::ZoomOut,
+                    false => keys::MapCmd::ZoomIn,
+                },
+            );
+        }
         None => {}
     }
     Vec::new()
@@ -1518,6 +1661,7 @@ fn scroll<B: InputBuffer>(model: &mut UiModel<B>, pane: Pane, cmd: ScrollCmd) {
     match pane {
         Pane::Conversations | Pane::Search => scroll_list(model, cmd),
         Pane::Messages | Pane::Compose => scroll_messages(model, cmd),
+        Pane::Map => {}
     }
 }
 
@@ -1803,6 +1947,10 @@ fn run<B: InputBuffer + Default>(model: &mut UiModel<B>, command: PaletteCommand
             model.toggle_pin();
             Vec::new()
         }
+        PaletteCommand::Map => {
+            open_map(model);
+            Vec::new()
+        }
         PaletteCommand::Theme => {
             model.theme = model.theme.toggle();
             let name = match model.theme {
@@ -2029,6 +2177,49 @@ fn take_telemetry<B>(model: &mut UiModel<B>, index: usize, message_id: [u8; 32])
 }
 
 impl<B> UiModel<B> {
+    /// The map's pins in `Tab` order: every peer with a position, our own
+    /// named `you`.
+    pub fn map_pins(&self) -> Vec<map::MapPin> {
+        map::pins_of(
+            &self.positions,
+            |peer| self.names.label(peer),
+            self.address,
+            self.now.map(|now| now.unix_secs),
+        )
+    }
+
+    /// The cells the map's picture covers.
+    pub fn map_area(&self) -> Rect
+    where
+        B: InputBuffer,
+    {
+        map::picture_area(Screen::of(self.screen.0, self.screen.1, self.compose_rows()).messages)
+    }
+
+    /// The open map as drawn: its view and the pins in it.
+    pub fn map_view(&self) -> Option<map::MapView>
+    where
+        B: InputBuffer,
+    {
+        let state = self.map.as_ref()?;
+        let area = self.map_area();
+        let viewport = map::viewport(state, area, &self.map_setup);
+        let pins = map::place(
+            &self.map_pins(),
+            &viewport,
+            area,
+            &self.map_setup,
+            state.selected,
+            self.ascii,
+        );
+        Some(map::MapView {
+            area,
+            viewport,
+            cell_px: self.map_setup.cell_px,
+            pins,
+        })
+    }
+
     /// One position received: the peer's latest when it is newer than what
     /// the screen holds, and for the store either way, which keeps the track.
     fn take_fix(&mut self, fix: Fix) {
@@ -2238,7 +2429,12 @@ pub struct View {
     /// The colour tier and the theme the screen is drawn in.
     pub tier: Tier,
     pub theme: Theme,
+    /// The map, when open, drawn in the conversation pane's place.
+    pub map: Option<map::MapView>,
 }
+
+/// The map pane's title.
+pub const MAP_TITLE: &str = "map";
 
 /// The empty conversations pane's line.
 pub const NO_CONVERSATIONS: &str = "No conversations: start with --to <address>.";
@@ -2529,6 +2725,14 @@ pub fn view<B: InputBuffer>(model: &UiModel<B>) -> View {
             .collect(),
     });
     let searching = model.search.is_some();
+    let map = model.map_view();
+    let (messages_title, messages_title_right) = match &map {
+        Some(shown) => (
+            MAP_TITLE.to_string(),
+            format!("z{} · {} in view", shown.viewport.zoom(), shown.pins.len()),
+        ),
+        None => (messages_title, messages_title_right),
+    };
     View {
         conversations_title: match (searching, model.address) {
             (true, _) => SEARCH_TITLE.to_string(),
@@ -2561,6 +2765,7 @@ pub fn view<B: InputBuffer>(model: &UiModel<B>) -> View {
         detail: model.detail.and_then(|(c, m)| detail_view(model, c, m)),
         tier: model.tier,
         theme: model.theme,
+        map,
     }
 }
 
@@ -5440,5 +5645,195 @@ mod tests {
         assert_eq!(model.positions[&PEER].location.latitude_e6, 2);
         model.delete_conversation(PEER);
         assert!(model.positions.is_empty());
+    }
+
+    /// A model with three peers' positions around Florence, ours among them,
+    /// at 14:00, on an 80 x 24 screen drawn with braille.
+    fn mapped() -> UiModel<Field> {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        clock(&mut model, 26, 14, 0);
+        model.address = Some([0x01; 16]);
+        model.names.remember(PEER, "bob");
+        model.names.remember(OTHER, "Alice");
+        let fix = |peer: [u8; 16], lat: i32, lon: i32, ago: i64| Fix {
+            peer,
+            via: PEER,
+            message: None,
+            received_at: Some(two_pm()),
+            location: fix_at(lat, lon, two_pm() - ago)
+                .location
+                .expect("a location"),
+            telemetry: Vec::new(),
+        };
+        model.restore_positions(vec![
+            fix(PEER, 43_775_000, 11_261_000, 240),
+            fix(OTHER, 43_776_000, 11_266_000, 3 * 3600),
+            fix([0x01; 16], 43_774_000, 11_258_000, 60),
+        ]);
+        update(
+            &mut model,
+            UiEvent::MapSetup(map::MapSetup {
+                cell_px: (2, 4),
+                zooms: (0, 20),
+            }),
+        );
+        model
+    }
+
+    fn selected_label(model: &UiModel<Field>) -> String {
+        let peer = model.map.and_then(|m| m.selected).expect("a pin selected");
+        let pins = model.map_pins();
+        pins.iter()
+            .find(|p| p.peer == peer)
+            .expect("pin")
+            .label
+            .clone()
+    }
+
+    /// `M` puts the map in the conversation's place with every pin in view
+    /// and the first by name selected; `Tab` steps by name; `Esc` brings
+    /// the conversation back with the focus in it.
+    #[test]
+    fn the_map_opens_fitted_steps_its_pins_and_closes() {
+        let mut model = mapped();
+        update(&mut model, key(KeyCode::Char('M')));
+        assert_eq!(model.focus, Pane::Map);
+        let shown = view(&model);
+        let map = shown.map.expect("the map is drawn");
+        assert_eq!(shown.messages_title, MAP_TITLE);
+        assert_eq!(map.pins.len(), 3, "every pin in view: {:?}", map.pins);
+        // 0.008 degrees of longitude in 104 x 72 dots, two cells spare.
+        assert_eq!(map.viewport.zoom(), 14);
+        // By name, case folded: Alice, bob, you.
+        let order: Vec<String> = model.map_pins().into_iter().map(|p| p.label).collect();
+        assert_eq!(order.len(), 3);
+        assert!(order[0].starts_with("Alice") && order[1].starts_with("bob"));
+        assert_eq!(order[2], "you");
+        assert!(selected_label(&model).starts_with("Alice"));
+        // Alice's fix is three hours old: stale, dimmed, with its age.
+        let alice = map
+            .pins
+            .iter()
+            .find(|p| p.text.contains("Alice"))
+            .expect("Alice");
+        // She is at the picture's right edge: her name is set left of her
+        // marker, which stays on her cell.
+        assert!(alice.stale, "{alice:?}");
+        assert_eq!(alice.text, "Alice ·cdcd · 3 h ◉");
+        assert!(alice.col + 19 <= map.area.x + map.area.width, "{alice:?}");
+        let last = map.pins.last().expect("pins");
+        assert!(
+            last.selected && last.text.contains('◉'),
+            "drawn last: {last:?}"
+        );
+        update(&mut model, key(KeyCode::Tab));
+        assert!(selected_label(&model).starts_with("bob"));
+        update(&mut model, key(KeyCode::BackTab));
+        update(&mut model, key(KeyCode::BackTab));
+        assert_eq!(selected_label(&model), "you");
+        update(&mut model, key(KeyCode::Esc));
+        assert!(model.map.is_none());
+        assert_eq!(model.focus, Pane::Messages);
+        assert!(view(&model).map.is_none());
+    }
+
+    #[test]
+    fn zoom_pan_and_fit_move_the_view_within_the_setups_zooms() {
+        let mut model = mapped();
+        update(&mut model, UiEvent::Run(PaletteCommand::Map));
+        let fitted = model.map.expect("open");
+        update(&mut model, key(KeyCode::Char('-')));
+        assert_eq!(model.map.expect("open").zoom, fitted.zoom - 1);
+        for _ in 0..30 {
+            update(&mut model, key(KeyCode::Char('+')));
+        }
+        assert_eq!(model.map.expect("open").zoom, 20, "the setup's deepest");
+        for _ in 0..30 {
+            update(&mut model, key(KeyCode::Char('-')));
+        }
+        assert_eq!(model.map.expect("open").zoom, 0);
+        update(&mut model, key(KeyCode::Char('0')));
+        assert_eq!(model.map, Some(fitted));
+        // A pan moves the centre a quarter of the view, the arrows and vi's
+        // keys alike, and back again.
+        update(&mut model, key(KeyCode::Char('l')));
+        let east = model.map.expect("open").centre;
+        assert!(east.x > fitted.centre.x && east.y == fitted.centre.y);
+        update(&mut model, key(KeyCode::Left));
+        assert_eq!(model.map.expect("open").centre, fitted.centre);
+        update(&mut model, key(KeyCode::Char('j')));
+        assert!(model.map.expect("open").centre.y > fitted.centre.y);
+        update(&mut model, key(KeyCode::Up));
+        assert_eq!(model.map.expect("open").centre, fitted.centre);
+    }
+
+    /// `Enter` on a pin, or a click on it, opens that peer's conversation,
+    /// a new one for a peer known only by position; our own pin opens none.
+    #[test]
+    fn a_pin_opens_its_peers_conversation_by_enter_or_click() {
+        let mut model = mapped();
+        update(&mut model, key(KeyCode::Char('M')));
+        assert!(selected_label(&model).starts_with("Alice"));
+        update(&mut model, key(KeyCode::Enter));
+        assert!(model.map.is_none());
+        assert_eq!(model.focus, Pane::Messages);
+        assert_eq!(model.conversations[model.selected].peer, OTHER);
+        // Open again, click bob's name.
+        update(&mut model, ctrl_key('g'));
+        update(
+            &mut model,
+            UiEvent::Key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::ALT)),
+        );
+        let map = view(&model).map.expect("open");
+        let bob = map
+            .pins
+            .iter()
+            .find(|p| p.text.contains("bob"))
+            .expect("bob");
+        press(&mut model, (bob.col + 3, bob.row));
+        assert!(model.map.is_none());
+        assert_eq!(model.conversations[model.selected].peer, PEER);
+        // A click on the map where no pin is focuses it and opens nothing.
+        update(&mut model, key(KeyCode::Char('M')));
+        let map = view(&model).map.expect("open");
+        let empty = (map.area.x, map.area.y);
+        assert!(map.pins.iter().all(|p| (p.col, p.row) != empty));
+        press(&mut model, empty);
+        assert_eq!(model.focus, Pane::Map);
+        assert!(model.map.is_some());
+        // Our own pin.
+        update(&mut model, key(KeyCode::BackTab));
+        assert_eq!(selected_label(&model), "you");
+        update(&mut model, key(KeyCode::Enter));
+        assert!(model.map.is_some(), "no conversation with ourselves");
+    }
+
+    /// The list stays beside the map: the focus goes there and back by
+    /// `Tab`, and only the conversation or compose taking the focus closes
+    /// the map.
+    #[test]
+    fn the_list_stays_beside_the_map_and_compose_closes_it() {
+        let mut model = mapped();
+        update(&mut model, key(KeyCode::Char('M')));
+        update(&mut model, UiEvent::Run(PaletteCommand::FocusConversations));
+        assert!(model.map.is_some());
+        update(&mut model, key(KeyCode::Tab));
+        assert_eq!(model.focus, Pane::Map, "Tab from the list goes to the map");
+        update(&mut model, UiEvent::Run(PaletteCommand::FocusCompose));
+        assert!(model.map.is_none());
+        assert_eq!(model.focus, Pane::Compose);
+    }
+
+    /// No position at all: the whole world at the shallowest zoom.
+    #[test]
+    fn a_map_without_pins_shows_the_world() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        update(&mut model, key(KeyCode::Char('M')));
+        let state = model.map.expect("open");
+        assert_eq!((state.zoom, state.selected), (0, None));
+        assert!(view(&model).map.expect("drawn").pins.is_empty());
+        update(&mut model, key(KeyCode::Tab));
+        update(&mut model, key(KeyCode::Enter));
+        assert!(model.map.is_some());
     }
 }

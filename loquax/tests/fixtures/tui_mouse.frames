@@ -183,7 +183,7 @@ Enter details │ i write │ Tab pane │ Esc back │ : commands │ ? help �
 │  g / G   Home / End                            top / bottom                  █
 │  Ctrl-↑ / Ctrl-↓                               top / bottom (Signal)         █
 │  PageDown / PageUp                             page the messages (compose)   █
-│                                                                              █
+│                                                                              ║
 │Conversations                                                                 ║
 │  Enter                                         open the selected conversation║
 │  Enter                                         open the selected result      ║
