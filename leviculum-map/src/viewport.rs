@@ -147,6 +147,21 @@ impl Viewport {
         }
     }
 
+    /// A different zoom about pixel `(x, y)` of the view: the world point
+    /// at that pixel's top-left corner stays there, as a wheel under the
+    /// pointer expects. y stops at the edges as [`pan`](Self::pan) does.
+    pub fn zoom_about(&mut self, zoom: u8, x: i32, y: i32) {
+        let held = self.to_world(x, y);
+        self.set_zoom(zoom);
+        let s = self.sub_shift();
+        let dx = (i64::from(x) * SUB - i64::from(self.width) * SUB / 2) << s;
+        let dy = (i64::from(y) * SUB - i64::from(self.height) * SUB / 2) << s;
+        self.centre = World {
+            x: (i64::from(held.x) - dx).rem_euclid(1 << 32) as u32,
+            y: (i64::from(held.y) - dy).clamp(0, i64::from(u32::MAX)) as u32,
+        };
+    }
+
     /// Move the centre by whole pixels; x wraps, y stops at the edges.
     pub fn pan(&mut self, dx: i32, dy: i32) {
         let px = 24 - u32::from(self.zoom);

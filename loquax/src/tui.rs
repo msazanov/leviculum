@@ -81,6 +81,11 @@ type Model = UiModel<Input>;
 const TICK_MS: u64 = 250;
 /// How often the engine's queue is read: the send runner's own poll.
 const PUMP_MS: u64 = 20;
+/// How often a map being dragged is drawn: at the tick, not at every
+/// motion the terminal reports, which comes far faster than a sixel picture
+/// is encoded. The motions between two frames only move the model's view;
+/// the frame after the release is drawn at once.
+const DRAG_FRAME_MS: u64 = TICK_MS;
 /// How long a script's `until` waits by default.
 const UNTIL_SECS: u64 = 30;
 /// The longest a script's `sleep` may ask for.
@@ -1044,6 +1049,7 @@ async fn run_terminal(
     // The wall clock against the monotonic one, read on every tick: the
     // wall running ahead is a suspend the monotonic clock slept through.
     let mut clocks = (local_now().unix_secs, shell.elapsed_ms());
+    let mut drawn_at = tokio::time::Instant::now();
 
     let result = loop {
         for output in std::mem::take(&mut shell.outputs) {
@@ -1057,9 +1063,14 @@ async fn run_terminal(
                 break Err(error.to_string());
             }
         }
-        let view = ui::view(&shell.model);
-        if let Err(error) = terminal.draw(|frame| draw(frame, &view, Some(&mut painter))) {
-            break Err(error.to_string());
+        let held =
+            shell.model.map_dragging() && drawn_at.elapsed() < Duration::from_millis(DRAG_FRAME_MS);
+        if !held {
+            let view = ui::view(&shell.model);
+            if let Err(error) = terminal.draw(|frame| draw(frame, &view, Some(&mut painter))) {
+                break Err(error.to_string());
+            }
+            drawn_at = tokio::time::Instant::now();
         }
         if shell.model.quit {
             break Ok(());

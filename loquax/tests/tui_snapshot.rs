@@ -1802,7 +1802,9 @@ async fn a_peers_position_shows_in_the_header_and_its_reports_fold_into_one_line
 /// peer reports its own position and, as a collector, a stream row for a
 /// third peer three hours old and one for us. With the Florence fixture
 /// installed as the only region, `M` fits the three pins on it; `Tab`
-/// moves the selection; zooming out past the region's shallowest zoom
+/// moves the selection; a drag that starts on the selected pin moves the
+/// map ten cells left and three up under the pointer and opens nothing;
+/// zooming out past the region's shallowest zoom
 /// to z5 draws the world outline, the coast of Italy; `0` fits again; `Enter` opens the selected
 /// peer's conversation; the map again and `Esc` bring the conversation
 /// back.
@@ -1816,6 +1818,8 @@ key M
 frame map
 key tab
 frame next pin
+drag 50 11 40 8
+frame dragged
 key -
 key -
 key -
@@ -1932,6 +1936,19 @@ async fn the_map_shows_the_pins_on_the_region_and_the_outline_in_braille_and_hal
         let next = frame(&frames, "next pin");
         assert!(map.contains("· 3 h ◉") && next.contains("◉ them"), "{next}");
         assert!(map.contains("· 3 h"), "the stale one with its age\n{map}");
+        // The drag: every pin ten cells left and three up, the map open.
+        let dragged = frame(&frames, "dragged");
+        assert!(dragged.contains("● map"), "nothing opened\n{dragged}");
+        let at = |frame: &str| {
+            frame.lines().enumerate().find_map(|(row, line)| {
+                line.find("◉ them")
+                    .map(|byte| (line[..byte].chars().count(), row))
+            })
+        };
+        let (Some(was), Some(now)) = (at(next), at(dragged)) else {
+            panic!("the selected pin in both\n{next}\n{dragged}");
+        };
+        assert_eq!((was.0 - now.0, was.1 - now.1), (10, 3), "{dragged}");
         assert!(map.contains("· 4 min"), "{map}");
         let outline = frame(&frames, "outline");
         assert!(outline.contains("Natural Earth"), "{outline}");

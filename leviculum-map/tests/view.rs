@@ -279,3 +279,18 @@ fn pins_are_stepped_by_name_then_hash() {
     let hashes = [[3u8; 16], [9; 16], [1; 16], [2; 16]];
     assert_eq!(order(&pins, |i| hashes[i]), [2, 3, 1, 0]);
 }
+
+/// The wheel zooms about the pointer: the world point at the pixel under
+/// it stays at that pixel, in and out, in the middle and at a corner.
+#[test]
+fn a_zoom_about_a_pixel_keeps_the_point_under_it() {
+    for (x, y) in [(10, 20), (239, 0), (120, 80), (0, 159)] {
+        for (from, to) in [(6, 7), (7, 6), (12, 14), (14, 3)] {
+            let mut view = Viewport::new(project(CENTRE), from, 240, 160);
+            let held = view.to_world(x, y);
+            view.zoom_about(to, x, y);
+            assert_eq!(view.zoom(), to);
+            assert_eq!(view.to_world(x, y), held, "z{from} to z{to} at ({x}, {y})");
+        }
+    }
+}

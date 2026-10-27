@@ -47,7 +47,10 @@
 //! the reader sees. The two targets that transmit, `send` on the compose
 //! box's border and the mailbox state in the header, run the same commands
 //! as `Enter` and `F5`. A drag over the conversation selects text and its
-//! release copies it ([`UiEffect::Copy`], OSC 52 in the terminal).
+//! release copies it ([`UiEffect::Copy`], OSC 52 in the terminal). On the
+//! map a drag moves the view with the pointer and a click opens the pin it
+//! went down and came up on ([`map::MapPress`]); the wheel zooms about the
+//! pointer.
 //!
 //! # History
 //!
@@ -550,6 +553,8 @@ pub struct UiModel<B> {
     pub map: Option<map::MapState>,
     /// What the shell draws the map with ([`UiEvent::MapSetup`]).
     pub map_setup: map::MapSetup,
+    /// The left button held down on the map, a click or a drag.
+    pub map_press: Option<map::MapPress>,
 }
 
 /// Text a drag selected in the open conversation, from where the button went
@@ -616,6 +621,7 @@ impl<B: InputBuffer + Default> UiModel<B> {
             fixes_received: Vec::new(),
             map: None,
             map_setup: map::MapSetup::default(),
+            map_press: None,
         };
         for peer in peers {
             model.conversation(*peer);
@@ -1284,6 +1290,7 @@ fn map_key<B: InputBuffer>(model: &mut UiModel<B>, cmd: keys::MapCmd) -> Vec<UiE
         }
         MapCmd::Close => {
             model.map = None;
+            model.map_press = None;
             model.focus = Pane::Messages;
         }
     }
@@ -1465,7 +1472,7 @@ fn on_mouse<B: InputBuffer + Default>(model: &mut UiModel<B>, mouse: MouseEvent)
             drag(model, col, row);
             Vec::new()
         }
-        MouseEventKind::Up(MouseButton::Left) => release(model),
+        MouseEventKind::Up(MouseButton::Left) => release(model, col, row),
         MouseEventKind::ScrollDown => wheel(model, col, row, true),
         MouseEventKind::ScrollUp => wheel(model, col, row, false),
         _ => Vec::new(),
@@ -1477,6 +1484,7 @@ fn click<B: InputBuffer + Default>(model: &mut UiModel<B>, col: u16, row: u16) -
     use hit::Target;
     model.selection = None;
     model.press = None;
+    model.map_press = None;
     let target = hit::target_at(model, col, row);
     match target {
         Target::Nothing | Target::InsideOverlay => {}
@@ -1486,6 +1494,18 @@ fn click<B: InputBuffer + Default>(model: &mut UiModel<B>, col: u16, row: u16) -
             model.detail = None;
         }
         Target::Footer(act) => return footer_click(model, act),
+        // On the map a press is a click or a drag, which the release tells
+        // apart: a pin opens only on a release where it went down.
+        Target::Pane(Pane::Map) | Target::Pin(_) => {
+            model.focus = Pane::Map;
+            if let Some(state) = model.map {
+                let pin = match target {
+                    Target::Pin(peer) => Some(peer),
+                    _ => None,
+                };
+                model.map_press = Some(map::MapPress::new((col, row), state.centre, pin));
+            }
+        }
         Target::Pane(pane) => model.focus = pane,
         Target::Conversation(index) => {
             model.focus = Pane::Conversations;
@@ -1518,7 +1538,6 @@ fn click<B: InputBuffer + Default>(model: &mut UiModel<B>, col: u16, row: u16) -
             model.focus = Pane::Compose;
             return run(model, PaletteCommand::Send);
         }
-        Target::Pin(peer) => return open_pin(model, peer),
     }
     Vec::new()
 }
@@ -1581,9 +1600,14 @@ fn point_at<B: InputBuffer>(model: &mut UiModel<B>, index: usize) {
     };
 }
 
-/// The pointer moved with the left button held: a press on the conversation
-/// selects from where it went down to here.
+/// The pointer moved with the left button held: a press on the map moves
+/// it with the pointer, a press on the conversation selects from where it
+/// went down to here.
 fn drag<B: InputBuffer>(model: &mut UiModel<B>, col: u16, row: u16) {
+    if model.map_press.is_some() {
+        map_drag(model, col, row);
+        return;
+    }
     let Some(press) = model.press.as_mut() else {
         return;
     };
@@ -1603,9 +1627,35 @@ fn drag<B: InputBuffer>(model: &mut UiModel<B>, col: u16, row: u16) {
     }
 }
 
-/// The left button came up: a drag copies what it selected, a click on a
-/// mark opens the detail view and one on a link follows it.
-fn release<B: InputBuffer + Default>(model: &mut UiModel<B>) -> Vec<UiEffect> {
+/// The map follows the pointer: the view at the press, moved by how far
+/// the pointer is from where the button went down. Nothing moves until the
+/// press is a drag ([`map::DRAG_CELLS`]).
+fn map_drag<B: InputBuffer>(model: &mut UiModel<B>, col: u16, row: u16) {
+    let setup = model.map_setup;
+    let (Some(press), Some(state)) = (model.map_press.as_mut(), model.map.as_mut()) else {
+        return;
+    };
+    press.reach(col, row);
+    state.centre = press.centre_at(col, row, state, &setup);
+}
+
+/// The left button came up: on the map a drag ends where the pointer is
+/// and a click on a pin opens it; in the conversation a drag copies what
+/// it selected, a click on a mark opens the detail view and one on a link
+/// follows it.
+fn release<B: InputBuffer + Default>(model: &mut UiModel<B>, col: u16, row: u16) -> Vec<UiEffect> {
+    if model.map_press.is_some() {
+        // A terminal may report the release in a cell no motion reached.
+        map_drag(model, col, row);
+        let press = model.map_press.take();
+        return match press {
+            Some(press) if !press.dragging && model.map.is_some() => match press.pin {
+                Some(peer) => open_pin(model, peer),
+                None => Vec::new(),
+            },
+            _ => Vec::new(),
+        };
+    }
     let Some(press) = model.press.take() else {
         return Vec::new();
     };
@@ -1702,15 +1752,17 @@ fn wheel<B: InputBuffer>(model: &mut UiModel<B>, col: u16, row: u16, down: bool)
             };
             model.compose.edit(&KeyEvent::new(code, KeyModifiers::NONE));
         }
-        // The wheel zooms the map, toward the reader as it rolls back.
+        // The wheel zooms the map about the pointer, toward the reader as
+        // it rolls back.
         Some(Pane::Map) => {
-            return map_key(
-                model,
-                match down {
-                    true => keys::MapCmd::ZoomOut,
-                    false => keys::MapCmd::ZoomIn,
-                },
-            );
+            let (setup, area) = (model.map_setup, model.map_area());
+            if let Some(state) = model.map.as_mut() {
+                let zoom = match down {
+                    true => state.zoom.saturating_sub(1).max(setup.zooms.0),
+                    false => state.zoom.saturating_add(1).min(setup.zooms.1),
+                };
+                map::zoom_at(state, area, &setup, col, row, zoom);
+            }
         }
         None => {}
     }
@@ -2287,6 +2339,12 @@ impl<B> UiModel<B> {
         B: InputBuffer,
     {
         map::picture_area(Screen::of(self.screen.0, self.screen.1, self.compose_rows()).messages)
+    }
+
+    /// The map is being dragged: the shell draws it at its tick, not at
+    /// every motion the terminal reports.
+    pub fn map_dragging(&self) -> bool {
+        self.map.is_some() && self.map_press.is_some_and(|p| p.dragging)
     }
 
     /// The open map as drawn: its view and the pins in it.
@@ -6065,6 +6123,184 @@ mod tests {
         assert_eq!(selected_label(&model), "you");
         update(&mut model, key(KeyCode::Enter));
         assert!(model.map.is_some(), "no conversation with ourselves");
+    }
+
+    /// A drag on the map moves the view with the pointer at every
+    /// backend's cell: sixel's 9 x 19 pixels, half-blocks' 1 x 2,
+    /// braille's 2 x 4. The world point at the cell the button went down
+    /// on is at the cell it came up on, the view moved by the cells times
+    /// the cell's pixels, and nothing opens.
+    #[test]
+    fn a_drag_moves_the_map_by_the_cells_at_each_backends_geometry() {
+        for cell_px in [(9, 19), (1, 2), (2, 4)] {
+            let mut model = mapped();
+            update(
+                &mut model,
+                UiEvent::MapSetup(map::MapSetup {
+                    cell_px,
+                    zooms: (0, 20),
+                }),
+            );
+            update(&mut model, key(KeyCode::Char('M')));
+            let before = model.map.expect("open");
+            let shown = view(&model).map.expect("drawn");
+            let area = shown.area;
+            let from = (area.x + 2, area.y + 2);
+            assert_eq!(map::pin_at(&shown.pins, area, from.0, from.1), None);
+            let to = (from.0 + 5, from.1 + 3);
+            let corner = |view: &leviculum_map::viewport::Viewport, (col, row): (u16, u16)| {
+                view.to_world(
+                    i32::from(col - area.x) * i32::from(cell_px.0),
+                    i32::from(row - area.y) * i32::from(cell_px.1),
+                )
+            };
+            let held = corner(&shown.viewport, from);
+            update(
+                &mut model,
+                mouse(MouseEventKind::Down(MouseButton::Left), from.0, from.1),
+            );
+            assert_eq!(model.focus, Pane::Map);
+            assert!(!model.map_dragging(), "not before it moves");
+            update(
+                &mut model,
+                mouse(MouseEventKind::Drag(MouseButton::Left), to.0, to.1),
+            );
+            assert!(model.map_dragging(), "{cell_px:?}");
+            let after = model.map.expect("open");
+            let view_after = view(&model).map.expect("drawn").viewport;
+            assert_eq!(corner(&view_after, to), held, "{cell_px:?}");
+            let pixel = 1u32 << (24 - u32::from(before.zoom));
+            assert_eq!(
+                (
+                    before.centre.x - after.centre.x,
+                    before.centre.y - after.centre.y
+                ),
+                (
+                    5 * u32::from(cell_px.0) * pixel,
+                    3 * u32::from(cell_px.1) * pixel
+                ),
+                "{cell_px:?}"
+            );
+            assert_eq!(after.zoom, before.zoom);
+            update(
+                &mut model,
+                mouse(MouseEventKind::Up(MouseButton::Left), to.0, to.1),
+            );
+            assert!(!model.map_dragging());
+            assert_eq!(model.map.expect("open").centre, after.centre);
+            assert_eq!(model.focus, Pane::Map);
+        }
+    }
+
+    /// A release in a cell no motion reached still ends the drag there: a
+    /// terminal may report the button up without the move before it.
+    #[test]
+    fn a_release_away_from_the_press_is_a_drag_to_it() {
+        let mut model = mapped();
+        update(&mut model, key(KeyCode::Char('M')));
+        let before = model.map.expect("open");
+        let area = model.map_area();
+        let from = (area.x + 2, area.y + 2);
+        update(
+            &mut model,
+            mouse(MouseEventKind::Down(MouseButton::Left), from.0, from.1),
+        );
+        update(
+            &mut model,
+            mouse(MouseEventKind::Up(MouseButton::Left), from.0 + 1, from.1),
+        );
+        let after = model.map.expect("open");
+        let pixel = 1u32 << (24 - u32::from(before.zoom));
+        assert_eq!(before.centre.x - after.centre.x, 2 * pixel);
+    }
+
+    /// A press and release on a pin with no motion between, or a motion
+    /// the terminal reports in the same cell, is a click: the pin opens. A
+    /// drag that starts on a pin moves the map and opens nothing, also when
+    /// the pointer comes back to the pin before the release.
+    #[test]
+    fn a_press_without_motion_is_a_click_and_a_drag_from_a_pin_opens_nothing() {
+        let bob_of = |model: &UiModel<Field>| {
+            let map = view(model).map.expect("open");
+            let bob = map
+                .pins
+                .iter()
+                .find(|p| p.text.contains("bob"))
+                .expect("bob");
+            (bob.col + 3, bob.row)
+        };
+        let mut model = mapped();
+        update(&mut model, key(KeyCode::Char('M')));
+        let bob = bob_of(&model);
+        let before = model.map.expect("open");
+        update(
+            &mut model,
+            mouse(MouseEventKind::Down(MouseButton::Left), bob.0, bob.1),
+        );
+        update(
+            &mut model,
+            mouse(MouseEventKind::Drag(MouseButton::Left), bob.0 + 4, bob.1),
+        );
+        update(
+            &mut model,
+            mouse(MouseEventKind::Drag(MouseButton::Left), bob.0, bob.1),
+        );
+        update(
+            &mut model,
+            mouse(MouseEventKind::Up(MouseButton::Left), bob.0, bob.1),
+        );
+        assert!(model.map.is_some(), "a drag from a pin does not open it");
+        assert_eq!(model.map.expect("open").centre, before.centre, "and back");
+        update(
+            &mut model,
+            mouse(MouseEventKind::Down(MouseButton::Left), bob.0, bob.1),
+        );
+        update(
+            &mut model,
+            mouse(MouseEventKind::Drag(MouseButton::Left), bob.0, bob.1),
+        );
+        assert!(!model.map_dragging(), "the same cell is no drag");
+        update(
+            &mut model,
+            mouse(MouseEventKind::Up(MouseButton::Left), bob.0, bob.1),
+        );
+        assert!(model.map.is_none(), "a click opens it");
+        assert_eq!(model.conversations[model.selected].peer, PEER);
+    }
+
+    /// The wheel zooms about the pointer: the point at the centre of the
+    /// cell under it stays in that cell, in and out; off the picture, on
+    /// the map's border, it zooms about the centre.
+    #[test]
+    fn the_wheel_zooms_the_map_about_the_pointer() {
+        let mut model = mapped();
+        update(&mut model, key(KeyCode::Char('M')));
+        let area = model.map_area();
+        let at = (area.x + 3, area.y + 2);
+        let middle = |model: &UiModel<Field>| {
+            let view = view(model).map.expect("drawn").viewport;
+            view.to_world(
+                i32::from(at.0 - area.x) * 2 + 1,
+                i32::from(at.1 - area.y) * 4 + 2,
+            )
+        };
+        let before = model.map.expect("open");
+        let held = middle(&model);
+        update(&mut model, mouse(MouseEventKind::ScrollUp, at.0, at.1));
+        assert_eq!(model.map.expect("open").zoom, before.zoom + 1);
+        assert_eq!(middle(&model), held);
+        update(&mut model, mouse(MouseEventKind::ScrollDown, at.0, at.1));
+        update(&mut model, mouse(MouseEventKind::ScrollDown, at.0, at.1));
+        assert_eq!(model.map.expect("open").zoom, before.zoom - 1);
+        assert_eq!(middle(&model), held);
+        // On the border: the centre stays.
+        let centre = model.map.expect("open").centre;
+        update(
+            &mut model,
+            mouse(MouseEventKind::ScrollUp, area.x - 1, area.y + 2),
+        );
+        assert_eq!(model.map.expect("open").centre, centre);
+        assert_eq!(model.map.expect("open").zoom, before.zoom);
     }
 
     /// The list stays beside the map: the focus goes there and back by

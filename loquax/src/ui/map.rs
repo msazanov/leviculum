@@ -413,6 +413,85 @@ pub fn place(
     out
 }
 
+/// How far, in cells either way, the pointer goes from where the left
+/// button went down on the map before the press is a drag and no longer a
+/// click. One: the terminal reports the pointer by the cell, so a report
+/// of the next cell is a hand that moved, and a hand that held still sends
+/// none.
+pub const DRAG_CELLS: u16 = 1;
+
+/// The left button held down on the map.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MapPress {
+    /// The cell it went down on.
+    pub from: (u16, u16),
+    /// The view's centre then.
+    pub centre: World,
+    /// The pin it went down on, which a release without a drag opens.
+    pub pin: Option<[u8; 16]>,
+    /// The pointer went [`DRAG_CELLS`] or more from `from`: the release
+    /// opens nothing, and it stays a drag when the pointer comes back.
+    pub dragging: bool,
+}
+
+impl MapPress {
+    pub fn new(from: (u16, u16), centre: World, pin: Option<[u8; 16]>) -> Self {
+        Self {
+            from,
+            centre,
+            pin,
+            dragging: false,
+        }
+    }
+
+    /// The pointer is at `(col, row)`: a drag from there on once it is far
+    /// enough from where the button went down.
+    pub fn reach(&mut self, col: u16, row: u16) {
+        let far = |a: u16, b: u16| a.abs_diff(b) >= DRAG_CELLS;
+        self.dragging |= far(col, self.from.0) || far(row, self.from.1);
+    }
+
+    /// The centre with the pointer at `(col, row)`: the view at the press
+    /// moved the other way by the pointer's distance in the backend's
+    /// pixels, so the point under the pointer when the button went down is
+    /// under it again. The press's own centre while it is not a drag.
+    pub fn centre_at(&self, col: u16, row: u16, state: &MapState, setup: &MapSetup) -> World {
+        if !self.dragging {
+            return self.centre;
+        }
+        let cells = |to: u16, from: u16| i32::from(to) - i32::from(from);
+        let mut view = Viewport::new(self.centre, state.zoom, 1, 1);
+        view.pan(
+            -cells(col, self.from.0) * i32::from(setup.cell_px.0.max(1)),
+            -cells(row, self.from.1) * i32::from(setup.cell_px.1.max(1)),
+        );
+        view.centre
+    }
+}
+
+/// `state` at `zoom`, about the cell `(col, row)` when it is on the
+/// picture `area`: the point at the centre of that cell stays under it,
+/// as the wheel under the pointer expects. Off the picture, about the
+/// centre.
+pub fn zoom_at(state: &mut MapState, area: Rect, setup: &MapSetup, col: u16, row: u16, zoom: u8) {
+    let on = (area.x..area.x + area.width).contains(&col)
+        && (area.y..area.y + area.height).contains(&row);
+    if !on {
+        state.zoom = zoom;
+        return;
+    }
+    let (cw, ch) = (
+        i32::from(setup.cell_px.0.max(1)),
+        i32::from(setup.cell_px.1.max(1)),
+    );
+    let x = i32::from(col - area.x) * cw + cw / 2;
+    let y = i32::from(row - area.y) * ch + ch / 2;
+    let mut view = viewport(state, area, setup);
+    view.zoom_about(zoom, x, y);
+    state.centre = view.centre;
+    state.zoom = view.zoom();
+}
+
 /// The pin drawn at a cell, its marker or its name, the topmost where
 /// texts overlap.
 pub fn pin_at(cells: &[PinCell], area: Rect, col: u16, row: u16) -> Option<[u8; 16]> {
