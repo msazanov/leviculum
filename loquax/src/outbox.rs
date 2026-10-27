@@ -25,6 +25,7 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 use leviculum_lxmf::router::{MessageState, PropagationPathAttempts};
+use leviculum_lxmf::Field;
 
 use crate::mailbox_state::{Decision, Route, Stored};
 
@@ -62,6 +63,9 @@ pub struct SendRequest {
     pub destination: [u8; 16],
     pub title: Vec<u8>,
     pub body: Vec<u8>,
+    /// The LXMF fields, raw. The messenger itself sends none; a test's
+    /// correspondent sends telemetry through it, as a Sideband peer would.
+    pub fields: Vec<Field>,
     pub via: Via,
 }
 
@@ -156,6 +160,10 @@ pub enum OutboxEvent {
         source: [u8; 16],
         title: Vec<u8>,
         body: Vec<u8>,
+        /// The message's fields as they came, each value raw msgpack: the
+        /// core reads telemetry from them ([`crate::telemetry`]) and the
+        /// store keeps them.
+        fields: Vec<Field>,
         /// Whether the signature verified against a known source identity.
         verified: bool,
     },

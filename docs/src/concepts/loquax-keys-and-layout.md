@@ -863,7 +863,7 @@ first rung it is.
 #### 2. Light or dark
 
 `loquax` asks the terminal for its background before raw mode
-(`loquax/src/tui.rs:717`), the same query `lnomad` makes: OSC 11, with
+(`loquax/src/tui.rs:724`), the same query `lnomad` makes: OSC 11, with
 `COLORFGBG` as the fallback, 100 ms to answer
 (`leviculum-ui-ratatui/src/background.rs:12`), decided by
 `resolve_theme` (`leviculum-ui/src/theme.rs:73`). It was hardcoded to
@@ -879,7 +879,7 @@ first rung it is.
 - a palette action `theme` toggles for the session, the way `t` calls
   `toggle_theme` in lnomad (`lnomad/src/app/event.rs:697`); no key, the
   keymap is decided. Its toast names the theme it turned to
-  (`loquax/src/ui.rs:1762`).
+  (`loquax/src/ui.rs:1806`).
 
 #### 3. What colour carries and what it must not carry alone
 
@@ -1075,7 +1075,7 @@ in truecolor, 3.4:1 to 9.3:1 and 3.1:1 to 8.6:1 in 256.
 #### 5. Tests the layout slice will carry
 
 - **The frames stay plain text.** The `frame` step of the key script
-  (`loquax/src/tui.rs:1111`) writes characters only, and the existing
+  (`loquax/src/tui.rs:1118`) writes characters only, and the existing
   snapshot frames keep pinning the monochrome look.
 - **A script step `styles <name>`** writes one frame's per-cell style as a
   map in the letters above: `.` `,` `=` for the three tints, `s` for a
@@ -1138,7 +1138,7 @@ these differences from the text above:
   for a selected block and `r` for reverse video; the build writes `^`
   for both, because a selected block in 16 colours and in monochrome is
   reverse video and a map of styles cannot tell the two apart. The
-  letters (`style_letter`, `loquax/src/tui.rs:1210`): `.` ours, `,`
+  letters (`style_letter`, `loquax/src/tui.rs:1217`): `.` ours, `,`
   theirs, `=` the date pill, `!` the unread rule, `^` a selected block's
   tint or reverse video, `t` the toast, `e` the error colour, blank for
   the pane. Where two tokens share their colours the earlier letter wins:

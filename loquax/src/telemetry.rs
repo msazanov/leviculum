@@ -1,0 +1,767 @@
+//! What loquax reads of telemetry: the positions in an incoming message's
+//! fields, as slice (a) of `docs/src/concepts/loquax-map.md` has them.
+//!
+//! Two fields carry a position, both in Sideband's `Telemeter` format and
+//! both read with the codec of `leviculum-lxmf`:
+//!
+//! - `FIELD_TELEMETRY`, one node's own readings. Who measured is the
+//!   message's signed source.
+//! - `FIELD_TELEMETRY_STREAM`, a collector's rows. Who measured is the row's
+//!   source hash; the message's source only delivered it (`via`).
+//!
+//! Every reading with a location becomes one [`Fix`]. A blob that does not
+//! decode is [`Unreadable`]: kept raw with its message, and named in
+//! `tui.log` by the shell, never dropped silently (the archive rule of
+//! `docs/src/concepts/telemetry.md`, "What a receiving node owes").
+//!
+//! Nothing here sends: loquax receives and shows. The core has no clock, so
+//! every time here is unix seconds handed in by the caller.
+
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
+
+use leviculum_lxmf::constants::{FIELD_TELEMETRY, FIELD_TELEMETRY_STREAM};
+use leviculum_lxmf::msgpack::{self, Number};
+use leviculum_lxmf::telemetry::{decode_stream_field_value, Location, Telemetry};
+use leviculum_lxmf::Field;
+
+use crate::address::to_hex;
+use crate::when::WallTime;
+
+/// A fix older than this is drawn dimmed, its age still beside it: twice
+/// the station profile's 60 min heartbeat, so a board that misses one report
+/// stays current and one that misses two goes dim (`loquax-map.md`,
+/// "Stale"; proposed there, Lew may change it). A fix is never removed for
+/// its age alone.
+pub const STALE_AFTER_SECS: i64 = 2 * 3600;
+
+/// How far ahead of our clock a fix may claim to be before it is clamped:
+/// honest skew between two synced clocks, not the future
+/// (`docs/src/concepts/time-and-clocks.md`, "Ingress: clamp for semantics,
+/// keep for display").
+pub const FUTURE_TOLERANCE_SECS: i64 = 120;
+
+/// The line a telemetry report is drawn as in the conversation.
+pub const REPORT_MARK: char = '◎';
+
+/// One position, as received.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Fix {
+    /// Who measured.
+    pub peer: [u8; 16],
+    /// Who delivered: the message's source. Differs from `peer` for a
+    /// stream row.
+    pub via: [u8; 16],
+    /// The message it came in, as the store's key ([`crate::ui::Message::activity`]).
+    pub message: Option<u64>,
+    /// When we received it, unix seconds, when the shell had said the time.
+    pub received_at: Option<i64>,
+    /// The reading, in the wire's integers. `last_update` is the fix time.
+    pub location: Location,
+    /// The packed Telemeter the reading came from, for what we cannot decode
+    /// yet.
+    pub telemetry: Vec<u8>,
+}
+
+impl Fix {
+    /// The fix time the sender claims, `Location.last_update`.
+    pub fn fix_time(&self) -> i64 {
+        self.location.last_update
+    }
+
+    /// Whether the claimed fix time is ahead of our clock at receive time
+    /// by more than [`FUTURE_TOLERANCE_SECS`].
+    pub fn ahead(&self) -> bool {
+        self.received_at
+            .is_some_and(|at| self.fix_time() > at.saturating_add(FUTURE_TOLERANCE_SECS))
+    }
+
+    /// The time this fix sorts at: the claim, or the receive time where the
+    /// claim is ahead of our clock. Without the clamp one wrong clock would
+    /// hold a peer's position at "now" for ever.
+    pub fn order_time(&self) -> i64 {
+        match (self.ahead(), self.received_at) {
+            (true, Some(at)) => at,
+            _ => self.fix_time(),
+        }
+    }
+
+    /// Whether `self` replaces `other` as the peer's latest position.
+    pub fn newer_than(&self, other: &Fix) -> bool {
+        self.order_time() > other.order_time()
+            || (self.order_time() == other.order_time() && self.fix_time() > other.fix_time())
+    }
+
+    /// Whether the fix is older than [`STALE_AFTER_SECS`] at `now`.
+    pub fn stale(&self, now: i64) -> bool {
+        now.saturating_sub(self.fix_time()) > STALE_AFTER_SECS
+    }
+}
+
+/// A telemetry field whose value did not decode.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Unreadable {
+    /// The field number, or the stream field's for one of its rows.
+    pub field: i64,
+    /// Which part failed.
+    pub detail: String,
+    /// How many bytes were kept.
+    pub len: usize,
+}
+
+/// What a message's fields carried.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Read {
+    pub fixes: Vec<Fix>,
+    pub unreadable: Vec<Unreadable>,
+}
+
+/// Whether the fields carry telemetry at all.
+pub fn has_telemetry(fields: &[Field]) -> bool {
+    fields
+        .iter()
+        .any(|(k, _)| *k == FIELD_TELEMETRY || *k == FIELD_TELEMETRY_STREAM)
+}
+
+/// The positions in `fields`, from a message whose signed source is
+/// `source`, received at `received_at`.
+pub fn read(source: [u8; 16], fields: &[Field], received_at: Option<i64>) -> Read {
+    let mut out = Read::default();
+    let fix = |peer: [u8; 16], location: Location, telemetry: &[u8]| Fix {
+        peer,
+        via: source,
+        message: None,
+        received_at,
+        location,
+        telemetry: telemetry.to_vec(),
+    };
+    for (key, value) in fields {
+        match *key {
+            FIELD_TELEMETRY => match unwrap_bin(value) {
+                Some(blob) => match Telemetry::decode(blob) {
+                    Ok(telemetry) => {
+                        if let Some(location) = telemetry.location {
+                            out.fixes.push(fix(source, location, blob));
+                        }
+                    }
+                    Err(e) => out.unreadable.push(Unreadable {
+                        field: *key,
+                        detail: format!("the Telemeter is not a map ({e:?})"),
+                        len: value.len(),
+                    }),
+                },
+                None => out.unreadable.push(Unreadable {
+                    field: *key,
+                    detail: "the value is not a bin".to_string(),
+                    len: value.len(),
+                }),
+            },
+            FIELD_TELEMETRY_STREAM => match decode_stream_field_value(value) {
+                Ok(rows) => {
+                    for (n, row) in rows.iter().enumerate() {
+                        let Ok(peer) = <[u8; 16]>::try_from(row.source.as_slice()) else {
+                            out.unreadable.push(Unreadable {
+                                field: *key,
+                                detail: format!("row {n}: a source of {} bytes", row.source.len()),
+                                len: row.telemetry.len(),
+                            });
+                            continue;
+                        };
+                        match Telemetry::decode(&row.telemetry) {
+                            Ok(telemetry) => {
+                                if let Some(location) = telemetry.location {
+                                    out.fixes.push(fix(peer, location, &row.telemetry));
+                                }
+                            }
+                            Err(e) => out.unreadable.push(Unreadable {
+                                field: *key,
+                                detail: format!(
+                                    "row {n} from {}: the Telemeter is not a map ({e:?})",
+                                    to_hex(&peer[..4])
+                                ),
+                                len: row.telemetry.len(),
+                            }),
+                        }
+                    }
+                }
+                Err(e) => out.unreadable.push(Unreadable {
+                    field: *key,
+                    detail: format!("the stream is not an array ({e:?})"),
+                    len: value.len(),
+                }),
+            },
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The `tui.log` line for a field that did not decode.
+pub fn unreadable_line(source: &[u8; 16], message_id: &[u8; 32], u: &Unreadable) -> String {
+    format!(
+        "TELEMETRY_UNREADABLE source={} message={} field={} bytes={} kept=raw detail={:?}",
+        to_hex(source),
+        to_hex(&message_id[..8]),
+        u.field,
+        u.len,
+        u.detail
+    )
+}
+
+fn unwrap_bin(value: &[u8]) -> Option<&[u8]> {
+    let mut p = 0;
+    msgpack::read_bin(value, &mut p).ok()
+}
+
+/// The fields as one raw msgpack map, the store's `fields` column: the
+/// values are the wire's bytes, untouched.
+pub fn pack_fields(fields: &[Field]) -> Vec<u8> {
+    let mut out = Vec::new();
+    msgpack::map(&mut out, fields.len());
+    for (key, value) in fields {
+        msgpack::int(&mut out, *key);
+        out.extend_from_slice(value);
+    }
+    out
+}
+
+/// The inverse of [`pack_fields`]; `None` for bytes that are not such a map.
+pub fn unpack_fields(packed: &[u8]) -> Option<Vec<Field>> {
+    let mut p = 0;
+    let count = msgpack::map_len(packed, &mut p).ok()?;
+    let mut fields = Vec::with_capacity(count);
+    for _ in 0..count {
+        let key = msgpack::read_int(packed, &mut p).ok()?;
+        fields.push((key, msgpack::raw(packed, &mut p).ok()?.to_vec()));
+    }
+    Some(fields)
+}
+
+/// `43.77310 N 11.25600 E`: five decimals, a tenth of the wire's
+/// micro-degrees (about a metre), rounded half away from zero.
+pub fn coordinates(location: &Location) -> String {
+    format!(
+        "{} {}",
+        degrees(location.latitude_e6, 'N', 'S'),
+        degrees(location.longitude_e6, 'E', 'W')
+    )
+}
+
+fn degrees(e6: i32, positive: char, negative: char) -> String {
+    let abs = i64::from(e6).abs();
+    let e5 = (abs + 5) / 10;
+    let hemisphere = if e6 < 0 { negative } else { positive };
+    format!("{}.{:05} {hemisphere}", e5 / 100_000, e5 % 100_000)
+}
+
+/// `±5 m`, or `None` where the sender gave none. `Location.pack` always
+/// writes the field, so zero is the only absence the wire can say: no
+/// receiver reports a fix as exact to the centimetre and below.
+pub fn accuracy(location: &Location) -> Option<String> {
+    match location.accuracy_e2 {
+        0 => None,
+        e2 if e2 < 100 => Some(format!("±0.{e2:02} m")),
+        e2 => Some(format!("±{} m", (u32::from(e2) + 50) / 100)),
+    }
+}
+
+/// How long ago `secs` seconds is, as the header says it: `<1 min`,
+/// `4 min`, `3 h`, `2 d`.
+pub fn span(secs: i64) -> String {
+    let secs = secs.max(0);
+    match secs {
+        s if s < 60 => "<1 min".to_string(),
+        s if s < 3600 => format!("{} min", s / 60),
+        s if s < 86_400 => format!("{} h", s / 3600),
+        s => format!("{} d", s / 86_400),
+    }
+}
+
+/// The fix time as a wall time in `offset_secs`.
+pub fn fix_wall(fix_time: i64, offset_secs: i32) -> WallTime {
+    WallTime {
+        unix_secs: fix_time,
+        offset_secs,
+    }
+}
+
+/// The header's position text, longest first, at `now`: the renderer takes
+/// the first that fits. A fix ahead of our clock says its claimed time and
+/// that it is ahead, never an age below zero.
+pub fn header_words(fix: &Fix, now: Option<&WallTime>) -> Vec<String> {
+    let at = format!("at {}", coordinates(&fix.location));
+    let accuracy = accuracy(&fix.location);
+    let offset = now.map_or(0, |n| n.offset_secs);
+    let age = match (fix.ahead(), now) {
+        (true, _) => None,
+        (false, Some(now)) => Some(span(now.unix_secs - fix.fix_time())),
+        (false, None) => None,
+    };
+    let when = match &age {
+        Some(age) => format!("{age} ago"),
+        None => format!(
+            "fix {}, ahead of our clock",
+            fix_wall(fix.fix_time(), offset).hh_mm()
+        ),
+    };
+    let short = match &age {
+        Some(age) => format!("pos {age}"),
+        None => "pos ahead".to_string(),
+    };
+    let mut long = vec![at.clone()];
+    long.extend(accuracy);
+    long.push(when.clone());
+    vec![long.join(" · "), format!("{at} · {when}"), short]
+}
+
+/// The conversation's line for a telemetry report: `◎ position 43.77310 N
+/// 11.25600 E`. The block's own time beside it says when it arrived; the
+/// fix's age is the header's. A report without a position, or one that did
+/// not decode, says so on the same line.
+pub fn report_line(read: &Read) -> String {
+    match read.fixes.last() {
+        Some(fix) => {
+            let more = match read.fixes.len() {
+                1 => String::new(),
+                n => format!(" (+{} more)", n - 1),
+            };
+            format!(
+                "{REPORT_MARK} position {}{more}",
+                coordinates(&fix.location)
+            )
+        }
+        None if !read.unreadable.is_empty() => {
+            format!("{REPORT_MARK} telemetry, unreadable (kept)")
+        }
+        None => format!("{REPORT_MARK} telemetry, no position"),
+    }
+}
+
+/// The detail view's rows for the telemetry in `fields`: every sensor the
+/// codec decoded, per reading, with the peer of a stream row named. A fix
+/// time ahead of `received_at` by more than [`FUTURE_TOLERANCE_SECS`] is
+/// shown as claimed, marked.
+pub fn detail_rows(
+    source: &[u8; 16],
+    fields: &[Field],
+    offset_secs: i32,
+    received_at: Option<i64>,
+) -> Vec<String> {
+    let when = When {
+        offset_secs,
+        received_at,
+    };
+    let mut rows = Vec::new();
+    for (key, value) in fields {
+        match *key {
+            FIELD_TELEMETRY => {
+                rows.push("telemetry".to_string());
+                match unwrap_bin(value).map(Telemetry::decode) {
+                    Some(Ok(telemetry)) => sensors(&mut rows, &telemetry, &when),
+                    _ => rows.push(format!("  unreadable, {} bytes kept", value.len())),
+                }
+            }
+            FIELD_TELEMETRY_STREAM => match decode_stream_field_value(value) {
+                Ok(entries) => {
+                    for entry in entries {
+                        let from = match <[u8; 16]>::try_from(entry.source.as_slice()) {
+                            Ok(peer) if &peer == source => "the sender".to_string(),
+                            Ok(peer) => to_hex(&peer),
+                            Err(_) => format!("a source of {} bytes", entry.source.len()),
+                        };
+                        rows.push(format!("telemetry of {from}, relayed"));
+                        match Telemetry::decode(&entry.telemetry) {
+                            Ok(telemetry) => sensors(&mut rows, &telemetry, &when),
+                            Err(_) => rows.push(format!(
+                                "  unreadable, {} bytes kept",
+                                entry.telemetry.len()
+                            )),
+                        }
+                    }
+                }
+                Err(_) => {
+                    rows.push("telemetry stream".to_string());
+                    rows.push(format!("  unreadable, {} bytes kept", value.len()));
+                }
+            },
+            _ => {}
+        }
+    }
+    rows
+}
+
+/// The offset fix times are shown in, and when the message arrived.
+struct When {
+    offset_secs: i32,
+    received_at: Option<i64>,
+}
+
+fn sensors(rows: &mut Vec<String>, t: &Telemetry, when: &When) {
+    let offset_secs = when.offset_secs;
+    let before = rows.len();
+    if let Some(l) = &t.location {
+        rows.push(format!("  position  {}", coordinates(l)));
+        rows.push(format!(
+            "  altitude  {} m",
+            hundredths(i64::from(l.altitude_e2))
+        ));
+        rows.push(format!(
+            "  speed     {} m/s",
+            hundredths(i64::from(l.speed_e2))
+        ));
+        rows.push(format!(
+            "  bearing   {}°",
+            hundredths(i64::from(l.bearing_e2))
+        ));
+        if let Some(accuracy) = accuracy(l) {
+            rows.push(format!("  accuracy  {accuracy}"));
+        }
+        let wall = fix_wall(l.last_update, offset_secs);
+        let c = wall.civil();
+        let ahead = when
+            .received_at
+            .is_some_and(|at| l.last_update > at.saturating_add(FUTURE_TOLERANCE_SECS));
+        rows.push(format!(
+            "  fix       {:04}-{:02}-{:02} {}{}",
+            c.year,
+            c.month,
+            c.day,
+            wall.hh_mm_ss(),
+            if ahead {
+                "  ! ahead of our clock, as claimed"
+            } else {
+                ""
+            }
+        ));
+    }
+    if let Some(time) = t.time {
+        rows.push(format!(
+            "  time      {}",
+            fix_wall(time, offset_secs).hh_mm_ss()
+        ));
+    }
+    if let Some(b) = &t.battery {
+        let charging = match b.charging {
+            Some(true) => ", charging",
+            Some(false) => ", not charging",
+            None => "",
+        };
+        let temperature = b
+            .temperature
+            .map(|t| format!(", {} °C", number(t)))
+            .unwrap_or_default();
+        rows.push(format!(
+            "  battery   {} %{charging}{temperature}",
+            number(b.charge_percent)
+        ));
+    }
+    if let Some(link) = &t.physical_link {
+        let mut words = Vec::new();
+        if let Some(rssi) = link.rssi {
+            words.push(format!("rssi {} dBm", number(rssi)));
+        }
+        if let Some(snr) = link.snr {
+            words.push(format!("snr {} dB", number(snr)));
+        }
+        if let Some(q) = link.q {
+            words.push(format!("quality {} %", number(q)));
+        }
+        if !words.is_empty() {
+            rows.push(format!("  link      {}", words.join(", ")));
+        }
+    }
+    if let Some(temperature) = t.temperature {
+        rows.push(format!("  temp      {} °C", number(temperature)));
+    }
+    if let Some(producers) = &t.power_production {
+        for p in producers {
+            let label = p.type_label.as_deref().unwrap_or("power");
+            rows.push(format!("  {label}  {} W", number(p.power)));
+        }
+    }
+    if rows.len() == before {
+        rows.push("  no sensor with a reading".to_string());
+    }
+}
+
+/// A wire integer in hundredths, as a decimal: `-12.05`.
+fn hundredths(e2: i64) -> String {
+    let sign = if e2 < 0 { "-" } else { "" };
+    let abs = e2.abs();
+    format!("{sign}{}.{:02}", abs / 100, abs % 100)
+}
+
+/// A number as the sender sent it: an integer bare, a float to two places.
+fn number(n: Number) -> String {
+    match n {
+        Number::Int(v) => format!("{v}"),
+        Number::Float(v) => {
+            let scaled = v * 100.0;
+            // Round half away from zero without libm.
+            let rounded = if scaled < 0.0 {
+                (scaled - 0.5) as i64
+            } else {
+                (scaled + 0.5) as i64
+            };
+            hundredths(rounded)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use leviculum_lxmf::telemetry::{encode_stream_field_value, Battery, StreamEntry};
+
+    const BOB: [u8; 16] = [0xb0; 16];
+    const CAROL: [u8; 16] = [0xca; 16];
+    const COLLECTOR: [u8; 16] = [0xc0; 16];
+    const NOW: i64 = 1_793_016_000;
+
+    fn location(lat: i32, lon: i32, accuracy: u16, at: i64) -> Location {
+        Location {
+            latitude_e6: lat,
+            longitude_e6: lon,
+            altitude_e2: 5_120,
+            speed_e2: 0,
+            bearing_e2: 0,
+            accuracy_e2: accuracy,
+            last_update: at,
+        }
+    }
+
+    fn report(location: Location) -> Telemetry {
+        Telemetry {
+            time: Some(location.last_update),
+            location: Some(location),
+            battery: Some(Battery {
+                charge_percent: Number::Float(87.0),
+                charging: Some(false),
+                temperature: None,
+            }),
+            ..Telemetry::default()
+        }
+    }
+
+    #[test]
+    fn a_sideband_report_is_one_fix_of_its_sender() {
+        let fields = vec![(
+            FIELD_TELEMETRY,
+            report(location(43_773_100, 11_256_000, 500, NOW - 240)).encode_field_value(),
+        )];
+        let read = read(BOB, &fields, Some(NOW));
+        assert!(read.unreadable.is_empty());
+        assert_eq!(read.fixes.len(), 1);
+        let fix = &read.fixes[0];
+        assert_eq!((fix.peer, fix.via), (BOB, BOB));
+        assert_eq!(fix.fix_time(), NOW - 240);
+        assert_eq!(coordinates(&fix.location), "43.77310 N 11.25600 E");
+        assert_eq!(accuracy(&fix.location).as_deref(), Some("±5 m"));
+    }
+
+    /// Bytes as Sideband's `Telemeter.packed()` writes them for a time
+    /// sensor and a location sensor beside a battery sensor mapped to nil
+    /// (`Sensor.pack` returning `None`), built by hand from the format and
+    /// not by our encoder: SID 0x01 an int, SID 0x02 the seven-element
+    /// array of `Location.pack`, SID 0x04 nil.
+    #[test]
+    fn a_hand_packed_sideband_blob_with_a_nil_sensor_reads() {
+        let mut blob = vec![0x83, 0x01, 0xce];
+        blob.extend_from_slice(&((NOW - 60) as u32).to_be_bytes());
+        blob.extend_from_slice(&[0x02, 0x97]);
+        for (bytes, width) in [
+            (52_520_008i32.to_be_bytes().to_vec(), 4),
+            ((-13_404_954i32).to_be_bytes().to_vec(), 4),
+            (3_400i32.to_be_bytes().to_vec(), 4),
+            (0u32.to_be_bytes().to_vec(), 4),
+            (0i32.to_be_bytes().to_vec(), 4),
+            (1_200u16.to_be_bytes().to_vec(), 2),
+        ] {
+            blob.extend_from_slice(&[0xc4, width]);
+            blob.extend_from_slice(&bytes);
+        }
+        blob.push(0xce);
+        blob.extend_from_slice(&((NOW - 60) as u32).to_be_bytes());
+        blob.extend_from_slice(&[0x04, 0xc0]);
+        let mut value = vec![0xc4, blob.len() as u8];
+        value.extend_from_slice(&blob);
+        let read = read(BOB, &[(FIELD_TELEMETRY, value)], Some(NOW));
+        assert_eq!(read.fixes.len(), 1, "{read:?}");
+        assert_eq!(
+            coordinates(&read.fixes[0].location),
+            "52.52001 N 13.40495 W"
+        );
+        assert_eq!(accuracy(&read.fixes[0].location).as_deref(), Some("±12 m"));
+    }
+
+    #[test]
+    fn a_stream_row_belongs_to_who_measured_and_names_who_delivered() {
+        let rows = [
+            (BOB, location(43_773_100, 11_256_000, 500, NOW - 600)),
+            (CAROL, location(-33_868_800, 151_209_300, 0, NOW - 300)),
+        ]
+        .map(|(peer, l)| StreamEntry {
+            source: peer.to_vec(),
+            timestamp: Number::Int(l.last_update),
+            telemetry: report(l).encode(),
+            appearance: None,
+        });
+        let fields = vec![(FIELD_TELEMETRY_STREAM, encode_stream_field_value(&rows))];
+        let read = read(COLLECTOR, &fields, Some(NOW));
+        let who: Vec<_> = read.fixes.iter().map(|f| (f.peer, f.via)).collect();
+        assert_eq!(who, vec![(BOB, COLLECTOR), (CAROL, COLLECTOR)]);
+        assert_eq!(
+            coordinates(&read.fixes[1].location),
+            "33.86880 S 151.20930 E"
+        );
+        assert_eq!(accuracy(&read.fixes[1].location), None, "none given");
+    }
+
+    #[test]
+    fn a_broken_blob_is_unreadable_and_named_not_dropped() {
+        let fields = vec![
+            (FIELD_TELEMETRY, vec![0xc4, 0x02, 0x91, 0x01]),
+            (FIELD_TELEMETRY_STREAM, vec![0x01]),
+        ];
+        let read = read(BOB, &fields, Some(NOW));
+        assert!(read.fixes.is_empty());
+        assert_eq!(read.unreadable.len(), 2);
+        let line = unreadable_line(&BOB, &[0x42; 32], &read.unreadable[0]);
+        assert!(
+            line.starts_with("TELEMETRY_UNREADABLE source=b0b0"),
+            "{line}"
+        );
+        assert!(line.contains("field=2 bytes=4 kept=raw"), "{line}");
+        assert_eq!(report_line(&read), "◎ telemetry, unreadable (kept)");
+    }
+
+    #[test]
+    fn a_fix_ahead_of_our_clock_sorts_at_receive_time_and_shows_its_claim() {
+        let ahead = Fix {
+            peer: BOB,
+            via: BOB,
+            message: None,
+            received_at: Some(NOW),
+            location: location(1, 1, 0, NOW + 3600),
+            telemetry: Vec::new(),
+        };
+        assert!(ahead.ahead());
+        assert_eq!(ahead.order_time(), NOW);
+        let honest = Fix {
+            location: location(1, 1, 0, NOW - 60),
+            ..ahead.clone()
+        };
+        assert!(!honest.ahead());
+        assert!(ahead.newer_than(&honest), "now beats a minute ago");
+        let later = Fix {
+            location: location(1, 1, 0, NOW + 60),
+            received_at: Some(NOW + 30),
+            ..ahead.clone()
+        };
+        assert!(!later.ahead(), "inside the tolerance");
+        assert!(later.newer_than(&ahead), "the clamped one sorts at NOW");
+        let now = WallTime {
+            unix_secs: NOW,
+            offset_secs: 0,
+        };
+        let words = header_words(&ahead, Some(&now));
+        assert!(
+            words[0].ends_with("fix 13:00, ahead of our clock"),
+            "{words:?}"
+        );
+        assert_eq!(words.last().map(String::as_str), Some("pos ahead"));
+        let fields = vec![(
+            FIELD_TELEMETRY,
+            Telemetry {
+                location: Some(ahead.location),
+                ..Telemetry::default()
+            }
+            .encode_field_value(),
+        )];
+        let rows = detail_rows(&BOB, &fields, 0, Some(NOW));
+        assert!(
+            rows.contains(
+                &"  fix       2026-10-26 13:00:00  ! ahead of our clock, as claimed".to_string()
+            ),
+            "{rows:?}"
+        );
+    }
+
+    #[test]
+    fn the_stale_boundary_is_two_hours() {
+        let fix = Fix {
+            peer: BOB,
+            via: BOB,
+            message: None,
+            received_at: Some(NOW),
+            location: location(1, 1, 0, NOW - STALE_AFTER_SECS),
+            telemetry: Vec::new(),
+        };
+        assert!(!fix.stale(NOW), "exactly two hours is still current");
+        assert!(fix.stale(NOW + 1));
+    }
+
+    #[test]
+    fn the_header_says_position_accuracy_and_age_longest_first() {
+        let fix = read(
+            BOB,
+            &[(
+                FIELD_TELEMETRY,
+                report(location(43_773_100, 11_256_000, 500, NOW - 240)).encode_field_value(),
+            )],
+            Some(NOW),
+        )
+        .fixes
+        .remove(0);
+        let now = WallTime {
+            unix_secs: NOW,
+            offset_secs: 3600,
+        };
+        assert_eq!(
+            header_words(&fix, Some(&now)),
+            vec![
+                "at 43.77310 N 11.25600 E · ±5 m · 4 min ago".to_string(),
+                "at 43.77310 N 11.25600 E · 4 min ago".to_string(),
+                "pos 4 min".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_detail_rows_list_every_decoded_sensor() {
+        let fields = vec![(
+            FIELD_TELEMETRY,
+            report(location(43_773_100, 11_256_000, 500, NOW - 240)).encode_field_value(),
+        )];
+        let rows = detail_rows(&BOB, &fields, 0, Some(NOW));
+        assert_eq!(rows[0], "telemetry");
+        assert!(rows.contains(&"  position  43.77310 N 11.25600 E".to_string()));
+        assert!(rows.contains(&"  altitude  51.20 m".to_string()));
+        assert!(rows.contains(&"  accuracy  ±5 m".to_string()));
+        assert!(rows.contains(&"  battery   87.00 %, not charging".to_string()));
+    }
+
+    #[test]
+    fn fields_pack_and_unpack_untouched() {
+        let fields = vec![
+            (FIELD_TELEMETRY, vec![0xc4, 0x01, 0x80]),
+            (0x10, vec![0xa1, b'x']),
+        ];
+        let packed = pack_fields(&fields);
+        assert_eq!(unpack_fields(&packed), Some(fields));
+        assert_eq!(unpack_fields(&[0x01]), None);
+    }
+
+    #[test]
+    fn decimals_round_at_the_fifth_place() {
+        let l = location(-15, 999_995, 99, 0);
+        assert_eq!(coordinates(&l), "0.00002 S 1.00000 E");
+        assert_eq!(accuracy(&l).as_deref(), Some("±0.99 m"));
+        assert_eq!(span(59), "<1 min");
+        assert_eq!(span(3599), "59 min");
+        assert_eq!(span(7200), "2 h");
+        assert_eq!(span(-5), "<1 min");
+    }
+}

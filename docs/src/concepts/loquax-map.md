@@ -9,8 +9,9 @@ board. [A messenger whose core runs anywhere](handheld-messenger.md), "The
 map", already calls the map a product of its own and a view inside the
 messenger, on the desktop and embedded. This page plans it in slices.
 
-**Status: proposed 2026-10-27, for Lew's decision.** Nothing on this page
-is built. The measurement it rests on is
+**Status: proposed 2026-10-27, for Lew's decision.** Slice (a), positions
+in the model shown as text, is built (2026-10-27, leviculum 1059); the
+rest of the page is not. The measurement it rests on is
 `docs/drafts/map-measurement-2026-10.md`; the decisions it rests on are the
 toolkit ([A GUI toolkit for the desktop and the M9](gui-toolkit.md),
 option B) and the vector path with our own filler (handheld-messenger.md,
@@ -19,21 +20,27 @@ option B) and the vector path with our own filler (handheld-messenger.md,
 
 ## What loquax receives of telemetry today
 
-Nothing. An incoming LXMF message carries its fields
-(`Message::fields`, `leviculum-lxmf/src/message.rs:84`), but the engine
-drops them when it hands the message on: `RouterEvent::MessageReceived`
-becomes `OutboxEvent::Received` with id, source, title, body and the
-verification, and no fields (`loquax/src/engine.rs:418`,
-`loquax/src/outbox.rs:154`). The store has a `fields` column
-(`loquax/src/store.rs:95`) that stays empty for exactly that reason
-(`loquax/src/store.rs:27`). No file under `loquax/src` names
-`FIELD_TELEMETRY`.
+Since slice (a), every position. The engine passes an incoming message's
+fields on (`Message::fields`, `leviculum-lxmf/src/message.rs:84`):
+`RouterEvent::MessageReceived` becomes `OutboxEvent::Received` with the
+fields beside id, source, title, body and the verification
+(`loquax/src/engine.rs:420`, `loquax/src/outbox.rs:158`). The core reads
+the two telemetry fields into positions (`telemetry::read`,
+`loquax/src/telemetry.rs:130`), the screen model keeps each peer's latest
+and hands every one to the store (`take_telemetry`,
+`loquax/src/ui.rs:2003`), and the store keeps the fields whole in its
+`fields` column (`loquax/src/store.rs:724`) and the positions in a table of
+their own (`SCHEMA_V2`, `loquax/src/store.rs:144`). The sender's timestamp
+is still not carried: `OutboxEvent`, the screen's `Message` and every type
+the model folds derive `Eq`, which an `f64` cannot, so carrying it is a
+change of its own and not the one line of plumbing the fields were.
 
-A telemetry report has an empty body and title ([Telemetry](telemetry.md),
-"A reporting message carries no text"), so today such a message arrives as
-an empty block in the peer's conversation, and its position is lost.
+Before slice (a) the fields were dropped at that hand-over, and a telemetry
+report, whose body and title are empty ([Telemetry](telemetry.md), "A
+reporting message carries no text"), arrived as an empty block in the
+peer's conversation with its position lost.
 
-What exists to fill the gap, all in `leviculum-lxmf`, `no_std + alloc`:
+What the core reads them with, all in `leviculum-lxmf`, `no_std + alloc`:
 
 - the field numbers, `FIELD_TELEMETRY` and `FIELD_TELEMETRY_STREAM`
   (`leviculum-lxmf/src/constants.rs:61`, `leviculum-lxmf/src/constants.rs:62`);
@@ -61,7 +68,10 @@ accuracy where given, the fix time, battery, link and temperature. A
 telemetry message is not drawn as an empty block. It is one line in the
 conversation, `◎ position 43.77310 N 11.25600 E, 14:05`, so the exchange
 still shows when a report arrived, and the rows of one peer's reports
-fold into the latest one when they follow each other.
+fold into the latest one when they follow each other. As built, the `14:05` is the
+block's own arrival time beside the line, as every block carries it; the
+fix's own time is in the header's age and the detail view. A run folds
+only within one day, and not across a name note or the `new` rule.
 
 **The age** is always shown and always counts from the fix time
 (`Location::last_update`), not from when the message arrived: a report
@@ -127,7 +137,12 @@ CREATE TABLE positions(
 ```
 
 The wire's integers are stored as they are, so no rounding happens between
-the wire and the disk. The key `(peer, fix_time)` is Sideband's dedup rule
+the wire and the disk. As built, `received_at` may be NULL: a report
+that arrives before the shell first told the screen the time has no
+receive time to store, and inventing one would be the placeholder the
+telemetry page forbids. A fix the wire gives no accuracy for (the field
+is always packed, so zero is the only absence it can say) is stored as 0
+and shown without one. The key `(peer, fix_time)` is Sideband's dedup rule
 (exact source and timestamp), so the same fix arriving directly and again
 in a collector's stream is one row. The map reads the latest row per peer;
 the table keeps the track, which a later slice can draw. Retention follows

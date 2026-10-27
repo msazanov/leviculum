@@ -54,6 +54,14 @@
 //! pin above its rule and the reply gone. Pinned in
 //! `tests/fixtures/tui_history.frames`.
 //!
+//! The telemetry session (`docs/src/concepts/loquax-map.md`, slice (a)) runs
+//! at 80 x 24 and at 120 x 40: the peer writes a line, then sends two
+//! position reports with no text, as Sideband and Columba do. The header
+//! carries the position, at 120 columns with its accuracy and age, at 80
+//! only `pos` and the age; the two reports fold into one `◎ position` line
+//! and no empty block is drawn; the detail view lists the sensors. Pinned in
+//! `tests/fixtures/tui_telemetry.frames`.
+//!
 //! The daemon is the in-process one `mailbox_cli.rs` uses. The correspondent
 //! is a second loquax engine attached to it in this process
 //! (`loquax::engine::attach`), a full LXMF router, so the proof that turns the
@@ -90,6 +98,7 @@ const EXPECTED_STYLES: &str = include_str!("fixtures/tui_chat.styles");
 const EXPECTED_SEARCH: &str = include_str!("fixtures/tui_search_session.frames");
 const EXPECTED_NAMES: &str = include_str!("fixtures/tui_names.frames");
 const EXPECTED_HISTORY: &str = include_str!("fixtures/tui_history.frames");
+const EXPECTED_TELEMETRY: &str = include_str!("fixtures/tui_telemetry.frames");
 
 const SCRIPT: &str = "\
 until ready 20
@@ -219,6 +228,7 @@ async fn a_scripted_session_sends_sees_the_proof_and_reads_the_reply() {
             destination: our_address,
             title: Vec::new(),
             body: b"hello back\nalso on two lines".to_vec(),
+            fields: Vec::new(),
             via: Via::Direct,
         },
         &SendOptions::new(daemon.instance.clone(), Duration::from_secs(20)),
@@ -830,6 +840,7 @@ async fn chat_session(size: &str) -> (String, String) {
                 destination: our_address,
                 title: Vec::new(),
                 body: body.as_bytes().to_vec(),
+                fields: Vec::new(),
                 via: Via::Direct,
             },
             &options,
@@ -1501,6 +1512,7 @@ async fn a_restart_shows_the_earlier_exchange_with_its_marks() {
             destination: our_address,
             title: Vec::new(),
             body: b"yes, from ten".to_vec(),
+            fields: Vec::new(),
             via: Via::Direct,
         },
         &SendOptions::new(daemon.instance.clone(), Duration::from_secs(20)),
@@ -1558,6 +1570,195 @@ async fn a_restart_shows_the_earlier_exchange_with_its_marks() {
         panic!(
             "the frames moved; this run's are in {}, the pinned ones in \
              loquax/tests/fixtures/tui_history.frames\n{all}",
+            kept.display()
+        );
+    }
+}
+
+/// The telemetry session: every time on screen is the script's, and the
+/// fixes the peer sends are stamped against that same clock, so the ages
+/// are the same on every run.
+const TELEMETRY_SCRIPT: &str = "\
+clock 2026-10-26 14:00
+until ready 20
+frame attached
+until received 3 60
+tick 12
+frame folded
+key enter
+key enter
+frame detail
+key esc
+key q
+";
+
+/// 2026-10-26 14:00 UTC, the script's clock.
+const TELEMETRY_NOW: i64 = 1_793_023_200;
+
+/// One position report as the peer's Telemeter packs it.
+fn position_report(minutes_ago: i64, lat_e6: i32) -> Vec<(i64, Vec<u8>)> {
+    use leviculum_lxmf::telemetry::{Location, Telemetry};
+    let at = TELEMETRY_NOW - minutes_ago * 60;
+    let telemetry = Telemetry {
+        time: Some(at),
+        location: Some(Location {
+            latitude_e6: lat_e6,
+            longitude_e6: 11_256_000,
+            altitude_e2: 5_120,
+            speed_e2: 0,
+            bearing_e2: 0,
+            accuracy_e2: 500,
+            last_update: at,
+        }),
+        ..Telemetry::default()
+    };
+    vec![(
+        leviculum_lxmf::constants::FIELD_TELEMETRY,
+        telemetry.encode_field_value(),
+    )]
+}
+
+async fn telemetry_session(size: &str) -> String {
+    let daemon = daemon(&format!("tui-telemetry-{size}"), |b| b).await;
+    let home = tempfile::tempdir().expect("tui home");
+    let ours = fixed_identity(0x11);
+    std::fs::write(
+        home.path().join("identity"),
+        encode_identity(&ours).expect("storable"),
+    )
+    .expect("write the identity");
+    let our_address = delivery_address(&ours).expect("our address");
+    let theirs = fixed_identity(0x22);
+    let their_hex: String = delivery_address(&theirs)
+        .expect("their address")
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let script = home.path().join("telemetry.script");
+    let frames = home.path().join("telemetry.frames");
+    std::fs::write(&script, TELEMETRY_SCRIPT).expect("write the script");
+    let args: Vec<String> = vec![
+        "--instance".into(),
+        daemon.instance.clone(),
+        "--config".into(),
+        daemon.config_dir.path().display().to_string(),
+        "--to".into(),
+        their_hex,
+        "--script".into(),
+        script.display().to_string(),
+        "--frames".into(),
+        frames.display().to_string(),
+        "--size".into(),
+        size.into(),
+    ];
+    let child_home = home.path().to_path_buf();
+    let child = tokio::task::spawn_blocking(move || {
+        let mut command = Command::new(LNMSG);
+        command
+            .args(&args)
+            .env("LNMSG_HOME", &child_home)
+            .env("LNMSG_DISPLAY_NAME", "tui")
+            .env_remove("LEVICULUM_EVENT_LOG")
+            .env_remove("RUST_LOG")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let child = leviculum_std::process::spawn_supervised(command).expect("spawn loquax");
+        child.wait_with_output().expect("wait for loquax")
+    });
+
+    wait_for_frame(&frames, "attached", Duration::from_secs(20)).await;
+    let storage = tempfile::tempdir().expect("their storage");
+    let mut them = attach(AttachConfig {
+        instance: daemon.instance.clone(),
+        storage_dir: storage.path().to_path_buf(),
+        identity: theirs,
+        display_name: b"them".to_vec(),
+        notices: Terminal::new(storage.path().to_path_buf()),
+    })
+    .await
+    .expect("the correspondent attaches");
+    let options = SendOptions::new(daemon.instance.clone(), Duration::from_secs(20));
+    let mut fanout = Fanout::default();
+    for (body, fields) in [
+        ("leaving the hut now", Vec::new()),
+        ("", position_report(10, 43_770_000)),
+        ("", position_report(4, 43_773_100)),
+    ] {
+        let mut tap = fanout.tap();
+        let clock = Tokio::new();
+        let send = run_send(
+            &mut tap,
+            SendRequest {
+                destination: our_address,
+                title: Vec::new(),
+                body: body.as_bytes().to_vec(),
+                fields,
+                via: Via::Direct,
+            },
+            &options,
+            &clock,
+        );
+        tokio::pin!(send);
+        let sent = loop {
+            tokio::select! {
+                sent = &mut send => break sent,
+                _ = tokio::time::sleep(Duration::from_millis(20)) => {
+                    let _ = fanout.pump(&mut them.outbox);
+                }
+            }
+        };
+        assert!(sent.is_ok(), "{body:?} did not go out: {sent:?}");
+    }
+
+    let output = child.await.expect("the loquax child thread");
+    them.stop().await;
+    let got = std::fs::read_to_string(&frames).expect("read the frames");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{size}: stderr: {}\nframes:\n{got}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    without_ids(&got)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_peers_position_shows_in_the_header_and_its_reports_fold_into_one_line() {
+    let mut all = String::new();
+    for size in ["80x24", "120x40"] {
+        let frames = telemetry_session(size).await;
+        let folded = frame(&frames, "folded");
+        assert_eq!(
+            folded.matches("◎ position 4").count(),
+            1,
+            "{size}: the two reports are one line\n{folded}"
+        );
+        assert!(
+            folded.contains("◎ position 43.77310 N 11.25600 E"),
+            "{size}: the latest\n{folded}"
+        );
+        match size {
+            "80x24" => assert!(folded.contains("pos 4 min"), "{folded}"),
+            _ => assert!(
+                folded.contains("at 43.77310 N 11.25600 E · ±5 m · 4 min ago"),
+                "{folded}"
+            ),
+        }
+        let detail = frame(&frames, "detail");
+        assert!(
+            detail.contains("position  43.77310 N 11.25600 E"),
+            "{size}: {detail}"
+        );
+        assert!(detail.contains("fix       2026-10-26 13:56:00"), "{detail}");
+        all.push_str(&format!("=== {size} ===\n{frames}"));
+    }
+    if all != EXPECTED_TELEMETRY {
+        let kept = std::env::temp_dir().join("loquax-tui-telemetry.frames");
+        let _ = std::fs::write(&kept, &all);
+        panic!(
+            "the frames moved; this run's are in {}, the pinned ones in \
+             loquax/tests/fixtures/tui_telemetry.frames\n{all}",
             kept.display()
         );
     }

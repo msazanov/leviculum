@@ -80,5 +80,6 @@ pub mod seen;
 pub mod send;
 #[cfg(feature = "history")]
 pub mod store;
+pub mod telemetry;
 pub mod ui;
 pub mod when;

@@ -31,6 +31,7 @@ use leviculum_ui::{RLine, RStyle};
 
 use super::{leg_label, plain, push, wrap, Conversation, Message, UiModel};
 use crate::names::Names;
+use crate::telemetry;
 use crate::when::{date_label, list_time, WallTime};
 
 /// The top of what this device holds: the store's first message with the
@@ -159,6 +160,16 @@ pub fn conversation(conversation: &Conversation, width: usize, draw: &Draw<'_>) 
     let mut day = None;
     for (index, message) in conversation.messages.iter().enumerate() {
         let start = laid.rows.len();
+        if folded(conversation, index) {
+            // Drawn as the report after it: no rows, so no click lands on
+            // it and the cursor steps over it.
+            laid.spans.push(Span {
+                start,
+                end: start,
+                mark: None,
+            });
+            continue;
+        }
         if let (Some(at), Some(now)) = (message.at, draw.now) {
             if day != Some(at.day()) {
                 day = Some(at.day());
@@ -188,6 +199,7 @@ pub fn conversation(conversation: &Conversation, width: usize, draw: &Draw<'_>) 
         }
         let first = laid.rows.len();
         let drawn = block(
+            conversation.peer,
             message,
             index,
             width,
@@ -213,6 +225,26 @@ pub fn conversation(conversation: &Conversation, width: usize, draw: &Draw<'_>) 
         last = Last::Separator;
     }
     laid
+}
+
+/// Whether message `index` is a telemetry report the next one replaces on
+/// screen: one peer's consecutive reports fold into the latest
+/// (`loquax-map.md`, "In the conversation"). Not across a day, a note or the
+/// `new` rule, which say something about where the run is.
+pub fn folded(conversation: &Conversation, index: usize) -> bool {
+    let (Some(this), Some(next)) = (
+        conversation.messages.get(index),
+        conversation.messages.get(index + 1),
+    ) else {
+        return false;
+    };
+    this.is_report()
+        && next.is_report()
+        && this.at.map(|at| at.day()) == next.at.map(|at| at.day())
+        && !conversation.notes.iter().any(|n| n.before == index + 1)
+        && conversation
+            .new_rule
+            .is_none_or(|rule| rule.at != index + 1)
 }
 
 /// `── was Alice, now announces Ally ──`, centred and muted: a peer's name
@@ -345,6 +377,7 @@ struct Block {
 /// link in the body is underlined and its cells name it in `links`. With a
 /// search open the body's first match is marked, the marks part of the text.
 fn block(
+    peer: [u8; 16],
     message: &Message,
     index: usize,
     width: usize,
@@ -356,9 +389,15 @@ fn block(
     let cap = block_cap(width);
     let mut rows = Vec::new();
     let mut wrapped = Vec::new();
-    let body = match draw.mark {
-        Some(query) => super::search::mark_first(&message.body, query),
-        None => message.body.clone(),
+    let body = match (message.is_report(), draw.mark) {
+        // A report has no text: its line says what it carried.
+        (true, _) => {
+            let received = message.at.map(|at| at.unix_secs);
+            let read = telemetry::read(peer, &message.fields, received);
+            telemetry::report_line(&read)
+        }
+        (false, Some(query)) => super::search::mark_first(&message.body, query),
+        (false, None) => message.body.clone(),
     };
     for text in body.split('\n') {
         let mut line = plain(text);
@@ -575,6 +614,7 @@ fn entry(
         n => format!("[{n}]"),
     };
     let preview = match last {
+        Some(message) if message.is_report() => format!("{} position", telemetry::REPORT_MARK),
         Some(message) => {
             let first = message.body.split('\n').next().unwrap_or("");
             match message.outbound {

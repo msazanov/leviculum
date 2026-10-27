@@ -82,7 +82,7 @@
 //! of the open conversation in place. `Esc` closes it and the list comes
 //! back; the conversation keeps what it showed.
 
-use alloc::collections::{BTreeSet, VecDeque};
+use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec;
@@ -108,7 +108,9 @@ use crate::keys::{self, Action};
 use crate::names::{Heard, Names};
 use crate::outbox::OutboxEvent;
 use crate::send::Leg;
+use crate::telemetry::{self, Fix};
 use crate::when::{list_time, WallTime};
+use leviculum_lxmf::Field;
 
 use history::{Confirm, StoreRead, StoreWrite, StoredHit};
 
@@ -284,6 +286,9 @@ pub struct Message {
     /// The model's activity count when it was written or arrived: the
     /// search lists messages most recent first by it.
     pub activity: u64,
+    /// The LXMF fields it came with, raw: telemetry is read from them on
+    /// screen ([`crate::telemetry`]) and the store keeps them whole.
+    pub fields: Vec<Field>,
 }
 
 impl Message {
@@ -301,7 +306,14 @@ impl Message {
             ledger: vec![LedgerEntry::new(at, "queued")],
             last_leg: None,
             activity: 0,
+            fields: Vec::new(),
         }
+    }
+
+    /// A telemetry report: no text, a telemetry field. It is drawn as one
+    /// `◎ position` line instead of an empty block.
+    pub fn is_report(&self) -> bool {
+        !self.outbound && self.body.trim().is_empty() && telemetry::has_telemetry(&self.fields)
     }
 
     fn note(&mut self, at: Option<WallTime>, what: &str) {
@@ -504,6 +516,10 @@ pub struct UiModel<B> {
     pub confirm: Option<(Confirm, Toast)>,
     /// A stored search result to open once its page has loaded.
     reveal_pending: Option<([u8; 16], u64)>,
+    /// Each peer's latest position, by [`Fix::newer_than`]: the header's.
+    pub positions: BTreeMap<[u8; 16], Fix>,
+    /// Positions received since the store last wrote, in arrival order.
+    fixes_received: Vec<Fix>,
 }
 
 /// Text a drag selected in the open conversation, from where the button went
@@ -563,6 +579,8 @@ impl<B: InputBuffer + Default> UiModel<B> {
             forgotten: Vec::new(),
             confirm: None,
             reveal_pending: None,
+            positions: BTreeMap::new(),
+            fixes_received: Vec::new(),
         };
         for peer in peers {
             model.conversation(*peer);
@@ -845,6 +863,9 @@ pub enum UiEffect {
     Notice(String),
     /// Ask the store for what the screen has not loaded.
     Store(StoreRead),
+    /// A line for the shell's log (`tui.log`), not for the screen: a
+    /// telemetry blob that did not decode, kept raw with its message.
+    Log(String),
 }
 
 /// Fold one event into the model.
@@ -1590,6 +1611,13 @@ fn scroll_messages<B: InputBuffer>(model: &mut UiModel<B>, cmd: ScrollCmd) {
                 .min(at)
         }
     };
+    // A report folded into the next one has no rows: the cursor goes on
+    // past it the way it moved, or back where nothing is drawn that way.
+    let forward = !matches!(
+        cmd,
+        ScrollCmd::LineUp | ScrollCmd::PageUp | ScrollCmd::HalfPageUp | ScrollCmd::Bottom
+    );
+    let cursor = drawn_near(&laid.spans, cursor, forward);
     if let Some(span) = laid.spans.get(cursor) {
         if span.end > top + rows {
             top = span.end - rows;
@@ -1604,6 +1632,22 @@ fn scroll_messages<B: InputBuffer>(model: &mut UiModel<B>, cmd: ScrollCmd) {
         true => None,
         false => Some(top),
     };
+}
+
+/// The message nearest `at` that has rows on screen, looking `forward`
+/// first and the other way after.
+fn drawn_near(spans: &[layout::Span], at: usize, forward: bool) -> usize {
+    let drawn = |i: &usize| spans.get(*i).is_some_and(|s| s.start < s.end);
+    if spans.get(at).is_none() || drawn(&at) {
+        return at;
+    }
+    let after = (at + 1..spans.len()).find(drawn);
+    let before = (0..at).rev().find(drawn);
+    match forward {
+        true => after.or(before),
+        false => before.or(after),
+    }
+    .unwrap_or(at)
 }
 
 /// Select the conversation `step` away in the list's order, or the next one
@@ -1882,6 +1926,7 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
             message_id,
             source,
             body,
+            fields,
             verified,
             ..
         } => {
@@ -1918,9 +1963,11 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
                 )],
                 last_leg: None,
                 activity,
+                fields,
             });
             let peer = conversation.peer;
             model.changed.insert((peer, activity));
+            let effects = take_telemetry(model, index, message_id);
             if !open {
                 model.changed_peers.insert(peer);
                 let conversation = &mut model.conversations[index];
@@ -1936,11 +1983,77 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
                 model.conversations[index].mark_new();
             }
             let from = model.names.label(&source);
-            model.toast(ToastKind::Info, format!("message from {from}"));
+            let report = model.conversations[index]
+                .messages
+                .last()
+                .is_some_and(Message::is_report);
+            let what = if report { "position" } else { "message" };
+            model.toast(ToastKind::Info, format!("{what} from {from}"));
+            return effects;
         }
         _ => {}
     }
     Vec::new()
+}
+
+/// The telemetry in the newest message of conversation `index`, just
+/// received: each position into the peer's latest where it is newer, and
+/// into the store; each blob that did not decode named in `tui.log`, the
+/// bytes kept with the message.
+fn take_telemetry<B>(model: &mut UiModel<B>, index: usize, message_id: [u8; 32]) -> Vec<UiEffect> {
+    let Some(conversation) = model.conversations.get(index) else {
+        return Vec::new();
+    };
+    let Some(message) = conversation.messages.last() else {
+        return Vec::new();
+    };
+    if !telemetry::has_telemetry(&message.fields) {
+        return Vec::new();
+    }
+    let source = conversation.peer;
+    let key = message.activity;
+    let read = telemetry::read(source, &message.fields, model.now.map(|now| now.unix_secs));
+    let mut effects = Vec::new();
+    for unreadable in &read.unreadable {
+        effects.push(UiEffect::Log(telemetry::unreadable_line(
+            &source,
+            &message_id,
+            unreadable,
+        )));
+    }
+    for mut fix in read.fixes {
+        fix.message = Some(key);
+        model.take_fix(fix);
+    }
+    effects
+}
+
+impl<B> UiModel<B> {
+    /// One position received: the peer's latest when it is newer than what
+    /// the screen holds, and for the store either way, which keeps the track.
+    fn take_fix(&mut self, fix: Fix) {
+        let newer = self
+            .positions
+            .get(&fix.peer)
+            .is_none_or(|held| fix.newer_than(held));
+        if newer {
+            self.positions.insert(fix.peer, fix.clone());
+        }
+        self.fixes_received.push(fix);
+    }
+
+    /// The store's latest positions at start, one a peer.
+    pub fn restore_positions(&mut self, fixes: Vec<Fix>) {
+        for fix in fixes {
+            let newer = self
+                .positions
+                .get(&fix.peer)
+                .is_none_or(|held| fix.newer_than(held));
+            if newer {
+                self.positions.insert(fix.peer, fix);
+            }
+        }
+    }
 }
 
 impl<B> UiModel<B> {
@@ -2263,9 +2376,16 @@ fn detail_view<B>(model: &UiModel<B>, c: usize, m: usize) -> Option<DetailView> 
             (None, true) => "signature verified".to_string(),
             (None, false) => "signature NOT verified".to_string(),
         },
-        String::new(),
-        "on this device".to_string(),
     ];
+    let offset = message.at.or(model.now).map_or(0, |at| at.offset_secs);
+    let received = message.at.map(|at| at.unix_secs);
+    let sensors = telemetry::detail_rows(&conversation.peer, &message.fields, offset, received);
+    if !sensors.is_empty() {
+        rows.push(String::new());
+        rows.extend(sensors);
+    }
+    rows.push(String::new());
+    rows.push("on this device".to_string());
     for entry in &message.ledger {
         let at = entry
             .at
@@ -2297,6 +2417,12 @@ pub fn view<B: InputBuffer>(model: &UiModel<B>) -> View {
         None => "messages".to_string(),
     };
     let mailbox = mailbox_words(model);
+    let fix = peer.and_then(|peer| model.positions.get(&peer));
+    let position = fix.map(|fix| telemetry::header_words(fix, model.now.as_ref()));
+    let stale = match (fix, model.now) {
+        (Some(fix), Some(now)) => fix.stale(now.unix_secs),
+        _ => false,
+    };
     // Room for the right end: the pane less its corners, the title with its
     // focus mark and the spaces around both.
     let room = sizes
@@ -2305,11 +2431,21 @@ pub fn view<B: InputBuffer>(model: &UiModel<B>) -> View {
         .saturating_sub(leviculum_ui::text::fit_width(&messages_title) + 6);
     let messages_title_right = match (wide, peer) {
         (true, Some(peer)) => to_hex(&peer),
-        _ => mailbox
-            .iter()
-            .find(|words| words.chars().count() <= room)
-            .cloned()
-            .unwrap_or_default(),
+        // Narrow: the position's age before the mailbox, so the reader
+        // knows there is one, then the mailbox alone where both do not fit.
+        _ => {
+            let short = position.as_ref().and_then(|words| words.last().cloned());
+            let mut choices: Vec<String> = Vec::new();
+            if let Some(short) = &short {
+                choices.extend(mailbox.iter().map(|words| format!("{short} · {words}")));
+                choices.push(short.clone());
+            }
+            choices.extend(mailbox.iter().cloned());
+            choices
+                .into_iter()
+                .find(|words| words.chars().count() <= room)
+                .unwrap_or_default()
+        }
     };
     let mut laid = model.laid();
     let texts = core::mem::take(&mut laid.texts);
@@ -2319,8 +2455,28 @@ pub fn view<B: InputBuffer>(model: &UiModel<B>) -> View {
     if wide {
         let width = sizes.messages.0;
         let words = mailbox.first().cloned().unwrap_or_default();
-        let pad = width.saturating_sub(words.chars().count() + 1);
-        messages.push(plain(&format!("{}{words}", " ".repeat(pad))));
+        // The peer's position on the left of the mailbox's row, the longest
+        // that leaves the mailbox room; dimmed once it is stale.
+        let left_room = width.saturating_sub(words.chars().count() + 4);
+        let at = position
+            .as_ref()
+            .and_then(|all| all.iter().find(|w| w.chars().count() <= left_room))
+            .cloned()
+            .unwrap_or_default();
+        let mut row = plain(" ");
+        let st = match stale {
+            true => layout::painted(model.tokens().muted),
+            false => RStyle::default(),
+        };
+        push(&mut row, &at, st);
+        let used = row.cells.len();
+        let pad = width.saturating_sub(used + words.chars().count() + 1);
+        push(
+            &mut row,
+            &format!("{}{words}", " ".repeat(pad)),
+            RStyle::default(),
+        );
+        messages.push(row);
         let mut rule = plain(" ");
         push(
             &mut rule,
@@ -2905,6 +3061,7 @@ mod tests {
             source: OTHER,
             title: Vec::new(),
             body: b"hey".to_vec(),
+            fields: Vec::new(),
             verified: true,
         };
         engine(&mut model, received.clone());
@@ -2928,6 +3085,7 @@ mod tests {
             source: PEER,
             title: Vec::new(),
             body: b"hey".to_vec(),
+            fields: Vec::new(),
             verified: true,
         };
         engine(&mut model, from_peer(ID));
@@ -3311,6 +3469,7 @@ mod tests {
                 source: PEER,
                 title: Vec::new(),
                 body: b"back\nagain".to_vec(),
+                fields: Vec::new(),
                 verified: true,
             },
         );
@@ -3370,6 +3529,7 @@ mod tests {
                 source: from,
                 title: Vec::new(),
                 body: body.as_bytes().to_vec(),
+                fields: Vec::new(),
                 verified: true,
             },
         );
@@ -3707,6 +3867,7 @@ mod tests {
                 source: PEER,
                 title: Vec::new(),
                 body: b"who?".to_vec(),
+                fields: Vec::new(),
                 verified: false,
             },
         );
@@ -4468,6 +4629,7 @@ mod tests {
                 source: PEER,
                 title: Vec::new(),
                 body: b"hi".to_vec(),
+                fields: Vec::new(),
                 verified: true,
             },
         );
@@ -4602,6 +4764,7 @@ mod tests {
             ledger: vec![LedgerEntry::new(Some(at(25, 14, 0)), "queued")],
             last_leg: None,
             activity: key,
+            fields: Vec::new(),
         }
     }
 
@@ -4952,5 +5115,330 @@ mod tests {
         assert_eq!(model.focus, Pane::Messages);
         assert_eq!(model.message_cursor, 0);
         assert_eq!(model.messages_of_selected()[0].body, "bring the tripod");
+    }
+
+    // Telemetry (loquax-map.md, slice (a)): positions in the model, shown as
+    // text.
+
+    use leviculum_lxmf::constants::{FIELD_TELEMETRY, FIELD_TELEMETRY_STREAM};
+    use leviculum_lxmf::telemetry::{encode_stream_field_value, Location, StreamEntry, Telemetry};
+
+    /// 2026-10-26 14:00 at +01:00, the clock these tests set.
+    fn two_pm() -> i64 {
+        at(26, 14, 0).unix_secs
+    }
+
+    fn fix_at(lat: i32, lon: i32, last_update: i64) -> Telemetry {
+        Telemetry {
+            location: Some(Location {
+                latitude_e6: lat,
+                longitude_e6: lon,
+                altitude_e2: 4_210,
+                speed_e2: 120,
+                bearing_e2: 9_000,
+                accuracy_e2: 500,
+                last_update,
+            }),
+            ..Telemetry::default()
+        }
+    }
+
+    fn arrive(
+        model: &mut UiModel<Field>,
+        from: [u8; 16],
+        id: u8,
+        body: &str,
+        fields: Vec<(i64, Vec<u8>)>,
+    ) -> Vec<UiEffect> {
+        update(
+            model,
+            UiEvent::Engine(OutboxEvent::Received {
+                message_id: [id; 32],
+                source: from,
+                title: Vec::new(),
+                body: body.as_bytes().to_vec(),
+                fields,
+                verified: true,
+            }),
+        )
+    }
+
+    fn report_of(telemetry: &Telemetry) -> Vec<(i64, Vec<u8>)> {
+        vec![(FIELD_TELEMETRY, telemetry.encode_field_value())]
+    }
+
+    #[test]
+    fn a_report_is_one_position_line_and_the_header_says_where_and_how_old() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        clock(&mut model, 26, 14, 0);
+        arrive(
+            &mut model,
+            PEER,
+            1,
+            "",
+            report_of(&fix_at(43_773_100, 11_256_000, two_pm() - 240)),
+        );
+        assert_eq!(
+            shown(&model),
+            vec![
+                layout::EARLIEST.to_string(),
+                "── Today ──".to_string(),
+                "◎ position 43.77310 N 11.25600 E  14:00".to_string(),
+            ]
+        );
+        assert_eq!(view(&model).messages_title_right, "pos 4 min · no mailbox");
+        let list: Vec<String> = view(&model).conversations.iter().map(text).collect();
+        assert!(
+            list[1].contains("◎ position"),
+            "the list's preview: {list:?}"
+        );
+        assert_eq!(
+            model.toasts.last().map(|t| t.text.as_str()),
+            Some("position from <abababab…>")
+        );
+        update(
+            &mut model,
+            UiEvent::Resize {
+                width: 120,
+                height: 40,
+            },
+        );
+        let wide = view(&model);
+        let row = text(&wide.messages[0]);
+        assert!(
+            row.starts_with(" at 43.77310 N 11.25600 E · ±5 m · 4 min ago "),
+            "{row:?}"
+        );
+        assert!(row.trim_end().ends_with("no mailbox"), "{row:?}");
+        // The age counts from the fix, not from when it arrived.
+        clock(&mut model, 26, 15, 0);
+        assert!(text(&view(&model).messages[0]).contains("· 1 h ago"));
+    }
+
+    #[test]
+    fn consecutive_reports_fold_into_the_latest_and_the_cursor_steps_over_them() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        clock(&mut model, 26, 14, 0);
+        arrive(&mut model, PEER, 1, "on my way", Vec::new());
+        for (id, minutes) in [(2u8, 10i64), (3, 5), (4, 1)] {
+            arrive(
+                &mut model,
+                PEER,
+                id,
+                "",
+                report_of(&fix_at(
+                    43_773_100 + id as i32 * 100,
+                    11_256_000,
+                    two_pm() - minutes * 60,
+                )),
+            );
+        }
+        let rows = shown(&model);
+        let lines: Vec<&String> = rows.iter().filter(|r| r.contains('◎')).collect();
+        assert_eq!(lines.len(), 1, "{rows:?}");
+        assert!(
+            lines[0].contains("◎ position 43.77350 N"),
+            "the latest: {rows:?}"
+        );
+        assert!(rows.contains(&"on my way  14:00".to_string()));
+        // The store still gets every one of them.
+        let writes = model.take_writes();
+        let positions = writes
+            .iter()
+            .filter(|w| matches!(w, StoreWrite::Position(_)))
+            .count();
+        assert_eq!(positions, 3);
+        // Up from the shown report goes past the folded ones to the text.
+        update(&mut model, key(KeyCode::Tab));
+        update(&mut model, key(KeyCode::Up));
+        assert_eq!(model.message_cursor, 0, "{rows:?}");
+        update(&mut model, key(KeyCode::Down));
+        assert_eq!(model.message_cursor, 3);
+        // A text between two reports breaks the run.
+        arrive(&mut model, PEER, 5, "here", Vec::new());
+        arrive(&mut model, PEER, 6, "", report_of(&fix_at(1, 1, two_pm())));
+        let rows = shown(&model);
+        assert_eq!(
+            rows.iter().filter(|r| r.contains('◎')).count(),
+            2,
+            "{rows:?}"
+        );
+    }
+
+    #[test]
+    fn text_and_telemetry_show_the_text_and_move_the_position() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        clock(&mut model, 26, 14, 0);
+        arrive(
+            &mut model,
+            PEER,
+            1,
+            "parked at the gate",
+            report_of(&fix_at(52_000_000, 13_000_000, two_pm() - 60)),
+        );
+        assert!(shown(&model).contains(&"parked at the gate  14:00".to_string()));
+        assert!(!shown(&model).iter().any(|r| r.contains('◎')));
+        assert_eq!(model.positions[&PEER].location.latitude_e6, 52_000_000);
+        assert_eq!(
+            model.toasts.last().map(|t| t.text.as_str()),
+            Some("message from <abababab…>")
+        );
+        let detail = detail_view(&model, 0, 0).expect("a detail view");
+        assert!(
+            detail
+                .rows
+                .contains(&"  position  52.00000 N 13.00000 E".to_string()),
+            "{:?}",
+            detail.rows
+        );
+        assert!(detail.rows.contains(&"  speed     1.20 m/s".to_string()));
+        assert!(detail.rows.contains(&"  bearing   90.00°".to_string()));
+        assert!(detail.rows.contains(&"  accuracy  ±5 m".to_string()));
+    }
+
+    #[test]
+    fn a_fix_direct_and_again_in_a_stream_is_one_position_and_rows_name_their_peer() {
+        let mut model = UiModel::<Field>::new(&[PEER, OTHER]);
+        clock(&mut model, 26, 14, 0);
+        let bob = fix_at(43_773_100, 11_256_000, two_pm() - 300);
+        arrive(&mut model, PEER, 1, "", report_of(&bob));
+        let carol = fix_at(-33_868_800, 151_209_300, two_pm() - 100);
+        let collector = [0xc0; 16];
+        let stream = encode_stream_field_value(&[
+            StreamEntry {
+                source: PEER.to_vec(),
+                timestamp: leviculum_lxmf::msgpack::Number::Int(two_pm() - 300),
+                telemetry: bob.encode(),
+                appearance: None,
+            },
+            StreamEntry {
+                source: OTHER.to_vec(),
+                timestamp: leviculum_lxmf::msgpack::Number::Int(two_pm() - 100),
+                telemetry: carol.encode(),
+                appearance: None,
+            },
+        ]);
+        arrive(
+            &mut model,
+            collector,
+            2,
+            "",
+            vec![(FIELD_TELEMETRY_STREAM, stream)],
+        );
+        assert_eq!(model.positions.len(), 2);
+        assert_eq!(model.positions[&PEER].via, PEER, "the direct one stays");
+        assert_eq!(model.positions[&OTHER].via, collector);
+        // Both go to the store; its key makes the repeated fix one row.
+        let fixes: Vec<_> = model
+            .take_writes()
+            .into_iter()
+            .filter_map(|w| match w {
+                StoreWrite::Position(fix) => Some((fix.peer, fix.fix_time())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            fixes,
+            vec![
+                (PEER, two_pm() - 300),
+                (PEER, two_pm() - 300),
+                (OTHER, two_pm() - 100)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_broken_blob_is_kept_with_its_message_and_logged() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        clock(&mut model, 26, 14, 0);
+        let broken = vec![(FIELD_TELEMETRY, vec![0xc4, 0x01, 0x07])];
+        let effects = arrive(&mut model, PEER, 1, "", broken.clone());
+        match effects.as_slice() {
+            [UiEffect::Log(line)] => assert!(
+                line.starts_with("TELEMETRY_UNREADABLE source=abab"),
+                "{line}"
+            ),
+            other => panic!("not logged: {other:?}"),
+        }
+        assert_eq!(
+            model.conversations[0].messages[0].fields, broken,
+            "kept raw"
+        );
+        assert!(model.positions.is_empty());
+        assert!(shown(&model).contains(&"◎ telemetry, unreadable (kept)  14:00".to_string()));
+    }
+
+    #[test]
+    fn a_stale_fix_is_dimmed_in_the_header_and_still_aged() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        model.tier = Tier::Ansi256;
+        clock(&mut model, 26, 14, 0);
+        update(
+            &mut model,
+            UiEvent::Resize {
+                width: 120,
+                height: 40,
+            },
+        );
+        arrive(
+            &mut model,
+            PEER,
+            1,
+            "",
+            report_of(&fix_at(
+                1_000_000,
+                1_000_000,
+                two_pm() - telemetry::STALE_AFTER_SECS,
+            )),
+        );
+        let fresh = view(&model).messages[0].cells[1].st;
+        assert_eq!(fresh, RStyle::default(), "two hours is still current");
+        clock(&mut model, 26, 14, 1);
+        let row = &view(&model).messages[0];
+        assert!(text(row).contains("· 2 h ago"));
+        assert_eq!(row.cells[1].st, layout::painted(model.tokens().muted));
+    }
+
+    #[test]
+    fn a_fix_from_the_future_shows_its_claim_and_does_not_hold_the_header() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        clock(&mut model, 26, 14, 0);
+        arrive(
+            &mut model,
+            PEER,
+            1,
+            "",
+            report_of(&fix_at(1_000_000, 1_000_000, two_pm() + 7200)),
+        );
+        assert_eq!(view(&model).messages_title_right, "pos ahead · no mailbox");
+        assert!(shown(&model).contains(&"◎ position 1.00000 N 1.00000 E  14:00".to_string()));
+        // An honest fix a minute later replaces it: the claim sorted at 14:00.
+        clock(&mut model, 26, 14, 2);
+        arrive(
+            &mut model,
+            PEER,
+            2,
+            "",
+            report_of(&fix_at(2_000_000, 1_000_000, two_pm() + 60)),
+        );
+        assert_eq!(model.positions[&PEER].location.latitude_e6, 2_000_000);
+        assert_eq!(view(&model).messages_title_right, "pos 1 min · no mailbox");
+    }
+
+    #[test]
+    fn restored_positions_keep_the_latest_and_a_deleted_conversation_takes_them() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        let fix = |lat: i32, t: i64| Fix {
+            peer: PEER,
+            via: PEER,
+            message: None,
+            received_at: Some(t),
+            location: fix_at(lat, 0, t).location.expect("a location"),
+            telemetry: Vec::new(),
+        };
+        model.restore_positions(vec![fix(2, 200), fix(1, 100)]);
+        assert_eq!(model.positions[&PEER].location.latitude_e6, 2);
+        model.delete_conversation(PEER);
+        assert!(model.positions.is_empty());
     }
 }

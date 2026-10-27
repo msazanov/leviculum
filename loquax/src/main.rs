@@ -580,6 +580,7 @@ async fn run(args: SendArgs) -> ExitCode {
         destination,
         title: title.clone(),
         body: body.clone(),
+        fields: Vec::new(),
         via,
     };
 

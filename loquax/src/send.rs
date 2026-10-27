@@ -780,6 +780,7 @@ mod tests {
             destination: DST,
             title: b"status".to_vec(),
             body: b"disk 91%".to_vec(),
+            fields: Vec::new(),
             via: Via::Direct,
         }
     }
@@ -1187,6 +1188,7 @@ mod tests {
             destination: DST,
             title: b"status".to_vec(),
             body: b"disk 91%".to_vec(),
+            fields: Vec::new(),
             via: Via::Propagated,
         }
     }

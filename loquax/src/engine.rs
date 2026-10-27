@@ -423,6 +423,7 @@ impl Engine {
                     verified: message.verification == Verification::Valid,
                     title: message.title,
                     body: message.content,
+                    fields: message.fields,
                 });
             }
             RouterEvent::PeerAnnounced {
@@ -853,7 +854,7 @@ impl Engine {
             request.destination,
             request.title,
             request.body,
-            Vec::new(),
+            request.fields,
             method,
         ) {
             Ok(message) => message,
@@ -1438,6 +1439,7 @@ mod tests {
             destination: [0x11; 16],
             title: Vec::new(),
             body: b"body".to_vec(),
+            fields: Vec::new(),
             via: Via::Propagated,
         })));
         let now_ms = core.now_ms();
@@ -1750,6 +1752,7 @@ mod tests {
             destination: [0x33; 16],
             title: b"t".to_vec(),
             body: b"a short status line".to_vec(),
+            fields: Vec::new(),
             via: Via::Direct,
         })));
         let now_ms = core.now_ms();

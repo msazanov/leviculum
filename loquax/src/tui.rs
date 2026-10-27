@@ -232,6 +232,7 @@ impl Shell {
                 UiEffect::Copy(text) => self.outputs.push(Output::Copy(text)),
                 UiEffect::Open(url) => self.outputs.push(Output::Open(url)),
                 UiEffect::Mouse(on) => self.outputs.push(Output::Mouse(on)),
+                UiEffect::Log(line) => tracing::warn!("{line}"),
             }
         }
         for answer in answers {
@@ -435,6 +436,7 @@ async fn send(mut tap: Tap, context: RunContext, to: [u8; 16], body: String) -> 
         destination: to,
         title: Vec::new(),
         body: body.into_bytes(),
+        fields: Vec::new(),
         via: Via::Link,
     };
     let outcome = run_send_auto(
@@ -520,10 +522,14 @@ pub async fn run(options: TuiOptions) -> ExitCode {
         Ok(store) => store,
         Err(error) => return super::failure(error, "no-store"),
     };
-    let history = match store
-        .restore()
-        .and_then(|restored| Ok((restored, store.names()?, store.last_key()?)))
-    {
+    let history = match store.restore().and_then(|restored| {
+        Ok((
+            restored,
+            store.names()?,
+            store.last_key()?,
+            store.positions()?,
+        ))
+    }) {
         Ok(history) => history,
         Err(error) => return super::failure(error, "no-store"),
     };
@@ -576,7 +582,7 @@ pub async fn run(options: TuiOptions) -> ExitCode {
     };
     let mut model = Model::new(&options.to);
     model.names = loquax::names::Names::new(contacts);
-    let (restored, names, last_key) = history;
+    let (restored, names, last_key, positions) = history;
     for (peer, name) in &names {
         model.names.remember(*peer, name);
     }
@@ -588,6 +594,7 @@ pub async fn run(options: TuiOptions) -> ExitCode {
     };
     update(&mut model, UiEvent::Clock(start));
     model.restore(restored);
+    model.restore_positions(positions);
     model.activity = model.activity.max(last_key);
     model.ascii = options.ascii;
     model.mouse = !options.no_mouse;
@@ -2061,6 +2068,7 @@ mod tests {
                     source: from,
                     title: Vec::new(),
                     body: body.as_bytes().to_vec(),
+                    fields: Vec::new(),
                     verified: true,
                 }),
             );
@@ -2236,6 +2244,7 @@ mod tests {
                     source: [0xb7; 16],
                     title: Vec::new(),
                     body: b"the tripod is with 4f4f4f4f".to_vec(),
+                    fields: Vec::new(),
                     verified: true,
                 }),
             );
@@ -2313,6 +2322,7 @@ mod tests {
                     source: [0xb7; 16],
                     title: Vec::new(),
                     body: b"one for the badge".to_vec(),
+                    fields: Vec::new(),
                     verified: true,
                 }),
             );

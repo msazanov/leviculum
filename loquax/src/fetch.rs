@@ -245,6 +245,7 @@ pub async fn run_fetch<O: Outbox, E: Effects>(
                     title,
                     body,
                     verified,
+                    ..
                 } => {
                     // An unwritable seen record must not cost mail: the worst
                     // a failed write can do is a duplicate print next run,
@@ -341,6 +342,7 @@ mod tests {
             source: SRC,
             title: b"t".to_vec(),
             body: body.to_vec(),
+            fields: Vec::new(),
             verified: true,
         }
     }
@@ -711,6 +713,7 @@ mod tests {
                 source: SRC,
                 title: Vec::new(),
                 body: b"body".to_vec(),
+                fields: Vec::new(),
                 verified: false,
             },
             OutboxEvent::SyncDone {

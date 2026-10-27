@@ -30,6 +30,7 @@ use leviculum_ui::input::InputBuffer;
 use leviculum_ui::toast::{Toast, ToastKind};
 
 use super::{Message, NewRule, UiEffect, UiModel};
+use crate::telemetry::Fix;
 use crate::when::WallTime;
 
 /// How many of a conversation's newest messages the screen loads at start,
@@ -67,8 +68,12 @@ pub enum StoreWrite {
     },
     /// Delete the message with this key from the device.
     ForgetMessage { key: u64 },
-    /// Delete the conversation and every message in it from the device.
+    /// Delete the conversation and every message in it from the device,
+    /// the positions it measured with them.
     ForgetConversation { peer: [u8; 16] },
+    /// Keep one received position; one already there for the same peer and
+    /// fix time is the same fix, arrived again.
+    Position(Fix),
 }
 
 /// A message the store found for a search and the screen has not loaded:
@@ -196,6 +201,12 @@ impl<B> UiModel<B> {
                 });
             }
         }
+        // After the messages: a position names the row of its message.
+        writes.extend(
+            core::mem::take(&mut self.fixes_received)
+                .into_iter()
+                .map(StoreWrite::Position),
+        );
         writes.append(&mut self.forgotten);
         writes
     }
@@ -438,7 +449,7 @@ impl<B> UiModel<B> {
     }
 
     /// Delete a conversation and its messages from the device.
-    fn delete_conversation(&mut self, peer: [u8; 16]) {
+    pub(super) fn delete_conversation(&mut self, peer: [u8; 16]) {
         let Some(c) = self.conversations.iter().position(|c| c.peer == peer) else {
             return;
         };
@@ -456,6 +467,8 @@ impl<B> UiModel<B> {
         };
         self.changed.retain(|(p, _)| *p != peer);
         self.changed_peers.remove(&peer);
+        self.positions.remove(&peer);
+        self.fixes_received.retain(|fix| fix.peer != peer);
         self.forgotten.push(StoreWrite::ForgetConversation { peer });
         if self.selected == c {
             let open = self.order().first().copied().unwrap_or(0);

@@ -24,10 +24,24 @@
 //! - **Conversations are a table** for what is the conversation's and not a
 //!   message's: the pin and the unread count. Names heard from announces
 //!   are one more, so a peer keeps its name across a restart.
-//! - **`title`, `fields` and `timestamp` stay empty for now**: the engine's
-//!   `Received` event hands the screen neither the fields nor the sender's
-//!   time, and the screen drops the title. The columns are there so filling
-//!   them is no migration.
+//! - **`fields` is filled, `title` and `timestamp` stay empty for now**:
+//!   the engine's `Received` event carries the fields, which the store keeps
+//!   whole as one raw msgpack map; it does not carry the sender's time, and
+//!   the screen drops the title. The columns are there so filling them is no
+//!   migration.
+//! - **Positions are a table** (`positions`, schema 2): every position a
+//!   telemetry field carried, keyed by who measured and the fix time, so the
+//!   same fix arriving directly and again in a collector's stream is one row
+//!   (`docs/src/concepts/loquax-map.md`, "Stored where"). The wire's
+//!   integers go in as they are.
+//!
+//! # Versions
+//!
+//! Schema 1 is the store of slice 6; schema 2 adds `positions` and nothing
+//! else, so a schema 1 file is migrated in place at open, in one
+//! transaction. A file newer than this program is refused
+//! ([`StoreError::Newer`]): a loquax that knows only schema 1 refuses a
+//! schema 2 file, and leaves it as it is.
 //!
 //! # The durability rule
 //!
@@ -53,15 +67,17 @@ use leviculum_ui::delivery::DeliveryState;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 
 use crate::send::Leg;
+use crate::telemetry::{pack_fields, unpack_fields, Fix};
 use crate::ui::history::{Restored, StoreWrite, StoredHit, LOAD_WINDOW};
 use crate::ui::{LedgerEntry, Message};
 use crate::when::WallTime;
+use leviculum_lxmf::telemetry::Location;
 
 /// The store's file under the loquax home directory.
 pub const STORE_FILE: &str = "history.sqlite3";
 
 /// The schema this program writes, in SQLite's `user_version`.
-pub const SCHEMA_VERSION: i32 = 1;
+pub const SCHEMA_VERSION: i32 = 2;
 
 /// How long a write waits for another loquax holding the file.
 const BUSY_MS: u64 = 5_000;
@@ -124,14 +140,32 @@ CREATE TRIGGER message_text_update AFTER UPDATE OF content ON messages BEGIN
 END;
 ";
 
-/// The tables a whole store has.
-const TABLES: [&str; 5] = [
+/// What schema 2 adds to schema 1: the positions telemetry carried.
+const SCHEMA_V2: &str = "
+CREATE TABLE positions(
+    identity BLOB NOT NULL,
+    peer BLOB NOT NULL,
+    via BLOB NOT NULL,
+    message INTEGER REFERENCES messages(seq) ON DELETE SET NULL,
+    fix_time INTEGER NOT NULL,
+    received_at INTEGER,
+    lat_e6 INTEGER NOT NULL, lon_e6 INTEGER NOT NULL,
+    alt_e2 INTEGER, speed_e2 INTEGER, bearing_e2 INTEGER, accuracy_e2 INTEGER,
+    telemetry BLOB NOT NULL,
+    PRIMARY KEY (identity, peer, fix_time));
+";
+
+/// The tables a whole store of schema 1 has.
+const TABLES_V1: [&str; 5] = [
     "conversations",
     "messages",
     "ledger",
     "names",
     "message_text",
 ];
+
+/// The tables schema 2 adds.
+const TABLES_V2: [&str; 1] = ["positions"];
 
 /// Why the store could not be used.
 #[derive(Debug)]
@@ -218,8 +252,9 @@ impl Store {
     }
 
     fn create(&self) -> Result<(), StoreError> {
-        let batch =
-            format!("BEGIN IMMEDIATE; {SCHEMA} PRAGMA user_version = {SCHEMA_VERSION}; COMMIT;");
+        let batch = format!(
+            "BEGIN IMMEDIATE; {SCHEMA} {SCHEMA_V2} PRAGMA user_version = {SCHEMA_VERSION}; COMMIT;"
+        );
         self.conn
             .execute_batch(&batch)
             .map_err(|e| failed(&self.path, e))
@@ -256,15 +291,47 @@ impl Store {
                 version,
             });
         }
-        if version != SCHEMA_VERSION {
+        if !(1..=SCHEMA_VERSION).contains(&version) {
             return Err(corrupt(format!(
                 "not a loquax store: schema version {version}"
             )));
         }
-        if let Some(missing) = TABLES.iter().find(|t| !tables.iter().any(|n| n == *t)) {
+        let missing = |want: &[&'static str]| -> Option<&'static str> {
+            want.iter()
+                .find(|t| !tables.iter().any(|n| n == *t))
+                .copied()
+        };
+        if let Some(missing) = missing(&TABLES_V1) {
+            return Err(corrupt(format!("table {missing} is missing")));
+        }
+        if version == 1 {
+            return self.migrate_v1();
+        }
+        if let Some(missing) = missing(&TABLES_V2) {
             return Err(corrupt(format!("table {missing} is missing")));
         }
         Ok(())
+    }
+
+    /// Schema 1 to 2: add `positions`, all or none. The version is read
+    /// again under the write lock, so two loquax opening one old file at
+    /// once migrate it once.
+    fn migrate_v1(&self) -> Result<(), StoreError> {
+        let batch = format!("{SCHEMA_V2} PRAGMA user_version = 2;");
+        let migrate = || -> rusqlite::Result<()> {
+            self.conn.execute_batch("BEGIN IMMEDIATE")?;
+            let version: i32 = self
+                .conn
+                .query_row("PRAGMA user_version", [], |row| row.get(0))?;
+            if version == 1 {
+                if let Err(error) = self.conn.execute_batch(&batch) {
+                    let _ = self.conn.execute_batch("ROLLBACK");
+                    return Err(error);
+                }
+            }
+            self.conn.execute_batch("COMMIT")
+        };
+        migrate().map_err(|e| failed(&self.path, e))
     }
 
     fn configure(&self) -> Result<(), StoreError> {
@@ -369,7 +436,7 @@ impl Store {
             .conn
             .prepare(
                 "SELECT seq, id, direction, state, unproven, verification, last_leg, \
-                 received_at, utc_offset, size, content FROM messages \
+                 received_at, utc_offset, size, content, fields FROM messages \
                  WHERE identity = ?1 AND conversation = ?2 AND seq < ?3 AND seq >= ?4 \
                  ORDER BY seq",
             )
@@ -424,6 +491,71 @@ impl Store {
             apply(&tx, &identity, write).map_err(|e| failed(&path, e))?;
         }
         tx.commit().map_err(|e| failed(&path, e))
+    }
+
+    /// Every peer's latest position, by [`Fix::newer_than`], the clamp for
+    /// a fix ahead of our clock applied as at receive time.
+    pub fn positions(&self) -> Result<Vec<Fix>, StoreError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT peer, via, message, fix_time, received_at, lat_e6, lon_e6, alt_e2, \
+                 speed_e2, bearing_e2, accuracy_e2, telemetry FROM positions \
+                 WHERE identity = ?1",
+            )
+            .map_err(|e| self.failed(e))?;
+        let rows = statement
+            .query_map(params![&self.identity[..]], |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    Location {
+                        last_update: row.get(3)?,
+                        latitude_e6: row.get(5)?,
+                        longitude_e6: row.get(6)?,
+                        altitude_e2: row.get::<_, Option<i32>>(7)?.unwrap_or(0),
+                        speed_e2: row.get::<_, Option<u32>>(8)?.unwrap_or(0),
+                        bearing_e2: row.get::<_, Option<i32>>(9)?.unwrap_or(0),
+                        accuracy_e2: row.get::<_, Option<u16>>(10)?.unwrap_or(0),
+                    },
+                    row.get::<_, Option<i64>>(4)?,
+                    row.get::<_, Vec<u8>>(11)?,
+                ))
+            })
+            .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            .map_err(|e| self.failed(e))?;
+        let mut latest: BTreeMap<[u8; 16], Fix> = BTreeMap::new();
+        for (peer, via, message, location, received_at, telemetry) in rows {
+            let fix = Fix {
+                peer: self.address(&peer)?,
+                via: self.address(&via)?,
+                message: message.map(|key| key as u64),
+                received_at,
+                location,
+                telemetry,
+            };
+            let newer = latest
+                .get(&fix.peer)
+                .is_none_or(|held| fix.newer_than(held));
+            if newer {
+                latest.insert(fix.peer, fix);
+            }
+        }
+        Ok(latest.into_values().collect())
+    }
+
+    /// How many positions the store holds for `peer`: the track.
+    pub fn track_len(&self, peer: [u8; 16]) -> Result<usize, StoreError> {
+        let count: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM positions WHERE identity = ?1 AND peer = ?2",
+                params![&self.identity[..], &peer[..]],
+                |row| row.get(0),
+            )
+            .map_err(|e| self.failed(e))?;
+        Ok(count.max(0) as usize)
     }
 
     /// The names heard from announces in earlier runs.
@@ -569,8 +701,9 @@ fn apply(
             let (secs, offset) = split(message.at);
             tx.execute(
                 "INSERT INTO messages(seq, identity, conversation, id, direction, state, \
-                 unproven, verification, last_leg, received_at, utc_offset, size, content) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13) \
+                 unproven, verification, last_leg, received_at, utc_offset, size, content, \
+                 fields) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) \
                  ON CONFLICT(seq) DO UPDATE SET id = excluded.id, state = excluded.state, \
                  unproven = excluded.unproven, verification = excluded.verification, \
                  last_leg = excluded.last_leg",
@@ -588,6 +721,7 @@ fn apply(
                     offset,
                     message.size as i64,
                     message.body,
+                    (!message.fields.is_empty()).then(|| pack_fields(&message.fields)),
                 ],
             )?;
             // The ledger only grows: the lines past what the store has.
@@ -632,6 +766,36 @@ fn apply(
                 "DELETE FROM conversations WHERE identity = ?1 AND peer = ?2",
                 params![&identity[..], &peer[..]],
             )?;
+            tx.execute(
+                "DELETE FROM positions WHERE identity = ?1 AND peer = ?2",
+                params![&identity[..], &peer[..]],
+            )?;
+        }
+        StoreWrite::Position(fix) => {
+            let l = &fix.location;
+            tx.execute(
+                "INSERT OR IGNORE INTO positions(identity, peer, via, message, fix_time, \
+                 received_at, lat_e6, lon_e6, alt_e2, speed_e2, bearing_e2, accuracy_e2, \
+                 telemetry) \
+                 VALUES (?1, ?2, ?3, \
+                 (SELECT seq FROM messages WHERE seq = ?4 AND identity = ?1), \
+                 ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                params![
+                    &identity[..],
+                    &fix.peer[..],
+                    &fix.via[..],
+                    fix.message.map(|key| key as i64),
+                    l.last_update,
+                    fix.received_at,
+                    l.latitude_e6,
+                    l.longitude_e6,
+                    l.altitude_e2,
+                    i64::from(l.speed_e2),
+                    l.bearing_e2,
+                    i64::from(l.accuracy_e2),
+                    fix.telemetry,
+                ],
+            )?;
         }
     }
     Ok(())
@@ -655,6 +819,12 @@ fn row_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
         ledger: Vec::new(),
         last_leg: leg.and_then(leg_of),
         activity: row.get::<_, i64>(0)? as u64,
+        // Bytes that are not a fields map were not written by us: kept out
+        // of the screen rather than misread.
+        fields: row
+            .get::<_, Option<Vec<u8>>>(11)?
+            .and_then(|packed| unpack_fields(&packed))
+            .unwrap_or_default(),
     })
 }
 
@@ -747,6 +917,7 @@ mod tests {
             }],
             last_leg: outbound.then_some(Leg::Direct),
             activity: key,
+            fields: Vec::new(),
         }
     }
 
@@ -1065,5 +1236,168 @@ mod tests {
             restored.iter().all(|c| c.peer != BOB),
             "the first half of the failed write is not in the store"
         );
+    }
+
+    // Telemetry (loquax-map.md, slice (a), "Stored where").
+
+    fn fix(peer: [u8; 16], via: [u8; 16], message: Option<u64>, fix_time: i64) -> Fix {
+        Fix {
+            peer,
+            via,
+            message,
+            received_at: Some(fix_time + 30),
+            location: Location {
+                latitude_e6: 43_773_100,
+                longitude_e6: 11_256_000,
+                altitude_e2: -150,
+                speed_e2: 4_000_000_000,
+                bearing_e2: 27_000,
+                accuracy_e2: 65_535,
+                last_update: fix_time,
+            },
+            telemetry: vec![0x81, 0x01, 0x05],
+        }
+    }
+
+    #[test]
+    fn fields_are_kept_raw_and_come_back_with_their_message() {
+        let home = tempfile::tempdir().expect("home");
+        let mut store = Store::open_in(home.path(), US).expect("open");
+        let mut report = message(1, false, "");
+        report.fields = vec![(0x02, vec![0xc4, 0x01, 0x80]), (0x10, vec![0xc0])];
+        put(&mut store, BOB, report.clone());
+        drop(store);
+        let store = Store::open_in(home.path(), US).expect("reopen");
+        assert_eq!(store.restore().expect("restore")[0].messages, vec![report]);
+        let raw: Vec<u8> = store
+            .conn
+            .query_row("SELECT fields FROM messages WHERE seq = 1", [], |row| {
+                row.get(0)
+            })
+            .expect("the column");
+        assert_eq!(raw, vec![0x82, 0x02, 0xc4, 0x01, 0x80, 0x10, 0xc0]);
+    }
+
+    #[test]
+    fn a_fix_arriving_twice_is_one_row_and_the_latest_comes_back() {
+        let home = tempfile::tempdir().expect("home");
+        let mut store = Store::open_in(home.path(), US).expect("open");
+        put(&mut store, BOB, message(1, false, ""));
+        put(&mut store, ALICE, message(2, false, ""));
+        let direct = fix(BOB, BOB, Some(1), 5_000);
+        let relayed = fix(BOB, ALICE, Some(2), 5_000);
+        let older = fix(BOB, BOB, None, 4_000);
+        store
+            .write(&[
+                StoreWrite::Position(direct.clone()),
+                StoreWrite::Position(relayed),
+                StoreWrite::Position(older),
+            ])
+            .expect("write");
+        assert_eq!(
+            store.track_len(BOB).expect("track"),
+            2,
+            "the repeat is one row"
+        );
+        drop(store);
+        let store = Store::open_in(home.path(), US).expect("reopen");
+        assert_eq!(
+            store.positions().expect("positions"),
+            vec![direct],
+            "integers as they were"
+        );
+        // Scoped to our address like every table.
+        let other = Store::open_in(home.path(), [0x02; 16]).expect("as another");
+        assert!(other.positions().expect("positions").is_empty());
+    }
+
+    #[test]
+    fn deleting_a_message_keeps_its_position_and_a_conversation_takes_them() {
+        let home = tempfile::tempdir().expect("home");
+        let mut store = Store::open_in(home.path(), US).expect("open");
+        put(&mut store, BOB, message(1, false, ""));
+        store
+            .write(&[StoreWrite::Position(fix(BOB, BOB, Some(1), 5_000))])
+            .expect("write");
+        store
+            .write(&[StoreWrite::ForgetMessage { key: 1 }])
+            .expect("forget the message");
+        let left = store.positions().expect("positions");
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].message, None, "the reference is cleared");
+        store
+            .write(&[StoreWrite::ForgetConversation { peer: BOB }])
+            .expect("forget bob");
+        assert!(store.positions().expect("positions").is_empty());
+    }
+
+    /// The schema 1 store of slice 6, as that loquax wrote it.
+    fn v1_store(home: &Path) {
+        let conn = Connection::open(home.join(STORE_FILE)).expect("create");
+        conn.execute_batch(&format!("BEGIN; {SCHEMA} PRAGMA user_version = 1; COMMIT;"))
+            .expect("schema 1");
+        conn.execute_batch(
+            "INSERT INTO conversations(identity, peer) VALUES (X'01010101010101010101010101010101', \
+             X'a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1'); \
+             INSERT INTO messages(seq, identity, conversation, direction, verification, \
+             received_at, utc_offset, size, content) VALUES (7, \
+             X'01010101010101010101010101010101', X'a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1', 0, 1, \
+             1000, 3600, 5, 'older');",
+        )
+        .expect("a message");
+    }
+
+    #[test]
+    fn a_schema_1_store_migrates_in_place_and_keeps_its_history() {
+        let home = tempfile::tempdir().expect("home");
+        v1_store(home.path());
+        let mut store = Store::open_in(home.path(), US).expect("schema 1 opens");
+        assert_eq!(
+            store
+                .conn
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i32>(0))
+                .expect("version"),
+            2
+        );
+        let restored = store.restore().expect("restore");
+        assert_eq!(restored[0].messages[0].body, "older");
+        assert!(restored[0].messages[0].fields.is_empty());
+        put(&mut store, ALICE, message(8, false, ""));
+        store
+            .write(&[StoreWrite::Position(fix(ALICE, ALICE, Some(8), 9_000))])
+            .expect("a position in the migrated store");
+        drop(store);
+        // Opened again it is a schema 2 store, not migrated twice.
+        let store = Store::open_in(home.path(), US).expect("reopen");
+        assert_eq!(store.positions().expect("positions").len(), 1);
+    }
+
+    /// A store this loquax wrote, opened by the loquax before it: the check
+    /// of that program, which knew schema 1 only, refuses it as newer. Run
+    /// here as the same comparison against version 1.
+    #[test]
+    fn a_schema_2_store_is_newer_than_a_schema_1_reader() {
+        let home = tempfile::tempdir().expect("home");
+        drop(Store::open_in(home.path(), US).expect("fresh"));
+        let conn = Connection::open(home.path().join(STORE_FILE)).expect("open");
+        let version: i32 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("version");
+        assert_eq!(version, 2);
+        assert!(
+            version > 1,
+            "store.rs's check refuses `version > SCHEMA_VERSION`"
+        );
+    }
+
+    #[test]
+    fn a_schema_2_store_without_its_positions_is_refused() {
+        let home = tempfile::tempdir().expect("home");
+        drop(Store::open_in(home.path(), US).expect("fresh"));
+        let conn = Connection::open(home.path().join(STORE_FILE)).expect("open");
+        conn.execute_batch("DROP TABLE positions").expect("drop");
+        drop(conn);
+        let text = refused(home.path());
+        assert!(text.contains("table positions is missing"), "{text}");
     }
 }
