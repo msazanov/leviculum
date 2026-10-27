@@ -285,3 +285,50 @@ fn rows_outside_the_projection_are_not_selected() {
     assert!(v.tiles(0..=15).iter().all(|t| t.id.y < 32));
     assert!(v.tiles(0..=15).iter().all(|t| t.id.y == 0 || t.id.y == 1));
 }
+
+/// `+` N times and `-` N times come back to the centre they left, and at
+/// every step the centre is on the view's middle sub-pixel, whatever the
+/// pane's parity; the wheel's zoom about a pixel round-trips too, away
+/// from the projection's top and bottom (1077:
+/// the region's edge wandered on zoom, and this rules out the view as
+/// the cause).
+#[test]
+fn zooming_in_and_out_keeps_the_centre_exactly() {
+    let centres = [
+        project(DUOMO),
+        // Frankfurt, with low bits set below every zoom's sub-pixel.
+        World {
+            x: 2_249_123_457,
+            y: 1_452_345_679,
+        },
+        World { x: 1, y: 7 },
+    ];
+    for c in centres {
+        for (w, h) in [(600, 400), (601, 401), (241, 157), (1, 1)] {
+            let middle = (i64::from(w) * 8, i64::from(h) * 8);
+            for start in [0u8, 8, 12] {
+                for n in 1..=7u8 {
+                    let mut v = Viewport::new(c, start, w, h);
+                    for z in (start + 1..=start + n).chain((start..start + n).rev()) {
+                        v.set_zoom(z);
+                        assert_eq!(v.centre, c, "z{z} {w}x{h}");
+                        assert_eq!(v.to_screen_sub(c), middle, "z{z} {w}x{h}");
+                    }
+                    assert_eq!(v, Viewport::new(c, start, w, h));
+                    // The wheel's y stops at the projection's edges, as a
+                    // pan does: tried where the view stays inside them.
+                    if start < 8 || c.y < 1 << 24 {
+                        continue;
+                    }
+                    let (x, y) = ((w / 3) as i32, (h / 5) as i32);
+                    let held = v.to_world(x, y);
+                    for z in (start + 1..=start + n).chain((start..start + n).rev()) {
+                        v.zoom_about(z, x, y);
+                        assert_eq!(v.to_world(x, y), held, "wheel z{z} {w}x{h}");
+                    }
+                    assert_eq!(v.centre, c, "wheel back to z{start} {w}x{h}");
+                }
+            }
+        }
+    }
+}
