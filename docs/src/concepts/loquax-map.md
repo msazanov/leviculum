@@ -514,12 +514,16 @@ Each alternative stays as one line, rejected, so the reasoning stays.
 
 The reviewer decided three more for slice (c), 2026-10-27 (leviculum 1065):
 
-- **The world outline is Natural Earth**, public domain, the 1:110m land
+- **The world outline is Natural Earth**, public domain, the 1:50m land
   polygons of version 5.1.2, baked by `scripts/bake-world-outline.py`
-  into `leviculum-map/data/ne_110m_land.lwo` (21,298 bytes, 128 rings,
-  5,003 points) and built into the binary; source and checksum in
-  `leviculum-map/fixtures/README.md` and THIRD-PARTY.md. Drawn as land
-  over water in colour and as coasts in braille, down to zoom 10.
+  into `leviculum-map/data/ne_50m_land.lwo` (159,357 bytes, 1,422 rings,
+  59,239 points, a step one pixel at zoom 10) and built into the binary;
+  source and checksum in `leviculum-map/fixtures/README.md` and
+  THIRD-PARTY.md. Drawn as land over water in colour and as coasts in
+  braille, down to zoom 10. Until leviculum 1073 it was the 1:110m
+  polygons quantised to 611 m, 21,298 bytes, which looked coarse without
+  a region; one table serves every zoom, a z2 view of a sixel pane
+  rendering in under 6 ms.
   *Rejected:* the world file ratatui's `Map` shape draws, whose licence
   is unsettled.
 - **`loquax map add` is not in slice (c).** Regions are placed by hand:

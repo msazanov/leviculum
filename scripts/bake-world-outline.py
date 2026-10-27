@@ -1,46 +1,58 @@
 #!/usr/bin/env python3
-"""Bake Natural Earth's 1:110m land polygons into the world outline table
+"""Bake Natural Earth's 1:50m land polygons into the world outline table
 leviculum-map draws when no region covers the view
 (leviculum-map/src/outline.rs, docs/src/concepts/loquax-map.md).
 
-Input: ne_110m_land.geojson of Natural Earth 5.1.2, public domain
+Input: ne_50m_land.geojson of Natural Earth 5.1.2, public domain
 (https://www.naturalearthdata.com/about/terms-of-use/), from
-https://raw.githubusercontent.com/nvkelso/natural-earth-vector/v5.1.2/geojson/ne_110m_land.geojson
-(sha256 9e0729ee253ca7d7a5c4ae9395fb1902264c5377c52e224d13dd85010e2835d9).
+https://raw.githubusercontent.com/nvkelso/natural-earth-vector/v5.1.2/geojson/ne_50m_land.geojson
+(sha256 e874b27a51d146452be360cafb3cc50c86001074a67d534113e6534682f9826b).
 
-Output, all integers little-endian u16:
-
-    "LWO1"  ring count
-    per ring: point count (bit 15 set: a hole of the ring before),
-              west, north, east, south of its points,
-              then x, y per point
-
-x and y are the Web Mercator world coordinate of leviculum-map's
-mercator.rs shifted right by 16: 65,536 steps around the world, 611 m at
-the equator. x is not wrapped, so a ring that reaches 180 E ends at 65535
+A point is the Web Mercator world coordinate of leviculum-map's
+mercator.rs shifted right by 32 - BITS: with BITS = 18, 262,144 steps
+around the world, 153 m at the equator and one pixel at zoom 10, the
+outline's deepest, so a coast is never off by more than half a pixel there.
+x is not wrapped, so a ring that reaches 180 E ends at the last step
 instead of jumping back to 0; the drawer places a copy of the world each
 side. Latitudes are clamped to the projection's edge, so Antarctica's
 closing edge along 90 S lies on the bottom row. The geometry is Natural
-Earth's own 1:110m simplification; this script only quantises it and drops
+Earth's own 1:50m simplification; this script only quantises it and drops
 the repeated points the quantisation makes.
+
+Output, "uv" an unsigned LEB128 varint:
+
+    "LWO2"  u8 BITS  uv ring count
+    per ring: uv point count * 2 + (1 for a hole of the ring before)
+              uv byte length of its deltas
+              uv x, uv y of its first point
+              uv x - west, uv y - north, uv east - x, uv south - y
+              u8 k
+              then per further point its dx and dy, zigzagged, k bits
+              each, least significant bit first; a value of k ones is an
+              escape and BITS + 1 bits with the value follow
+
+k is chosen per ring for the fewest bits, the smallest k on a tie, so a
+ring of short steps packs tight and one long step costs only its escape.
+Baking the same input again gives the same bytes.
 
 Usage: scripts/bake-world-outline.py IN.geojson OUT.lwo
 """
 
 import json
 import math
-import struct
 import sys
 
+BITS = 18
 MAX_LAT = 85.0511287798
 
 
 def project(lon, lat):
-    x = min(65535, max(0, round((lon + 180.0) / 360.0 * 65536.0)))
+    n = 1 << BITS
+    x = min(n - 1, max(0, round((lon + 180.0) / 360.0 * n)))
     lat = max(-MAX_LAT, min(MAX_LAT, lat))
     phi = math.radians(lat)
     t = math.log(math.tan(math.pi / 4 + phi / 2))
-    y = min(65535, max(0, round((1.0 - t / math.pi) / 2.0 * 65536.0)))
+    y = min(n - 1, max(0, round((1.0 - t / math.pi) / 2.0 * n)))
     return x, y
 
 
@@ -53,6 +65,70 @@ def ring_points(coords):
     # GeoJSON repeats the first point last; the drawer closes rings itself.
     while len(out) > 1 and out[-1] == out[0]:
         out.pop()
+    return out
+
+
+def uv(v):
+    out = bytearray()
+    while True:
+        b = v & 0x7F
+        v >>= 7
+        if v:
+            out.append(b | 0x80)
+        else:
+            out.append(b)
+            return out
+
+
+def zigzag(v):
+    return v << 1 if v >= 0 else ((-v) << 1) - 1
+
+
+def cost(values, k):
+    esc = (1 << k) - 1
+    return sum(k if v < esc else k + BITS + 1 for v in values)
+
+
+def pack(values, k):
+    esc = (1 << k) - 1
+    acc, n, out = 0, 0, bytearray()
+
+    def put(v, width):
+        nonlocal acc, n
+        acc |= v << n
+        n += width
+        while n >= 8:
+            out.append(acc & 0xFF)
+            acc >>= 8
+            n -= 8
+
+    for v in values:
+        if v < esc:
+            put(v, k)
+        else:
+            put(esc, k)
+            put(v, BITS + 1)
+    if n:
+        out.append(acc & 0xFF)
+    return out
+
+
+def ring_bytes(hole, pts):
+    values = []
+    for (ax, ay), (bx, by) in zip(pts, pts[1:]):
+        values += [zigzag(bx - ax), zigzag(by - ay)]
+    k = min(range(1, BITS + 2), key=lambda k: (cost(values, k), k))
+    deltas = pack(values, k)
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    x, y = pts[0]
+    out = bytearray()
+    out += uv(len(pts) * 2 + (1 if hole else 0))
+    out += uv(len(deltas))
+    out += uv(x) + uv(y)
+    out += uv(x - min(xs)) + uv(y - min(ys)) + uv(max(xs) - x) + uv(max(ys) - y)
+    out.append(k)
+    out += deltas
     return out
 
 
@@ -69,19 +145,16 @@ def main():
                 pts = ring_points(coords)
                 if len(pts) >= 3:
                     rings.append((i > 0, pts))
-    body = bytearray(b"LWO1")
-    body += struct.pack("<H", len(rings))
+    body = bytearray(b"LWO2")
+    body.append(BITS)
+    body += uv(len(rings))
     for hole, pts in rings:
-        xs = [p[0] for p in pts]
-        ys = [p[1] for p in pts]
-        body += struct.pack("<H", len(pts) | (0x8000 if hole else 0))
-        body += struct.pack("<HHHH", min(xs), min(ys), max(xs), max(ys))
-        for x, y in pts:
-            body += struct.pack("<HH", x, y)
+        body += ring_bytes(hole, pts)
     with open(dst, "wb") as f:
         f.write(body)
     points = sum(len(p) for _, p in rings)
-    print(f"OUTLINE rings={len(rings)} points={points} bytes={len(body)}")
+    holes = sum(1 for h, _ in rings if h)
+    print(f"OUTLINE rings={len(rings)} holes={holes} points={points} bytes={len(body)}")
 
 
 if __name__ == "__main__":

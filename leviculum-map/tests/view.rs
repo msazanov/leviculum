@@ -8,7 +8,7 @@ use embedded_graphics::prelude::*;
 use leviculum_map::choice::{choose, useful_zooms, view_zooms};
 use leviculum_map::draw::{draw, Ink};
 use leviculum_map::mercator::{project, LatLon, World};
-use leviculum_map::outline::{self, OutlineStats, WORLD_110M};
+use leviculum_map::outline::{self, OutlineStats, WORLD_50M};
 use leviculum_map::pins::{order, Pin};
 use leviculum_map::region::{Bounds, Header, Region};
 use leviculum_map::viewport::Viewport;
@@ -102,22 +102,32 @@ fn the_lines_ink_fills_nothing() {
 }
 
 #[test]
-fn the_outline_table_is_natural_earth_110m() {
-    let rings: Vec<_> = outline::rings(WORLD_110M).collect();
-    assert_eq!(rings.len(), 128);
-    assert_eq!(rings.iter().map(|r| r.len()).sum::<usize>(), 5003);
+fn the_outline_table_is_natural_earth_50m() {
+    let rings: Vec<_> = outline::rings(WORLD_50M).collect();
+    assert_eq!(outline::bits(WORLD_50M), Some(18));
+    assert_eq!(rings.len(), 1422);
+    assert_eq!(rings.iter().map(|r| r.len()).sum::<usize>(), 59_239);
     assert_eq!(rings.iter().filter(|r| r.hole).count(), 1);
-    assert!(WORLD_110M.len() < 64 * 1024, "{}", WORLD_110M.len());
+    assert!(WORLD_50M.len() <= 160 * 1024, "{}", WORLD_50M.len());
+    // Every point decodes inside its ring's box, and on the world.
+    for r in &rings {
+        let [w, n, e, s] = r.bbox;
+        assert!(e < 1 << 18 && s < 1 << 18, "{:?}", r.bbox);
+        assert_eq!(r.points().count(), r.len());
+        assert!(r
+            .points()
+            .all(|(x, y)| (w..=e).contains(&x) && (n..=s).contains(&y)));
+    }
     // Cut short anywhere, it yields fewer rings and never panics.
-    for cut in [0, 5, 6, 15, 1000, WORLD_110M.len() - 1] {
-        assert!(outline::rings(&WORLD_110M[..cut]).count() < 128);
+    for cut in [0, 4, 5, 6, 15, 1000, WORLD_50M.len() - 1] {
+        assert!(outline::rings(&WORLD_50M[..cut]).count() < 1422);
     }
 }
 
 fn outline_view(view: &Viewport, ink: Ink, fb: &mut [u16]) -> OutlineStats {
     let (w, h) = view.size();
     let mut frame = Frame::new(fb, w, h).expect("frame");
-    let Ok(st) = outline::draw(WORLD_110M, view, ink, &mut frame);
+    let Ok(st) = outline::draw(WORLD_50M, view, ink, &mut frame);
     st
 }
 
@@ -134,13 +144,32 @@ fn the_outline_draws_the_world_at_z2() {
     assert_eq!(land + water, 240 * 160);
     assert_eq!(
         (st.rings, st.culled, st.vertices, st.fill.pixels, land),
-        (7, 121, 624, 22_183, 22_183)
+        (122, 1_300, 4_695, 22_074, 22_074)
     );
     let ink = Rgb565::new(0, 0, 0);
     let st = outline_view(&view, Ink::Lines(ink), &mut fb);
     assert_eq!(st.fill.pixels, 0);
     let coast = count(&mut fb, 240, 160, ink);
-    assert_eq!((st.rings, st.stroke.pixels, coast), (7, 1_199, 1_199));
+    assert_eq!((st.rings, st.stroke.pixels, coast), (122, 1_931, 1_812));
+}
+
+/// Italy at z6, the zoom a reader passes on the way from the world to a
+/// region: the coast and its islands, filled and stroked.
+#[test]
+fn the_outline_draws_italy_at_z6() {
+    let view = Viewport::new(project(LatLon::from_degrees(42.0, 12.5)), 6, 240, 160);
+    let mut fb = vec![0u16; 240 * 160];
+    let st = outline_view(&view, Ink::Colour, &mut fb);
+    assert_eq!(st.overflows, 0);
+    let land = count(&mut fb, 240, 160, BACKGROUND);
+    assert_eq!(
+        (st.rings, st.culled, st.vertices, st.fill.pixels, land),
+        (4, 1_418, 87, 18_549, 18_549)
+    );
+    let ink = Rgb565::new(0, 0, 0);
+    let st = outline_view(&view, Ink::Lines(ink), &mut fb);
+    let coast = count(&mut fb, 240, 160, ink);
+    assert_eq!((st.rings, st.stroke.pixels, coast), (4, 409, 409));
 }
 
 /// Across the antimeridian the world repeats: a view centred on 180 E draws
@@ -151,7 +180,7 @@ fn the_outline_wraps_and_holds_at_every_zoom() {
     let mut fb = vec![0u16; 400 * 100];
     let wide = Viewport::new(World { x: 0, y: 1 << 31 }, 0, 400, 100);
     let st = outline_view(&wide, Ink::Colour, &mut fb);
-    assert_eq!(st.rings + st.culled, 2 * 128, "two copies of the world");
+    assert_eq!(st.rings + st.culled, 2 * 1422, "two copies of the world");
     let land = count(&mut fb, 400, 100, BACKGROUND);
     assert!(land > 0);
     for zoom in [8, 14, 20] {

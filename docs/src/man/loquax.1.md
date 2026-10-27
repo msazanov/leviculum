@@ -154,7 +154,7 @@ The map is drawn from region files you place by hand: every `*.lmr` in `$XDG_DAT
     leviculum-map-tool cut -o city.lmr city.pmtiles --bbox 8.47,50.01,8.80,50.23
     mv city.lmr ~/.local/share/loquax/maps/
 
-Where no region covers the view, and with none installed, the map is the world outline, Natural Earth's land at 1:110m, as far in as zoom 10. The attribution line under the map names what is drawn, `© OpenStreetMap contributors` for a region and `Natural Earth` for the outline. A region file that does not open is named in `tui.log` and left out.
+Where no region covers the view, and with none installed, the map is the world outline, Natural Earth's land at 1:50m, as far in as zoom 10. The attribution line under the map names what is drawn, `© OpenStreetMap contributors` for a region and `Natural Earth` for the outline. A region file that does not open is named in `tui.log` and left out.
 
 The picture is drawn with the kitty graphics protocol or sixel where the terminal speaks one (foot draws sixel), else with half-blocks, two pixels a cell in colour, else with braille, eight dots a cell, the roads and coasts as lines in one colour. **--graphics** forces one, and `tui.log` names the one taken once at start, as `GRAPHICS backend=sixel detected=sixel cell=10x20 zooms=0-20`.
 

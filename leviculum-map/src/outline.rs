@@ -1,12 +1,17 @@
 //! The world outline: what a view shows where no region covers it
 //! (`docs/src/concepts/loquax-map.md`, section 7, "No default region").
 //!
-//! Natural Earth's 1:110m land polygons, version 5.1.2, public domain,
-//! baked by `scripts/bake-world-outline.py` into a table of 21,298 bytes
-//! (128 rings, 5,003 points) that is part of the binary. The format is the
-//! script's: `LWO1`, a ring count, then per ring its point count (bit 15
-//! set for a hole of the ring before), its box, and its points, all `u16`
-//! little-endian, each point the world coordinate shifted right by 16.
+//! Natural Earth's 1:50m land polygons, version 5.1.2, public domain,
+//! baked by `scripts/bake-world-outline.py` into a table of 159,357 bytes
+//! (1,422 rings, 59,239 points) that is part of the binary. The format is
+//! the script's: `LWO2`, the bits a coordinate has, a ring count, then per
+//! ring its point count with a hole flag, the length of its deltas, its
+//! first point, its box as distances from that point, and the deltas to
+//! each further point, packed at a width the ring chose with an escape for
+//! a long step. Counts and distances are LEB128 varints. A point is the
+//! world coordinate shifted right by `32 - bits`; at 18 bits a step is one
+//! pixel at [`MAX_ZOOM`], so a coast there is never more than half a pixel
+//! off.
 //!
 //! [`Ink::Colour`] fills the land in the earth colour over water;
 //! [`Ink::Lines`] draws the coasts alone, one pixel wide. A ring is clipped
@@ -28,15 +33,15 @@ use leviculum_mapfill::SUBPIXEL;
 use crate::draw::Ink;
 use crate::viewport::Viewport;
 
-/// The table, Natural Earth 1:110m land.
-pub const WORLD_110M: &[u8] = include_bytes!("../data/ne_110m_land.lwo");
+/// The table, Natural Earth 1:50m land.
+pub const WORLD_50M: &[u8] = include_bytes!("../data/ne_50m_land.lwo");
 
 /// The attribution line a view of the outline carries.
 pub const ATTRIBUTION: &str = "Natural Earth";
 
 /// The deepest zoom the outline is worth drawing at without a region: at
-/// z10 one of its 611 m steps is about four pixels, and 1:110m data is
-/// coarser than that by far.
+/// z10 a step of the table is one pixel, and 1:50m data holds no detail
+/// finer than that.
 pub const MAX_ZOOM: u8 = 10;
 
 /// How far outside the view, in sub-pixels, a ring is clipped: more than
@@ -49,48 +54,127 @@ pub struct Ring<'a> {
     /// A hole in the ring before it.
     pub hole: bool,
     /// West, north, east, south of its points.
-    pub bbox: [u16; 4],
-    points: &'a [u8],
+    pub bbox: [u32; 4],
+    len: usize,
+    first: (u32, u32),
+    /// Bits a coordinate has, and bits a packed delta has.
+    bits: u32,
+    width: u32,
+    deltas: &'a [u8],
+}
+
+/// Reads bits least significant first; past the end it reads zeros.
+struct Bits<'a> {
+    bytes: &'a [u8],
+    at: usize,
+}
+
+impl Bits<'_> {
+    fn take(&mut self, n: u32) -> u32 {
+        let mut v = 0u32;
+        for i in 0..n {
+            let byte = self.bytes.get(self.at / 8).copied().unwrap_or(0);
+            v |= u32::from((byte >> (self.at % 8)) & 1) << i;
+            self.at += 1;
+        }
+        v
+    }
+
+    /// One delta: `width` bits, or the escape and `bits + 1` more.
+    fn delta(&mut self, width: u32, bits: u32) -> i64 {
+        let escape = (1u32 << width) - 1;
+        let z = match self.take(width) {
+            v if v == escape => self.take(bits + 1),
+            v => v,
+        };
+        i64::from(z >> 1) ^ -i64::from(z & 1)
+    }
 }
 
 impl Ring<'_> {
     /// Its points, as table units.
-    pub fn points(&self) -> impl Iterator<Item = (u16, u16)> + '_ {
-        self.points.chunks_exact(4).map(|p| {
-            (
-                u16::from_le_bytes([p[0], p[1]]),
-                u16::from_le_bytes([p[2], p[3]]),
-            )
+    pub fn points(&self) -> impl Iterator<Item = (u32, u32)> + '_ {
+        let mut bits = Bits {
+            bytes: self.deltas,
+            at: 0,
+        };
+        let (mut x, mut y) = (i64::from(self.first.0), i64::from(self.first.1));
+        let (width, coord) = (self.width, self.bits);
+        (0..self.len).map(move |i| {
+            if i > 0 {
+                x += bits.delta(width, coord);
+                y += bits.delta(width, coord);
+            }
+            (x.max(0) as u32, y.max(0) as u32)
         })
     }
 
     /// How many points it has.
     pub fn len(&self) -> usize {
-        self.points.len() / 4
+        self.len
     }
 
     pub fn is_empty(&self) -> bool {
-        self.points.is_empty()
+        self.len == 0
+    }
+}
+
+/// An unsigned LEB128 varint at `at`, which moves past it; `None` past the
+/// end or past 32 bits.
+fn varint(table: &[u8], at: &mut usize) -> Option<u32> {
+    let mut v = 0u32;
+    for shift in (0..35).step_by(7) {
+        let byte = *table.get(*at)?;
+        *at += 1;
+        v |= u32::from(byte & 0x7F).checked_shl(shift)?;
+        if byte & 0x80 == 0 {
+            return Some(v);
+        }
+    }
+    None
+}
+
+/// The bits a coordinate of `table` has, `None` for no table.
+pub fn bits(table: &[u8]) -> Option<u32> {
+    match table.get(..5) {
+        Some(head) if head[..4] == *b"LWO2" && (8..=24).contains(&head[4]) => {
+            Some(u32::from(head[4]))
+        }
+        _ => None,
     }
 }
 
 /// The rings of a table; a table cut short ends early, it never panics.
 pub fn rings(table: &[u8]) -> impl Iterator<Item = Ring<'_>> {
-    let count = match table.get(..6) {
-        Some(head) if head[..4] == *b"LWO1" => usize::from(u16::from_le_bytes([head[4], head[5]])),
-        _ => 0,
+    let bits = bits(table).unwrap_or(16);
+    let mut at = 5usize;
+    let count = match self::bits(table) {
+        Some(_) => varint(table, &mut at).unwrap_or(0),
+        None => 0,
     };
-    let mut at = 6usize;
     (0..count).map_while(move |_| {
-        let head = table.get(at..at + 10)?;
-        let word = |i: usize| u16::from_le_bytes([head[i], head[i + 1]]);
-        let n = usize::from(word(0) & 0x7FFF);
-        let points = table.get(at + 10..at + 10 + 4 * n)?;
-        at += 10 + 4 * n;
+        let mut v = || varint(table, &mut at);
+        let (head, size, x, y) = (v()?, v()?, v()?, v()?);
+        let (west, north, east, south) = (v()?, v()?, v()?, v()?);
+        let width = u32::from(*table.get(at)?);
+        if !(1..=bits + 1).contains(&width) {
+            return None;
+        }
+        let deltas = table.get(at + 1..at + 1 + size as usize)?;
+        at += 1 + size as usize;
         Some(Ring {
-            hole: word(0) & 0x8000 != 0,
-            bbox: [word(2), word(4), word(6), word(8)],
-            points,
+            hole: head & 1 != 0,
+            bbox: [
+                x.checked_sub(west)?,
+                y.checked_sub(north)?,
+                x.checked_add(east)?,
+                y.checked_add(south)?,
+            ],
+            len: (head >> 1) as usize,
+            first: (x, y),
+            bits,
+            width,
+            deltas,
         })
     })
 }
@@ -164,7 +248,7 @@ fn clip(ring: &[(i64, i64)], x0: i64, y0: i64, x1: i64, y1: i64, out: &mut Vec<(
     out.extend(cur);
 }
 
-/// Draw the outline of `table` (normally [`WORLD_110M`]) for `view` into
+/// Draw the outline of `table` (normally [`WORLD_50M`]) for `view` into
 /// `target`, which is cleared first: to water under [`Ink::Colour`], to the
 /// background under [`Ink::Lines`].
 pub fn draw<D>(
@@ -185,18 +269,33 @@ where
     let (left, top) = view.top_left_sub();
     let sub = i64::from(SUBPIXEL);
     let (vw, vh) = (i64::from(w) * sub, i64::from(h) * sub);
-    // Table units to view sub-pixels: a unit is 2^16 world units, a
-    // sub-pixel 2^(20 - zoom).
-    let up = i32::from(view.zoom()) - 4;
-    let scale = |v: u16| -> i64 {
+    // Table units to view sub-pixels: a unit is 2^(32 - bits) world
+    // units, a sub-pixel 2^(20 - zoom).
+    let Some(bits) = bits(table) else {
+        return Ok(st);
+    };
+    let up = i32::from(view.zoom()) + 12 - bits as i32;
+    let scale = |v: u32| -> i64 {
         match up >= 0 {
             true => i64::from(v) << up,
             false => i64::from(v) >> -up,
         }
     };
     let world = 1i64 << (12 + u32::from(view.zoom()));
-    let mut edges = vec![Edge::EMPTY; 8192];
-    let mut active = vec![0u16; 8192];
+    // Room for the largest polygon, its holes in, twice over for the
+    // corners the clip may add.
+    let mut largest = 0usize;
+    let mut polygon = 0usize;
+    for r in rings(table) {
+        polygon = match r.hole {
+            true => polygon + r.len(),
+            false => r.len(),
+        };
+        largest = largest.max(polygon);
+    }
+    let room = (2 * largest + 16).min(usize::from(u16::MAX));
+    let mut edges = vec![Edge::EMPTY; room];
+    let mut active = vec![0u16; room];
     let mut heads = vec![0u16; h as usize];
     let mut scratch = Scratch {
         edges: &mut edges,

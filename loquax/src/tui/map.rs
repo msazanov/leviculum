@@ -271,7 +271,7 @@ impl MapPainter {
         };
         if !drawn {
             if let Some(mut frame) = Frame::new(&mut fb, w, h) {
-                let Ok(_) = outline::draw(outline::WORLD_110M, view, ink, &mut frame);
+                let Ok(_) = outline::draw(outline::WORLD_50M, view, ink, &mut frame);
             }
         }
         self.painted = Some(Painted {

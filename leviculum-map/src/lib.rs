@@ -12,7 +12,7 @@
 //! - [`draw`]: the tiles of one view drawn into any `DrawTarget`, class by
 //!   class across the tiles, through `leviculum-mapfill`, in colour or as
 //!   lines alone, at the line widths of the view's zoom.
-//! - [`outline`]: the world outline, Natural Earth 1:110m land, where no
+//! - [`outline`]: the world outline, Natural Earth 1:50m land, where no
 //!   region covers the view.
 //! - [`choice`]: which installed region a view draws, and the zooms a
 //!   frontend offers.

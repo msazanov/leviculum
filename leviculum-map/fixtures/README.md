@@ -24,21 +24,21 @@ drawn from it are produced works and carry the same attribution.
 
 ## The world outline
 
-`../data/ne_110m_land.lwo` is not a test fixture but the table the crate
+`../data/ne_50m_land.lwo` is not a test fixture but the table the crate
 draws where no region covers the view (`src/outline.rs`): Natural Earth's
-1:110m land polygons, version 5.1.2, 128 rings and 5,003 points in 21,298
-bytes. Baked with
+1:50m land polygons, version 5.1.2, 1,422 rings and 59,239 points in
+159,357 bytes. Baked with
 
 ```sh
-scripts/bake-world-outline.py ne_110m_land.geojson leviculum-map/data/ne_110m_land.lwo
+scripts/bake-world-outline.py ne_50m_land.geojson leviculum-map/data/ne_50m_land.lwo
 ```
 
 from
-`https://raw.githubusercontent.com/nvkelso/natural-earth-vector/v5.1.2/geojson/ne_110m_land.geojson`
-(138,160 bytes, sha256
-`9e0729ee253ca7d7a5c4ae9395fb1902264c5377c52e224d13dd85010e2835d9`). Baking
+`https://raw.githubusercontent.com/nvkelso/natural-earth-vector/v5.1.2/geojson/ne_50m_land.geojson`
+(1,636,166 bytes, sha256
+`e874b27a51d146452be360cafb3cc50c86001074a67d534113e6534682f9826b`). Baking
 again gives the same bytes (sha256
-`6ddec1169769a2433e4d44e686d430fc84465bd460b404f7adea59cf275bed86`).
+`a154e60ef141e605a707441bb11215efcb97b5a013da08acc8ddfca90c0e2579`).
 
 **Natural Earth** is in the public domain
 (<https://www.naturalearthdata.com/about/terms-of-use/>); no permission is

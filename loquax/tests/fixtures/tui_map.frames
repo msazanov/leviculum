@@ -76,24 +76,24 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 4: outline ---
 ┌  loquax afbda7b3───────┐┌● map─────────────────────────────── z5 · 3 in view ┐
-│▌them ·61dd       14:00 ││                                      ⡜             │
-│▌◎ position             ││                                     ⢠⠃             │
-│                        ││                                     ⢪              │
-│                        ││                                      ⢇             │
-│                        ││⢄⡀                                    ⠈⢆            │
-│                        ││ ⠈⠑⠤⣀                                  ⠈⢆           │
-│                        ││     ⠉⠢⢄⡀                               ⠘⢦⡀         │
-│                        ││        ⠈⠉⠒⠂⠤⢄                            ⠈⠒⢄       │
-│                        ││              ⡇           ● <33333333…> · 3 h⠉⠢⣀    │
-│                        ││             you · 1 min ●◉ them ·61dd · 4 min  ⠑⠦⡀ │
-│                        ││               ⡆                                  ⠈⠳│
-│                        ││               ⢱                                    │
-│                        ││               ⠈⡄                                   │
-│                        ││                ⢣                                   │
-│                        ││    ⢀           ⠘⡄                                  │
-│                        ││  ⣠⠔⢹            ⢧⡀                                 │
-│                        ││⡠⠊⠁  ⡆            ⠑⢄                                │
-│                        ││     ⠇              ⠳⣄                              │
+│▌them ·61dd       14:00 ││                                     ⡠⢄⠼⠁           │
+│▌◎ position             ││                                     ⡇              │
+│                        ││                                     ⢣              │
+│                        ││                                     ⢸              │
+│                        ││⠑⠒⠤⢤⡀                                 ⢇             │
+│                        ││    ⠈⠒⢄⡀                              ⠘⣄            │
+│                        ││       ⠈⠒⠤⢄⣀                           ⠈⠢⣀          │
+│                        ││            ⠑⢢                           ⠈⠓⠦⢄       │
+│                        ││              ⢃           ● <33333333…> · 3 h⠙⠦⡀    │
+│                        ││             you · 1 min ●◉ them ·61dd · 4 min ⠈⠢⢄⡀ │
+│                        ││               ⡆                                  ⠈⠑│
+│                        ││               ⠑⡄                                   │
+│                        ││                ⠘⡄                                  │
+│                        ││                 ⢱                                  │
+│                        ││    ⣀⡀           ⢸                                  │
+│                        ││   ⢀⠇⢻           ⠚⠒⠢⡀                               │
+│                        ││   ⠸⡄⢸      ⠠⠤⠔⡒⡳   ⠳⢄                              │
+│                        ││⡠⠊⠉⠚ ⢜       ⠉⠉⠈⠃     ⠑⢄                            │
 │                        ││                                      Natural Earth │
 │                        │├  to them ·61dd───── Enter send · Alt-Enter newline ┤
 │                        ││                                                    │
