@@ -360,13 +360,16 @@ impl MapPainter {
             if pin.selected {
                 style = style.add_modifier(Modifier::REVERSED);
             }
-            let room = usize::from((area.x + area.width).saturating_sub(pin.col));
-            let (end, _) = buf.set_stringn(pin.col, pin.row, &pin.text, room, style);
-            // A graphics protocol marks the cells under its picture as
-            // skipped; the pin's own cells are drawn over it.
-            for x in pin.col..end {
-                if let Some(cell) = buf.cell_mut((x, pin.row)) {
-                    cell.set_diff_option(CellDiffOption::None);
+            let apart = pin.apart.iter().map(|a| (a.col, a.row, &a.text));
+            for (col, row, text) in std::iter::once((pin.col, pin.row, &pin.text)).chain(apart) {
+                let room = usize::from((area.x + area.width).saturating_sub(col));
+                let (end, _) = buf.set_stringn(col, row, text, room, style);
+                // A graphics protocol marks the cells under its picture as
+                // skipped; the pin's own cells are drawn over it.
+                for x in col..end {
+                    if let Some(cell) = buf.cell_mut((x, row)) {
+                        cell.set_diff_option(CellDiffOption::None);
+                    }
                 }
             }
         }
@@ -522,6 +525,7 @@ mod tests {
                 col: 16,
                 row: 5,
                 text: "● bob · 4 min".to_string(),
+                apart: None,
                 stale: false,
                 selected: true,
             }],

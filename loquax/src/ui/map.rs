@@ -73,13 +73,157 @@ pub struct MapPin {
 pub struct PinCell {
     pub peer: [u8; 16],
     /// Where the text starts: the marker's cell, or left of it when the
-    /// name is set before the marker at the picture's right edge.
+    /// name is set before the marker.
     pub col: u16,
     pub row: u16,
-    /// The marker, the name and the age, as drawn from `col` on.
+    /// The marker, with the name and the age beside it when they are set
+    /// on the marker's row, as drawn from `col` on.
     pub text: String,
+    /// The name and the age on the row above or below the marker, where
+    /// neither side of it had room.
+    pub apart: Option<LabelCell>,
     pub stale: bool,
     pub selected: bool,
+}
+
+/// A pin's name set on a row of its own.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LabelCell {
+    pub col: u16,
+    pub row: u16,
+    pub text: String,
+}
+
+/// Where a pin's name goes, relative to its marker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Side {
+    /// `● name`, from the marker's cell on.
+    Right,
+    /// `name ●`, ending on the marker's cell.
+    Left,
+    /// The row above, from the marker's column, shifted left to fit.
+    Above,
+    /// The row below, likewise.
+    Below,
+}
+
+/// One pin as [`labels`] sees it: its marker's cell in the picture and how
+/// many cells its name takes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LabelAsk {
+    pub col: u16,
+    pub row: u16,
+    pub len: u16,
+}
+
+/// One row's run of cells, `start..end`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Run {
+    row: u16,
+    start: u16,
+    end: u16,
+}
+
+impl Run {
+    fn overlaps(&self, other: &Run) -> bool {
+        self.row == other.row && self.start < other.end && other.start < self.end
+    }
+}
+
+/// The cells `ask`'s name covers on `side` in a `width` x `height`
+/// picture, without its marker, or `None` where it does not fit. Right and
+/// left include the space between marker and name.
+fn run(ask: &LabelAsk, side: Side, width: u16, height: u16) -> Option<Run> {
+    let (c, r, len) = (ask.col, ask.row, ask.len);
+    let apart = |row: u16| {
+        (len <= width).then(|| {
+            let start = c.min(width - len);
+            Run {
+                row,
+                start,
+                end: start + len,
+            }
+        })
+    };
+    match side {
+        Side::Right => (u32::from(c) + 2 + u32::from(len) <= u32::from(width)).then(|| Run {
+            row: r,
+            start: c + 1,
+            end: c + 2 + len,
+        }),
+        Side::Left => (c > len).then(|| Run {
+            row: r,
+            start: c - len - 1,
+            end: c,
+        }),
+        Side::Above => r.checked_sub(1).and_then(apart),
+        Side::Below => (r + 1 < height).then_some(r + 1).and_then(apart),
+    }
+}
+
+/// Where each pin's name goes so no name covers another's, or a marker:
+/// right of the marker, then left, then the row above and below. A name
+/// that fits nowhere is dropped (`None`) while its marker stays. The pin
+/// `selected` (an index into `asks`) chooses first and always keeps its
+/// name: where every side is taken it is set right, or left at the
+/// picture's edge, over what lies there. The others choose in order.
+///
+/// A pure function over cells, so a frame and a test agree and the rule
+/// can move into `leviculum_map::pins` beside the placement it follows.
+pub fn labels(
+    asks: &[LabelAsk],
+    selected: Option<usize>,
+    width: u16,
+    height: u16,
+) -> Vec<Option<Side>> {
+    let markers: Vec<Run> = asks
+        .iter()
+        .map(|a| Run {
+            row: a.row,
+            start: a.col,
+            end: a.col + 1,
+        })
+        .collect();
+    let mut taken: Vec<Run> = Vec::new();
+    let mut out = alloc::vec![None; asks.len()];
+    let order = selected
+        .filter(|&i| i < asks.len())
+        .into_iter()
+        .chain((0..asks.len()).filter(|&i| Some(i) != selected));
+    for i in order {
+        let ask = &asks[i];
+        let free = [Side::Right, Side::Left, Side::Above, Side::Below]
+            .into_iter()
+            .find_map(|side| {
+                let cells = run(ask, side, width, height)?;
+                let clear = markers
+                    .iter()
+                    .chain(taken.iter())
+                    .all(|m| !m.overlaps(&cells));
+                clear.then_some((side, cells))
+            });
+        let chosen = match free {
+            Some(found) => Some(found),
+            None if Some(i) == selected => {
+                let side = match run(ask, Side::Left, width, height) {
+                    Some(_) if run(ask, Side::Right, width, height).is_none() => Side::Left,
+                    _ => Side::Right,
+                };
+                let cells = run(ask, side, width, height).unwrap_or(Run {
+                    row: ask.row,
+                    start: ask.col.saturating_add(1),
+                    end: ask.col.saturating_add(2).saturating_add(ask.len),
+                });
+                Some((side, cells))
+            }
+            None => None,
+        };
+        if let Some((side, cells)) = chosen {
+            taken.push(cells);
+            out[i] = Some(side);
+        }
+    }
+    out
 }
 
 /// The map as drawn.
@@ -189,7 +333,8 @@ pub fn fit(pins: &[MapPin], area: Rect, setup: &MapSetup) -> (World, u8) {
     }
 }
 
-/// The pins of `pins` that land in `view` drawn over `area`, as cells.
+/// The pins of `pins` that land in `view` drawn over `area`, as cells,
+/// their names set by [`labels`].
 pub fn place(
     pins: &[MapPin],
     view: &Viewport,
@@ -206,10 +351,27 @@ pub fn place(
             stale: p.stale,
         })
         .collect();
-    let mut out: Vec<PinCell> = pins::place(view, &as_pins)
+    let landed: Vec<(&MapPin, LabelAsk, String)> = pins::place(view, &as_pins)
         .into_iter()
         .filter_map(|placed| {
             let pin = pins.get(placed.index)?;
+            let col = u16::try_from(placed.x / u32::from(setup.cell_px.0.max(1))).ok()?;
+            let row = u16::try_from(placed.y / u32::from(setup.cell_px.1.max(1))).ok()?;
+            let words = match &pin.age {
+                Some(age) => format!("{} · {age}", pin.label),
+                None => pin.label.clone(),
+            };
+            let len = u16::try_from(words.chars().count()).unwrap_or(u16::MAX);
+            Some((pin, LabelAsk { col, row, len }, words))
+        })
+        .collect();
+    let asks: Vec<LabelAsk> = landed.iter().map(|(_, ask, _)| *ask).collect();
+    let chosen = selected.and_then(|peer| landed.iter().position(|(p, _, _)| p.peer == peer));
+    let sides = labels(&asks, chosen, area.width, area.height);
+    let mut out: Vec<PinCell> = landed
+        .into_iter()
+        .zip(sides)
+        .map(|((pin, ask, words), side)| {
             let selected = Some(pin.peer) == selected;
             let marker = match (ascii, selected) {
                 (false, false) => MARKER,
@@ -217,44 +379,165 @@ pub fn place(
                 (true, false) => '*',
                 (true, true) => '@',
             };
-            let col = u16::try_from(placed.x / u32::from(setup.cell_px.0.max(1))).ok()?;
-            let row = u16::try_from(placed.y / u32::from(setup.cell_px.1.max(1))).ok()?;
-            let words = match &pin.age {
-                Some(age) => format!("{} · {age}", pin.label),
-                None => pin.label.clone(),
+            let (col, row) = (area.x + ask.col, area.y + ask.row);
+            let apart = |row: u16| {
+                Some(LabelCell {
+                    col: area.x + ask.col.min(area.width.saturating_sub(ask.len)),
+                    row,
+                    text: words.clone(),
+                })
             };
-            // The name right of the marker, or left of it where the right
-            // has no room: the marker stays on the pin's cell either way.
-            let len = words.chars().count() as u16 + 2;
-            let (col, text) = match col + len <= area.width || col + 1 < len {
-                true => (col, format!("{marker} {words}")),
-                false => (col + 1 - len, format!("{words} {marker}")),
+            let (col, text, apart) = match side {
+                Some(Side::Right) => (col, format!("{marker} {words}"), None),
+                Some(Side::Left) => (
+                    col.saturating_sub(ask.len + 1),
+                    format!("{words} {marker}"),
+                    None,
+                ),
+                Some(Side::Above) => (col, marker.to_string(), apart(row - 1)),
+                Some(Side::Below) => (col, marker.to_string(), apart(row + 1)),
+                None => (col, marker.to_string(), None),
             };
-            Some(PinCell {
+            PinCell {
                 peer: pin.peer,
-                col: area.x + col,
-                row: area.y + row,
+                col,
+                row,
                 text,
+                apart,
                 stale: pin.stale,
                 selected,
-            })
+            }
         })
         .collect();
     out.sort_by_key(|p| p.selected);
     out
 }
 
-/// The pin drawn at a cell, the topmost where texts overlap.
+/// The pin drawn at a cell, its marker or its name, the topmost where
+/// texts overlap.
 pub fn pin_at(cells: &[PinCell], area: Rect, col: u16, row: u16) -> Option<[u8; 16]> {
+    let hit = |at: u16, on: u16, text: &str| {
+        let end = at
+            .saturating_add(text.chars().count() as u16)
+            .min(area.x + area.width);
+        on == row && (at..end).contains(&col)
+    };
     cells
         .iter()
         .rev()
         .find(|p| {
-            let end = p
-                .col
-                .saturating_add(p.text.chars().count() as u16)
-                .min(area.x + area.width);
-            p.row == row && (p.col..end).contains(&col)
+            hit(p.col, p.row, &p.text)
+                || p.apart.as_ref().is_some_and(|a| hit(a.col, a.row, &a.text))
         })
         .map(|p| p.peer)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::vec;
+
+    const AT: LabelAsk = LabelAsk {
+        col: 20,
+        row: 5,
+        len: 8,
+    };
+
+    /// Two pins on one cell: the selected keeps the right, whichever comes
+    /// first; the other goes left.
+    #[test]
+    fn two_pins_at_one_spot_share_the_sides_the_selected_right() {
+        let asks = [AT, AT];
+        assert_eq!(
+            labels(&asks, Some(0), 60, 12),
+            vec![Some(Side::Right), Some(Side::Left)]
+        );
+        assert_eq!(
+            labels(&asks, Some(1), 60, 12),
+            vec![Some(Side::Left), Some(Side::Right)]
+        );
+        assert_eq!(
+            labels(&asks, None, 60, 12),
+            vec![Some(Side::Right), Some(Side::Left)]
+        );
+    }
+
+    /// Three on one cell: right, left, then the row above; four take the
+    /// row below; a fifth is dropped while the selected never is.
+    #[test]
+    fn three_pins_at_one_spot_go_above_and_a_name_without_room_is_dropped() {
+        assert_eq!(
+            labels(&[AT; 3], Some(2), 60, 12),
+            vec![Some(Side::Left), Some(Side::Above), Some(Side::Right)]
+        );
+        assert_eq!(
+            labels(&[AT; 5], Some(4), 60, 12),
+            vec![
+                Some(Side::Left),
+                Some(Side::Above),
+                Some(Side::Below),
+                None,
+                Some(Side::Right)
+            ]
+        );
+    }
+
+    /// A neighbour's marker is not covered: the name beside it moves to
+    /// the other side.
+    #[test]
+    fn a_name_does_not_cover_a_neighbours_marker() {
+        let next = LabelAsk { col: 24, ..AT };
+        assert_eq!(
+            labels(&[AT, next], Some(1), 60, 12),
+            vec![Some(Side::Left), Some(Side::Right)]
+        );
+    }
+
+    /// Hemmed in on every side, the selected still keeps its name: right,
+    /// or left at the picture's right edge.
+    #[test]
+    fn the_selected_keeps_its_name_where_no_side_is_free() {
+        let corner = LabelAsk {
+            col: 55,
+            row: 0,
+            len: 8,
+        };
+        let below = LabelAsk { row: 1, ..corner };
+        let left = LabelAsk { col: 50, ..corner };
+        let sides = labels(&[below, left, corner], Some(2), 60, 2);
+        assert_eq!(sides[2], Some(Side::Left));
+    }
+
+    /// The cells `place` draws for two pins on one spot: neither name
+    /// covers the other, and the selected one is drawn last.
+    #[test]
+    fn place_sets_two_names_on_one_spot_apart() {
+        let at = leviculum_map::mercator::project(LatLon::from_degrees(43.775, 11.261));
+        let pin = |peer: u8, label: &str| MapPin {
+            peer: [peer; 16],
+            at,
+            label: label.to_string(),
+            age: None,
+            stale: false,
+        };
+        let pins = [pin(1, "you"), pin(2, "them")];
+        let area = Rect::new(1, 1, 40, 10);
+        let setup = MapSetup::default();
+        let view = viewport(
+            &MapState {
+                centre: at,
+                zoom: 4,
+                selected: None,
+            },
+            area,
+            &setup,
+        );
+        let cells = place(&pins, &view, area, &setup, Some([2; 16]), false);
+        let texts: Vec<&str> = cells.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts, vec!["you ●", "◉ them"]);
+        assert_eq!(cells[0].col + 4, cells[1].col, "one marker cell");
+        let (marker, row) = (cells[1].col, cells[1].row);
+        assert_eq!(pin_at(&cells, area, marker, row), Some([2; 16]), "on top");
+        assert_eq!(pin_at(&cells, area, marker - 4, row), Some([1; 16]));
+    }
 }

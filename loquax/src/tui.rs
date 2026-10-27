@@ -1555,13 +1555,17 @@ pub fn draw(frame: &mut Frame, view: &View, painter: Option<&mut map::MapPainter
         }
         (Some(shown), None) => {
             for pin in &shown.pins {
-                frame.buffer_mut().set_stringn(
-                    pin.col,
-                    pin.row,
-                    &pin.text,
-                    usize::from(inner.width),
-                    Style::default(),
-                );
+                let apart = pin.apart.iter().map(|a| (a.col, a.row, &a.text));
+                for (col, row, text) in std::iter::once((pin.col, pin.row, &pin.text)).chain(apart)
+                {
+                    frame.buffer_mut().set_stringn(
+                        col,
+                        row,
+                        text,
+                        usize::from(inner.width),
+                        Style::default(),
+                    );
+                }
             }
         }
         (None, _) => {
