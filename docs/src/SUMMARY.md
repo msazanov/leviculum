@@ -33,6 +33,7 @@
   - [loquax: keys, mouse and layout](concepts/loquax-keys-and-layout.md)
   - [loquax: conversation storage](concepts/loquax-storage.md)
   - [loquax: the mailbox, and who you talk to](concepts/loquax-mailbox.md)
+  - [loquax: the map](concepts/loquax-map.md)
 - [Public channels over LXMF](concepts/public-channels.md)
 - [Telemetry](concepts/telemetry.md)
 - [The ThinkNode M9](concepts/thinknode-m9.md)

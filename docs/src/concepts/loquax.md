@@ -13,7 +13,7 @@ conclusion. Between 2026-08-08 and 2026-08-10 all ten questions were
 settled, so the document graduates from discussion to record and the
 remaining work is issues and batches.
 
-The rejected alternatives are kept throughout, on all six pages. They are
+The rejected alternatives are kept throughout, on all seven pages. They are
 the *why*: a decision recorded without the options it beat is an assertion,
 and the next person to ask "why not SQLite / why not modal keys / why not a
 daemon" has to re-derive the argument from nothing.
@@ -30,6 +30,9 @@ daemon" has to re-derive the argument from nothing.
 - [Conversation storage](loquax-storage.md) — SQLite, the schema, retention.
 - [The mailbox and who you talk to](loquax-mailbox.md) — propagation-node
   policy, trust, contacts and names.
+- [The map](loquax-map.md): telemetry positions in the conversation and
+  on a map, the renderer shared by the terminal, the GUI and the M9, and
+  the slices (a proposal of 2026-10-27).
 
 ## 1. What the program is
 

@@ -116,6 +116,12 @@ the M9, showing received telemetry positions. The device measurement
 below decides whether the vector path holds or the PNG fallback is
 taken, not whether the map exists.
 
+2026-10-27, Lew: the map is part of loquax, on the desktop (the terminal
+and the iced GUI) as well as on the board, because the positions arrive
+over the same LXMF channel as the messages. The plan, the renderer split
+and the slices are on [loquax: the map](loquax-map.md), proposed for
+Lew's decision.
+
 2026-10-25, Lew: the embedded map is vector, drawn with a minimal
 polygon filler of our own on `embedded-graphics` and measured on the
 device before any product code, with PNG raster tiles as the documented
@@ -206,7 +212,8 @@ messenger core holds the same types a board will.
 - **The licence text for the map data.** OSM data is ODbL: which notice
   ships with the tiles, and where the device shows it ([Licensing and
   third-party notices](licensing-and-notices.md)).
-- **How other nodes' positions age out of the map.**
+- **How other nodes' positions age out of the map.** Proposed on
+  [loquax: the map](loquax-map.md), section 2, "Stale".
 - **Whether the M9 frontend and the terminal share a text layout
   engine.** Since 2026-10-25 the rule for answering it is "One
   interaction model" above: shared where it is the same problem.
