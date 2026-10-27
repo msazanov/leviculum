@@ -189,6 +189,15 @@ this page leaves, or departs from it:
   asks for 200 more when the reader reaches the top: both index lookups on
   `(identity, conversation, seq)`, as "On the 2 GB Raspberry Pi question"
   argues.
+- **One row per received message** (leviculum 1070). A message that came
+  directly and comes again from the mailbox, the sender's fallback after
+  a delivery it could not prove, shares its LXMF id with the first copy.
+  The screen's own check sees only what it loaded, so after a restart the
+  older copy is out of its sight; the shell asks the store
+  (`Store::holds_received`, over the `id` index) before it folds a
+  received message, and drops one the store holds. A write of a received
+  message whose id another row already holds is a no-op as well. A
+  message the reader deleted is no longer held and would come back.
 - **Retention** is as decided: text and its ledger are kept until the
   reader deletes them (`d`, or the palette's `delete conversation`).
   Attachments do not exist yet, so neither does their byte budget.

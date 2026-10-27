@@ -120,6 +120,28 @@ pub struct TuiOptions {
     pub size: (u16, u16),
 }
 
+/// A received message the store already holds, which the screen drops
+/// before it folds: the mailbox copy of one that came directly, perhaps
+/// before a restart and below the window the screen loaded. A store that
+/// cannot answer lets the message through; a duplicate beats a lost one.
+fn already_held(store: &Store, event: &OutboxEvent) -> bool {
+    let OutboxEvent::Received { message_id, .. } = event else {
+        return false;
+    };
+    match store.holds_received(message_id) {
+        Ok(held) => {
+            if held {
+                tracing::info!("HELD message={}", loquax::address::to_hex(message_id));
+            }
+            held
+        }
+        Err(error) => {
+            tracing::warn!("{error}");
+            false
+        }
+    }
+}
+
 /// Effects for the runners and the stamp worker: their lines become toasts,
 /// their files are the CLI's, and a fetched message is not printed, because
 /// the screen already has it from the engine's `Received`.
@@ -334,6 +356,9 @@ impl Shell {
                         } => Some(*destination),
                         _ => None,
                     };
+                    if already_held(&self.store, &event) {
+                        continue;
+                    }
                     self.apply(UiEvent::Engine(event));
                     if let Some(destination) = named {
                         self.keep_name(destination);
@@ -2505,5 +2530,76 @@ mod tests {
                 "{width}: {glyphs:?}\n{shot}"
             );
         }
+    }
+
+    /// A message held from a direct delivery, older than the window the
+    /// restart loads, arriving again from the mailbox after the restart
+    /// (leviculum 1070, the sender's fallback of 1069): one row in the
+    /// store, no second block on the screen. The screen's own check sees
+    /// only what is loaded; the store's sees every row.
+    #[test]
+    fn a_mailbox_copy_of_a_message_below_the_loaded_window_is_not_kept_twice() {
+        use loquax::ui::history::LOAD_WINDOW;
+        use std::collections::BTreeMap;
+
+        let us = [0x01; 16];
+        let alice = [0xa1; 16];
+        let direct = [0xd1; 32];
+        let from_alice = |id: [u8; 32], body: &str| {
+            UiEvent::Engine(OutboxEvent::Received {
+                message_id: id,
+                source: alice,
+                title: Vec::new(),
+                body: body.as_bytes().to_vec(),
+                fields: Vec::new(),
+                verified: true,
+            })
+        };
+        let home = tempfile::tempdir().expect("home");
+
+        // The first run: the direct copy, then a window's worth after it.
+        let mut store = Store::open_in(home.path(), us).expect("open");
+        let mut model = Model::new(&[]);
+        update(&mut model, from_alice(direct, "the direct copy"));
+        for n in 0..LOAD_WINDOW {
+            let mut id = [0u8; 32];
+            id[..8].copy_from_slice(&(n as u64).to_be_bytes());
+            update(&mut model, from_alice(id, &format!("later {n}")));
+        }
+        store.write(&model.take_writes()).expect("write");
+        drop(store);
+
+        // The restart, as `run` makes it, and the mailbox copy.
+        let mut store = Store::open_in(home.path(), us).expect("reopen");
+        let mut model = Model::new(&[]);
+        model.restore(store.restore().expect("restore"));
+        model.activity = model.activity.max(store.last_key().expect("last key"));
+        assert!(
+            model.conversations[0]
+                .messages
+                .iter()
+                .all(|m| m.id != Some(direct)),
+            "the direct copy lies below the loaded window"
+        );
+        let again = from_alice(direct, "the direct copy");
+        let UiEvent::Engine(event) = &again else {
+            unreachable!("an engine event")
+        };
+        // What `Shell::poll` asks before it folds.
+        if !already_held(&store, event) {
+            update(&mut model, again);
+        }
+        store.write(&model.take_writes()).expect("write");
+
+        let everything: BTreeMap<[u8; 16], u64> = [(alice, u64::MAX)].into_iter().collect();
+        let rows = store
+            .search("the direct copy", &everything)
+            .expect("search");
+        assert_eq!(rows.len(), 1, "one row: {rows:?}");
+        assert_eq!(
+            model.conversations[0].messages.len(),
+            LOAD_WINDOW,
+            "no second block"
+        );
     }
 }

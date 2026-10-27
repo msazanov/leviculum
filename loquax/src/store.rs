@@ -493,6 +493,16 @@ impl Store {
         tx.commit().map_err(|e| failed(&path, e))
     }
 
+    /// Whether a message received with this id is already held: the
+    /// mailbox copy of one that came directly, in this run or an earlier one
+    /// (leviculum 1070). The screen holds only a window of each conversation,
+    /// so its own check cannot say this for the older ones.
+    pub fn holds_received(&self, id: &[u8; 32]) -> Result<bool, StoreError> {
+        received_key(&self.conn, &self.identity, id, None)
+            .map(|key| key.is_some())
+            .map_err(|e| self.failed(e))
+    }
+
     /// Every peer's latest position, by [`Fix::newer_than`], the clamp for
     /// a fix ahead of our clock applied as at receive time.
     pub fn positions(&self) -> Result<Vec<Fix>, StoreError> {
@@ -692,12 +702,19 @@ fn apply(
 ) -> rusqlite::Result<()> {
     match write {
         StoreWrite::Message { peer, message } => {
+            let key = message.activity as i64;
+            // One row per received message: a second copy under another key
+            // is the same message, arrived again, and changes nothing.
+            if let (false, Some(id)) = (message.outbound, &message.id) {
+                if received_key(tx, identity, id, Some(key))?.is_some() {
+                    return Ok(());
+                }
+            }
             tx.execute(
                 "INSERT INTO conversations(identity, peer) VALUES (?1, ?2) \
                  ON CONFLICT DO NOTHING",
                 params![&identity[..], &peer[..]],
             )?;
-            let key = message.activity as i64;
             let (secs, offset) = split(message.at);
             tx.execute(
                 "INSERT INTO messages(seq, identity, conversation, id, direction, state, \
@@ -801,6 +818,22 @@ fn apply(
     Ok(())
 }
 
+/// The key of the received message with this id, other than `except`.
+fn received_key(
+    conn: &Connection,
+    identity: &[u8; 16],
+    id: &[u8; 32],
+    except: Option<i64>,
+) -> rusqlite::Result<Option<i64>> {
+    conn.query_row(
+        "SELECT seq FROM messages WHERE id = ?1 AND identity = ?2 AND direction = 0 \
+         AND seq IS NOT ?3 LIMIT 1",
+        params![&id[..], &identity[..], except],
+        |row| row.get(0),
+    )
+    .optional()
+}
+
 fn row_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
     let id: Option<Vec<u8>> = row.get(1)?;
     let direction: i64 = row.get(2)?;
@@ -900,11 +933,18 @@ mod tests {
         })
     }
 
+    /// A message id of its own for every key.
+    fn id_of(key: u64) -> [u8; 32] {
+        let mut id = [0; 32];
+        id[..8].copy_from_slice(&key.to_be_bytes());
+        id
+    }
+
     fn message(key: u64, outbound: bool, body: &str) -> Message {
         Message {
             outbound,
             body: body.to_string(),
-            id: Some([key as u8; 32]),
+            id: Some(id_of(key)),
             delivery: outbound.then_some(DeliveryState::Delivered),
             verified: true,
             leg: None,
@@ -1016,6 +1056,37 @@ mod tests {
         let (through, earlier) = store.earlier(BOB, first, Some(3)).expect("through");
         assert_eq!(through[0].activity, 3);
         assert_eq!(earlier, 2);
+    }
+
+    #[test]
+    fn a_received_message_is_one_row_however_often_it_arrives() {
+        let home = tempfile::tempdir().expect("home");
+        let mut store = Store::open_in(home.path(), US).expect("open");
+        let direct = message(1, false, "the direct copy");
+        let id = direct.id.expect("an id");
+        assert!(!store.holds_received(&id).expect("ask"));
+        put(&mut store, ALICE, direct.clone());
+        assert!(store.holds_received(&id).expect("ask"));
+        // Its own key again is an update, not a second copy.
+        put(&mut store, ALICE, direct.clone());
+        // The mailbox copy under a later key changes nothing.
+        put(
+            &mut store,
+            ALICE,
+            Message {
+                activity: 2,
+                ..direct.clone()
+            },
+        );
+        let restored = store.restore().expect("restore");
+        assert_eq!(restored[0].messages, vec![direct]);
+        assert_eq!(store.last_key().expect("last key"), 1);
+        // A sent message with the same id is not a received one.
+        put(&mut store, BOB, message(3, true, "sent"));
+        assert!(!store.holds_received(&id_of(3)).expect("ask"));
+        // Nor is a row under another of our addresses.
+        let other = Store::open_in(home.path(), [0x02; 16]).expect("as another");
+        assert!(!other.holds_received(&id).expect("ask"));
     }
 
     #[test]
