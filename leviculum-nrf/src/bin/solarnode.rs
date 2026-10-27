@@ -33,7 +33,6 @@ extern crate alloc;
 use alloc::collections::BTreeMap;
 use embassy_executor::Spawner;
 use embassy_futures::select::{select, select3, select4, Either, Either3, Either4};
-use embassy_nrf::gpio::Level;
 use embassy_time::{Duration, Instant, Timer};
 
 use leviculum_core::embedded_storage::EmbeddedStorage;
@@ -166,7 +165,7 @@ async fn main(spawner: Spawner) {
     // supply of the T114's kind. What it does have is a GNSS enable
     // (P1.05), and that one belongs to the receiver, so it is raised in
     // the GNSS block below rather than at board level.
-    let mut led = solarnode::led(p.P0_19);
+    let led = solarnode::led(p.P0_19);
     let led_notification = solarnode::led_notification(p.P0_15);
 
     let rng = Entropy;
@@ -666,24 +665,16 @@ async fn main(spawner: Spawner) {
     let mut ble_iface = BleInterface::new(ble_channels.outgoing_tx);
     let ifac_configs: BTreeMap<usize, IfacConfig> = BTreeMap::new();
 
-    // Boot blink. Inverted against the T114's: this board's green LED is
-    // **active high** (`boards/solarnode.rs`), so High is the lit level
-    // and the pin ends where `solarnode::led` left it, dark.
-    led.set_level(Level::High);
-    for _ in 0..12_000_000u32 {
-        cortex_m::asm::nop();
-    }
-    led.set_level(Level::Low);
-    // From here the two LEDs are the feedback grammar's (order 892): the
-    // green one answers the button (battery on a short press, a blip at
-    // 2 s), the blue one blinks once for a message for this board. Both
-    // active high (`boards/solarnode.rs`).
-    leviculum_nrf::feedback::spawn_led(
+    // Boot blink, then the two LEDs are the feedback grammar's (order
+    // 892): the green one answers the button (battery on a short press, a
+    // blip at 2 s), the blue one blinks once for a message for this board.
+    // Both active high (`boards/solarnode.rs`). The blink is the green
+    // player's, on a timer, not a spin that holds USB back (order 1055).
+    leviculum_nrf::feedback::spawn_led_with_boot_blink(
         &spawner,
         led,
         true,
         leviculum_nrf::feedback::Sink::Led,
-        None,
     );
     leviculum_nrf::feedback::spawn_led(
         &spawner,

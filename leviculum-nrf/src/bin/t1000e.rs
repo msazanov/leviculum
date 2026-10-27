@@ -33,7 +33,6 @@ extern crate alloc;
 use alloc::collections::BTreeMap;
 use embassy_executor::Spawner;
 use embassy_futures::select::{select, select3, select4, Either, Either3, Either4};
-use embassy_nrf::gpio::Level;
 use embassy_time::{Duration, Instant, Timer};
 
 use leviculum_core::embedded_storage::EmbeddedStorage;
@@ -160,7 +159,7 @@ async fn main(spawner: Spawner) {
     // receiver's enable and sleep lines belong to the GNSS task below.
     let _power_sensors = t1000e::power_sensors(p.P1_06);
     let gnss_control = t1000e::gnss_control(p.P0_08, p.P1_15, p.P0_15, p.P1_14);
-    let mut led = t1000e::led(p.P0_24);
+    let led = t1000e::led(p.P0_24);
     // The buzzer's enable starts low; the feedback grammar's buzzer player
     // raises it for the length of a pattern (order 892, `crate::feedback`).
     let buzzer_enable = t1000e::buzzer_enable(p.P1_05);
@@ -590,24 +589,17 @@ async fn main(spawner: Spawner) {
     let mut ble_iface = BleInterface::new(ble_channels.outgoing_tx);
     let ifac_configs: BTreeMap<usize, IfacConfig> = BTreeMap::new();
 
-    // Boot blink. Inverted against the T114's: this board's green LED is
-    // **active high** (`boards/t1000e.rs`), so High is the lit level
-    // and the pin ends where `t1000e::led` left it, dark.
-    led.set_level(Level::High);
-    for _ in 0..12_000_000u32 {
-        cortex_m::asm::nop();
-    }
-    led.set_level(Level::Low);
-    // From here the LED and the buzzer are the feedback grammar's (order
-    // 892): a short press plays the battery, a held button blips at 2 s, a
-    // message for this board blinks and buzzes once. No notification LED,
-    // so `notify` plays on the LED.
-    leviculum_nrf::feedback::spawn_led(
+    // Boot blink, then the LED and the buzzer are the feedback grammar's
+    // (order 892): a short press plays the battery, a held button blips at
+    // 2 s, a message for this board blinks and buzzes once. No
+    // notification LED, so `notify` plays on the LED. This board's green
+    // LED is **active high** (`boards/t1000e.rs`). The blink is the
+    // player's, on a timer, not a spin that holds USB back (order 1055).
+    leviculum_nrf::feedback::spawn_led_with_boot_blink(
         &spawner,
         led,
         true,
         leviculum_nrf::feedback::Sink::Led,
-        None,
     );
     leviculum_nrf::feedback::spawn_buzzer(&spawner, buzzer_pwm, buzzer_enable);
 

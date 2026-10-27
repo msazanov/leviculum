@@ -26,19 +26,19 @@ runs an event-driven main loop that dispatches packets between them:
 | Interface | ID | Medium | HW MTU |
 |-----------|----|--------|--------|
 | `serial_usb` | 0 | USB CDC-ACM, HDLC framing to host | 564 |
-| `lora_sx1262` on the T114, RAK4631 and solar node, `lora_lr1110` on the T1000-E | 1 | the board's LoRa radio, named in its board file (`IFACE_NAMES`) | 508 (#390: two frames of at most 254 B, `leviculum-nrf/src/bin/t114.rs:290`) |
+| `lora_sx1262` on the T114, RAK4631 and solar node, `lora_lr1110` on the T1000-E | 1 | the board's LoRa radio, named in its board file (`IFACE_NAMES`) | 508 (#390: two frames of at most 254 B, `leviculum-nrf/src/bin/t114.rs:289`) |
 | `ble` | 2 | BLE peripheral, Columba v2.2 | 564 |
 
 (Interface registration and MTUs:
 `set_interface_name` (`leviculum-nrf/src/bin/t114.rs:270-287`) and
 `leviculum-nrf/src/bin/rak4631.rs:297-338`. The main loop selecting over
 the three RX sources plus a timer deadline begins at
-`leviculum-nrf/src/bin/t114.rs:596`.)
+`leviculum-nrf/src/bin/t114.rs:752`.)
 
 Transport routing is enabled in the node builder, so an LNode forwards
 packets and serves paths for other peers, exactly like a
 transport-enabled `lnsd`.
-(`enable_transport` (`leviculum-nrf/src/bin/t114.rs:168`),
+(`enable_transport` (`leviculum-nrf/src/bin/t114.rs:167`),
 `leviculum-nrf/src/bin/rak4631.rs:199`)
 
 A board does not accept compressed resources. The firmware builds
@@ -525,7 +525,7 @@ board. Exactly one BSP feature must be enabled per build; a
 
 > **Note on BLE:** Both firmware entry points register a BLE interface
 > and call `leviculum_nrf::ble::init`
-> (`leviculum-nrf/src/bin/t114.rs:356`,
+> (`leviculum-nrf/src/bin/t114.rs:355`,
 > `leviculum-nrf/src/bin/rak4631.rs:410`). The Cargo `softdevice`
 > feature, and therefore the BLE stack, is pulled in by *both* BSP
 > features (`leviculum-nrf/Cargo.toml:380`,

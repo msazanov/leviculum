@@ -9,9 +9,9 @@ src/battery.rs (324):
 src/bin/qspi-selftest.rs (634):
 src/bin/rak4631.rs (1470):
 src/bin/sd-ram-probe.rs (294):
-src/bin/solarnode.rs (1503):
-src/bin/t1000e.rs (1375): feedback
-src/bin/t114.rs (1416):
+src/bin/solarnode.rs (1494):
+src/bin/t1000e.rs (1367): feedback
+src/bin/t114.rs (1407):
 src/ble/columba.rs (3225): info log radio_store warn
 src/ble/mod.rs (891): info log media radio_store transport_stats warn
 src/ble/notify.rs (238): ble log
@@ -26,7 +26,7 @@ src/button.rs (86):
 src/chtm.rs (71): log lora sx1262
 src/display.rs (222): log panel_facts
 src/events.rs (261): announce log pn transport_stats
-src/feedback.rs (244): led log
+src/feedback.rs (274): led log
 src/flash.rs (79):
 src/gnss.rs (587): boards log vext
 src/heap_census.rs (398): log pn

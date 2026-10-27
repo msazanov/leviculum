@@ -19,13 +19,13 @@ and the Solar Node add a `LedNotificationPin`
 (`leviculum-nrf/src/boards/rak4631.rs:50`,
 `leviculum-nrf/src/boards/solarnode.rs:89`), the T1000-E a `BuzzerPin`
 (`leviculum-nrf/src/boards/t1000e.rs:289`). The Pocket drives an OLED
-and the T114 an ST7789 (`leviculum-nrf/src/bin/t114.rs:491`).
+and the T114 an ST7789 (`leviculum-nrf/src/bin/t114.rs:490`).
 
 Since 889 every board brings the button up with the same task
-(`leviculum-nrf/src/bin/t114.rs:518`,
-`leviculum-nrf/src/bin/solarnode.rs:572`,
+(`leviculum-nrf/src/bin/t114.rs:517`,
+`leviculum-nrf/src/bin/solarnode.rs:571`,
 `leviculum-nrf/src/bin/rak4631.rs:528`,
-`leviculum-nrf/src/bin/t1000e.rs:518`). The T114 and the Solar Node used
+`leviculum-nrf/src/bin/t1000e.rs:517`). The T114 and the Solar Node used
 to say `[BTN] none` only because nobody had wired the task: neither pin
 is shared with anything the firmware drives, and the Solar Node's touch
 pad is a second pin (`TouchButton`, `leviculum-nrf/src/boards/solarnode.rs:95`)
@@ -34,9 +34,11 @@ power button (`leviculum-nrf/src/boards/t1000e.rs:280-284`).
 
 Before 892 the LEDs said nothing a user asked for. The T114, the Solar
 Node and the T1000-E flashed theirs once at boot and never touched it
-again (`leviculum-nrf/src/bin/t114.rs:591`,
-`leviculum-nrf/src/bin/solarnode.rs:669`,
-`leviculum-nrf/src/bin/t1000e.rs:593`). The Pocket V2's two LEDs pulsed
+again. The boot blink stays, and since order 1055 it is the LED player's
+opening, on a timer instead of a spin that held USB back
+(`leviculum-nrf/src/bin/t114.rs:597`,
+`leviculum-nrf/src/bin/solarnode.rs:673`,
+`leviculum-nrf/src/bin/t1000e.rs:598`). The Pocket V2's two LEDs pulsed
 LoRa TX and RX activity (`leviculum-nrf/src/led.rs`), and a bare RAK4631
 module without the baseboard blinks a 1 Hz heartbeat
 (`leviculum-nrf/src/bin/rak4631.rs:1463`). The Solar Node's blue LED was
@@ -110,9 +112,9 @@ on/off steps built from these constants:
 | `announce-sent` | 1 short, 150 ms dark, 1 blip | 360 ms |
 
 The players are `leviculum-nrf/src/feedback.rs`: one per LED
-(`led_task`, `leviculum-nrf/src/feedback.rs:144`) and the T1000-E's buzzer
-(`buzzer_task`, `leviculum-nrf/src/feedback.rs:208`). The buzzer sounds
-`BUZZER_TONE_HZ` (247 Hz, `leviculum-nrf/src/feedback.rs:200`), the B3 of
+(`led_task`, `leviculum-nrf/src/feedback.rs:154`) and the T1000-E's buzzer
+(`buzzer_task`, `leviculum-nrf/src/feedback.rs:238`). The buzzer sounds
+`BUZZER_TONE_HZ` (247 Hz, `leviculum-nrf/src/feedback.rs:230`), the B3 of
 Meshtastic's own beep on this board, while a step is on. A pattern
 raised while another plays on the same sink replaces it. The Pocket V2's
 LEDs keep their activity pulses between patterns. Which event raises
@@ -167,7 +169,7 @@ drop, the stale drop and after a transmission,
 `leviculum-nrf/src/lora.rs:1829,2222,2467`). The button arm notes the
 count before and after its dispatch around the feedback policy's
 watch (`leviculum-nrf/firmware/src/feedback.rs:273`, called from each
-binary, e.g. `leviculum-nrf/src/bin/t1000e.rs:1107-1127`), and the
+binary, e.g. `leviculum-nrf/src/bin/t1000e.rs:1099-1119`), and the
 press's last LoRa packet settling keyed plays the pattern
 (`leviculum-nrf/firmware/src/feedback.rs:284`). The rule is
 `leviculum_feedback::AirWatch` (`leviculum-nrf/feedback/src/lib.rs:245`),
@@ -199,7 +201,7 @@ Since 914 the double press does what the gesture table says: after the
 two announces the node loop's button arm asks the telemetry reporter for
 one report (`leviculum_nrf::telemetry::on_button_press`,
 `leviculum-nrf/src/telemetry.rs:1949`, called from each binary, e.g.
-`leviculum-nrf/src/bin/t1000e.rs:1132`). There is no second sender. The
+`leviculum-nrf/src/bin/t1000e.rs:1124`). There is no second sender. The
 press arms the same immediate report a target write or a request from
 the target arms ([Telemetry](telemetry.md), "Setting a target emits one
 immediate report" and "A request from the target triggers one report"),

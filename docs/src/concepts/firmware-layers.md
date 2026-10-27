@@ -43,9 +43,9 @@ tree:
 
 - **The node loop is not a module. It is four copies.** Each board
   binary carries its own `main` with the loop inside it:
-  `leviculum-nrf/src/bin/t1000e.rs:54-1295` is a 1,242-line `main` with a
+  `leviculum-nrf/src/bin/t1000e.rs:53-1287` is a 1,235-line `main` with a
   537-line `loop { select ... dispatch ... settle }` at
-  `leviculum-nrf/src/bin/t1000e.rs:758-1294` and 110 references into
+  `leviculum-nrf/src/bin/t1000e.rs:750-1286` and 110 references into
   `leviculum_nrf::`; `bin/t114.rs`, `bin/rak4631.rs` and
   `bin/solarnode.rs` carry the same loop, and `t114` and `rak4631`
   differ by 500 lines. Beside the four board binaries sit two probes

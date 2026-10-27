@@ -136,16 +136,27 @@ async fn play(mut pattern: Pattern, sink: Sink, mut drive: impl FnMut(bool)) {
 const ACTIVITY_ON_MS: u64 = 80;
 const ACTIVITY_OFF_MS: u64 = 30;
 
+/// How long the boot blink holds the LED lit. The length the spin it
+/// replaced had on the T114 (12 M `nop`s, 2093 ms between `post-init` and
+/// `blink_done` on d5981450, order 1055), now on a timer, so the executor
+/// runs the USB task meanwhile instead of waiting for it.
+pub const BOOT_BLINK_MS: u64 = 2_100;
+
 /// An LED player. `activity`, where given, is the Pocket V2's LoRa TX or
 /// RX pulse signal: the LED pulses on it while no pattern plays, and the
 /// pulses raised during a pattern are dropped, so a pattern is never cut
 /// into by traffic and never followed by a stale flash.
+///
+/// `boot_blink` lights the LED for [`BOOT_BLINK_MS`] before the player
+/// starts, then stamps `[BOOT_TRACE] stage=blink_done`. A pattern raised
+/// meanwhile waits in its signal and plays once the blink is over.
 #[embassy_executor::task(pool_size = 2)]
 pub async fn led_task(
     mut led: Output<'static>,
     active_high: bool,
     sink: Sink,
     activity: Option<&'static Signal<CriticalSectionRawMutex, ()>>,
+    boot_blink: bool,
 ) {
     let mut set = move |on: bool| {
         if on == active_high {
@@ -154,6 +165,12 @@ pub async fn led_task(
             led.set_low();
         }
     };
+    if boot_blink {
+        set(true);
+        Timer::after(Duration::from_millis(BOOT_BLINK_MS)).await;
+        set(false);
+        leviculum_firmware::boot_trace::log_stage("blink_done");
+    }
     set(false);
     let signal = signal(sink);
     loop {
@@ -186,7 +203,20 @@ pub fn spawn_led(
     sink: Sink,
     activity: Option<&'static Signal<CriticalSectionRawMutex, ()>>,
 ) {
-    spawner.must_spawn(led_task(led, active_high, sink, activity));
+    spawner.must_spawn(led_task(led, active_high, sink, activity, false));
+    present(sink).store(true, Ordering::Relaxed);
+}
+
+/// [`spawn_led`] for the board's main LED, opening with the boot blink
+/// (see [`led_task`]). The blink runs on the executor, so `main` goes on
+/// to the main loop and USB enumerates while the LED is still lit.
+pub fn spawn_led_with_boot_blink(
+    spawner: &Spawner,
+    led: Output<'static>,
+    active_high: bool,
+    sink: Sink,
+) {
+    spawner.must_spawn(led_task(led, active_high, sink, None, true));
     present(sink).store(true, Ordering::Relaxed);
 }
 

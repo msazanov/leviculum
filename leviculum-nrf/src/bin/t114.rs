@@ -15,7 +15,6 @@ extern crate alloc;
 use alloc::collections::BTreeMap;
 use embassy_executor::Spawner;
 use embassy_futures::select::{select, select3, select4, Either, Either3, Either4};
-use embassy_nrf::gpio::Level;
 use embassy_time::{Duration, Instant, Timer};
 
 use leviculum_core::embedded_storage::EmbeddedStorage;
@@ -142,7 +141,7 @@ async fn main(spawner: Spawner) {
     // peripherals exist so its 1 s warmup overlaps the rest of init
     // instead of delaying a consumer.
     leviculum_nrf::vext::raise::<t114::VextEnable>(p.P0_21);
-    let mut led = t114::led(p.P1_03);
+    let led = t114::led(p.P1_03);
 
     let rng = Entropy;
 
@@ -588,26 +587,18 @@ async fn main(spawner: Spawner) {
     let mut ble_iface = BleInterface::new(ble_channels.outgoing_tx);
     let ifac_configs: BTreeMap<usize, IfacConfig> = BTreeMap::new();
 
-    // Boot blink
-    led.set_level(Level::Low);
-    for _ in 0..12_000_000u32 {
-        cortex_m::asm::nop();
-    }
-    led.set_level(Level::High);
-    // How long the busy wait above held the executor, and with it the USB
-    // task, which has not run yet (order 1053): `[STACK] tag=post-init`
-    // is its start.
-    leviculum_firmware::boot_trace::log_stage("blink_done");
-    // From here the LED is the feedback grammar's (order 892): a short
-    // press blinks the battery, a held button blips at 2 s, a message for
-    // this board blinks once. Active low (`boards/t114.rs`). The board has
-    // no notification LED, so `notify` plays here too.
-    leviculum_nrf::feedback::spawn_led(
+    // Boot blink, then the LED is the feedback grammar's (order 892): a
+    // short press blinks the battery, a held button blips at 2 s, a
+    // message for this board blinks once. Active low (`boards/t114.rs`).
+    // The board has no notification LED, so `notify` plays here too. The
+    // blink is the player's, on a timer (order 1055): a 12 M `nop` spin
+    // here held the executor, and with it the USB task, for 2093 ms. The
+    // player stamps `[BOOT_TRACE] stage=blink_done` when it ends.
+    leviculum_nrf::feedback::spawn_led_with_boot_blink(
         &spawner,
         led,
         false,
         leviculum_nrf::feedback::Sink::Led,
-        None,
     );
 
     // Telemetry (Codeberg #236). The delivery destination is registered
