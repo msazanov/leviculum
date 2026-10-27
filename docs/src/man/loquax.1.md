@@ -119,6 +119,16 @@ Message text is kept until you delete it. `d` on a message, then `y`, deletes it
 
 What **send** and **fetch** handle on the command line is not written to the history.
 
+## TELEMETRY
+
+**tui** reads the positions peers send in their messages: the telemetry field of Sideband, Columba and the leviculum boards, and a collector's stream of other peers' positions. A report with no text is one line in the conversation, `◎ position 43.77310 N 11.25600 E`, beside the time it arrived; reports that follow each other fold into the latest one. A message with text and a position shows its text, and the position is taken all the same.
+
+The open conversation's title carries the peer's latest position. A wide screen shows it in the row under the title, `at 43.77310 N 11.25600 E · ±5 m · 4 min ago`, the accuracy only where the peer gave one; on a narrow one the title says `pos 4 min`. The age counts from the fix, not from when the message arrived, and a fix older than two hours is drawn dimmed, its age still beside it. A fix stamped ahead of this computer's clock is shown with its claimed time, `fix 16:00, ahead of our clock`, and does not count as newer than the fixes that follow it. The detail view of a report lists every sensor it carried: position, altitude, speed, bearing, accuracy, fix time, battery, link and temperature. A report that cannot be read is kept as it came and named in `$LNMSG_HOME/tui.log` as `TELEMETRY_UNREADABLE`.
+
+Every position is kept in the history with the message it came in; one fix that arrives twice, directly and again in a collector's stream, is kept once. Deleting a conversation deletes the positions its peer reported.
+
+loquax sends no telemetry: it never sends your position and answers no request for it.
+
 ## MOUSE
 
 In **tui** the mouse is captured unless **--no-mouse** says otherwise, and the palette's `mouse` switches it off and on. A click on a pane focuses it, and the wheel scrolls the pane under the pointer, whichever has the focus: the list a conversation a notch, the conversation three rows, the compose box a line. A click on a conversation's rows opens it; on its unread count, it opens at the `new` rule. A click on a message selects it where it is, without scrolling; on its delivery mark, it opens the detail view. A click in the compose box puts the cursor there. A click on `/ search` on the list's bottom border opens the search; a click on a result opens it, and one on the field puts the cursor back there.
