@@ -128,7 +128,7 @@ pub enum Action {
 pub enum MapCmd {
     ZoomIn,
     ZoomOut,
-    /// Move the view a quarter of its size: west, east, north, south.
+    /// Move the view by eighths of its size: west, east, north, south.
     Pan(i8, i8),
     /// Every pin in view again, as on open.
     Fit,
@@ -514,6 +514,27 @@ pub const ROWS: &[Row<Action>] = {
                     key(Char('j'), Mods::Plain, Map(MapCmd::Pan(0, 1)), MAP),
                     key(Char('k'), Mods::Plain, Map(MapCmd::Pan(0, -1)), MAP),
                     key(Char('l'), Mods::Plain, Map(MapCmd::Pan(1, 0)), MAP),
+                ],
+            ],
+        ),
+        // A key moves an eighth, so one press is a small step; Shift a half
+        // (1075). The Shift arrows resolve but are named in the text: four
+        // `Shift-` chords would widen the help's key column for every row.
+        Row::new(
+            "pan by half the view, also Shift and an arrow",
+            MAP_GROUP,
+            &[
+                &[
+                    key(Char('H'), Mods::Plain, Map(MapCmd::Pan(-4, 0)), MAP),
+                    key(Char('J'), Mods::Plain, Map(MapCmd::Pan(0, 4)), MAP),
+                    key(Char('K'), Mods::Plain, Map(MapCmd::Pan(0, -4)), MAP),
+                    key(Char('L'), Mods::Plain, Map(MapCmd::Pan(4, 0)), MAP),
+                ],
+                &[
+                    key(Left, SHIFT, Map(MapCmd::Pan(-4, 0)), MAP).quiet(),
+                    key(Down, SHIFT, Map(MapCmd::Pan(0, 4)), MAP).quiet(),
+                    key(Up, SHIFT, Map(MapCmd::Pan(0, -4)), MAP).quiet(),
+                    key(Right, SHIFT, Map(MapCmd::Pan(4, 0)), MAP).quiet(),
                 ],
             ],
         ),

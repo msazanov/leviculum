@@ -1308,7 +1308,7 @@ fn map_key<B: InputBuffer>(model: &mut UiModel<B>, cmd: keys::MapCmd) -> Vec<UiE
         MapCmd::Pan(dx, dy) => {
             let mut view = map::viewport(state, area, &setup);
             let (w, h) = view.size();
-            let step = |n: i8, of: u32| i32::from(n) * (of / 4).max(1) as i32;
+            let step = |n: i8, of: u32| i32::from(n) * (of / 8).max(1) as i32;
             view.pan(step(dx, w), step(dy, h));
             state.centre = view.centre;
         }
@@ -6168,7 +6168,7 @@ mod tests {
         assert_eq!(model.map.expect("open").zoom, 0);
         update(&mut model, key(KeyCode::Char('0')));
         assert_eq!(model.map, Some(fitted));
-        // A pan moves the centre a quarter of the view, the arrows and vi's
+        // A pan moves the centre an eighth of the view, the arrows and vi's
         // keys alike, and back again.
         update(&mut model, key(KeyCode::Char('l')));
         let east = model.map.expect("open").centre;
@@ -6178,6 +6178,30 @@ mod tests {
         update(&mut model, key(KeyCode::Char('j')));
         assert!(model.map.expect("open").centre.y > fitted.centre.y);
         update(&mut model, key(KeyCode::Up));
+        assert_eq!(model.map.expect("open").centre, fitted.centre);
+        // Shift, or vi's capitals, moves four times as far: half the view.
+        let at = |model: &UiModel<Field>| {
+            let state = model.map.expect("open");
+            let view = map::viewport(&state, model.map_area(), &model.map_setup);
+            view.to_screen(fitted.centre)
+        };
+        let (w, h) = map::viewport(&fitted, model.map_area(), &model.map_setup).size();
+        let (cx, cy) = at(&model);
+        update(&mut model, key(KeyCode::Char('l')));
+        assert_eq!(at(&model), (cx - i64::from(w / 8), cy));
+        update(&mut model, key(KeyCode::Char('h')));
+        update(
+            &mut model,
+            UiEvent::Key(KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT)),
+        );
+        assert_eq!(at(&model), (cx - i64::from(w / 8 * 4), cy));
+        update(&mut model, key(KeyCode::Char('H')));
+        update(&mut model, key(KeyCode::Char('J')));
+        assert_eq!(at(&model), (cx, cy - i64::from(h / 8 * 4)));
+        update(
+            &mut model,
+            UiEvent::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT)),
+        );
         assert_eq!(model.map.expect("open").centre, fitted.centre);
     }
 
