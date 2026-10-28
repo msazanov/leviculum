@@ -98,6 +98,21 @@ tui = [
     "dep:tui-input",
     "dep:open",
 ]
+# `loquax gui`: the window (docs/src/concepts/gui-toolkit.md, option B,
+# iced on the desktop), over the same shell and model as the terminal. Off
+# by default and off in `tui`, so iced is in no graph that does not ask for
+# it: not the CLI's, not the terminal's, not the core's. Its first view is
+# the map (loquax-map.md, slice (d)). Built for the gnu target: winit opens
+# X11 and Wayland with dlopen, which a musl-static binary cannot do.
+gui = [
+    "std",
+    "history",
+    "picture",
+    "leviculum-ui/std",
+    "dep:tui-input",
+    "dep:futures",
+    "dep:iced",
+]
 
 [dependencies]
 # The LXMF router, node and message codec. Everything protocol-shaped lives
@@ -131,6 +146,20 @@ futures = { version = "0.3", optional = true }
 # Default features off: the default `ratatui-crossterm` feature pulls both
 # terminal crates in for a backend `leviculum_ui::input` restates.
 tui-input = { version = "0.15", default-features = false, optional = true }
+# The window (`gui`): iced 0.14, the version the toolkit spike measured,
+# with its software renderer alone (tiny-skia; no wgpu, no GPU driver), the
+# canvas the map is drawn on, raster images without decoders (the map's
+# frame is raw RGBA), and `advanced` for measuring a label's text the way
+# the window sets it.
+iced = { version = "0.14", default-features = false, features = [
+    "tiny-skia",
+    "x11",
+    "wayland",
+    "thread-pool",
+    "canvas",
+    "image-without-codecs",
+    "advanced",
+], optional = true }
 # A web or mail link in a message body, clicked, goes to the system's
 # handler as lnomad hands it one (`xdg-open` on Linux).
 open = { version = "5", optional = true }

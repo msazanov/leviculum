@@ -19,7 +19,9 @@
 //! `--via propagated` return so a script can tell the two successes apart
 //! (`loquax/src/send.rs`, `EXIT_PROPAGATED`).
 
-#[cfg(feature = "tui")]
+#[cfg(feature = "gui")]
+mod gui;
+#[cfg(any(feature = "tui", feature = "gui"))]
 mod shell;
 #[cfg(feature = "tui")]
 mod tui;
@@ -101,6 +103,36 @@ enum SubCommand {
     /// a compose line.
     #[cfg(feature = "tui")]
     Tui(TuiArgs),
+    /// The messenger in a window, attached as the terminal one is. Its
+    /// first view is the map of every peer with a position.
+    #[cfg(feature = "gui")]
+    Gui(GuiArgs),
+}
+
+#[cfg(feature = "gui")]
+#[derive(clap::Args, Debug)]
+struct GuiArgs {
+    /// The propagation node for the fallback and for fetch, as `send --pn`.
+    #[arg(long, value_name = "HASH")]
+    pn: Option<String>,
+
+    /// Shared-instance name to connect to (overrides the config file's).
+    #[arg(long)]
+    instance: Option<String>,
+
+    /// Reticulum config directory (default: the platform default).
+    #[arg(long)]
+    config: Option<PathBuf>,
+
+    /// Seconds each send's leg may take, as `send --timeout`; a fetch gets
+    /// twice this.
+    #[arg(long, default_value_t = DEFAULT_TIMEOUT_SECS)]
+    timeout: u64,
+
+    /// The longest the mailbox goes unsynced, as the terminal's
+    /// `--sync-interval`: `15m` by default, `off` for none.
+    #[arg(long, value_name = "DURATION")]
+    sync_interval: Option<String>,
 }
 
 #[cfg(feature = "tui")]
@@ -449,6 +481,8 @@ async fn main() -> ExitCode {
     // ever saw from a send that worked. Whoever wants the detail asks for the
     // event log, which is where the message id lives.
     let command = match args.command {
+        #[cfg(feature = "gui")]
+        Some(SubCommand::Gui(gui)) => return run_gui(gui).await,
         #[cfg(feature = "tui")]
         Some(SubCommand::Tui(tui)) => return run_tui(tui).await,
         #[cfg(feature = "tui")]
@@ -472,7 +506,36 @@ async fn main() -> ExitCode {
         // Dispatched above, before the subscriber writes to stderr.
         #[cfg(feature = "tui")]
         SubCommand::Tui(_) => ExitCode::SUCCESS,
+        #[cfg(feature = "gui")]
+        SubCommand::Gui(_) => ExitCode::SUCCESS,
     }
+}
+
+/// `loquax gui`: parse what the shell needs, then hand over.
+#[cfg(feature = "gui")]
+async fn run_gui(args: GuiArgs) -> ExitCode {
+    let sync_interval = match args
+        .sync_interval
+        .as_deref()
+        .map(loquax::sync::parse_interval)
+    {
+        None => None,
+        Some(Ok(bound)) => Some(bound),
+        Some(Err(error)) => return usage(format!("--sync-interval {error}")),
+    };
+    gui::run(shell::ShellOptions {
+        sync_interval,
+        to: Vec::new(),
+        pn: args.pn,
+        instance: args.instance,
+        config: args.config,
+        timeout: args.timeout,
+        ascii: false,
+        no_mouse: false,
+        scripted: false,
+        log_file: "gui.log",
+    })
+    .await
 }
 
 /// `loquax` (or `loquax tui`): parse what the shell needs, then hand over.
