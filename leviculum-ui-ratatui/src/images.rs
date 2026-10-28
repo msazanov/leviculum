@@ -272,6 +272,95 @@ fn sixel_run(out: &mut String, bits: u8, run: usize) {
     }
 }
 
+/// What stands between this program and the terminal that shows it: a
+/// mosh session, a tmux or screen multiplexer. The graphics protocol query
+/// asks whatever answers first, which behind these is the go-between, not
+/// the terminal, so a ladder needs to know they are there (1088).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Between {
+    /// A `mosh-server` among this process's ancestors. Measured on mosh
+    /// 1.4.0 (1088): it answers DA1 itself, without sixel, and drops a
+    /// sixel DCS and a kitty APC whole, so no graphics protocol arrives.
+    /// Colours (`38;5`, `38;2`) and `▀` pass unchanged.
+    pub mosh: bool,
+    /// tmux: `TMUX` set, `TERM` or `TERM_PROGRAM` naming it, or a `tmux`
+    /// ancestor.
+    pub tmux: bool,
+    /// GNU screen: `STY` set, `TERM` starting `screen` outside tmux, or a
+    /// `screen` ancestor.
+    pub screen: bool,
+}
+
+impl Between {
+    /// This process's go-betweens, from its environment and its ancestry.
+    pub fn detect() -> Self {
+        let env = |name: &str| std::env::var(name).ok();
+        Self::from_facts(&env, &ancestry())
+    }
+
+    /// The go-betweens named by `env` (a variable's value, `None` when
+    /// unset) and `ancestors` (the command names of the parent processes,
+    /// nearest first).
+    ///
+    /// mosh sets no variable of its own; its server shows only as an
+    /// ancestor. A tmux server is a daemon whose parent is init, so from
+    /// inside tmux a mosh session that holds the tmux client is not an
+    /// ancestor and is not seen.
+    pub fn from_facts(env: &dyn Fn(&str) -> Option<String>, ancestors: &[String]) -> Self {
+        let set = |name: &str| env(name).is_some_and(|v| !v.is_empty());
+        let term = env("TERM").unwrap_or_default();
+        let named = |prefix: &str| ancestors.iter().any(|a| a.starts_with(prefix));
+        let tmux = set("TMUX")
+            || term.starts_with("tmux")
+            || env("TERM_PROGRAM").is_some_and(|t| t == "tmux")
+            || named("tmux");
+        Between {
+            mosh: named("mosh-server"),
+            tmux,
+            screen: set("STY") || (!tmux && term.starts_with("screen")) || named("screen"),
+        }
+    }
+}
+
+/// The command names of this process's ancestors, nearest first, from
+/// `/proc`; empty where there is no `/proc` to read.
+pub fn ancestry() -> Vec<String> {
+    let mut names = Vec::new();
+    let mut pid = std::process::id();
+    // A loop in a broken /proc cannot hold the start up.
+    for _ in 0..64 {
+        let Some((comm, ppid)) = proc_stat(pid) else {
+            break;
+        };
+        if pid != std::process::id() {
+            names.push(comm);
+        }
+        if ppid <= 1 {
+            break;
+        }
+        pid = ppid;
+    }
+    names
+}
+
+/// A process's command name and parent from `/proc/<pid>/stat`. The name
+/// sits in parentheses and may itself hold spaces and parentheses, so the
+/// fields after it are read from the last `)`.
+fn proc_stat(pid: u32) -> Option<(String, u32)> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    parse_stat(&stat)
+}
+
+fn parse_stat(stat: &str) -> Option<(String, u32)> {
+    let open = stat.find('(')?;
+    let close = stat.rfind(')')?;
+    let comm = stat.get(open + 1..close)?.to_string();
+    let mut rest = stat.get(close + 1..)?.split_whitespace();
+    let _state = rest.next()?;
+    let ppid = rest.next()?.parse().ok()?;
+    Some((comm, ppid))
+}
+
 /// Inside tmux, by the rule `ratatui-image`'s picker applies.
 fn in_tmux() -> bool {
     std::env::var("TERM").is_ok_and(|t| t.starts_with("tmux"))
@@ -337,6 +426,67 @@ mod tests {
         // picture rather than a wrong one.
         assert!(sixel_indexed(&palette, &[4; 4], 2, 2, (1, 1)).is_none());
         assert!(sixel_indexed(&palette, &[0; 3], 2, 2, (1, 1)).is_none());
+    }
+
+    /// Each go-between is seen from the variable or the ancestor it leaves,
+    /// and nothing is seen where there is neither.
+    #[test]
+    fn the_go_betweens_are_read_from_env_and_ancestry() {
+        let facts = |vars: &[(&str, &str)], ancestors: &[&str]| {
+            let vars: Vec<(String, String)> = vars
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            let env =
+                move |name: &str| vars.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone());
+            let ancestors: Vec<String> = ancestors.iter().map(|a| a.to_string()).collect();
+            Between::from_facts(&env, &ancestors)
+        };
+        let none = Between::default();
+        assert_eq!(
+            facts(&[("TERM", "xterm-256color")], &["bash", "sshd"]),
+            none
+        );
+        // Lew's session, 2026-10-28: Termux, mosh, a shell, loquax.
+        assert_eq!(
+            facts(&[("TERM", "xterm-256color")], &["bash", "mosh-server"]),
+            Between { mosh: true, ..none }
+        );
+        let tmux = Between { tmux: true, ..none };
+        assert_eq!(facts(&[("TMUX", "/tmp/tmux-1/default,1,0")], &[]), tmux);
+        assert_eq!(facts(&[("TERM", "tmux-256color")], &[]), tmux);
+        assert_eq!(facts(&[("TERM_PROGRAM", "tmux")], &[]), tmux);
+        // tmux of old sets TERM=screen: that is tmux, not screen.
+        assert_eq!(
+            facts(&[("TERM", "screen-256color"), ("TMUX", "x")], &[]),
+            tmux
+        );
+        assert_eq!(facts(&[], &["bash", "tmux: server"]), tmux);
+        let screen = Between {
+            screen: true,
+            ..none
+        };
+        assert_eq!(facts(&[("STY", "123.pts-0.host")], &[]), screen);
+        assert_eq!(facts(&[("TERM", "screen.xterm-256color")], &[]), screen);
+        assert_eq!(facts(&[], &["bash", "screen"]), screen);
+        // An empty variable is an unset one.
+        assert_eq!(facts(&[("TMUX", ""), ("STY", "")], &[]), none);
+    }
+
+    /// A command name with a space and a parenthesis still yields the
+    /// parent after it; this process's own ancestry ends without a loop.
+    #[test]
+    fn a_stat_line_is_read_from_its_last_parenthesis() {
+        assert_eq!(
+            parse_stat("4242 (tmux: server) S 1 4242 4242 0 -1"),
+            Some(("tmux: server".to_string(), 1))
+        );
+        assert_eq!(
+            parse_stat("7 (a) b) R 6 7 7"),
+            Some(("a) b".to_string(), 6))
+        );
+        assert_eq!(parse_stat("garbage"), None);
+        assert!(ancestry().len() < 64);
     }
 
     #[test]
