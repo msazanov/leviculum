@@ -178,7 +178,7 @@ this page leaves, or departs from it:
   is malformed", and one that is not SQLite at all), the schema version
   must be this program's (`PRAGMA user_version`, a later one is refused as
   newer, version 0 as not a loquax store, which covers an empty file), and
-  all five tables must be there. Any of these stops `loquax` with the
+  all its tables must be there. Any of these stops `loquax` with the
   file's path and what to do (move it aside, or restore a backup); nothing
   is written over it. The tests cut a real store by its last page and by
   half after opening it whole as the positive control, and refuse an empty
@@ -198,6 +198,17 @@ this page leaves, or departs from it:
   received message, and drops one the store holds. A write of a received
   message whose id another row already holds is a no-op as well. A
   message the reader deleted is no longer held and would come back.
+- **Unverified messages keep their bytes** (leviculum 1079, schema 3). A
+  message from a sender whose key this device has not seen cannot have its
+  signature checked when it arrives. The engine asks for the sender's path,
+  whose answer is the sender's announce with the key, and checks the
+  signature once the key is there; the store keeps the message as it came
+  in `unverified` until then, so a later run hands it back to the engine
+  and the check survives a restart. `messages.verification` is 0
+  unverified, 1 verified, 2 invalid (schemas 1 and 2 wrote it as a
+  boolean, which reads the same). A message stored unverified by a loquax
+  before schema 3 has no bytes kept, so it stays unverified: the signature
+  was never stored.
 - **Retention** is as decided: text and its ledger are kept until the
   reader deletes them (`d`, or the palette's `delete conversation`).
   Attachments do not exist yet, so neither does their byte budget.

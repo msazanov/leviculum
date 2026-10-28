@@ -29,7 +29,7 @@ use leviculum_ui::text::{fit_width, truncate_to_cols};
 use leviculum_ui::tokens::{Paint, Tokens};
 use leviculum_ui::{RLine, RStyle};
 
-use super::{leg_label, plain, push, wrap, Conversation, Message, UiModel};
+use super::{leg_label, plain, push, wrap, Conversation, Message, Signature, UiModel};
 use crate::names::Names;
 use crate::telemetry;
 use crate::when::{date_label, list_time, WallTime};
@@ -326,10 +326,15 @@ fn suffix(message: &Message, narrow: bool, draw: &Draw<'_>, selected: bool) -> R
             false => format!("{label} · {text}"),
         };
     }
-    if !message.outbound && !message.verified {
+    let doubt = match (message.outbound, message.signature) {
+        (false, Signature::Unverified) => Some("unverified"),
+        (false, Signature::Invalid) => Some("INVALID signature"),
+        _ => None,
+    };
+    if let Some(doubt) = doubt {
         text = match text.is_empty() {
-            true => "unverified".into(),
-            false => format!("{text} · unverified"),
+            true => doubt.into(),
+            false => format!("{text} · {doubt}"),
         };
     }
     let time = match (selected, message.outbound) {

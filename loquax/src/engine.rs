@@ -121,6 +121,13 @@ const STAMP_PROGRESS_COST: u8 = 10;
 /// How often a narrated grind says it is still going.
 const STAMP_PROGRESS_EVERY_MS: u64 = 5_000;
 
+/// How long the engine waits before asking again for the path of a sender
+/// whose messages still wait on its key. The first request goes out on the
+/// tick that saw the message; a repeat covers a request lost on the way,
+/// and is rare because it is a mesh-wide packet for a key the reader can do
+/// without in the meantime.
+const UNHEARD_PATH_REQUEST_INTERVAL_MS: u64 = 5 * 60_000;
+
 /// One proof-of-work job on its way to the miner.
 ///
 /// Each job carries the handle that calls it off. The terminal's miner is one
@@ -196,6 +203,26 @@ struct Resolve {
     answered: bool,
 }
 
+/// The received messages of one sender whose key is not known yet, held
+/// until it is (leviculum 1079).
+///
+/// The reference checks a signature once, when the message is unpacked, and
+/// leaves an unknown source `SOURCE_UNKNOWN` for good
+/// (`reference/LXMF/LXMF/LXMessage.py:807-817`); nor does `LXMRouter` ask for
+/// the source's path (`LXMRouter.lxmf_delivery`, `LXMRouter.py:1837-1924`). Asking for
+/// it and checking again changes nothing on the wire a peer sees, one path
+/// request aside, and is what turns a genuine message from someone this
+/// device has not heard yet into a verified one.
+struct Unheard {
+    /// Each message's id and the bytes it came as, which its signature
+    /// covers.
+    messages: Vec<([u8; 32], Vec<u8>)>,
+    /// When the sender's path is next asked for, on the tick clock; `None`
+    /// until the first request.
+    next_path_request_ms: Option<u64>,
+    path_requests: u32,
+}
+
 /// A selection waiting for the daemon's announce replays.
 struct PendingSelection {
     routes: Vec<Route>,
@@ -261,6 +288,9 @@ pub struct Engine {
     /// A [`Command::SelectPn`] without a preference, waiting for the
     /// announces that tell it which path-table entries are propagation nodes.
     pending_selection: Option<PendingSelection>,
+    /// Received messages waiting on their sender's key, by sender. See
+    /// [`Unheard`].
+    unheard: BTreeMap<[u8; 16], Unheard>,
 }
 
 impl Engine {
@@ -279,6 +309,7 @@ impl Engine {
             mining: BTreeMap::new(),
             announced: false,
             pending_selection: None,
+            unheard: BTreeMap::new(),
         }
     }
 
@@ -419,14 +450,28 @@ impl Engine {
             }
             RouterEvent::MessageReceived(message) => {
                 let message = *message;
+                let verified = message.verification == Verification::Valid;
+                // The router drops a signature that was checked and failed
+                // (`leviculum-lxmf/src/router.rs`, `accept_inbound`), so one
+                // that did not verify here had no key to be checked against.
+                let held =
+                    (!verified).then(|| (message.message_id, message.source_hash, message.pack()));
                 self.emit(OutboxEvent::Received {
                     message_id: message.message_id,
                     source: message.source_hash,
-                    verified: message.verification == Verification::Valid,
+                    verified,
                     title: message.title,
                     body: message.content,
                     fields: message.fields,
                 });
+                if let Some((message_id, source, packed)) = held {
+                    self.hold(message_id, source, packed.clone());
+                    self.emit(OutboxEvent::Unverified {
+                        message_id,
+                        source,
+                        packed,
+                    });
+                }
             }
             RouterEvent::PeerAnnounced {
                 destination,
@@ -534,6 +579,11 @@ impl Engine {
                     self.fetch(ready, core, path_budget_ms, out);
                 }
                 Command::Cancel { message_id } => self.cancel(ready, core, &message_id, out),
+                Command::Verify {
+                    message_id,
+                    source,
+                    packed,
+                } => self.hold(message_id, source, packed),
             }
         }
     }
@@ -929,6 +979,81 @@ impl Engine {
         }
     }
 
+    /// Hold one received message until its sender's key is known.
+    fn hold(&mut self, message_id: [u8; 32], source: [u8; 16], packed: Vec<u8>) {
+        let unheard = self.unheard.entry(source).or_insert_with(|| Unheard {
+            messages: Vec::new(),
+            next_path_request_ms: None,
+            path_requests: 0,
+        });
+        if !unheard.messages.iter().any(|(id, _)| *id == message_id) {
+            unheard.messages.push((message_id, packed));
+        }
+    }
+
+    /// Check every held message whose sender's key has arrived, and ask for
+    /// the path of each sender whose key has not, at most once every
+    /// [`UNHEARD_PATH_REQUEST_INTERVAL_MS`]: the answer to a path request is
+    /// the sender's announce, which carries the key.
+    fn poll_unheard<R: CryptoRngCore, C: CoreClock, S: Storage>(
+        &mut self,
+        ready: &mut Ready,
+        core: &mut NodeCore<R, C, S>,
+        now_ms: u64,
+        out: &mut TickOutput,
+    ) {
+        if self.unheard.is_empty() {
+            return;
+        }
+        let sources: Vec<[u8; 16]> = self.unheard.keys().copied().collect();
+        for source in sources {
+            if let Some(identity) = core.storage().get_identity(&source) {
+                let verdicts: Vec<([u8; 32], bool)> = self
+                    .unheard
+                    .remove(&source)
+                    .map(|unheard| unheard.messages)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(id, packed)| (id, reverify(&packed, identity) == Verification::Valid))
+                    .collect();
+                for (message_id, valid) in verdicts {
+                    crate::events::verify_result(&source, &message_id, valid);
+                    self.emit(OutboxEvent::Verified {
+                        message_id,
+                        source,
+                        valid,
+                    });
+                }
+                continue;
+            }
+            let Some(unheard) = self.unheard.get_mut(&source) else {
+                continue;
+            };
+            if unheard.next_path_request_ms.is_some_and(|due| now_ms < due) {
+                continue;
+            }
+            unheard.next_path_request_ms =
+                Some(now_ms.saturating_add(UNHEARD_PATH_REQUEST_INTERVAL_MS));
+            unheard.path_requests = unheard.path_requests.saturating_add(1);
+            crate::events::verify_path_request(
+                &source,
+                unheard.messages.len(),
+                unheard.path_requests,
+            );
+            // Through `absorb`, for the reason `poll_resolves` gives.
+            let output = core.request_path(&DestinationHash::new(source));
+            self.absorb(
+                ready,
+                core,
+                RouterOutput {
+                    core: output,
+                    events: Vec::new(),
+                },
+                out,
+            );
+        }
+    }
+
     /// Answer every resolve that can be answered now.
     ///
     /// A destination counts as resolved when its identity is known *and* a
@@ -1057,6 +1182,17 @@ pub fn delivery_address(identity: &Identity) -> Result<[u8; 16], String> {
     Ok(*destination.hash().as_bytes())
 }
 
+/// A held message's signature, checked against its sender's key.
+///
+/// The bytes are the whole message as it came (destination first, as
+/// [`leviculum_lxmf::Message::pack`] gives a received one back), so they are
+/// read as a direct delivery. Bytes that no longer parse are not a message
+/// this key signed, and say so: never a quiet `unverified`.
+fn reverify(packed: &[u8], identity: &Identity) -> Verification {
+    leviculum_lxmf::Message::unpack(packed, None, Some(identity), DeliveryMethod::Direct)
+        .map_or(Verification::Invalid, |message| message.verification)
+}
+
 /// The mailbox-drain failure states, in the words the frontend reports.
 fn sync_failure(state: PropagationClientState) -> Option<&'static str> {
     match state {
@@ -1157,6 +1293,7 @@ impl Engine {
         let now_ms = core.now_ms();
         self.poll_resolves(&mut ready, core, now_ms, &mut out);
         self.poll_pending_selection(&mut ready, core, now_ms, &mut out);
+        self.poll_unheard(&mut ready, core, now_ms, &mut out);
         self.report_departures(&ready);
         self.state = State::Ready(ready);
         out
@@ -1180,6 +1317,7 @@ impl Engine {
         self.pump_stamps(&mut ready, core, &mut out);
         self.poll_resolves(&mut ready, core, now_ms, &mut out);
         self.poll_pending_selection(&mut ready, core, now_ms, &mut out);
+        self.poll_unheard(&mut ready, core, now_ms, &mut out);
         match ready.router.tick(core) {
             Ok(output) => self.absorb(&mut ready, core, output, &mut out),
             Err(e) => self.emit(OutboxEvent::Broken {
@@ -1947,5 +2085,91 @@ mod tests {
             cancel,
         ));
         assert!(notices.is_empty(), "{notices:?}");
+    }
+
+    /// A held message turns verified once its sender's key is known, and one
+    /// whose signature another key made turns invalid, never left
+    /// unverified (leviculum 1079). Until the key arrives the engine asks for
+    /// the sender's path and says nothing about the message.
+    #[test]
+    fn a_held_message_is_checked_when_the_key_arrives_and_a_forgery_is_invalid() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let mut engine = engine();
+        let now_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, now_ms);
+        let ours = match drain(&mut engine).first() {
+            Some(OutboxEvent::Ready { address }) => *address,
+            other => panic!("expected Ready first, got {other:?}"),
+        };
+        let alice = leviculum_std::generate_identity();
+        let mallory = leviculum_std::generate_identity();
+        let alice_address = delivery_address(&alice).expect("alice's address");
+        let signed_by = |key: &Identity, body: &[u8]| {
+            leviculum_lxmf::Message::create(
+                ours,
+                alice_address,
+                key,
+                1_700_000_000.0,
+                Vec::new(),
+                body.to_vec(),
+                Vec::new(),
+                DeliveryMethod::Direct,
+            )
+            .expect("a signed message")
+        };
+        let genuine = signed_by(&alice, b"from alice");
+        let forged = signed_by(&mallory, b"from alice, honest");
+        for message in [&genuine, &forged] {
+            engine.submit(Command::Verify {
+                message_id: message.message_id,
+                source: alice_address,
+                packed: message.pack(),
+            });
+        }
+
+        let _ = engine.on_tick(&mut core, now_ms + POLL_INTERVAL_MS);
+        assert!(
+            !drain(&mut engine)
+                .iter()
+                .any(|event| matches!(event, OutboxEvent::Verified { .. })),
+            "nothing is checked before the key is known"
+        );
+
+        let public =
+            Identity::from_public_key_bytes(&alice.public_key_bytes()).expect("alice's public key");
+        core.storage_mut().set_identity(alice_address, public);
+        let _ = engine.on_tick(&mut core, now_ms + 2 * POLL_INTERVAL_MS);
+        let verdicts: Vec<([u8; 32], bool)> = drain(&mut engine)
+            .into_iter()
+            .filter_map(|event| match event {
+                OutboxEvent::Verified {
+                    message_id,
+                    source,
+                    valid,
+                } => {
+                    assert_eq!(source, alice_address);
+                    Some((message_id, valid))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            verdicts,
+            vec![(genuine.message_id, true), (forged.message_id, false)]
+        );
+
+        // Checked once: a later tick says nothing more.
+        let _ = engine.on_tick(&mut core, now_ms + 3 * POLL_INTERVAL_MS);
+        assert!(!drain(&mut engine)
+            .iter()
+            .any(|event| matches!(event, OutboxEvent::Verified { .. })));
+    }
+
+    /// Bytes that no longer parse as a message are not one the key signed.
+    #[test]
+    fn bytes_that_do_not_parse_are_invalid_not_unverified() {
+        let alice = leviculum_std::generate_identity();
+        assert_eq!(reverify(&[0u8; 40], &alice), Verification::Invalid);
     }
 }

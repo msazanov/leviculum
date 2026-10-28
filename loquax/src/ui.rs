@@ -268,6 +268,20 @@ impl Pane {
     }
 }
 
+/// What a received message's signature says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Signature {
+    /// It holds against the sender's key.
+    Verified,
+    /// The sender's key is not known (yet): `SOURCE_UNKNOWN` in the
+    /// reference. It turns into one of the other two when the key arrives
+    /// ([`OutboxEvent::Verified`]).
+    Unverified,
+    /// It does not hold against the sender's key: the message is not what
+    /// the sender signed, or not from the sender at all.
+    Invalid,
+}
+
 /// One message in a conversation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Message {
@@ -280,8 +294,9 @@ pub struct Message {
     pub id: Option<[u8; 32]>,
     /// Where a sent message stands; `None` for a received one.
     pub delivery: Option<DeliveryState>,
-    /// Whether a received message's signature verified.
-    pub verified: bool,
+    /// What a received message's signature says; ours are
+    /// [`Signature::Verified`].
+    pub signature: Signature,
     /// The leg the send runner is on and the tick it began, while the runner
     /// still works on the message: the row says `direct 12 s` or `via
     /// mailbox 40 s` beside the spinner, so a wait has a reason on screen.
@@ -318,7 +333,7 @@ impl Message {
             body,
             id: None,
             delivery: Some(DeliveryState::Queued),
-            verified: true,
+            signature: Signature::Verified,
             leg: None,
             unproven: false,
             at,
@@ -2299,7 +2314,10 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
                 body: String::from_utf8_lossy(&body).into_owned(),
                 id: Some(message_id),
                 delivery: None,
-                verified,
+                signature: match verified {
+                    true => Signature::Verified,
+                    false => Signature::Unverified,
+                },
                 leg: None,
                 unproven: false,
                 at,
@@ -2340,9 +2358,54 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
             model.toast(ToastKind::Info, format!("{what} from {from}"));
             return effects;
         }
+        OutboxEvent::Verified {
+            message_id,
+            source,
+            valid,
+        } => apply_verdict(model, message_id, source, valid),
         _ => {}
     }
     Vec::new()
+}
+
+/// A held message's signature, checked once its sender's key arrived: the
+/// block changes in place and the ledger says when. Only the messages the
+/// screen holds are here; the shell writes the verdict to the store for the
+/// rest.
+fn apply_verdict<B>(model: &mut UiModel<B>, message_id: [u8; 32], source: [u8; 16], valid: bool) {
+    let now = model.now;
+    let Some(conversation) = model.conversations.iter_mut().find(|c| c.peer == source) else {
+        return;
+    };
+    let peer = conversation.peer;
+    for message in &mut conversation.messages {
+        if message.outbound
+            || message.id != Some(message_id)
+            || message.signature != Signature::Unverified
+        {
+            continue;
+        }
+        let (signature, line) = match valid {
+            true => (
+                Signature::Verified,
+                "signature verified, once the sender's key arrived",
+            ),
+            false => (
+                Signature::Invalid,
+                "signature INVALID against the sender's key",
+            ),
+        };
+        message.signature = signature;
+        message.note(now, line);
+        model.changed.insert((peer, message.activity));
+    }
+    if !valid {
+        let from = model.names.label(&source);
+        model.toast(
+            ToastKind::Error,
+            format!("invalid signature on a message from {from}"),
+        );
+    }
 }
 
 /// The telemetry in the newest message of conversation `index`, just
@@ -2815,10 +2878,11 @@ fn detail_view<B>(model: &UiModel<B>, c: usize, m: usize) -> Option<DetailView> 
             None => "id     none yet: the router has not queued it".to_string(),
         },
         format!("size   {} bytes", message.size),
-        match (message.delivery, message.verified) {
+        match (message.delivery, message.signature) {
             (Some(state), _) => format!("state  {}", state_words(state)),
-            (None, true) => "signature verified".to_string(),
-            (None, false) => "signature NOT verified".to_string(),
+            (None, Signature::Verified) => "signature verified".to_string(),
+            (None, Signature::Unverified) => "signature NOT verified".to_string(),
+            (None, Signature::Invalid) => "signature INVALID".to_string(),
         },
     ];
     let offset = message.at.or(model.now).map_or(0, |at| at.offset_secs);
@@ -4341,6 +4405,74 @@ mod tests {
         assert!(shown(&model).contains(&"who?  unverified".to_string()));
     }
 
+    /// A held message's verdict changes its block in place (leviculum
+    /// 1079): a signature that holds drops `unverified`, one that does not
+    /// says `INVALID signature`, and each says so in the ledger. A verdict
+    /// for a message of another sender changes nothing.
+    #[test]
+    fn a_verdict_turns_an_unverified_message_verified_or_invalid() {
+        const ID3: [u8; 32] = [0x33; 32];
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        for (id, body) in [(ID2, b"one".as_slice()), (ID3, b"two".as_slice())] {
+            engine(
+                &mut model,
+                OutboxEvent::Received {
+                    message_id: id,
+                    source: PEER,
+                    title: Vec::new(),
+                    body: body.to_vec(),
+                    fields: Vec::new(),
+                    verified: false,
+                },
+            );
+        }
+        engine(
+            &mut model,
+            OutboxEvent::Verified {
+                message_id: ID2,
+                source: [0x77; 16],
+                valid: true,
+            },
+        );
+        assert_eq!(
+            model.conversations[0].messages[0].signature,
+            Signature::Unverified
+        );
+        engine(
+            &mut model,
+            OutboxEvent::Verified {
+                message_id: ID2,
+                source: PEER,
+                valid: true,
+            },
+        );
+        engine(
+            &mut model,
+            OutboxEvent::Verified {
+                message_id: ID3,
+                source: PEER,
+                valid: false,
+            },
+        );
+        let messages = &model.conversations[0].messages;
+        assert_eq!(messages[0].signature, Signature::Verified);
+        assert_eq!(
+            messages[0].ledger.last().map(|e| e.what.as_str()),
+            Some("signature verified, once the sender's key arrived")
+        );
+        assert_eq!(messages[1].signature, Signature::Invalid);
+        assert_eq!(
+            messages[1].ledger.last().map(|e| e.what.as_str()),
+            Some("signature INVALID against the sender's key")
+        );
+        let lines = shown(&model);
+        assert!(lines.contains(&"one".to_string()), "{lines:?}");
+        assert!(
+            lines.contains(&"two  INVALID signature".to_string()),
+            "{lines:?}"
+        );
+    }
+
     /// The header names the peer, its trust and the mailbox, the longest
     /// form that fits; a wide pane gives the address and a mailbox row.
     #[test]
@@ -5364,7 +5496,7 @@ mod tests {
             body: body.to_string(),
             id: Some([key as u8; 32]),
             delivery,
-            verified: true,
+            signature: Signature::Verified,
             leg: None,
             unproven: false,
             at: Some(at(25, 14, key as u32 % 60)),

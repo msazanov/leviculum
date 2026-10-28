@@ -34,12 +34,19 @@
 //!   same fix arriving directly and again in a collector's stream is one row
 //!   (`docs/src/concepts/loquax-map.md`, "Stored where"). The wire's
 //!   integers go in as they are.
+//! - **Unverified messages keep their bytes** (`unverified`, schema 3): a
+//!   received message whose sender's key was not known, as it came, so its
+//!   signature can be checked when the key arrives, in this run or a later
+//!   one (leviculum 1079). The row goes once the verdict is in, which
+//!   `messages.verification` then holds: 0 unverified, 1 verified, 2
+//!   invalid. A message stored unverified before schema 3 has no bytes kept
+//!   and stays unverified: the signature was never stored.
 //!
 //! # Versions
 //!
-//! Schema 1 is the store of slice 6; schema 2 adds `positions` and nothing
-//! else, so a schema 1 file is migrated in place at open, in one
-//! transaction. A file newer than this program is refused
+//! Schema 1 is the store of slice 6; schema 2 adds `positions` and schema 3
+//! `unverified`, nothing else, so an older file is migrated in place at
+//! open, in one transaction. A file newer than this program is refused
 //! ([`StoreError::Newer`]): a loquax that knows only schema 1 refuses a
 //! schema 2 file, and leaves it as it is.
 //!
@@ -69,7 +76,7 @@ use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use crate::send::Leg;
 use crate::telemetry::{pack_fields, unpack_fields, Fix};
 use crate::ui::history::{Restored, StoreWrite, StoredHit, LOAD_WINDOW};
-use crate::ui::{LedgerEntry, Message};
+use crate::ui::{LedgerEntry, Message, Signature};
 use crate::when::WallTime;
 use leviculum_lxmf::telemetry::Location;
 
@@ -77,7 +84,7 @@ use leviculum_lxmf::telemetry::Location;
 pub const STORE_FILE: &str = "history.sqlite3";
 
 /// The schema this program writes, in SQLite's `user_version`.
-pub const SCHEMA_VERSION: i32 = 2;
+pub const SCHEMA_VERSION: i32 = 3;
 
 /// How long a write waits for another loquax holding the file.
 const BUSY_MS: u64 = 5_000;
@@ -155,6 +162,17 @@ CREATE TABLE positions(
     PRIMARY KEY (identity, peer, fix_time));
 ";
 
+/// What schema 3 adds to schema 2: the bytes of the received messages whose
+/// signature waits on their sender's key.
+const SCHEMA_V3: &str = "
+CREATE TABLE unverified(
+    identity BLOB NOT NULL,
+    id BLOB NOT NULL,
+    source BLOB NOT NULL,
+    packed BLOB NOT NULL,
+    PRIMARY KEY (identity, id));
+";
+
 /// The tables a whole store of schema 1 has.
 const TABLES_V1: [&str; 5] = [
     "conversations",
@@ -166,6 +184,13 @@ const TABLES_V1: [&str; 5] = [
 
 /// The tables schema 2 adds.
 const TABLES_V2: [&str; 1] = ["positions"];
+
+/// The tables schema 3 adds.
+const TABLES_V3: [&str; 1] = ["unverified"];
+
+/// A received message kept for its signature check: its id, its sender and
+/// the bytes it came as.
+pub type Held = ([u8; 32], [u8; 16], Vec<u8>);
 
 /// Why the store could not be used.
 #[derive(Debug)]
@@ -253,7 +278,8 @@ impl Store {
 
     fn create(&self) -> Result<(), StoreError> {
         let batch = format!(
-            "BEGIN IMMEDIATE; {SCHEMA} {SCHEMA_V2} PRAGMA user_version = {SCHEMA_VERSION}; COMMIT;"
+            "BEGIN IMMEDIATE; {SCHEMA} {SCHEMA_V2} {SCHEMA_V3} PRAGMA user_version = {SCHEMA_VERSION}; \
+             COMMIT;"
         );
         self.conn
             .execute_batch(&batch)
@@ -304,26 +330,38 @@ impl Store {
         if let Some(missing) = missing(&TABLES_V1) {
             return Err(corrupt(format!("table {missing} is missing")));
         }
-        if version == 1 {
-            return self.migrate_v1();
+        if version >= 2 {
+            if let Some(missing) = missing(&TABLES_V2) {
+                return Err(corrupt(format!("table {missing} is missing")));
+            }
         }
-        if let Some(missing) = missing(&TABLES_V2) {
-            return Err(corrupt(format!("table {missing} is missing")));
+        if version >= 3 {
+            if let Some(missing) = missing(&TABLES_V3) {
+                return Err(corrupt(format!("table {missing} is missing")));
+            }
+        }
+        if version < SCHEMA_VERSION {
+            return self.migrate();
         }
         Ok(())
     }
 
-    /// Schema 1 to 2: add `positions`, all or none. The version is read
-    /// again under the write lock, so two loquax opening one old file at
-    /// once migrate it once.
-    fn migrate_v1(&self) -> Result<(), StoreError> {
-        let batch = format!("{SCHEMA_V2} PRAGMA user_version = 2;");
+    /// An older schema to this one: each later schema's tables, all or
+    /// none. The version is read again under the write lock, so two loquax
+    /// opening one old file at once migrate it once.
+    fn migrate(&self) -> Result<(), StoreError> {
         let migrate = || -> rusqlite::Result<()> {
             self.conn.execute_batch("BEGIN IMMEDIATE")?;
             let version: i32 = self
                 .conn
                 .query_row("PRAGMA user_version", [], |row| row.get(0))?;
-            if version == 1 {
+            if version < SCHEMA_VERSION {
+                let mut batch = String::new();
+                if version < 2 {
+                    batch.push_str(SCHEMA_V2);
+                }
+                batch.push_str(SCHEMA_V3);
+                batch.push_str(&format!("PRAGMA user_version = {SCHEMA_VERSION};"));
                 if let Err(error) = self.conn.execute_batch(&batch) {
                     let _ = self.conn.execute_batch("ROLLBACK");
                     return Err(error);
@@ -501,6 +539,85 @@ impl Store {
         received_key(&self.conn, &self.identity, id, None)
             .map(|key| key.is_some())
             .map_err(|e| self.failed(e))
+    }
+
+    /// Keep the bytes of a received message whose sender's key is not known,
+    /// for [`Store::unverified`] to hand back. Kept once: a second copy of
+    /// the same message changes nothing.
+    pub fn keep_unverified(
+        &mut self,
+        id: &[u8; 32],
+        source: &[u8; 16],
+        packed: &[u8],
+    ) -> Result<(), StoreError> {
+        self.conn
+            .execute(
+                "INSERT OR IGNORE INTO unverified(identity, id, source, packed) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![&self.identity[..], &id[..], &source[..], packed],
+            )
+            .map(|_| ())
+            .map_err(|e| self.failed(e))
+    }
+
+    /// Every kept message still waiting on its sender's key. One whose
+    /// message was deleted is not handed back.
+    pub fn unverified(&self) -> Result<Vec<Held>, StoreError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT u.id, u.source, u.packed FROM unverified u WHERE u.identity = ?1 \
+                 AND EXISTS (SELECT 1 FROM messages m WHERE m.identity = u.identity \
+                 AND m.id = u.id AND m.direction = 0 AND m.verification = 0)",
+            )
+            .map_err(|e| self.failed(e))?;
+        let rows = statement
+            .query_map(params![&self.identity[..]], |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                ))
+            })
+            .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            .map_err(|e| self.failed(e))?;
+        rows.into_iter()
+            .filter_map(|(id, source, packed)| {
+                Some((
+                    <[u8; 32]>::try_from(id.as_slice()).ok()?,
+                    <[u8; 16]>::try_from(source.as_slice()).ok()?,
+                    packed,
+                ))
+            })
+            .map(Ok)
+            .collect()
+    }
+
+    /// A kept message's verdict: its row says it, whether or not the screen
+    /// holds the message, and its bytes go.
+    pub fn settle_verdict(&mut self, id: &[u8; 32], valid: bool) -> Result<(), StoreError> {
+        let signature = match valid {
+            true => Signature::Verified,
+            false => Signature::Invalid,
+        };
+        let identity = self.identity;
+        let path = self.path.clone();
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| failed(&path, e))?;
+        tx.execute(
+            "UPDATE messages SET verification = ?1 \
+             WHERE identity = ?2 AND id = ?3 AND direction = 0 AND verification = 0",
+            params![signature_code(signature), &identity[..], &id[..]],
+        )
+        .map_err(|e| failed(&path, e))?;
+        tx.execute(
+            "DELETE FROM unverified WHERE identity = ?1 AND id = ?2",
+            params![&identity[..], &id[..]],
+        )
+        .map_err(|e| failed(&path, e))?;
+        tx.commit().map_err(|e| failed(&path, e))
     }
 
     /// Every peer's latest position, by [`Fix::newer_than`], the clamp for
@@ -732,7 +849,7 @@ fn apply(
                     i64::from(message.outbound),
                     message.delivery.map(state_code),
                     message.unproven,
-                    message.verified,
+                    signature_code(message.signature),
                     message.last_leg.map(leg_code),
                     secs,
                     offset,
@@ -844,7 +961,7 @@ fn row_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
         body: row.get(10)?,
         id: id.and_then(|id| <[u8; 32]>::try_from(id.as_slice()).ok()),
         delivery: state.and_then(state_of),
-        verified: row.get(5)?,
+        signature: signature_of(row.get(5)?),
         leg: None,
         unproven: row.get(4)?,
         at: wall_time(row.get(7)?, row.get(8)?),
@@ -859,6 +976,24 @@ fn row_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
             .and_then(|packed| unpack_fields(&packed))
             .unwrap_or_default(),
     })
+}
+
+/// `messages.verification`: 1 verified, as the boolean of schemas 1 and 2
+/// wrote it, 0 unverified, 2 invalid.
+fn signature_code(signature: Signature) -> i64 {
+    match signature {
+        Signature::Unverified => 0,
+        Signature::Verified => 1,
+        Signature::Invalid => 2,
+    }
+}
+
+fn signature_of(code: i64) -> Signature {
+    match code {
+        0 => Signature::Unverified,
+        1 => Signature::Verified,
+        _ => Signature::Invalid,
+    }
 }
 
 fn split(at: Option<WallTime>) -> (Option<i64>, Option<i64>) {
@@ -946,7 +1081,7 @@ mod tests {
             body: body.to_string(),
             id: Some(id_of(key)),
             delivery: outbound.then_some(DeliveryState::Delivered),
-            verified: true,
+            signature: Signature::Verified,
             leg: None,
             unproven: false,
             at: at(1_000 + key as i64),
@@ -1428,7 +1563,7 @@ mod tests {
                 .conn
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i32>(0))
                 .expect("version"),
-            2
+            SCHEMA_VERSION
         );
         let restored = store.restore().expect("restore");
         assert_eq!(restored[0].messages[0].body, "older");
@@ -1438,7 +1573,7 @@ mod tests {
             .write(&[StoreWrite::Position(fix(ALICE, ALICE, Some(8), 9_000))])
             .expect("a position in the migrated store");
         drop(store);
-        // Opened again it is a schema 2 store, not migrated twice.
+        // Opened again it is a current store, not migrated twice.
         let store = Store::open_in(home.path(), US).expect("reopen");
         assert_eq!(store.positions().expect("positions").len(), 1);
     }
@@ -1454,7 +1589,7 @@ mod tests {
         let version: i32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("version");
-        assert_eq!(version, 2);
+        assert_eq!(version, SCHEMA_VERSION);
         assert!(
             version > 1,
             "store.rs's check refuses `version > SCHEMA_VERSION`"
@@ -1470,5 +1605,80 @@ mod tests {
         drop(conn);
         let text = refused(home.path());
         assert!(text.contains("table positions is missing"), "{text}");
+    }
+
+    /// A schema 2 store, as the loquax before leviculum 1079 wrote it,
+    /// migrates to schema 3 in place: its unverified message keeps its row
+    /// and has no bytes to be checked with.
+    #[test]
+    fn a_schema_2_store_migrates_to_3_and_its_old_unverified_messages_stay() {
+        let home = tempfile::tempdir().expect("home");
+        let conn = Connection::open(home.path().join(STORE_FILE)).expect("create");
+        conn.execute_batch(&format!(
+            "BEGIN; {SCHEMA} {SCHEMA_V2} PRAGMA user_version = 2; COMMIT;"
+        ))
+        .expect("schema 2");
+        drop(conn);
+        let mut store = Store::open_in(home.path(), US).expect("schema 2 opens");
+        let mut old = message(1, false, "older");
+        old.signature = Signature::Unverified;
+        put(&mut store, ALICE, old);
+        drop(store);
+        let store = Store::open_in(home.path(), US).expect("reopen");
+        assert_eq!(
+            store
+                .conn
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i32>(0))
+                .expect("version"),
+            3
+        );
+        assert!(store.unverified().expect("unverified").is_empty());
+        assert_eq!(
+            store.restore().expect("restore")[0].messages[0].signature,
+            Signature::Unverified
+        );
+    }
+
+    /// The bytes of an unverified message are kept until its verdict, which
+    /// its row then says across a reopen, invalid as loudly as verified; the
+    /// bytes of a deleted message are not handed back.
+    #[test]
+    fn an_unverified_message_keeps_its_bytes_until_its_verdict() {
+        let home = tempfile::tempdir().expect("home");
+        let mut store = Store::open_in(home.path(), US).expect("fresh");
+        for key in [1, 2, 3] {
+            let mut received = message(key, false, "who?");
+            received.signature = Signature::Unverified;
+            put(&mut store, ALICE, received);
+            store
+                .keep_unverified(&id_of(key), &ALICE, &[key as u8; 120])
+                .expect("keep");
+        }
+        store
+            .keep_unverified(&id_of(1), &ALICE, &[9; 120])
+            .expect("kept once");
+        store
+            .write(&[StoreWrite::ForgetMessage { key: 3 }])
+            .expect("forget 3");
+        let mut held = store.unverified().expect("unverified");
+        held.sort();
+        assert_eq!(
+            held,
+            vec![
+                (id_of(1), ALICE, vec![1; 120]),
+                (id_of(2), ALICE, vec![2; 120])
+            ]
+        );
+        store.settle_verdict(&id_of(1), true).expect("valid");
+        store.settle_verdict(&id_of(2), false).expect("invalid");
+        drop(store);
+        let store = Store::open_in(home.path(), US).expect("reopen");
+        assert!(store.unverified().expect("unverified").is_empty());
+        let signatures: Vec<Signature> = store.restore().expect("restore")[0]
+            .messages
+            .iter()
+            .map(|m| m.signature)
+            .collect();
+        assert_eq!(signatures, [Signature::Verified, Signature::Invalid]);
     }
 }

@@ -226,6 +226,33 @@ pub fn path_not_found(to: &[u8; 16], waited: core::time::Duration) {
     );
 }
 
+/// A received message's sender is not known, so its path is asked for:
+/// `VERIFY path_request src=<8 hex> held=<messages waiting on its key>
+/// requests=<asked so far>`.
+pub fn verify_path_request(source: &[u8; 16], held: usize, requests: u32) {
+    tracing::info!(
+        target: "loquax::verify",
+        "VERIFY path_request src={} held={} requests={}",
+        short_hex(source),
+        held,
+        requests
+    );
+}
+
+/// A held message checked against its sender's key, now known: `VERIFY
+/// result src=<8 hex> id=<8 hex> verdict=valid|invalid`.
+pub fn verify_result(source: &[u8; 16], message_id: &[u8; 32], valid: bool) {
+    let mut id = to_hex(message_id);
+    id.truncate(8);
+    tracing::info!(
+        target: "loquax::verify",
+        "VERIFY result src={} id={} verdict={}",
+        short_hex(source),
+        id,
+        if valid { "valid" } else { "invalid" }
+    );
+}
+
 /// The first eight hex characters of an address, as the log lines carry it.
 fn short_hex(address: &[u8; 16]) -> String {
     let mut hex = to_hex(address);

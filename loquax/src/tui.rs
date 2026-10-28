@@ -392,6 +392,27 @@ impl Shell {
         }
     }
 
+    /// The store's side of a signature that waits on its sender's key: the
+    /// message's bytes while it waits, the verdict once it is in. The
+    /// verdict goes to the store here because the screen holds only a
+    /// window of each conversation (leviculum 1079).
+    fn keep_signature(&mut self, event: &OutboxEvent) {
+        let kept = match event {
+            OutboxEvent::Unverified {
+                message_id,
+                source,
+                packed,
+            } => self.store.keep_unverified(message_id, source, packed),
+            OutboxEvent::Verified {
+                message_id, valid, ..
+            } => self.store.settle_verdict(message_id, *valid),
+            _ => return,
+        };
+        if let Err(error) = kept {
+            loquax::events::store_failed(&error.to_string());
+        }
+    }
+
     /// Everything that arrived since the last call, without waiting.
     fn poll(&mut self) {
         match self.fanout.pump(&mut self.attached.outbox) {
@@ -407,6 +428,7 @@ impl Shell {
                     if already_held(&self.store, &event) {
                         continue;
                     }
+                    self.keep_signature(&event);
                     self.apply(UiEvent::Engine(event));
                     if let Some(destination) = named {
                         self.keep_name(destination);
@@ -749,6 +771,7 @@ pub async fn run(options: TuiOptions) -> ExitCode {
             store.names()?,
             store.last_key()?,
             store.positions()?,
+            store.unverified()?,
         ))
     }) {
         Ok(history) => history,
@@ -803,7 +826,22 @@ pub async fn run(options: TuiOptions) -> ExitCode {
     };
     let mut model = Model::new(&options.to);
     model.names = loquax::names::Names::new(contacts);
-    let (restored, names, last_key, positions) = history;
+    let (restored, names, last_key, positions, unverified) = history;
+    // The messages an earlier run kept unverified: the engine checks each
+    // once its sender's key is known, and asks for it until then.
+    for (message_id, source, packed) in unverified {
+        if attached
+            .outbox
+            .submit(Command::Verify {
+                message_id,
+                source,
+                packed,
+            })
+            .is_err()
+        {
+            break;
+        }
+    }
     for (peer, name) in &names {
         model.names.remember(*peer, name);
     }
@@ -1156,6 +1194,9 @@ enum Until {
     Received(usize),
     /// This many peers' announces carried a name.
     Named(usize),
+    /// This many received messages whose signature verified, across every
+    /// conversation.
+    Verified(usize),
     /// The send runner reported this leg for the newest message we wrote in
     /// the selected conversation.
     Leg(Leg),
@@ -1184,6 +1225,15 @@ impl Until {
                     >= *count
             }
             Self::Named(count) => model.names.heard_count() >= *count,
+            Self::Verified(count) => {
+                model
+                    .conversations
+                    .iter()
+                    .flat_map(|c| c.messages.iter())
+                    .filter(|m| !m.outbound && m.signature == loquax::ui::Signature::Verified)
+                    .count()
+                    >= *count
+            }
             Self::Leg(leg) => {
                 let newest = model
                     .messages_of_selected()
@@ -1389,6 +1439,7 @@ fn parse_state(name: &str) -> Result<DeliveryState, String> {
 /// until delivery <state> [secs]  the newest sent message shows <state>
 /// until received <n> [secs]      n messages have arrived
 /// until named <n> [secs]         n peers have announced a name
+/// until verified <n> [secs]      n received messages have a verified signature
 /// until leg <direct|propagated> [secs]
 ///                                the runner is on that leg for the newest
 ///                                sent message
@@ -1499,6 +1550,13 @@ fn parse_script(text: &str) -> Result<Vec<Step>, String> {
                     ),
                     ["named", n, tail @ ..] => Step::Until(
                         Until::Named(n.parse().map_err(|_| at(format!("bad peer count {n:?}")))?),
+                        secs(tail.first().copied()).map_err(at)?,
+                    ),
+                    ["verified", n, tail @ ..] => Step::Until(
+                        Until::Verified(
+                            n.parse()
+                                .map_err(|_| at(format!("bad message count {n:?}")))?,
+                        ),
                         secs(tail.first().copied()).map_err(at)?,
                     ),
                     _ => return Err(at(format!("unknown condition {rest:?}"))),

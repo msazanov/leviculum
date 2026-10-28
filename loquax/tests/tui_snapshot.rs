@@ -2483,3 +2483,156 @@ async fn a_failed_fetch_leaves_its_end_in_the_log() {
         .unwrap_or_else(|| panic!("no elapsed_ms: {done}"));
     assert!((2_000..7_000).contains(&elapsed), "{done}");
 }
+
+/// A sender loquax has never heard (leviculum 1079): it attaches and
+/// announces before loquax starts, so its announce never reaches loquax, and
+/// `--pn` keeps the start from replaying the daemon's path table. Its message
+/// arrives with no key to check it against, and turns verified once loquax
+/// has asked for the key.
+const UNHEARD_SCRIPT: &str = "\
+until ready 20
+frame attached
+key enter
+until received 1 30
+until verified 1 15
+frame verified
+key esc
+key q
+";
+
+/// A message from a sender loquax has not heard turns verified, under the
+/// sender's announced name, once loquax has asked for the sender's key.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_from_an_unheard_sender_is_verified_once_its_key_arrives() {
+    let daemon = daemon("tui-unheard", |b| b).await;
+    let home = tempfile::tempdir().expect("tui home");
+    let ours = fixed_identity(0x11);
+    std::fs::write(
+        home.path().join("identity"),
+        encode_identity(&ours).expect("storable"),
+    )
+    .expect("write the identity");
+    let our_address = delivery_address(&ours).expect("our address");
+    let theirs = fixed_identity(0x22);
+    let their_address = delivery_address(&theirs).expect("their address");
+
+    // The sender first: its one announce reaches the daemon before loquax
+    // is there to hear it.
+    let storage = tempfile::tempdir().expect("their storage");
+    let mut them = attach(AttachConfig {
+        instance: daemon.instance.clone(),
+        storage_dir: storage.path().to_path_buf(),
+        identity: theirs,
+        display_name: b"them".to_vec(),
+        notices: Terminal::new(storage.path().to_path_buf()),
+    })
+    .await
+    .expect("the sender attaches");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !daemon
+        .node
+        .has_path(&leviculum_core::DestinationHash::new(their_address))
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the daemon never heard the sender"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let script = home.path().join("unheard.script");
+    let frames = home.path().join("unheard.frames");
+    std::fs::write(&script, UNHEARD_SCRIPT).expect("write the script");
+    let args: Vec<String> = vec![
+        "--instance".into(),
+        daemon.instance.clone(),
+        "--config".into(),
+        daemon.config_dir.path().display().to_string(),
+        "--pn".into(),
+        "5e".repeat(16),
+        "--script".into(),
+        script.display().to_string(),
+        "--frames".into(),
+        frames.display().to_string(),
+        "--size".into(),
+        "120x24".into(),
+    ];
+    let child_home = home.path().to_path_buf();
+    let child = tokio::task::spawn_blocking(move || {
+        let mut command = Command::new(LNMSG);
+        command
+            .args(&args)
+            .env("LNMSG_HOME", &child_home)
+            .env("LNMSG_DISPLAY_NAME", "tui")
+            .env_remove("LEVICULUM_EVENT_LOG")
+            .env_remove("RUST_LOG")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let child = leviculum_std::process::spawn_supervised(command).expect("spawn loquax");
+        child.wait_with_output().expect("wait for loquax")
+    });
+
+    wait_for_frame(&frames, "attached", Duration::from_secs(20)).await;
+    let options = SendOptions::new(daemon.instance.clone(), Duration::from_secs(20));
+    let mut fanout = Fanout::default();
+    let mut tap = fanout.tap();
+    let clock = Tokio::new();
+    let send = run_send(
+        &mut tap,
+        SendRequest {
+            destination: our_address,
+            title: Vec::new(),
+            body: b"you have not heard of me".to_vec(),
+            fields: Vec::new(),
+            via: Via::Direct,
+        },
+        &options,
+        &clock,
+    );
+    tokio::pin!(send);
+    let sent = loop {
+        tokio::select! {
+            sent = &mut send => break sent,
+            _ = tokio::time::sleep(Duration::from_millis(20)) => {
+                let _ = fanout.pump(&mut them.outbox);
+            }
+        }
+    };
+    assert!(sent.is_ok(), "the message did not go out: {sent:?}");
+
+    let output = child.await.expect("the loquax child thread");
+    them.stop().await;
+    let got = std::fs::read_to_string(&frames).expect("read the frames");
+    let log = std::fs::read_to_string(home.path().join("tui.log")).unwrap_or_default();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}\nframes:\n{got}\ntui.log:\n{log}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // It arrived unverified: the engine asked for the sender's path, and
+    // checked the signature once the answer brought the key.
+    let source = their_address[..4]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    assert!(
+        log.contains(&format!(
+            "VERIFY path_request src={source} held=1 requests=1"
+        )),
+        "{log}"
+    );
+    assert!(
+        log.lines().any(
+            |line| line.contains(&format!("VERIFY result src={source} id="))
+                && line.ends_with("verdict=valid")
+        ),
+        "{log}"
+    );
+    let verified = frame(&got, "verified");
+    assert!(
+        !verified.contains("unverified") && verified.contains("them"),
+        "the block did not turn verified under the sender's name:\n{verified}\ntui.log:\n{log}"
+    );
+}

@@ -98,6 +98,14 @@ pub enum Command {
     /// direct copy before uploading the propagated one, so a peer that
     /// reappears mid-fallback cannot be handed the same message twice.
     Cancel { message_id: [u8; 32] },
+    /// Check a received message's signature once its sender's key is
+    /// known: one the store kept unverified from an earlier run
+    /// ([`OutboxEvent::Unverified`]). `packed` is the message as it came.
+    Verify {
+        message_id: [u8; 32],
+        source: [u8; 16],
+        packed: Vec<u8>,
+    },
 }
 
 /// What the mailbox rule is fed from, read by the frontend before it selects:
@@ -169,6 +177,25 @@ pub enum OutboxEvent {
         fields: Vec<Field>,
         /// Whether the signature verified against a known source identity.
         verified: bool,
+    },
+    /// The message just [`OutboxEvent::Received`] came from a sender whose
+    /// key is not known, so its signature could not be checked. The engine
+    /// asks for the sender's path and checks it when the key arrives
+    /// ([`OutboxEvent::Verified`]); `packed` is the message as it came, for
+    /// the store to keep, so a later run can check it too
+    /// ([`Command::Verify`]).
+    Unverified {
+        message_id: [u8; 32],
+        source: [u8; 16],
+        packed: Vec<u8>,
+    },
+    /// A held message's signature was checked against its sender's key, now
+    /// known: `valid` is the verdict, and a message whose signature does not
+    /// hold is said to be invalid, never left looking unverified.
+    Verified {
+        message_id: [u8; 32],
+        source: [u8; 16],
+        valid: bool,
     },
     /// A peer announced its delivery destination. `name` is the display
     /// name as the reference reads it from the app data
