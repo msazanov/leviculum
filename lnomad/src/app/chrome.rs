@@ -533,8 +533,9 @@ pub(crate) fn help_groups() -> Vec<HelpGroup> {
 }
 
 /// The plain-text lines of lnomad's help overlay ([`leviculum_ui::help::lines`]
-/// over [`help_groups`]). The renderer and the layout both derive from this, so
-/// widths can never disagree.
+/// over [`help_groups`]), for the tests: the renderer and the scroll bounds
+/// draw and count their wrapped rows ([`leviculum_ui::help::rows`]).
+#[cfg(test)]
 pub(crate) fn help_lines() -> Vec<String> {
     leviculum_ui::help::lines(&help_groups())
 }
@@ -543,12 +544,9 @@ pub(crate) fn help_lines() -> Vec<String> {
 /// of help lines that fit at once (the viewport) and the largest valid
 /// [`Model::help_scroll`] (`max`). Shared by the key/wheel handler (to clamp the
 /// offset via [`scrolled`]) and the renderer (to slice the visible lines), so
-/// the two can never disagree on the bounds. Mirrors `render_help`'s sizing: the
-/// overlay is at most the full terminal height, two rows go to the border.
+/// the two can never disagree on the bounds: both are
+/// [`leviculum_ui::help::scroll_bounds`] over the whole terminal.
 pub(crate) fn help_scroll_geometry(model: &Model) -> (usize, usize) {
-    let total = help_lines().len();
-    let rows = model.size.1 as usize;
-    let height = (total + 2).min(rows);
-    let viewport = height.saturating_sub(2);
-    (viewport, total.saturating_sub(viewport))
+    let (cols, rows) = model.size;
+    leviculum_ui::help::scroll_bounds(&help_groups(), leviculum_ui::Rect::new(0, 0, cols, rows))
 }

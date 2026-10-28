@@ -16,7 +16,7 @@ them is table-driven.
 
 **What is table-driven.** The scroll rows. When this page was written they
 were `SCROLL_KEYS` in `lnomad/src/app/event.rs`; since leviculum 1030 they are
-`SCROLL_ROWS` (`leviculum-ui/src/keymap.rs:646`), shared with `loquax`. A row
+`SCROLL_ROWS` (`leviculum-ui/src/keymap.rs:666`), shared with `loquax`. A row
 is a `Row { desc, group, spellings }` whose chords each carry a modifier
 class (`Mods::{Any, Plain, Ctrl, Alt, Exact}`,
 `leviculum-ui/src/keymap.rs:92`). One row carries the vi and the emacs and
@@ -48,7 +48,7 @@ help overlay's non-scroll groups are a second, unlinked static list
    toast; `Ctrl-C` quits from anywhere; an open help overlay swallows
    everything; an open places panel takes over.
 2. *Mode gating*. `Mode::{Browse, Address, Hint, Search, Field}`
-   (`lnomad/src/app/model.rs:115-134`), each with its own handler. Text modes
+   (`lnomad/src/app/model.rs:97-116`), each with its own handler. Text modes
    forward unclaimed keys to a `tui_input::Input` editor. `Mode::Field`
    uses a whitelist rather than a catch-all so that "field editing never
    leaks into browse hotkeys" (`lnomad/src/app/event.rs:438`, whitelist at
@@ -73,7 +73,7 @@ That is a cost-aware keymap, and a messenger sends over the same radios.
 
 **Architecture.** Elm-style with an explicit effect list. The core sits in
 `lnomad/src/app/` since the #219 cut (2026-10-25): `Model` at
-`lnomad/src/app/model.rs:477-636` (`#[derive(Clone, Debug, Default)]` at
+`lnomad/src/app/model.rs:459-618` (`#[derive(Clone, Debug, Default)]` at
 `:565`), `Effect` at `:478-532`; `AppEvent` at
 `lnomad/src/app/event.rs:25-92` and `update(&mut Model, AppEvent) ->
 Vec<Effect>` at `:98-208`. The terminal frontend is `lnomad/src/tui.rs`:
@@ -101,7 +101,7 @@ slices (`spawn_discovery`, `lnomad/src/tui.rs:1265-1306`), and a
 (`lnomad/src/tui.rs:1646-1648`). The main loop has five arms
 (`lnomad/src/tui.rs:1550-1653`), and the timer arm is conditionally enabled
 (`, if animate` at `:2229`, driven by `needs_tick()` at
-`lnomad/src/app/model.rs:822-825`) so an idle browser does not wake eight
+`lnomad/src/app/model.rs:804-807`) so an idle browser does not wake eight
 times a second.
 
 **Persistence.** Three small files under
@@ -138,14 +138,15 @@ owning link index. That IR feeds either `to_ratatui_text`
 (`lnomad/src/render.rs:225-231`) for `--print`. Scrolling is a slice, not a
 widget scroll, because the page is pre-wrapped
 (`lnomad/src/tui.rs:317-324`), and there is one scroll rule shared by
-every scrollable window (`scrolled`, `lnomad/src/app/model.rs:97-112`).
+every scrollable window (`scrolled`, `leviculum-ui/src/keymap.rs:639-653`),
+which loquax's help and detail view scroll by too.
 
 Two rendering caveats. Wrapping compares `cur.len() > width`, i.e.
 character count rather than display width (`wrap`,
 `lnomad/src/render.rs:773-800`), which will overflow on CJK and emoji. No
 test covering that was found, so whether it is a known limitation or an
 oversight is unclear. And the whole page is laid out eagerly on every
-relayout (`lnomad/src/app/model.rs:708-732`), including on every keystroke in a
+relayout (`lnomad/src/app/model.rs:690-714`), including on every keystroke in a
 form field (`:1657-1660`).
 
 **Scriptability, and the absence of settings.** `--print` fetches, renders
@@ -784,13 +785,13 @@ terms without a terminal, exactly as `leviculum-lxmf-node` is.
 Three specific things `lnomad` does that must change:
 
 1. **Bottom-anchored scrolling with a pinned flag.** `lnomad`'s `scroll` is
-   the index of the top visible line (`lnomad/src/app/model.rs:97-112`). A
+   the index of the top visible line (`scrolled`, `leviculum-ui/src/keymap.rs:639-653`). A
    message list wants a "pinned to bottom" boolean so an inbound message
    appends without yanking the viewport out from under a user who has
    scrolled up. NomadNet gets this wrong: it resets to the bottom on every
    refresh (NomadNet's `Conversations.py`, line 2287).
 2. **Windowed layout.** `lnomad` re-lays out the whole page on every
-   relayout (`lnomad/src/app/model.rs:708-732`). A ten-thousand-message
+   relayout (`lnomad/src/app/model.rs:690-714`). A ten-thousand-message
    conversation must not do that, and a compose buffer must not trigger it
    per keystroke. Lay out the visible window plus a margin, and cache per
    message keyed by `(message_id, width, theme)`.

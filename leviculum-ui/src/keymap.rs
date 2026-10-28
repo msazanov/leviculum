@@ -632,6 +632,26 @@ pub enum ScrollCmd {
     Bottom,
 }
 
+/// The one scroll rule every scrollable window in lnomad and loquax shares:
+/// `cmd` resolved against the offset `cur`, given the `viewport` height in
+/// rows and `max`, the largest valid offset (`content - viewport`), clamped
+/// into `0..=max`. A half page is `viewport / 2`, at least a line.
+pub fn scrolled(cur: usize, cmd: ScrollCmd, viewport: usize, max: usize) -> usize {
+    let vp = viewport.max(1);
+    let half = (vp / 2).max(1);
+    let next = match cmd {
+        ScrollCmd::LineUp => cur.saturating_sub(1),
+        ScrollCmd::LineDown => cur.saturating_add(1),
+        ScrollCmd::HalfPageUp => cur.saturating_sub(half),
+        ScrollCmd::HalfPageDown => cur.saturating_add(half),
+        ScrollCmd::PageUp => cur.saturating_sub(vp),
+        ScrollCmd::PageDown => cur.saturating_add(vp),
+        ScrollCmd::Top => 0,
+        ScrollCmd::Bottom => max,
+    };
+    next.min(max)
+}
+
 /// The help group the scroll rows sit in.
 pub const MOVE: &str = "Move";
 

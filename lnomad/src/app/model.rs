@@ -88,27 +88,9 @@ pub(crate) fn content_height(rows: u16) -> usize {
 pub use leviculum_ui::keymap::ScrollCmd;
 
 /// The single scroll rule shared by every scrollable window — the content body
-/// and both overlays (help, places), and any future overlay. Resolve `cmd`
-/// against the current offset `cur`, given the `viewport` height in rows and
-/// `max` (the largest valid offset, i.e. `content.saturating_sub(viewport)`),
-/// clamped into `0..=max`. A half page is `viewport / 2`. Keeping one pure
-/// function means all windows scroll with identical semantics; a new overlay
-/// gets correct scrolling by calling this with its own viewport and max.
-pub fn scrolled(cur: usize, cmd: ScrollCmd, viewport: usize, max: usize) -> usize {
-    let vp = viewport.max(1);
-    let half = (vp / 2).max(1);
-    let next = match cmd {
-        ScrollCmd::LineUp => cur.saturating_sub(1),
-        ScrollCmd::LineDown => cur.saturating_add(1),
-        ScrollCmd::HalfPageUp => cur.saturating_sub(half),
-        ScrollCmd::HalfPageDown => cur.saturating_add(half),
-        ScrollCmd::PageUp => cur.saturating_sub(vp),
-        ScrollCmd::PageDown => cur.saturating_add(vp),
-        ScrollCmd::Top => 0,
-        ScrollCmd::Bottom => max,
-    };
-    next.min(max)
-}
+/// and both overlays (help, places), and any future overlay; it lives in
+/// `leviculum-ui` because loquax's overlays scroll by it too.
+pub use leviculum_ui::keymap::scrolled;
 
 /// The interactive UI mode: normal browsing or entering an address.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

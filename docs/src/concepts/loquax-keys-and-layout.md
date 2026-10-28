@@ -27,7 +27,7 @@ colour part of section 5 ("Colour") is proposed, not decided.
 `lnomad` is operable with the mouse like a classic browser, with the
 browser's keyboard, and with the typical Emacs and vi commands, all at
 once: one keymap whose rows carry the vi, Emacs and arrow spellings of the
-same motion side by side (`SCROLL_ROWS`, `leviculum-ui/src/keymap.rs:646`,
+same motion side by side (`SCROLL_ROWS`, `leviculum-ui/src/keymap.rs:666`,
 which were `lnomad`'s own `SCROLL_KEYS` until the keymap slice;
 the mechanism is described under [architecture](loquax-architecture.md),
 section 1). `loquax` takes the principle over, with three substitutions:

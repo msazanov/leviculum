@@ -181,7 +181,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 │  Ctrl-f / Ctrl-b   Ctrl-v   PageDown / PageUp  page down / up                █
 │  Ctrl-d / Ctrl-u                               half a page                   █
 │  g / G   Home / End                            top / bottom                  █
-│  Ctrl-↑ / Ctrl-↓                               top / bottom (Signal)         █
+│  Ctrl-↑ / Ctrl-↓                               top / bottom (Signal)         ║
 │  PageDown / PageUp                             page the messages (compose)   ║
 │                                                                              ║
 │Conversations                                                                 ║

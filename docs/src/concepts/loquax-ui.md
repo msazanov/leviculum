@@ -59,7 +59,7 @@ Concretely:
   (right, lower). `Tab` and `Shift-Tab` cycle; a click focuses.
 - **In the conversation and message panes**, `lnomad`'s keymap applies
   unchanged: the scroll rows verbatim
-  (`SCROLL_ROWS`, `leviculum-ui/src/keymap.rs:646`), so `j`/`k`, `Ctrl-n`/`Ctrl-p`, arrows,
+  (`SCROLL_ROWS`, `leviculum-ui/src/keymap.rs:666`), so `j`/`k`, `Ctrl-n`/`Ctrl-p`, arrows,
   `Ctrl-f`/`Ctrl-b`, `Ctrl-v`/`Alt-v`, `Ctrl-d`/`Ctrl-u`, `g`/`G`,
   `Home`/`End` and the wheel all work, in all four idioms, for free.
 - **In the compose pane**, plain keys type. Only `Ctrl-` and `Alt-` chords
@@ -84,9 +84,9 @@ Concretely:
   all, and each entry shows its key if it has one. NomadNet's static
   shortcut bar is the failure mode to avoid.
 - **`f` hint mode from `lnomad`** (`hints`,
-  `lnomad/src/app/model.rs:959-996`), extended to conversations. Its best
+  `lnomad/src/app/model.rs:941-978`), extended to conversations. Its best
   property is that it matches either the hint label *or* a substring of the
-  target's text (`hint_matches`, `lnomad/src/app/model.rs:986-996`), so `f`
+  target's text (`hint_matches`, `lnomad/src/app/model.rs:968-978`), so `f`
   then typing part of a contact's name jumps to that conversation. That is
   a better contact switcher than anything in either prior-art program.
 
