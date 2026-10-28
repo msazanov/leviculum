@@ -228,6 +228,8 @@ async fn d6_arm(tag: &str, reprice: bool) -> D6Arm {
         stored_value(&subject),
         stored_value(&witness)
     );
+    // As `main.rs` hands it to the engine: re-priced, then on its writer.
+    let store = store.write_behind().expect("the store's writer");
 
     let instance = SharedInstance::start(tag).await;
     let lxmd = LxmdPeer::start(&instance, &stock_peer_at_four(tag), &[]).await;

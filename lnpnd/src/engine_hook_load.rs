@@ -20,7 +20,9 @@
 //! `LNPND_LOAD_SYNC` (messages in the inbound sync, 100),
 //! `LNPND_LOAD_STORED` (messages already in the store, 0),
 //! `LNPND_LOAD_FULL` (1: the store limit leaves no room, so every append of
-//! the sync evicts; 0), `LNPND_LOAD_DIR` (the target directory).
+//! the sync evicts; 0), `LNPND_LOAD_DIR` (the target directory),
+//! `LNPND_LOAD_WRITE_BEHIND` (0: the message store appends inline, as it did
+//! before order 1081; 1). The peer store writes off the hook either way.
 
 use std::collections::BTreeMap;
 use std::time::Instant;
@@ -276,6 +278,7 @@ fn hook_profile_under_field_load() {
     };
     let mut store =
         FilePropagationStore::open(dir.path().join("store"), limit).expect("message store");
+    let write_behind = knob("LNPND_LOAD_WRITE_BEHIND", 1) == 1;
     let received_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| since.as_secs());
@@ -292,6 +295,11 @@ fn hook_profile_under_field_load() {
                 &stamped(1_000_000 + index as u32),
             )
             .expect("prefill the store");
+    }
+    // As the daemon runs it (order 1081), unless the knob asks for the
+    // inline store this measured before.
+    if write_behind {
+        store = store.write_behind().expect("the store's writer");
     }
 
     let mut core = NodeCoreBuilder::new().enable_transport(false).build(
@@ -382,7 +390,15 @@ fn hook_profile_under_field_load() {
     engine.state = State::Ready(ready);
 
     let mut round = 0usize;
-    while !engine.pending.is_empty() || engine.validation.busy() || round < 50 {
+    let writes_outstanding = |engine: &Engine<FilePropagationStore>| match &engine.state {
+        State::Ready(ready) => ready.node.store().writes_outstanding(),
+        _ => false,
+    };
+    while !engine.pending.is_empty()
+        || engine.validation.busy()
+        || writes_outstanding(&engine)
+        || round < 50
+    {
         assert!(round < sync_messages * 4 + 100, "the sync did not drain");
         now_ms = core.now_ms();
         tick(&mut engine, &mut core, &mut ledger, "sync", now_ms);

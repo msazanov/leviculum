@@ -643,6 +643,13 @@ async fn daemon(args: &Args, config_dir: &Path, instance: String) -> ExitCode {
         store_free_kb(&store),
         effective.store_limit_kb
     );
+    // From here on the durable writes run on the store's own writer thread,
+    // not in the hooks that hold the core lock (order 1081); the re-pricing
+    // above ran before, inline, while nothing else was waiting.
+    let store = match store.write_behind() {
+        Ok(store) => store,
+        Err(error) => return failure(format!("message store writer: {error}")),
+    };
 
     let auth_allowed = if effective.auth_required {
         let allowed = load_hash_file(&config_dir.join("allowed"));

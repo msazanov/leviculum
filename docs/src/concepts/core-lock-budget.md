@@ -504,6 +504,39 @@ What this does *not* buy: one append can exceed the budget on its own —
 can still fire on a slow disk. What is gone is the multiplier, which is the
 part that scaled with someone else's batch size.
 
+### The single append left the lock too (order 1081)
+
+The remainder did fire, and often: 4520 `CORE_PROCESSOR_OVER_BUDGET` lines
+in ten hours on miauhaus (order 1009), on a store append of 3 to 9 ms on
+the field node's Odroid and a peer-store rewrite of up to 9.5 ms on the
+coder host. Even one `fsync` per hook is over budget on a small host.
+
+"Cannot be dropped" is still true; "must be paid under the lock" was not.
+The proof needs the write to be durable, not to have happened inside the
+hook. So `lnpnd`'s message store runs its durable writes on a writer thread
+of its own (`FilePropagationStore::write_behind`): the hook pushes the write
+onto the writer's queue, and the engine holds the upload's proof until the
+writer reports it durable (`Engine::release_proofs`, `lnpnd/src/engine.rs`),
+polling at the validation poll meanwhile. The proof is as late as the
+`fsync` makes it, as it always was; a writer that dies or a device that
+refuses produces no proof and no record. The board's flush queue had
+already drawn the line in the same place (`leviculum-nrf/pn-store`). The
+peer store, whose writes nothing on the wire waits for, rewrites its file
+on a writer of its own and coalesces the changes that arrive meanwhile
+(`leviculum-std/src/file_peer_store.rs`).
+
+1009's load harness (`lnpnd/src/engine_hook_load.rs`, release, coder host
+ext4 on virtio, 40 000 destinations, a 100-message inbound sync) before and
+after, p50/p95/max per hook in microseconds:
+
+| hook | before | after |
+|---|---|---|
+| `on_tick` storing one sync message | 980/1171/2115 | 0/3/69 |
+| `on_event` announce that updates a peer | 1/1083/1319 | 0/0/10 |
+
+> **A cost that cannot be dropped and does not need the lock is paid
+> beside it. What depends on it waits for it, not the core.**
+
 ### A diagnostic's volume is a cost too, and the cadence is the wrong lever
 
 The same log gave the other half of the lesson. Of those 397 023 881

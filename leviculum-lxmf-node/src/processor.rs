@@ -1088,7 +1088,10 @@ impl LxmfHelperProcessor {
                 return;
             }
         }
-        let store = match FilePropagationStore::open(&self.config.pn_store_dir, store_limit) {
+        // With its writer, as lnpnd runs it (order 1081).
+        let store = match FilePropagationStore::open(&self.config.pn_store_dir, store_limit)
+            .and_then(FilePropagationStore::write_behind)
+        {
             Ok(store) => store,
             Err(e) => {
                 self.emitter.error(&format!("pn store: {e}"));

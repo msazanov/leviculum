@@ -9,7 +9,7 @@
 //! events come from"). A mailbox that silently loses uploads under load
 //! would still have proven them if the proof were automatic; instead the
 //! propagation destination runs `ProofStrategy::App`, the proof is sent
-//! only after the store append returned, and both the data event and the
+//! only after the store append is durable, and both the data event and the
 //! `LinkProofRequested` it must answer ride the tap. This is the same
 //! reasoning that put loquax's engine on the tap
 //! (`docs/src/concepts/loquax-architecture.md` §3).
@@ -50,6 +50,8 @@ use leviculum_lxmf::{
     PropagationNode, PropagationNodeConfig, PropagationStore, TransientId, UploadOutcome,
     MESSAGE_GET_PATH,
 };
+
+use leviculum_std::file_propagation_store::SettledWrites;
 
 use crate::hook_profile::{HookProfile, HookTimes, Section};
 use crate::mailbox::{MailboxConfig, MailboxRuntime};
@@ -117,14 +119,61 @@ const VALIDATION_POLL_MS: u64 = 1;
 /// 105 messages, 239 ms of core lock, miauhaus 2026-09-21 — and that is
 /// what this bounds.
 ///
-/// One append can still overrun the budget on a slow device; nothing this
-/// side of the lock can prevent that, because the latency is the disk's.
-/// What this removes is the multiplier.
+/// One append can still overrun the budget on a slow device when the store
+/// writes inline. The daemon's store does not: it hands the write to its
+/// writer thread (order 1081, [`WriteBehind`]), so an append in the hook is
+/// a queue push and the proof waits for the writer instead. The bound stays
+/// for a store that writes inline, which is what this removes the
+/// multiplier of.
 ///
 /// The arithmetic — this many appends at what an append costs, against the
 /// budget — is asserted in `the_hook_budget_pays_for_the_slice_it_takes`,
 /// against a price re-measured on the coder host (`PRICED_APPEND_COST`).
 const PERSIST_PER_HOOK: usize = 1;
+
+/// A store whose appends become durable after they return (order 1081).
+///
+/// The upload proof is the node's statement "stored", so it may not leave
+/// before the message survives a power cut ("persist before you prove",
+/// `docs/src/concepts/propagation-node-on-a-board.md` §3). A store that
+/// writes inline is durable when `append` returns and keeps the defaults:
+/// no tickets, nothing to settle. [`FilePropagationStore`] switched to its
+/// writer hands out a ticket per append, and the engine holds the proof
+/// until the writer has passed it (`Engine::release_proofs`).
+///
+/// [`FilePropagationStore`]: leviculum_std::FilePropagationStore
+pub trait WriteBehind {
+    /// The ticket of the last append handed to the writer.
+    fn writes_issued(&self) -> u64 {
+        0
+    }
+
+    /// How far the writer has got, and what it could not write.
+    fn settle_writes(&mut self) -> SettledWrites {
+        SettledWrites::default()
+    }
+
+    /// Whether an append is still with the writer.
+    fn writes_outstanding(&self) -> bool {
+        false
+    }
+}
+
+impl WriteBehind for leviculum_std::FilePropagationStore {
+    fn writes_issued(&self) -> u64 {
+        leviculum_std::FilePropagationStore::writes_issued(self)
+    }
+
+    fn settle_writes(&mut self) -> SettledWrites {
+        leviculum_std::FilePropagationStore::settle_writes(self)
+    }
+
+    fn writes_outstanding(&self) -> bool {
+        leviculum_std::FilePropagationStore::writes_outstanding(self)
+    }
+}
+
+impl WriteBehind for leviculum_lxmf::MemoryPropagationStore {}
 
 /// What the engine needs before the node exists (a processor is installed
 /// on the builder, before the node it runs inside).
@@ -301,11 +350,23 @@ pub struct Engine<S> {
     /// validate → append → prove the proof correlation relies on (module
     /// docs) is the order the payloads arrived in.
     pending: VecDeque<Pending>,
+    /// Accepted uploads whose proof waits for the store's writer, in ticket
+    /// order ([`Self::release_proofs`]).
+    unproven: VecDeque<Unproven>,
     /// The clock of the hook invocation in progress (order 1009), kept on
     /// the engine so the drain can charge sync slices apart from the rest.
     profile: HookProfile,
     /// What the last finished invocation spent, section by section.
     last_profile: HookTimes,
+}
+
+/// An accepted upload whose proof waits until its append is durable.
+struct Unproven {
+    /// [`WriteBehind::writes_issued`] just after the append.
+    ticket: u64,
+    link_id: LinkId,
+    packet_hash: [u8; 32],
+    transient_id: TransientId,
 }
 
 /// One validated payload waiting for the store.
@@ -442,7 +503,7 @@ fn full_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-impl<S: PropagationStore + PropagationBodyStore> Engine<S> {
+impl<S: PropagationStore + PropagationBodyStore + WriteBehind> Engine<S> {
     pub fn new(config: EngineConfig<S>) -> (Self, std::sync::mpsc::Receiver<EngineEvent>) {
         let (events, receiver) = std::sync::mpsc::channel();
         let announce_interval_secs = config.announce_interval_secs;
@@ -463,6 +524,7 @@ impl<S: PropagationStore + PropagationBodyStore> Engine<S> {
                 next_maintenance_at: 0,
                 validation: ValidationWorker::spawn(),
                 pending: VecDeque::new(),
+                unproven: VecDeque::new(),
                 profile: HookProfile::start("-"),
                 last_profile: HookTimes::default(),
             },
@@ -510,7 +572,7 @@ impl<S: PropagationStore + PropagationBodyStore> Engine<S> {
     ///
     /// The destination accepts links and proves link data via the
     /// application (`ProofStrategy::App`): the upload proof is the node's
-    /// statement "stored", so it must not leave before the append returns
+    /// statement "stored", so it must not leave before the append is durable
     /// ("persist before you prove",
     /// `docs/src/concepts/propagation-node-on-a-board.md` §3). The two
     /// request handlers on the reference's destination are `/offer` and
@@ -757,8 +819,8 @@ impl<S: PropagationStore + PropagationBodyStore> Engine<S> {
         *Destination::compute_destination_hash(&name_hash, identity.hash()).as_bytes()
     }
 
-    /// One upload envelope, from either carrier. Returns whether it was
-    /// accepted (so the packet path can prove it).
+    /// One upload envelope, from either carrier. Returns the accepted
+    /// message's transient id (so the packet path can prove it).
     ///
     /// `validate` is the caller's verdict source: the drain path passes a
     /// lookup into the worker's finished verdicts, the inline path (cost
@@ -775,7 +837,7 @@ impl<S: PropagationStore + PropagationBodyStore> Engine<S> {
         via: &'static str,
         validate: &mut dyn FnMut(&TransientId, &[u8; STAMP_SIZE]) -> Option<u16>,
         out: &mut TickOutput,
-    ) -> bool {
+    ) -> Option<TransientId> {
         let outcome = ready.node.handle_upload(data, unix_secs(), &mut *validate);
         match outcome {
             UploadOutcome::Accepted {
@@ -807,7 +869,7 @@ impl<S: PropagationStore + PropagationBodyStore> Engine<S> {
                     ready.client_received += 1;
                     self.deliver_own_mailbox(ready, core, &transient_id, &destination_hash, out);
                 }
-                true
+                Some(transient_id)
             }
             UploadOutcome::InvalidStamp { reject } => {
                 // A resource from an identified remote throttles it for
@@ -833,7 +895,7 @@ impl<S: PropagationStore + PropagationBodyStore> Engine<S> {
                 self.emit(EngineEvent::Rejected {
                     detail: "invalid stamp".into(),
                 });
-                false
+                None
             }
             UploadOutcome::PeerSyncForm => {
                 // Multi-message without a peering key: not supposed to
@@ -844,14 +906,14 @@ impl<S: PropagationStore + PropagationBodyStore> Engine<S> {
                 self.emit(EngineEvent::Rejected {
                     detail: "peer sync form without peering support".into(),
                 });
-                false
+                None
             }
             UploadOutcome::Malformed(error) => {
                 // The reference logs and ignores
                 // (reference/LXMF/LXMF/LXMRouter.py:2262-2264).
                 tracing::debug!("lnpnd: undecodable upload ignored: {error}");
                 log_reject("malformed", via);
-                false
+                None
             }
             UploadOutcome::StoreFailed(error) => {
                 // No proof leaves: the client keeps its retry, which is the
@@ -860,7 +922,7 @@ impl<S: PropagationStore + PropagationBodyStore> Engine<S> {
                 self.emit(EngineEvent::Rejected {
                     detail: format!("store failed: {error}"),
                 });
-                false
+                None
             }
         }
     }
@@ -1294,17 +1356,18 @@ impl<S: PropagationStore + PropagationBodyStore> Engine<S> {
                 };
                 let accepted =
                     self.ingest(ready, core, &link_id, &data, "packet", &mut validate, out);
-                if accepted {
-                    if let Some(packet_hash) = proof {
-                        // Prove only now that the append returned: the proof
-                        // is the "stored" statement (persist before you
-                        // prove; packet.prove after storing,
-                        // reference/LXMF/LXMF/LXMRouter.py:2255).
-                        match core.send_data_proof(&link_id, &packet_hash) {
-                            Ok(send) => out.merge(send),
-                            Err(error) => tracing::warn!("lnpnd: proof failed: {error:?}"),
-                        }
-                    }
+                if let (Some(transient_id), Some(packet_hash)) = (accepted, proof) {
+                    // The proof is the "stored" statement (persist before
+                    // you prove; packet.prove after storing,
+                    // reference/LXMF/LXMF/LXMRouter.py:2255), so it waits
+                    // for the writer: `release_proofs` sends it, in this
+                    // hook already when the store writes inline.
+                    self.unproven.push_back(Unproven {
+                        ticket: ready.node.store().writes_issued(),
+                        link_id,
+                        packet_hash,
+                        transient_id,
+                    });
                 }
                 1
             }
@@ -1450,6 +1513,67 @@ impl<S: PropagationStore + PropagationBodyStore> Engine<S> {
         self.ask_back_if_queued(core, out);
     }
 
+    /// Send the proofs whose appends the store's writer has made durable,
+    /// in ticket order, and let go of what it could not write.
+    ///
+    /// A failed write left the store; the role forgets the id, so the
+    /// client's retry is stored rather than answered as a proven duplicate
+    /// (`PropagationNode::forget_processed`, the board's
+    /// `settle_message_op`). A proof is sent only for a message the store
+    /// still holds once its ticket is passed: a duplicate whose original
+    /// failed, or a message purged meanwhile, gets none, and the client
+    /// keeps its retry.
+    fn release_proofs(
+        &mut self,
+        ready: &mut Ready<S>,
+        core: &mut StdNodeCoreRef<'_>,
+        out: &mut TickOutput,
+    ) {
+        let settled = ready.node.store_mut().settle_writes();
+        for transient_id in &settled.failed {
+            ready.node.forget_processed(transient_id);
+            log_reject("store_failed", "writer");
+            self.emit(EngineEvent::Rejected {
+                detail: format!("store write failed for {}", short_hex(transient_id)),
+            });
+        }
+        while self
+            .unproven
+            .front()
+            .is_some_and(|unproven| unproven.ticket <= settled.through)
+        {
+            let Some(unproven) = self.unproven.pop_front() else {
+                break;
+            };
+            if !ready
+                .node
+                .store()
+                .contains(&unproven.transient_id)
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            match core.send_data_proof(&unproven.link_id, &unproven.packet_hash) {
+                Ok(send) => out.merge(send),
+                Err(error) => tracing::warn!("lnpnd: proof failed: {error:?}"),
+            }
+        }
+    }
+
+    /// While a proof waits for the writer, come back at the validation
+    /// poll: nothing else wakes the engine when the write lands, and a
+    /// stock client gives the proof a few milliseconds over a LAN
+    /// ([`VALIDATION_POLL_MS`]).
+    fn ask_back_for_proofs(&self, core: &StdNodeCoreRef<'_>, out: &mut TickOutput) {
+        if !self.unproven.is_empty() {
+            let due = core.now_ms() + VALIDATION_POLL_MS;
+            out.next_deadline_ms = Some(match out.next_deadline_ms {
+                Some(existing) => existing.min(due),
+                None => due,
+            });
+        }
+    }
+
     /// Whatever is left on the store queue asks the driver to come straight
     /// back: the deadline is now, and the driver clamps that to its next
     /// millisecond (`leviculum-std/src/driver/mod.rs`, "Advance next_poll").
@@ -1501,7 +1625,7 @@ impl<S: PropagationStore + PropagationBodyStore> Engine<S> {
 /// The concrete core type the driver hands its processors.
 type StdNodeCoreRef<'a> = leviculum_std::driver::StdNodeCore;
 
-impl<S: PropagationStore + PropagationBodyStore + Send + 'static>
+impl<S: PropagationStore + PropagationBodyStore + WriteBehind + Send + 'static>
     leviculum_std::driver::CoreProcessor for Engine<S>
 {
     fn on_event(
@@ -1738,6 +1862,8 @@ impl<S: PropagationStore + PropagationBodyStore + Send + 'static>
             }
             NodeEvent::LinkClosed { link_id, .. } => {
                 self.pending_proofs.remove(link_id);
+                self.unproven
+                    .retain(|unproven| &unproven.link_id != link_id);
                 self.inbound_links.remove(link_id);
                 ready.peering.on_link_closed(link_id);
             }
@@ -1761,6 +1887,9 @@ impl<S: PropagationStore + PropagationBodyStore + Send + 'static>
         } else {
             self.ask_back_if_queued(core, &mut out);
         }
+        self.release_proofs(&mut ready, core, &mut out);
+        self.ask_back_for_proofs(core, &mut out);
+        self.profile.lap(Section::Drain);
         self.state = State::Ready(ready);
         // A job queued for the worker, here or by an earlier hook, comes
         // back at the next poll: nothing else would wake the engine for
@@ -1825,6 +1954,7 @@ impl<S: PropagationStore + PropagationBodyStore + Send + 'static>
         self.profile.lap(Section::Tick);
 
         self.drain_pending(&mut ready, core, &mut out);
+        self.release_proofs(&mut ready, core, &mut out);
         self.profile.lap(Section::Drain);
         self.close_idle_links(core, now_ms, &mut out);
         self.profile.lap(Section::Links);
@@ -1842,9 +1972,10 @@ impl<S: PropagationStore + PropagationBodyStore + Send + 'static>
 
         self.state = State::Ready(ready);
 
-        let validation_poll = if self.validation.busy() {
-            // Grinding in flight: come back quickly so the append and the
-            // proof follow the worker with minimal added latency.
+        let validation_poll = if self.validation.busy() || !self.unproven.is_empty() {
+            // Grinding in flight, or a proof waiting for the store's writer:
+            // come back quickly so the proof follows with minimal added
+            // latency.
             now_ms + VALIDATION_POLL_MS
         } else {
             now_ms + POLL_INTERVAL_MS
@@ -3227,8 +3358,8 @@ mod tests {
     /// exchange out until both sides fall silent. Every event the engine's
     /// core raises goes through the engine, as the driver routes it.
     /// Returns the client's events and every packet the engine's side sent.
-    fn converse(
-        engine: &mut Engine<MemoryPropagationStore>,
+    fn converse<S: PropagationStore + PropagationBodyStore + WriteBehind + Send + 'static>(
+        engine: &mut Engine<S>,
         server: &mut leviculum_std::driver::StdNodeCore,
         client: &mut leviculum_std::driver::StdNodeCore,
         first: TickOutput,
@@ -3668,8 +3799,8 @@ mod tests {
 
     /// A link up between a client core and the engine's core, and a
     /// single upload stamped at the node's minimum, ready to send.
-    struct UploadFixture {
-        engine: Engine<MemoryPropagationStore>,
+    struct UploadFixture<S = MemoryPropagationStore> {
+        engine: Engine<S>,
         server: leviculum_std::driver::StdNodeCore,
         client: leviculum_std::driver::StdNodeCore,
         link_id: LinkId,
@@ -3678,6 +3809,28 @@ mod tests {
     }
 
     fn upload_fixture() -> UploadFixture {
+        let fixture = upload_fixture_on(
+            MemoryPropagationStore::new(64_000),
+            PropagationNodeConfig::default(),
+        );
+        let min_cost = match &fixture.engine.state {
+            State::Ready(ready) => ready.min_cost,
+            _ => panic!("engine must be ready"),
+        };
+        assert!(
+            ValidationWorker::worth_deferring(min_cost, false),
+            "the stamp must need grinding, or the test proves nothing"
+        );
+        fixture
+    }
+
+    /// [`upload_fixture`] over any store and node configuration.
+    fn upload_fixture_on<
+        S: PropagationStore + PropagationBodyStore + WriteBehind + Send + 'static,
+    >(
+        store: S,
+        node_config: PropagationNodeConfig,
+    ) -> UploadFixture<S> {
         use leviculum_lxmf::constants::{LXMF_OVERHEAD, WORKBLOCK_EXPAND_ROUNDS_PN};
         use leviculum_lxmf::{CooperativeStamper, PropagationUpload, StampCancel};
 
@@ -3687,11 +3840,10 @@ mod tests {
         let mut client = core(client_dir.path());
         let identity = leviculum_std::generate_identity();
         let signing_key = identity.ed25519_verifying().to_bytes();
-        // The shipped cost: every upload's stamp is ground.
         let (mut engine, _events) = Engine::new(EngineConfig {
             identity,
-            node_config: PropagationNodeConfig::default(),
-            store: MemoryPropagationStore::new(64_000),
+            node_config,
+            store,
             announce_interval_secs: 3600,
             announce_delay_secs: 3600,
             announce_at_start: true,
@@ -3709,10 +3861,6 @@ mod tests {
             State::Ready(ready) => (ready.destination_hash, ready.min_cost),
             _ => panic!("engine must be ready"),
         };
-        assert!(
-            ValidationWorker::worth_deferring(min_cost, false),
-            "the stamp must need grinding, or the test proves nothing"
-        );
 
         let (link_id, _, out) = client
             .connect(destination_hash, &signing_key)
@@ -3755,7 +3903,9 @@ mod tests {
     /// Send the fixture's upload and run every event it raises through the
     /// engine, as the driver routes them. Returns whether a proof left and
     /// the earliest wake any hook asked for.
-    fn deliver_upload(fixture: &mut UploadFixture) -> (bool, Option<u64>) {
+    fn deliver_upload<S: PropagationStore + PropagationBodyStore + WriteBehind + Send + 'static>(
+        fixture: &mut UploadFixture<S>,
+    ) -> (bool, Option<u64>) {
         let (_, out) = fixture
             .client
             .send_packet_on_link(&fixture.link_id, &fixture.upload)
@@ -3883,6 +4033,295 @@ mod tests {
             );
         }
     }
+
+    /// Order 1081: the durable write of an upload runs on the store's
+    /// writer, and the proof follows the write.
+    mod write_behind {
+        use super::*;
+
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Mutex};
+        use std::thread::ThreadId;
+        use std::time::{Duration, Instant};
+
+        use leviculum_std::driver::PROCESSOR_TICK_BUDGET;
+        use leviculum_std::durable::Fsync;
+        use leviculum_std::FilePropagationStore;
+
+        /// The order's slow device: every `fsync` takes 20 ms, and the seam
+        /// notes the thread each one ran on.
+        #[derive(Default)]
+        struct SlowFsync {
+            threads: Mutex<Vec<ThreadId>>,
+        }
+
+        impl Fsync for SlowFsync {
+            fn sync(&self, handle: &std::fs::File) -> std::io::Result<()> {
+                std::thread::sleep(Duration::from_millis(20));
+                if let Ok(mut threads) = self.threads.lock() {
+                    threads.push(std::thread::current().id());
+                }
+                handle.sync_all()
+            }
+        }
+
+        /// Holds every `fsync` until the test drops the sender, and counts
+        /// the ones that finished.
+        struct GatedFsync {
+            gate: Mutex<std::sync::mpsc::Receiver<()>>,
+            finished: AtomicUsize,
+        }
+
+        impl Fsync for GatedFsync {
+            fn sync(&self, handle: &std::fs::File) -> std::io::Result<()> {
+                if let Ok(gate) = self.gate.lock() {
+                    let _ = gate.recv();
+                }
+                handle.sync_all()?;
+                self.finished.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        /// The writer dies between writing the temp file and renaming it,
+        /// as a process killed mid-write would.
+        struct DyingFsync;
+
+        impl Fsync for DyingFsync {
+            fn sync(&self, _handle: &std::fs::File) -> std::io::Result<()> {
+                panic!("the writer dies before the write is durable");
+            }
+        }
+
+        /// The first write fails, every later one lands.
+        #[derive(Default)]
+        struct FailOnceFsync {
+            calls: AtomicUsize,
+        }
+
+        impl Fsync for FailOnceFsync {
+            fn sync(&self, handle: &std::fs::File) -> std::io::Result<()> {
+                if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    return Err(std::io::Error::other("the device refused"));
+                }
+                handle.sync_all()
+            }
+        }
+
+        fn store_on(dir: &std::path::Path, fsync: Arc<dyn Fsync>) -> FilePropagationStore {
+            FilePropagationStore::open_with(dir, 1_000_000, fsync)
+                .expect("open the store")
+                .write_behind()
+                .expect("start the writer")
+        }
+
+        /// One dispatch of the upload's events, as the driver hands them
+        /// over (`run_event_tap`: one lock, every event). Returns whether a
+        /// proof left and how long the dispatch held the core.
+        fn upload(fixture: &mut UploadFixture<FilePropagationStore>) -> (bool, Duration) {
+            let (_, out) = fixture
+                .client
+                .send_packet_on_link(&fixture.link_id, &fixture.upload)
+                .expect("upload packet");
+            let mut proven = false;
+            let mut held = Duration::ZERO;
+            for data in wire_of(&out) {
+                let core_out = fixture
+                    .server
+                    .handle_packet(leviculum_core::InterfaceId(0), &data);
+                let started = Instant::now();
+                for event in &core_out.events {
+                    let hook = fixture.engine.on_event(&mut fixture.server, event);
+                    proven |= wire_of(&hook).iter().any(|data| is_proof(data));
+                }
+                held += started.elapsed();
+            }
+            (proven, held)
+        }
+
+        /// Play the driver for `ticks` ticks, or until a proof leaves, each
+        /// at the wake the engine asked for. While the engine has a proof
+        /// to send it must ask back within the validation poll.
+        fn tick_for_proof(fixture: &mut UploadFixture<FilePropagationStore>, ticks: usize) -> bool {
+            let mut wake = fixture.server.now_ms();
+            for _ in 0..ticks {
+                let now = fixture.server.now_ms();
+                if wake > now {
+                    std::thread::sleep(Duration::from_millis(wake - now));
+                }
+                let now = fixture.server.now_ms();
+                let tick = fixture.engine.on_tick(&mut fixture.server, now);
+                if wire_of(&tick).iter().any(|data| is_proof(data)) {
+                    return true;
+                }
+                wake = tick
+                    .next_deadline_ms
+                    .expect("the engine always names a wake");
+                if !fixture.engine.unproven.is_empty() {
+                    assert!(
+                        wake <= now + VALIDATION_POLL_MS,
+                        "a proof waits for the writer and the engine slept to +{} ms",
+                        wake.saturating_sub(now)
+                    );
+                }
+            }
+            false
+        }
+
+        /// Tick until the store's writer has nothing outstanding.
+        fn tick_until_settled(fixture: &mut UploadFixture<FilePropagationStore>) -> bool {
+            let give_up = Instant::now() + Duration::from_secs(10);
+            let mut proven = false;
+            loop {
+                let outstanding = match &fixture.engine.state {
+                    State::Ready(ready) => ready.node.store().writes_outstanding(),
+                    _ => false,
+                };
+                if !outstanding {
+                    return proven;
+                }
+                assert!(Instant::now() < give_up, "the writer never settled");
+                proven |= tick_for_proof(fixture, 1);
+            }
+        }
+
+        fn records_in(dir: &std::path::Path) -> Vec<String> {
+            std::fs::read_dir(dir)
+                .expect("list the store")
+                .flatten()
+                .filter_map(|entry| entry.file_name().into_string().ok())
+                .filter(|name| !name.starts_with('.'))
+                .collect()
+        }
+
+        /// mvr, order 1081: a hook that stores an upload stays inside the
+        /// core-lock budget on a slow disk, because no `fsync` runs in it.
+        ///
+        /// **The named failure mode:** the store's append ran its two
+        /// `fsync`s inside the hook, under the core lock: one store append
+        /// p50 1.0 to 1.8 ms on the coder host, 3 to 9 ms on the field
+        /// node's Odroid (order 1009), and `CORE_PROCESSOR_OVER_BUDGET` 4520
+        /// times in ten hours on miauhaus. With a device that takes 20 ms
+        /// per `fsync` the upload's dispatch held the lock 40.5 ms on the
+        /// inline store. What is asserted is the mechanism, not a wall
+        /// clock: every `fsync` of the write ran on a thread other than the
+        /// one that holds the core, so the hold cannot contain the device's
+        /// latency however slow it is or however the test is scheduled.
+        #[test]
+        fn a_slow_disk_does_not_hold_the_hook_that_stores_an_upload() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let fsync = Arc::new(SlowFsync::default());
+            let mut fixture = upload_fixture_on(
+                store_on(dir.path(), Arc::clone(&fsync) as Arc<dyn Fsync>),
+                cost_free(),
+            );
+            let (_, held) = upload(&mut fixture);
+            let proven = tick_until_settled(&mut fixture) || tick_for_proof(&mut fixture, 5);
+            assert!(proven, "the upload was never proven");
+            let hook_thread = std::thread::current().id();
+            let threads = fsync.threads.lock().map(|t| t.clone()).unwrap_or_default();
+            assert_eq!(threads.len(), 2, "the write is two fsyncs: {threads:?}");
+            assert!(
+                threads.iter().all(|thread| *thread != hook_thread),
+                "an fsync ran on the thread that holds the core lock; the dispatch held \
+                 it {held:?} against a budget of {PROCESSOR_TICK_BUDGET:?}"
+            );
+        }
+
+        /// Order 1081: the proof for an upload leaves only after its write
+        /// is durable, and soon after: the engine asks the driver back at
+        /// the validation poll while it waits.
+        #[test]
+        fn the_proof_waits_for_the_durable_write_and_follows_it() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let (release, gate) = std::sync::mpsc::channel();
+            let fsync = Arc::new(GatedFsync {
+                gate: Mutex::new(gate),
+                finished: AtomicUsize::new(0),
+            });
+            let mut fixture = upload_fixture_on(
+                store_on(dir.path(), Arc::clone(&fsync) as Arc<dyn Fsync>),
+                cost_free(),
+            );
+            let (proven, _) = upload(&mut fixture);
+            assert!(!proven, "the proof left before the write was durable");
+            assert!(
+                !tick_for_proof(&mut fixture, 20),
+                "the proof left while the write was held"
+            );
+            assert_eq!(records_in(dir.path()).len(), 0, "the held write landed");
+
+            drop(release);
+            let proven = tick_until_settled(&mut fixture) || tick_for_proof(&mut fixture, 5);
+            assert!(proven, "no proof after the write landed");
+            assert_eq!(
+                fsync.finished.load(Ordering::SeqCst),
+                2,
+                "the proof left before both fsyncs finished"
+            );
+            assert_eq!(
+                records_in(dir.path()).len(),
+                1,
+                "the record was not in place"
+            );
+        }
+
+        /// Order 1081: a writer that dies between accept and durable write
+        /// leaves no proof and no record.
+        #[test]
+        fn a_writer_dead_before_the_write_leaves_no_proof_and_no_record() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let mut fixture =
+                upload_fixture_on(store_on(dir.path(), Arc::new(DyingFsync)), cost_free());
+            let (proven, _) = upload(&mut fixture);
+            assert!(!proven, "the proof left before the write");
+            assert!(
+                !tick_until_settled(&mut fixture) && !tick_for_proof(&mut fixture, 5),
+                "a proof left for a message the writer never stored"
+            );
+            assert!(
+                fixture.engine.unproven.is_empty(),
+                "the proof is still held"
+            );
+            let UploadFixture { engine, .. } = fixture;
+            drop(engine);
+            // Positive control: the writer did die mid-write, leaving the
+            // temp file a power cut leaves.
+            let torn = std::fs::read_dir(dir.path())
+                .expect("list the store")
+                .flatten()
+                .filter(|entry| entry.file_name().to_string_lossy().starts_with(".tmp-"))
+                .count();
+            assert_eq!(torn, 1, "the writer did not die between write and rename");
+            let reopened = FilePropagationStore::open(dir.path(), 1_000_000).expect("reopen");
+            assert!(
+                reopened.is_empty(),
+                "the reopened store holds a record the writer never finished"
+            );
+        }
+
+        /// Order 1081: a write the device refused takes the message out of
+        /// the store and out of the role's memory, so the client's retry is
+        /// stored and proven rather than answered as a proven duplicate.
+        #[test]
+        fn a_refused_write_is_not_proven_and_its_retry_is() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let mut fixture = upload_fixture_on(
+                store_on(dir.path(), Arc::new(FailOnceFsync::default())),
+                cost_free(),
+            );
+            let (proven, _) = upload(&mut fixture);
+            assert!(
+                !proven && !tick_until_settled(&mut fixture) && !tick_for_proof(&mut fixture, 5),
+                "a proof left for a write the device refused"
+            );
+            let (proven, _) = upload(&mut fixture);
+            let proven =
+                proven || tick_until_settled(&mut fixture) || tick_for_proof(&mut fixture, 5);
+            assert!(proven, "the retry was not proven");
+            assert_eq!(records_in(dir.path()).len(), 1, "the retry was not stored");
+        }
+    }
 }
 
 /// mvr: a peer's inbound sync must not be stored inside one hook.
@@ -4001,6 +4440,8 @@ mod inbound_sync_slices {
             self.inner.contains(transient_id)
         }
     }
+
+    impl super::WriteBehind for ModelledStore {}
 
     impl PropagationBodyStore for ModelledStore {
         fn read_body(&self, transient_id: &TransientId) -> Result<Option<Vec<u8>>, StorageError> {

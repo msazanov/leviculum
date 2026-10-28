@@ -462,7 +462,7 @@ pub struct Lnpnd {
 impl Lnpnd {
     pub async fn start<S>(instance: &SharedInstance, store: S, options: LnpndOptions) -> Self
     where
-        S: PropagationStore + PropagationBodyStore + Send + 'static,
+        S: PropagationStore + PropagationBodyStore + lnpnd::engine::WriteBehind + Send + 'static,
     {
         let identity = leviculum_std::generate_identity();
         let (announce_delay_secs, announce_interval_secs) = match options.announce_delay_secs {
