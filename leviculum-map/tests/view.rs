@@ -5,9 +5,9 @@
 
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::*;
-use leviculum_map::choice::{choose, fit_ceiling, useful_zooms, view_zooms};
+use leviculum_map::choice::{choose, drawn, fit_ceiling, useful_zooms, view_zooms};
 use leviculum_map::draw::{draw, Ink};
-use leviculum_map::mercator::{project, LatLon, World};
+use leviculum_map::mercator::{project, unproject, LatLon, World};
 use leviculum_map::outline::{self, OutlineStats, WORLD_50M};
 use leviculum_map::pins::{order, Pin};
 use leviculum_map::region::{Bounds, Header, Region};
@@ -319,4 +319,80 @@ fn a_zoom_about_a_pixel_keeps_the_point_under_it() {
             assert_eq!(view.to_world(x, y), held, "z{from} to z{to} at ({x}, {y})");
         }
     }
+}
+
+/// A box around a place (loquax's autoload, 1089): as many metres each
+/// way north and south as east and west, held by a box around it and not
+/// by a smaller one, wrapped at the antimeridian.
+#[test]
+fn a_box_around_a_place_and_one_box_in_another() {
+    let frankfurt = LatLon::from_degrees(50.1109, 8.6821);
+    let b = Bounds::around(frankfurt, 6_000);
+    assert!(b.contains(frankfurt));
+    // 12 km is 0.1078 degrees of latitude, and at 50.11 N 0.1681 of longitude.
+    assert!((b.north - b.south - 1_078_000).abs() < 1_000, "{b:?}");
+    assert!((b.east - b.west - 1_681_000).abs() < 2_000, "{b:?}");
+    let inner = Bounds::around(frankfurt, 3_000);
+    assert!(b.holds(&inner) && !inner.holds(&b) && b.holds(&b));
+    let fiji = Bounds::around(LatLon::from_degrees(-17.0, 179.99), 6_000);
+    assert!(fiji.west > fiji.east, "across the antimeridian: {fiji:?}");
+    assert!(fiji.holds(&fiji) && !fiji.holds(&inner));
+}
+
+/// A view's box is its corners, and the whole world's longitudes once the
+/// view is wider than the world.
+#[test]
+fn a_views_box_is_its_corners() {
+    let view = Viewport::new(project(LatLon::from_degrees(50.1109, 8.6821)), 13, 400, 200);
+    let b = view.bounds();
+    let nw = unproject(view.to_world(0, 0));
+    let se = unproject(view.to_world(400, 200));
+    assert_eq!(
+        (b.west, b.north, b.east, b.south),
+        (nw.lon_e7, nw.lat_e7, se.lon_e7, se.lat_e7)
+    );
+    assert!(b.contains(LatLon::from_degrees(50.1109, 8.6821)));
+    let world = Viewport::new(project(LatLon::from_degrees(0.0, 0.0)), 0, 512, 256).bounds();
+    assert_eq!((world.west, world.east), (-1_800_000_000, 1_800_000_000));
+}
+
+/// Every region that reaches into a view is drawn, the deepest last; one
+/// outside the view or past its zooms is not.
+#[test]
+fn every_region_in_a_view_is_drawn_the_deepest_last() {
+    let header = |west: i32, east: i32, max_zoom: u8| Header {
+        bounds: Bounds {
+            west,
+            south: 500_000_000,
+            east,
+            north: 502_000_000,
+        },
+        min_zoom: 10,
+        max_zoom,
+        profile: 1,
+        attribution: (0, 0),
+        notice: (0, 0),
+        tiles: 0,
+        index: 0,
+        len: 0,
+    };
+    let regions = [
+        ("a.lmr", header(86_000_000, 86_800_000, 15)),
+        ("b.lmr", header(86_800_000, 87_600_000, 14)),
+        ("far.lmr", header(100_000_000, 101_000_000, 15)),
+        (
+            "deep.lmr",
+            Header {
+                min_zoom: 14,
+                ..header(86_000_000, 87_600_000, 15)
+            },
+        ),
+    ];
+    let view = Viewport::new(project(LatLon::from_degrees(50.1, 8.68)), 12, 400, 200);
+    let order = drawn(regions.iter().map(|(n, h)| (*n, h)), &view);
+    assert_eq!(
+        order,
+        [1, 0],
+        "b (z14) under a (z15); far, and deep from z14 on, left out"
+    );
 }

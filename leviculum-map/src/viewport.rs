@@ -18,7 +18,7 @@ use core::ops::RangeInclusive;
 use embedded_graphics::prelude::{Point, Size};
 use embedded_graphics::primitives::Rectangle;
 
-use crate::mercator::{x_of_lon, y_of_lat, World};
+use crate::mercator::{unproject, x_of_lon, y_of_lat, World};
 use crate::region::{Bounds, TileId};
 
 /// The deepest view zoom: a sub-pixel is one world unit there.
@@ -145,6 +145,27 @@ impl Viewport {
         World {
             x: (i64::from(self.centre.x) + dx).rem_euclid(1 << 32) as u32,
             y: (i64::from(self.centre.y) + dy).clamp(0, i64::from(u32::MAX)) as u32,
+        }
+    }
+
+    /// The view's box in degrees, from its top-left corner to its
+    /// bottom-right; the whole world's longitudes when the view is as wide
+    /// as the world or wider. What a load of the visible area asks for
+    /// (loquax, 1089).
+    pub fn bounds(&self) -> Bounds {
+        let nw = unproject(self.to_world(0, 0));
+        let (w, h) = (self.width as i32, self.height as i32);
+        let se = unproject(self.to_world(w, h));
+        let wide = (i64::from(self.width) * SUB) << self.sub_shift() >= 1i64 << 32;
+        let (west, east) = match wide {
+            true => (-1_800_000_000, 1_800_000_000),
+            false => (nw.lon_e7, se.lon_e7),
+        };
+        Bounds {
+            west,
+            south: se.lat_e7,
+            east,
+            north: nw.lat_e7,
         }
     }
 
