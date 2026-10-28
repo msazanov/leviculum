@@ -287,9 +287,11 @@ once per pin and per viewport change, never per vertex, since the region
 holds geometry already projected. Both round-trip to the same 10^-7 degree
 step. x wraps, so the antimeridian is wrapping arithmetic.
 
-**Where it comes from.** `leviculum-map-tool cut` reads Protomaps PMTiles
-archives (one, or the parts of one build downloaded separately) for a
-bounding box and writes the region file; the output does not depend on the
+**Where it comes from.** The cut lives in `leviculum-mapcut`, which
+`leviculum-map-tool cut` and loquax's autoload both call (1089). It reads
+Protomaps PMTiles archives (one, or the parts of one build downloaded
+separately, from a file or by HTTP range requests, only the directories
+and tiles of the box) for a bounding box and writes the region file; the output does not depend on the
 thread count or on the order the archive lists its tiles, and the same
 input gives the same bytes. A named region and an OSM PBF are later steps:
 a PBF reader exists (`osmpbf`, MIT OR Apache-2.0), but a PBF holds raw
@@ -302,23 +304,75 @@ of handheld-messenger.md asks for.
 
 **How a user gets one, zero config.** The 90 % rule (Lew, 2026-10-25; zero
 config, #471) says the map works without a step. Decided 2026-10-27
-(Lew):
+(Lew), point 2 revised by Lew on 2026-10-28 (leviculum 1089):
 
-1. Without any region file, the map view still works: pins on a plain
-   grid with the coastlines of the world at low detail. ratatui's canvas
-   carries such a world outline (`Map`, 5,125 points in its high
-   resolution) for the TUI. Its source is the world file of
-   gnuplotting.org, whose own licence is to be checked before the core
-   copies the data for the GUI and the M9.
-   Positions are useful at once, the map comes later.
-2. A region is installed by one action: `loquax map add <region>` or the
-   palette's `add map region`, which cuts it around a named place or
-   around the positions loquax already holds, from an extract the user
-   names or downloads. Nothing is downloaded without that action: a mesh
-   messenger may run with no internet at all, and a download that fires
-   on its own is the wrong default for a privacy tool.
+1. Without any region file, the map view still works: pins on the world
+   outline (section 7, Natural Earth). Positions are useful at once.
+2. **Map data loads by itself** and is shown at once, with no further
+   step: when the user goes to a place (a position report, the peer's
+   position, `L` or `Alt-l`, or the map opened with pins no region holds),
+   loquax loads the region around it; a key (`d`) and the palette's `load
+   map area` load the visible area. It can be switched off in the config
+   (`map_autoload = off`). The first version of this point (2026-10-27)
+   said nothing downloads without an explicit action; Lew revised it
+   because a map that stays empty until the user learns a command fails
+   the 90 % rule, and a user who wants no download has the switch.
 3. The Debian package ships no region; a board's flash image may carry
    one cut for its deployment.
+
+**The autoload** (1089), `loquax::mapload` over `leviculum-mapcut`:
+
+- *Source.* A PMTiles archive read by HTTP range requests, so only the
+  tiles of the box and the directories above them are fetched, never the
+  planet. Default: the newest Protomaps daily build that answers
+  (`https://build.protomaps.com/<yyyymmdd>.pmtiles`, looked for back ten
+  days, found once a session). `map_source = <url>` in loquax's config
+  names another, for instance the project's own server later. Terms of
+  the default, as Protomaps' download page (`docs.protomaps.com/basemaps/
+  downloads`, read 2026-10-28) states them: the basemap is an ODbL
+  Produced Work, OpenStreetMap attribution required, which the region
+  carries in its attribution and notice; the bucket keeps the builds of
+  the past week; and "URLs may change and hotlinking to these downloads
+  are discouraged", the page advising a copy on one's own storage. The
+  page sets no usage limits and says nothing of range requests from apps.
+  So the default works and is honest about its source, but a fleet of
+  messengers on it is the hotlinking the page discourages: a copy on the
+  project's server, set as the default `map_source`, is the follow-up.
+- *Around a place:* a box 6 km to each side (12 by 12 km), z10 to z15; a
+  place counts as held when a region holds 3 km around it at z15. Measured
+  2026-10-28 from the build of that day, cut on the coder host over its
+  link: central Frankfurt 11.1 MB fetched, 3.87 MB region, 384 tiles, 8.3
+  s; central Berlin 20.1 MB, 7.90 MB, 412 tiles, 11.7 s; the Vogelsberg
+  countryside 2.5 MB, 1.26 MB, 360 tiles, 8.4 s. At most four places per
+  opening of the map, one per group of pins a few streets apart.
+- *The visible area:* the view's box, from three zooms above the view's to
+  z15. Before anything is fetched the box's tiles are located from the
+  directories and their bytes summed; over 64 MB of archive the deepest
+  zoom is lowered, down to the view's own, and an area too large even
+  there is refused with "zoom in" instead of a question. An area a region
+  holds at the view's zoom loads nothing.
+- *Showing it.* The region is written beside the others under a name no
+  painter reads, checked whole, renamed into the maps directory, and the
+  directory's epoch bumped; each painter reads the directory again before
+  its next paint. Every region that reaches into a view is drawn, each
+  into its own box (1077's clip), the deepest last, so loaded patches
+  join up (this replaces "one region or the outline" of section 7). A
+  place's map is fitted again to the region when it lands, unless the
+  reader moved it.
+- *Quiet and robust.* One load at a time on a thread of its own; the map
+  title says `loading map`; `tui.log` has `MAPLOAD start`, `done` and
+  `failed` lines with the box, zooms, bytes and `elapsed_ms`; a failure is
+  one toast; a failed box backs off 30 s doubling to an hour; no internet
+  is said once until a load succeeds again.
+- *Disk.* Loaded regions are named `auto-<box>-z<min>-<max>.lmr` and are a
+  cache of `map_cache_mb` megabytes (500 by default, a hundred or more city
+  places), the least recently viewed evicted first, viewed meaning drawn,
+  marked on the file's modification time at most once a minute. A file
+  under any other name was placed by hand and is never evicted nor
+  counted.
+- *Privacy.* The source learns which areas are looked at, as any map
+  server does. `map_autoload = off` stops the loads that start by
+  themselves; `map_source` points them at a server the user trusts.
 
 **Size per region**, measured 2026-10-27 (leviculum 1062) for layer profile
 1, z0 to z15, from the Protomaps daily build of 2026-10-26 (Basemap 4.15.2,
@@ -562,10 +616,16 @@ Each alternative stays as one line, rejected, so the reasoning stays.
   and speaks no kitty graphics, so the ladder must not assume kitty.
   *Rejected:* braille only, which needs no `ratatui-image` in loquax but
   gives no filled areas.
-- **No default region in the package.** The world outline until the user
-  adds one, one explicit action to add one, no download of loquax's own
-  (section 4). *Rejected:* a small default region in the package, which
-  would have to be chosen for someone.
+- **No default region in the package.** The world outline until a region
+  is there (section 4). *Rejected:* a small default region in the
+  package, which would have to be chosen for someone. This decision said
+  "one explicit action to add one, no download of loquax's own" until Lew
+  revised that half on 2026-10-28: map data loads by itself when the user
+  goes to a place, switchable off (section 4, point 2, and "The autoload";
+  leviculum 1089). The reason is the 90 % rule of #471: a map that stays
+  the world outline until the user learns a command is a map most users
+  never see. *Rejected with it:* the explicit `loquax map add` as the only
+  way in.
 - **Our own position is not sent by default.** loquax sends no position
   until the user switches it on per peer, and answers no telemetry
   request until then. A messenger that broadcasts where its user is
@@ -589,7 +649,9 @@ The reviewer decided three more for slice (c), 2026-10-27 (leviculum 1065):
   rendering in under 6 ms.
   *Rejected:* the world file ratatui's `Map` shape draws, whose licence
   is unsettled.
-- **`loquax map add` is not in slice (c).** Regions are placed by hand:
+- **`loquax map add` is not in slice (c).** Superseded by the autoload
+  (1089), which uses the cut as a library (`leviculum-mapcut`) rather than
+  spawning the tool. Regions placed by hand still work:
   loquax reads every `*.lmr` in `${XDG_DATA_HOME:-~/.local/share}/loquax/maps/`,
   or in `$LNMSG_HOME/maps/` when `LNMSG_HOME` is set. That variable
   replaces the whole default base for the identity and the store, so it
@@ -597,7 +659,11 @@ The reviewer decided three more for slice (c), 2026-10-27 (leviculum 1065):
   maps. The man page says how to cut a region with
   `leviculum-map-tool cut`. Spawning the tool or a library feature is
   decided with `map add`.
-- **One region or the outline, never a patchwork.** A view draws the
+- **One region or the outline, never a patchwork.** Superseded by 1089:
+  loaded patches must join up, so a view now draws every region that
+  reaches into it whose zooms reach the view's, each inside its box, the
+  deepest last (`leviculum_map::choice::drawn`), over the outline. Until
+  then: a view drew the
   installed region of the deepest max zoom whose box holds the view's
   centre and whose zooms reach the view's (its shallowest down to eight
   past its deepest), two alike by file name; the outline where none does.

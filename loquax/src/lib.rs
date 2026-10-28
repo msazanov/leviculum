@@ -74,6 +74,8 @@ pub mod identity;
 pub mod keys;
 pub mod mailbox;
 pub mod mailbox_state;
+#[cfg(feature = "mapload")]
+pub mod mapload;
 pub mod names;
 pub mod outbox;
 #[cfg(feature = "picture")]

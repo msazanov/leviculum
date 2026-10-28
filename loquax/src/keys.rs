@@ -548,6 +548,12 @@ pub const ROWS: &[Row<Action>] = {
             ],
         ),
         Row::new(
+            "load the map of the visible area",
+            MAP_GROUP,
+            &[&[key(Char('d'), Mods::Plain, run(C::LoadMapArea), MAP)]],
+        )
+        .palette("load map area"),
+        Row::new(
             "every pin in view again",
             MAP_GROUP,
             &[&[key(Char('0'), Mods::Plain, Map(MapCmd::Fit), MAP)]],

@@ -588,6 +588,14 @@ pub struct UiModel<B> {
     pub map_setup: map::MapSetup,
     /// The left button held down on the map, a click or a drag.
     pub map_press: Option<map::MapPress>,
+    /// Whether going to a place loads its region by itself (`map_autoload`,
+    /// on in the shell's config by default; off here until the shell says).
+    pub map_autoload: bool,
+    /// The word the map's title carries while a region loads.
+    pub map_loading: Option<String>,
+    /// Regions to ask the shell for, handed out as [`UiEffect::LoadMap`]
+    /// at the end of the fold.
+    map_wants: Vec<map::MapWant>,
 }
 
 /// Text a drag selected in the open conversation, from where the button went
@@ -656,6 +664,9 @@ impl<B: InputBuffer + Default> UiModel<B> {
             map: None,
             map_setup: map::MapSetup::default(),
             map_press: None,
+            map_autoload: false,
+            map_loading: None,
+            map_wants: Vec::new(),
         };
         for peer in peers {
             model.conversation(*peer);
@@ -921,6 +932,23 @@ pub enum UiEvent {
     /// How the shell draws the map: the cell's pixels and the zooms its
     /// regions reach.
     MapSetup(map::MapSetup),
+    /// A region load asked with [`UiEffect::LoadMap`] moved on.
+    MapLoad(MapLoad),
+}
+
+/// How a region load goes, as the shell reports it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MapLoad {
+    /// It started: the title says so.
+    Started(map::MapWant),
+    /// It landed, and [`UiEvent::MapSetup`] has the region already.
+    Done(map::MapWant),
+    /// It failed. `toast` is the line to show, `None` where the shell said
+    /// it once already (no internet, a box backing off).
+    Failed {
+        want: map::MapWant,
+        toast: Option<String>,
+    },
 }
 
 /// What the shell is asked to do.
@@ -956,11 +984,15 @@ pub enum UiEffect {
     /// A line for the shell's log (`tui.log`), not for the screen: a
     /// telemetry blob that did not decode, kept raw with its message.
     Log(String),
+    /// Load this region into the maps directory, reported with
+    /// [`UiEvent::MapLoad`] (1089).
+    LoadMap(map::MapWant),
 }
 
 /// Fold one event into the model.
 pub fn update<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec<UiEffect> {
-    let effects = fold(model, event);
+    let mut effects = fold(model, event);
+    effects.extend(model.map_wants.drain(..).map(UiEffect::LoadMap));
     // Whatever hid the open conversation, a block, the `blocked` view or a
     // restore, another the list shows takes its place.
     model.settle();
@@ -982,6 +1014,10 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
                 state.zoom = state.zoom.clamp(setup.zooms.0, setup.zooms.1);
             }
             model.map_setup = setup;
+            Vec::new()
+        }
+        UiEvent::MapLoad(load) => {
+            map_load(model, load);
             Vec::new()
         }
         UiEvent::Key(key) if key.kind == KeyEventKind::Release => Vec::new(),
@@ -1325,6 +1361,41 @@ fn open_map_at<B: InputBuffer>(model: &mut UiModel<B>, fix: &Fix) {
     model.map_press = None;
     model.focus = Pane::Map;
     model.selection = None;
+    // Going to a place loads its region (1089): the map is shown at once
+    // over what is there, and fitted again when the region lands.
+    if model.map_autoload {
+        model
+            .map_wants
+            .extend(map::want_place(at, &model.map_setup.regions));
+    }
+}
+
+/// A region load moved on: the title's word, a toast for a failure, and a
+/// place's map fitted again to the region that landed under it, unless the
+/// reader moved it meanwhile.
+fn map_load<B: InputBuffer>(model: &mut UiModel<B>, load: MapLoad) {
+    match load {
+        MapLoad::Started(_) => model.map_loading = Some(MAP_LOADING.to_string()),
+        MapLoad::Done(want) => {
+            model.map_loading = None;
+            let area = model.map_area();
+            let setup = model.map_setup.clone();
+            if let Some(state) = model.map.as_mut() {
+                if want.reason == map::LoadReason::View || state.centre != want.centre {
+                    return;
+                }
+                let (centre, zoom) = map::fit_at(want.centre, area, &setup);
+                state.centre = centre;
+                state.zoom = zoom;
+            }
+        }
+        MapLoad::Failed { toast, .. } => {
+            model.map_loading = None;
+            if let Some(line) = toast {
+                model.toast(ToastKind::Error, line);
+            }
+        }
+    }
 }
 
 /// The palette's `map`: the map in the conversation's place, every pin in
@@ -1339,6 +1410,26 @@ fn open_map<B: InputBuffer>(model: &mut UiModel<B>) {
     });
     model.focus = Pane::Map;
     model.selection = None;
+    // Pins where no region is: their places load (1089).
+    if model.map_autoload {
+        let wants = map::want_pins(&pins, &model.map_setup.regions);
+        model.map_wants.extend(wants);
+    }
+}
+
+/// The palette's `load map area`, `d` on the map: the visible area's
+/// region, asked whether autoload is on or not, since the reader asked.
+fn load_map_area<B: InputBuffer>(model: &mut UiModel<B>) {
+    let area = model.map_area();
+    let Some(state) = model.map.as_ref() else {
+        model.toast(ToastKind::Info, "open the map first".to_string());
+        return;
+    };
+    let view = map::viewport(state, area, &model.map_setup);
+    match map::want_view(&view, &model.map_setup.regions) {
+        Some(want) => model.map_wants.push(want),
+        None => model.toast(ToastKind::Info, MAP_LOADED_ALREADY.to_string()),
+    }
 }
 
 /// A key on the open map.
@@ -2183,6 +2274,10 @@ fn run<B: InputBuffer + Default>(model: &mut UiModel<B>, command: PaletteCommand
             model.toggle_pin();
             Vec::new()
         }
+        PaletteCommand::LoadMapArea => {
+            load_map_area(model);
+            Vec::new()
+        }
         PaletteCommand::Map => {
             open_map(model);
             Vec::new()
@@ -2792,6 +2887,12 @@ pub struct View {
 /// The map pane's title.
 pub const MAP_TITLE: &str = "map";
 
+/// The map title's word while a region loads.
+pub const MAP_LOADING: &str = "loading map";
+
+/// The toast for `load map area` over an area loaded already.
+pub const MAP_LOADED_ALREADY: &str = "the map here is loaded already";
+
 /// The empty conversations pane's line.
 pub const NO_CONVERSATIONS: &str = "No conversations: start with --to <address>.";
 
@@ -3115,7 +3216,14 @@ pub fn view<B: InputBuffer>(model: &UiModel<B>) -> View {
     let (messages_title, messages_title_right) = match &map {
         Some(shown) => (
             MAP_TITLE.to_string(),
-            format!("z{} · {} in view", shown.viewport.zoom(), shown.pins.len()),
+            match &model.map_loading {
+                Some(word) => format!(
+                    "z{} · {} in view · {word}",
+                    shown.viewport.zoom(),
+                    shown.pins.len()
+                ),
+                None => format!("z{} · {} in view", shown.viewport.zoom(), shown.pins.len()),
+            },
         ),
         None => (messages_title, messages_title_right),
     };
@@ -6775,6 +6883,168 @@ mod tests {
         let state = model.map.expect("open");
         assert_eq!(state.centre, projected(50_110_600, 8_682_100));
         assert_eq!(state.zoom, leviculum_map::outline::MAX_ZOOM);
+    }
+
+    /// A model with a report from Frankfurt, outside every region, the
+    /// autoload as `autoload` says, the list focused on it.
+    fn frankfurt(autoload: bool) -> UiModel<Field> {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        model.map_autoload = autoload;
+        clock(&mut model, 26, 14, 0);
+        arrive(
+            &mut model,
+            PEER,
+            1,
+            "",
+            report_of(&fix_at(50_110_600, 8_682_100, two_pm() - 60)),
+        );
+        update(&mut model, key(KeyCode::Tab));
+        model
+    }
+
+    /// The region the shell would write for `want`, as its header.
+    fn landed(want: &map::MapWant) -> leviculum_map::region::Header {
+        leviculum_map::region::Header {
+            bounds: want.bounds,
+            min_zoom: want.zooms.0,
+            max_zoom: want.zooms.1,
+            ..florence()
+        }
+    }
+
+    /// Going to a place no region holds asks for its region once (1089):
+    /// a 12 km box around it, z10 to z15. The title says it loads; the
+    /// region landing fits the map to its deepest zoom; asked again, the
+    /// place is held and nothing is asked.
+    #[test]
+    fn opening_the_map_at_a_place_without_a_region_loads_it_once() {
+        let mut model = frankfurt(true);
+        let effects = update(&mut model, key(KeyCode::Enter));
+        let [UiEffect::LoadMap(want)] = effects.as_slice() else {
+            panic!("{effects:?}");
+        };
+        let at = projected(50_110_600, 8_682_100);
+        assert_eq!(
+            model.map.expect("open").zoom,
+            leviculum_map::outline::MAX_ZOOM
+        );
+        assert_eq!(want.reason, map::LoadReason::Place);
+        assert_eq!(want.centre, at);
+        assert_eq!((want.zooms, want.floor), ((10, 15), 13));
+        let b = want.bounds;
+        assert!(b.contains(leviculum_map::mercator::unproject(at)));
+        // 12 km north to south: 0.1078 degrees.
+        assert!((b.north - b.south - 1_078_000).abs() < 2_000, "{b:?}");
+        update(&mut model, UiEvent::MapLoad(MapLoad::Started(want.clone())));
+        assert!(
+            view(&model).messages_title_right.ends_with("· loading map"),
+            "{}",
+            view(&model).messages_title_right
+        );
+        let mut setup = model.map_setup.clone();
+        setup.regions.push(landed(want));
+        setup.zooms = (0, 20);
+        update(&mut model, UiEvent::MapSetup(setup));
+        update(&mut model, UiEvent::MapLoad(MapLoad::Done(want.clone())));
+        assert_eq!(model.map_loading, None);
+        let state = model.map.expect("open");
+        assert_eq!((state.centre, state.zoom), (at, 15), "fitted to the region");
+        // The place again: held, nothing asked.
+        update(&mut model, key(KeyCode::Esc));
+        assert_eq!(update(&mut model, key(KeyCode::Enter)), []);
+    }
+
+    /// With `map_autoload = off` going to a place asks for nothing.
+    #[test]
+    fn with_the_autoload_off_nothing_is_loaded() {
+        let mut model = frankfurt(false);
+        assert_eq!(update(&mut model, key(KeyCode::Enter)), []);
+        assert!(model.map.is_some());
+        update(&mut model, key(KeyCode::Esc));
+        assert_eq!(update(&mut model, key(KeyCode::Char('M'))), []);
+    }
+
+    /// `d` on the map asks for the visible area, whether the autoload is on
+    /// or not: from three zooms above the view's to z15, the deepest lowered
+    /// no further than the view's. Over an area held already it says so.
+    #[test]
+    fn the_key_loads_the_visible_area_and_a_held_one_is_not_loaded() {
+        let mut model = frankfurt(false);
+        update(&mut model, key(KeyCode::Enter));
+        let state = model.map.expect("open");
+        let shown = map::viewport(&state, model.map_area(), &model.map_setup);
+        let effects = update(&mut model, key(KeyCode::Char('d')));
+        let [UiEffect::LoadMap(want)] = effects.as_slice() else {
+            panic!("{effects:?}");
+        };
+        assert_eq!(want.reason, map::LoadReason::View);
+        assert_eq!(want.bounds, shown.bounds());
+        assert_eq!(want.zooms, (state.zoom - 3, 15));
+        assert_eq!(want.floor, state.zoom);
+        let mut setup = model.map_setup.clone();
+        setup.regions.push(landed(want));
+        update(&mut model, UiEvent::MapSetup(setup));
+        update(&mut model, UiEvent::MapLoad(MapLoad::Done(want.clone())));
+        assert_eq!(
+            model.map.expect("open"),
+            state,
+            "a view's load moves nothing"
+        );
+        assert_eq!(update(&mut model, key(KeyCode::Char('d'))), []);
+        assert_eq!(
+            model.toasts.last().map(|t| t.text.as_str()),
+            Some(MAP_LOADED_ALREADY)
+        );
+    }
+
+    /// A failed load is one toast, when the shell gives one; a failure it
+    /// said already is silent.
+    #[test]
+    fn a_failed_load_is_one_toast() {
+        let mut model = frankfurt(true);
+        let effects = update(&mut model, key(KeyCode::Enter));
+        let [UiEffect::LoadMap(want)] = effects.as_slice() else {
+            panic!("{effects:?}");
+        };
+        update(&mut model, UiEvent::MapLoad(MapLoad::Started(want.clone())));
+        let before = model.toasts.len();
+        update(
+            &mut model,
+            UiEvent::MapLoad(MapLoad::Failed {
+                want: want.clone(),
+                toast: Some("map: HTTP status 503".to_string()),
+            }),
+        );
+        assert_eq!(model.toasts.len(), before + 1);
+        assert_eq!(model.map_loading, None);
+        update(
+            &mut model,
+            UiEvent::MapLoad(MapLoad::Failed {
+                want: want.clone(),
+                toast: None,
+            }),
+        );
+        assert_eq!(model.toasts.len(), before + 1);
+    }
+
+    /// The palette's `map` asks for the places of the pins no region holds
+    /// 3 km around: one place for three pins a few streets apart (the
+    /// Florence fixture is too small to hold them), none once that place's
+    /// region is there.
+    #[test]
+    fn the_map_asks_for_the_pins_no_region_holds() {
+        let mut model = mapped();
+        model.map_autoload = true;
+        let effects = update(&mut model, key(KeyCode::Char('M')));
+        let [UiEffect::LoadMap(want)] = effects.as_slice() else {
+            panic!("{effects:?}");
+        };
+        assert_eq!(want.reason, map::LoadReason::Place);
+        let mut setup = model.map_setup.clone();
+        setup.regions.push(landed(want));
+        update(&mut model, UiEvent::MapSetup(setup));
+        update(&mut model, key(KeyCode::Esc));
+        assert_eq!(update(&mut model, key(KeyCode::Char('M'))), []);
     }
 
     /// A click on a report row opens the map at its fix; a click on the

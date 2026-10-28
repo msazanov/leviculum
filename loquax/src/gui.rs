@@ -15,6 +15,12 @@
 //!   [`MapState`], driven by the model's own map functions in screen
 //!   pixels, [`map`]), the picture on screen, and the painter, whose paints
 //!   run on iced's executor so a drag never waits for one.
+//!
+//! The map's autoload (1089) runs in the shell: the window decides what to
+//! ask with the model's own rules ([`want_pins`] when the pins first arrive,
+//! [`want_view`] on `d`) and sends it over; the shell's [`Seen`] carries the
+//! loading word and the maps directory's epoch, and a new epoch reads the
+//! regions again and paints the view anew.
 
 pub mod map;
 
@@ -32,8 +38,10 @@ use iced::{
 use tokio::sync::oneshot;
 
 use loquax::picture::Painter;
-use loquax::ui::map::{fit, viewport, zoom_at, MapPin, MapPress, MapSetup, MapState};
-use loquax::ui::UiEvent;
+use loquax::ui::map::{
+    fit, viewport, want_pins, want_view, zoom_at, MapPin, MapPress, MapSetup, MapState, MapWant,
+};
+use loquax::ui::{UiEvent, MAP_LOADED_ALREADY};
 
 use crate::shell::{self, local_now, Shell, ShellOptions, PUMP_MS, TICK_MS};
 
@@ -50,6 +58,12 @@ pub struct Seen {
     pub pins: Vec<MapPin>,
     /// The newest note the model holds, said in the bar.
     pub notice: Option<String>,
+    /// The word while a map region loads.
+    pub loading: Option<String>,
+    /// The maps directory's epoch: a new one means a region landed or left.
+    pub maps: u64,
+    /// Whether going to a place loads its region (`map_autoload`).
+    pub autoload: bool,
 }
 
 impl Seen {
@@ -57,6 +71,9 @@ impl Seen {
         Self {
             pins: shell.model.map_pins(),
             notice: shell.model.toasts.last().map(|t| t.text.clone()),
+            loading: shell.model.map_loading.clone(),
+            maps: shell.maps.epoch(),
+            autoload: shell.model.map_autoload,
         }
     }
 }
@@ -65,17 +82,18 @@ impl Seen {
 /// the runtime while the window runs, and finished as the terminal
 /// finishes it.
 pub async fn run(options: ShellOptions) -> ExitCode {
-    let (mut shell, _config) = match shell::start(&options).await {
+    let (shell, _config) = match shell::start(&options).await {
         Ok(started) => started,
         Err(code) => return code,
     };
-    let painter = Painter::new(std::mem::take(&mut shell.regions));
+    let painter = Painter::new(shell.maps.clone());
     let (seen_tx, seen_rx) = unbounded();
+    let (asks_tx, asks_rx) = tokio::sync::mpsc::unbounded_channel();
     let (leave_tx, leave_rx) = oneshot::channel();
-    let driver = tokio::spawn(drive(shell, leave_rx, seen_tx));
+    let driver = tokio::spawn(drive(shell, leave_rx, seen_tx, asks_rx));
     // iced runs its own loop on this thread until the window closes; the
     // runtime's other threads drive the shell meanwhile.
-    let shown = tokio::task::block_in_place(|| window(painter, seen_rx));
+    let shown = tokio::task::block_in_place(|| window(painter, seen_rx, asks_tx));
     let _ = leave_tx.send(());
     let shell = match driver.await {
         Ok(shell) => shell,
@@ -91,6 +109,7 @@ async fn drive(
     mut shell: Shell,
     mut leave: oneshot::Receiver<()>,
     seen: UnboundedSender<Seen>,
+    mut asks: tokio::sync::mpsc::UnboundedReceiver<MapWant>,
 ) -> Shell {
     let mut tick = tokio::time::interval(Duration::from_millis(TICK_MS));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -115,6 +134,7 @@ async fn drive(
         }
         tokio::select! {
             _ = &mut leave => break,
+            Some(want) = asks.recv() => shell.map_ask(want),
             _ = pump.tick() => shell.poll(),
             _ = tick.tick() => shell.tick(&mut clocks),
         }
@@ -123,10 +143,10 @@ async fn drive(
 }
 
 /// Open the window and run it until it is closed.
-fn window(painter: Painter, seen: UnboundedReceiver<Seen>) -> iced::Result {
+fn window(painter: Painter, seen: UnboundedReceiver<Seen>, asks: Asks) -> iced::Result {
     // iced asks its boot function for the first state; it is asked once,
     // and what it needs is handed over through this slot.
-    let slot = Mutex::new(Some((painter, seen)));
+    let slot = Mutex::new(Some((painter, seen, asks)));
     iced::application(
         move || {
             let taken = slot.lock().unwrap_or_else(PoisonError::into_inner).take();
@@ -165,9 +185,15 @@ pub enum Message {
     Painted(Arc<map::Picture>),
 }
 
+/// Where the window sends the regions it asks the shell to load.
+type Asks = tokio::sync::mpsc::UnboundedSender<MapWant>;
+
 /// The window's state.
 struct App {
     seen: Seen,
+    asks: Option<Asks>,
+    /// The view the last fit chose: a region landing under it fits again.
+    fitted_at: Option<(leviculum_map::mercator::World, u8)>,
     painter: Arc<Mutex<Painter>>,
     setup: MapSetup,
     state: MapState,
@@ -187,10 +213,10 @@ struct App {
 }
 
 impl App {
-    fn boot(taken: Option<(Painter, UnboundedReceiver<Seen>)>) -> (Self, Task<Message>) {
-        let (painter, seen) = match taken {
-            Some((painter, seen)) => (painter, Some(seen)),
-            None => (Painter::new(Vec::new()), None),
+    fn boot(taken: Option<(Painter, UnboundedReceiver<Seen>, Asks)>) -> (Self, Task<Message>) {
+        let (painter, seen, asks) = match taken {
+            Some((painter, seen, asks)) => (painter, Some(seen), Some(asks)),
+            None => (Painter::new(loquax::picture::Maps::default()), None, None),
         };
         let setup = map::setup(&painter);
         let state = MapState {
@@ -202,7 +228,12 @@ impl App {
             seen: Seen {
                 pins: Vec::new(),
                 notice: None,
+                loading: None,
+                maps: 0,
+                autoload: false,
             },
+            asks,
+            fitted_at: None,
             painter: Arc::new(Mutex::new(painter)),
             setup,
             state,
@@ -241,7 +272,11 @@ impl App {
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Seen(seen) => {
+                let landed = seen.maps != self.seen.maps;
                 self.seen = seen;
+                if landed {
+                    self.regions_changed();
+                }
                 if !self.fitted {
                     self.fit();
                 }
@@ -277,7 +312,8 @@ impl App {
     }
 
     /// Every pin in view, as `0` does; before the first pins and the
-    /// canvas, nothing.
+    /// canvas, nothing. The first fit with pins asks for the places no
+    /// region holds (1089).
     fn fit(&mut self) {
         let Some(size) = self.pixels() else {
             return;
@@ -285,10 +321,38 @@ impl App {
         let (centre, zoom) = fit(&self.seen.pins, map::area(size), &self.setup);
         self.state.centre = centre;
         self.state.zoom = zoom;
+        self.fitted_at = Some((centre, zoom));
         if self.state.selected.is_none() {
             self.state.selected = self.seen.pins.first().map(|p| p.peer);
         }
+        let first = !self.fitted && !self.seen.pins.is_empty();
         self.fitted = !self.seen.pins.is_empty();
+        if first && self.seen.autoload {
+            for want in want_pins(&self.seen.pins, &self.setup.regions) {
+                self.ask(want);
+            }
+        }
+    }
+
+    fn ask(&self, want: MapWant) {
+        if let Some(asks) = &self.asks {
+            let _ = asks.send(want);
+        }
+    }
+
+    /// A region landed or left: the regions read again, the setup with
+    /// them, and the fit again when the reader has not moved since it.
+    fn regions_changed(&mut self) {
+        {
+            let mut painter = self.painter.lock().unwrap_or_else(PoisonError::into_inner);
+            painter.refresh();
+            self.setup = map::setup(&painter);
+        }
+        if self.fitted_at == Some((self.state.centre, self.state.zoom)) {
+            let selected = self.state.selected;
+            self.fit();
+            self.state.selected = selected.or(self.state.selected);
+        }
     }
 
     /// The pins over the picture on screen: placed for its view, so they
@@ -313,7 +377,10 @@ impl App {
             return Task::none();
         };
         let view = viewport(&self.state, map::area(size), &self.setup);
-        let current = self.picture.as_ref().is_some_and(|(p, _)| p.view == view);
+        let current = self
+            .picture
+            .as_ref()
+            .is_some_and(|(p, _)| p.view == view && p.epoch == self.seen.maps);
         if current || self.painting {
             return Task::none();
         }
@@ -343,6 +410,17 @@ impl App {
                 let selected = self.state.selected;
                 self.fit();
                 self.state.selected = selected.or(self.state.selected);
+            }
+            // The visible area's region, as `d` on the terminal's map.
+            "d" => {
+                let Some(size) = self.pixels() else {
+                    return;
+                };
+                let view = viewport(&self.state, map::area(size), &self.setup);
+                match want_view(&view, &self.setup.regions) {
+                    Some(want) => self.ask(want),
+                    None => self.seen.notice = Some(MAP_LOADED_ALREADY.to_string()),
+                }
             }
             _ => {}
         }
@@ -428,9 +506,18 @@ impl App {
         let bar = row![
             // Always on screen: the region's credit, or the outline's.
             text(credit).size(13),
-            container(text(self.seen.notice.clone().unwrap_or_default()).size(13))
-                .width(Length::Fill)
-                .align_right(Length::Fill),
+            container(
+                text(
+                    [self.seen.loading.clone(), self.seen.notice.clone()]
+                        .into_iter()
+                        .flatten()
+                        .collect::<Vec<_>>()
+                        .join(" · ")
+                )
+                .size(13)
+            )
+            .width(Length::Fill)
+            .align_right(Length::Fill),
             text(format!("  z{}", self.state.zoom)).size(13),
         ]
         .padding([2, 8]);

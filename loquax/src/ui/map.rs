@@ -19,9 +19,9 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use leviculum_map::choice::fit_ceiling;
-use leviculum_map::mercator::{project, LatLon, World};
+use leviculum_map::mercator::{project, unproject, LatLon, World};
 use leviculum_map::pins::{self, Mark, Metrics, Pin, Side};
-use leviculum_map::region::Header;
+use leviculum_map::region::{Bounds, Header};
 use leviculum_map::viewport::Viewport;
 use leviculum_ui::Rect;
 
@@ -51,6 +51,119 @@ impl Default for MapSetup {
             regions: Vec::new(),
         }
     }
+}
+
+/// Why a region is loaded (1089): the reader went to a place, or asked for
+/// the visible area.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoadReason {
+    Place,
+    View,
+}
+
+impl LoadReason {
+    /// `tui.log`'s `reason=`.
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Place => "place",
+            Self::View => "view",
+        }
+    }
+}
+
+/// A region the model asks the shell to load: a box, the zooms, and how
+/// far the deepest zoom may be lowered to stay under the shell's size cap.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MapWant {
+    pub bounds: Bounds,
+    /// The shallowest and the deepest zoom asked for.
+    pub zooms: (u8, u8),
+    /// The shallowest the deepest zoom may be lowered to.
+    pub floor: u8,
+    pub reason: LoadReason,
+    /// The place, or the view's centre: a place's load fits the map there
+    /// again when it lands and the map has not moved.
+    pub centre: World,
+}
+
+/// A place's region reaches this far to each side: a box of 12 by 12 km,
+/// a town with its surroundings. Scaled from Frankfurt's 576 km² box of
+/// 9.9 MB (loquax-map.md, section 4), a city's is 2 to 3 MB.
+pub const PLACE_HALF_M: u32 = 6_000;
+/// A place counts as loaded when a region holds this much around it at
+/// the deepest zoom: no load for a fix a street away from the last.
+pub const PLACE_MARGIN_M: u32 = 3_000;
+/// A place's zooms. Below z10 its box is a few pixels, and the world
+/// outline draws there anyway.
+pub const PLACE_ZOOMS: (u8, u8) = (10, 15);
+/// The deepest zoom a place's load lowers to under the size cap.
+pub const PLACE_FLOOR: u8 = 13;
+/// The deepest zoom any load asks for: the Protomaps builds end there.
+pub const DEEPEST_LOAD: u8 = 15;
+/// A load of the visible area starts this many zooms above the view's,
+/// so zooming out a little still finds the region.
+pub const VIEW_BELOW: u8 = 3;
+/// The most places one opening of the map asks for, its first pins in
+/// `Tab` order: a list of peers across a continent is not a download of it.
+pub const MAX_PIN_LOADS: usize = 4;
+
+/// Whether a region of `regions` holds `b` at `zooms`.
+pub fn covered(regions: &[Header], b: &Bounds, zooms: (u8, u8)) -> bool {
+    regions
+        .iter()
+        .any(|h| h.bounds.holds(b) && h.min_zoom <= zooms.0 && h.max_zoom >= zooms.1)
+}
+
+/// The region to load around `at`, unless `regions` hold it already
+/// ([`PLACE_MARGIN_M`] around it at the deepest zoom).
+pub fn want_place(at: World, regions: &[Header]) -> Option<MapWant> {
+    let place = unproject(at);
+    let inner = Bounds::around(place, PLACE_MARGIN_M);
+    if covered(regions, &inner, (PLACE_ZOOMS.1, PLACE_ZOOMS.1)) {
+        return None;
+    }
+    Some(MapWant {
+        bounds: Bounds::around(place, PLACE_HALF_M),
+        zooms: PLACE_ZOOMS,
+        floor: PLACE_FLOOR,
+        reason: LoadReason::Place,
+        centre: at,
+    })
+}
+
+/// The places to load for `pins`, at most [`MAX_PIN_LOADS`], none held by
+/// `regions` or by a place asked for before it.
+pub fn want_pins(pins: &[MapPin], regions: &[Header]) -> Vec<MapWant> {
+    let mut wants: Vec<MapWant> = Vec::new();
+    for pin in pins {
+        if wants.len() >= MAX_PIN_LOADS {
+            break;
+        }
+        let inner = Bounds::around(unproject(pin.at), PLACE_MARGIN_M);
+        if wants.iter().any(|w| w.bounds.holds(&inner)) {
+            continue;
+        }
+        wants.extend(want_place(pin.at, regions));
+    }
+    wants
+}
+
+/// The region to load for `view`: its box, from [`VIEW_BELOW`] zooms above
+/// its zoom to [`DEEPEST_LOAD`], the deepest lowered no further than the
+/// view's own. `None` when `regions` hold the box at the view's zoom.
+pub fn want_view(view: &Viewport, regions: &[Header]) -> Option<MapWant> {
+    let zoom = view.zoom().min(DEEPEST_LOAD);
+    let bounds = view.bounds();
+    if covered(regions, &bounds, (zoom, zoom)) {
+        return None;
+    }
+    Some(MapWant {
+        bounds,
+        zooms: (zoom.saturating_sub(VIEW_BELOW), DEEPEST_LOAD),
+        floor: zoom,
+        reason: LoadReason::View,
+        centre: view.centre,
+    })
 }
 
 /// The open map.

@@ -33,13 +33,15 @@ use loquax::fanout::{Fanout, Tap};
 use loquax::fetch::{run_fetch, FetchError, FetchOptions};
 use loquax::mailbox::{Unanswered, UNANSWERED_EXCLUSION_MS, UNANSWERED_LIMIT};
 use loquax::mailbox_state::{self, short, Stored};
+use loquax::mapload::{Loader, Source, Step, CACHE_DEFAULT_MB};
 use loquax::outbox::{Command, Outbox, OutboxEvent, OutboxGone, SendRequest, Via};
-use loquax::picture::Installed;
+use loquax::picture::Maps;
 use loquax::seen::{SeenStore, SeenWrite};
 use loquax::send::{run_send_auto, AutoError, Leg, SendError, SendOptions};
 use loquax::store::Store;
 use loquax::ui::history::StoreRead;
-use loquax::ui::{update, UiEffect, UiEvent, UiModel};
+use loquax::ui::map::{MapSetup, MapWant};
+use loquax::ui::{update, MapLoad, UiEffect, UiEvent, UiModel};
 use loquax::when::WallTime;
 use loquax::{display_name, identity};
 
@@ -241,9 +243,10 @@ pub(crate) struct Shell {
     /// What the screen asked of the terminal and not yet done: the real
     /// terminal does it, a script writes it into its frames.
     pub(crate) outputs: Vec<Output>,
-    /// The region files found at start, for the map painter the loop
-    /// makes once it knows the backend.
-    pub(crate) regions: Vec<Installed>,
+    /// The maps directory every painter of this session draws from.
+    pub(crate) maps: Maps,
+    /// The autoload: regions the model asks for, one load at a time.
+    loader: Loader,
     /// The origin of the monotonic clock the mailbox schedule runs on.
     origin: tokio::time::Instant,
 }
@@ -298,6 +301,7 @@ impl Shell {
                     }
                 }
                 UiEffect::Log(line) => tracing::warn!("{line}"),
+                UiEffect::LoadMap(want) => self.map_ask(want),
             }
         }
         for answer in answers {
@@ -443,6 +447,8 @@ impl Shell {
             self.replaced(&stored);
             self.apply(chosen(&stored));
         }
+        let steps = self.loader.poll(self.elapsed_ms());
+        self.map_steps(steps);
         self.apply(UiEvent::Elapsed(self.elapsed_ms()));
     }
 
@@ -497,6 +503,76 @@ impl Shell {
                     let _ = done.send(Finished::Fetch(end));
                 });
                 self.fetch_task = Some((task, reason));
+            }
+        }
+    }
+
+    /// Load `want`'s region, from the model's [`UiEffect::LoadMap`] or the
+    /// window's key: queued behind a running load, skipped while its box
+    /// backs off.
+    pub(crate) fn map_ask(&mut self, want: MapWant) {
+        let steps = self.loader.ask(want, self.elapsed_ms());
+        self.map_steps(steps);
+    }
+
+    /// The loader's steps: one `tui.log` line each, and the model told. A
+    /// region that landed reaches the model's setup before its `Done`, so
+    /// the fit that follows sees it.
+    fn map_steps(&mut self, steps: Vec<Step>) {
+        for step in steps {
+            match step {
+                Step::Started(want) => {
+                    tracing::info!(
+                        "MAPLOAD start box={} zooms={}-{} reason={}",
+                        box_words(&want),
+                        want.zooms.0,
+                        want.zooms.1,
+                        want.reason.word()
+                    );
+                    self.apply(UiEvent::MapLoad(MapLoad::Started(want)));
+                }
+                Step::Done {
+                    want,
+                    landed,
+                    elapsed_ms,
+                } => {
+                    tracing::info!(
+                        "MAPLOAD done box={} zooms={}-{} bytes={} fetched={} elapsed_ms={elapsed_ms} file={} evicted={}",
+                        box_words(&want),
+                        landed.zooms.0,
+                        landed.zooms.1,
+                        landed.bytes,
+                        landed.fetched,
+                        landed.name,
+                        landed.evicted.len()
+                    );
+                    let regions = self.maps.headers();
+                    let zooms = leviculum_map::choice::view_zooms(regions.iter());
+                    let setup = MapSetup {
+                        cell_px: self.model.map_setup.cell_px,
+                        zooms: (*zooms.start(), *zooms.end()),
+                        regions,
+                    };
+                    self.apply(UiEvent::MapSetup(setup));
+                    self.apply(UiEvent::MapLoad(MapLoad::Done(want)));
+                }
+                Step::Failed {
+                    want,
+                    detail,
+                    toast,
+                    elapsed_ms,
+                } => {
+                    tracing::info!(
+                        "MAPLOAD failed box={} zooms={}-{} detail={detail:?} elapsed_ms={elapsed_ms}",
+                        box_words(&want),
+                        want.zooms.0,
+                        want.zooms.1
+                    );
+                    self.apply(UiEvent::MapLoad(MapLoad::Failed { want, toast }));
+                }
+                Step::Skipped { want, why } => {
+                    tracing::info!("MAPLOAD skipped box={} why={why}", box_words(&want));
+                }
             }
         }
     }
@@ -619,6 +695,14 @@ impl Shell {
             task.abort();
         }
     }
+}
+
+/// A load's box as `tui.log` writes it: west, south, east, north in
+/// degrees.
+fn box_words(want: &MapWant) -> String {
+    let d = |e7: i32| format!("{:.5}", f64::from(e7) / 1e7);
+    let b = &want.bounds;
+    format!("{},{},{},{}", d(b.west), d(b.south), d(b.east), d(b.north))
 }
 
 /// The header's mailbox state for a kept selection.
@@ -863,14 +947,25 @@ pub(crate) async fn start(
     if let Some(event) = mailbox {
         update(&mut model, event);
     }
-    // The map's regions, read once: a file that does not open is named in
-    // the log and left out.
-    let (regions, problems) = loquax::picture::maps_dir()
-        .map(|dir| loquax::picture::load(&dir))
-        .unwrap_or_default();
-    for problem in problems {
+    // The map's regions: a file that does not open is named in the log
+    // and left out. The painters read the directory again whenever the
+    // autoload changes it.
+    let maps = Maps::new(loquax::picture::maps_dir());
+    for problem in maps.load().1 {
         tracing::warn!("{problem}");
     }
+    model.map_autoload = config.map_autoload.unwrap_or(true);
+    let source = Source::of(config.map_source.as_deref());
+    tracing::info!(
+        "MAPLOAD autoload={} source={}",
+        if model.map_autoload { "on" } else { "off" },
+        match &source {
+            Source::Url(url) => url.clone(),
+            Source::Daily(base) => format!("{base}<newest>.pmtiles"),
+        }
+    );
+    let cache_bytes = config.map_cache_mb.unwrap_or(CACHE_DEFAULT_MB) << 20;
+    let loader = Loader::new(maps.clone(), source, cache_bytes);
     let (done_tx, done_rx) = unbounded_channel();
     let shell = Shell {
         model,
@@ -904,7 +999,8 @@ pub(crate) async fn start(
         gone: false,
         redraw: false,
         outputs: Vec::new(),
-        regions,
+        maps,
+        loader,
         origin: tokio::time::Instant::now(),
     };
     Ok((shell, config))

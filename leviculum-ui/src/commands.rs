@@ -62,6 +62,8 @@ pub enum Command {
     Pin,
     /// Show the peers' positions on the map, in the conversation's place.
     Map,
+    /// Load the map's region of the visible area.
+    LoadMapArea,
     /// Give the open conversation's peer a name of the reader's own, or
     /// clear it: the palette takes the name as text.
     Rename,
@@ -83,7 +85,7 @@ pub struct PaletteEntry {
 }
 
 /// The table, in the order the palette lists it unfiltered.
-pub const COMMANDS: [PaletteEntry; 25] = [
+pub const COMMANDS: [PaletteEntry; 26] = [
     entry("send", Command::Send),
     entry("fetch", Command::Fetch),
     entry("quit", Command::Quit),
@@ -105,6 +107,7 @@ pub const COMMANDS: [PaletteEntry; 25] = [
     entry("delete conversation", Command::DeleteConversation),
     entry("pin", Command::Pin),
     entry("map", Command::Map),
+    entry("load map area", Command::LoadMapArea),
     entry("rename", Command::Rename),
     entry("block", Command::Block),
     entry("unblock", Command::Unblock),

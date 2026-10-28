@@ -27,7 +27,7 @@ use leviculum_map::viewport::Viewport;
 use leviculum_mapfill::frame::{rgb888, Frame};
 use leviculum_mapfill::style::{area_color, line_style, Class, BACKGROUND};
 use leviculum_ui::color::{rgb_to_ansi16, rgb_to_ansi256};
-use loquax::picture::{load, Painter};
+use loquax::picture::{Maps, Painter};
 
 /// Source pixels across and down one cell.
 const SX: usize = 4;
@@ -1312,11 +1312,11 @@ fn main() {
             std::process::exit(1);
         }
     }
-    let (regions, problems) = load(Path::new(maps));
-    for p in &problems {
+    let maps = Maps::new(Some(PathBuf::from(maps)));
+    for p in &maps.load().1 {
         eprintln!("{p}");
     }
-    let mut painter = Painter::new(regions);
+    let mut painter = Painter::new(maps);
     let sets = Sets {
         half: halves(),
         quadrant: quadrants(),

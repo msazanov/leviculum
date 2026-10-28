@@ -13,15 +13,26 @@
 //! replaces this one too; a test or a second profile then sees only its own
 //! maps. Where no region covers the view the world outline is drawn
 //! ([`leviculum_map::outline`]).
+//!
+//! The directory changes while the messenger runs: the autoload
+//! ([`crate::mapload`], 1089) adds regions and evicts old ones. [`Maps`] is
+//! the handle every painter and the shell share; a change bumps its epoch,
+//! and a painter that sees a new epoch reads the directory again before its
+//! next paint. Every region that reaches into a view is drawn, each into its
+//! own box, so regions loaded side by side join up.
 
+use std::collections::HashMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::string::{String, ToString};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime};
 use std::vec::Vec;
 
 use embedded_graphics::prelude::{Dimensions, Point};
 use embedded_graphics::primitives::Rectangle;
-use leviculum_map::choice::{choose, view_zooms};
+use leviculum_map::choice::{drawn, view_zooms};
 use leviculum_map::draw::{draw_in_scaled, draw_tiles, Ink};
 use leviculum_map::outline;
 use leviculum_map::region::{Header, Region};
@@ -43,6 +54,70 @@ pub fn maps_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
         .or_else(|| set("HOME").map(|home| PathBuf::from(home).join(".local/share")))?;
     Some(data.join("loquax").join("maps"))
+}
+
+/// The file name prefix of a region the autoload wrote: those are a cache,
+/// evicted least recently viewed first; a file without it was placed by
+/// hand and is never touched.
+pub const AUTO_PREFIX: &str = "auto-";
+
+/// How often a painter marks an autoloaded region it drew as viewed, by its
+/// file's modification time, which the eviction orders by.
+const VIEWED_EVERY: Duration = Duration::from_secs(60);
+
+/// Whether `name` is a region the autoload wrote.
+pub fn is_auto(name: &str) -> bool {
+    name.starts_with(AUTO_PREFIX)
+}
+
+/// The maps directory as every painter and the shell share it: where it
+/// is, and an epoch bumped whenever a region is added or removed.
+#[derive(Clone, Debug, Default)]
+pub struct Maps {
+    inner: Arc<MapsInner>,
+}
+
+#[derive(Debug, Default)]
+struct MapsInner {
+    dir: Option<PathBuf>,
+    epoch: AtomicU64,
+}
+
+impl Maps {
+    /// The regions of `dir`; `None` for none at all.
+    pub fn new(dir: Option<PathBuf>) -> Self {
+        Self {
+            inner: Arc::new(MapsInner {
+                dir,
+                epoch: AtomicU64::new(0),
+            }),
+        }
+    }
+
+    pub fn dir(&self) -> Option<&Path> {
+        self.inner.dir.as_deref()
+    }
+
+    /// The directory's version: a painter holding an older one reads it
+    /// again.
+    pub fn epoch(&self) -> u64 {
+        self.inner.epoch.load(Ordering::SeqCst)
+    }
+
+    /// A region was added or removed.
+    pub fn changed(&self) {
+        self.inner.epoch.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Every region there now, and a line for each that did not open.
+    pub fn load(&self) -> (Vec<Installed>, Vec<String>) {
+        self.dir().map(load).unwrap_or_default()
+    }
+
+    /// The headers of the regions there now.
+    pub fn headers(&self) -> Vec<Header> {
+        self.load().0.iter().map(|r| *r.region.header()).collect()
+    }
 }
 
 /// One region file, open.
@@ -90,16 +165,43 @@ pub struct Drawn {
 /// The installed regions and the buffers a view is read into, kept from
 /// one view to the next.
 pub struct Painter {
+    maps: Maps,
+    /// The epoch `regions` were read at.
+    epoch: u64,
     regions: Vec<Installed>,
     read: Vec<(ViewTile, Vec<u8>)>,
+    /// When each autoloaded region was last marked viewed.
+    viewed: HashMap<String, Instant>,
 }
 
 impl Painter {
-    pub fn new(regions: Vec<Installed>) -> Self {
+    /// A painter over the regions of `maps`, read now.
+    pub fn new(maps: Maps) -> Self {
+        let epoch = maps.epoch();
+        let (regions, _) = maps.load();
         Self {
+            maps,
+            epoch,
             regions,
             read: Vec::new(),
+            viewed: HashMap::new(),
         }
+    }
+
+    /// Read the directory again when it changed since; whether it did.
+    pub fn refresh(&mut self) -> bool {
+        let epoch = self.maps.epoch();
+        if epoch == self.epoch {
+            return false;
+        }
+        self.epoch = epoch;
+        self.regions = self.maps.load().0;
+        true
+    }
+
+    /// The epoch of the regions this painter draws.
+    pub fn epoch(&self) -> u64 {
+        self.epoch
     }
 
     pub fn regions(&self) -> &[Installed] {
@@ -118,57 +220,84 @@ impl Painter {
     }
 
     /// Draw `view` in `ink` with lines `percent` per cent as wide as the
-    /// zoom's ([`leviculum_mapfill::render::Look::scaled`]): the region
-    /// [`choose`] picks inside its box with the outline under the rest, or
-    /// the outline alone where none is chosen or a tile does not read.
+    /// zoom's ([`leviculum_mapfill::render::Look::scaled`]): the world
+    /// outline under what no region covers, then every region that reaches
+    /// into the view ([`drawn`]), each inside its own box, the deepest last.
+    /// A region whose tile does not read is left out. The directory is read
+    /// again first when it changed.
     pub fn draw(&mut self, view: &Viewport, ink: Ink, percent: u32) -> Drawn {
+        self.refresh();
         let (w, h) = view.size();
         let mut fb = vec![0u16; (w as usize) * (h as usize)];
-        let chosen = choose(
+        let order = drawn(
             self.regions
                 .iter()
                 .map(|r| (r.name.as_str(), r.region.header())),
-            view.centre,
-            view.zoom(),
+            view,
         );
         let mut attribution = outline::ATTRIBUTION.to_string();
-        let drawn = match chosen.and_then(|i| self.regions.get(i)) {
-            Some(installed) => {
-                let drawn = Frame::new(&mut fb, w, h).is_some_and(|mut frame| {
-                    // The region ends at its box at every zoom; the
-                    // outline goes under the rest of the view (1077).
-                    let area = installed.region.area(view);
-                    if area != frame.bounding_box() {
-                        let Ok(_) = outline::draw(outline::WORLD_50M, view, ink, &mut frame);
-                    }
-                    region_into(
-                        &installed.region,
-                        view,
-                        area,
-                        ink,
-                        percent,
-                        &mut self.read,
-                        &mut frame,
-                    )
-                });
-                if drawn {
-                    attribution = installed.region.attribution().to_string();
-                }
-                drawn
-            }
-            None => false,
-        };
-        if !drawn {
-            if let Some(mut frame) = Frame::new(&mut fb, w, h) {
+        let mut shown: Vec<usize> = Vec::new();
+        if let Some(mut frame) = Frame::new(&mut fb, w, h) {
+            // The outline goes under the view unless one region fills it.
+            let whole = frame.bounding_box();
+            let filled = order
+                .iter()
+                .any(|&i| self.regions[i].region.area(view) == whole);
+            if !filled {
                 let Ok(_) = outline::draw(outline::WORLD_50M, view, ink, &mut frame);
             }
+            for &i in &order {
+                let installed = &self.regions[i];
+                let area = installed.region.area(view);
+                if region_into(
+                    &installed.region,
+                    view,
+                    area,
+                    ink,
+                    percent,
+                    &mut self.read,
+                    &mut frame,
+                ) {
+                    attribution = installed.region.attribution().to_string();
+                    shown.push(i);
+                }
+            }
+        }
+        for i in shown {
+            self.viewed(i);
         }
         Drawn { fb, attribution }
+    }
+
+    /// Mark the autoloaded region `i` viewed, at most every
+    /// [`VIEWED_EVERY`]: its file's modification time is the order the
+    /// cache is evicted in ([`crate::mapload`]).
+    fn viewed(&mut self, i: usize) {
+        let Some(name) = self.regions.get(i).map(|r| r.name.clone()) else {
+            return;
+        };
+        if !is_auto(&name) {
+            return;
+        }
+        let now = Instant::now();
+        if self
+            .viewed
+            .get(&name)
+            .is_some_and(|t| now.duration_since(*t) < VIEWED_EVERY)
+        {
+            return;
+        }
+        if let Some(dir) = self.maps.dir() {
+            if let Ok(file) = File::open(dir.join(&name)) {
+                let _ = file.set_modified(SystemTime::now());
+            }
+        }
+        self.viewed.insert(name, now);
     }
 }
 
 /// Draw `region`'s tiles of `view` into `area` of `frame`; `false` when a
-/// tile could not be read, and the outline is drawn instead.
+/// tile could not be read, and the region is left out.
 fn region_into(
     region: &Region<File>,
     view: &Viewport,
@@ -233,5 +362,94 @@ mod tests {
         let (regions, problems) = load(empty.path());
         assert!(regions.is_empty());
         assert_eq!(problems.len(), 1, "{problems:?}");
+    }
+
+    /// Two regions loaded side by side draw together (1089): over a view
+    /// across their shared edge each half shows its own region, where one
+    /// region alone leaves the other half to the outline. Cut here from the
+    /// autoload's fixture, the west and the east half of its box.
+    #[cfg(feature = "mapload")]
+    #[test]
+    fn two_adjacent_regions_draw_together() {
+        use leviculum_map::mercator::{project, LatLon};
+        use leviculum_map::region::Bounds;
+        use leviculum_mapcut::cut::{cut, CutOptions};
+        use leviculum_mapcut::pmtiles::Archive;
+
+        const FIXTURE: &[u8] = include_bytes!("../../leviculum-mapcut/fixtures/oltrarno.pmtiles");
+        let dir = tempfile::tempdir().expect("tmp");
+        let source = dir.path().join("o.pmtiles");
+        std::fs::write(&source, FIXTURE).expect("write");
+        let archive = Archive::open(&source).expect("open");
+        let half = |name: &str, west: i32, east: i32| {
+            let maps = dir.path().join(name);
+            std::fs::create_dir_all(&maps).expect("dir");
+            let bounds = Bounds {
+                west,
+                south: 437_405_000,
+                east,
+                north: 437_545_000,
+            };
+            let opts = CutOptions {
+                bounds,
+                zooms: 14..=15,
+                profile: leviculum_map::profile::CUT_1,
+                attribution: "© OpenStreetMap contributors".to_string(),
+                notice: "test".to_string(),
+                threads: 1,
+            };
+            let out = File::create(maps.join(format!("{name}.lmr"))).expect("create");
+            cut(&archive, &opts, std::io::BufWriter::new(out)).expect("cut");
+            maps
+        };
+        let (west, east) = (
+            half("west", 112_615_000, 112_720_000),
+            half("east", 112_720_000, 112_825_000),
+        );
+        let both = dir.path().join("both");
+        std::fs::create_dir_all(&both).expect("dir");
+        for (from, name) in [(&west, "west.lmr"), (&east, "east.lmr")] {
+            std::fs::copy(from.join(name), both.join(name)).expect("copy");
+        }
+        let view = Viewport::new(
+            project(LatLon::from_degrees(43.7475, 11.2720)),
+            15,
+            200,
+            100,
+        );
+        let paint = |dir: &Path| {
+            Painter::new(Maps::new(Some(dir.to_path_buf())))
+                .draw(&view, Ink::Colour, 100)
+                .fb
+        };
+        let (w, b, e) = (paint(&west), paint(&both), paint(&east));
+        let side = |fb: &[u16], right: bool| -> Vec<u16> {
+            fb.chunks(200)
+                .flat_map(|row| match right {
+                    false => row[..90].to_vec(),
+                    true => row[110..].to_vec(),
+                })
+                .collect()
+        };
+        assert_eq!(
+            side(&b, false),
+            side(&w, false),
+            "the west half is the west region"
+        );
+        assert_eq!(
+            side(&b, true),
+            side(&e, true),
+            "the east half is the east region"
+        );
+        assert_ne!(
+            side(&b, true),
+            side(&w, true),
+            "not the outline east of the west region"
+        );
+        assert_ne!(
+            side(&b, false),
+            side(&e, false),
+            "nor west of the east region"
+        );
     }
 }

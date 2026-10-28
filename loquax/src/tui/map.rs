@@ -32,7 +32,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::Frame as TermFrame;
 use tokio::sync::Notify;
 
-use loquax::picture::{Drawn, Painter};
+use loquax::picture::{Drawn, Maps, Painter};
 use loquax::ui::map::{MapSetup, MapView};
 
 /// `--graphics`.
@@ -168,8 +168,6 @@ pub fn choose_graphics(
     }
 }
 
-pub use loquax::picture::Installed;
-
 /// A no-op the terminal carries out before a picture sent again only to
 /// erase stale labels: save and restore the cursor, which makes the
 /// picture's cell differ from the last frame's so ratatui sends it.
@@ -206,16 +204,21 @@ enum Picture {
 struct Painted {
     view: Viewport,
     cells: (u16, u16),
+    /// The maps directory's epoch it was painted at.
+    epoch: u64,
     fb: Vec<u16>,
     attribution: String,
     picture: Option<Picture>,
 }
 
-/// One paint asked for: the view and the cells its picture covers.
+/// One paint asked for: the view, the cells its picture covers, and the
+/// maps directory's epoch, so a region that landed paints the same view
+/// again (1089).
 #[derive(Copy, Clone, Debug, PartialEq)]
 struct Ask {
     view: Viewport,
     cells: (u16, u16),
+    epoch: u64,
 }
 
 /// What draws a view: the regions, the backend, the scratch. It does not
@@ -251,6 +254,7 @@ impl Canvas {
         Painted {
             view: *view,
             cells: ask.cells,
+            epoch: ask.epoch,
             fb,
             attribution,
             picture,
@@ -428,6 +432,7 @@ enum Engine {
 /// whole.
 pub struct MapPainter {
     graphics: Graphics,
+    maps: Maps,
     setup: MapSetup,
     engine: Engine,
     painted: Option<Painted>,
@@ -443,10 +448,11 @@ pub struct MapPainter {
 }
 
 impl MapPainter {
-    /// A painter over `regions`, drawing with `graphics` in the frame that
-    /// asks. `picker` is the terminal's answer, needed for kitty and sixel;
-    /// without one those draw for `ratatui-image`'s assumed 10 x 20 font.
-    pub fn new(regions: Vec<Installed>, graphics: Graphics, picker: Option<Picker>) -> Self {
+    /// A painter over the regions of `maps`, drawing with `graphics` in the
+    /// frame that asks. `picker` is the terminal's answer, needed for kitty
+    /// and sixel; without one those draw for `ratatui-image`'s assumed 10 x
+    /// 20 font.
+    pub fn new(maps: Maps, graphics: Graphics, picker: Option<Picker>) -> Self {
         let mut picker = match (graphics.protocol(), picker) {
             (Some(_), Some(picker)) => Some(picker),
             (Some(_), None) => Some(Picker::halfblocks()),
@@ -466,7 +472,7 @@ impl MapPainter {
             },
             Picker::font_size,
         );
-        let painter = Painter::new(regions);
+        let painter = Painter::new(maps.clone());
         let setup = MapSetup {
             cell_px: graphics.cell_px(font),
             zooms: painter.zooms(),
@@ -474,6 +480,7 @@ impl MapPainter {
         };
         Self {
             graphics,
+            maps,
             setup,
             engine: Engine::Inline(Canvas {
                 painter,
@@ -534,7 +541,7 @@ impl MapPainter {
     fn paint(&mut self, ask: Ask, now: Instant) {
         let current = |p: &Option<Painted>| {
             p.as_ref()
-                .is_some_and(|p| p.view == ask.view && p.cells == ask.cells)
+                .is_some_and(|p| p.view == ask.view && p.cells == ask.cells && p.epoch == ask.epoch)
         };
         match &mut self.engine {
             Engine::Inline(canvas) => {
@@ -550,6 +557,7 @@ impl MapPainter {
                     let of = Ask {
                         view: done.view,
                         cells: done.cells,
+                        epoch: done.epoch,
                     };
                     if keep(&of, &ask, shown_for) {
                         self.painted = Some(done);
@@ -572,6 +580,7 @@ impl MapPainter {
         let ask = Ask {
             view: shown.viewport,
             cells: (shown.area.width, shown.area.height),
+            epoch: self.maps.epoch(),
         };
         self.paint(ask, Instant::now());
         let graphics = self.graphics;
@@ -758,11 +767,9 @@ fn braille(ink: impl Fn(u32, u32) -> bool) -> char {
 mod tests {
     use super::*;
     use leviculum_map::mercator::{project, LatLon, World};
-    use leviculum_map::region::Region;
     use loquax::ui::map::PinCell;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
-    use std::fs::File;
     use std::path::PathBuf;
 
     /// Every combination of what the terminal answered, its colour tier
@@ -854,7 +861,7 @@ mod tests {
         use leviculum_ui::color::ColorDepth;
         use leviculum_ui_ratatui::style::downgrade_buffer;
         use ratatui::backend::CrosstermBackend;
-        let mut painter = MapPainter::new(Vec::new(), Graphics::Halfblocks, None);
+        let mut painter = MapPainter::new(Maps::default(), Graphics::Halfblocks, None);
         let shown = shown(painter.setup().cell_px);
         // The backend's writer is private in ratatui; a shared buffer
         // keeps what it wrote.
@@ -931,7 +938,7 @@ mod tests {
     }
 
     fn drawn(graphics: Graphics, picker: Option<Picker>) -> (TestBackend, String) {
-        let mut painter = MapPainter::new(Vec::new(), graphics, picker);
+        let mut painter = MapPainter::new(Maps::default(), graphics, picker);
         let shown = shown(painter.setup().cell_px);
         let mut terminal = Terminal::new(TestBackend::new(32, 10)).expect("terminal");
         let Ok(_) = terminal.draw(|f| painter.render(f, &shown, Style::default()));
@@ -1076,8 +1083,8 @@ mod tests {
 
     fn graphics_painters() -> [MapPainter; 2] {
         [
-            MapPainter::new(Vec::new(), Graphics::Sixel, Some(Picker::halfblocks())),
-            MapPainter::new(Vec::new(), Graphics::Kitty, None),
+            MapPainter::new(Maps::default(), Graphics::Sixel, Some(Picker::halfblocks())),
+            MapPainter::new(Maps::default(), Graphics::Kitty, None),
         ]
     }
 
@@ -1170,13 +1177,11 @@ mod tests {
             },
             PathBuf::from,
         );
-        let open = || {
-            let region = Region::open(File::open(&path).expect("region")).expect("open");
-            vec![Installed {
-                name: "region.lmr".to_string(),
-                region,
-            }]
-        };
+        // The region alone in a maps directory of its own, linked.
+        let dir = tempfile::tempdir().expect("maps dir");
+        let linked = std::fs::canonicalize(&path).expect("region");
+        std::os::unix::fs::symlink(&linked, dir.path().join("region.lmr")).expect("link");
+        let open = || Maps::new(Some(dir.path().to_path_buf()));
         let ((cols, rows), at, zooms): ((u16, u16), _, &[u8]) = match measure {
             Some(_) => (
                 (155, 65),
@@ -1234,6 +1239,7 @@ mod tests {
                 let ask = Ask {
                     view,
                     cells: (cols, rows),
+                    epoch: 0,
                 };
                 // Painted whole for the render's share: the picture is
                 // encoded again below, both ways.
@@ -1296,6 +1302,7 @@ mod tests {
             Ask {
                 view,
                 cells: (cols, rows),
+                epoch: 0,
             }
         };
         for per_s in [25u32, 50] {
@@ -1391,6 +1398,7 @@ mod tests {
         Ask {
             view,
             cells: (30, 8),
+            epoch: 0,
         }
     }
 
@@ -1399,6 +1407,7 @@ mod tests {
         Painted {
             view: ask.view,
             cells: ask.cells,
+            epoch: ask.epoch,
             fb: Vec::new(),
             attribution: String::new(),
             picture: None,
@@ -1425,6 +1434,7 @@ mod tests {
         let of = Ask {
             view: done.view,
             cells: done.cells,
+            epoch: done.epoch,
         };
         assert!(!keep(&of, &c, fresh), "A is dropped");
         assert_eq!(slot.start(), Some(c), "B is never painted");
@@ -1434,6 +1444,7 @@ mod tests {
         let of = Ask {
             view: done.view,
             cells: done.cells,
+            epoch: done.epoch,
         };
         assert!(keep(&of, &c, fresh), "C is the view wanted");
         // Keys faster than paints: after CATCH_UP_MS the paint behind is
@@ -1476,10 +1487,10 @@ mod tests {
 
     fn every_backend() -> [MapPainter; 4] {
         [
-            MapPainter::new(Vec::new(), Graphics::Halfblocks, None),
-            MapPainter::new(Vec::new(), Graphics::Braille, None),
-            MapPainter::new(Vec::new(), Graphics::Sixel, Some(Picker::halfblocks())),
-            MapPainter::new(Vec::new(), Graphics::Kitty, None),
+            MapPainter::new(Maps::default(), Graphics::Halfblocks, None),
+            MapPainter::new(Maps::default(), Graphics::Braille, None),
+            MapPainter::new(Maps::default(), Graphics::Sixel, Some(Picker::halfblocks())),
+            MapPainter::new(Maps::default(), Graphics::Kitty, None),
         ]
     }
 
@@ -1544,7 +1555,7 @@ mod tests {
     /// finished shows it, and a frame of the same view asks nothing more.
     #[test]
     fn the_threaded_painter_shows_the_view_asked_for() {
-        let mut painter = MapPainter::new(Vec::new(), Graphics::Braille, None).threaded();
+        let mut painter = MapPainter::new(Maps::default(), Graphics::Braille, None).threaded();
         let (a, b) = (ask_east(0), ask_east(5));
         let now = Instant::now();
         painter.paint(a, now);

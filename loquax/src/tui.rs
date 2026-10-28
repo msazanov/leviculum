@@ -244,9 +244,7 @@ async fn run_terminal(
     let chosen = map::choose_graphics(graphics, detected, shell.model.tier, between);
     // The map is drawn on its own thread: a key is read while the last
     // one's view is painted and encoded (1075).
-    let mut painter =
-        map::MapPainter::new(std::mem::take(&mut shell.regions), chosen.graphics, picker)
-            .threaded();
+    let mut painter = map::MapPainter::new(shell.maps.clone(), chosen.graphics, picker).threaded();
     log_graphics(&painter, &chosen, detected, between);
     shell.apply(UiEvent::MapSetup(painter.setup()));
     let mut events = EventStream::new();
@@ -406,6 +404,8 @@ enum Until {
     /// The send runner reported this leg for the newest message we wrote in
     /// the selected conversation.
     Leg(Leg),
+    /// No region load runs or waits (1089).
+    MapIdle,
 }
 
 impl Until {
@@ -431,6 +431,7 @@ impl Until {
                     >= *count
             }
             Self::Named(count) => model.names.heard_count() >= *count,
+            Self::MapIdle => model.map_loading.is_none(),
             Self::Verified(count) => {
                 model
                     .conversations
@@ -646,6 +647,7 @@ fn parse_state(name: &str) -> Result<DeliveryState, String> {
 /// until received <n> [secs]      n messages have arrived
 /// until named <n> [secs]         n peers have announced a name
 /// until verified <n> [secs]      n received messages have a verified signature
+/// until map [secs]               no map region load runs or waits
 /// until leg <direct|propagated> [secs]
 ///                                the runner is on that leg for the newest
 ///                                sent message
@@ -732,6 +734,9 @@ fn parse_script(text: &str) -> Result<Vec<Step>, String> {
             "until" => {
                 let words: Vec<&str> = rest.split_whitespace().collect();
                 match words.as_slice() {
+                    ["map", tail @ ..] => {
+                        Step::Until(Until::MapIdle, secs(tail.first().copied()).map_err(at)?)
+                    }
                     ["ready", tail @ ..] => {
                         Step::Until(Until::Ready, secs(tail.first().copied()).map_err(at)?)
                     }
@@ -876,8 +881,7 @@ async fn run_script(
     // test runs.
     let between = Between::default();
     let chosen = map::choose_graphics(options.graphics, None, shell.model.tier, between);
-    let mut painter =
-        map::MapPainter::new(std::mem::take(&mut shell.regions), chosen.graphics, None);
+    let mut painter = map::MapPainter::new(shell.maps.clone(), chosen.graphics, None);
     log_graphics(&painter, &chosen, None, between);
     shell.apply(UiEvent::MapSetup(painter.setup()));
     let mut out =
@@ -2111,7 +2115,11 @@ mod tests {
     #[test]
     fn ten_queued_pans_are_one_frame_at_their_sum() {
         let mut model = Model::new(&[[0x22; 16]]);
-        let mut painter = map::MapPainter::new(Vec::new(), map::Graphics::Braille, None);
+        let mut painter = map::MapPainter::new(
+            loquax::picture::Maps::default(),
+            map::Graphics::Braille,
+            None,
+        );
         update(&mut model, UiEvent::MapSetup(painter.setup()));
         update(
             &mut model,

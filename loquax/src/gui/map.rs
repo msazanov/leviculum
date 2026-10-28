@@ -56,6 +56,8 @@ pub struct Picture {
     pub view: Viewport,
     pub rgba: Vec<u8>,
     pub attribution: String,
+    /// The maps directory's epoch the regions were read at.
+    pub epoch: u64,
 }
 
 impl std::fmt::Debug for Picture {
@@ -84,6 +86,7 @@ pub fn paint(painter: &mut Painter, view: &Viewport, scale: f32) -> Picture {
         view: *view,
         rgba,
         attribution: drawn.attribution,
+        epoch: painter.epoch(),
     }
 }
 
@@ -216,17 +219,18 @@ pub fn measure(text: &str, size: f32) -> u32 {
 mod tests {
     use super::*;
     use leviculum_map::mercator::{project, LatLon};
-    use loquax::picture::load;
+    use loquax::picture::Maps;
     use loquax::ui::map::{fit, viewport, MapState};
     use std::path::PathBuf;
 
     /// A painter over the committed Florence region alone.
     fn florence() -> Painter {
         let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../leviculum-map/fixtures");
-        let (regions, problems) = load(&dir);
+        let maps = Maps::new(Some(dir));
+        let (regions, problems) = maps.load();
         assert!(problems.is_empty(), "{problems:?}");
         assert_eq!(regions.len(), 1);
-        Painter::new(regions)
+        Painter::new(maps)
     }
 
     fn pin(peer: u8, label: &str, lat: f64, lon: f64) -> MapPin {

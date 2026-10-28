@@ -113,6 +113,7 @@ const EXPECTED_NAMES: &str = include_str!("fixtures/tui_names.frames");
 const EXPECTED_HISTORY: &str = include_str!("fixtures/tui_history.frames");
 const EXPECTED_TELEMETRY: &str = include_str!("fixtures/tui_telemetry.frames");
 const EXPECTED_MAP: &str = include_str!("fixtures/tui_map.frames");
+const EXPECTED_MAPLOAD: &str = include_str!("fixtures/tui_mapload.frames");
 
 const SCRIPT: &str = "\
 until ready 20
@@ -1711,6 +1712,11 @@ async fn peer_session(
     let daemon = daemon(&format!("tui-{name}-{size}"), |b| b).await;
     let home = tempfile::tempdir().expect("tui home");
     prepare(home.path());
+    // No session reaches the network (1089): the map's autoload is off
+    // unless the session's own config names a source on the loopback.
+    if !home.path().join("config").exists() {
+        std::fs::write(home.path().join("config"), "map_autoload = off\n").expect("config");
+    }
     let ours = fixed_identity(0x11);
     std::fs::write(
         home.path().join("identity"),
@@ -2035,6 +2041,142 @@ async fn the_map_shows_the_pins_on_the_region_and_the_outline_in_braille_and_hal
         panic!(
             "the frames moved; this run's are in {}, the pinned ones in \
              loquax/tests/fixtures/tui_map.frames\n{all}",
+            kept.display()
+        );
+    }
+}
+
+/// The autoload session (1089), against the loopback server serving the
+/// committed fixture `leviculum-mapcut/fixtures/oltrarno.pmtiles`, no maps
+/// installed. The peer reports a position in the fixture's box; `L` opens
+/// the map there over the outline and asks for the place's region, the
+/// title saying so; once it landed the map is fitted to it at z15 and the
+/// streets are drawn. `d` over the place's region says it is loaded
+/// already; zoomed out to z9 the view is wider than the place's box, and
+/// `d` loads it.
+const MAPLOAD_SCRIPT: &str = "\
+clock 2026-10-26 14:00
+until ready 20
+frame attached
+until received 1 60
+tick 12
+key L
+frame before the load
+until map 30
+frame after the load
+key d
+frame held already
+tick 40
+key -
+key -
+key -
+key -
+key -
+key -
+key d
+frame loading the area
+until map 30
+frame the area loaded
+key q
+";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn opening_the_map_at_a_place_loads_its_region_and_the_next_frame_draws_it() {
+    const FIXTURE: &[u8] = include_bytes!("../../leviculum-mapcut/fixtures/oltrarno.pmtiles");
+    let serve = leviculum_mapcut::serve::Serve::start(vec![(
+        "oltrarno.pmtiles".to_string(),
+        FIXTURE.to_vec(),
+    )])
+    .expect("serve the fixture");
+    let source = serve.url("oltrarno.pmtiles");
+    let prepare = move |home: &Path| {
+        std::fs::write(home.join("config"), format!("map_source = {source}\n")).expect("config");
+    };
+    let messages = |_: [u8; 16]| {
+        vec![(
+            "",
+            vec![(
+                leviculum_lxmf::constants::FIELD_TELEMETRY,
+                located(4, 43_747_300, 11_272_000).encode_field_value(),
+            )],
+        )]
+    };
+    let (frames, log) = peer_session(
+        "mapload",
+        "80x24",
+        MAPLOAD_SCRIPT,
+        &["--graphics=braille"],
+        prepare,
+        messages,
+    )
+    .await;
+    let before = frame(&frames, "before the load");
+    assert!(before.contains("· loading map"), "{before}");
+    assert!(
+        before.contains("Natural Earth"),
+        "the outline meanwhile\n{before}"
+    );
+    let after = frame(&frames, "after the load");
+    assert!(
+        after.contains("z15 · 1 in view"),
+        "fitted to the region\n{after}"
+    );
+    assert!(after.contains("© OpenStreetMap contributors"), "{after}");
+    assert!(!after.contains("loading map"), "{after}");
+    assert_ne!(before, after);
+    let held = frame(&frames, "held already");
+    assert!(held.contains("the map here is loaded already"), "{held}");
+    let loading = frame(&frames, "loading the area");
+    assert!(
+        loading.contains("z9 · 1 in view · loading map"),
+        "{loading}"
+    );
+    let lines: Vec<&str> = log
+        .lines()
+        .filter_map(|l| l.find("MAPLOAD ").map(|at| &l[at..]))
+        .collect();
+    let count = |word: &str| lines.iter().filter(|l| l.starts_with(word)).count();
+    assert_eq!(
+        (
+            count("MAPLOAD start"),
+            count("MAPLOAD done"),
+            count("MAPLOAD failed")
+        ),
+        (2, 2, 0),
+        "{lines:#?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("MAPLOAD start") && l.contains("reason=place")),
+        "{lines:#?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("MAPLOAD start") && l.contains("reason=view")),
+        "{lines:#?}"
+    );
+    // Two regions written, each under the autoload's prefix.
+    let files: Vec<&str> = lines
+        .iter()
+        .filter(|l| l.starts_with("MAPLOAD done"))
+        .filter_map(|l| l.split(" file=").nth(1)?.split(' ').next())
+        .collect();
+    assert_eq!(files.len(), 2, "{lines:#?}");
+    assert_ne!(files[0], files[1]);
+    assert!(
+        files
+            .iter()
+            .all(|f| f.starts_with("auto-") && f.ends_with(".lmr")),
+        "{files:?}"
+    );
+    if frames != EXPECTED_MAPLOAD {
+        let kept = std::env::temp_dir().join("loquax-tui-mapload.frames");
+        let _ = std::fs::write(&kept, &frames);
+        panic!(
+            "the frames moved; this run's are in {}, the pinned ones in \
+             loquax/tests/fixtures/tui_mapload.frames\n{frames}",
             kept.display()
         );
     }

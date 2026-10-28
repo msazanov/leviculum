@@ -208,6 +208,7 @@ compose too.
 | this conversation's peer on the map, at its latest fix | `L` | `Alt-l` | | click the position in the header | `L` L M; `Alt-l` all |
 | zoom in / out | | | `+` (`=`) / `-` | wheel | P |
 | pan | `h` `j` `k` `l` | | arrows | | P |
+| load the map of the visible area (1089) | `d` | | palette `load map area` | | P |
 | every pin in view again | | | `0` | | P |
 | next / previous pin | | | `Tab` / `Shift-Tab` | | P |
 | open the pin's conversation | | | `Enter` | click the pin | P |
