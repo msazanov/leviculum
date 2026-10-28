@@ -93,6 +93,14 @@ impl<T: TerminalOps> TerminalGuard<T> {
         })
     }
 
+    /// Enter the UI again after something left it while the guard held it:
+    /// the panic hook does, and a caller that caught the panic carries on.
+    pub fn enter_again(&mut self) -> io::Result<()> {
+        self.ops.enter()?;
+        self.restored = false;
+        Ok(())
+    }
+
     /// Restore the terminal now (idempotent); the drop becomes a no-op.
     pub fn restore_now(&mut self) -> io::Result<()> {
         if self.restored {
@@ -159,6 +167,29 @@ mod tests {
             drop(guard);
         }
         assert!(restored.get(), "restore must run on drop");
+    }
+
+    /// Entered again after a caught panic left the UI: the drop restores
+    /// once more.
+    #[test]
+    fn guard_entered_again_restores_again() {
+        let entered = Rc::new(Cell::new(false));
+        let restored = Rc::new(Cell::new(false));
+        let mut guard = TerminalGuard::new(MockOps {
+            entered: entered.clone(),
+            restored: restored.clone(),
+        })
+        .expect("enter");
+        guard.restore_now().expect("restore");
+        entered.set(false);
+        restored.set(false);
+        guard.enter_again().expect("enter again");
+        assert!(entered.get());
+        drop(guard);
+        assert!(
+            restored.get(),
+            "restore must run on drop after entering again"
+        );
     }
 
     #[test]
