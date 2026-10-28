@@ -2,12 +2,13 @@
 //! on the way in, all of it reversed on the way out, on every path out
 //! (normal return, `?`, panic unwind, and a panic's own message).
 
-use std::io::{self, Stdout};
+use std::io::{self, Stdout, Write};
 
+use crossterm::cursor::MoveTo;
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::execute;
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    disable_raw_mode, enable_raw_mode, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen,
 };
 
 /// The terminal side-effects the IO shell needs, abstracted so a test can
@@ -59,14 +60,24 @@ impl Default for CrosstermTerminal {
     }
 }
 
+/// The bytes that enter the UI: the alternate screen, mouse capture when
+/// `mouse` is set, then a cleared screen with the cursor home. ratatui's first
+/// draw diffs against a blank buffer and never writes a blank cell, so the
+/// clear is what blanks them. Not every terminal gives a fresh alternate
+/// screen: mosh 1.4.0 ignores `?1049h` (its `get_DEC_mode` has no case for
+/// it), and the shell output stayed visible behind the first frame.
+fn write_enter<W: Write>(out: &mut W, mouse: bool) -> io::Result<()> {
+    execute!(out, EnterAlternateScreen)?;
+    if mouse {
+        execute!(out, EnableMouseCapture)?;
+    }
+    execute!(out, Clear(ClearType::All), MoveTo(0, 0))
+}
+
 impl TerminalOps for CrosstermTerminal {
     fn enter(&mut self) -> io::Result<()> {
         enable_raw_mode()?;
-        execute!(self.out, EnterAlternateScreen)?;
-        if self.mouse {
-            execute!(self.out, EnableMouseCapture)?;
-        }
-        Ok(())
+        write_enter(&mut self.out, self.mouse)
     }
 
     fn restore(&mut self) -> io::Result<()> {
@@ -190,6 +201,24 @@ mod tests {
             restored.get(),
             "restore must run on drop after entering again"
         );
+    }
+
+    /// The screen is cleared and the cursor homed after the alternate screen
+    /// switch, with and without mouse capture.
+    #[test]
+    fn enter_clears_after_the_alternate_screen() {
+        let clear = "\x1b[2J\x1b[1;1H";
+        for mouse in [false, true] {
+            let mut out = Vec::new();
+            write_enter(&mut out, mouse).expect("write");
+            let text = String::from_utf8(out).expect("utf8");
+            let alt = text.find("\x1b[?1049h").expect("alternate screen");
+            assert!(
+                text.ends_with(clear),
+                "mouse={mouse}: no clear at the end: {text:?}"
+            );
+            assert!(alt < text.len() - clear.len());
+        }
     }
 
     #[test]
