@@ -899,7 +899,7 @@ first rung it is.
 #### 2. Light or dark
 
 `loquax` asks the terminal for its background before raw mode
-(`loquax/src/tui.rs:211`), the same query `lnomad` makes: OSC 11, with
+(`loquax/src/tui.rs:213`), the same query `lnomad` makes: OSC 11, with
 `COLORFGBG` as the fallback, 100 ms to answer
 (`leviculum-ui-ratatui/src/background.rs:12`), decided by
 `resolve_theme` (`leviculum-ui/src/theme.rs:73`). It was hardcoded to
@@ -915,7 +915,7 @@ first rung it is.
 - a palette action `theme` toggles for the session, the way `t` calls
   `toggle_theme` in lnomad (`lnomad/src/app/event.rs:697`); no key, the
   keymap is decided. Its toast names the theme it turned to
-  (`loquax/src/ui.rs:2295`).
+  (`loquax/src/ui.rs:2362`).
 
 #### 3. What colour carries and what it must not carry alone
 
@@ -1111,7 +1111,7 @@ in truecolor, 3.4:1 to 9.3:1 and 3.1:1 to 8.6:1 in 256.
 #### 5. Tests the layout slice will carry
 
 - **The frames stay plain text.** The `frame` step of the key script
-  (`loquax/src/tui.rs:709`) writes characters only, and the existing
+  (`loquax/src/tui.rs:711`) writes characters only, and the existing
   snapshot frames keep pinning the monochrome look.
 - **A script step `styles <name>`** writes one frame's per-cell style as a
   map in the letters above: `.` `,` `=` for the three tints, `s` for a
@@ -1174,7 +1174,7 @@ these differences from the text above:
   for a selected block and `r` for reverse video; the build writes `^`
   for both, because a selected block in 16 colours and in monochrome is
   reverse video and a map of styles cannot tell the two apart. The
-  letters (`style_letter`, `loquax/src/tui.rs:818`): `.` ours, `,`
+  letters (`style_letter`, `loquax/src/tui.rs:820`): `.` ours, `,`
   theirs, `=` the date pill, `!` the unread rule, `^` a selected block's
   tint or reverse video, `t` the toast, `e` the error colour, blank for
   the pane. Where two tokens share their colours the earlier letter wins:
@@ -1262,6 +1262,13 @@ sees. Where it differs from the table:
   screen and leaves no outside. The palette and the detail view close on
   a click outside them; a click on a palette row does nothing yet, its
   footer's `Enter run` and `Esc close` work.
+- **The help and the detail view scroll** (1095: Lew could not reach the
+  bottom of the help on a phone over mosh). The shared scroll rows move
+  them, as in the conversation, and the wheel moves either three rows
+  wherever the pointer is; each opens at the top, and its scrollbar
+  follows. A line wider than the help wraps on a narrow screen, and the
+  scroll counts the wrapped rows, so the last row stays reachable. The
+  scrollbar is not draggable: a click on the help closes it.
 - **A drag selects from where it went down to where it is**, in reading
   order and held to the text: the margin, the bar, the time and the mark
   are never part of it. A copy has a new line between a body's lines and

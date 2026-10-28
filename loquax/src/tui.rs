@@ -24,11 +24,13 @@ use crossterm::event::{
 };
 use futures::{FutureExt, StreamExt};
 use ratatui::backend::{CrosstermBackend, TestBackend};
-use ratatui::layout::{Position, Rect};
+use ratatui::layout::{Margin, Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::symbols::border;
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{
+    Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+};
 use ratatui::{Frame, Terminal};
 
 use leviculum_ui::clipboard::osc52;
@@ -1189,7 +1191,7 @@ pub fn draw(frame: &mut Frame, view: &View, painter: Option<&mut map::MapPainter
         toast::render_rows(frame, over, note.kind, &rows, tokens);
     }
     if let Some(detail) = &view.detail {
-        draw_detail(frame, detail);
+        draw_detail(frame, detail, view.detail_scroll);
     }
     if let Some(palette) = &view.palette {
         let area = to_ratatui(ui::palette_rect(palette.rows.len(), screen.area()));
@@ -1208,7 +1210,7 @@ pub fn draw(frame: &mut Frame, view: &View, painter: Option<&mut map::MapPainter
             frame.area(),
             &help_groups(),
             " loquax help ",
-            0,
+            view.help_scroll,
             no_color,
             theme,
         );
@@ -1220,9 +1222,13 @@ pub fn draw(frame: &mut Frame, view: &View, painter: Option<&mut map::MapPainter
     }
 }
 
-/// A message's detail view, centred over the panes, its rows wrapped.
-fn draw_detail(frame: &mut Frame, detail: &ui::DetailView) {
-    let (area, rows) = ui::detail_layout(detail, from_rect(frame.area()));
+/// A message's detail view, centred over the panes, its rows wrapped, from
+/// its `scroll`th row with a scrollbar when the screen is too short for all.
+fn draw_detail(frame: &mut Frame, detail: &ui::DetailView, scroll: usize) {
+    let screen = from_rect(frame.area());
+    let (area, rows) = ui::detail_layout(detail, screen);
+    let (viewport, max) = ui::detail_scroll_bounds(detail, screen);
+    let scroll = scroll.min(max);
     let area = to_ratatui(area);
     frame.render_widget(Clear, area);
     let block = Block::default()
@@ -1231,8 +1237,20 @@ fn draw_detail(frame: &mut Frame, detail: &ui::DetailView) {
         .title_bottom(Line::from(" Esc closes ").right_aligned());
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let lines: Vec<Line> = rows.into_iter().map(Line::from).collect();
+    let lines: Vec<Line> = rows
+        .into_iter()
+        .skip(scroll)
+        .take(viewport)
+        .map(Line::from)
+        .collect();
     frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+    if max > 0 {
+        let mut state = ScrollbarState::new(max).position(scroll);
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None);
+        frame.render_stateful_widget(scrollbar, area.inner(Margin::new(0, 1)), &mut state);
+    }
 }
 
 fn from_rect(rect: Rect) -> leviculum_ui::Rect {
@@ -1677,6 +1695,142 @@ mod tests {
         assert!(screen.contains("commands"), "{screen}");
         assert!(screen.contains("▸ send"), "{screen}");
         assert!(screen.contains("focus compose"), "{screen}");
+    }
+
+    /// The first help row on a `width` x `height` screen: the help's drawn
+    /// rows ([`leviculum_ui::help::rows`]) matched against the overlay's
+    /// inside.
+    fn help_shown_from(model: &mut Model, width: u16, height: u16) -> usize {
+        update(model, UiEvent::Resize { width, height });
+        let frame = screen(model, width, height);
+        let rows: Vec<&str> = frame.lines().collect();
+        let title = rows
+            .iter()
+            .position(|row| row.contains("loquax help"))
+            .expect("the help is drawn");
+        let inner: Vec<String> = rows[title + 1..]
+            .iter()
+            .take_while(|row| !row.contains('└'))
+            .map(|row| {
+                row.trim()
+                    .trim_matches(|c| matches!(c, '│' | '█' | '║' | '▐'))
+                    .trim()
+                    .to_string()
+            })
+            .collect();
+        assert!(!inner.is_empty(), "{frame}");
+        let lines = leviculum_ui::help::lines(&help_groups());
+        let all: Vec<String> =
+            leviculum_ui::help::rows(&help_groups(), leviculum_ui::Rect::new(0, 0, width, height))
+                .into_iter()
+                .map(|row| {
+                    lines[row.line]
+                        .chars()
+                        .skip(row.chars.start)
+                        .take(row.chars.len())
+                        .collect::<String>()
+                        .trim()
+                        .to_string()
+                })
+                .collect();
+        (0..all.len())
+            .find(|&at| {
+                all.len() - at >= inner.len()
+                    && all[at..].iter().zip(&inner).all(|(want, got)| got == want)
+            })
+            .unwrap_or_else(|| panic!("no help window matches\n{frame}"))
+    }
+
+    /// Lew's phone over mosh (1095): a short screen shows part of the help,
+    /// and the shared scroll keys and the wheel move through the rest, both
+    /// ends clamped, a resize keeping the offset valid.
+    #[test]
+    fn the_help_scrolls_on_a_short_screen() {
+        let mut model = Model::new(&[[0xab; 16]]);
+        let (width, height) = (80, 20);
+        update(&mut model, UiEvent::Resize { width, height });
+        update(&mut model, UiEvent::Key(parse_key("?").expect("key")));
+        let (_, max) = leviculum_ui::help::scroll_bounds(
+            &help_groups(),
+            leviculum_ui::Rect::new(0, 0, width, height),
+        );
+        assert!(max > 2, "the help overflows 80 x 20");
+        let at = |model: &mut Model| help_shown_from(model, width, height);
+        let press = |model: &mut Model, k: &str| {
+            update(model, UiEvent::Key(parse_key(k).expect("key")));
+        };
+        let wheel = |model: &mut Model, kind: MouseEventKind| {
+            update(
+                model,
+                UiEvent::Mouse(MouseEvent {
+                    kind,
+                    column: width / 2,
+                    row: height / 2,
+                    modifiers: KeyModifiers::NONE,
+                }),
+            );
+        };
+        assert_eq!(at(&mut model), 0, "the help opens at the top");
+        press(&mut model, "k");
+        assert_eq!(at(&mut model), 0, "clamped at the top");
+        press(&mut model, "down");
+        assert_eq!(at(&mut model), 1);
+        press(&mut model, "j");
+        assert_eq!(at(&mut model), 2);
+        press(&mut model, "up");
+        assert_eq!(at(&mut model), 1);
+        press(&mut model, "k");
+        assert_eq!(at(&mut model), 0);
+        wheel(&mut model, MouseEventKind::ScrollDown);
+        let wheeled = at(&mut model);
+        assert!(wheeled > 0, "the wheel scrolls the help");
+        wheel(&mut model, MouseEventKind::ScrollUp);
+        assert_eq!(at(&mut model), 0);
+        press(&mut model, "pagedown");
+        let page = at(&mut model);
+        assert!(page > 2, "a page is more than a line");
+        press(&mut model, "pageup");
+        assert_eq!(at(&mut model), 0);
+        press(&mut model, "ctrl-v");
+        assert_eq!(at(&mut model), page.min(max));
+        press(&mut model, "alt-v");
+        assert_eq!(at(&mut model), 0);
+        press(&mut model, "end");
+        assert_eq!(at(&mut model), max);
+        press(&mut model, "j");
+        assert_eq!(at(&mut model), max, "clamped at the bottom");
+        press(&mut model, "home");
+        assert_eq!(at(&mut model), 0);
+        press(&mut model, "G");
+        assert_eq!(at(&mut model), max);
+        assert!(model.help, "no scroll key closes the help");
+        // Taller, the bottom comes nearer: the offset follows it, so `k`
+        // moves at once instead of working off rows that no longer exist.
+        let taller = height + 6;
+        update(
+            &mut model,
+            UiEvent::Resize {
+                width,
+                height: taller,
+            },
+        );
+        let (_, max_taller) = leviculum_ui::help::scroll_bounds(
+            &help_groups(),
+            leviculum_ui::Rect::new(0, 0, width, taller),
+        );
+        assert_eq!(help_shown_from(&mut model, width, taller), max_taller);
+        press(&mut model, "k");
+        assert_eq!(
+            help_shown_from(&mut model, width, taller),
+            max_taller.saturating_sub(1)
+        );
+        press(&mut model, "g");
+        assert_eq!(help_shown_from(&mut model, width, taller), 0);
+        // Closed and opened again, it starts at the top.
+        press(&mut model, "end");
+        press(&mut model, "esc");
+        press(&mut model, "?");
+        assert_eq!(help_shown_from(&mut model, width, taller), 0);
     }
 
     use leviculum_lxmf::router::MessageState;

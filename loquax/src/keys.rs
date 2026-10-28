@@ -723,6 +723,12 @@ pub fn resolve(key: &KeyEvent, pane: Panes, ctx: Ctx) -> Option<Action> {
     }
 }
 
+/// The scroll motion `key` makes in a scrolling overlay, the help or a
+/// detail view: the shared scroll rows, as in the conversation.
+pub fn overlay_scroll(key: &KeyEvent, ctx: Ctx) -> Option<ScrollCmd> {
+    keymap::best(SCROLL_ROWS, key, Panes::SCROLL, ctx).map(|(_, cmd)| cmd)
+}
+
 /// The row whose palette name is `name`.
 pub fn row_named(name: &str) -> Option<&'static Row<Action>> {
     ROWS.iter().find(|r| r.palette == Some(name))

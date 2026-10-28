@@ -113,7 +113,7 @@ use leviculum_ui::input::{
     InputBuffer, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
     MouseEventKind,
 };
-use leviculum_ui::keymap::{Ctx, ScrollCmd};
+use leviculum_ui::keymap::{scrolled, Ctx, ScrollCmd};
 use leviculum_ui::link::{classify_link, LinkKind};
 use leviculum_ui::toast::{Toast, ToastKind};
 use leviculum_ui::tokens::{tokens, Tokens};
@@ -500,6 +500,8 @@ pub struct UiModel<B> {
     pub palette: Option<Palette<B>>,
     /// Whether the help overlay is up.
     pub help: bool,
+    /// The help's first row on screen, back to the top whenever it opens.
+    pub help_scroll: usize,
     /// Our own address, once the engine is ready.
     pub address: Option<[u8; 16]>,
     /// Draw the delivery glyphs' ASCII fallback.
@@ -540,6 +542,9 @@ pub struct UiModel<B> {
     pub scroll_top: Option<usize>,
     /// The message whose detail view is up, as (conversation, message).
     pub detail: Option<(usize, usize)>,
+    /// The detail view's first row on screen, back to the top whenever one
+    /// opens.
+    pub detail_scroll: usize,
     /// The mailbox, for the header.
     pub mailbox: MailboxShown,
     /// Counts messages in and out, for the list's order.
@@ -628,6 +633,7 @@ impl<B: InputBuffer + Default> UiModel<B> {
             toasts: Vec::new(),
             palette: None,
             help: false,
+            help_scroll: 0,
             address: None,
             ascii: false,
             tick: 0,
@@ -643,6 +649,7 @@ impl<B: InputBuffer + Default> UiModel<B> {
             screen: (80, 24),
             scroll_top: None,
             detail: None,
+            detail_scroll: 0,
             mailbox: MailboxShown::default(),
             activity: 0,
             mouse: true,
@@ -1044,6 +1051,9 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
             model.screen = (width, height);
             model.selection = None;
             model.press = None;
+            // A taller screen brings the overlays' bottoms nearer.
+            model.help_scroll = model.help_scroll.min(help_bounds(model).1);
+            model.detail_scroll = model.detail_scroll.min(detail_bounds(model).1);
             Vec::new()
         }
         UiEvent::Mouse(mouse) => on_mouse(model, mouse),
@@ -1206,7 +1216,8 @@ fn on_key<B: InputBuffer + Default>(model: &mut UiModel<B>, key: KeyEvent) -> Ve
     }
 }
 
-/// A key while the help, the palette or a detail view is up.
+/// A key while the help, the palette or a detail view is up. The help and
+/// the detail view scroll by the conversation's scroll keys.
 fn overlay_key<B: InputBuffer + Default>(model: &mut UiModel<B>, key: KeyEvent) -> Vec<UiEffect> {
     if model.help {
         if matches!(
@@ -1214,12 +1225,16 @@ fn overlay_key<B: InputBuffer + Default>(model: &mut UiModel<B>, key: KeyEvent) 
             KeyCode::Char('?') | KeyCode::Char('q') | KeyCode::Enter
         ) {
             model.help = false;
+        } else if let Some(cmd) = keys::overlay_scroll(&key, model.ctx()) {
+            scroll_overlay(model, cmd);
         }
         return Vec::new();
     }
     if model.detail.is_some() {
         if matches!(key.code, KeyCode::Char('q') | KeyCode::Enter) {
             model.detail = None;
+        } else if let Some(cmd) = keys::overlay_scroll(&key, model.ctx()) {
+            scroll_overlay(model, cmd);
         }
         return Vec::new();
     }
@@ -1251,6 +1266,42 @@ fn overlay_key<B: InputBuffer + Default>(model: &mut UiModel<B>, key: KeyEvent) 
         }
     }
     Vec::new()
+}
+
+/// Scroll the help, or else the detail view, by the shared scroll rule.
+fn scroll_overlay<B: InputBuffer>(model: &mut UiModel<B>, cmd: ScrollCmd) {
+    if model.help {
+        let (viewport, max) = help_bounds(model);
+        model.help_scroll = scrolled(model.help_scroll, cmd, viewport, max);
+    } else if model.detail.is_some() {
+        let (viewport, max) = detail_bounds(model);
+        model.detail_scroll = scrolled(model.detail_scroll, cmd, viewport, max);
+    }
+}
+
+/// The help's rows on screen at once and its largest first row, on the
+/// model's screen: the bounds its renderer slices by.
+fn help_bounds<B: InputBuffer>(model: &UiModel<B>) -> (usize, usize) {
+    let (width, height) = model.screen;
+    leviculum_ui::help::scroll_bounds(&help_groups(), Rect::new(0, 0, width, height))
+}
+
+/// The open detail view's rows on screen at once and its largest first row,
+/// from [`detail_layout`] on the model's screen; nothing when none is open.
+fn detail_bounds<B: InputBuffer>(model: &UiModel<B>) -> (usize, usize) {
+    let Some(detail) = model.detail.and_then(|(c, m)| detail_view(model, c, m)) else {
+        return (0, 0);
+    };
+    let (width, height) = model.screen;
+    detail_scroll_bounds(&detail, Rect::new(0, 0, width, height))
+}
+
+/// A detail view's scroll bounds over `screen`: the rows inside its border
+/// and the largest valid first row.
+pub fn detail_scroll_bounds(detail: &DetailView, screen: Rect) -> (usize, usize) {
+    let (area, rows) = detail_layout(detail, screen);
+    let viewport = usize::from(area.height.saturating_sub(2));
+    (viewport, rows.len().saturating_sub(viewport))
 }
 
 /// Run what a key resolved to.
@@ -1866,6 +1917,7 @@ fn release<B: InputBuffer + Default>(model: &mut UiModel<B>, col: u16, row: u16)
     }
     if mark {
         model.detail = Some((model.selected, message));
+        model.detail_scroll = 0;
         return Vec::new();
     }
     if let Some(target) = link.and_then(|link| model.laid().links.get(link).cloned()) {
@@ -1918,6 +1970,19 @@ fn follow<B: InputBuffer + Default>(model: &mut UiModel<B>, target: &str) -> Vec
 /// the list a conversation a notch, the conversation [`WHEEL_ROWS`] rows
 /// without moving its cursor, the compose box a line of the body.
 fn wheel<B: InputBuffer>(model: &mut UiModel<B>, col: u16, row: u16, down: bool) -> Vec<UiEffect> {
+    // Over the help or a detail view the wheel scrolls it, wherever the
+    // pointer is: the help leaves no outside, and a detail view is the only
+    // thing to scroll while it is up.
+    if model.palette.is_none() && (model.help || model.detail.is_some()) {
+        let cmd = match down {
+            true => ScrollCmd::LineDown,
+            false => ScrollCmd::LineUp,
+        };
+        for _ in 0..WHEEL_ROWS {
+            scroll_overlay(model, cmd);
+        }
+        return Vec::new();
+    }
     if model.help || model.palette.is_some() || model.detail.is_some() {
         return Vec::new();
     }
@@ -2189,6 +2254,7 @@ fn details<B>(model: &mut UiModel<B>) -> Vec<UiEffect> {
         return Vec::new();
     }
     model.detail = Some((model.selected, model.message_cursor));
+    model.detail_scroll = 0;
     Vec::new()
 }
 
@@ -2217,6 +2283,7 @@ fn run<B: InputBuffer + Default>(model: &mut UiModel<B>, command: PaletteCommand
         }
         PaletteCommand::Help => {
             model.help = true;
+            model.help_scroll = 0;
             Vec::new()
         }
         PaletteCommand::FocusConversations => focus(model, Pane::Conversations),
@@ -2875,8 +2942,12 @@ pub struct View {
     pub palette: Option<PaletteView>,
     /// Whether the help overlay is up; its text is [`help_groups`].
     pub help: bool,
+    /// The help's first row on screen.
+    pub help_scroll: usize,
     /// The detail view, when open.
     pub detail: Option<DetailView>,
+    /// The detail view's first row on screen.
+    pub detail_scroll: usize,
     /// The colour tier and the theme the screen is drawn in.
     pub tier: Tier,
     pub theme: Theme,
@@ -3262,7 +3333,9 @@ pub fn view<B: InputBuffer>(model: &UiModel<B>) -> View {
         toast: model.current_toast().cloned(),
         palette,
         help: model.help,
+        help_scroll: model.help_scroll,
         detail: model.detail.and_then(|(c, m)| detail_view(model, c, m)),
+        detail_scroll: model.detail_scroll,
         tier: model.tier,
         theme: model.theme,
         map,
@@ -4571,6 +4644,72 @@ mod tests {
         update(&mut model, key(KeyCode::Char('q')));
         assert!(model.detail.is_none());
         assert_eq!(model.focus, Pane::Messages);
+    }
+
+    /// A detail view taller than a short screen scrolls by the shared scroll
+    /// keys and the wheel, clamped at both ends and on a resize, from the top
+    /// each time it opens (1095).
+    #[test]
+    fn the_detail_view_scrolls_on_a_short_screen() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        update(
+            &mut model,
+            UiEvent::Resize {
+                width: 80,
+                height: 10,
+            },
+        );
+        clock(&mut model, 26, 14, 2);
+        say(&mut model, "hello");
+        update(&mut model, UiEvent::SendLeg(Leg::Direct));
+        engine(&mut model, OutboxEvent::Queued { message_id: ID });
+        update(&mut model, UiEvent::SendDone(Ok(())));
+        state(&mut model, ID, MessageState::Delivered);
+        update(&mut model, key(KeyCode::Tab));
+        update(&mut model, key(KeyCode::Enter));
+        let detail = view(&model).detail.expect("the detail view");
+        let (_, max) = detail_scroll_bounds(&detail, Rect::new(0, 0, 80, 10));
+        assert!(max > 1, "the detail view overflows 80 x 10");
+        assert_eq!(model.detail_scroll, 0);
+        update(&mut model, key(KeyCode::Up));
+        assert_eq!(model.detail_scroll, 0, "clamped at the top");
+        update(&mut model, key(KeyCode::Char('j')));
+        update(&mut model, key(KeyCode::Down));
+        assert_eq!(model.detail_scroll, 2);
+        assert_eq!(view(&model).detail_scroll, 2);
+        update(&mut model, key(KeyCode::Char('k')));
+        assert_eq!(model.detail_scroll, 1);
+        update(&mut model, key(KeyCode::End));
+        assert_eq!(model.detail_scroll, max);
+        update(&mut model, key(KeyCode::PageDown));
+        assert_eq!(model.detail_scroll, max, "clamped at the bottom");
+        update(&mut model, mouse(MouseEventKind::ScrollUp, 40, 5));
+        assert_eq!(model.detail_scroll, max.saturating_sub(WHEEL_ROWS));
+        update(&mut model, key(KeyCode::Home));
+        assert_eq!(model.detail_scroll, 0);
+        update(&mut model, mouse(MouseEventKind::ScrollDown, 40, 5));
+        assert_eq!(model.detail_scroll, WHEEL_ROWS.min(max));
+        assert!(model.detail.is_some(), "no scroll key closes it");
+        update(&mut model, key(KeyCode::End));
+        update(
+            &mut model,
+            UiEvent::Resize {
+                width: 80,
+                height: 40,
+            },
+        );
+        assert_eq!(model.detail_scroll, 0, "all of it fits now");
+        update(
+            &mut model,
+            UiEvent::Resize {
+                width: 80,
+                height: 10,
+            },
+        );
+        update(&mut model, key(KeyCode::End));
+        update(&mut model, key(KeyCode::Char('q')));
+        update(&mut model, key(KeyCode::Enter));
+        assert_eq!(model.detail_scroll, 0, "it opens at the top");
     }
 
     /// A failure names its reason in the ledger; a received message says
