@@ -15,15 +15,11 @@ unsafe_code = "forbid"
 
 [dependencies]
 leviculum-map = { path = "../leviculum-map", features = ["std"] }
-# `std` for the fixture writer, which lives beside its reader there.
 leviculum-mapfill = { path = "../leviculum-mapfill", features = ["std"] }
+# The cut itself, shared with loquax's autoload (1089); `http` for an
+# `https://` input read by range requests.
+leviculum-mapcut = { path = "../leviculum-mapcut", features = ["http"] }
 embedded-graphics = "0.8"
-# The prost-generated MVT types and the geometry decoder the map
-# measurement chose (docs/drafts/map-measurement-2026-10.md, "Crates"). They
-# stay in this crate: leviculum-map reads only the flat format.
-tinymvt = "0.3"
-prost = "0.14"
-flate2 = "1"
 serde_json = "1"
 clap = { version = "4", features = ["derive"] }
 # The allocator lnsd runs on (leviculum-cli/Cargo.toml). The cut allocates

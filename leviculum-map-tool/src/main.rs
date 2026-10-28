@@ -11,9 +11,10 @@ use leviculum_map::draw::{draw_in, draw_tiles, Ink};
 use leviculum_map::mercator::{project, LatLon};
 use leviculum_map::region::{Bounds, Region};
 use leviculum_map::viewport::Viewport;
-use leviculum_map_tool::cut::{cut, CutOptions, ZoomStats};
-use leviculum_map_tool::pmtiles::Archive;
-use leviculum_map_tool::{Res, ATTRIBUTION};
+use leviculum_mapcut::cut::{cut, CutOptions, ZoomStats};
+use leviculum_mapcut::http::HttpRange;
+use leviculum_mapcut::pmtiles::{Archive, RangeRead};
+use leviculum_mapcut::{notice, source_line, Res, TileSource, ATTRIBUTION};
 use leviculum_mapfill::fill::{Edge, Scratch};
 use leviculum_mapfill::frame::Frame;
 use leviculum_mapfill::render::{NoClock, Work};
@@ -33,12 +34,13 @@ struct Cli {
 #[derive(Subcommand)]
 enum Cmd {
     /// Cut a region file from Protomaps PMTiles archives: one, or the parts
-    /// of one build downloaded separately.
+    /// of one build downloaded separately; an `http(s)://` input is read by
+    /// range requests, only the box's tiles.
     Cut {
         #[arg(short, long)]
         output: PathBuf,
         #[arg(required = true)]
-        inputs: Vec<PathBuf>,
+        inputs: Vec<String>,
         /// west,south,east,north in degrees.
         #[arg(long, allow_hyphen_values = true)]
         bbox: String,
@@ -51,6 +53,20 @@ enum Cmd {
         /// Worker threads; the output does not depend on it.
         #[arg(long)]
         threads: Option<usize>,
+    },
+    /// Copy the tiles of a box of a PMTiles archive into a smaller one, as
+    /// they are: the test fixture of the autoload (leviculum-mapcut/fixtures).
+    Extract {
+        #[arg(short, long)]
+        output: PathBuf,
+        input: String,
+        /// west,south,east,north in degrees.
+        #[arg(long, allow_hyphen_values = true)]
+        bbox: String,
+        #[arg(long, default_value_t = 0)]
+        min_zoom: u8,
+        #[arg(long, default_value_t = 15)]
+        max_zoom: u8,
     },
     /// Print a region's header and per-zoom sizes, after checking it whole.
     Info { region: PathBuf },
@@ -88,31 +104,6 @@ fn parse_bbox(s: &str) -> Res<Bounds> {
     })
 }
 
-fn source_line(a: &Archive) -> String {
-    let m = a.metadata().unwrap_or(serde_json::Value::Null);
-    let field = |k: &str| m.get(k).and_then(|v| v.as_str()).map(str::to_owned);
-    let name = field("name").unwrap_or_else(|| "a PMTiles archive".into());
-    let version = field("version")
-        .map(|v| format!(" {v}"))
-        .unwrap_or_default();
-    let osm = field("planetiler:osm:osmosisreplicationtime")
-        .or_else(|| field("planetiler:osm:replicationtime"))
-        .map(|t| format!(", OpenStreetMap data of {t}"))
-        .unwrap_or_default();
-    format!("{name}{version}{osm}")
-}
-
-fn notice(profile: u8, source: &str) -> String {
-    format!(
-        "Map data {ATTRIBUTION}, https://www.openstreetmap.org/copyright. \
-         Available under the Open Database License (ODbL) 1.0, \
-         https://opendatacommons.org/licenses/odbl/1-0/. This region file is a \
-         derived database of it and is under the same licence. Low zooms may \
-         carry Natural Earth data, which is in the public domain. Cut by \
-         leviculum-map-tool under layer profile {profile} from {source}."
-    )
-}
-
 fn print_zoom(label: &str, s: &ZoomStats) {
     println!(
         "MAPTOOL zoom={label} tiles={} entries={} empty={} shared={} bytes={} features_in={} features_out={} vertices_in={} vertices_out={} over_device={} clamped={} resimplified={}",
@@ -122,7 +113,7 @@ fn print_zoom(label: &str, s: &ZoomStats) {
 }
 
 fn cmd_cut(
-    inputs: &[PathBuf],
+    inputs: &[String],
     output: &Path,
     bbox: &str,
     zooms: (u8, u8),
@@ -130,22 +121,46 @@ fn cmd_cut(
     threads: Option<usize>,
 ) -> Res<()> {
     let t = Instant::now();
+    let bounds = parse_bbox(bbox)?;
+    let remote = |i: &String| i.starts_with("http://") || i.starts_with("https://");
     let archives = inputs
         .iter()
-        .map(|p| Archive::open(p))
+        .map(|i| match remote(i) {
+            true => Archive::from_source(Input::Http(HttpRange::new(i))),
+            false => Archive::from_source(Input::File(File::open(i)?)),
+        })
         .collect::<Res<Vec<_>>>()?;
     let opts = CutOptions {
-        bounds: parse_bbox(bbox)?,
+        bounds,
         zooms: zooms.0..=zooms.1,
         profile,
         attribution: ATTRIBUTION.to_owned(),
-        notice: notice(profile, &source_line(&archives[0])),
+        notice: notice("leviculum-map-tool", profile, &source_line(&archives[0])),
         threads: threads
             .or_else(|| std::thread::available_parallelism().ok().map(|n| n.get()))
             .unwrap_or(1),
     };
     let file = BufWriter::new(File::create(output)?);
-    let stats = cut(archives.as_slice(), &opts, file)?;
+    // A remote archive's tiles of the box are fetched first, in few
+    // ranges, where a tile at a time would cost a request each; files are
+    // read as the cut goes, so a country's box never sits in memory.
+    let (stats, input_bytes) = match inputs.iter().any(remote) {
+        true => {
+            let mut fetched = Vec::new();
+            for a in &archives {
+                fetched.push(a.fetch(&a.locate_in(&bounds, opts.zooms.clone())?)?);
+            }
+            let bytes = fetched.iter().map(|f| f.bytes).sum();
+            (cut(&Parts(&fetched), &opts, file)?, bytes)
+        }
+        false => {
+            let mut bytes = 0;
+            for p in inputs {
+                bytes += std::fs::metadata(p)?.len();
+            }
+            (cut(archives.as_slice(), &opts, file)?, bytes)
+        }
+    };
     let cut_s = t.elapsed().as_secs_f64();
     for (z, s) in &stats.zooms {
         print_zoom(&z.to_string(), s);
@@ -154,16 +169,96 @@ fn cmd_cut(
     region
         .verify()
         .map_err(|e| format!("written region does not verify: {e:?}"))?;
-    let mut input_bytes = 0;
-    for p in inputs {
-        input_bytes += std::fs::metadata(p)?.len();
-    }
     println!(
         "MAPTOOL cut inputs={} input_bytes={input_bytes} region_bytes={} entries={} threads={} seconds={cut_s:.2}",
         inputs.len(),
         stats.bytes,
         region.header().tiles,
         opts.threads
+    );
+    Ok(())
+}
+
+/// An input of `cut`: a file, or an archive on a server.
+enum Input {
+    File(File),
+    Http(HttpRange),
+}
+
+impl RangeRead for Input {
+    fn read_range(&self, offset: u64, len: u64) -> Res<Vec<u8>> {
+        match self {
+            Self::File(f) => f.read_range(offset, len),
+            Self::Http(h) => h.read_range(offset, len),
+        }
+    }
+}
+
+/// The fetched parts of one build read as one, a tile from the first part
+/// that holds it.
+struct Parts<'a>(&'a [leviculum_mapcut::pmtiles::Fetched]);
+
+impl TileSource for Parts<'_> {
+    fn tiles_in(
+        &self,
+        bounds: &Bounds,
+        zooms: std::ops::RangeInclusive<u8>,
+    ) -> Res<Vec<leviculum_map::region::TileId>> {
+        let mut all = Vec::new();
+        for f in self.0 {
+            all.extend(f.tiles_in(bounds, zooms.clone())?);
+        }
+        Ok(all)
+    }
+
+    fn mvt(&self, t: leviculum_map::region::TileId) -> Res<Option<Vec<u8>>> {
+        for f in self.0 {
+            if let Some(b) = f.mvt(t)? {
+                return Ok(Some(b));
+            }
+        }
+        Ok(None)
+    }
+}
+
+fn cmd_extract(
+    input: &str,
+    output: &Path,
+    bbox: &str,
+    zooms: std::ops::RangeInclusive<u8>,
+) -> Res<()> {
+    let archive = match input.starts_with("http://") || input.starts_with("https://") {
+        true => Archive::from_source(Input::Http(HttpRange::new(input)))?,
+        false => Archive::from_source(Input::File(File::open(input)?))?,
+    };
+    let located = archive.locate_in(&parse_bbox(bbox)?, zooms)?;
+    let fetched = archive.fetch(&located)?;
+    let mut tiles = std::collections::BTreeMap::new();
+    for t in fetched.tiles() {
+        if let Some(raw) = fetched.raw(t) {
+            tiles.insert(t, raw.to_vec());
+        }
+    }
+    // The metadata's text fields alone (name, version, attribution, the
+    // OSM date): its layer lists and statistics are most of a small
+    // archive, and nothing here reads them.
+    let metadata: serde_json::Map<String, serde_json::Value> = match archive.metadata()? {
+        serde_json::Value::Object(m) => m.into_iter().filter(|(_, v)| v.is_string()).collect(),
+        _ => serde_json::Map::new(),
+    };
+    let out = BufWriter::new(File::create(output)?);
+    leviculum_mapcut::pmtiles::write(
+        &tiles,
+        archive.header.tile_compression,
+        &serde_json::Value::Object(metadata),
+        out,
+    )?;
+    println!(
+        "MAPTOOL extract tiles={} fetched_bytes={} requests={} bytes={}",
+        tiles.len(),
+        fetched.bytes,
+        fetched.requests,
+        std::fs::metadata(output)?.len()
     );
     Ok(())
 }
@@ -270,6 +365,13 @@ fn main() -> Res<()> {
             profile,
             threads,
         ),
+        Cmd::Extract {
+            output,
+            input,
+            bbox,
+            min_zoom,
+            max_zoom,
+        } => cmd_extract(&input, &output, &bbox, min_zoom..=max_zoom),
         Cmd::Info { region } => cmd_info(&region),
         Cmd::Render {
             region,

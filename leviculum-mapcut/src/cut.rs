@@ -287,7 +287,7 @@ pub fn cut<S: TileSource + ?Sized, W: Write + Seek>(
         layers.insert(z, l);
     }
     let mut ids: Vec<TileId> = src
-        .tiles()
+        .tiles_in(&opts.bounds, opts.zooms.clone())?
         .into_iter()
         .filter(|t| opts.zooms.contains(&t.z) && in_bounds(*t, &opts.bounds))
         .collect();

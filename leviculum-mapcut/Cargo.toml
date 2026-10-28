@@ -1,0 +1,41 @@
+[package]
+name = "leviculum-mapcut"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Cuts leviculum map region files from Protomaps PMTiles archives, local or by HTTP range requests (#474)"
+# A library for the workspace's own programs, not published on its own.
+publish = false
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[features]
+# A PMTiles archive read over HTTP(S) by range requests, so a region is cut
+# from the tiles of its box alone and never the planet (1089). loquax turns
+# it on for the map's autoload, leviculum-map-tool for a URL input.
+http = ["dep:ureq"]
+
+[dependencies]
+leviculum-map = { path = "../leviculum-map", features = ["std"] }
+# `std` for the fixture writer, which lives beside its reader there.
+leviculum-mapfill = { path = "../leviculum-mapfill", features = ["std"] }
+# The prost-generated MVT types and the geometry decoder the map
+# measurement chose (docs/drafts/map-measurement-2026-10.md, "Crates"). They
+# stay in this crate: leviculum-map reads only the flat format, and the
+# no_std cores never link this one.
+tinymvt = "0.3"
+prost = "0.14"
+flate2 = "1"
+serde_json = "1"
+# Blocking, so a load is one thread and no runtime; rustls on ring with the
+# webpki roots, so the musl-static binaries need no system TLS or CA files.
+# Without `gzip`: the tiles are compressed already, and a range request
+# must not come back content-encoded.
+ureq = { version = "3", default-features = false, features = ["rustls"], optional = true }
+
+[dev-dependencies]
+tinymvt = "0.3"

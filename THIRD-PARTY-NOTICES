@@ -33,9 +33,9 @@ Linked into lnsd, lnstest, lncp, lnstatus, lnomad, lblogd and
 lnflash. Built for x86_64-unknown-linux-musl and
 aarch64-unknown-linux-musl.
 
-380 third-party crates, by licence:
+384 third-party crates, by licence:
 
-  Apache-2.0                   263
+  Apache-2.0                   267
   BSD-2-Clause                 1
   BSD-3-Clause                 6
   CC0-1.0                      1
@@ -537,6 +537,7 @@ Applies to:
   time-core 0.1.9
   time-macros 0.2.31
   unicode-ident 1.0.22
+  utf8-zero 0.8.1
   utf8parse 0.2.2
   wide 0.8.3
   yasna 0.5.2
@@ -862,6 +863,7 @@ Applies to:
   autocfg 1.5.0
   az 1.2.1
   base64 0.22.1
+  base64 0.23.1
   bitflags 1.3.2
   bitflags 2.13.0
   blocking 1.6.2
@@ -2330,6 +2332,7 @@ Applies to:
   fragile 2.1.0
   micromath 2.1.0
   static_assertions 1.1.0
+  ureq-proto 0.6.5
   zeroize 1.8.2
   zeroize_derive 1.5.0
 
@@ -7026,6 +7029,7 @@ Apache-2.0 — Apache License 2.0
 
 Applies to:
   self_cell 1.3.0
+  ureq 3.4.2
   zune-core 0.5.1
   zune-jpeg 0.5.15
 

@@ -1,7 +1,7 @@
 //! Host harness of the map measurement (#474).
 //!
-//! `extract <tiles> <fixture>` decodes, through the map tool's MVT decoder
-//! (`leviculum-map-tool`, `mvt`), the z15 Protomaps tiles a 240x320
+//! `extract <tiles> <fixture>` decodes, through the tree's MVT decoder
+//! (`leviculum-mapcut`, `mvt`), the z15 Protomaps tiles a 240x320
 //! view centred on Santa Maria del Fiore touches (`<tiles>/15_<x>_<y>.mvt.gz`,
 //! fetched as in `docs/drafts/map-measurement-2026-10.md`) and writes the
 //! flat fixture the device binary carries in flash.
@@ -16,8 +16,8 @@ use std::path::Path;
 use std::time::Instant;
 
 use embedded_graphics::prelude::*;
-use leviculum_map_tool::mvt;
-use leviculum_map_tool::pmtiles::decompress;
+use leviculum_mapcut::mvt;
+use leviculum_mapcut::pmtiles::decompress;
 use leviculum_mapfill::fill::{Edge, Scratch};
 use leviculum_mapfill::fixture::{write, Fixture};
 use leviculum_mapfill::frame::Frame;

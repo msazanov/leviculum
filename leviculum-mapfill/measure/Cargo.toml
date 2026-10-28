@@ -15,7 +15,8 @@ publish = false
 [dependencies]
 leviculum-mapfill = { path = "..", features = ["std"] }
 embedded-graphics = "0.8"
-# The tree's one MVT decoder, which started here and moved to the map tool
-# when the cut needed it too; prost and tinymvt come in through it.
-leviculum-map-tool = { path = "../../leviculum-map-tool" }
+# The tree's one MVT decoder, which started here, moved to the map tool
+# when the cut needed it too, and to leviculum-mapcut when loquax did
+# (1089); prost and tinymvt come in through it.
+leviculum-mapcut = { path = "../../leviculum-mapcut" }
 png = "0.18"

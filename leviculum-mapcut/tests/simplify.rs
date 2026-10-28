@@ -1,8 +1,6 @@
 //! Douglas-Peucker, quantisation and areas.
 
-use leviculum_map_tool::simplify::{
-    area2, douglas_peucker, quantise, quantise_path, simplify_ring,
-};
+use leviculum_mapcut::simplify::{area2, douglas_peucker, quantise, quantise_path, simplify_ring};
 
 #[test]
 fn douglas_peucker_keeps_the_ends_and_the_corners() {

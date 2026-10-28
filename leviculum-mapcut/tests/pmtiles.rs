@@ -2,7 +2,7 @@
 //! varint directory, runs and a leaf directory.
 
 use leviculum_map::region::TileId;
-use leviculum_map_tool::pmtiles::{parse_directory, tile_id, tile_of, Archive};
+use leviculum_mapcut::pmtiles::{parse_directory, tile_id, tile_of, Archive};
 
 #[test]
 fn hilbert_ids_round_trip() {
@@ -91,7 +91,7 @@ fn an_archive_with_a_run_and_a_leaf() {
     let path = std::env::temp_dir().join(format!("lmt-pmtiles-{}.pmtiles", std::process::id()));
     std::fs::write(&path, &file).expect("write");
     let a = Archive::open(&path).expect("open");
-    let tiles: Vec<TileId> = a.tiles().collect();
+    let tiles: Vec<TileId> = a.tiles().expect("walk");
     let _ = std::fs::remove_file(&path);
     let t = |z, x, y| TileId { z, x, y };
     assert_eq!(tiles, [t(0, 0, 0), t(1, 0, 0), t(1, 0, 1), t(2, 0, 0)]);

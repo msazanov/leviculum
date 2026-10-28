@@ -6,8 +6,8 @@ use std::collections::BTreeMap;
 use std::io::Cursor;
 
 use leviculum_map::region::{Bounds, Region, TileId};
-use leviculum_map_tool::cut::{cut, cut_tile, in_bounds, CutOptions, DEVICE_POINTS};
-use leviculum_map_tool::{Res, TileSource};
+use leviculum_mapcut::cut::{cut, cut_tile, in_bounds, CutOptions, DEVICE_POINTS};
+use leviculum_mapcut::{Res, TileSource};
 use leviculum_mapfill::fixture::Kind;
 use leviculum_mapfill::style::Class;
 use prost::Message;
@@ -133,12 +133,15 @@ struct Synthetic {
 }
 
 impl TileSource for Synthetic {
-    fn tiles(&self) -> Vec<TileId> {
+    /// Every tile, the box and the zooms ignored: the cut filters them
+    /// itself, which `tiles_outside_the_box_or_the_zooms_are_left_out`
+    /// holds it to.
+    fn tiles_in(&self, _: &Bounds, _: std::ops::RangeInclusive<u8>) -> Res<Vec<TileId>> {
         let mut t: Vec<TileId> = self.tiles.keys().copied().collect();
         if self.reversed {
             t.reverse();
         }
-        t
+        Ok(t)
     }
 
     fn mvt(&self, t: TileId) -> Res<Option<Vec<u8>>> {
