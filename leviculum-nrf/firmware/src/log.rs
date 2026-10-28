@@ -139,10 +139,10 @@ pub static LOG_SIGNAL: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 /// so it is as safe in `log_fmt_critical`'s boot-phase and PMRT-replay
 /// callers as in a task.
 ///
-/// It is *meaningful* from every logging context too, because both
-/// firmware entry points call `embassy_nrf::init` — which starts RTC1 —
-/// as the FIRST statement of `main`, before any log call
-/// (`bin/t114.rs:42`, `bin/rak4631.rs:43`). The panic handler
+/// It is *meaningful* from every logging context too, because every
+/// firmware entry point calls `embassy_nrf::init` — which starts RTC1 —
+/// at the start of `main`, before any log call (`bin/rak4631.rs:43`;
+/// on the shared loop `node_loop::enter`, `src/node_loop.rs:187`). The panic handler
 /// (`lib.rs:715`) and the `HardFault` exception (`lib.rs:955`) never log:
 /// both write their evidence to `.uninit` RAM and `sys_reset`, and it is
 /// the NEXT boot that logs it — with its own running clock. There is

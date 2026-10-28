@@ -11,7 +11,7 @@ src/bin/rak4631.rs (1470):
 src/bin/sd-ram-probe.rs (294):
 src/bin/solarnode.rs (1494):
 src/bin/t1000e.rs (1367): feedback
-src/bin/t114.rs (1407):
+src/bin/t114.rs (218):
 src/ble/columba.rs (3225): info log radio_store warn
 src/ble/mod.rs (899): info log media radio_store transport_stats warn
 src/ble/notify.rs (238): ble log

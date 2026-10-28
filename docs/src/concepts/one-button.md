@@ -19,10 +19,10 @@ and the Solar Node add a `LedNotificationPin`
 (`leviculum-nrf/src/boards/rak4631.rs:50`,
 `leviculum-nrf/src/boards/solarnode.rs:89`), the T1000-E a `BuzzerPin`
 (`leviculum-nrf/src/boards/t1000e.rs:289`). The Pocket drives an OLED
-and the T114 an ST7789 (`leviculum-nrf/src/bin/t114.rs:490`).
+and the T114 an ST7789 (`leviculum-nrf/src/bin/t114.rs:112`).
 
 Since 889 every board brings the button up with the same task
-(`leviculum-nrf/src/bin/t114.rs:517`,
+(`leviculum-nrf/src/bin/t114.rs:139`,
 `leviculum-nrf/src/bin/solarnode.rs:571`,
 `leviculum-nrf/src/bin/rak4631.rs:528`,
 `leviculum-nrf/src/bin/t1000e.rs:517`). The T114 and the Solar Node used
@@ -36,7 +36,7 @@ Before 892 the LEDs said nothing a user asked for. The T114, the Solar
 Node and the T1000-E flashed theirs once at boot and never touched it
 again. The boot blink stays, and since order 1055 it is the LED player's
 opening, on a timer instead of a spin that held USB back
-(`leviculum-nrf/src/bin/t114.rs:597`,
+(`leviculum-nrf/src/bin/t114.rs:210`,
 `leviculum-nrf/src/bin/solarnode.rs:673`,
 `leviculum-nrf/src/bin/t1000e.rs:598`). The Pocket V2's two LEDs pulsed
 LoRa TX and RX activity (`leviculum-nrf/src/led.rs`), and a bare RAK4631

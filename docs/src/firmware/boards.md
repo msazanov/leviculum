@@ -26,19 +26,19 @@ runs an event-driven main loop that dispatches packets between them:
 | Interface | ID | Medium | HW MTU |
 |-----------|----|--------|--------|
 | `serial_usb` | 0 | USB CDC-ACM, HDLC framing to host | 564 |
-| `lora_sx1262` on the T114, RAK4631 and solar node, `lora_lr1110` on the T1000-E | 1 | the board's LoRa radio, named in its board file (`IFACE_NAMES`) | 508 (#390: two frames of at most 254 B, `leviculum-nrf/src/bin/t114.rs:289`) |
+| `lora_sx1262` on the T114, RAK4631 and solar node, `lora_lr1110` on the T1000-E | 1 | the board's LoRa radio, named in its board file (`IFACE_NAMES`) | 508 (#390: two frames of at most 254 B, `leviculum-nrf/src/node_loop.rs:458`) |
 | `ble` | 2 | BLE peripheral, Columba v2.2 | 564 |
 
 (Interface registration and MTUs:
-`set_interface_name` (`leviculum-nrf/src/bin/t114.rs:270-287`) and
+`set_interface_name` (`leviculum-nrf/src/node_loop.rs:439-456`) and
 `leviculum-nrf/src/bin/rak4631.rs:297-338`. The main loop selecting over
 the three RX sources plus a timer deadline begins at
-`leviculum-nrf/src/bin/t114.rs:752`.)
+`leviculum-nrf/src/node_loop.rs:848`.)
 
 Transport routing is enabled in the node builder, so an LNode forwards
 packets and serves paths for other peers, exactly like a
 transport-enabled `lnsd`.
-(`enable_transport` (`leviculum-nrf/src/bin/t114.rs:167`),
+(`enable_transport` (`leviculum-nrf/src/node_loop.rs:337`),
 `leviculum-nrf/src/bin/rak4631.rs:199`)
 
 A board does not accept compressed resources. The firmware builds
@@ -525,7 +525,7 @@ board. Exactly one BSP feature must be enabled per build; a
 
 > **Note on BLE:** Both firmware entry points register a BLE interface
 > and call `leviculum_nrf::ble::init`
-> (`leviculum-nrf/src/bin/t114.rs:355`,
+> (`leviculum-nrf/src/bin/t114.rs:89`,
 > `leviculum-nrf/src/bin/rak4631.rs:410`). The Cargo `softdevice`
 > feature, and therefore the BLE stack, is pulled in by *both* BSP
 > features (`leviculum-nrf/Cargo.toml:380`,
@@ -617,7 +617,7 @@ RNode configuration on the same LoRa network.
 
 (`leviculum-nrf/README.md:8`. The profile the firmware loads at boot,
 `eu_medium` (`leviculum-nrf/src/lora.rs:595-634`), applied at
-`leviculum-nrf/src/bin/t114.rs:305` and
+`leviculum-nrf/src/node_loop.rs:474` and
 `leviculum-nrf/src/bin/rak4631.rs:402`.)
 
 See [Flashing](flashing.md) for how to build and write these binaries to

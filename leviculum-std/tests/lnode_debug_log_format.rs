@@ -288,6 +288,28 @@ fn nrf_source(rel: &str) -> String {
     tree_source("leviculum-nrf/src", rel)
 }
 
+/// Does this board binary run the shared node loop (#469 step 7, order
+/// 1085)? The boards move onto it one order at a time; until one has, its
+/// binary holds every line of its boot itself.
+fn on_node_loop(bin_src: &str) -> bool {
+    bin_src.contains("node_loop::run(")
+}
+
+/// A board binary's boot path as text: the binary and, for a binary on the
+/// shared node loop, the loop's source behind it with `crate::` spelt
+/// `leviculum_nrf::`, the path the same code had while it lived in the
+/// binary. The invariants below are about what a board runs, not about
+/// which file of the crate a line sits in.
+fn board_boot_path(bin: &str) -> String {
+    let src = nrf_source(bin);
+    if on_node_loop(&src) {
+        let skeleton = nrf_source("node_loop.rs").replace("crate::", "leviculum_nrf::");
+        format!("{src}\n{skeleton}")
+    } else {
+        src
+    }
+}
+
 /// A source of the orchestration stratum, `leviculum-nrf/firmware/src`, where
 /// the chip-free modules move out of the bind crate (#469).
 fn firmware_source(rel: &str) -> String {
@@ -345,13 +367,13 @@ fn the_firmware_still_emits_the_shapes_these_parsers_expect() {
         "spawn_diagnostics_tasks no longer spawns both watermark tasks"
     );
     for bin in ["bin/t114.rs", "bin/rak4631.rs", "bin/solarnode.rs"] {
-        let src = nrf_source(bin);
+        let src = board_boot_path(bin);
         assert!(
             src.contains("leviculum_nrf::log_boot_diagnostics("),
             "leviculum-nrf/src/{bin} no longer logs the shared boot diagnostics"
         );
         assert!(
-            src.contains("leviculum_nrf::spawn_diagnostics_tasks(&spawner)"),
+            src.contains("leviculum_nrf::spawn_diagnostics_tasks("),
             "leviculum-nrf/src/{bin} no longer spawns the shared diagnostics tasks"
         );
     }
@@ -439,20 +461,42 @@ fn the_firmware_stamps_every_line_with_board_uptime() {
     // already running when the first line is written. Both entry points start
     // it — `embassy_nrf::init` — before they log anything. If that order ever
     // flips, the boot lines silently become t=0.
-    for bin in ["bin/t114.rs", "bin/rak4631.rs"] {
-        let src = nrf_source(bin);
-        let init = src
-            .find("embassy_nrf::init(")
-            .unwrap_or_else(|| panic!("leviculum-nrf/src/{bin} no longer calls embassy_nrf::init"));
-        let first_log = ["log_critical!", "info!(", "warn!(", "log_fmt"]
+    // A binary on the shared node loop starts the clock through
+    // `node_loop::enter`, its first call (#469 step 7, order 1085): there
+    // the call has to precede the binary's first line, and in the loop's
+    // source `embassy_nrf::init` has to precede every line.
+    let first_log = |src: &str, file: &str| {
+        ["log_critical!", "info!(", "warn!(", "log_fmt"]
             .iter()
             .filter_map(|pat| src.find(pat))
             .min()
-            .unwrap_or_else(|| panic!("leviculum-nrf/src/{bin} logs nothing at all"));
+            .unwrap_or_else(|| panic!("leviculum-nrf/src/{file} logs nothing at all"))
+    };
+    let starts_clock_before_logging = |file: &str, src: &str, start: &str| {
+        let init = src
+            .find(start)
+            .unwrap_or_else(|| panic!("leviculum-nrf/src/{file} no longer calls {start}"));
         assert!(
-            init < first_log,
-            "leviculum-nrf/src/{bin} logs before embassy_nrf::init starts the clock, \
+            init < first_log(src, file),
+            "leviculum-nrf/src/{file} logs before {start} starts the clock, \
              so the first lines would carry t=0 rather than a real uptime"
+        );
+    };
+    let mut on_loop = 0;
+    for bin in ["bin/t114.rs", "bin/rak4631.rs"] {
+        let src = nrf_source(bin);
+        if on_node_loop(&src) {
+            on_loop += 1;
+            starts_clock_before_logging(bin, &src, "node_loop::enter(");
+        } else {
+            starts_clock_before_logging(bin, &src, "embassy_nrf::init(");
+        }
+    }
+    if on_loop > 0 {
+        starts_clock_before_logging(
+            "node_loop.rs",
+            &nrf_source("node_loop.rs"),
+            "embassy_nrf::init(",
         );
     }
 }
@@ -1298,7 +1342,7 @@ fn the_transmit_deferral_is_spent_once_per_externally_paced_event() {
 #[test]
 fn the_identity_lines_are_not_dropped_by_the_runtime_gate() {
     for bin in ["bin/t114.rs", "bin/rak4631.rs", "bin/solarnode.rs"] {
-        let src = nrf_source(bin);
+        let src = board_boot_path(bin);
         assert!(
             !src.contains(r#"log_fmt("[IDENTITY] ""#),
             "leviculum-nrf/src/{bin} writes an [IDENTITY] line through the \
@@ -1590,7 +1634,7 @@ fn the_display_and_button_bring_up_is_not_dropped_by_the_runtime_gate() {
 #[test]
 fn the_time_source_banner_mirrors_the_node_rather_than_the_seeding_sites() {
     for bin in ["bin/t114.rs", "bin/rak4631.rs", "bin/solarnode.rs"] {
-        let src = nrf_source(bin);
+        let src = board_boot_path(bin);
         assert!(
             src.contains("set_time_source(node.time_source())"),
             "leviculum-nrf/src/{bin} never mirrors node.time_source() into the \

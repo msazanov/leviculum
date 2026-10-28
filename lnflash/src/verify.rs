@@ -28,7 +28,7 @@
 //! **A line the firmware replays is not a line the firmware claims**
 //! (Codeberg #372). At boot our firmware re-emits the last ~2 KiB of the
 //! previous boot's log out of retained RAM, each line wrapped in
-//! `[PERSISTENT_LOG]` (`leviculum-nrf/src/bin/t114.rs:163`,
+//! `[PERSISTENT_LOG]` (`leviculum-nrf/src/node_loop.rs:196`,
 //! `rak4631.rs:185`, `solarnode.rs:190`). Those lines include the *previous*
 //! firmware's own `[FW_BUILD]` banner, so a board that has just booted into
 //! a new image says the old image's sha within milliseconds of the port
@@ -96,7 +96,7 @@ const READ_STEP: Duration = Duration::from_millis(200);
 const CARRY_MAX: usize = 16 * 1024;
 
 /// The prefix our firmware puts on every line it replays out of retained
-/// RAM at boot (`leviculum-nrf/src/bin/t114.rs:163`). A line carrying it is
+/// RAM at boot (`leviculum-nrf/src/node_loop.rs:196`). A line carrying it is
 /// output from the boot *before* this one, quoted verbatim — including a
 /// `[FW_BUILD]` banner, which is then the sha of the image that was
 /// replaced. Structural, not temporal: this is the firmware saying "this is
@@ -795,7 +795,7 @@ mod tests {
     const FIELD_NEW: &str = "01eb398b7";
 
     /// A line of the new firmware's boot-time persistent-log replay, byte
-    /// for byte as the board emits it: `leviculum-nrf/src/bin/t114.rs:163`
+    /// for byte as the board emits it: `leviculum-nrf/src/node_loop.rs:196`
     /// wraps a retained line from the PREVIOUS boot in `[PERSISTENT_LOG]`,
     /// so the line carries two stamps — the quoted boot's, and this one's.
     fn replayed_banner(sha: &str) -> String {
