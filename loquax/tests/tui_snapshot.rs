@@ -1916,7 +1916,7 @@ async fn the_map_shows_the_pins_on_the_region_and_the_outline_in_braille_and_hal
         assert_eq!(
             line,
             format!(
-                "GRAPHICS backend={graphics} detected=none cell={} zooms=0-20",
+                "GRAPHICS backend={graphics} reason=forced detected=none between=none cell={} zooms=0-20",
                 match graphics {
                     "braille" => "2x4",
                     _ => "1x2",

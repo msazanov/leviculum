@@ -160,9 +160,10 @@ struct TuiArgs {
     #[arg(long)]
     no_mouse: bool,
 
-    /// How the map is drawn: `auto` asks the terminal and climbs the
-    /// ladder, kitty or sixel, else half-blocks in colour, else braille;
-    /// the others force one.
+    /// How the map is drawn: `auto` picks by itself, asking the terminal
+    /// and climbing the ladder, kitty or sixel, else half-blocks in colour,
+    /// else braille, which is also what it takes behind mosh; the others
+    /// force one.
     #[arg(long, value_enum, default_value_t = tui::map::GraphicsFlag::Auto)]
     graphics: tui::map::GraphicsFlag,
 

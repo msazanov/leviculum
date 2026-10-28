@@ -51,7 +51,7 @@ use leviculum_ui::tokens::Tokens;
 use leviculum_ui_ratatui::background::detect_background;
 use leviculum_ui_ratatui::event::{key_event, mouse_event, step_event, EventStep};
 use leviculum_ui_ratatui::geometry::to_ratatui;
-use leviculum_ui_ratatui::images::{Picker, ProtocolType};
+use leviculum_ui_ratatui::images::{Between, Picker, ProtocolType};
 use leviculum_ui_ratatui::style::downgrade_buffer;
 use leviculum_ui_ratatui::terminal::{install_panic_hook, set_mouse_capture, TerminalOps};
 use leviculum_ui_ratatui::{help, to_ratatui_text, toast, CrosstermTerminal, TerminalGuard};
@@ -1007,14 +1007,30 @@ fn log_keys(model: &Model) {
     );
 }
 
-/// The once-at-start `tui.log` line naming how the map is drawn, beside
-/// the `KEYS` line.
-fn log_graphics(painter: &map::MapPainter, detected: Option<ProtocolType>) {
+/// The once-at-start `tui.log` line naming how the map is drawn and why,
+/// beside the `KEYS` line.
+fn log_graphics(
+    painter: &map::MapPainter,
+    chosen: &map::Chosen,
+    detected: Option<ProtocolType>,
+    between: Between,
+) {
     let setup = painter.setup();
+    let names = [
+        (between.mosh, "mosh"),
+        (between.tmux, "tmux"),
+        (between.screen, "screen"),
+    ];
+    let between: Vec<&str> = names.iter().filter(|(b, _)| *b).map(|(_, n)| *n).collect();
     tracing::info!(
-        "GRAPHICS backend={} detected={} cell={}x{} zooms={}-{}",
+        "GRAPHICS backend={} reason={} detected={} between={} cell={}x{} zooms={}-{}",
         painter.graphics().name(),
+        chosen.reason(),
         detected.map_or("none".to_string(), |p| format!("{p:?}").to_lowercase()),
+        match between.is_empty() {
+            true => "none".to_string(),
+            false => between.join(","),
+        },
         setup.cell_px.0,
         setup.cell_px.1,
         setup.zooms.0,
@@ -1064,12 +1080,14 @@ async fn run_terminal(
         false => None,
     };
     let detected = picker.as_ref().map(Picker::protocol_type);
-    let chosen = map::choose_graphics(graphics, detected, shell.model.tier);
+    let between = Between::detect();
+    let chosen = map::choose_graphics(graphics, detected, shell.model.tier, between);
     // The map is drawn on its own thread: a key is read while the last
     // one's view is painted and encoded (1075).
     let mut painter =
-        map::MapPainter::new(std::mem::take(&mut shell.regions), chosen, picker).threaded();
-    log_graphics(&painter, detected);
+        map::MapPainter::new(std::mem::take(&mut shell.regions), chosen.graphics, picker)
+            .threaded();
+    log_graphics(&painter, &chosen, detected, between);
     shell.apply(UiEvent::MapSetup(painter.setup()));
     let mut events = EventStream::new();
     shell.apply(UiEvent::Clock(local_now()));
@@ -1703,10 +1721,14 @@ async fn run_script(
     let text = std::fs::read_to_string(script).map_err(|e| format!("{}: {e}", script.display()))?;
     let steps = parse_script(&text).map_err(|e| format!("{}: {e}", script.display()))?;
     log_keys(&shell.model);
-    // A script asks no terminal: `auto` climbs the ladder on its tier.
-    let chosen = map::choose_graphics(options.graphics, None, shell.model.tier);
-    let mut painter = map::MapPainter::new(std::mem::take(&mut shell.regions), chosen, None);
-    log_graphics(&painter, None);
+    // A script asks no terminal and looks for no go-between: `auto` climbs
+    // the ladder on its tier alone, so a frame does not depend on where the
+    // test runs.
+    let between = Between::default();
+    let chosen = map::choose_graphics(options.graphics, None, shell.model.tier, between);
+    let mut painter =
+        map::MapPainter::new(std::mem::take(&mut shell.regions), chosen.graphics, None);
+    log_graphics(&painter, &chosen, None, between);
     shell.apply(UiEvent::MapSetup(painter.setup()));
     let mut out =
         std::fs::File::create(frames).map_err(|e| format!("{}: {e}", frames.display()))?;

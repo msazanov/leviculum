@@ -6,9 +6,10 @@
 //! pins go; this module draws the view's picture under them and the
 //! attribution line below it. The ladder, decided 2026-10-27: kitty or
 //! sixel where the terminal answers for one, else half-blocks in colour,
-//! else braille, which is also the backend under `--no-color`. The
-//! `--graphics` flag forces a rung, and `tui.log` names the one taken
-//! (`GRAPHICS backend=`), beside the `KEYS` line.
+//! else braille, which is also the backend under `--no-color` and behind
+//! mosh (1088). The `--graphics` flag forces a rung, and `tui.log` names
+//! the one taken and why (`GRAPHICS backend= reason=`), beside the `KEYS`
+//! line.
 //!
 //! Regions are read from `$LNMSG_HOME/maps/` when `LNMSG_HOME` is set and
 //! from `${XDG_DATA_HOME:-~/.local/share}/loquax/maps/` otherwise: every
@@ -37,7 +38,7 @@ use leviculum_mapfill::render::{NoClock, Work};
 use leviculum_mapfill::style::{Profile, BACKGROUND};
 use leviculum_ui::color::Tier;
 use leviculum_ui_ratatui::images::{
-    self, Backend, FontSize, Picker, Pictures, ProtocolType, SlicedProtocol,
+    self, Backend, Between, FontSize, Picker, Pictures, ProtocolType, SlicedProtocol,
 };
 use ratatui::buffer::CellDiffOption;
 use ratatui::layout::Rect;
@@ -101,24 +102,83 @@ impl Graphics {
     }
 }
 
+/// The rung the ladder took, and the facts that kept it off the rungs
+/// above.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Chosen {
+    pub graphics: Graphics,
+    /// `tui.log`'s `reason=`: `forced` for a `--graphics` rung; under
+    /// `auto` `no-color`, `no-graphics` (the terminal answered for no
+    /// kitty or sixel), `mosh`, `no-truecolor` (half-blocks in the 256
+    /// colour palette) and `16-colors`. Empty on the top rung.
+    pub reasons: Vec<&'static str>,
+}
+
+impl Chosen {
+    /// The reasons as `tui.log` writes them, `best` where there is none.
+    pub fn reason(&self) -> String {
+        match self.reasons.is_empty() {
+            true => "best".to_string(),
+            false => self.reasons.join(","),
+        }
+    }
+}
+
 /// The ladder: a forced rung as it is; under `auto` kitty or sixel when
 /// the terminal answered for one, half-blocks with 256 colours or more,
 /// braille below that and without colour. A terminal that answered for
 /// iTerm2's protocol climbs on to half-blocks: the decision names kitty and
 /// sixel only.
-pub fn choose_graphics(flag: GraphicsFlag, detected: Option<ProtocolType>, tier: Tier) -> Graphics {
+///
+/// Behind mosh it is braille (1088). mosh answers the protocol query
+/// itself and drops sixel and kitty pictures, so no protocol is taken
+/// there. Half-blocks are not either: mosh 1.4.0 was measured to pass
+/// their colours and glyph unchanged, yet Lew's map from Termux over mosh
+/// (2026-10-28) showed an empty box in every cell, so the reader there
+/// gets the rung that carries no colour and only one glyph family.
+/// `--graphics halfblocks` still forces them.
+pub fn choose_graphics(
+    flag: GraphicsFlag,
+    detected: Option<ProtocolType>,
+    tier: Tier,
+    between: Between,
+) -> Chosen {
+    let forced = |graphics| Chosen {
+        graphics,
+        reasons: vec!["forced"],
+    };
     match flag {
-        GraphicsFlag::Kitty => Graphics::Kitty,
-        GraphicsFlag::Sixel => Graphics::Sixel,
-        GraphicsFlag::Halfblocks => Graphics::Halfblocks,
-        GraphicsFlag::Braille => Graphics::Braille,
-        GraphicsFlag::Auto => match (tier, detected) {
-            (Tier::Mono, _) => Graphics::Braille,
-            (_, Some(ProtocolType::Kitty)) => Graphics::Kitty,
-            (_, Some(ProtocolType::Sixel)) => Graphics::Sixel,
-            (Tier::Truecolor | Tier::Ansi256, _) => Graphics::Halfblocks,
-            (Tier::Ansi16, _) => Graphics::Braille,
-        },
+        GraphicsFlag::Kitty => return forced(Graphics::Kitty),
+        GraphicsFlag::Sixel => return forced(Graphics::Sixel),
+        GraphicsFlag::Halfblocks => return forced(Graphics::Halfblocks),
+        GraphicsFlag::Braille => return forced(Graphics::Braille),
+        GraphicsFlag::Auto => {}
+    }
+    let take = |graphics, reasons| Chosen { graphics, reasons };
+    if tier == Tier::Mono {
+        return take(Graphics::Braille, vec!["no-color"]);
+    }
+    let mut reasons = Vec::new();
+    match (detected, between.mosh) {
+        (Some(ProtocolType::Kitty), false) => return take(Graphics::Kitty, reasons),
+        (Some(ProtocolType::Sixel), false) => return take(Graphics::Sixel, reasons),
+        (Some(ProtocolType::Kitty | ProtocolType::Sixel), true) => {}
+        _ => reasons.push("no-graphics"),
+    }
+    if between.mosh {
+        reasons.push("mosh");
+        return take(Graphics::Braille, reasons);
+    }
+    match tier {
+        Tier::Truecolor => take(Graphics::Halfblocks, reasons),
+        Tier::Ansi256 => {
+            reasons.push("no-truecolor");
+            take(Graphics::Halfblocks, reasons)
+        }
+        Tier::Ansi16 | Tier::Mono => {
+            reasons.push("16-colors");
+            take(Graphics::Braille, reasons)
+        }
     }
 }
 
@@ -843,46 +903,140 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
+    /// Every combination of what the terminal answered, its colour tier
+    /// and mosh, under `auto`, against the rung and the reasons.
     #[test]
     fn the_ladder_takes_kitty_or_sixel_then_halfblocks_then_braille() {
         use GraphicsFlag::Auto;
-        let kitty = Some(ProtocolType::Kitty);
-        let sixel = Some(ProtocolType::Sixel);
-        let none = Some(ProtocolType::Halfblocks);
+        use ProtocolType::{Halfblocks as None_, Iterm2, Kitty, Sixel};
+        let direct = Between::default();
+        let mosh = Between {
+            mosh: true,
+            ..direct
+        };
+        let tmux = Between {
+            tmux: true,
+            ..direct
+        };
+        let screen = Between {
+            screen: true,
+            ..direct
+        };
+        let detections = [None, Some(None_), Some(Iterm2), Some(Kitty), Some(Sixel)];
+        let tiers = [Tier::Mono, Tier::Ansi16, Tier::Ansi256, Tier::Truecolor];
+        for between in [direct, mosh, tmux, screen] {
+            for detected in detections {
+                for tier in tiers {
+                    let chosen = choose_graphics(Auto, detected, tier, between);
+                    let protocol = match detected {
+                        Some(Kitty) => Some(Graphics::Kitty),
+                        Some(Sixel) => Some(Graphics::Sixel),
+                        _ => None,
+                    };
+                    let want: (Graphics, &[&str]) = match (tier, protocol, between.mosh) {
+                        (Tier::Mono, _, _) => (Graphics::Braille, &["no-color"]),
+                        (_, Some(g), false) => (g, &[]),
+                        (_, Some(_), true) => (Graphics::Braille, &["mosh"]),
+                        (_, None, true) => (Graphics::Braille, &["no-graphics", "mosh"]),
+                        (Tier::Truecolor, None, false) => (Graphics::Halfblocks, &["no-graphics"]),
+                        (Tier::Ansi256, None, false) => {
+                            (Graphics::Halfblocks, &["no-graphics", "no-truecolor"])
+                        }
+                        (Tier::Ansi16, None, false) => {
+                            (Graphics::Braille, &["no-graphics", "16-colors"])
+                        }
+                    };
+                    assert_eq!(
+                        (chosen.graphics, chosen.reasons.as_slice()),
+                        want,
+                        "{detected:?} {tier:?} {between:?}"
+                    );
+                }
+            }
+        }
+        // Lew's line from Termux over mosh, 2026-10-28, and what it is now.
+        let chosen = choose_graphics(Auto, Some(None_), Tier::Ansi256, mosh);
+        assert_eq!(chosen.graphics, Graphics::Braille);
+        assert_eq!(chosen.reason(), "no-graphics,mosh");
+        // foot, on foot.
+        let chosen = choose_graphics(Auto, Some(Sixel), Tier::Ansi256, direct);
         assert_eq!(
-            choose_graphics(Auto, kitty, Tier::Truecolor),
-            Graphics::Kitty
+            (chosen.graphics, chosen.reason()),
+            (Graphics::Sixel, "best".to_string())
         );
-        // foot: sixel, no kitty graphics.
-        assert_eq!(
-            choose_graphics(Auto, sixel, Tier::Truecolor),
-            Graphics::Sixel
-        );
-        assert_eq!(choose_graphics(Auto, sixel, Tier::Ansi16), Graphics::Sixel);
-        assert_eq!(
-            choose_graphics(Auto, Some(ProtocolType::Iterm2), Tier::Truecolor),
-            Graphics::Halfblocks
-        );
-        assert_eq!(
-            choose_graphics(Auto, none, Tier::Ansi256),
-            Graphics::Halfblocks
-        );
-        assert_eq!(
-            choose_graphics(Auto, None, Tier::Truecolor),
-            Graphics::Halfblocks
-        );
-        assert_eq!(choose_graphics(Auto, none, Tier::Ansi16), Graphics::Braille);
-        // No colour: braille, whatever the terminal speaks.
-        assert_eq!(choose_graphics(Auto, kitty, Tier::Mono), Graphics::Braille);
-        // A forced rung is taken as it is.
-        assert_eq!(
-            choose_graphics(GraphicsFlag::Sixel, None, Tier::Mono),
-            Graphics::Sixel
-        );
-        assert_eq!(
-            choose_graphics(GraphicsFlag::Braille, kitty, Tier::Truecolor),
-            Graphics::Braille
-        );
+        // A forced rung is taken as it is, whatever was found.
+        for (flag, graphics) in [
+            (GraphicsFlag::Kitty, Graphics::Kitty),
+            (GraphicsFlag::Sixel, Graphics::Sixel),
+            (GraphicsFlag::Halfblocks, Graphics::Halfblocks),
+            (GraphicsFlag::Braille, Graphics::Braille),
+        ] {
+            for between in [direct, mosh] {
+                for tier in tiers {
+                    let chosen = choose_graphics(flag, Some(Kitty), tier, between);
+                    assert_eq!(
+                        (chosen.graphics, chosen.reason()),
+                        (graphics, "forced".into())
+                    );
+                }
+            }
+        }
+    }
+
+    /// Half-blocks at 256 colours reach the terminal as palette indexes
+    /// only: the frame's downgrade, which the screen runs over every
+    /// frame, turns the map's RGB into `38;5`/`48;5`, and no `38;2` or
+    /// `48;2` is written that a 256 colour terminal would misread.
+    #[test]
+    fn halfblocks_at_256_colours_emit_only_palette_sgr() {
+        use leviculum_ui::color::ColorDepth;
+        use leviculum_ui_ratatui::style::downgrade_buffer;
+        use ratatui::backend::CrosstermBackend;
+        let mut painter = MapPainter::new(Vec::new(), Graphics::Halfblocks, None);
+        let shown = shown(painter.setup().cell_px);
+        // The backend's writer is private in ratatui; a shared buffer
+        // keeps what it wrote.
+        #[derive(Clone, Default)]
+        struct Shared(std::rc::Rc<std::cell::RefCell<Vec<u8>>>);
+        impl std::io::Write for Shared {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.borrow_mut().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let bytes = Shared::default();
+        // A fixed viewport: the size is not asked of a terminal there is not.
+        let options = ratatui::TerminalOptions {
+            viewport: ratatui::Viewport::Fixed(Rect::new(0, 0, 32, 10)),
+        };
+        let mut terminal = Terminal::with_options(CrosstermBackend::new(bytes.clone()), options)
+            .expect("terminal");
+        terminal
+            .draw(|f| {
+                painter.render(f, &shown, Style::default());
+                downgrade_buffer(f, ColorDepth::Ansi256, false);
+            })
+            .expect("draw");
+        let out = String::from_utf8_lossy(&bytes.0.borrow()).into_owned();
+        // The 30 x 8 picture, less the pin label over it.
+        assert!(out.matches('▀').count() >= 30 * 8 - 20, "{out:?}");
+        let sgr: Vec<&str> = out
+            .split("\u{1b}[")
+            .skip(1)
+            .filter_map(|s| s.split_once('m').map(|(p, _)| p))
+            .filter(|p| p.chars().all(|c| c.is_ascii_digit() || c == ';'))
+            .collect();
+        assert!(sgr.iter().any(|p| p.contains("38;5;")));
+        assert!(sgr.iter().any(|p| p.contains("48;5;")));
+        for p in &sgr {
+            assert!(
+                !p.contains("38;2") && !p.contains("48;2"),
+                "24-bit SGR {p:?}"
+            );
+        }
     }
 
     #[test]

@@ -508,6 +508,20 @@ The ladder, decided 2026-10-27 (Lew): kitty or sixel where the query finds one, 
 half-blocks in colour, else braille. It is the ladder `lnomad`'s pictures
 already climb, plus braille at the bottom.
 
+Behind mosh it is braille (Lew, 2026-10-28, 1088). Measured on mosh
+1.4.0 on the coder host: mosh answers the DA1 query itself, without
+sixel, and drops a sixel DCS and a kitty APC whole, so no protocol
+arrives; the half-blocks' `38;5`, `38;2` and `▀` pass unchanged. Lew's
+map from Termux over mosh nonetheless showed an empty box in every cell
+(`GRAPHICS backend=halfblocks detected=halfblocks`), a client-side
+failure this host cannot see, so the ladder does not take half-blocks
+there. mosh sets no variable; it is found as a `mosh-server` among the
+parent processes (`leviculum_ui_ratatui::images::Between`). tmux and
+screen are found too and named in `tui.log`, and change nothing: both
+pass 256 colours, and `ratatui-image` wraps sixel for tmux. Inside tmux
+a mosh session that holds the tmux client is not an ancestor and is not
+seen. `GRAPHICS` names the rung and why: `reason=no-graphics,mosh`.
+
 ## 7. Decided
 
 Lew, 2026-10-27, accepted the five proposals of this section as written.
