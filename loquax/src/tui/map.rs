@@ -612,12 +612,18 @@ impl MapPainter {
         };
         self.paint(ask, Instant::now());
         let graphics = self.graphics;
+        // The view is the model's, laid out for the size it last heard of;
+        // the frame is the terminal's now. Between a shrink and its resize
+        // event they differ, and nothing is written outside the frame
+        // (1087).
+        let bounds = frame.area();
         let area = Rect::new(
             shown.area.x,
             shown.area.y,
             shown.area.width,
             shown.area.height,
-        );
+        )
+        .intersection(bounds);
         let Some(painted) = self.painted.as_ref() else {
             return;
         };
@@ -631,7 +637,7 @@ impl MapPainter {
         };
         // A picture painted for another pane size is not drawn over this
         // one: its cells would not cover the pane.
-        let fits = painted.cells == ask.cells;
+        let fits = painted.cells == ask.cells && (area.width, area.height) == ask.cells;
         match graphics {
             _ if !fits => {}
             Graphics::Halfblocks => {
@@ -670,7 +676,10 @@ impl MapPainter {
                 None => {}
             },
         }
-        let behind = painted.view != ask.view && self.labels_view == Some(painted.view);
+        // The labels placed for a paint of another pane size belong to
+        // that size's layout, not to this one: a shrink would put them
+        // below the frame (1087).
+        let behind = fits && painted.view != ask.view && self.labels_view == Some(painted.view);
         let labels = match behind {
             true => self.labels.clone(),
             false => labels_of(shown, muted),
@@ -697,6 +706,9 @@ impl MapPainter {
         }
         for label in &labels {
             let (col, row) = (label.col, label.row);
+            if !area.contains(ratatui::layout::Position::new(col, row)) {
+                continue;
+            }
             let room = usize::from((area.x + area.width).saturating_sub(col));
             let (end, _) = buf.set_stringn(col, row, &label.text, room, label.style);
             // Drawn over the picture every frame: a picture sent again
@@ -708,7 +720,7 @@ impl MapPainter {
                 }
             }
         }
-        if !behind {
+        if fits && !behind {
             self.labels_view = Some(painted.view);
         }
         self.labels = labels;
@@ -717,6 +729,9 @@ impl MapPainter {
         let credit = format!("{} ", painted.attribution);
         let len = credit.chars().count() as u16;
         let x = (area.x + area.width).saturating_sub(len).max(area.x);
+        if area.y + area.height >= bounds.bottom() {
+            return;
+        }
         buf.set_stringn(
             x,
             area.y + area.height,
@@ -1414,6 +1429,99 @@ mod tests {
         let mut wider = c;
         wider.cells.0 += 1;
         assert!(!keep(&c, &wider, fresh));
+    }
+
+    /// The map laid out for a `width` x `height` screen, as the model does:
+    /// the picture inside the pane's border, one pin "Lew Mobile" at
+    /// `(39, row)`.
+    fn laid_out(cell_px: (u16, u16), width: u16, height: u16, row: u16) -> MapView {
+        let area = leviculum_ui::Rect::new(1, 1, width - 2, height - 3);
+        let at = project(LatLon::from_degrees(48.0, 10.0));
+        MapView {
+            area,
+            viewport: Viewport::new(
+                at,
+                10,
+                u32::from(area.width) * u32::from(cell_px.0),
+                u32::from(area.height) * u32::from(cell_px.1),
+            ),
+            cell_px,
+            pins: vec![PinCell {
+                peer: [1; 16],
+                col: 39,
+                row,
+                text: "● Lew Mobile · 1 min".to_string(),
+                apart: None,
+                stale: false,
+                selected: false,
+            }],
+        }
+    }
+
+    fn every_backend() -> [MapPainter; 4] {
+        [
+            MapPainter::new(Vec::new(), Graphics::Halfblocks, None),
+            MapPainter::new(Vec::new(), Graphics::Braille, None),
+            MapPainter::new(Vec::new(), Graphics::Sixel, Some(Picker::halfblocks())),
+            MapPainter::new(Vec::new(), Graphics::Kitty, None),
+        ]
+    }
+
+    /// The terminal shrank (a phone's keyboard came up) and the frame is
+    /// drawn before the model heard of it: the view is laid out for 54 x 60,
+    /// the frame is 54 x 30. Nothing is written outside it (1087: "index
+    /// outside of buffer ... is (39, 49)").
+    #[test]
+    fn a_view_laid_out_for_a_taller_screen_draws_in_a_shorter_frame() {
+        for mut painter in every_backend() {
+            let graphics = painter.graphics();
+            let tall = laid_out(painter.setup().cell_px, 54, 60, 49);
+            let mut terminal = Terminal::new(TestBackend::new(54, 60)).expect("terminal");
+            terminal
+                .draw(|f| painter.render(f, &tall, Style::default()))
+                .expect("tall");
+            terminal.backend_mut().resize(54, 30);
+            terminal
+                .draw(|f| painter.render(f, &tall, Style::default()))
+                .expect("short");
+            let area = terminal.backend().buffer().area;
+            assert_eq!((area.width, area.height), (54, 30), "{graphics:?}");
+        }
+    }
+
+    /// The same shrink, heard by the model, on the painter's thread: the
+    /// first frame at 54 x 30 still shows the 54 x 60 paint, and with it
+    /// the labels placed for that paint, one of them on row 49.
+    #[test]
+    fn a_paint_for_the_old_size_does_not_place_its_labels_in_the_new_one() {
+        for painter in every_backend() {
+            let mut painter = painter.threaded();
+            let graphics = painter.graphics();
+            let cell_px = painter.setup().cell_px;
+            let tall = laid_out(cell_px, 54, 60, 49);
+            let mut terminal = Terminal::new(TestBackend::new(54, 60)).expect("terminal");
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                terminal
+                    .draw(|f| painter.render(f, &tall, Style::default()))
+                    .expect("tall");
+                if painter.painted_view() == Some(tall.viewport) || Instant::now() > deadline {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            assert_eq!(painter.painted_view(), Some(tall.viewport), "{graphics:?}");
+            terminal.backend_mut().resize(54, 30);
+            let short = laid_out(cell_px, 54, 30, 20);
+            terminal
+                .draw(|f| painter.render(f, &short, Style::default()))
+                .expect("short");
+            assert_eq!(
+                painter.painted_view(),
+                Some(tall.viewport),
+                "{graphics:?}: the old paint still up"
+            );
+        }
     }
 
     /// The thread end to end: a frame asks, the next frame after the paint

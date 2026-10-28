@@ -1098,9 +1098,36 @@ async fn run_terminal(
                 break Err(error.to_string());
             }
         }
+        // The terminal's size as the frame will have it: a shrink whose
+        // resize event has not been read yet (mosh delivers them late) is
+        // laid out for now, not for the size before (1087).
+        if let Ok(size) = terminal.size() {
+            if (size.width, size.height) != shell.model.screen {
+                shell.apply(UiEvent::Resize {
+                    width: size.width,
+                    height: size.height,
+                });
+            }
+        }
         let view = ui::view(&shell.model);
-        if let Err(error) = terminal.draw(|frame| draw(frame, &view, Some(&mut painter))) {
-            break Err(error.to_string());
+        // A frame that panics is skipped, not the messenger: the panic hook
+        // has left the alternate screen by then, so it is entered again and
+        // the next frame drawn whole.
+        match unwound(|| terminal.draw(|frame| draw(frame, &view, Some(&mut painter)))) {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => break Err(error.to_string()),
+            Err(panic) => {
+                tracing::error!("DRAW frame skipped: {panic}");
+                if let Err(error) = guard.enter_again() {
+                    break Err(error.to_string());
+                }
+                if let Err(error) = set_mouse_capture(shell.model.mouse) {
+                    break Err(error.to_string());
+                }
+                // Not drawn again until something happens: a frame that
+                // panics every time is one line a key, not a spin.
+                shell.redraw = true;
+            }
         }
         if shell.model.quit {
             break Ok(());
@@ -1135,6 +1162,17 @@ async fn run_terminal(
     tracing::info!("GRAPHICS paints={}", painter.paints());
     guard.restore_now().map_err(|e| e.to_string())?;
     result
+}
+
+/// `f`'s result, or the message of the panic it raised.
+fn unwound<R>(f: impl FnOnce() -> R) -> Result<R, String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).map_err(|payload| {
+        payload
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_string())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "a panic without a message".to_string())
+    })
 }
 
 /// `first` and every event already waiting behind it on `events`, applied
@@ -1893,6 +1931,10 @@ pub fn draw(frame: &mut Frame, view: &View, painter: Option<&mut map::MapPainter
                 let apart = pin.apart.iter().map(|a| (a.col, a.row, &a.text));
                 for (col, row, text) in std::iter::once((pin.col, pin.row, &pin.text)).chain(apart)
                 {
+                    // Placed for the size the model last heard of (1087).
+                    if !area.contains(Position::new(col, row)) {
+                        continue;
+                    }
                     frame.buffer_mut().set_stringn(
                         col,
                         row,
@@ -2865,6 +2907,25 @@ mod tests {
             model.conversations[0].messages.len(),
             LOAD_WINDOW,
             "no second block"
+        );
+    }
+
+    /// A panic in a frame comes back as its message, the messenger goes on
+    /// (1087); a frame that draws comes back as it is.
+    #[test]
+    fn a_panicking_frame_is_its_message() {
+        assert_eq!(unwound(|| 7), Ok(7));
+        let index = unwound(|| {
+            let buf = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 54, 30));
+            buf[(39, 49)].symbol().to_string()
+        });
+        assert!(
+            index.is_err_and(|m| m.contains("index outside of buffer")),
+            "the buffer's own message"
+        );
+        assert_eq!(
+            unwound(|| -> u8 { std::panic::panic_any(3u8) }),
+            Err("a panic without a message".to_string())
         );
     }
 
