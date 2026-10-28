@@ -75,17 +75,23 @@ std = [
 # history of docs/src/concepts/loquax-storage.md. The terminal messenger
 # reads and writes it; the CLI does not yet.
 history = ["std", "dep:rusqlite"]
+# The map's picture (`loquax::picture`): the region files and one view of
+# them drawn into a frame, for the terminal and the GUI alike.
+picture = [
+    "std",
+    "leviculum-map/std",
+    "dep:leviculum-mapfill",
+    "dep:embedded-graphics",
+]
 tui = [
     "std",
     "history",
+    "picture",
     "leviculum-ui/std",
     "dep:leviculum-ui-ratatui",
     # The map's sixel and kitty pictures go through ratatui-image, the
     # crate lnomad's inline pictures use (loquax-map.md, section 6).
     "leviculum-ui-ratatui/images",
-    "leviculum-map/std",
-    "dep:leviculum-mapfill",
-    "dep:embedded-graphics",
     "dep:ratatui",
     "dep:crossterm",
     "dep:futures",

@@ -11,31 +11,17 @@
 //! the one taken and why (`GRAPHICS backend= reason=`), beside the `KEYS`
 //! line.
 //!
-//! Regions are read from `$LNMSG_HOME/maps/` when `LNMSG_HOME` is set and
-//! from `${XDG_DATA_HOME:-~/.local/share}/loquax/maps/` otherwise: every
-//! `*.lmr` there, by file name. `LNMSG_HOME` replaces the whole default
-//! base for the identity and the store ([`loquax::identity::home_dir`]),
-//! so it replaces this one too; a test or a second profile then sees only
-//! its own maps. Where no region covers the view the world outline is
-//! drawn ([`leviculum_map::outline`]).
+//! The region files, where they are read from, and the frame one view is
+//! drawn into are the library's ([`loquax::picture`]), shared with the GUI.
 
-use std::fs::File;
-use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use embedded_graphics::pixelcolor::Rgb565;
-use embedded_graphics::prelude::Dimensions;
-use embedded_graphics::primitives::Rectangle;
-use leviculum_map::choice::{choose, view_zooms};
-use leviculum_map::draw::{draw_in, draw_tiles, Ink};
-use leviculum_map::outline;
-use leviculum_map::region::Region;
-use leviculum_map::viewport::{ViewTile, Viewport};
-use leviculum_mapfill::fill::{Edge, Scratch};
+use leviculum_map::draw::Ink;
+use leviculum_map::viewport::Viewport;
 use leviculum_mapfill::frame::{rgb888, Frame};
-use leviculum_mapfill::render::{NoClock, Work};
-use leviculum_mapfill::style::{Profile, BACKGROUND};
+use leviculum_mapfill::style::BACKGROUND;
 use leviculum_ui::color::Tier;
 use leviculum_ui_ratatui::images::{
     self, Backend, Between, FontSize, Picker, Pictures, ProtocolType, SlicedProtocol,
@@ -46,7 +32,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::Frame as TermFrame;
 use tokio::sync::Notify;
 
-use loquax::identity::HOME_ENV;
+use loquax::picture::{Drawn, Painter};
 use loquax::ui::map::{MapSetup, MapView};
 
 /// `--graphics`.
@@ -182,52 +168,7 @@ pub fn choose_graphics(
     }
 }
 
-/// Where the region files are read from.
-pub fn maps_dir() -> Option<PathBuf> {
-    let set = |name: &str| std::env::var_os(name).filter(|v| !v.is_empty());
-    if let Some(home) = set(HOME_ENV) {
-        return Some(PathBuf::from(home).join("maps"));
-    }
-    let data = set("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| set("HOME").map(|home| PathBuf::from(home).join(".local/share")))?;
-    Some(data.join("loquax").join("maps"))
-}
-
-/// One region file, open.
-pub struct Installed {
-    pub name: String,
-    pub region: Region<File>,
-}
-
-/// Every `*.lmr` in `dir`, by name, and a line for each that did not open.
-/// A missing directory is no regions, not an error.
-pub fn load(dir: &Path) -> (Vec<Installed>, Vec<String>) {
-    let mut paths: Vec<PathBuf> = match std::fs::read_dir(dir) {
-        Ok(entries) => entries
-            .filter_map(Result::ok)
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|x| x == "lmr"))
-            .collect(),
-        Err(_) => return (Vec::new(), Vec::new()),
-    };
-    paths.sort();
-    let (mut regions, mut problems) = (Vec::new(), Vec::new());
-    for path in paths {
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        match File::open(&path)
-            .map_err(|e| e.to_string())
-            .and_then(|f| Region::open(f).map_err(|e| format!("{e:?}")))
-        {
-            Ok(region) => regions.push(Installed { name, region }),
-            Err(error) => problems.push(format!("map {}: {error}", path.display())),
-        }
-    }
-    (regions, problems)
-}
+pub use loquax::picture::{load, maps_dir, Installed};
 
 /// A no-op the terminal carries out before a picture sent again only to
 /// erase stale labels: save and restore the cursor, which makes the
@@ -281,10 +222,9 @@ struct Ask {
 /// know the terminal's frame, so it runs on the painter's own thread as
 /// well as inline.
 struct Canvas {
-    regions: Vec<Installed>,
+    painter: Painter,
     graphics: Graphics,
     pictures: Pictures,
-    read: Vec<(ViewTile, Vec<u8>)>,
 }
 
 impl Canvas {
@@ -300,46 +240,10 @@ impl Canvas {
     fn paint(&mut self, ask: Ask) -> Painted {
         let view = &ask.view;
         let (w, h) = view.size();
-        let mut fb = vec![0u16; (w as usize) * (h as usize)];
-        let ink = self.ink();
-        let chosen = choose(
-            self.regions
-                .iter()
-                .map(|r| (r.name.as_str(), r.region.header())),
-            view.centre,
-            view.zoom(),
-        );
-        let mut attribution = outline::ATTRIBUTION.to_string();
-        let drawn = match chosen.and_then(|i| self.regions.get(i)) {
-            Some(installed) => {
-                let drawn = Frame::new(&mut fb, w, h).is_some_and(|mut frame| {
-                    // The region ends at its box at every zoom; the
-                    // outline goes under the rest of the view (1077).
-                    let area = installed.region.area(view);
-                    if area != frame.bounding_box() {
-                        let Ok(_) = outline::draw(outline::WORLD_50M, view, ink, &mut frame);
-                    }
-                    region_into(
-                        &installed.region,
-                        view,
-                        area,
-                        ink,
-                        &mut self.read,
-                        &mut frame,
-                    )
-                });
-                if drawn {
-                    attribution = installed.region.attribution().to_string();
-                }
-                drawn
-            }
-            None => false,
-        };
-        if !drawn {
-            if let Some(mut frame) = Frame::new(&mut fb, w, h) {
-                let Ok(_) = outline::draw(outline::WORLD_50M, view, ink, &mut frame);
-            }
-        }
+        let Drawn {
+            mut fb,
+            attribution,
+        } = self.painter.draw(view, self.ink(), 100);
         let picture = match self.graphics {
             Graphics::Kitty | Graphics::Sixel => self.encode(&mut fb, w, h, ask.cells),
             Graphics::Halfblocks | Graphics::Braille => None,
@@ -562,20 +466,19 @@ impl MapPainter {
             },
             Picker::font_size,
         );
-        let zooms = view_zooms(regions.iter().map(|r| r.region.header()));
+        let painter = Painter::new(regions);
         let setup = MapSetup {
             cell_px: graphics.cell_px(font),
-            zooms: (*zooms.start(), *zooms.end()),
-            regions: regions.iter().map(|r| *r.region.header()).collect(),
+            zooms: painter.zooms(),
+            regions: painter.headers(),
         };
         Self {
             graphics,
             setup,
             engine: Engine::Inline(Canvas {
-                regions,
+                painter,
                 graphics,
                 pictures: Pictures::new(picker, backend),
-                read: Vec::new(),
             }),
             painted: None,
             shown_at: None,
@@ -851,57 +754,16 @@ fn braille(ink: impl Fn(u32, u32) -> bool) -> char {
     }
 }
 
-/// Draw `region`'s tiles of `view` into `area` of `frame`; `false` when a
-/// tile could not be read, and the outline is drawn instead.
-fn region_into(
-    region: &Region<File>,
-    view: &Viewport,
-    area: Rectangle,
-    ink: Ink,
-    read: &mut Vec<(ViewTile, Vec<u8>)>,
-    frame: &mut Frame<'_>,
-) -> bool {
-    if region.read_view(view, read).is_err() {
-        return false;
-    }
-    let Ok(tiles) = draw_tiles(read) else {
-        return false;
-    };
-    let (_, h) = view.size();
-    let mut edges = vec![Edge::default(); 8192];
-    let mut active = vec![0u16; 8192];
-    let mut heads = vec![0u16; h as usize];
-    let mut points = vec![embedded_graphics::prelude::Point::zero(); 8192];
-    let mut ring_ends = vec![0u16; 2048];
-    let mut scratch = Scratch {
-        edges: &mut edges,
-        heads: &mut heads,
-        active: &mut active,
-    };
-    let mut work = Work {
-        points: &mut points,
-        ring_ends: &mut ring_ends,
-    };
-    let Ok(_) = draw_in(
-        &tiles,
-        area,
-        Profile::Full,
-        ink,
-        frame,
-        &mut scratch,
-        &mut work,
-        &mut NoClock,
-    );
-    true
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use leviculum_map::mercator::{project, LatLon, World};
+    use leviculum_map::region::Region;
     use loquax::ui::map::PinCell;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use std::fs::File;
+    use std::path::PathBuf;
 
     /// Every combination of what the terminal answered, its colour tier
     /// and mosh, under `auto`, against the rung and the reasons.
@@ -1348,11 +1210,11 @@ mod tests {
             buffer.content().iter().map(|c| c.symbol().len()).sum()
         };
         let mut canvas = Canvas {
-            regions: open(),
+            painter: Painter::new(open()),
             graphics: Graphics::Sixel,
             pictures: Pictures::new(Some(picker()), Backend::Graphics(ProtocolType::Sixel)),
-            read: Vec::new(),
         };
+        let mut read = Vec::new();
         let area = Rect::new(0, 0, cols, rows);
         let n = if measure_on() { 5 } else { 1 };
         for &zoom in zooms {
@@ -1364,9 +1226,9 @@ mod tests {
                 view.pan(i * (w as i32 / 8), 0);
                 let mut fb = vec![0u16; (w * h) as usize];
                 let t0 = Instant::now();
-                canvas.regions[0]
+                canvas.painter.regions()[0]
                     .region
-                    .read_view(&view, &mut canvas.read)
+                    .read_view(&view, &mut read)
                     .expect("read");
                 let t1 = Instant::now();
                 let ask = Ask {
@@ -1702,23 +1564,5 @@ mod tests {
         }
         assert_eq!(painter.painted_view(), Some(b.view));
         assert_eq!(painter.paints(), 2);
-    }
-
-    #[test]
-    fn the_maps_directory_follows_the_home_rule() {
-        // Read only, no environment written: the rule is checked on what
-        // this process has.
-        let dir = maps_dir();
-        match std::env::var_os(HOME_ENV).filter(|v| !v.is_empty()) {
-            Some(home) => assert_eq!(dir, Some(PathBuf::from(home).join("maps"))),
-            None => assert!(dir.is_none_or(|d| d.ends_with("loquax/maps"))),
-        }
-        let empty = tempfile::tempdir().expect("tmp");
-        let (regions, problems) = load(empty.path());
-        assert!(regions.is_empty() && problems.is_empty());
-        std::fs::write(empty.path().join("broken.lmr"), b"not a region").expect("write");
-        let (regions, problems) = load(empty.path());
-        assert!(regions.is_empty());
-        assert_eq!(problems.len(), 1, "{problems:?}");
     }
 }

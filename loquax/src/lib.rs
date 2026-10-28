@@ -76,6 +76,8 @@ pub mod mailbox;
 pub mod mailbox_state;
 pub mod names;
 pub mod outbox;
+#[cfg(feature = "picture")]
+pub mod picture;
 pub mod seen;
 pub mod send;
 #[cfg(feature = "history")]
