@@ -199,3 +199,9 @@ required-features = ["std"]
 [[test]]
 name = "tui_snapshot"
 required-features = ["tui"]
+
+# A throwaway: the samples and cost table of
+# docs/drafts/terminal-map-rendering-2026-10.md (1090). Never in a package.
+[[example]]
+name = "term_map_samples"
+required-features = ["picture"]
