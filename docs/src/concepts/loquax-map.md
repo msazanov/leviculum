@@ -13,8 +13,9 @@ messenger, on the desktop and embedded. This page plans it in slices.
 proposed.** Slice (a), positions in the model shown as text, is built
 (2026-10-27, leviculum 1059, commit `230c5e4d`); slice (b), the map core
 `leviculum-map`, the region tool `leviculum-map-tool`, the region file and
-its size measurement, is built (2026-10-27, leviculum 1062); the rest of
-the page is not. The measurement it rests on is
+its size measurement, is built (2026-10-27, leviculum 1062); slice (c),
+the terminal's map, is built (leviculum 1065); slice (d), the window's map,
+is built (2026-10-28, leviculum 1084); slice (e), the M9's, is not. The measurement it rests on is
 `docs/drafts/map-measurement-2026-10.md`; the decisions it rests on are the
 toolkit ([A GUI toolkit for the desktop and the M9](gui-toolkit.md),
 option B) and the vector path with our own filler (handheld-messenger.md,
@@ -423,10 +424,31 @@ positioned by projection tests; clicking a pin opens the conversation.
 *1001 phase:* after (a)'s phase, Alice opens the map and her frame shows
 Bob's pin with his announced name.
 
-**(d) The iced GUI map.** The map view in the GUI. Depends on (b), and on
-the iced frontend itself, which is not built. *Acceptance:* the GUI's own
-snapshot test of the view over the fixture region. *1001 phase:* the same
-as (c) once the cell can drive the GUI; until then none.
+**(d) The iced GUI map.** Built 2026-10-28 (leviculum 1084), Lew's
+decision that day to start it: `loquax gui`, behind loquax's `gui` feature,
+which no other feature enables, so the CLI, the terminal and the core carry
+no iced. The window starts the same shell as the terminal (`loquax/src/
+shell.rs`, moved out of `tui.rs`: the engine, the history, the sends and
+fetches, the mailbox's schedule, the model) and shows the map: the peers
+with a position on the left by the display rule with their fix's age, the
+stale ones dimmed; on the right the region from the same maps directory,
+the outline where none covers the view, the pins with their labels as iced
+text, the credit always in the bar below. Drag pans, the wheel zooms about
+the pointer, `+` `-` `0` as in the terminal, a click on a pin or a row
+selects it; integer zooms only. The window counts in the screen's own
+pixels and runs the model's map functions with one pixel a cell; a dense
+screen draws its own pixels with the lines widened by its scale
+(`Look::scaled`). The picture is `loquax::picture`, which the terminal
+draws through too, and the label rule moved into the core as
+`leviculum_map::pins::labels`, in cells for the terminal and in pixels
+with the window's font measuring each label. Pinned by
+`the_map_frame_over_the_fixture_at_three_zooms` in
+`loquax/src/gui/map.rs` (the window's own pipeline, no display needed),
+the label rule's tests in `leviculum-map/tests/labels.rs`, and `just
+loquax-gui`. The binary is built for the gnu target: winit opens X11 and
+Wayland with dlopen, which a musl-static binary cannot. Left for later:
+conversations and compose in the window, the package. *1001 phase:* the
+same as (c) once the cell can drive the GUI; until then none.
 
 **(e) The M9 map.** The view on the panel with the region on flash.
 Depends on (b), the M9's stage two (its keyboard UI, [The ThinkNode

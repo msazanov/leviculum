@@ -2468,3 +2468,16 @@ loquax-core-no-std:
 loquax-tui:
     cargo clippy -p loquax --features tui --all-targets -- -D warnings
     {{manifest}} loquax-tui -- cargo test -p loquax --features tui --bins --test tui_snapshot
+
+# 1084, #474: loquax's `gui` feature (the iced window) is off by default and
+# in no other feature, so neither the workspace runs nor `loquax-tui` compile
+# it. This does: clippy over every loquax target with the feature, and the
+# binary's tests with it, among them the map view's frame over the fixture
+# region at three zooms through the window's own pipeline, which needs no
+# display. The tests build for the host's own triple, not the workspace's
+# musl-static default: winit opens X11 and Wayland with dlopen, which a
+# musl-static binary cannot link. Not in `standard`: nothing ships it yet.
+[doc('Lint and test loquax with its gui feature (#474)')]
+loquax-gui:
+    cargo clippy -p loquax --features gui --all-targets -- -D warnings
+    {{manifest}} loquax-gui -- cargo test -p loquax --features gui --bins --target "$(rustc -vV | sed -n 's/^host: //p')"
