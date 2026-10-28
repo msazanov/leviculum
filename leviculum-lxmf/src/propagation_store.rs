@@ -157,7 +157,11 @@ pub enum ConfirmedPurge {
 /// [`append`](Self::append) returns `Ok`, the message survives a power cut,
 /// because the role proves the upload packet only after this returns
 /// ("persist before you prove",
-/// `docs/src/concepts/propagation-node-on-a-board.md` §3).
+/// `docs/src/concepts/propagation-node-on-a-board.md` §3). A store that
+/// defers durability past `append` moves that boundary to its own
+/// confirmation, and its caller proves only after it: the board's flush
+/// queue (`leviculum-nrf/pn-store`) and the host store's writer
+/// (`FilePropagationStore::write_behind` in `leviculum-std`).
 pub trait PropagationStore {
     /// Store one message. The body must be `lxmf_data || stamp` and at least
     /// `DESTINATION_LENGTH + STAMP_SIZE` bytes. Returns

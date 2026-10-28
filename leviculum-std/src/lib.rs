@@ -23,6 +23,7 @@ pub(crate) mod counter64;
 pub mod daemon_rpc;
 pub(crate) mod discovery;
 pub mod driver;
+pub mod durable;
 pub mod error;
 /// `EVENT_CATALOG` completeness, checked against the tree.
 ///
