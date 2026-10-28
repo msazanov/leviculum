@@ -322,17 +322,7 @@ async fn run_terminal(
             }
             _ = painter.ready() => {}
             _ = pump.tick() => shell.poll(),
-            _ = tick.tick() => {
-                let now = local_now();
-                let read = (now.unix_secs, shell.elapsed_ms());
-                shell.apply(UiEvent::Clock(now));
-                if loquax::sync::resumed(clocks, read) {
-                    tracing::info!("SYNC resumed after {}s", read.0 - clocks.0);
-                    shell.apply(UiEvent::Resumed);
-                }
-                clocks = read;
-                shell.apply(UiEvent::Tick);
-            }
+            _ = tick.tick() => shell.tick(&mut clocks),
         }
     };
     // How many map pictures went up, beside the GRAPHICS line: a held key

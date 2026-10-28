@@ -74,6 +74,17 @@ pub struct MapPin {
     pub stale: bool,
 }
 
+impl MapPin {
+    /// What is set beside the marker: the name, and the fix's age when
+    /// the shell has said the time.
+    pub fn words(&self) -> String {
+        match &self.age {
+            Some(age) => format!("{} · {age}", self.label),
+            None => self.label.clone(),
+        }
+    }
+}
+
 /// A pin that lands in the picture, in screen cells.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PinCell {
@@ -248,10 +259,7 @@ pub fn place(
             let pin = pins.get(placed.index)?;
             let col = u16::try_from(placed.x / u32::from(setup.cell_px.0.max(1))).ok()?;
             let row = u16::try_from(placed.y / u32::from(setup.cell_px.1.max(1))).ok()?;
-            let words = match &pin.age {
-                Some(age) => format!("{} · {age}", pin.label),
-                None => pin.label.clone(),
-            };
+            let words = pin.words();
             let len = u16::try_from(words.chars().count()).unwrap_or(u16::MAX);
             Some((pin, (col, row), len, words))
         })

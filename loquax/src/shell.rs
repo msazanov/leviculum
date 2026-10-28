@@ -446,6 +446,22 @@ impl Shell {
         self.apply(UiEvent::Elapsed(self.elapsed_ms()));
     }
 
+    /// The clock's tick, every [`TICK_MS`]: the time of day to the model,
+    /// a suspend said and folded where the wall clock ran ahead of the
+    /// monotonic one (`clocks` holds both as last read), then the
+    /// spinner's tick.
+    pub(crate) fn tick(&mut self, clocks: &mut (i64, u64)) {
+        let now = local_now();
+        let read = (now.unix_secs, self.elapsed_ms());
+        self.apply(UiEvent::Clock(now));
+        if loquax::sync::resumed(*clocks, read) {
+            tracing::info!("SYNC resumed after {}s", read.0 - clocks.0);
+            self.apply(UiEvent::Resumed);
+        }
+        *clocks = read;
+        self.apply(UiEvent::Tick);
+    }
+
     /// The schedule's clock: tokio's, which on Linux stands still in
     /// suspend, as `crate::sync::resumed` needs.
     pub(crate) fn elapsed_ms(&self) -> u64 {
