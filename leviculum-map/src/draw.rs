@@ -74,6 +74,53 @@ where
     draw_in(tiles, all, profile, ink, target, scratch, work, clock)
 }
 
+/// [`draw_in`] with every line `percent` per cent as wide
+/// ([`Look::scaled`]): a GUI on a dense screen draws at the screen's own
+/// pixels and passes its scale factor here.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_in_scaled<D, C>(
+    tiles: &[DrawTile<'_>],
+    area: Rectangle,
+    profile: Profile,
+    ink: Ink,
+    percent: u32,
+    target: &mut D,
+    scratch: &mut Scratch<'_>,
+    work: &mut Work<'_>,
+    clock: &mut C,
+) -> Result<RenderStats, D::Error>
+where
+    D: DrawTarget<Color = Rgb565>,
+    C: Clock,
+{
+    let target = &mut target.clipped(&area);
+    // Every tile of one view is at the view's zoom less its overzoom.
+    let zoom = tiles
+        .first()
+        .map_or(0, |t| t.tile.id.z.saturating_add(t.tile.overzoom));
+    let look = ink.look(zoom).scaled(percent);
+    let mut pass = Pass::begin(target, scratch, clock)?.with_look(look);
+    let mut cursors: Vec<_> = tiles
+        .iter()
+        .map(|t| {
+            let at = Placement {
+                shift: t.fixture.shift() + t.tile.overzoom as i8,
+                origin: t.tile.origin,
+            };
+            (at, t.fixture.features().peekable())
+        })
+        .collect();
+    for class in Class::ALL {
+        for (at, features) in &mut cursors {
+            // `<=`: a blob out of class order still has every feature drawn.
+            while let Some(f) = features.next_if(|f| f.class <= class) {
+                pass.feature(&f, *at, profile, target, work, clock)?;
+            }
+        }
+    }
+    Ok(pass.stats)
+}
+
 /// [`draw`] into the part `area` of `target` alone, which is cleared
 /// first; the rest of `target` is left as it is. A region's view goes into
 /// its box, [`Region::area`], so its edge is the same place on the earth
@@ -95,31 +142,7 @@ where
     D: DrawTarget<Color = Rgb565>,
     C: Clock,
 {
-    let target = &mut target.clipped(&area);
-    // Every tile of one view is at the view's zoom less its overzoom.
-    let zoom = tiles
-        .first()
-        .map_or(0, |t| t.tile.id.z.saturating_add(t.tile.overzoom));
-    let mut pass = Pass::begin(target, scratch, clock)?.with_look(ink.look(zoom));
-    let mut cursors: Vec<_> = tiles
-        .iter()
-        .map(|t| {
-            let at = Placement {
-                shift: t.fixture.shift() + t.tile.overzoom as i8,
-                origin: t.tile.origin,
-            };
-            (at, t.fixture.features().peekable())
-        })
-        .collect();
-    for class in Class::ALL {
-        for (at, features) in &mut cursors {
-            // `<=`: a blob out of class order still has every feature drawn.
-            while let Some(f) = features.next_if(|f| f.class <= class) {
-                pass.feature(&f, *at, profile, target, work, clock)?;
-            }
-        }
-    }
-    Ok(pass.stats)
+    draw_in_scaled(tiles, area, profile, ink, 100, target, scratch, work, clock)
 }
 
 impl<S: Storage> Region<S> {

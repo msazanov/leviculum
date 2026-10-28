@@ -147,6 +147,23 @@ impl Look {
     };
 }
 
+impl Look {
+    /// The same look with every line `percent` per cent as wide: 200 on a
+    /// screen of twice the ordinary density, where a picture drawn at the
+    /// screen's own pixels would otherwise show every road half as thick
+    /// to the eye. 100 is this look unchanged.
+    pub fn scaled(self, percent: u32) -> Self {
+        let scale = |w: i32| {
+            let wide = i64::from(w) * i64::from(percent) / 100;
+            i32::try_from(wide).unwrap_or(i32::MAX)
+        };
+        Self {
+            widths: self.widths.map(scale),
+            ..self
+        }
+    }
+}
+
 impl Default for Look {
     fn default() -> Self {
         Self::DEFAULT

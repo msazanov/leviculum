@@ -340,3 +340,61 @@ fn corrupted_bytes_are_an_error_not_a_panic() {
         let _ = survives(&b);
     }
 }
+
+/// The lines' colour in [`lines`], which nothing else in its frame has.
+const INK: embedded_graphics::pixelcolor::Rgb565 =
+    embedded_graphics::pixelcolor::Rgb565::new(31, 0, 0);
+
+/// How many pixels of `fb` are [`INK`].
+fn inked(fb: &mut [u16], w: u32, h: u32) -> usize {
+    let frame = Frame::new(fb, w, h).expect("frame");
+    (0..h)
+        .flat_map(|y| (0..w).map(move |x| (x, y)))
+        .filter(|&(x, y)| frame.pixel(x, y) == Some(INK))
+        .count()
+}
+
+/// The view of `region` in lines alone, through `draw_in` (`None`) or
+/// `draw_in_scaled` at `Some(percent)`.
+fn lines(region: &Region<&[u8]>, view: &Viewport, percent: Option<u32>) -> Vec<u16> {
+    use leviculum_map::draw::draw_in_scaled;
+    let (w, h) = view.size();
+    let mut fb = vec![0u16; (w * h) as usize];
+    let tiles = region.view(view).expect("tiles");
+    let mut edges = vec![Edge::default(); 4096];
+    let mut active = vec![0u16; 4096];
+    let mut heads = vec![0u16; h as usize];
+    let mut points = vec![Point::zero(); 4096];
+    let mut ring_ends = vec![0u16; 1024];
+    let mut frame = Frame::new(&mut fb, w, h).expect("frame");
+    let mut scratch = Scratch {
+        edges: &mut edges,
+        heads: &mut heads,
+        active: &mut active,
+    };
+    let mut work = Work {
+        points: &mut points,
+        ring_ends: &mut ring_ends,
+    };
+    let (area, ink) = (region.area(view), Ink::Lines(INK));
+    let (s, w2, wk) = (&mut scratch, &mut work, &mut NoClock);
+    let Ok(_) = match percent {
+        None => draw_in(&tiles, area, Profile::Full, ink, &mut frame, s, w2, wk),
+        Some(p) => draw_in_scaled(&tiles, area, Profile::Full, ink, p, &mut frame, s, w2, wk),
+    };
+    fb
+}
+
+/// A dense screen's scale: the same view with lines twice as wide inks
+/// well over as many pixels, and 100 per cent is the plain draw exactly.
+#[test]
+fn scaled_lines_are_wider_and_one_hundred_per_cent_is_unchanged() {
+    let r = Region::from_bytes(FLORENCE).expect("open");
+    let view = Viewport::new(project(CENTRE), 15, 240, 320);
+    let plain = lines(&r, &view, None);
+    assert_eq!(lines(&r, &view, Some(100)), plain);
+    let (mut once, mut twice) = (plain, lines(&r, &view, Some(200)));
+    let (a, b) = (inked(&mut once, 240, 320), inked(&mut twice, 240, 320));
+    assert!(a > 0, "the view has lines");
+    assert!(b > a * 3 / 2, "200 per cent inks {b}, 100 inks {a}");
+}
