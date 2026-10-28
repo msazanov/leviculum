@@ -2,14 +2,17 @@
 
 A plan to give Leviculum and Periculum a home on a server under our own
 control, publicly `leviculum.network`, reachable over both the clearweb
-and the Reticulum network. The source of truth moves there, step by step,
-while Codeberg runs in parallel; once the move is done, other forges are
-mirrors only.
+and the Reticulum network. The source of truth moves there, step by step.
+Codeberg stays an active public mirror indefinitely, of the code and of
+the issues as long as it carries them, so that the public finds and
+reads the project where it already looks; other forges are mirrors too.
 
 This was first written on 2026-08-17 as a design record. Lew revised it
 on 2026-10-28: the source of truth moves to our own server, nothing is
 built on that server, and `lblogd` becomes the frontend on both
-networks. Part of it is in the tree and running. The next section says
+networks. Later the same day he decided that Codeberg stays an active
+mirror, that the issue store is a git repository of its own, and how
+records are numbered. Part of it is in the tree and running. The next section says
 exactly which part, so that the rest can be read as what it is: a plan.
 
 ## What of this is already built
@@ -35,7 +38,7 @@ exactly which part, so that the rest can be read as what it is: a plan.
   `packaging/site/lev-unpack-docs` makes it what `/docs/` serves.
 
 Unbuilt: a page in `lblogd` that lists the releases with their notes,
-the `issues/` store and its import, the bare git repo on the server,
+the issue repository and its import, the bare git repos on the server,
 `rngit`, and `AGENTS.md`.
 
 ## Motivation
@@ -56,7 +59,7 @@ for a Reticulum stack.
    the server. A bare git repo, plain files, `lblogd`, `rngit`.
 2. **Both networks, one source.** Everything a user needs (code, issues,
    releases) is reachable over clearweb *and* Reticulum. Where possible
-   the data lives *in the git repo*, which is clonable over both, and one
+   the data lives *in git repositories*, clonable over both, and one
    daemon renders it for both, rather than one service per network.
 3. **Nothing is built on the server.** It is too small for the workspace
    and the firmware, and the gate that makes a build green already runs
@@ -86,11 +89,13 @@ for a Reticulum stack.
   └───────────────────────┘            │          NomadNet node           │
                                        │   site pages, releases, issues   │
   maintainers ── ssh push ───────────► │ /srv/git/leviculum.git (bare)    │
+                                       │ /srv/git/leviculum-issues.git    │
                                        │ rngit    rns:// remote           │
                                        │ lnsd     Reticulum transport     │
                                        └──────────────────────────────────┘
-  Codeberg, other forges: mirrors of the bare repo (Codeberg in parallel
-  until the move is done; its issues mirrored one way into issues/).
+  Codeberg: active public mirror of the code and, one way from our side,
+  of the issues; outside issues filed there come in as triage records.
+  Other forges: mirrors of the code.
 ```
 
 ## Component 1: git upstream
@@ -110,50 +115,96 @@ the server.
   (`git remote set-url --add --push origin`), so Codeberg and the server
   hold identical history; content addressing makes the two byte-identical
   when in sync. Once it has carried every push for a while, it becomes
-  the first remote and Codeberg the mirror.
-- **Other forges are mirrors only.** A mirror on another hosted forge
-  (CodeFloe was named) may exist for public findability. None is ever
-  the source of truth.
+  the first remote and Codeberg the mirror, which it then stays.
+- **Other forges are mirrors only.** Codeberg stays one indefinitely, and
+  a mirror on another hosted forge (CodeFloe was named) may exist for
+  public findability. None is ever the source of truth.
 
-Periculum is a second repo in the same group, treated identically.
+Periculum is a second repo in the same group, treated identically. The
+issue store is a third (Component 2).
 
-## Component 2: issues as plain text in the repo
+## Component 2: issues as plain text in their own repository
 
-Issues are Markdown files committed into the repo. They are part of every
-clone, on both networks, with no running issue service and no API.
+Issues are Markdown files in a git repository of their own, beside the
+code repository on the server: `/srv/git/leviculum-issues.git` is the
+proposed name, the choice is Lew's. They are clonable on both networks,
+with no running issue service and no API.
+
+**Why a repository of its own** (decided 2026-10-28): a note on an issue
+must land at once. In the code repository it would wait behind the
+pre-push hook and the land gate, which exist for code. The issue
+repository has neither: a record change is a commit and a push.
 
 ```
-issues/
-  open/    0042-lxmf-msgpack-unbounded-recursion.md
-  closed/  0038-lrproof-hop-asymmetry.md
+records/
+  42-lxmf-msgpack-unbounded-recursion.md
+  LV-479-issue-store-import.md
 ```
 
-Each file is front matter plus a Markdown body:
+**Proposed record format.** One file per record. On top a header, then a
+status block that is *replaced* whenever the picture changes, then a log
+that is only *appended* to, dated entries, newest last:
 
 ```markdown
 ---
-id: 42
+id: LV-479
 title: LXMF msgpack skip recurses without a depth budget
-labels: [bug, compat, priority:low]
+kind: bug
 state: open
-created: 2026-08-17
+lane: 2
+next: write the mvr for a nested map over the budget
+closed_by:
+labels: [compat, priority:low]
+created: 2026-10-28
 author: <name or Reticulum identity hash>
 ---
-Body in Markdown, cite code as path:line. Comments are appended below a
-`---` rule, each with an author + date line.
+## Status
+
+What is known now, the current hypothesis, what would refute it.
+Rewritten in place, so a reader needs only this block.
+
+## Log
+
+### 2026-10-28
+What was measured or decided, cite code as path:line.
 ```
 
-- **State** is the directory (`open/` vs `closed/`); `ls issues/open` is
-  the backlog, a state change is one `git mv`, and it diffs cleanly.
+- **kind:** bug, feature, task or question.
+- **state:** `triage` (filed, not yet looked at; every outside issue
+  starts here), `open`, `waiting-on-lew` (a decision only Lew makes),
+  `waiting-external` (upstream, hardware in the post, another project),
+  `parked` (deliberately not worked on, with the reason in the status
+  block), `closed`. The state lives in the header, not in a directory,
+  because there are more than two; the backlog is
+  `grep -l '^state: open' records/`.
+- **lane** and **next:** who works on it and the one next action, so an
+  agent picking up a record knows what to do without reading the log.
+- **closed_by:** the commit, the record or the decision that closed it.
+  A record closes only with a stated reason.
+- **The log absorbs the bug ledgers.** The per-bug debugging ledgers kept
+  so far outside any repository (current hypothesis on top, history
+  below) are exactly this shape; they move into the records and stop
+  existing separately.
 - **Search** is `grep -r`. No index, no database.
-- **Numbering:** `scripts/new-issue.sh "title"` picks the next free
-  number by scanning `issues/`. The imported Codeberg issues keep their
-  numbers, so every `#N` already written in commits and docs still
-  names the same issue. Collisions are rare (nearly all issues originate
-  from our own instances) and resolve at merge; switch to short hash IDs
-  only if distributed creation ever makes that a real problem.
 - **Attribution**, if wanted, comes from signed git commits, not a
-  per-issue crypto layer.
+  per-record crypto layer.
+
+**Numbering** (decided 2026-10-28). Imported Codeberg issues keep their
+numbers, so every `#N` already written in commits and docs still names
+the same issue. New records are `LV-479`, `LV-480` and up (Codeberg #477
+and #478 exist and keep theirs), and the Codeberg mirror carries the
+prefix in its title. The prefix keeps a record apart from everything
+else that is numbered: Codeberg pull requests (which share Codeberg's
+`#N` space), order numbers, and the internal review findings, which are
+already called `L-0001` and up. `scripts/new-issue.sh "title"` in the
+issue repository picks the next free `LV-` number. Collisions are rare
+(nearly all records originate from our own instances) and resolve at
+merge.
+
+**Working hypotheses are public** (decided 2026-10-28), in the record, as
+they already are in the Codeberg issues. The exception is a security
+relevant finding: its record says only that it exists and is being
+worked on until the fix has landed.
 
 `rngit work` was considered and rejected for the issue store: it keeps
 work items as msgpack in a side directory, writable only with `rngit`
@@ -211,9 +262,9 @@ fallback from before 517 and goes with this move.
 node from one snapshot, and already carries the site pages
 (`docs/src/man/lblogd.1.md`). It becomes the project's frontend on both
 networks, from one source: first the releases (list, notes, download),
-later the issues, rendered from `issues/`. The 2026-08-17 design had two
-static views instead, `stagit` for code browsing and a separate script
-rendering `issues/` to HTML; both are superseded by this frontend. Code
+later the issues, rendered from a clone of the issue repository. The
+2026-08-17 design had two static views instead, `stagit` for code
+browsing and a separate script rendering the issue files to HTML; both are superseded by this frontend. Code
 browsing over the web is a clone or a forge mirror until a need for more
 is shown.
 
@@ -263,34 +314,40 @@ stop being a blog server others can simply run. Cutting the library
 along the table above at that point costs one refactor with the blog's
 existing tests as its guard.
 
-## Component 6: Codeberg in parallel
+## Component 6: Codeberg as an active mirror
+
+Codeberg stays an active public mirror indefinitely (decided
+2026-10-28): the code, and the issues as long as it carries them, so the
+public finds and reads the project where it already looks. The source of
+truth is our own server.
 
 Code sync is trivial: the same commits go to both remotes, and content
 addressing guarantees they match.
 
 Issues are the hard part, because Codeberg keeps them in its database
-while ours are files in the repo. Decided 2026-10-28: while both live,
-the sync is **one way, Codeberg to repo**. A one-time import brings the
-current Codeberg issues into `issues/`, and a job on a timer mirrors
-later creates, edits, comments and closes into the files, so Reticulum
-users can read them and `lblogd` can render them. When the move is done
-the repo becomes the source of truth and Codeberg the mirror. The job is
-an export/import script, not a live service; the Gitea API access already
-used for issue curation is sufficient.
+while ours are files in the issue repository. The sync is **one way,
+our side to Codeberg**. A one-time import brings the current Codeberg
+issues into the issue repository under their numbers; from then on the
+records are the truth, and a job on a timer mirrors creates, status
+changes, log entries and closes out to Codeberg, an `LV-` record under
+a title that carries its prefix. The one way in is outside work: an
+issue someone files on Codeberg comes in as a new record in state
+`triage`. The job is an export/import script, not a live service; the
+Gitea API access already used for issue curation is sufficient.
 
 ## AI-friendliness: the `AGENTS.md` contract
 
 A single file at the repo root tells any agent everything in one screen:
-how to clone over each network, that issues are Markdown under
-`issues/open` and `issues/closed`, how to file one (`scripts/new-issue.sh`,
-edit, commit, push), how to close one (`git mv` to `closed/` with a
-note), and that releases are cut only by `just nightly-publish` on the
+how to clone over each network, that issues are Markdown records in the
+issue repository, how to file one (`scripts/new-issue.sh` there, edit,
+commit, push), how to close one (`state: closed`, `closed_by` and a log
+entry), and that releases are cut only by `just nightly-publish` on the
 nightly host after a green or attributed night. Because the substrate is
 plain files and standard git, an agent needs no project-specific API
 knowledge.
 
-**Where this stands.** None of that is in the tree: no `AGENTS.md`, no
-`issues/` directory, no `scripts/new-issue.sh`. It comes last in the
+**Where this stands.** None of that exists yet: no `AGENTS.md`, no
+issue repository, no `scripts/new-issue.sh`. It comes last in the
 rollout, because it describes the other three. Said here because the
 paragraph above reads as a description of the repository, and the
 citation guard cannot catch that: it names files in prose rather than as
@@ -298,15 +355,16 @@ citation guard cannot catch that: it names files in prose rather than as
 
 ## Rollout
 
-Step by step, each step in parallel with Codeberg, no forge installed.
+Step by step, Codeberg mirrored throughout, no forge installed.
 
 1. **Releases.** Receiver user and key on the server, the nightly host
    deploying after a green or attributed run: done. Left: `lblogd` shows
    the releases (list, notes, download) on both networks, and the
    Woodpecker `publish-site` fallback goes.
-2. **Issues.** The one-time import from Codeberg into `issues/`, the one
-   way mirror Codeberg to repo while both live, `lblogd` (or the project
-   site, see Component 5) renders them.
+2. **Issues.** The issue repository on the server, the one-time import
+   from Codeberg into it, the one way mirror from it to Codeberg with
+   outside issues coming in as `triage`, the bug ledgers moved into the
+   records, `lblogd` (or the project site, see Component 5) renders them.
 3. **Git.** The bare repo on the server as the second push remote, then
    as the first; `rngit` beside it; Codeberg and any other forge as
    mirrors.
@@ -330,16 +388,20 @@ Step by step, each step in parallel with Codeberg, no forge installed.
    clearweb, or a real RF path; affects reachability and announce
    cadence of `lblogd`'s node and `rngit`.
 3. **Issue import field mapping:** how Codeberg's labels, milestones,
-   assignees and comment authors map onto the front matter, and what the
-   mirror does with an edit to an issue already imported.
+   assignees and comment authors map onto the record header and log, and
+   what the mirror does with a comment or an edit made on Codeberg to a
+   record it mirrors.
 4. **`rngit` acceptance bar:** what track record over Reticulum is
    required before it is relied on even as a secondary path.
 5. **Signing:** SSH vs GPG commit signing for attribution; whether
    release signing uses a dedicated identity.
 
 Closed on 2026-10-28: the server baseline (a small VPS already running
-`lnsd` and `lblogd`, nothing built on it), and the issue sync direction
-(one way, Codeberg to repo, while both live).
+`lnsd` and `lblogd`, nothing built on it); Codeberg's role (an active
+public mirror, indefinitely); the issue sync direction (one way, our side
+to Codeberg, outside issues in as `triage`); the issue store (a
+repository of its own); and numbering (`#N` kept for imports, `LV-479`
+and up for new records).
 
 ## See also
 
