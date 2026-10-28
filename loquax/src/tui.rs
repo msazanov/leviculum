@@ -321,6 +321,22 @@ impl Shell {
                 UiEffect::Copy(text) => self.outputs.push(Output::Copy(text)),
                 UiEffect::Open(url) => self.outputs.push(Output::Open(url)),
                 UiEffect::Mouse(on) => self.outputs.push(Output::Mouse(on)),
+                // The screen already shows the change; a file that would not
+                // take it is said, because the next start would not show it.
+                UiEffect::Contact(contact) => {
+                    if let Err(error) = loquax::names::save_contact(&self.context.home, &contact) {
+                        let line = format!(
+                            "{}: not saved: {error}",
+                            self.context
+                                .home
+                                .join(loquax::names::CONTACTS_FILE)
+                                .display()
+                        );
+                        tracing::warn!("{line}");
+                        self.afterwards.push(line.clone());
+                        answers.push(UiEvent::Notice(line));
+                    }
+                }
                 UiEffect::Log(line) => tracing::warn!("{line}"),
             }
         }

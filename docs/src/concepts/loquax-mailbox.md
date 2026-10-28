@@ -385,6 +385,35 @@ gap this page leaves (the width cap, the collision glyph, what blocking
 does) is listed in [keys, mouse and layout](loquax-keys-and-layout.md),
 section 5, "Built 2026-10-26, names".
 
+### Blocking, and names from the palette (Lew, 2026-10-28)
+
+**Decision**: blocked means **stored silently**, as Signal does. A message
+from a blocked address is accepted and proven as any other (the sender sees
+it delivered, and nothing on the wire differs), and it is stored; it is not
+shown in the list, not counted unread, raises no toast or notification, and
+its telemetry pins nothing on the map. The palette's `blocked` lists the
+blocked conversations, so nothing is lost, and unblocking shows the
+conversation with its history.
+
+Petnames and blocks are set from the palette: `rename` takes the petname as
+text in the palette (an empty line clears it), `block` and `unblock` act on
+the open conversation, which is also the list's selected entry. The
+contacts file stays the storage, written atomically, with its comments and
+the lines about other peers kept as they are.
+
+**Built 2026-10-28** (leviculum 1082): `loquax/src/ui/contacts.rs` holds
+the palette's side and the rule what a blocked peer's conversation is
+hidden from (`UiModel::shows`: the list, the search, the unread count, the
+toasts, the map pins); the receive path in `loquax/src/ui.rs` stores the
+message before it asks. `names::edit_contacts` rewrites only the peer's own
+`name` and `block` lines, and `names::save_contact` writes the file through
+a rename. The petname to edit stands in the palette when it opens, so a
+second `Enter` keeps it rather than clearing it. Positions from a blocked
+peer are kept with their messages, and the map leaves them out until the
+block is lifted. What the wire does is unchanged by construction: blocking
+lives in the screen, below which the engine and the router never learn of
+it.
+
 ### Trust levels: how many?
 
 NomadNet has four — `WARNING`, `UNTRUSTED`, `UNKNOWN`, `TRUSTED` (its

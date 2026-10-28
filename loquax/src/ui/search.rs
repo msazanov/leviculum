@@ -108,10 +108,10 @@ pub fn mark_first(text: &str, query: &str) -> String {
     out
 }
 
-/// What `query` finds among `conversations`: those whose name matches, in
-/// `order` (the list's, most recent first), then every message whose text
-/// matches, `stored` among them, the most recent first. Nothing for an
-/// empty query.
+/// What `query` finds among the `conversations` the list shows: those whose
+/// name matches, in `order` (the list's, most recent first), then every
+/// message of theirs whose text matches, `stored` among them, the most
+/// recent first. Nothing for an empty query.
 pub fn hits(
     conversations: &[Conversation],
     names: &Names,
@@ -127,8 +127,11 @@ pub fn hits(
         .filter(|&&c| find(&names.label(&conversations[c].peer), query).is_some())
         .map(|&c| Hit::Conversation(c))
         .collect();
+    // Only the conversations the list shows: a blocked peer's messages are
+    // found in the `blocked` view, not outside it.
     let mut messages: Vec<(u64, Hit)> = Vec::new();
-    for (c, conversation) in conversations.iter().enumerate() {
+    for &c in order {
+        let conversation = &conversations[c];
         for (m, message) in conversation.messages.iter().enumerate() {
             if find(&message.body, query).is_some() {
                 let hit = Hit::Message {
@@ -140,7 +143,9 @@ pub fn hits(
         }
     }
     for (index, hit) in stored.iter().enumerate() {
-        messages.push((hit.key, Hit::Stored(index)));
+        if order.iter().any(|&c| conversations[c].peer == hit.peer) {
+            messages.push((hit.key, Hit::Stored(index)));
+        }
     }
     messages.sort_by_key(|&(activity, _)| core::cmp::Reverse(activity));
     out.extend(messages.into_iter().map(|(_, hit)| hit));

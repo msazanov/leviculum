@@ -172,6 +172,8 @@ impl<B> UiModel<B> {
             }
             self.message_cursor = conversation.messages.len().saturating_sub(1);
         }
+        // A `--to` peer the reader blocked is not the one to open.
+        self.settle();
     }
 
     /// Everything a fold changed that the store must learn, in the order to
@@ -479,7 +481,7 @@ impl<B> UiModel<B> {
                 .conversations
                 .get(open)
                 .map_or(0, |c| c.messages.len().saturating_sub(1));
-        } else if self.selected > c {
+        } else if self.selected > c && self.selected != super::NONE_OPEN {
             self.selected -= 1;
         }
         if let Some(search) = self.search.as_mut() {

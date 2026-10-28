@@ -73,7 +73,10 @@
 //! petname or the announced name with the short hash, `≈` when another
 //! peer's name looks the same, the address while it has none. The header
 //! adds the trust state in words, and a changed name is a line in the
-//! conversation ([`Note`]).
+//! conversation ([`Note`]). The palette's `rename` names the open
+//! conversation's peer, `block` and `unblock` set its block, and `blocked`
+//! lists the blocked conversations, which the list, the search, the map, the
+//! unread counts and the toasts otherwise leave out ([`contacts`]).
 //!
 //! # The search
 //!
@@ -118,7 +121,7 @@ use leviculum_ui::{RLine, RStyle, Rect, StyledChar, Theme, Tier};
 
 use crate::address::to_hex;
 use crate::keys::{self, Action};
-use crate::names::{Heard, Names};
+use crate::names::{Contact, Heard, Names, Trust};
 use crate::outbox::OutboxEvent;
 use crate::send::Leg;
 use crate::sync::{Reason, Schedule, SyncEvent};
@@ -128,6 +131,7 @@ use leviculum_lxmf::Field;
 
 use history::{Confirm, StoreRead, StoreWrite, StoredHit};
 
+pub mod contacts;
 pub mod history;
 pub mod hit;
 pub mod layout;
@@ -455,14 +459,25 @@ pub struct Palette<B> {
     pub query: B,
     /// The highlighted row among the matches.
     pub selected: usize,
+    /// What the palette asks for instead of a command, its text the answer
+    /// (`rename`).
+    pub ask: Option<contacts::Ask>,
 }
 
 impl<B: InputBuffer> Palette<B> {
-    /// The rows the query matches, in table order.
+    /// The rows the query matches, in table order; none while the palette
+    /// asks.
     pub fn matches(&self) -> Vec<&'static PaletteEntry> {
-        commands::filter(self.query.value())
+        match self.ask {
+            Some(_) => Vec::new(),
+            None => commands::filter(self.query.value()),
+        }
     }
 }
+
+/// [`UiModel::selected`] while no conversation is open: every one there is
+/// is blocked, or in the `blocked` view none is.
+pub const NONE_OPEN: usize = usize::MAX;
 
 /// The whole screen's state. `B` is the text field: `tui_input::Input` in
 /// the terminal, whatever a board brings on a board.
@@ -470,7 +485,7 @@ impl<B: InputBuffer> Palette<B> {
 pub struct UiModel<B> {
     /// Conversations, in the order they appeared.
     pub conversations: Vec<Conversation>,
-    /// The selected conversation's index.
+    /// The open conversation's index, one the list shows, or [`NONE_OPEN`].
     pub selected: usize,
     /// The message the messages pane's cursor is on, in the selected
     /// conversation.
@@ -549,6 +564,9 @@ pub struct UiModel<B> {
     /// The names this session heard and the reader's contacts: how every
     /// pane names a peer ([`crate::names`]).
     pub names: Names,
+    /// The palette's `blocked` view: the list holds the blocked
+    /// conversations instead of the others.
+    pub show_blocked: bool,
     /// Messages a fold changed, by conversation and key, for the store
     /// ([`UiModel::take_writes`]).
     changed: BTreeSet<([u8; 16], u64)>,
@@ -627,6 +645,7 @@ impl<B: InputBuffer + Default> UiModel<B> {
             theme: Theme::Dark,
             search: None,
             names: Names::default(),
+            show_blocked: false,
             changed: BTreeSet::new(),
             changed_peers: BTreeSet::new(),
             forgotten: Vec::new(),
@@ -758,9 +777,12 @@ impl<B> UiModel<B> {
 
     /// The conversations in the list's order: the pinned first, then the
     /// rest, each by their last message, most recent first; those without
-    /// one after, in the order they came.
+    /// one after, in the order they came. Only those the list shows
+    /// ([`UiModel::shows`]): a blocked peer's outside the `blocked` view.
     pub fn order(&self) -> Vec<usize> {
-        let mut order: Vec<usize> = (0..self.conversations.len()).collect();
+        let mut order: Vec<usize> = (0..self.conversations.len())
+            .filter(|&i| self.shows(&self.conversations[i].peer))
+            .collect();
         order.sort_by_key(|&i| {
             let c = &self.conversations[i];
             (core::cmp::Reverse(c.pinned), core::cmp::Reverse(c.activity))
@@ -917,6 +939,9 @@ pub enum UiEffect {
     Redraw,
     /// Put this text on the clipboard (OSC 52 in the terminal).
     Copy(String),
+    /// Make the contacts file say this about its peer, its other lines kept
+    /// ([`crate::names::save_contact`]).
+    Contact(Contact),
     /// Hand this URL to the system's handler for it: an `http`, `https` or
     /// `mailto` link in a body, which [`classify_link`] let through.
     Open(String),
@@ -936,6 +961,9 @@ pub enum UiEffect {
 /// Fold one event into the model.
 pub fn update<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec<UiEffect> {
     let effects = fold(model, event);
+    // Whatever hid the open conversation, a block, the `blocked` view or a
+    // restore, another the list shows takes its place.
+    model.settle();
     // The map holds the conversation's place: the focus going to the
     // conversation or compose takes it away, and without it there is no
     // map to focus.
@@ -1164,6 +1192,11 @@ fn overlay_key<B: InputBuffer + Default>(model: &mut UiModel<B>, key: KeyEvent) 
     };
     match key.code {
         KeyCode::Enter => {
+            if let Some(ask) = palette.ask {
+                let typed = palette.query.value().to_string();
+                model.palette = None;
+                return model.answer_ask(ask, typed);
+            }
             let chosen = palette.matches().get(palette.selected).map(|e| e.command);
             model.palette = None;
             if let Some(command) = chosen {
@@ -2154,6 +2187,16 @@ fn run<B: InputBuffer + Default>(model: &mut UiModel<B>, command: PaletteCommand
             open_map(model);
             Vec::new()
         }
+        PaletteCommand::Rename => {
+            model.ask_rename();
+            Vec::new()
+        }
+        PaletteCommand::Block => model.set_blocked(true),
+        PaletteCommand::Unblock => model.set_blocked(false),
+        PaletteCommand::Blocked => {
+            model.toggle_blocked_view();
+            Vec::new()
+        }
         PaletteCommand::Theme => {
             model.theme = model.theme.toggle();
             let name = match model.theme {
@@ -2294,8 +2337,15 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
             verified,
             ..
         } => {
+            let blocked = model.names.trust(&source) == Trust::Blocked;
+            let shown = model.shows(&source);
             let index = model.conversation(source);
-            let open = index == model.selected;
+            // A message to a screen with no conversation open opens its
+            // own, where the list shows it.
+            if shown && model.conversations.get(model.selected).is_none() {
+                model.selected = index;
+            }
+            let open = index == model.selected && shown;
             let follow = model.scroll_top.is_none();
             if model.conversations[index]
                 .messages
@@ -2335,6 +2385,15 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
             let peer = conversation.peer;
             model.changed.insert((peer, activity));
             let effects = take_telemetry(model, index, message_id);
+            // Blocked: kept and stored, and nothing more: no unread, no
+            // `new` rule, no toast. Its position is kept too; the map leaves
+            // it out.
+            if blocked {
+                if open && follow {
+                    model.message_cursor = model.conversations[index].messages.len() - 1;
+                }
+                return effects;
+            }
             if !open {
                 model.changed_peers.insert(peer);
                 let conversation = &mut model.conversations[index];
@@ -2444,8 +2503,16 @@ impl<B> UiModel<B> {
     /// The map's pins in `Tab` order: every peer with a position, our own
     /// named `you`.
     pub fn map_pins(&self) -> Vec<map::MapPin> {
+        let shown: BTreeMap<[u8; 16], Fix> = self
+            .positions
+            .iter()
+            .filter(|(peer, _)| {
+                self.names.trust(peer) != Trust::Blocked || self.address == Some(**peer)
+            })
+            .map(|(peer, fix)| (*peer, fix.clone()))
+            .collect();
         map::pins_of(
-            &self.positions,
+            &shown,
             |peer| self.names.label(peer),
             self.address,
             self.now.map(|now| now.unix_secs),
@@ -2728,6 +2795,14 @@ pub const MAP_TITLE: &str = "map";
 /// The empty conversations pane's line.
 pub const NO_CONVERSATIONS: &str = "No conversations: start with --to <address>.";
 
+/// The `blocked` view's line while nothing is blocked.
+pub const NO_BLOCKED: &str = "Nothing blocked. :blocked returns.";
+
+/// The list pane's title in the `blocked` view, and its right end: the
+/// palette name that returns, short enough for the narrow list.
+pub const BLOCKED_TITLE: &str = "Blocked";
+pub const BLOCKED_RETURNS: &str = ":blocked";
+
 /// The list's bottom border while no search is open: a click on it opens
 /// one (section 5, "What the mouse does").
 pub const SEARCH_HINT: &str = "/ search";
@@ -2910,12 +2985,18 @@ fn detail_view<B>(model: &UiModel<B>, c: usize, m: usize) -> Option<DetailView> 
 /// The screen.
 pub fn view<B: InputBuffer>(model: &UiModel<B>) -> View {
     let sizes = model.sizes();
-    let (conversations, search_cursor) = match (&model.search, model.conversations.is_empty()) {
+    let (conversations, search_cursor) = match (&model.search, model.order().is_empty()) {
         (Some(open), _) => {
             let (rows, cursor) = search_pane(model, open, sizes.list.0, sizes.list.1);
             (rows, (model.focus == Pane::Search).then_some(cursor))
         }
-        (None, true) => (wrap(&[plain(NO_CONVERSATIONS)], sizes.list.0, 0), None),
+        (None, true) => {
+            let empty = match model.show_blocked {
+                true => NO_BLOCKED,
+                false => NO_CONVERSATIONS,
+            };
+            (wrap(&[plain(empty)], sizes.list.0, 0), None)
+        }
         (None, false) => (layout::list(model, sizes.list.0, sizes.list.1), None),
     };
     let wide = sizes.messages.0 >= WIDE_HEADER;
@@ -3024,24 +3105,10 @@ pub fn view<B: InputBuffer>(model: &UiModel<B>) -> View {
     let palette = model.palette.as_ref().map(|p| PaletteView {
         query: p.query.value().to_string(),
         cursor: p.query.cursor(),
-        rows: p
-            .matches()
-            .iter()
-            .enumerate()
-            .map(|(i, e)| {
-                // The name, and the row's first chord this terminal sends.
-                let shown = match keys::palette_key(e.name, ctx) {
-                    Some(key) => format!("{}  {key}", e.name),
-                    None => e.name.to_string(),
-                };
-                let mut line = RLine::default();
-                match i == p.selected {
-                    true => push(&mut line, &format!("▸ {shown}"), bold()),
-                    false => push(&mut line, &format!("  {shown}"), RStyle::default()),
-                }
-                line
-            })
-            .collect(),
+        rows: match p.ask {
+            Some(ask) => model.ask_rows(ask).iter().map(|row| plain(row)).collect(),
+            None => palette_rows(p, ctx),
+        },
     });
     let searching = model.search.is_some();
     let map = model.map_view();
@@ -3055,12 +3122,14 @@ pub fn view<B: InputBuffer>(model: &UiModel<B>) -> View {
     View {
         conversations_title: match (searching, model.address) {
             (true, _) => SEARCH_TITLE.to_string(),
+            (false, _) if model.show_blocked => BLOCKED_TITLE.to_string(),
             (false, Some(address)) => format!("loquax {}", &to_hex(&address)[..8]),
             (false, None) => "loquax (attaching)".to_string(),
         },
-        conversations_title_right: match searching {
-            true => SEARCH_CLOSES.to_string(),
-            false => String::new(),
+        conversations_title_right: match (searching, model.show_blocked) {
+            (true, _) => SEARCH_CLOSES.to_string(),
+            (false, true) => BLOCKED_RETURNS.to_string(),
+            (false, false) => String::new(),
         },
         list_hint: match searching {
             true => String::new(),
@@ -3090,6 +3159,27 @@ pub fn view<B: InputBuffer>(model: &UiModel<B>) -> View {
         theme: model.theme,
         map,
     }
+}
+
+/// The palette's command rows: the matching names, the highlighted one bold
+/// behind `▸`, each with the first chord this terminal sends for it.
+fn palette_rows<B: InputBuffer>(p: &Palette<B>, ctx: Ctx) -> Vec<RLine> {
+    p.matches()
+        .iter()
+        .enumerate()
+        .map(|(i, e)| {
+            let shown = match keys::palette_key(e.name, ctx) {
+                Some(key) => format!("{}  {key}", e.name),
+                None => e.name.to_string(),
+            };
+            let mut line = RLine::default();
+            match i == p.selected {
+                true => push(&mut line, &format!("▸ {shown}"), bold()),
+                false => push(&mut line, &format!("  {shown}"), RStyle::default()),
+            }
+            line
+        })
+        .collect()
 }
 
 /// The rows and the column the compose box is scrolled to, a box `width` x
@@ -5452,7 +5542,9 @@ mod tests {
             "Mum ·abab  known · announces Alice"
         );
         assert_eq!(view(&model).compose_title, "to Mum ·abab");
-        model.selected = 1;
+        // A blocked peer is opened from the `blocked` view.
+        update(&mut model, UiEvent::Run(PaletteCommand::Blocked));
+        assert_eq!(model.selected, 1);
         assert_eq!(view(&model).messages_title, "<cdcdcdcd…>  blocked");
     }
 
@@ -6762,5 +6854,243 @@ mod tests {
             Some("no position from <cdcdcdcd…>")
         );
         assert!(cells(&model, |t| *t == hit::Target::Position).is_empty());
+    }
+
+    // Blocking and names from the palette (1082): blocked is stored
+    // silently, and `rename`, `block`, `unblock` and `blocked` run from the
+    // palette.
+
+    /// `:` and a palette name, then `Enter`.
+    fn palette(model: &mut UiModel<Field>, name: &str) -> Vec<UiEffect> {
+        update(model, key(KeyCode::Char(':')));
+        typed(model, name);
+        update(model, key(KeyCode::Enter))
+    }
+
+    fn blocking(blocked: &[[u8; 16]]) -> Names {
+        let text: String = blocked
+            .iter()
+            .map(|p| format!("block {}\n", to_hex(p)))
+            .collect();
+        Names::new(crate::names::parse_contacts(&text).expect("contacts"))
+    }
+
+    /// A message from a blocked peer is received and stored as any other,
+    /// and the screen says nothing of it: not in the list, not unread, no
+    /// toast, no `new` rule, no pin on the map, no search hit. The `blocked`
+    /// view lists it, and `unblock` there brings the conversation back with
+    /// its history.
+    #[test]
+    fn a_blocked_peers_message_is_stored_and_shown_nowhere_until_unblocked() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        model.names = blocking(&[OTHER]);
+        clock(&mut model, 26, 14, 0);
+        let toasts = model.toasts.len();
+        let effects = arrive(
+            &mut model,
+            OTHER,
+            1,
+            "still there? tripod",
+            report_of(&fix_at(43_773_100, 11_256_000, two_pm() - 240)),
+        );
+        assert!(effects.is_empty(), "{effects:?}");
+        // Received and stored.
+        let c = model
+            .conversations
+            .iter()
+            .position(|c| c.peer == OTHER)
+            .expect("kept");
+        assert_eq!(model.conversations[c].messages.len(), 1);
+        let writes = model.take_writes();
+        assert!(
+            writes
+                .iter()
+                .any(|w| matches!(w, StoreWrite::Message { peer, .. } if *peer == OTHER)),
+            "{writes:?}"
+        );
+        // Shown nowhere.
+        assert_eq!(model.order(), [0]);
+        assert_eq!(model.conversations[c].unread, 0);
+        assert_eq!(model.conversations[c].new_rule, None);
+        assert_eq!(model.toasts.len(), toasts, "no toast");
+        assert_eq!(model.selected, 0, "PEER stays open");
+        assert!(
+            list_rows(&model).iter().all(|r| !r.contains("cdcd")),
+            "{:?}",
+            list_rows(&model)
+        );
+        assert!(model.positions.contains_key(&OTHER), "the position is kept");
+        assert!(model.map_pins().is_empty(), "and not pinned");
+        assert!(search::hits(
+            &model.conversations,
+            &model.names,
+            &model.order(),
+            "tripod",
+            &[]
+        )
+        .is_empty());
+        // The `blocked` view lists it, opens it, and its search finds it.
+        palette(&mut model, "blocked");
+        assert_eq!(model.order(), [c]);
+        assert_eq!(model.selected, c);
+        let v = view(&model);
+        assert_eq!(v.conversations_title, BLOCKED_TITLE);
+        assert_eq!(v.conversations_title_right, BLOCKED_RETURNS);
+        assert_eq!(v.messages_title, "<cdcdcdcd…>  blocked");
+        assert!(list_rows(&model).iter().any(|r| r.contains("cdcdcdcd")));
+        assert_eq!(model.messages_of_selected()[0].body, "still there? tripod");
+        // Unblock: back in the list, open, with its history.
+        let effects = palette(&mut model, "unblock");
+        assert_eq!(
+            effects,
+            [UiEffect::Contact(Contact {
+                peer: OTHER,
+                petname: None,
+                blocked: false
+            })]
+        );
+        assert!(!model.show_blocked);
+        assert_eq!(model.conversations[model.selected].peer, OTHER);
+        assert_eq!(model.order().len(), 2);
+        assert_eq!(model.messages_of_selected().len(), 1);
+        assert_eq!(model.map_pins().len(), 1);
+        // Unblocked, the next one counts and toasts as any other.
+        update(&mut model, key(KeyCode::Down));
+        let open = model.selected;
+        assert_ne!(model.conversations[open].peer, OTHER);
+        receive(&mut model, OTHER, 2, "now you see me");
+        assert_eq!(model.conversations[c].unread, 1);
+        assert!(model
+            .current_toast()
+            .is_some_and(|t| t.text.contains("message from")));
+    }
+
+    /// `block` hides the open conversation and opens the next; with only a
+    /// blocked peer on the screen nothing is open, and a message from it
+    /// does not open one.
+    #[test]
+    fn block_hides_the_open_conversation_and_writes_the_contact() {
+        let mut model = UiModel::<Field>::new(&[PEER, OTHER]);
+        receive(&mut model, PEER, 1, "hi");
+        assert_eq!(model.selected, 0);
+        let effects = palette(&mut model, "block");
+        assert_eq!(
+            effects,
+            [UiEffect::Contact(Contact {
+                peer: PEER,
+                petname: None,
+                blocked: true
+            })]
+        );
+        assert_eq!(model.names.trust(&PEER), Trust::Blocked);
+        assert_eq!(model.conversations[model.selected].peer, OTHER);
+        assert_eq!(model.order(), [1]);
+        assert!(model
+            .current_toast()
+            .is_some_and(|t| t.text.starts_with("blocked <abababab…>")));
+        // Again: said, not written.
+        update(&mut model, UiEvent::Run(PaletteCommand::Blocked));
+        assert!(palette(&mut model, "block").is_empty());
+        assert!(model
+            .current_toast()
+            .is_some_and(|t| t.text.ends_with("already blocked")));
+        update(&mut model, UiEvent::Run(PaletteCommand::Blocked));
+
+        let mut alone = UiModel::<Field>::new(&[]);
+        alone.names = blocking(&[PEER]);
+        receive(&mut alone, PEER, 1, "hello?");
+        assert_eq!(alone.selected, NONE_OPEN);
+        assert_eq!(view(&alone).messages_title, "messages");
+        assert_eq!(
+            list_rows(&alone).join(" ").trim_end(),
+            NO_CONVERSATIONS,
+            "the list is empty, wrapped"
+        );
+        assert!(palette(&mut alone, "block").is_empty());
+        assert!(alone
+            .current_toast()
+            .is_some_and(|t| t.text == "no conversation here"));
+        // A visible peer's message opens its conversation, as on an empty
+        // screen.
+        receive(&mut alone, OTHER, 2, "me too");
+        assert_eq!(alone.conversations[alone.selected].peer, OTHER);
+        assert_eq!(alone.conversations[alone.selected].unread, 0);
+    }
+
+    /// `rename` asks in the palette, holding the petname to edit: `Enter`
+    /// sets the typed one, sanitised, and an empty line clears it.
+    #[test]
+    fn rename_takes_text_in_the_palette_and_empty_clears() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        announced(&mut model, PEER, "Alice");
+        assert!(palette(&mut model, "rename").is_empty());
+        let asking = model.palette.as_ref().expect("the palette asks");
+        assert_eq!(asking.ask, Some(contacts::Ask::Rename(PEER)));
+        assert!(asking.matches().is_empty());
+        let rows: Vec<String> = view(&model)
+            .palette
+            .expect("drawn")
+            .rows
+            .iter()
+            .map(text)
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                "your name for Alice ·abab",
+                "Enter sets it, empty clears it"
+            ]
+        );
+        assert_eq!(view(&model).footer.len(), 2);
+        typed(&mut model, "Mum ✓");
+        let effects = update(&mut model, key(KeyCode::Enter));
+        assert_eq!(
+            effects,
+            [UiEffect::Contact(Contact {
+                peer: PEER,
+                petname: Some("Mum ?".into()),
+                blocked: false
+            })]
+        );
+        assert!(model.palette.is_none());
+        assert_eq!(
+            view(&model).messages_title,
+            "Mum ? ·abab  known · announces Alice"
+        );
+        assert!(model
+            .current_toast()
+            .is_some_and(|t| t.text == "named Mum ? ·abab"));
+        // The palette holds the petname to edit; `Enter` unchanged writes
+        // nothing.
+        palette(&mut model, "rename");
+        assert_eq!(
+            model.palette.as_ref().map(|p| p.query.value()),
+            Some("Mum ?")
+        );
+        assert!(update(&mut model, key(KeyCode::Enter)).is_empty());
+        // Emptied, it clears.
+        palette(&mut model, "rename");
+        update(&mut model, ctrl_key('u'));
+        let effects = update(&mut model, key(KeyCode::Enter));
+        assert_eq!(
+            effects,
+            [UiEffect::Contact(Contact {
+                peer: PEER,
+                petname: None,
+                blocked: false
+            })]
+        );
+        assert_eq!(view(&model).messages_title, "Alice ·abab  unknown");
+        // Nothing visible is refused, not written.
+        palette(&mut model, "rename");
+        typed(&mut model, "\u{200b}");
+        assert!(update(&mut model, key(KeyCode::Enter)).is_empty());
+        assert_eq!(model.names.petname(&PEER), None);
+        // `Esc` leaves without a write.
+        palette(&mut model, "rename");
+        typed(&mut model, "Bob");
+        update(&mut model, key(KeyCode::Esc));
+        assert!(model.palette.is_none());
+        assert_eq!(model.names.petname(&PEER), None);
     }
 }

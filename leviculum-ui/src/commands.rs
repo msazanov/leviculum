@@ -62,6 +62,15 @@ pub enum Command {
     Pin,
     /// Show the peers' positions on the map, in the conversation's place.
     Map,
+    /// Give the open conversation's peer a name of the reader's own, or
+    /// clear it: the palette takes the name as text.
+    Rename,
+    /// Block the open conversation's peer: what it sends is kept, not shown.
+    Block,
+    /// Lift the block on the open conversation's peer.
+    Unblock,
+    /// List the blocked conversations instead of the others, and back.
+    Blocked,
 }
 
 /// One palette row: the words the reader filters on, and what it runs.
@@ -74,7 +83,7 @@ pub struct PaletteEntry {
 }
 
 /// The table, in the order the palette lists it unfiltered.
-pub const COMMANDS: [PaletteEntry; 21] = [
+pub const COMMANDS: [PaletteEntry; 25] = [
     entry("send", Command::Send),
     entry("fetch", Command::Fetch),
     entry("quit", Command::Quit),
@@ -96,6 +105,10 @@ pub const COMMANDS: [PaletteEntry; 21] = [
     entry("delete conversation", Command::DeleteConversation),
     entry("pin", Command::Pin),
     entry("map", Command::Map),
+    entry("rename", Command::Rename),
+    entry("block", Command::Block),
+    entry("unblock", Command::Unblock),
+    entry("blocked", Command::Blocked),
 ];
 
 /// The entry that runs `command`.

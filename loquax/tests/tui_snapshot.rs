@@ -43,6 +43,9 @@
 //! a second peer announcing `B0b` marks both with `≈` and the header says
 //! whose name it shares; and the third, whom the contacts file names
 //! `Carol`, keeps that name over the `Caroline` it announces and is `known`.
+//! Then the palette renames her (`rename`, the petname in the palette to
+//! edit), blocks her (her conversation leaves the list) and lists the
+//! blocked (`blocked`), and the contacts file says both, its comment kept.
 //! Pinned in `tests/fixtures/tui_names.frames`.
 //!
 //! The history's session (section 7, slice 6) runs loquax three times over
@@ -1252,6 +1255,22 @@ until named 3 30
 key j
 key j
 frame petname
+key :
+type rename
+key enter
+key ctrl-u
+type Carol Meyer
+frame rename
+key enter
+frame renamed
+key :
+type block
+key enter
+frame blocked
+key :
+type blocked
+key enter
+frame blocked view
 key q
 ";
 
@@ -1352,6 +1371,40 @@ async fn names_from_announces_carry_their_hash_collide_and_yield_to_a_petname() 
     assert!(
         petname.contains("Carol ·") && petname.contains("known · announces Caroline"),
         "{petname}"
+    );
+    // The palette's rename asks with the petname to edit, and its answer
+    // is the header's name; block takes Carol off the list, and the
+    // `blocked` view lists her.
+    let rename = frame(&got, "rename");
+    assert!(rename.contains("> Carol Meyer"), "{rename}");
+    assert!(rename.contains("your name for Carol ·"), "{rename}");
+    let renamed = frame(&got, "renamed");
+    assert!(
+        renamed.contains("Carol Meyer ·") && renamed.contains("known · announces Caroline"),
+        "{renamed}"
+    );
+    let blocked = frame(&got, "blocked");
+    assert!(
+        blocked
+            .lines()
+            .all(|row| !row.starts_with("│ Carol") && !row.starts_with("│▌Carol")),
+        "{blocked}"
+    );
+    assert!(blocked.contains("blocked Carol Meyer ·"), "{blocked}");
+    let view = frame(&got, "blocked view");
+    assert!(
+        view.contains("Blocked") && view.contains("Carol Meyer ·"),
+        "{view}"
+    );
+    assert!(view.contains("blocked · announces Caroline"), "{view}");
+    // The file says it, its comment kept.
+    let contacts = std::fs::read_to_string(home.path().join("contacts")).expect("the contacts");
+    assert_eq!(
+        contacts,
+        format!(
+            "# the reader's own names\nname {carol} Carol Meyer\nblock {carol}\n",
+            carol = hex(0x44)
+        )
     );
     if got != EXPECTED_NAMES {
         let kept = std::env::temp_dir().join("loquax-tui-names.frames");

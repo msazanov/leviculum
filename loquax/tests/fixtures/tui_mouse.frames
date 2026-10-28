@@ -182,7 +182,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 │  Ctrl-d / Ctrl-u                               half a page                   █
 │  g / G   Home / End                            top / bottom                  █
 │  Ctrl-↑ / Ctrl-↓                               top / bottom (Signal)         █
-│  PageDown / PageUp                             page the messages (compose)   █
+│  PageDown / PageUp                             page the messages (compose)   ║
 │                                                                              ║
 │Conversations                                                                 ║
 │  Enter                                         open the selected conversation║
@@ -190,14 +190,14 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 │  : delete conversation                         delete the conversation       ║
 │                                                on this device; y confirms    ║
 │  : pin                                         pin or unpin the conversation ║
+│  : rename                                      name the peer                 ║
+│                                                empty clears                  ║
+│  : block                                       block the peer                ║
+│                                                kept, not shown               ║
+│  : unblock                                     unblock the peer              ║
+│  : blocked                                     list the blocked, or the rest ║
 │  Alt-↑   Ctrl-Shift-Tab                        previous conversation         ║
 │  Alt-↓   Ctrl-Tab                              next conversation             ║
-│  Alt-Shift-↑                                   previous unread               ║
-│  Alt-Shift-↓                                   next unread                   ║
-│                                                Tab in mutt: here Alt-Shift-↓,║
-│Tab cycles the panes                                                          ║
-│  i / a   r   Ctrl-Shift-T                      write in this conversation    ║
-│  : focus conversations                         focus the conversation list   ║
 └──────────────────────────────────────────────────────────────────────────────┘
 === wheel ===
 --- frame 1: list focused ---

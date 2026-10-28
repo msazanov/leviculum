@@ -281,7 +281,7 @@ and the palette finds the action by the chat program's word too (`new
 chat`, `find`).
 
 **`:q` quits for free.** The palette's fuzzy match is a subsequence test
-(`fuzzy_match`, `leviculum-ui/src/commands.rs:115`), and `quit` is the only
+(`fuzzy_match`, `leviculum-ui/src/commands.rs:128`), and `quit` is the only
 palette name containing a `q`, so `:`, `q`, `Enter` quits as a vi user
 expects. That stays true only while it is tested, so the keymap slice
 pins it.
@@ -711,14 +711,14 @@ the mailbox page's decision, or fills a gap they leave:
   `name <address> <petname>` or `block <address>` a line; a wrong line
   stops the start with the file and line, as `config` does. The pages say
   trust follows from naming someone and do not say where the naming
-  happens; a palette action that writes the file needs text input in the
-  palette, which it does not take yet.
+  happens. (The palette writes it since 1082: see the mailbox page,
+  section 2, "Blocking, and names from the palette".)
 - **Trust** is the three words of the mailbox page in the header:
   `known` with a petname, `blocked` with a block (over a petname),
   `unknown` else. Beside a petname that differs from what the peer
   announces the header adds `announces Ally`, the provenance of option C.
-  `blocked` is said, not yet acted on: what arrives from a blocked peer is
-  still shown, because neither page decides what blocking does to it.
+  `blocked` was only said until Lew decided what it does on 2026-10-28
+  (1082): stored silently, see the mailbox page, section 2.
 - **Names are this session's.** The store across restarts is the history
   slice; a peer heard in an earlier run is its address until it announces
   again. (Kept across restarts since 1049, "Built 2026-10-27, history".)
@@ -778,7 +778,7 @@ or fills a gap it leaves:
   blank row under the last of them when an unpinned one follows. No key and
   no mouse target, as the element text has it.
 - **The palette ranks** a name typed whole and then one it begins before
-  the scattered matches (`leviculum-ui/src/commands.rs:127`); without it
+  the scattered matches (`leviculum-ui/src/commands.rs:140`); without it
   `:pin` and `Enter` ran `previous conversation`, whose letters hold
   `p`, `i`, `n` in order.
 - **The unread count** and the `new` rule survive a restart: a conversation
@@ -898,7 +898,7 @@ first rung it is.
 #### 2. Light or dark
 
 `loquax` asks the terminal for its background before raw mode
-(`loquax/src/tui.rs:1051`), the same query `lnomad` makes: OSC 11, with
+(`loquax/src/tui.rs:1067`), the same query `lnomad` makes: OSC 11, with
 `COLORFGBG` as the fallback, 100 ms to answer
 (`leviculum-ui-ratatui/src/background.rs:12`), decided by
 `resolve_theme` (`leviculum-ui/src/theme.rs:73`). It was hardcoded to
@@ -914,7 +914,7 @@ first rung it is.
 - a palette action `theme` toggles for the session, the way `t` calls
   `toggle_theme` in lnomad (`lnomad/src/app/event.rs:697`); no key, the
   keymap is decided. Its toast names the theme it turned to
-  (`loquax/src/ui.rs:2157`).
+  (`loquax/src/ui.rs:2200`).
 
 #### 3. What colour carries and what it must not carry alone
 
@@ -1110,7 +1110,7 @@ in truecolor, 3.4:1 to 9.3:1 and 3.1:1 to 8.6:1 in 256.
 #### 5. Tests the layout slice will carry
 
 - **The frames stay plain text.** The `frame` step of the key script
-  (`loquax/src/tui.rs:1557`) writes characters only, and the existing
+  (`loquax/src/tui.rs:1573`) writes characters only, and the existing
   snapshot frames keep pinning the monochrome look.
 - **A script step `styles <name>`** writes one frame's per-cell style as a
   map in the letters above: `.` `,` `=` for the three tints, `s` for a
@@ -1173,7 +1173,7 @@ these differences from the text above:
   for a selected block and `r` for reverse video; the build writes `^`
   for both, because a selected block in 16 colours and in monochrome is
   reverse video and a map of styles cannot tell the two apart. The
-  letters (`style_letter`, `loquax/src/tui.rs:1663`): `.` ours, `,`
+  letters (`style_letter`, `loquax/src/tui.rs:1679`): `.` ours, `,`
   theirs, `=` the date pill, `!` the unread rule, `^` a selected block's
   tint or reverse video, `t` the toast, `e` the error colour, blank for
   the pane. Where two tokens share their colours the earlier letter wins:

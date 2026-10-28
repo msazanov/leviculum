@@ -19,7 +19,8 @@
 //! meaning (`Ctrl-r` fetches then).
 //!
 //! Delete (`d`, then `y`) and the palette's `delete conversation` and `pin`
-//! came with the history (slice 6).
+//! came with the history (slice 6); `rename`, `block`, `unblock` and
+//! `blocked` with the contacts (1082), palette names without a chord.
 //!
 //! The map (`docs/src/concepts/loquax-map.md`, slice (c)) adds a pane,
 //! [`MAP`], in the conversation's place: `M` from the two command panes and
@@ -248,6 +249,14 @@ pub const ROWS: &[Row<Action>] = {
             .palette("delete conversation")
             .note("on this device; y confirms"),
         Row::new("pin or unpin the conversation", CONVERSATIONS, &[]).palette("pin"),
+        Row::new("name the peer", CONVERSATIONS, &[])
+            .palette("rename")
+            .note("empty clears"),
+        Row::new("block the peer", CONVERSATIONS, &[])
+            .palette("block")
+            .note("kept, not shown"),
+        Row::new("unblock the peer", CONVERSATIONS, &[]).palette("unblock"),
+        Row::new("list the blocked, or the rest", CONVERSATIONS, &[]).palette("blocked"),
         Row::new(
             "previous conversation",
             CONVERSATIONS,
