@@ -20,6 +20,8 @@
 //! (`loquax/src/send.rs`, `EXIT_PROPAGATED`).
 
 #[cfg(feature = "tui")]
+mod shell;
+#[cfg(feature = "tui")]
 mod tui;
 
 use std::path::{Path, PathBuf};

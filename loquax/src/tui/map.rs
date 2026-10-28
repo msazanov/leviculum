@@ -168,7 +168,7 @@ pub fn choose_graphics(
     }
 }
 
-pub use loquax::picture::{load, maps_dir, Installed};
+pub use loquax::picture::Installed;
 
 /// A no-op the terminal carries out before a picture sent again only to
 /// erase stale labels: save and restore the cursor, which makes the
