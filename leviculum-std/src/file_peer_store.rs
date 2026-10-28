@@ -14,18 +14,93 @@
 //! path for the same reason the message store is: a peering key can cost
 //! minutes of mining (§5's cost table), and losing it to a power cut costs
 //! that again.
+//!
+//! # Off the caller's thread, and only on a change (order 1081)
+//!
+//! `lnpnd` saves a record from its core hooks, under the core lock and a 5 ms
+//! budget, and one rewrite with its two `fsync`s measured up to 9.5 ms on the
+//! coder host (order 1009). So the table lives in memory, a save or remove
+//! that changes it hands the encoded table to a writer thread, and the
+//! writer rewrites the file with whatever is newest when it gets to it:
+//! changes that arrive while a write runs are coalesced into the next one,
+//! and a save that changes nothing writes nothing. Nothing on the wire waits
+//! on this file, so nothing waits on the writer; what a power cut can cost
+//! is the changes of the last write's duration, which re-form from announces
+//! as the reboot case above already describes. Dropping the store waits for
+//! the newest table to be written.
 
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::thread::JoinHandle;
 
 use leviculum_lxmf::msgpack;
 use leviculum_lxmf::peering::{PeerRecord, PeerStore, PeerTraffic};
 use leviculum_lxmf::storage::StorageError;
 
+use crate::durable::{device_fsync, write_durably, Fsync};
+
 /// A peer table in one msgpack file.
 pub struct FilePeerStore {
     path: PathBuf,
     records: Vec<PeerRecord>,
+    shared: Arc<Shared>,
+    writer: Option<JoinHandle<()>>,
+}
+
+/// What the store and its writer share.
+struct Shared {
+    slot: Mutex<Slot>,
+    changed: Condvar,
+}
+
+#[derive(Default)]
+struct Slot {
+    /// The newest encoded table not yet taken by the writer.
+    newest: Option<Vec<u8>>,
+    /// The writer is writing a table it took.
+    writing: bool,
+    closed: bool,
+    /// Rewrites made since the store opened.
+    writes: u64,
+}
+
+impl Shared {
+    fn lock(&self) -> MutexGuard<'_, Slot> {
+        // A writer that panicked mid-write left the slot as consistent as
+        // it was: every field is set under the lock in one step.
+        self.slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+fn run_writer(path: PathBuf, shared: Arc<Shared>, fsync: Arc<dyn Fsync>) {
+    let temp = path.with_extension("tmp");
+    loop {
+        let bytes = {
+            let mut slot = shared.lock();
+            loop {
+                if let Some(bytes) = slot.newest.take() {
+                    slot.writing = true;
+                    break bytes;
+                }
+                if slot.closed {
+                    return;
+                }
+                slot = shared
+                    .changed
+                    .wait(slot)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+            }
+        };
+        if write_durably(&temp, &path, &bytes, &*fsync).is_err() {
+            tracing::warn!("peer store write to {} failed", path.display());
+        }
+        let mut slot = shared.lock();
+        slot.writing = false;
+        slot.writes += 1;
+        shared.changed.notify_all();
+    }
 }
 
 impl FilePeerStore {
@@ -34,6 +109,11 @@ impl FilePeerStore {
     /// re-forms from announces, one bounded re-offer per re-formed peer
     /// (§5's reboot case).
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, StorageError> {
+        Self::open_with(path, device_fsync())
+    }
+
+    /// [`Self::open`] over another [`Fsync`], for a test's slow device.
+    pub fn open_with<P: AsRef<Path>>(path: P, fsync: Arc<dyn Fsync>) -> Result<Self, StorageError> {
         let path = path.as_ref().to_path_buf();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|_| StorageError::Io)?;
@@ -48,23 +128,66 @@ impl FilePeerStore {
             }),
             Err(_) => Vec::new(),
         };
-        Ok(Self { path, records })
+        let shared = Arc::new(Shared {
+            slot: Mutex::new(Slot::default()),
+            changed: Condvar::new(),
+        });
+        let writer = {
+            let path = path.clone();
+            let shared = Arc::clone(&shared);
+            std::thread::Builder::new()
+                .name("peer-store-writer".into())
+                .spawn(move || run_writer(path, shared, fsync))
+                .map_err(|_| StorageError::Io)?
+        };
+        Ok(Self {
+            path,
+            records,
+            shared,
+            writer: Some(writer),
+        })
     }
 
-    fn persist(&self) -> Result<(), StorageError> {
+    /// The file this store writes.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Hand the table to the writer, replacing a newer-than-written table it
+    /// has not taken yet: that one is coalesced into this.
+    fn persist(&self) {
         let bytes = encode_records(&self.records);
-        let temp = self.path.with_extension("tmp");
-        let mut file = std::fs::File::create(&temp).map_err(|_| StorageError::Io)?;
-        file.write_all(&bytes).map_err(|_| StorageError::Io)?;
-        file.sync_all().map_err(|_| StorageError::Io)?;
-        drop(file);
-        std::fs::rename(&temp, &self.path).map_err(|_| StorageError::Io)?;
-        if let Some(parent) = self.path.parent() {
-            if let Ok(dir) = std::fs::File::open(parent) {
-                let _ = dir.sync_all();
-            }
+        let mut slot = self.shared.lock();
+        slot.newest = Some(bytes);
+        self.shared.changed.notify_all();
+    }
+
+    /// Wait until the newest table is written.
+    pub fn flush(&self) {
+        let mut slot = self.shared.lock();
+        while (slot.newest.is_some() || slot.writing) && self.writer.is_some() {
+            slot = self
+                .shared
+                .changed
+                .wait(slot)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
         }
-        Ok(())
+    }
+
+    /// How many times the file has been rewritten since the store opened.
+    pub fn writes(&self) -> u64 {
+        self.shared.lock().writes
+    }
+}
+
+impl Drop for FilePeerStore {
+    /// The newest table is written before the store is gone.
+    fn drop(&mut self) {
+        self.shared.lock().closed = true;
+        self.shared.changed.notify_all();
+        if let Some(writer) = self.writer.take() {
+            let _ = writer.join();
+        }
     }
 }
 
@@ -75,10 +198,13 @@ impl PeerStore for FilePeerStore {
             .iter_mut()
             .find(|known| known.destination_hash == record.destination_hash)
         {
+            // The same record again: the file already says this.
+            Some(existing) if existing == record => return Ok(()),
             Some(existing) => *existing = record.clone(),
             None => self.records.push(record.clone()),
         }
-        self.persist()
+        self.persist();
+        Ok(())
     }
 
     fn remove(&mut self, destination_hash: &[u8; 16]) -> Result<(), StorageError> {
@@ -86,7 +212,7 @@ impl PeerStore for FilePeerStore {
         self.records
             .retain(|record| &record.destination_hash != destination_hash);
         if self.records.len() != before {
-            self.persist()?;
+            self.persist();
         }
         Ok(())
     }
@@ -353,5 +479,97 @@ mod tests {
         std::fs::write(&path, b"not msgpack at all").unwrap();
         let store = FilePeerStore::open(&path).expect("open corrupt");
         assert!(store.load_all().unwrap().is_empty());
+    }
+
+    /// Order 1081: a change writes the file once, a save that changes
+    /// nothing does not write it, and a restart reads back the same table.
+    #[test]
+    fn writes_follow_changes_and_an_unchanged_save_writes_nothing() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("peers");
+        let mut store = FilePeerStore::open(&path).expect("open");
+        for seed in 2..7 {
+            store.save(&record(seed)).unwrap();
+            store.flush();
+        }
+        assert_eq!(store.writes(), 5, "five changes, one write each");
+        store.save(&record(2)).unwrap();
+        store.remove(&[99; 16]).unwrap();
+        store.flush();
+        assert_eq!(
+            store.writes(),
+            5,
+            "nothing changed, and the file was written"
+        );
+        store.remove(&[3; 16]).unwrap();
+        store.flush();
+        assert_eq!(store.writes(), 6);
+        let before = store.load_all().unwrap();
+        drop(store);
+
+        let store = FilePeerStore::open(&path).expect("reopen");
+        assert_eq!(store.load_all().unwrap(), before);
+        assert_eq!(store.writes(), 0, "opening writes nothing");
+    }
+
+    /// Order 1081: a save costs its caller no `fsync`, and the changes that
+    /// arrive while a write runs are coalesced into one write of the newest
+    /// table. The device is held for the whole burst, so the count does not
+    /// depend on how the threads are scheduled: the writer has taken the
+    /// first table or not, and everything after it is one write.
+    #[test]
+    fn a_burst_during_a_write_is_coalesced_and_costs_the_caller_no_fsync() {
+        struct Held {
+            gate: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+            threads: std::sync::Mutex<Vec<std::thread::ThreadId>>,
+        }
+        impl Fsync for Held {
+            fn sync(&self, handle: &std::fs::File) -> std::io::Result<()> {
+                if let Ok(gate) = self.gate.lock() {
+                    let _ = gate.recv();
+                }
+                if let Ok(mut threads) = self.threads.lock() {
+                    threads.push(std::thread::current().id());
+                }
+                handle.sync_all()
+            }
+        }
+        let (release, gate) = std::sync::mpsc::channel();
+        let held = Arc::new(Held {
+            gate: std::sync::Mutex::new(gate),
+            threads: std::sync::Mutex::new(Vec::new()),
+        });
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("peers");
+        let mut store =
+            FilePeerStore::open_with(&path, Arc::clone(&held) as Arc<dyn Fsync>).expect("open");
+        for cursor in 0..50 {
+            let mut changed = record(2);
+            changed.cursor = cursor;
+            // Returns although the device holds every fsync: the save does
+            // not wait for one.
+            store.save(&changed).unwrap();
+        }
+        drop(release);
+        store.flush();
+        let writes = store.writes();
+        assert!(
+            (1..=2).contains(&writes),
+            "50 changes during one held write made {writes} writes"
+        );
+        let caller = std::thread::current().id();
+        let threads = held.threads.lock().map(|t| t.clone()).unwrap_or_default();
+        assert!(
+            !threads.is_empty() && threads.iter().all(|thread| *thread != caller),
+            "an fsync ran on the caller's thread: {threads:?}"
+        );
+        drop(store);
+        let store = FilePeerStore::open(&path).expect("reopen");
+        let records = store.load_all().unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].cursor, 49,
+            "the newest table was not the one written"
+        );
     }
 }
