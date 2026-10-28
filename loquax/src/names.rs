@@ -33,14 +33,19 @@
 //!
 //! Three states, `known` (the reader named the peer), `unknown` and
 //! `blocked`, from the contacts file ([`Contacts`]): `${LNMSG_HOME}/contacts`,
-//! one `name <address> <petname>` or `block <address>` a line.
+//! one `name <address> <petname>` or `block <address>` a line. The palette's
+//! `rename`, `block` and `unblock` write it ([`edit_contacts`]): only the
+//! lines about that peer change, every comment and every other line stays
+//! as it was, and the file is replaced through a rename ([`save_contact`]).
 //!
-//! # What is not here
+//! A message from a blocked address is received, proven and stored as any
+//! other, so its sender sees it delivered and nothing on the wire tells; the
+//! screen leaves it out of the list, the unread count, the toasts and the
+//! map (`crate::ui`), and the palette's `blocked` lists those
+//! conversations.
 //!
 //! A name heard is kept in the history store (`crate::store`) and named
-//! again after a restart ([`Names::remember`]). A petname is set in the contacts file, not yet from the
-//! screen; and `blocked` is a state the header says, not yet a filter on
-//! what arrives.
+//! again after a restart ([`Names::remember`]).
 
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
@@ -263,6 +268,85 @@ pub struct Contacts {
     pub blocked: BTreeSet<[u8; 16]>,
 }
 
+impl Contacts {
+    /// The reader's word on `peer`.
+    pub fn of(&self, peer: &[u8; 16]) -> Contact {
+        Contact {
+            peer: *peer,
+            petname: self.petnames.get(peer).cloned(),
+            blocked: self.blocked.contains(peer),
+        }
+    }
+
+    /// Take `contact` as the reader's word on its peer.
+    pub fn set(&mut self, contact: &Contact) {
+        match &contact.petname {
+            Some(name) => self.petnames.insert(contact.peer, name.clone()),
+            None => self.petnames.remove(&contact.peer),
+        };
+        match contact.blocked {
+            true => self.blocked.insert(contact.peer),
+            false => self.blocked.remove(&contact.peer),
+        };
+    }
+}
+
+/// Everything the contacts file says about one peer: what the palette's
+/// `rename`, `block` and `unblock` change, whole, so writing it twice is
+/// writing it once.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Contact {
+    pub peer: [u8; 16],
+    /// Sanitised ([`sanitise`]); `None` for none.
+    pub petname: Option<String>,
+    pub blocked: bool,
+}
+
+/// The contacts text with `contact`'s lines made to say it: its first `name`
+/// and `block` line replaced in place or removed, a later duplicate of
+/// either removed, a missing one appended. Every other line, comments,
+/// blank lines and lines this version does not read among them, comes back
+/// byte for byte, so the file stays the reader's.
+pub fn edit_contacts(text: &str, contact: &Contact) -> String {
+    let hex = to_hex(&contact.peer);
+    let name_line = contact
+        .petname
+        .as_ref()
+        .map(|pet| format!("name {hex} {pet}"));
+    let block_line = contact.blocked.then(|| format!("block {hex}"));
+    let (mut named, mut blocked) = (false, false);
+    let mut out = String::new();
+    for raw in text.split_inclusive('\n') {
+        let line = raw.trim();
+        let mut words = line.split_whitespace();
+        let verb = words.next();
+        let about = words.next().and_then(|w| address::parse(w).ok()) == Some(contact.peer);
+        let (wanted, done) = match verb {
+            Some("name") if about => (&name_line, &mut named),
+            Some("block") if about => (&block_line, &mut blocked),
+            _ => {
+                out.push_str(raw);
+                continue;
+            }
+        };
+        if let Some(wanted) = wanted.as_ref().filter(|_| !*done) {
+            out.push_str(wanted);
+            out.push('\n');
+            *done = true;
+        }
+    }
+    for (wanted, done) in [(&name_line, named), (&block_line, blocked)] {
+        if let Some(wanted) = wanted.as_ref().filter(|_| !done) {
+            if !out.is_empty() && !out.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str(wanted);
+            out.push('\n');
+        }
+    }
+    out
+}
+
 /// Why the contacts text could not be used, with the line (1-based).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ContactsError {
@@ -360,6 +444,21 @@ pub fn load_contacts(home: &std::path::Path) -> Result<Contacts, LoadError> {
         Err(error) => return Err(LoadError::Io(path, error)),
     };
     parse_contacts(&text).map_err(|error| LoadError::Bad(path, error))
+}
+
+/// Make `home/contacts` say `contact` ([`edit_contacts`]), through a rename
+/// so a crash leaves the old file whole. A missing file is an empty one.
+#[cfg(feature = "std")]
+pub fn save_contact(home: &std::path::Path, contact: &Contact) -> std::io::Result<()> {
+    let path = home.join(CONTACTS_FILE);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error),
+    };
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, edit_contacts(&text, contact))?;
+    std::fs::rename(&tmp, &path)
 }
 
 /// What an announce changed.
@@ -764,5 +863,127 @@ mod tests {
         std::fs::write(dir.path().join(CONTACTS_FILE), "frobnicate\n").expect("write");
         let text = load_contacts(dir.path()).expect_err("bad").to_string();
         assert!(text.contains("contacts:1: "), "{text}");
+    }
+
+    /// The palette's three writes: only the peer's own lines change, the
+    /// comments, the blank line, the other peer's lines and their spelling
+    /// come back byte for byte, and the text parses to what was set.
+    #[test]
+    fn an_edit_changes_the_peers_lines_and_keeps_every_other() {
+        let (alice, mallory) = (to_hex(&ALICE), to_hex(&MALLORY));
+        let text = format!(
+            "# the reader's own names\n\nname {}   Mum  # kept as written\n\
+             name {alice} Alice\n# blocked on 2026-10-01\nblock {mallory}\n",
+            to_hex(&CAROL).to_uppercase(),
+        );
+        let named = Contact {
+            peer: ALICE,
+            petname: Some("Ally".into()),
+            blocked: false,
+        };
+        let renamed = edit_contacts(&text, &named);
+        assert_eq!(renamed, text.replace("Alice\n", "Ally\n"));
+        assert_eq!(parse_contacts(&renamed).expect("parses").of(&ALICE), named);
+
+        let blocked = Contact {
+            peer: ALICE,
+            petname: Some("Ally".into()),
+            blocked: true,
+        };
+        let both = edit_contacts(&renamed, &blocked);
+        assert_eq!(both, format!("{renamed}block {alice}\n"));
+        // Writing the same word again changes nothing.
+        assert_eq!(edit_contacts(&both, &blocked), both);
+
+        let cleared = Contact {
+            peer: ALICE,
+            petname: None,
+            blocked: true,
+        };
+        let unnamed = edit_contacts(&both, &cleared);
+        assert_eq!(unnamed, both.replace(&format!("name {alice} Ally\n"), ""));
+        let contacts = parse_contacts(&unnamed).expect("parses");
+        assert_eq!(contacts.of(&ALICE), cleared);
+        assert_eq!(
+            contacts.petnames.get(&CAROL).map(String::as_str),
+            Some("Mum # kept as written")
+        );
+        assert!(contacts.blocked.contains(&MALLORY));
+
+        let unblocked = Contact {
+            peer: MALLORY,
+            petname: None,
+            blocked: false,
+        };
+        let lifted = edit_contacts(&unnamed, &unblocked);
+        assert_eq!(lifted, unnamed.replace(&format!("block {mallory}\n"), ""));
+        assert!(lifted.contains("# blocked on 2026-10-01\n"), "{lifted}");
+    }
+
+    /// A duplicate line for the peer goes, the first stands for both; a text
+    /// without a last newline gets one before what is appended, and an
+    /// empty text is the new lines alone.
+    #[test]
+    fn an_edit_settles_duplicates_and_a_missing_newline() {
+        let alice = to_hex(&ALICE);
+        let text = format!("name {alice} One\nblock {alice}\nname {alice} Two\nblock {alice}");
+        let contact = Contact {
+            peer: ALICE,
+            petname: Some("Three".into()),
+            blocked: true,
+        };
+        assert_eq!(
+            edit_contacts(&text, &contact),
+            format!("name {alice} Three\nblock {alice}\n")
+        );
+        let comment = "# no newline at the end";
+        assert_eq!(
+            edit_contacts(comment, &contact),
+            format!("{comment}\nname {alice} Three\nblock {alice}\n")
+        );
+        assert_eq!(
+            edit_contacts(
+                "",
+                &Contact {
+                    peer: ALICE,
+                    petname: None,
+                    blocked: true
+                }
+            ),
+            format!("block {alice}\n")
+        );
+    }
+
+    /// `save_contact` writes through a rename and keeps the comments; a
+    /// missing file is made.
+    #[test]
+    fn a_saved_contact_round_trips_through_the_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let contact = Contact {
+            peer: ALICE,
+            petname: Some("Mum".into()),
+            blocked: false,
+        };
+        save_contact(dir.path(), &contact).expect("made");
+        assert_eq!(
+            load_contacts(dir.path()).expect("loads").of(&ALICE),
+            contact
+        );
+
+        let path = dir.path().join(CONTACTS_FILE);
+        let kept = format!("# mine\n{}", std::fs::read_to_string(&path).expect("read"));
+        std::fs::write(&path, &kept).expect("write");
+        let blocked = Contact {
+            blocked: true,
+            ..contact
+        };
+        save_contact(dir.path(), &blocked).expect("saved");
+        let text = std::fs::read_to_string(&path).expect("read");
+        assert!(text.starts_with(&kept), "{text}");
+        assert_eq!(
+            load_contacts(dir.path()).expect("loads").of(&ALICE),
+            blocked
+        );
+        assert!(!dir.path().join("contacts.tmp").exists());
     }
 }
