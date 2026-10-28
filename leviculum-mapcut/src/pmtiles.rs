@@ -372,7 +372,7 @@ impl<R: RangeRead> Archive<R> {
         Ok(out)
     }
 
-    /// Fetch `tiles`, near ones in one range and [`FETCHERS`] ranges at a
+    /// Fetch `tiles`, near ones in one range and four ranges at a
     /// time.
     pub fn fetch(&self, tiles: &[Located]) -> Res<Fetched> {
         let mut by_offset: Vec<Located> = tiles.to_vec();

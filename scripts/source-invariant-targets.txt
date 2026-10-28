@@ -153,9 +153,10 @@ skip  leviculum-map labels                    # the pin label rule in cells and 
 skip  leviculum-map projection                # in-process projection and viewport arithmetic; subject is the code
 skip  leviculum-map region                    # reads the committed region, but the subject is the reader and the draw (golden counts)
 skip  leviculum-map view                      # the outline table and the region drawn at pinned counts; subject is the draw, choice and pin order
-skip  leviculum-map-tool cut                  # synthetic tiles through the cut; subject is the code
-skip  leviculum-map-tool pmtiles              # writes a temp archive and reads it back; subject is the reader
-skip  leviculum-map-tool simplify             # in-process geometry arithmetic; subject is the code
+skip  leviculum-mapcut cut                    # synthetic tiles through the cut; subject is the code
+skip  leviculum-mapcut http                   # a loopback server and threads; subject is the HTTP reader and the load
+skip  leviculum-mapcut pmtiles                # writes a temp archive and reads it back; subject is the reader
+skip  leviculum-mapcut simplify               # in-process geometry arithmetic; subject is the code
 skip  leviculum-mapfill fill                   # pixel-exact reference images; subject is the filler
 skip  leviculum-mapfill fixture                # reads the committed fixture, but the subject is the render pipeline (a golden count)
 skip  leviculum-mapfill frame                  # in-process framebuffer; subject is the code
