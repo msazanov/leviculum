@@ -19,7 +19,7 @@ src/boards/mod.rs (84): lora qspi radio_store telemetry
 src/boards/rak4631.rs (208):
 src/boards/solarnode.rs (410): lora qspi vext
 src/boards/t1000e.rs (372): button feedback radio
-src/boards/t114.rs (214): st7789
+src/boards/t114.rs (225): st7789
 src/boot_count.rs (96): boot_trace radio_store record_store
 src/boot_trace.rs (27):
 src/button.rs (86):
@@ -28,15 +28,16 @@ src/display.rs (222): log panel_facts
 src/events.rs (261): announce log pn transport_stats
 src/feedback.rs (274): led log
 src/flash.rs (79):
-src/gnss.rs (587): boards log vext
+src/gnss.rs (598): boards log log_critical vext
 src/heap_census.rs (398): log pn
 src/led.rs (48): feedback log
-src/lib.rs (734): log log_critical
+src/lib.rs (739): log log_critical
 src/lora.rs (2710): announce chtm events log media pn radio radio_store set_irq_priorities
 src/media.rs (288): log telemetry
 src/mgmt.rs (259): log name telemetry usb
 src/motion.rs (177): log
 src/name.rs (259): ble log media telemetry
+src/node_loop.rs (1503): announce banner ble ble_peripherals boards boot_count boot_trace button events feedback flash gnss heap_census init_heap init_vbus log log_boot_diagnostics log_stack lora media mgmt name paint_stack pn radio radio_store record_store remote_status rng set_irq_priorities spawn_diagnostics_tasks store_spike take_hardfault_postmortem take_panic_postmortem telemetry time_floor transport_stats usb
 src/panel_facts.rs (30): lora pn
 src/pn.rs (3759): announce events heap_census log lora name record_store telemetry usb
 src/qspi.rs (1188): log

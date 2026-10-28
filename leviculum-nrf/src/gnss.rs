@@ -585,3 +585,14 @@ pub async fn gnss_task(wiring: GnssWiring) {
 pub fn init(spawner: &Spawner, wiring: GnssWiring) {
     spawner.must_spawn(gnss_task(wiring));
 }
+
+/// The boot anchor (#240, D2 of order 1085): "machinery armed, answer
+/// pending", printed once by every GNSS board before the task's first
+/// transition. The settled states are the task's `state=<no-hardware|
+/// no-fix|fix>` transitions (`apply_output`); this line marks the wait for
+/// them, so a log tail always carries a `[GNSS_PRESENCE]` anchor. A replay
+/// keyed on the three settled states treats it like no line at all. `baud`
+/// is the rate the board's module ships at.
+pub fn log_detecting(baud: u32) {
+    crate::log_critical!("[GNSS_PRESENCE] state=detecting baud={}", baud);
+}

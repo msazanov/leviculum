@@ -77,6 +77,9 @@ fn no_board_binary_spins_on_nop_before_the_main_loop() {
         .filter(|p| p.extension().is_some_and(|x| x == "rs"))
         .collect();
     files.sort();
+    // The shared node loop is boot code of every binary on it (#469 step 7,
+    // order 1085), so a spin there holds the same executor.
+    files.push(bin.with_file_name("node_loop.rs"));
     // The four boards at least: an empty or misplaced directory must not
     // pass by reading nothing.
     for board in ["t114.rs", "t1000e.rs", "solarnode.rs", "rak4631.rs"] {

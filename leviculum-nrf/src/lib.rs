@@ -732,3 +732,8 @@ unsafe fn blink_then_reset(led: postmortem::LedRegisters, cycles: u32) -> ! {
     }
     cortex_m::peripheral::SCB::sys_reset();
 }
+
+// The node loop, once (#469 step 7): the skeleton a board binary runs
+// between its own wiring. Gated like `pn`, which it drives.
+#[cfg(feature = "softdevice")]
+pub mod node_loop;

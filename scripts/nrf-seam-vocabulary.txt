@@ -47,6 +47,30 @@ src/lora.rs: radio_store::load doc x1
 src/lora.rs: set_irq_priorities doc x1
 src/mgmt.rs: usb doc x1
 src/name.rs: ble::columba doc x1
+src/node_loop.rs: ble::MAX_LINKS x1
+src/node_loop.rs: ble::init x1
+src/node_loop.rs: ble_peripherals doc x1
+src/node_loop.rs: boards::BoardConfig x1
+src/node_loop.rs: button x1
+src/node_loop.rs: feedback::NrfSinks x1
+src/node_loop.rs: flash::NvmcIdentityStore::new x1
+src/node_loop.rs: flash::shared_flash x1
+src/node_loop.rs: gnss::log_detecting x1
+src/node_loop.rs: init_heap x1
+src/node_loop.rs: init_vbus x1
+src/node_loop.rs: log_boot_diagnostics x1
+src/node_loop.rs: log_stack x1
+src/node_loop.rs: paint_stack x1
+src/node_loop.rs: radio::Radio x1
+src/node_loop.rs: radio_store::load x1
+src/node_loop.rs: radio_store::spawn_store_task x1
+src/node_loop.rs: record_store x1
+src/node_loop.rs: record_store::spawn_store_task x1
+src/node_loop.rs: rng::fill_entropy x1
+src/node_loop.rs: set_irq_priorities x1
+src/node_loop.rs: spawn_diagnostics_tasks x1
+src/node_loop.rs: usb::SerialChannels x1
+src/node_loop.rs: usb::init x1
 src/pn.rs: record_store::PnOp x1
 src/pn.rs: record_store::mounted x3
 src/pn.rs: record_store::pn_execute x1 doc x1

@@ -212,3 +212,14 @@ pub const IFACE_NAMES: [&str; leviculum_firmware::iface_bytes::IFACE_COUNT] =
 pub const PANIC_LED_PORT: u8 = 1;
 pub const PANIC_LED_PIN: u8 = 3;
 pub const PANIC_LED_ACTIVE_LOW: bool = true;
+
+// Module names, for the spawn lines (D7 of order 1085: every board says
+// `<task> task spawned (<module>)` with the module from its board file).
+/// The status panel.
+pub const DISPLAY_MODULE: &str = "ST7789";
+/// The GNSS receiver on UARTE0.
+pub const GNSS_MODULE: &str = "L76K";
+/// The baud the L76K ships at (Quectel factory default), where the
+/// presence machine's sweep starts; the boot line `[GNSS_PRESENCE]
+/// state=detecting` names it (D2 of order 1085).
+pub const GNSS_BAUD: u32 = 9600;
