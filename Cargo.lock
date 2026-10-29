@@ -3272,9 +3272,16 @@ version = "0.1.0"
 dependencies = [
  "jni",
  "leviculum-core",
+ "leviculum-lxmf",
+ "leviculum-std",
+ "leviculum-ui",
  "loquax",
  "rand_core 0.6.4",
+ "rmp-serde",
+ "serde",
  "tempfile",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

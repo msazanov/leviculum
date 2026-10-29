@@ -20,14 +20,29 @@ name = "loquax_android"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-# The messenger core and shell, without a terminal or a store: what a home
-# node client needs (docs/drafts/loquax-android-2026-10.md, option A).
-loquax = { path = "../loquax" }
+# The messenger core and shell with the store (`history`, SQLite built by
+# the NDK's clang), without a terminal: what a home node client needs
+# (docs/drafts/loquax-android-2026-10.md, option A).
+loquax = { path = "../loquax", features = ["history"] }
+# The types the session hands loquax's model and engine, at the versions
+# loquax uses.
+leviculum-core = { path = "../leviculum-core" }
+leviculum-lxmf = { path = "../leviculum-lxmf", default-features = false, features = ["pow"] }
+leviculum-std = { path = "../leviculum-std" }
+leviculum-ui = { path = "../leviculum-ui", default-features = false }
+# The runtime the leaf node and the session's runners run on.
+tokio.workspace = true
+tracing.workspace = true
+# The JNI payloads (src/schema.rs): msgpack maps, as the study chose.
+serde.workspace = true
+rmp-serde.workspace = true
 # The safe JNI layer: `EnvUnowned::with_env` catches a panic before it
 # crosses into the Java VM. Already in the lock through winit.
 jni = { version = "0.22.4", default-features = false }
 
 [dev-dependencies]
-leviculum-core = { path = "../leviculum-core" }
+# The end-to-end test runs its transport node and home node on tokio's
+# test runtime.
+tokio = { workspace = true, features = ["full"] }
 rand_core = { workspace = true, features = ["getrandom"] }
 tempfile = "3"
