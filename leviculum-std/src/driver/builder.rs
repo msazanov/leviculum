@@ -1217,8 +1217,11 @@ fn resolve_network_identity_path(
 fn load_or_create_network_identity(path: &std::path::Path) -> std::io::Result<Identity> {
     use leviculum_core::constants::IDENTITY_KEY_SIZE;
     match std::fs::read(path) {
-        Ok(bytes) if bytes.len() == IDENTITY_KEY_SIZE => Identity::from_private_key_bytes(&bytes)
-            .map_err(|e| std::io::Error::other(format!("{e:?}"))),
+        Ok(bytes) if bytes.len() == IDENTITY_KEY_SIZE => {
+            crate::storage::narrow_secret_mode(path)?;
+            Identity::from_private_key_bytes(&bytes)
+                .map_err(|e| std::io::Error::other(format!("{e:?}")))
+        }
         Ok(bytes) => Err(std::io::Error::other(format!(
             "network identity file has wrong size: {} (expected {IDENTITY_KEY_SIZE})",
             bytes.len()
@@ -1231,7 +1234,7 @@ fn load_or_create_network_identity(path: &std::path::Path) -> std::io::Result<Id
             let key_bytes = id
                 .private_key_bytes()
                 .map_err(|e| std::io::Error::other(format!("{e:?}")))?;
-            std::fs::write(path, key_bytes)?;
+            crate::storage::atomic_write_secret(path, &key_bytes)?;
             tracing::info!(
                 "Network identity generated and persisted to {}",
                 path.display()
@@ -1703,6 +1706,25 @@ mod tests {
         assert_eq!(loaded.hash(), &explicit_hash);
 
         let _ = std::fs::remove_dir_all(&path);
+    }
+
+    /// 1119: the discovery network identity is a private key like the
+    /// transport identity, so it is minted 0600, not with the umask's mode.
+    #[cfg(unix)]
+    #[test]
+    fn a_minted_network_identity_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("nested/network_identity");
+        load_or_create_network_identity(&path).expect("mint");
+        let mode = std::fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "network_identity mode {mode:o}");
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+        load_or_create_network_identity(&path).expect("load");
+        let mode = std::fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "narrowed at load, mode {mode:o}");
     }
 
     #[test]

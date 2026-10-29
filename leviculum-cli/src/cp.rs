@@ -33,7 +33,10 @@ async fn deadline_or_never(deadline: Option<Instant>) {
 pub fn load_or_generate_identity(path: &Path) -> Result<Identity, Box<dyn std::error::Error>> {
     if path.exists() {
         let bytes = std::fs::read(path)?;
-        Identity::from_private_key_bytes(&bytes).map_err(|e| err(format!("bad identity file: {e}")))
+        let identity = Identity::from_private_key_bytes(&bytes)
+            .map_err(|e| err(format!("bad identity file: {e}")))?;
+        leviculum_std::narrow_secret_mode(path)?;
+        Ok(identity)
     } else {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -43,7 +46,7 @@ pub fn load_or_generate_identity(path: &Path) -> Result<Identity, Box<dyn std::e
         let pk = id
             .private_key_bytes()
             .map_err(|e| err(format!("identity error: {e}")))?;
-        std::fs::write(path, pk)?;
+        leviculum_std::atomic_write_secret(path, &pk)?;
         Ok(id)
     }
 }
@@ -1076,6 +1079,23 @@ fn format_size(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 1119: the identity is a private key, so it is minted 0600 whatever
+    /// the umask, and one left wider by an older build is narrowed at load.
+    #[cfg(unix)]
+    #[test]
+    fn the_identity_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode =
+            |p: &std::path::Path| std::fs::metadata(p).expect("stat").permissions().mode() & 0o777;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("nested/identity");
+        load_or_generate_identity(&path).expect("mint");
+        assert_eq!(mode(&path), 0o600);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o664)).expect("chmod");
+        load_or_generate_identity(&path).expect("load");
+        assert_eq!(mode(&path), 0o600);
+    }
     use leviculum_std::driver::ReticulumNodeBuilder;
     use rand_core::OsRng;
 

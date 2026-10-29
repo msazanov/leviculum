@@ -502,3 +502,19 @@ async fn a_dead_tunnel_behind_a_live_socket_is_rebuilt() {
         connects.load(std::sync::atomic::Ordering::Relaxed)
     );
 }
+
+/// 1119: the persisted I2P destination key is a private key, so it is
+/// written 0600 whatever the umask, and narrowed when it is loaded.
+#[cfg(unix)]
+#[test]
+fn the_i2p_keyfile_is_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = |p: &PathBuf| std::fs::metadata(p).expect("stat").permissions().mode() & 0o777;
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("nested/i2p_key");
+    save_keyfile(&path, "a2V5");
+    assert_eq!(mode(&path), 0o600);
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o664)).expect("chmod");
+    assert_eq!(load_keyfile(&path).as_deref(), Some("a2V5"));
+    assert_eq!(mode(&path), 0o600);
+}

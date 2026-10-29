@@ -96,6 +96,7 @@ pub fn load_or_create(path: &Path) -> Result<(Identity, Provenance), IdentityErr
         Ok(bytes) => {
             let identity = Identity::from_private_key_bytes(&bytes)
                 .map_err(|_| IdentityError::Corrupt(path.to_path_buf()))?;
+            leviculum_std::narrow_secret_mode(path).map_err(io_err)?;
             Ok((identity, Provenance::Loaded))
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => mint(path),

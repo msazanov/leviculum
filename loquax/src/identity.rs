@@ -145,9 +145,18 @@ fn copy_dir(from: &Path, to: &Path) -> Result<(), IdentityError> {
 
 /// Load the identity at `path`, minting and persisting one only if the file is
 /// not there at all. See the module header for why corruption is fatal.
+///
+/// The file is the private key, so it is written 0600 whatever the umask,
+/// and one an older loquax left wider is narrowed here (1119).
 pub fn load_or_create(path: &Path) -> Result<Identity, IdentityError> {
     match std::fs::read(path) {
-        Ok(bytes) => decode_identity(&bytes).ok_or_else(|| IdentityError::Corrupt(path.to_owned())),
+        Ok(bytes) => {
+            let identity =
+                decode_identity(&bytes).ok_or_else(|| IdentityError::Corrupt(path.to_owned()))?;
+            leviculum_std::narrow_secret_mode(path)
+                .map_err(|e| IdentityError::Io(path.to_owned(), e))?;
+            Ok(identity)
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => mint(path),
         Err(error) => Err(IdentityError::Io(path.to_owned(), error)),
     }
@@ -159,7 +168,8 @@ fn mint(path: &Path) -> Result<Identity, IdentityError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| IdentityError::Io(parent.to_owned(), e))?;
     }
-    std::fs::write(path, encoded).map_err(|e| IdentityError::Io(path.to_owned(), e))?;
+    leviculum_std::atomic_write_secret(path, &encoded)
+        .map_err(|e| IdentityError::Io(path.to_owned(), e))?;
     Ok(identity)
 }
 

@@ -688,9 +688,13 @@ async fn i2p_stream_task(
 }
 
 /// Load a persisted base64 private key, trimming whitespace. Returns `None` if
-/// the file is absent or unreadable.
+/// the file is absent or unreadable. A file left wider than 0600 by an older
+/// build is narrowed (1119); a failed chmod is logged, not fatal.
 fn load_keyfile(path: &PathBuf) -> Option<String> {
     let content = std::fs::read_to_string(path).ok()?;
+    if let Err(e) = crate::storage::narrow_secret_mode(path) {
+        tracing::warn!("could not narrow I2P key {:?} to 0600: {}", path, e);
+    }
     let trimmed = content.trim();
     if trimmed.is_empty() {
         None
@@ -709,7 +713,7 @@ fn save_keyfile(path: &PathBuf, private_key_base64: &str) {
             return;
         }
     }
-    if let Err(e) = std::fs::write(path, private_key_base64) {
+    if let Err(e) = crate::storage::atomic_write_secret(path, private_key_base64.as_bytes()) {
         tracing::warn!("could not persist I2P key {:?}: {}", path, e);
     }
 }

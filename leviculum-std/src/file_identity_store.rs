@@ -6,7 +6,6 @@
 use leviculum_core::constants::IDENTITY_KEY_SIZE;
 use leviculum_core::identity::Identity;
 use leviculum_core::identity_store::IdentityStore;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 const IDENTITY_FILE: &str = "transport_identity";
@@ -41,6 +40,8 @@ impl IdentityStore for FileIdentityStore {
     fn load(&mut self) -> Result<Option<Identity>, Self::Error> {
         match std::fs::read(&self.path) {
             Ok(bytes) if bytes.len() == IDENTITY_KEY_SIZE => {
+                // An older writer may have left it with the umask's mode.
+                crate::storage::narrow_secret_mode(&self.path)?;
                 Identity::from_private_key_bytes(&bytes)
                     .map(Some)
                     .map_err(|e| {
@@ -71,39 +72,17 @@ impl IdentityStore for FileIdentityStore {
         }
     }
 
-    /// Durable atomic write: the temp file's data reaches the disk before the
-    /// rename, and the directory entry reaches the disk after it. Without both
-    /// fsyncs a power cut can resurrect the file short or empty, which is
-    /// exactly the state `load` now refuses to start on.
+    /// Durable atomic write, owner-only from creation (L-0039): the data
+    /// reaches the disk before the rename and the directory entry after it.
+    /// Without both fsyncs a power cut can resurrect the file short or empty,
+    /// which is exactly the state `load` refuses to start on. The stack's one
+    /// writer for a secret, [`crate::storage::atomic_write_secret`], does all
+    /// of it.
     fn save(&mut self, identity: &Identity) -> Result<(), Self::Error> {
         let bytes = identity
             .private_key_bytes()
             .map_err(|e| std::io::Error::other(format!("{:?}", e)))?;
-
-        // Owner-only from creation (L-0039): the rename carries the mode in.
-        let tmp_path = self.path.with_extension("tmp");
-        {
-            let mut f = crate::storage::create_secret_file(&tmp_path)?;
-            f.write_all(&bytes)?;
-            f.sync_data()?;
-        }
-        std::fs::rename(&tmp_path, &self.path)?;
-
-        // Directory fsync: the rename itself is only durable once the parent
-        // directory's entry is on disk.
-        //
-        // Unix only. Windows cannot open a directory as a file at all —
-        // `File::open` on one fails with `ERROR_ACCESS_DENIED` (os error 5),
-        // so this line did not merely skip the flush there, it failed the
-        // save and took every builder test with it. There is no portable
-        // equivalent to reach for: NTFS commits the rename's metadata as part
-        // of the rename, and the durability this line buys on Unix is not
-        // something a handle can ask for on Windows.
-        #[cfg(unix)]
-        if let Some(dir) = self.path.parent() {
-            std::fs::File::open(dir)?.sync_all()?;
-        }
-        Ok(())
+        crate::storage::atomic_write_secret(&self.path, &bytes)
     }
 }
 
@@ -128,6 +107,28 @@ mod tests {
         let path = dir.path().join(IDENTITY_FILE);
         let mode = std::fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
         println!("{}: mode {mode:o}", path.display());
+        assert_eq!(mode, 0o600, "transport_identity mode {mode:o}");
+    }
+
+    /// 1119: a key an older writer left group- or world-readable is narrowed
+    /// to 0600 when it is loaded, and loads as the same key.
+    #[cfg(unix)]
+    #[test]
+    fn a_wide_identity_is_narrowed_at_load() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let identity = crate::generate_identity();
+        let path = dir.path().join(IDENTITY_FILE);
+        std::fs::write(&path, identity.private_key_bytes().expect("key")).expect("write");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o664)).expect("chmod");
+
+        let loaded = FileIdentityStore::new(dir.path())
+            .load()
+            .expect("load")
+            .expect("an identity");
+        assert_eq!(loaded.hash(), identity.hash());
+        let mode = std::fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "transport_identity mode {mode:o}");
     }
 }
