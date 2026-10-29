@@ -2900,6 +2900,7 @@ dependencies = [
  "embedded-graphics",
  "leviculum-mapfill",
  "libm",
+ "png",
 ]
 
 [[package]]
