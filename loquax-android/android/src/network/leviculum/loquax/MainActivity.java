@@ -21,6 +21,10 @@ import java.util.Map;
  * ({@code lqxh1...@host:port}): pasted, it fills the address field too;
  * shared from another app (a QR reader's share button), it fills both and
  * joins at once.
+ *
+ * The IM row of protocol LXMF on a contact's card (1139) taps into
+ * {@code imto://lxmf/<address>}: the session starts as ever, and the
+ * address's conversation opens over the list.
  */
 public class MainActivity extends Activity {
     private TextView status;
@@ -29,6 +33,8 @@ public class MainActivity extends Activity {
     private EditText code;
     private EditText server;
     private Button join;
+    /** The conversation an imto tap asked for, opened once started. */
+    private String imto;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -65,14 +71,18 @@ public class MainActivity extends Activity {
         // Recreated (a rotation, the phone's dark setting) the shared code
         // already joined or failed once: the fields restore what was typed,
         // and a second join with a code the home node took would fail.
+        imto = Book.imtoPeer(getIntent());
         start(savedInstanceState == null && shared(getIntent()));
     }
 
     @Override
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
+        imto = Book.imtoPeer(intent);
         if (shared(intent)) {
             start(true);
+        } else if (imto != null) {
+            start(false);
         }
     }
 
@@ -151,6 +161,9 @@ public class MainActivity extends Activity {
             // The session outlives this screen from here on.
             LoquaxService.start(this);
             startActivity(new Intent(this, ConversationsActivity.class));
+            if (imto != null) {
+                startActivity(new Intent(this, ChatActivity.class).putExtra(ChatActivity.PEER, imto));
+            }
             finish();
             return;
         }

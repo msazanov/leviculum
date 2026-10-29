@@ -153,6 +153,52 @@ final class Core {
         return out;
     }
 
+    /**
+     * Link `peer` to the contact `copy` describes (Book.copy): its lookup
+     * key, `_ID`, name and thumbnail; again to refresh the copy (1139).
+     */
+    static String link(String peer, Map<String, Object> copy) {
+        Map<String, Object> request = map("t", "link", "peer", peer);
+        request.putAll(copy);
+        return command(request);
+    }
+
+    static String unlink(String peer) {
+        return command(map("t", "unlink", "peer", peer));
+    }
+
+    /** "Not now" on the banner: it does not ask again for `peer`. */
+    static String notNow(String peer) {
+        return command(map("t", "notnow", "peer", peer));
+    }
+
+    /** The user's own name for `peer`, empty to clear it; every device of the home takes it. */
+    static String rename(String peer, String name) {
+        return command(map("t", "rename", "peer", peer, "name", name));
+    }
+
+    /** The address book's IM rows of protocol LXMF (Book.imRows): what loquax knows is linked. */
+    static String relink(List<Map<String, Object>> rows) {
+        return command(map("t", "relink", "rows", rows));
+    }
+
+    /** Which of `candidates` (Book.candidates) `peer`'s announced name may be, best first. */
+    static List<Map<String, Object>> suggest(String peer, List<Map<String, Object>> candidates) {
+        return list(answer(Native.query(MsgPack.pack(
+                map("t", "suggest", "peer", peer, "candidates", candidates)))), "suggestions");
+    }
+
+    /** Every address linked to the contact `lookup`. */
+    static List<Map<String, Object>> contact(String lookup) {
+        return list(answer(Native.query(MsgPack.pack(map("t", "contact", "lookup", lookup)))),
+                "addresses");
+    }
+
+    /** Every link: peer, lookup, contact_id, name. */
+    static List<Map<String, Object>> links() {
+        return list(answer(Native.query(MsgPack.pack(map("t", "links")))), "links");
+    }
+
     static String pull() {
         return command(map("t", "pull"));
     }

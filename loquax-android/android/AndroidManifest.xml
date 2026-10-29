@@ -15,6 +15,10 @@
   <uses-permission a:name='android.permission.POST_NOTIFICATIONS'/>
   <!-- The battery optimisation exemption, asked once and never forced (Asks). -->
   <uses-permission a:name='android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS'/>
+  <!-- The address book (1139): asked only when the user asks for
+       suggestions; without it a picked contact is read once by the
+       picker's own grant (Book). Nothing of it leaves the phone. -->
+  <uses-permission a:name='android.permission.READ_CONTACTS'/>
 
   <application a:label='@string/app_name'
                a:icon='@android:drawable/sym_def_app_icon'
@@ -34,6 +38,15 @@
         <action a:name='android.intent.action.SEND'/>
         <category a:name='android.intent.category.DEFAULT'/>
         <data a:mimeType='text/plain'/>
+      </intent-filter>
+      <!-- A contact card's IM row of protocol LXMF: AOSP's contacts app
+           sends SENDTO imto://lxmf/<address> (ContactsUtils.java:162-180);
+           VIEW for a contacts app that views instead. -->
+      <intent-filter>
+        <action a:name='android.intent.action.SENDTO'/>
+        <action a:name='android.intent.action.VIEW'/>
+        <category a:name='android.intent.category.DEFAULT'/>
+        <data a:scheme='imto' a:host='lxmf'/>
       </intent-filter>
     </activity>
 

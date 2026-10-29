@@ -7,7 +7,9 @@ import android.content.ClipboardManager;
 import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.graphics.BitmapFactory;
 import android.graphics.Typeface;
+import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
 import android.os.Handler;
@@ -33,6 +35,7 @@ import android.widget.LinearLayout;
 import android.widget.ListView;
 import android.widget.PopupMenu;
 import android.widget.ScrollView;
+import android.widget.Switch;
 import android.widget.TextView;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
@@ -53,6 +56,12 @@ import java.util.Set;
  * quick reactions with the full picker behind "…", and reply, forward,
  * copy, select, info, pin and delete. What goes on the wire is Rust's
  * (loquax::ui::replies); a pin is this phone's alone.
+ *
+ * The address book (1139): the bar's menu adds the peer to a contact, or
+ * opens, lists and unlinks the one it is linked to, and renames it for
+ * every device of the home; an unknown sender's first message asks once
+ * in a banner. Picking needs no permission (Book); suggestions ask for
+ * READ_CONTACTS, and only when the user taps for them.
  */
 public class ChatActivity extends Activity implements Events.Listener {
     static final String PEER = "peer";
@@ -89,6 +98,11 @@ public class ChatActivity extends Activity implements Events.Listener {
     private View selectionBar;
     private TextView selectionCount;
     private TextView pinned;
+    /** The last header the library gave: name, link, banner, petname. */
+    private Map<String, Object> header = Core.map();
+    private View banner;
+    /** Whether the address goes into the new contact the editor is creating. */
+    private boolean insertWithAddress;
     private final ServiceLink link = new ServiceLink(this);
     /** Redraws the relative times of the newest group while the screen is up. */
     private final Handler ticker = new Handler(Looper.getMainLooper());
@@ -167,6 +181,23 @@ public class ChatActivity extends Activity implements Events.Listener {
                 askDelete(selected());
             }
         });
+        banner = findViewById(R.id.book_banner);
+        ((Button) findViewById(R.id.book_add)).setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                choose();
+            }
+        });
+        ((Button) findViewById(R.id.book_not_now)).setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                say(Core.notNow(peer));
+                refresh();
+            }
+        });
+        if (savedInstanceState != null) {
+            insertWithAddress = savedInstanceState.getBoolean("insertWithAddress");
+        }
         pinned = (TextView) findViewById(R.id.pinned);
         pinned.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -225,6 +256,12 @@ public class ChatActivity extends Activity implements Events.Listener {
                 send();
             }
         });
+    }
+
+    @Override
+    protected void onSaveInstanceState(Bundle out) {
+        super.onSaveInstanceState(out);
+        out.putBoolean("insertWithAddress", insertWithAddress);
     }
 
     @Override
@@ -293,23 +330,325 @@ public class ChatActivity extends Activity implements Events.Listener {
         send.setAlpha(some ? 1f : 0.38f);
     }
 
-    /** The bar's menu: pull now, the map. */
+    /** The bar's menu: pull now, the map, the address book and the name. */
     private void showMenu(View anchor) {
         PopupMenu popup = new PopupMenu(this, anchor);
         popup.getMenu().add(0, R.string.refresh, 0, R.string.refresh);
         popup.getMenu().add(0, R.string.map, 1, R.string.map);
+        if (Core.bool(header, "linked")) {
+            popup.getMenu().add(0, R.string.open_contact, 2, R.string.open_contact);
+            Object others = header.get("others");
+            if (others instanceof List && !((List<?>) others).isEmpty()) {
+                popup.getMenu().add(0, R.string.contact_addresses, 3, R.string.contact_addresses);
+            }
+            popup.getMenu().add(0, R.string.unlink, 4, R.string.unlink);
+        } else {
+            popup.getMenu().add(0, R.string.add_to_contacts, 2, R.string.add_to_contacts);
+        }
+        popup.getMenu().add(0, R.string.rename, 5, R.string.rename);
         popup.setOnMenuItemClickListener(new PopupMenu.OnMenuItemClickListener() {
             @Override
             public boolean onMenuItemClick(MenuItem item) {
-                if (item.getItemId() == R.string.refresh) {
+                int id = item.getItemId();
+                if (id == R.string.refresh) {
                     say(Core.pull());
-                } else {
+                } else if (id == R.string.map) {
                     startActivity(new Intent(ChatActivity.this, MapActivity.class));
+                } else if (id == R.string.open_contact) {
+                    if (!Book.open(ChatActivity.this, Core.num(header, "contact_id"),
+                            Core.str(header, "lookup"))) {
+                        line(getString(R.string.no_contacts_app));
+                    }
+                } else if (id == R.string.contact_addresses) {
+                    addresses();
+                } else if (id == R.string.unlink) {
+                    say(Core.unlink(peer));
+                    refresh();
+                } else if (id == R.string.add_to_contacts) {
+                    choose();
+                } else if (id == R.string.rename) {
+                    rename();
                 }
                 return true;
             }
         });
         popup.show();
+    }
+
+    /**
+     * The choice of a contact, titled with the peer as every screen names
+     * it: with READ_CONTACTS up to five suggestions the library ranked from
+     * the announced name, then another contact by the picker, a new one,
+     * and "Not now"; without it, a line that asks for the permission.
+     */
+    private void choose() {
+        final List<String> labels = new ArrayList<>();
+        final List<Runnable> actions = new ArrayList<>();
+        if (Book.canRead(this)) {
+            List<Map<String, Object>> candidates = Book.candidates(getContentResolver());
+            Map<String, String> display = new java.util.HashMap<>();
+            for (Map<String, Object> candidate : candidates) {
+                display.put(Core.str(candidate, "key"), Core.str(candidate, "display"));
+            }
+            for (final Map<String, Object> suggestion : Core.suggest(peer, candidates)) {
+                final String key = Core.str(suggestion, "key");
+                labels.add(display.get(key) + " \u00B7 " + matched(suggestion));
+                actions.add(new Runnable() {
+                    @Override
+                    public void run() {
+                        Map<String, Object> copy = Book.copyByKey(getContentResolver(), key);
+                        if (copy == null) {
+                            line(getString(R.string.contact_unreadable));
+                        } else {
+                            confirm(copy);
+                        }
+                    }
+                });
+            }
+        }
+        labels.add(getString(R.string.another_contact));
+        actions.add(new Runnable() {
+            @Override
+            public void run() {
+                if (!Book.pick(ChatActivity.this)) {
+                    line(getString(R.string.no_contacts_app));
+                }
+            }
+        });
+        labels.add(getString(R.string.new_contact));
+        actions.add(new Runnable() {
+            @Override
+            public void run() {
+                askNew();
+            }
+        });
+        if (!Book.canRead(this)) {
+            labels.add(getString(R.string.allow_suggestions));
+            actions.add(new Runnable() {
+                @Override
+                public void run() {
+                    Book.ask(ChatActivity.this);
+                }
+            });
+        }
+        labels.add(getString(R.string.not_now));
+        actions.add(new Runnable() {
+            @Override
+            public void run() {
+                say(Core.notNow(peer));
+                refresh();
+            }
+        });
+        new AlertDialog.Builder(this)
+                .setTitle(Core.str(header, "name"))
+                .setItems(labels.toArray(new String[0]), new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface dialog, int which) {
+                        actions.get(which).run();
+                    }
+                })
+                .show();
+    }
+
+    /** What matched, in words: "nickname Ali". */
+    private String matched(Map<String, Object> suggestion) {
+        String field = Core.str(suggestion, "field");
+        if ("nickname".equals(field)) {
+            return getString(R.string.matched_nickname, Core.str(suggestion, "nickname"));
+        } else if ("given".equals(field)) {
+            return getString(R.string.matched_given);
+        } else if ("words".equals(field)) {
+            return getString(R.string.matched_words);
+        } else if ("prefix".equals(field)) {
+            return getString(R.string.matched_prefix);
+        }
+        return getString(R.string.matched_display);
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int code, String[] permissions, int[] results) {
+        super.onRequestPermissionsResult(code, permissions, results);
+        if (code == Book.ASK && Book.canRead(this)) {
+            Book.observe(this);
+            choose();
+        }
+        // Refused: the line is gone from the sheet; the phone's settings
+        // can still grant it.
+    }
+
+    /** The switch "Also save the address in the contact", off, and its one sentence. */
+    private Switch saveSwitch(LinearLayout into) {
+        Switch save = new Switch(this);
+        save.setText(R.string.save_address);
+        save.setChecked(false);
+        save.setPadding(0, dp(12), 0, 0);
+        into.addView(save);
+        TextView why = new TextView(this);
+        why.setText(R.string.save_address_why);
+        why.setTextSize(13);
+        why.setTextColor(getColor(R.color.text_secondary));
+        why.setPadding(0, dp(4), 0, 0);
+        into.addView(why);
+        return save;
+    }
+
+    private LinearLayout dialogBody(String message) {
+        LinearLayout body = new LinearLayout(this);
+        body.setOrientation(LinearLayout.VERTICAL);
+        body.setPadding(dp(24), dp(12), dp(24), 0);
+        TextView text = new TextView(this);
+        text.setText(message);
+        text.setTextSize(16);
+        text.setTextColor(getColor(R.color.text));
+        body.addView(text);
+        return body;
+    }
+
+    /**
+     * "Link Alice ·4f2a to Alice Schmidt?" with the contact's photo, the
+     * contact's other addresses named, and the switch. The link stands
+     * whatever the editor does after.
+     */
+    private void confirm(final Map<String, Object> copy) {
+        final String contactName = Core.str(copy, "name");
+        StringBuilder message = new StringBuilder(
+                getString(R.string.link_to, Core.str(header, "name"), contactName));
+        List<String> others = new ArrayList<>();
+        for (Map<String, Object> row : Core.contact(Core.str(copy, "lookup"))) {
+            if (!peer.equals(Core.str(row, "peer"))) {
+                others.add(Core.str(row, "name"));
+            }
+        }
+        if (!others.isEmpty()) {
+            message.append("\n\n").append(getString(R.string.other_addresses, contactName,
+                    android.text.TextUtils.join(", ", others)));
+        }
+        LinearLayout body = dialogBody(message.toString());
+        final Switch save = saveSwitch(body);
+        AlertDialog.Builder dialog = new AlertDialog.Builder(this)
+                .setView(body)
+                .setPositiveButton(R.string.link, new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface d, int which) {
+                        String error = Core.link(peer, copy);
+                        if (error != null) {
+                            line(error);
+                            return;
+                        }
+                        line(getString(R.string.linked_to, contactName));
+                        refresh();
+                        if (save.isChecked() && !Book.saveAddress(ChatActivity.this,
+                                Core.num(copy, "contact_id"), Core.str(copy, "lookup"), peer)) {
+                            line(getString(R.string.no_contacts_app));
+                        }
+                    }
+                })
+                .setNegativeButton(android.R.string.cancel, null);
+        Object photo = copy.get("photo");
+        if (photo instanceof byte[]) {
+            byte[] bytes = (byte[]) photo;
+            android.graphics.Bitmap bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
+            if (bitmap != null) {
+                dialog.setIcon(new BitmapDrawable(getResources(), bitmap));
+            }
+        }
+        dialog.show();
+    }
+
+    /** A new contact with the announced name, the address in it when the switch says so. */
+    private void askNew() {
+        String announced = Core.str(header, "announced");
+        LinearLayout body = dialogBody(getString(R.string.new_contact_for, Core.str(header, "name")));
+        final Switch save = saveSwitch(body);
+        final String name = announced;
+        new AlertDialog.Builder(this)
+                .setView(body)
+                .setPositiveButton(R.string.create, new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface d, int which) {
+                        insertWithAddress = save.isChecked();
+                        if (!Book.insert(ChatActivity.this, name, peer, insertWithAddress)) {
+                            line(getString(R.string.no_contacts_app));
+                        }
+                    }
+                })
+                .setNegativeButton(android.R.string.cancel, null)
+                .show();
+    }
+
+    /**
+     * The picker's contact, read now while its grant lasts, goes to the
+     * confirmation; a contact the editor created is linked as it is: the
+     * user just made it for this peer. Backed out, nothing changes.
+     */
+    @Override
+    protected void onActivityResult(int request, int result, Intent data) {
+        super.onActivityResult(request, result, data);
+        if (result != RESULT_OK || data == null || data.getData() == null) {
+            return;
+        }
+        if (request != Book.PICK && request != Book.INSERT) {
+            return;
+        }
+        Map<String, Object> copy = Book.copy(getContentResolver(), data.getData());
+        if (copy == null) {
+            line(getString(R.string.contact_unreadable));
+            return;
+        }
+        if (request == Book.PICK) {
+            confirm(copy);
+            return;
+        }
+        String error = Core.link(peer, copy);
+        line(error != null ? error : getString(R.string.linked_to, Core.str(copy, "name")));
+        refresh();
+    }
+
+    /** The user's own name for the peer, for every device of the home; empty clears it. */
+    private void rename() {
+        final EditText field = new EditText(this);
+        field.setSingleLine(true);
+        field.setText(Core.str(header, "petname"));
+        field.setSelection(field.getText().length());
+        field.setHint(R.string.rename_hint);
+        LinearLayout body = new LinearLayout(this);
+        body.setPadding(dp(20), dp(8), dp(20), 0);
+        body.addView(field, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        new AlertDialog.Builder(this)
+                .setTitle(R.string.rename)
+                .setView(body)
+                .setPositiveButton(android.R.string.ok, new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface d, int which) {
+                        say(Core.rename(peer, field.getText().toString()));
+                        refresh();
+                    }
+                })
+                .setNegativeButton(android.R.string.cancel, null)
+                .show();
+    }
+
+    /** The linked contact's addresses, each with its own chat. */
+    private void addresses() {
+        final List<Map<String, Object>> rows = Core.contact(Core.str(header, "lookup"));
+        String[] names = new String[rows.size()];
+        for (int i = 0; i < rows.size(); i++) {
+            names[i] = Core.str(rows.get(i), "name");
+        }
+        new AlertDialog.Builder(this)
+                .setTitle(R.string.contact_addresses)
+                .setItems(names, new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface dialog, int which) {
+                        String other = Core.str(rows.get(which), "peer");
+                        if (!other.equals(peer)) {
+                            startActivity(new Intent(ChatActivity.this, ChatActivity.class)
+                                    .putExtra(PEER, other));
+                        }
+                    }
+                })
+                .show();
     }
 
     /** An emoji from the full picker into the compose field, at the cursor. */
@@ -649,8 +988,10 @@ public class ChatActivity extends Activity implements Events.Listener {
             line(Core.str(answer, "error"));
             return;
         }
+        header = answer;
         title.setText(Core.str(answer, "name"));
         avatar.show(peer, answer);
+        banner.setVisibility(Core.bool(answer, "ask_link") ? View.VISIBLE : View.GONE);
         homeClient = Core.bool(answer, "home_client");
         rows.clear();
         rows.addAll(Core.list(answer, "messages"));
