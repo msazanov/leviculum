@@ -368,3 +368,193 @@ impl Viewport {
         out
     }
 }
+
+/// A view at a zoom between the steps (1134): the zoom a pinch left, in
+/// thousandths, so it stays where the fingers left it. Its data comes from
+/// one integer zoom ([`tile_zoom`](Self::tile_zoom), the step nearest),
+/// drawn at that step and scaled by [`scale_at`](Self::scale_at) on the
+/// way to the screen; names and pins are placed at the exact scale.
+///
+/// Positions are pixels as `f64` from the view's top left corner, a
+/// pixel's centre at `n + 0.5`. At a whole zoom the view is a [`Viewport`]'s
+/// ([`whole`](Self::whole)), and every frontend that keeps integer steps
+/// keeps using that.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExactView {
+    pub centre: World,
+    zoom_milli: u32,
+    width: u32,
+    height: u32,
+}
+
+/// Thousandths in a zoom step.
+pub const MILLI: u32 = 1000;
+
+impl ExactView {
+    /// A view of `width` x `height` pixels (each at least 1) at
+    /// `zoom_milli` thousandths of a zoom step, clamped to
+    /// [`MAX_VIEW_ZOOM`].
+    pub fn new(centre: World, zoom_milli: u32, width: u32, height: u32) -> Self {
+        Self {
+            centre,
+            zoom_milli: zoom_milli.min(u32::from(MAX_VIEW_ZOOM) * MILLI),
+            width: width.max(1),
+            height: height.max(1),
+        }
+    }
+
+    /// The zoom in thousandths.
+    pub fn zoom_milli(&self) -> u32 {
+        self.zoom_milli
+    }
+
+    /// The zoom as a real number.
+    pub fn zoom(&self) -> f64 {
+        f64::from(self.zoom_milli) / f64::from(MILLI)
+    }
+
+    /// Width and height in pixels.
+    pub fn size(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+
+    /// A different size about the same centre.
+    pub fn resize(&mut self, width: u32, height: u32) {
+        self.width = width.max(1);
+        self.height = height.max(1);
+    }
+
+    /// The step nearest the zoom, a half rounding up: the data's zoom. The
+    /// nearest rather than the one below keeps the scale between 0.71 and
+    /// 1.41, so a line is never stretched to twice its drawn width.
+    pub fn tile_zoom(&self) -> u8 {
+        let z = (self.zoom_milli + MILLI / 2) / MILLI;
+        u8::try_from(z).unwrap_or(MAX_VIEW_ZOOM).min(MAX_VIEW_ZOOM)
+    }
+
+    /// How many screen pixels one pixel of zoom `z` is: `2^(zoom - z)`.
+    pub fn scale_at(&self, z: u8) -> f64 {
+        libm::exp2(self.zoom() - f64::from(z))
+    }
+
+    /// World units a screen pixel spans.
+    pub fn unit(&self) -> f64 {
+        libm::exp2(24.0 - self.zoom())
+    }
+
+    /// Where `w` lands in pixels from the top left corner; x is the copy
+    /// nearest the centre.
+    pub fn to_screen(&self, w: World) -> (f64, f64) {
+        let dx = i64::from(w.x.wrapping_sub(self.centre.x) as i32);
+        let dy = i64::from(w.y) - i64::from(self.centre.y);
+        let u = self.unit();
+        (
+            f64::from(self.width) / 2.0 + dx as f64 / u,
+            f64::from(self.height) / 2.0 + dy as f64 / u,
+        )
+    }
+
+    /// The world point at `(x, y)` pixels from the top left corner; x
+    /// wraps, y stops at the projection's edges.
+    pub fn to_world(&self, x: f64, y: f64) -> World {
+        let u = self.unit();
+        let dx = libm::round((x - f64::from(self.width) / 2.0) * u) as i64;
+        let dy = libm::round((y - f64::from(self.height) / 2.0) * u) as i64;
+        World {
+            x: (i64::from(self.centre.x) + dx).rem_euclid(1 << 32) as u32,
+            y: (i64::from(self.centre.y) + dy).clamp(0, i64::from(u32::MAX)) as u32,
+        }
+    }
+
+    /// Move the centre by whole pixels; x wraps, y stops at the edges.
+    pub fn pan(&mut self, dx: i32, dy: i32) {
+        let c = self.to_world(
+            f64::from(self.width) / 2.0 + f64::from(dx),
+            f64::from(self.height) / 2.0 + f64::from(dy),
+        );
+        self.centre = c;
+    }
+
+    /// A different zoom about the point `(x, y)`: the world point there
+    /// stays there, as under a pinch's fingers.
+    pub fn zoom_about(&mut self, zoom_milli: u32, x: f64, y: f64) {
+        let held = self.to_world(x, y);
+        self.zoom_milli = zoom_milli.min(u32::from(MAX_VIEW_ZOOM) * MILLI);
+        let u = self.unit();
+        let dx = libm::round((x - f64::from(self.width) / 2.0) * u) as i64;
+        let dy = libm::round((y - f64::from(self.height) / 2.0) * u) as i64;
+        self.centre = World {
+            x: (i64::from(held.x) - dx).rem_euclid(1 << 32) as u32,
+            y: (i64::from(held.y) - dy).clamp(0, i64::from(u32::MAX)) as u32,
+        };
+    }
+
+    /// The view as every frontend shows it, [`Viewport::one_world`]'s rule
+    /// at the exact zoom: no shallower than the width's whole
+    /// [`Viewport::min_zoom`], y inside the projection.
+    pub fn one_world(mut self) -> Self {
+        let floor = u32::from(Viewport::min_zoom(self.width)) * MILLI;
+        self.zoom_milli = self.zoom_milli.max(floor);
+        let half = f64::from(self.height) / 2.0 * self.unit();
+        let full = (1u64 << 32) as f64;
+        self.centre.y = match 2.0 * half >= full {
+            true => 1 << 31,
+            false => (f64::from(self.centre.y)).clamp(half, full - half) as u32,
+        };
+        self
+    }
+
+    /// At a whole zoom, the view moved to the nearest whole pixel of it,
+    /// where a [`Viewport`] of that zoom draws the same pixels however it
+    /// is cut; between the steps, the view.
+    pub fn on_whole_pixel(mut self) -> Self {
+        if !self.zoom_milli.is_multiple_of(MILLI) {
+            return self;
+        }
+        let shift = 24 - (self.zoom_milli / MILLI).min(24);
+        let half = (1u64 << shift) >> 1;
+        let snap = |v: u32| (((u64::from(v) + half) >> shift) << shift) as u32;
+        let last = (u32::MAX >> shift) << shift;
+        self.centre = World {
+            x: snap(self.centre.x),
+            y: if self.centre.y > last {
+                last
+            } else {
+                snap(self.centre.y)
+            },
+        };
+        self
+    }
+
+    /// The view at the whole zoom, when it is one.
+    pub fn whole(&self) -> Option<Viewport> {
+        self.zoom_milli.is_multiple_of(MILLI).then(|| {
+            Viewport::new(
+                self.centre,
+                (self.zoom_milli / MILLI) as u8,
+                self.width,
+                self.height,
+            )
+        })
+    }
+
+    /// An integer view at zoom `z` over at least this view's area, the
+    /// same centre, a pixel more on each side unless `z` is the view's own
+    /// zoom, where it is the view: what the data of a step is looked up in
+    /// (the names a view holds, the region it loads).
+    pub fn at_zoom(&self, z: u8) -> Viewport {
+        if self.zoom_milli == u32::from(z) * MILLI {
+            return Viewport::new(self.centre, z, self.width, self.height);
+        }
+        let s = self.scale_at(z);
+        let side = |v: u32| (libm::ceil(f64::from(v) / s) as u32).saturating_add(2);
+        Viewport::new(self.centre, z, side(self.width), side(self.height))
+    }
+}
+
+impl From<Viewport> for ExactView {
+    fn from(v: Viewport) -> Self {
+        let (w, h) = v.size();
+        Self::new(v.centre, u32::from(v.zoom()) * MILLI, w, h)
+    }
+}

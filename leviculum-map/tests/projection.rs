@@ -435,3 +435,84 @@ fn one_world_keeps_the_view_inside_the_projection_or_centres_it() {
     let deeper = Viewport::new(north, 4, 1080, 2400).one_world();
     assert_eq!(deeper.top_left_sub().1, 0);
 }
+
+/// A view between two steps (1134): a point placed and read back lands
+/// within a world unit of itself, a zoom about a point holds that point,
+/// the data's step is the nearest, and a whole zoom is a `Viewport`'s.
+#[test]
+fn an_exact_view_round_trips_and_holds_the_pinch_point() {
+    use leviculum_map::viewport::{ExactView, MILLI};
+
+    let duomo = project(DUOMO);
+    let mut view = ExactView::new(duomo, 15_370, 1080, 2400);
+    assert_eq!(view.zoom_milli(), 15_370);
+    assert!((view.zoom() - 15.37).abs() < 1e-12);
+    assert_eq!(view.tile_zoom(), 15);
+    assert!((view.scale_at(15) - 2f64.powf(0.37)).abs() < 1e-12);
+    assert_eq!(ExactView::new(duomo, 15_500, 10, 10).tile_zoom(), 16);
+    assert_eq!(ExactView::new(duomo, 15_499, 10, 10).tile_zoom(), 15);
+    for (x, y) in [
+        (0.0, 0.0),
+        (540.0, 1200.0),
+        (1079.5, 2399.5),
+        (13.25, 777.75),
+    ] {
+        let w = view.to_world(x, y);
+        let (bx, by) = view.to_screen(w);
+        // Within a world unit, under a 300th of a pixel here.
+        assert!((bx - x).abs() < 4e-3 && (by - y).abs() < 4e-3, "{x},{y}");
+    }
+    let held = view.to_world(200.0, 300.0);
+    view.zoom_about(16_123, 200.0, 300.0);
+    assert_eq!(view.zoom_milli(), 16_123);
+    let (x, y) = view.to_screen(held);
+    assert!((x - 200.0).abs() < 4e-3 && (y - 300.0).abs() < 4e-3);
+    // A pan of whole pixels moves a point by them.
+    let before = view.to_screen(duomo);
+    view.pan(40, -20);
+    let after = view.to_screen(duomo);
+    assert!((before.0 - after.0 - 40.0).abs() < 4e-3);
+    assert!((before.1 - after.1 + 20.0).abs() < 4e-3);
+    // At a whole zoom the view is an integer one, and its points land in
+    // the pixel the integer view says.
+    let whole = ExactView::new(duomo, 15 * MILLI, 640, 480);
+    let v = whole.whole().expect("whole");
+    assert_eq!(v, Viewport::new(duomo, 15, 640, 480));
+    assert_eq!(whole.at_zoom(15), v);
+    assert_eq!(ExactView::from(v), whole);
+    let snapped = whole.on_whole_pixel();
+    let (sx, sy) = snapped.to_screen(project(LatLon {
+        lat_e7: 437_700_000,
+        lon_e7: 112_500_000,
+    }));
+    let (px, py) = Viewport::new(snapped.centre, 15, 640, 480).to_screen(project(LatLon {
+        lat_e7: 437_700_000,
+        lon_e7: 112_500_000,
+    }));
+    assert_eq!((sx.floor() as i64, sy.floor() as i64), (px, py));
+    assert!(view.whole().is_none());
+    // The data of a view between the steps is looked up over at least
+    // its area.
+    let at = view.at_zoom(16);
+    let (w, h) = at.size();
+    assert!(f64::from(w) * view.scale_at(16) >= 1080.0);
+    assert!(f64::from(h) * view.scale_at(16) >= 2400.0);
+}
+
+/// The one-world rule at an exact zoom: never shallower than the width's
+/// floor, y inside the projection.
+#[test]
+fn an_exact_view_shows_one_world() {
+    use leviculum_map::viewport::ExactView;
+
+    let north = World { x: 1 << 31, y: 0 };
+    let v = ExactView::new(north, 1_500, 1080, 2400).one_world();
+    assert_eq!(v.zoom_milli(), u32::from(Viewport::min_zoom(1080)) * 1000);
+    // The world, 2048 pixels tall there, sits in the middle of 2400.
+    let (_, top) = v.to_screen(World { x: 1 << 31, y: 0 });
+    assert!((top - 176.0).abs() < 1e-3, "{top}");
+    let deep = ExactView::new(north, 12_250, 1080, 2400).one_world();
+    assert_eq!(deep.zoom_milli(), 12_250);
+    let (_, top) = deep.to_screen(World { x: 1 << 31, y: 0 });
+    assert!(top.abs() < 1e-3, "{top}");
+}
