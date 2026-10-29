@@ -282,6 +282,17 @@ then the service and the battery measurement.
 - **Next**: the foreground service (`remoteMessaging`) holding the quiet
   link, the battery exemption intent, then the measurement of section 3.
 
+After order 1116: the client runners (send, pull, marks, the store's side
+of an engine event) are one copy in `loquax::home::runner`, which the
+terminal's shell and the app's session both call. The foreground service
+(`LoquaxService`, `remoteMessaging`) holds the session after the first
+start, with the persistent notification (home node, unread, a stop
+button) and a notification per conversation with new messages; the
+battery exemption is asked once (`Asks`). The APK with both ABIs is
+8 664 203 B, again the same twice, the second from a fresh target
+directory with sccache off. Next: the measurement of section 3 on the
+phone.
+
 ## 7. Open questions for Lew (answered 2026-10-29, see section 6)
 
 1. **Package name.** `network.leviculum.loquax` assumes the domain
