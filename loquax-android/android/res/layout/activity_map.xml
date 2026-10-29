@@ -21,6 +21,15 @@
             android:textSize="18sp"
             android:textStyle="bold" />
 
+        <!-- The map's own light or dark table (1133): a sun on a dark
+             map, a moon on a light one, set in MapActivity. -->
+        <Button
+            android:id="@+id/theme"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:contentDescription="@string/map_theme"
+            android:text="&#x263E;" />
+
         <Button
             android:id="@+id/fit"
             android:layout_width="wrap_content"

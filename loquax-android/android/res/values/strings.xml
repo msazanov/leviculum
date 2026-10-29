@@ -41,6 +41,8 @@
     <string name="map_fit">All</string>
     <string name="map_load">Load area</string>
     <string name="map_loading">Loading the map of this area…</string>
+    <string name="map_theme">Light or dark map; a long press follows the phone</string>
+    <string name="map_follows_phone">The map follows the phone\'s light or dark setting again.</string>
     <string name="map_no_pins">No positions yet. A contact\'s position report puts them on the map.</string>
     <string name="back">Back</string>
     <string name="menu">More</string>

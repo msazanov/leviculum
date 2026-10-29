@@ -79,6 +79,8 @@ final class MapView extends View {
     private Integer tapY;
     private boolean fit;
     private boolean load;
+    private boolean toggleTheme;
+    private boolean followPhone;
     private Long atLat;
     private Long atLon;
     /** A frame is owed: the view changed since the last request. */
@@ -166,6 +168,25 @@ final class MapView extends View {
     void loadArea() {
         synchronized (this) {
             load = true;
+        }
+        ask();
+    }
+
+    /**
+     * Switch the map to its other table, stored in the config, the
+     * phone's setting overruled from then on (1133).
+     */
+    void toggleTheme() {
+        synchronized (this) {
+            toggleTheme = true;
+        }
+        ask();
+    }
+
+    /** Drop the map's own choice: it follows the phone again. */
+    void followPhone() {
+        synchronized (this) {
+            followPhone = true;
         }
         ask();
     }
@@ -293,7 +314,8 @@ final class MapView extends View {
                         "pan_x", (long) panX, "pan_y", (long) panY,
                         "zoom_by", (long) steps,
                         "about_x", (long) (w / 2), "about_y", (long) (h / 2),
-                        "fit", fit, "load", load);
+                        "fit", fit, "load", load,
+                        "toggle_theme", toggleTheme, "follow_phone", followPhone);
                 if (x != null) {
                     request.put("x", x);
                     request.put("y", y);
@@ -310,6 +332,8 @@ final class MapView extends View {
                 }
                 fit = false;
                 load = false;
+                toggleTheme = false;
+                followPhone = false;
                 tapX = null;
                 tapY = null;
                 atLat = null;

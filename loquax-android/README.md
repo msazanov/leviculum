@@ -60,7 +60,11 @@ What it does today:
   the view. A tap on a position report in a chat opens the map on its
   fix. Regions load by themselves around the pins and a report's place,
   as in the terminal (`map_autoload`, `map_source`, `map_cache_mb` in the
-  app's `config`).
+  app's `config`). The sun or moon button switches only the map to its
+  other colours, whatever the phone says, and the app keeps that choice
+  (`map_theme` in the app's `config`); a long press on it follows the
+  phone again (`map_theme = auto`). Phone dark, text dark, map light is
+  one press.
 - **Light or dark** by the phone's setting: the theme and every colour are
   resources with a `-night` set (`android/res/values-night/`), no AndroidX.
   Switching while a screen is open recreates it, as a rotation does; the

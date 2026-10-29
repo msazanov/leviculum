@@ -340,6 +340,15 @@ pub struct MapRequest {
     /// which take a while to set, and the next frame at rest has them.
     #[serde(default)]
     pub moving: bool,
+    /// Switch the map, and only the map, to the other table than the one
+    /// it shows (1133): the choice is stored as the config's `map_theme`
+    /// and wins over the phone's setting from then on.
+    #[serde(default)]
+    pub toggle_theme: bool,
+    /// Drop that choice: the map follows the phone again, `map_theme =
+    /// auto`.
+    #[serde(default)]
+    pub follow_phone: bool,
 }
 
 /// The map frame's description; its pixels follow it (see the table
@@ -378,6 +387,12 @@ pub struct MapShown {
     pub notice: Option<String>,
     /// How long the frame took to draw, milliseconds.
     pub ms: u32,
+    /// The frame is in the map's dark table, and whether a stored choice
+    /// put it there rather than the phone's setting.
+    #[serde(default)]
+    pub dark: bool,
+    #[serde(default)]
+    pub theme_chosen: bool,
 }
 
 /// A map frame for Java: the description's length, the description, the

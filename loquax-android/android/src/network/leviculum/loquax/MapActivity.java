@@ -6,6 +6,7 @@ import android.view.View;
 import android.widget.Button;
 import android.widget.FrameLayout;
 import android.widget.TextView;
+import android.widget.Toast;
 import java.util.Map;
 
 /**
@@ -23,6 +24,7 @@ public class MapActivity extends Activity implements Events.Listener, MapView.Li
 
     private TextView status;
     private TextView credit;
+    private Button theme;
     private MapView map;
     private final ServiceLink link = new ServiceLink(this);
 
@@ -38,6 +40,21 @@ public class MapActivity extends Activity implements Events.Listener, MapView.Li
                     getIntent().getStringExtra(SELECTED));
         }
         ((FrameLayout) findViewById(R.id.map)).addView(map);
+        theme = (Button) findViewById(R.id.theme);
+        theme.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                map.toggleTheme();
+            }
+        });
+        theme.setOnLongClickListener(new View.OnLongClickListener() {
+            @Override
+            public boolean onLongClick(View v) {
+                map.followPhone();
+                Toast.makeText(MapActivity.this, R.string.map_follows_phone, Toast.LENGTH_SHORT).show();
+                return true;
+            }
+        });
         ((Button) findViewById(R.id.fit)).setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -87,6 +104,9 @@ public class MapActivity extends Activity implements Events.Listener, MapView.Li
             return;
         }
         credit.setText(Core.str(shown, "attribution"));
+        // The table the other press gives: a sun on a dark map, a moon on
+        // a light one.
+        theme.setText(Core.bool(shown, "dark") ? "\u2600" : "\u263E");
         if (shown.get("tapped_name") != null) {
             status.setText(Core.str(shown, "tapped_name"));
         } else if (shown.get("notice") != null) {

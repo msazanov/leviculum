@@ -5,7 +5,8 @@
 //! directory and the world outline under them ([`loquax::picture`]), the
 //! map's names set in Fira Sans ([`loquax::mapnames`]), the pins placed by
 //! the core's rule ([`leviculum_map::pins`]) and drawn in, in the map's
-//! dark table when the phone is dark. The window draws through the same
+//! dark table when the phone is dark, or in the table the map screen's
+//! own switch chose (1133, the config's `map_theme`). The window draws through the same
 //! functions, so the phone shows the map the desktop shows.
 //!
 //! Java keeps the last frame's view and hands it back with what the finger
@@ -33,7 +34,7 @@ use std::time::Instant;
 
 use leviculum_map::mercator::{project, LatLon, World};
 use leviculum_map::viewport::Viewport;
-use leviculum_mapfill::style::Style;
+use leviculum_mapfill::style::{MapTheme, Style};
 use leviculum_ui::theme::{Theme, ThemeFlag};
 use loquax::mapload::{Loader, Source, Step, CACHE_DEFAULT_MB};
 use loquax::mapnames::Typesetter;
@@ -147,6 +148,32 @@ impl Renderer {
         landed
     }
 
+    /// The map's own light or dark choice (1133): a toggle stores the
+    /// table other than the one the map shows over `screen`, "follow the
+    /// phone" stores `auto`; both in the config, so the choice outlives
+    /// the app. A write that failed keeps the old choice and says so.
+    fn choose_theme(&mut self, request: &MapRequest, screen: Theme, notice: &mut Option<String>) {
+        let next = if request.follow_phone {
+            ThemeFlag::Auto
+        } else if request.toggle_theme {
+            match map_theme(self.theme.or(Some(ThemeFlag::Auto)), Some(screen)) {
+                MapTheme::Dark => ThemeFlag::Light,
+                MapTheme::Light => ThemeFlag::Dark,
+            }
+        } else {
+            return;
+        };
+        let word = match next {
+            ThemeFlag::Auto => "auto",
+            ThemeFlag::Light => "light",
+            ThemeFlag::Dark => "dark",
+        };
+        match loquax::config::save(&self.dir, "map_theme", word) {
+            Ok(()) => self.theme = Some(next),
+            Err(error) => *notice = Some(format!("map: the choice was not stored: {error}")),
+        }
+    }
+
     /// One frame for `request` over `pins`.
     pub fn frame(&mut self, request: &MapRequest, pins: &[MapPin]) -> (MapShown, Vec<u8>) {
         let started = Instant::now();
@@ -239,9 +266,11 @@ impl Renderer {
             true => Theme::Dark,
             false => Theme::Light,
         };
+        self.choose_theme(request, screen, &mut notice);
         // Unset follows the phone; the config's `map_theme` still wins.
         let flag = self.theme.or(Some(ThemeFlag::Auto));
-        let style = Style::PC.in_theme(map_theme(flag, Some(screen)));
+        let table = map_theme(flag, Some(screen));
+        let style = Style::PC.in_theme(table);
         // The screen's view with the margins drawn around it, the same
         // centre: not held to one world itself, so a margin past the
         // world's edge stays empty rather than moving the view.
@@ -286,6 +315,8 @@ impl Renderer {
             loading: self.loader.busy(),
             notice,
             ms: u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX),
+            dark: table == MapTheme::Dark,
+            theme_chosen: matches!(self.theme, Some(ThemeFlag::Light | ThemeFlag::Dark)),
         };
         (shown, rendered.picture.rgba)
     }

@@ -1,7 +1,7 @@
 //! The map screen's call through the facade (1128): the frame Java gets
 //! is loquax's own map on a pixel screen, the same pixels the window's
 //! renderer draws for the view, the pins drawn in, the dark table when the
-//! phone is dark, and a position in the store is a pin. A test binary of
+//! phone is dark or the map switch says so (1133), and a position in the store is a pin. A test binary of
 //! its own: the map takes a running session's pins over the store's, and
 //! the facade tests run sessions in their process.
 
@@ -14,6 +14,7 @@ use leviculum_map::mercator::{project, LatLon};
 use leviculum_map::viewport::Viewport;
 use leviculum_mapfill::frame::rgb888;
 use leviculum_mapfill::style::{MapTheme, Style};
+use leviculum_ui::theme::ThemeFlag;
 use loquax::mapnames::Typesetter;
 use loquax::picture::{Maps, Painter};
 use loquax::store::Store;
@@ -182,6 +183,92 @@ fn a_dark_phone_draws_the_dark_table() {
     assert!(share >= 90, "dark under its names: {share} %");
     let share = same_share(&dark, &light);
     assert!(share < 50, "not the light table: {share} %");
+}
+
+/// The map's own switch (1133): with the phone dark, a toggle draws the
+/// light table and stores it as the config's `map_theme`, the other keys
+/// kept; the choice wins over the phone from then on, for a renderer that
+/// reads the config afresh too; "follow the phone" stores `auto` and the
+/// phone decides again.
+#[test]
+fn the_map_switch_wins_over_the_phone_until_it_follows_again() {
+    let home = home();
+    let draw = |request: &MapRequest| {
+        frame(&loquax_android::map::render(
+            request,
+            Some(Vec::new()),
+            now(),
+        ))
+    };
+    let dark_picture = picture(home.path(), MapTheme::Dark);
+    let light_picture = picture(home.path(), MapTheme::Light);
+
+    let (shown, rgba) = draw(&request(home.path(), true));
+    assert!(shown.dark && !shown.theme_chosen, "{shown:?}");
+    assert!(same_share(&rgba, &dark_picture) >= 90);
+
+    let toggle = MapRequest {
+        toggle_theme: true,
+        ..request(home.path(), true)
+    };
+    let (shown, rgba) = draw(&toggle);
+    assert!(!shown.dark && shown.theme_chosen, "{shown:?}");
+    assert_eq!(shown.notice, None);
+    assert!(same_share(&rgba, &light_picture) >= 90, "light at once");
+    let config = loquax::config::load(home.path()).expect("the config");
+    assert_eq!(config.map_theme, Some(ThemeFlag::Light));
+    assert_eq!(config.map_autoload, Some(false), "the other keys kept");
+
+    for phone_dark in [true, false] {
+        let (shown, rgba) = draw(&request(home.path(), phone_dark));
+        assert!(!shown.dark && shown.theme_chosen, "phone dark {phone_dark}");
+        assert!(same_share(&rgba, &light_picture) >= 90);
+    }
+
+    let (shown, _) = draw(&MapRequest {
+        toggle_theme: true,
+        ..request(home.path(), false)
+    });
+    assert!(shown.dark && shown.theme_chosen, "toggled back to dark");
+    assert_eq!(
+        loquax::config::load(home.path())
+            .expect("the config")
+            .map_theme,
+        Some(ThemeFlag::Dark)
+    );
+
+    let (shown, rgba) = draw(&MapRequest {
+        follow_phone: true,
+        ..request(home.path(), false)
+    });
+    assert!(
+        !shown.dark && !shown.theme_chosen,
+        "follows the light phone"
+    );
+    assert!(same_share(&rgba, &light_picture) >= 90);
+    assert_eq!(
+        loquax::config::load(home.path())
+            .expect("the config")
+            .map_theme,
+        Some(ThemeFlag::Auto)
+    );
+    let (shown, _) = draw(&request(home.path(), true));
+    assert!(shown.dark && !shown.theme_chosen, "and the dark one");
+}
+
+/// A choice stored before the app draws its first map wins over the
+/// phone: phone dark, `map_theme = light`, the light table.
+#[test]
+fn a_stored_map_theme_wins_over_the_phone() {
+    let home = home();
+    loquax::config::save(home.path(), "map_theme", "light").expect("stored");
+    let (shown, rgba) = frame(&loquax_android::map::render(
+        &request(home.path(), true),
+        Some(Vec::new()),
+        now(),
+    ));
+    assert!(!shown.dark && shown.theme_chosen, "{shown:?}");
+    assert!(same_share(&rgba, &picture(home.path(), MapTheme::Light)) >= 90);
 }
 
 /// A tap on a pin's marker selects it and names it; the selected pin is
