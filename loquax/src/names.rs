@@ -5,8 +5,10 @@
 //!
 //! # The display rule
 //!
-//! The petname if the reader set one, otherwise the name the peer announced,
-//! and in both cases the address's first four hex digits after it
+//! The petname if the reader set one, otherwise the name of the address
+//! book contact the reader linked the peer to (on a phone, 1139), otherwise
+//! the name the peer announced, and in each case the address's first four
+//! hex digits after it
 //! (`Alice ·4f2a`): the hash is shortened, never suppressed, so "that is not
 //! the Alice I know" stays possible at a glance. A peer that announced no
 //! name is its address, `<9c31e0a2…>`, as before names arrived.
@@ -31,7 +33,8 @@
 //!
 //! # Trust
 //!
-//! Three states, `known` (the reader named the peer), `unknown` and
+//! Three states, `known` (the reader named the peer, or linked it to a
+//! contact of the phone's address book), `unknown` and
 //! `blocked`, from the contacts file ([`Contacts`]): `${LNMSG_HOME}/contacts`,
 //! one `name <address> <petname>` or `block <address>` a line. The palette's
 //! `rename`, `block` and `unblock` write it ([`edit_contacts`]): only the
@@ -475,12 +478,25 @@ pub enum Heard {
     Nameless,
 }
 
+/// A peer linked to a contact of the phone's address book (1139): the
+/// contact's name as the link copied it, sanitised, and which contact it
+/// is, so two addresses of one person are told apart from two people who
+/// share a name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Linked {
+    pub name: String,
+    pub contact: String,
+}
+
 /// Every name this session heard, and the reader's contacts.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Names {
     /// The sanitised name each peer last announced.
     announced: BTreeMap<[u8; 16], String>,
     pub contacts: Contacts,
+    /// The address book's names of the linked peers: the reader's word
+    /// outside loquax, below a petname, above an announce.
+    book: BTreeMap<[u8; 16], Linked>,
 }
 
 impl Names {
@@ -488,7 +504,46 @@ impl Names {
         Self {
             announced: BTreeMap::new(),
             contacts,
+            book: BTreeMap::new(),
         }
+    }
+
+    /// Link `peer` to the address book's `contact`, named `name` there; a
+    /// name that sanitises to nothing unlinks.
+    pub fn link(&mut self, peer: [u8; 16], name: &str, contact: &str) {
+        match sanitise(name) {
+            Some(name) => {
+                self.book.insert(
+                    peer,
+                    Linked {
+                        name,
+                        contact: contact.to_string(),
+                    },
+                );
+            }
+            None => self.unlink(&peer),
+        }
+    }
+
+    pub fn unlink(&mut self, peer: &[u8; 16]) {
+        self.book.remove(peer);
+    }
+
+    /// The address book's name for the peer, when it is linked.
+    pub fn book_name(&self, peer: &[u8; 16]) -> Option<&str> {
+        self.book.get(peer).map(|linked| linked.name.as_str())
+    }
+
+    /// The other addresses linked to the peer's contact: the same person.
+    pub fn same_contact(&self, peer: &[u8; 16]) -> Vec<[u8; 16]> {
+        let Some(mine) = self.book.get(peer) else {
+            return Vec::new();
+        };
+        self.book
+            .iter()
+            .filter(|(other, linked)| *other != peer && linked.contact == mine.contact)
+            .map(|(other, _)| *other)
+            .collect()
     }
 
     /// Note an announce from `peer` carrying `name`, as the reference
@@ -527,15 +582,18 @@ impl Names {
         self.contacts.petnames.get(peer).map(String::as_str)
     }
 
-    /// The display rule's name: the petname, else the announced one.
+    /// The display rule's name: the petname, else the address book's, else
+    /// the announced one.
     pub fn shown(&self, peer: &[u8; 16]) -> Option<&str> {
-        self.petname(peer).or_else(|| self.announced(peer))
+        self.petname(peer)
+            .or_else(|| self.book_name(peer))
+            .or_else(|| self.announced(peer))
     }
 
     pub fn trust(&self, peer: &[u8; 16]) -> Trust {
         if self.contacts.blocked.contains(peer) {
             Trust::Blocked
-        } else if self.contacts.petnames.contains_key(peer) {
+        } else if self.contacts.petnames.contains_key(peer) || self.book.contains_key(peer) {
             Trust::Known
         } else {
             Trust::Unknown
@@ -550,16 +608,22 @@ impl Names {
             .petnames
             .keys()
             .filter(|peer| !self.announced.contains_key(*peer));
-        heard.chain(named)
+        let linked = self.book.keys().filter(|peer| {
+            !self.announced.contains_key(*peer) && !self.contacts.petnames.contains_key(*peer)
+        });
+        heard.chain(named).chain(linked)
     }
 
     /// The other peers whose shown name looks like this one's, by address.
+    /// Two addresses linked to one contact are one person, the reader said
+    /// so: no collision.
     pub fn collisions(&self, peer: &[u8; 16]) -> Vec<[u8; 16]> {
         let Some(mine) = self.shown(peer).map(skeleton) else {
             return Vec::new();
         };
+        let same = self.same_contact(peer);
         self.named()
-            .filter(|other| *other != peer)
+            .filter(|other| *other != peer && !same.contains(other))
             .filter(|other| self.shown(other).map(skeleton).as_deref() == Some(&mine))
             .copied()
             .collect()
@@ -591,14 +655,21 @@ impl Names {
     }
 
     /// The header's words after the trust state: whose name this one
-    /// shares, and the announced name beside a petname that differs.
+    /// shares, the contact's other addresses, and the announced name beside
+    /// a petname or an address book name that differs.
     pub fn header_notes(&self, peer: &[u8; 16]) -> Vec<String> {
         let mut notes = Vec::new();
         if let Some(other) = self.collisions(peer).first() {
             notes.push(format!("same name as {}", hash_suffix(other)));
         }
-        if let (Some(pet), Some(announced)) = (self.petname(peer), self.announced(peer)) {
-            if pet != announced {
+        let others = self.same_contact(peer);
+        if !others.is_empty() {
+            let hashes: Vec<String> = others.iter().map(hash_suffix).collect();
+            notes.push(format!("also {}", hashes.join(" ")));
+        }
+        let own = self.petname(peer).or_else(|| self.book_name(peer));
+        if let (Some(own), Some(announced)) = (own, self.announced(peer)) {
+            if own != announced {
                 notes.push(format!("announces {announced}"));
             }
         }
@@ -831,6 +902,62 @@ mod tests {
         names.heard(CAROL, Some("mum"));
         assert_eq!(names.label(&CAROL), "mum ·17ee ≈");
         assert_eq!(names.label(&ALICE), "Mum ·4f2a ≈");
+    }
+
+    /// The name order of 1139: petname, then the address book's name, then
+    /// the announced one; the short hash stays on each.
+    #[test]
+    fn a_petname_beats_the_address_book_which_beats_the_announce() {
+        let mut names = Names::default();
+        names.heard(ALICE, Some("Alice"));
+        assert_eq!(names.label(&ALICE), "Alice ·4f2a");
+        assert_eq!(names.trust(&ALICE), Trust::Unknown);
+        names.link(ALICE, "Alice Schmidt", "lookup-1");
+        assert_eq!(names.label(&ALICE), "Alice Schmidt ·4f2a");
+        assert_eq!(names.trust(&ALICE), Trust::Known);
+        assert_eq!(names.header_notes(&ALICE), ["announces Alice"]);
+        names.contacts.set(&Contact {
+            peer: ALICE,
+            petname: Some("Mum".into()),
+            blocked: false,
+        });
+        assert_eq!(names.label(&ALICE), "Mum ·4f2a");
+        // The petname gone, the address book's name is back.
+        names.contacts.set(&Contact {
+            peer: ALICE,
+            petname: None,
+            blocked: false,
+        });
+        assert_eq!(names.label(&ALICE), "Alice Schmidt ·4f2a");
+        names.unlink(&ALICE);
+        assert_eq!(names.label(&ALICE), "Alice ·4f2a");
+        assert_eq!(names.trust(&ALICE), Trust::Unknown);
+        // Linked before any announce, the contact names it; a name that
+        // sanitises to nothing is no link.
+        names.link(CAROL, "Carol \u{202e}", "lookup-2");
+        assert_eq!(names.label(&CAROL), "Carol ·17ee");
+        names.link(CAROL, "\u{200b}", "lookup-2");
+        assert_eq!(names.book_name(&CAROL), None);
+    }
+
+    /// Two addresses linked to one contact are one person: no collision
+    /// mark, and the header names the other address. A stranger who
+    /// announces the contact's name still collides with both.
+    #[test]
+    fn two_addresses_of_one_contact_do_not_collide() {
+        let mut names = Names::default();
+        names.link(ALICE, "Alice Schmidt", "lookup-1");
+        names.link(CAROL, "Alice Schmidt", "lookup-1");
+        assert_eq!(names.label(&ALICE), "Alice Schmidt ·4f2a");
+        assert_eq!(names.label(&CAROL), "Alice Schmidt ·17ee");
+        assert_eq!(names.header_notes(&ALICE), ["also ·17ee"]);
+        names.heard(MALLORY, Some("alice schmidt"));
+        assert_eq!(names.label(&ALICE), "Alice Schmidt ·4f2a ≈");
+        assert_eq!(names.label(&MALLORY), "alice schmidt ·b7d0 ≈");
+        // Two contacts of one name are two people: marked.
+        names.unlink(&CAROL);
+        names.link(CAROL, "Alice Schmidt", "lookup-9");
+        assert_eq!(names.label(&CAROL), "Alice Schmidt ·17ee ≈");
     }
 
     #[test]

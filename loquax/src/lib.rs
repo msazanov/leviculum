@@ -89,6 +89,7 @@ pub mod mailbox_state;
 pub mod mapload;
 #[cfg(feature = "screenmap")]
 pub mod mapnames;
+pub mod name_match;
 pub mod names;
 pub mod outbox;
 #[cfg(feature = "picture")]
