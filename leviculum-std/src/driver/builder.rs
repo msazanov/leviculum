@@ -79,6 +79,9 @@ pub struct ReticulumNodeBuilder {
     /// Instance name to connect to as a shared instance client.
     /// Mutually exclusive with share_instance.
     connect_instance_name: Option<String>,
+    /// The Reticulum config directory of the shared instance this client
+    /// joins; see [`Self::shared_instance_config_dir`].
+    shared_instance_config_dir: Option<PathBuf>,
     /// Shared-instance transport override; see
     /// [`Self::shared_instance_transport`].
     shared_instance_transport_explicit: Option<crate::interfaces::SharedInstanceTransport>,
@@ -128,6 +131,7 @@ impl ReticulumNodeBuilder {
             autoconnect_discovered_interfaces_explicit: None,
             discover_interfaces_explicit: None,
             connect_instance_name: None,
+            shared_instance_config_dir: None,
             shared_instance_transport_explicit: None,
             events_enabled: true,
             discovery_job_interval_secs_explicit: None,
@@ -779,6 +783,24 @@ impl ReticulumNodeBuilder {
         self
     }
 
+    /// The Reticulum config directory of the shared instance this client
+    /// joins, where its RPC key comes from.
+    ///
+    /// A client asks the daemon over RPC (the first hop's timeout before
+    /// every link and receipt), keyed as a Python client keys it: the
+    /// directory's `rpc_key`, else the hash of its
+    /// `storage/transport_identity`, the daemon's own key
+    /// (Reticulum.py:355-356, Transport.py:218-220). Its own identity is no
+    /// substitute when it keeps its own storage, as loquax, lnpnd and every
+    /// application client do (1119). Without this call the directory is the
+    /// config file's, else the platform default, as for a Python client
+    /// started without `--config`; with no key there, the client falls back
+    /// to its own identity's.
+    pub fn shared_instance_config_dir(mut self, dir: PathBuf) -> Self {
+        self.shared_instance_config_dir = Some(dir);
+        self
+    }
+
     /// Serve or dial the shared instance over `transport`.
     ///
     /// Without this call the transport comes from the config the builder was
@@ -1120,7 +1142,23 @@ impl ReticulumNodeBuilder {
         if let Some(ref name) = self.connect_instance_name {
             node.set_connect_instance(name.clone());
         }
-        node.set_rpc_key(config.reticulum.rpc_key.clone());
+        // A client asks with its shared instance's key (1119), see
+        // `shared_instance_config_dir`; a daemon serves with its own config's.
+        let rpc_key = config.reticulum.rpc_key.clone().or_else(|| {
+            self.connect_instance_name.as_ref()?;
+            let dir = self
+                .shared_instance_config_dir
+                .take()
+                .or_else(|| {
+                    self.config_path
+                        .as_deref()
+                        .and_then(std::path::Path::parent)
+                        .map(std::path::Path::to_path_buf)
+                })
+                .unwrap_or_else(Config::default_config_dir);
+            shared_instance_rpc_key(&dir)
+        });
+        node.set_rpc_key(rpc_key);
         // What lnsd decided about the automatic layer (#471), for
         // `interface_stats` to serve; a node built in code has none.
         // And where the configuration came from, for the rows no section
@@ -1209,6 +1247,28 @@ fn resolve_network_identity_path(
         expanded
     } else {
         storage_path.join(expanded)
+    }
+}
+
+/// The RPC key of the shared instance whose config directory is `config_dir`,
+/// resolved as the client tools resolve it
+/// ([`crate::daemon_rpc::resolve_authkey`]), or `None` when the directory
+/// holds neither an `rpc_key` nor a readable `transport_identity`.
+fn shared_instance_rpc_key(config_dir: &std::path::Path) -> Option<Vec<u8>> {
+    let config_file = config_dir.join("config");
+    let config = config_file
+        .is_file()
+        .then(|| Config::load(&config_file).ok())
+        .flatten();
+    match crate::daemon_rpc::resolve_authkey(config_dir, config.as_ref()) {
+        Ok((key, _)) => Some(key),
+        Err(e) => {
+            tracing::debug!(
+                "no shared-instance RPC key under {} ({e}); asking with this node's own",
+                config_dir.display()
+            );
+            None
+        }
     }
 }
 

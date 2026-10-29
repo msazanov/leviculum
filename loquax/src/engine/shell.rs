@@ -174,6 +174,12 @@ impl Outbox for InProcessOutbox {
 pub struct AttachConfig<N = Terminal> {
     /// The shared instance to join, i.e. which daemon.
     pub instance: String,
+    /// That daemon's Reticulum config directory, whose key the node asks the
+    /// daemon's RPC with
+    /// ([`ReticulumNodeBuilder::shared_instance_config_dir`]): this node's
+    /// own identity is not the daemon's key (1119). `None` is the platform
+    /// default.
+    pub config_dir: Option<PathBuf>,
     /// Where this client keeps its node state (learned identities, paths).
     ///
     /// Deliberately not the daemon's storage directory: `lncp` and `lnstatus`
@@ -242,8 +248,11 @@ pub fn parse_server(text: &str) -> Result<(String, u16), String> {
 
 /// Where the attached node's traffic goes.
 enum Upstream {
-    /// A running daemon's shared instance, by name.
-    Shared(String),
+    /// A running daemon's shared instance, by name, and its config directory.
+    Shared {
+        instance: String,
+        config_dir: Option<PathBuf>,
+    },
     /// One TCP client interface to this host and port, the node's only one.
     Tcp { host: String, port: u16 },
 }
@@ -323,6 +332,7 @@ pub async fn attach_as<N: Effects + Send + 'static>(
 ) -> Result<Attached, AttachError> {
     let AttachConfig {
         instance,
+        config_dir,
         storage_dir,
         identity,
         display_name,
@@ -334,7 +344,15 @@ pub async fn attach_as<N: Effects + Send + 'static>(
         display_name,
         notices,
     };
-    attach_through(joined, role, Upstream::Shared(instance)).await
+    attach_through(
+        joined,
+        role,
+        Upstream::Shared {
+            instance,
+            config_dir,
+        },
+    )
+    .await
 }
 
 /// Attach as a leaf: an in-process node with transport off and one TCP
@@ -379,7 +397,7 @@ async fn attach_through<N: Effects + Send + 'static>(
     upstream: Upstream,
 ) -> Result<Attached, AttachError> {
     let fail = |detail: String| match &upstream {
-        Upstream::Shared(instance) => AttachError::NoDaemon {
+        Upstream::Shared { instance, .. } => AttachError::NoDaemon {
             instance: instance.clone(),
             detail,
         },
@@ -436,7 +454,16 @@ async fn attach_through<N: Effects + Send + 'static>(
 
     let builder = ReticulumNodeBuilder::new().enable_transport(false);
     let builder = match &upstream {
-        Upstream::Shared(instance) => builder.connect_to_shared_instance(instance),
+        Upstream::Shared {
+            instance,
+            config_dir,
+        } => {
+            let builder = builder.connect_to_shared_instance(instance);
+            match config_dir {
+                Some(dir) => builder.shared_instance_config_dir(dir.clone()),
+                None => builder,
+            }
+        }
         // The interface as a config section, not `add_tcp_client`: that
         // takes a socket address, and a home node behind a dynamic DNS name
         // has to be looked up again on each reconnect, which the TCP

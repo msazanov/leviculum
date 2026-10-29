@@ -176,7 +176,10 @@ pub struct Mesh {
     /// The port of the daemon's TCP server on 127.0.0.1, where a leaf
     /// (the Android app's node) dials in: [`Mesh::start_serving`] only.
     pub tcp_port: Option<u16>,
-    _storage: tempfile::TempDir,
+    /// The daemon's Reticulum config directory, its storage under
+    /// `storage/`: every run gets it as `--config`, as a user's loquax
+    /// finds its lnsd, and takes the daemon's RPC key from it (1119).
+    pub config_dir: tempfile::TempDir,
 }
 
 impl Mesh {
@@ -205,7 +208,7 @@ impl Mesh {
             std::process::id(),
             COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         );
-        let storage = tempfile::tempdir().expect("daemon storage");
+        let config_dir = tempfile::tempdir().expect("daemon config dir");
         let mut builder = ReticulumNodeBuilder::new()
             .enable_transport(true)
             .share_instance(true)
@@ -225,7 +228,7 @@ impl Mesh {
             builder = builder.add_tcp_server_listener(listener);
         }
         let mut daemon = builder
-            .storage_path(storage.path().to_path_buf())
+            .storage_path(config_dir.path().join("storage"))
             .build_sync()
             .expect("build the Rust daemon");
         daemon.start().await.expect("start the Rust daemon");
@@ -238,7 +241,7 @@ impl Mesh {
             instance,
             home: tempfile::tempdir().expect("loquax state dir"),
             tcp_port,
-            _storage: storage,
+            config_dir,
         }
     }
 
@@ -266,6 +269,7 @@ impl Mesh {
         stdin: Vec<u8>,
     ) -> Sent {
         let instance = self.instance.clone();
+        let config_dir = self.config_dir.path().to_path_buf();
         let log = home.join(format!("events-{subcommand}-{}.log", args.join("-")));
         let read_log = log.clone();
         let sent = tokio::task::spawn_blocking(move || {
@@ -274,6 +278,8 @@ impl Mesh {
                 .arg(subcommand)
                 .args(&args)
                 .args(["--instance", &instance])
+                .arg("--config")
+                .arg(&config_dir)
                 .env("LNMSG_HOME", &home)
                 .env("LEVICULUM_EVENT_LOG", &log)
                 .stdin(Stdio::piped())

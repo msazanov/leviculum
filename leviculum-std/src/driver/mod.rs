@@ -11603,15 +11603,31 @@ mod first_hop_timeout_tests {
         same_identity_as_daemon: bool,
         measure: Measure,
     ) -> (u64, u16) {
+        client_measure_in(tag, same_identity_as_daemon, measure, None).await
+    }
+
+    /// [`client_measure`] with the daemon's storage at `config_dir/storage`
+    /// and the client told that directory, as a client is told the config
+    /// directory of the daemon it joins. `None` keeps both apart.
+    async fn client_measure_in(
+        tag: &str,
+        same_identity_as_daemon: bool,
+        measure: Measure,
+        config_dir: Option<std::path::PathBuf>,
+    ) -> (u64, u16) {
         let identity = Identity::generate(&mut OsRng);
         let instance = format!("firsthop_{tag}_{}", std::process::id());
         let daemon_storage = tempfile::tempdir().expect("daemon storage");
+        let daemon_storage_path = match &config_dir {
+            Some(dir) => dir.join("storage"),
+            None => daemon_storage.path().to_path_buf(),
+        };
         let mut daemon = ReticulumNodeBuilder::new()
             .identity(identity.clone())
             .enable_transport(true)
             .share_instance(true)
             .instance_name(instance.clone())
-            .storage_path(daemon_storage.path().to_path_buf())
+            .storage_path(daemon_storage_path)
             .build()
             .await
             .expect("build daemon");
@@ -11623,10 +11639,14 @@ mod first_hop_timeout_tests {
             Identity::generate(&mut OsRng)
         };
         let client_storage = tempfile::tempdir().expect("client storage");
+        // Without a directory of its own the client is pointed at an empty
+        // one, never the host's default, whose key is no test's business.
+        let client_config_dir = config_dir.unwrap_or_else(|| client_storage.path().join("rns"));
         let mut client = ReticulumNodeBuilder::new()
             .identity(client_identity)
             .enable_transport(false)
             .connect_to_shared_instance(&instance)
+            .shared_instance_config_dir(client_config_dir)
             .storage_path(client_storage.path().to_path_buf())
             .build()
             .await
@@ -11718,6 +11738,30 @@ mod first_hop_timeout_tests {
 
     /// A client the daemon does not answer (here: one without the daemon's
     /// RPC key) keeps the conservative fallback, 31 333 ms before jitter.
+    /// 1119: a client with an identity of its own (loquax's device identity,
+    /// lnpnd's, any client keeping its own storage) asks with the key of the
+    /// daemon's config directory, as a Python client does: its rpc_key is the
+    /// hash of `Transport.identity`, which it loads from
+    /// `<configdir>/storage/transport_identity` (Reticulum.py:355-356,
+    /// Transport.py:218-220), never the application's identity. Keyed with
+    /// its own, every first-hop question failed authentication.
+    #[tokio::test]
+    async fn a_client_with_its_own_identity_asks_with_the_daemons_key() {
+        let config_dir = tempfile::tempdir().expect("daemon config dir");
+        let (timeout, jitter) = client_measure_in(
+            "ownidentity",
+            false,
+            Measure::Link,
+            Some(config_dir.path().to_path_buf()),
+        )
+        .await;
+        assert_eq!(
+            timeout,
+            jittered(20_276, jitter),
+            "jitter {jitter} permille on a 20 276 ms base; 31 333 ms is the unanswered fallback"
+        );
+    }
+
     #[tokio::test]
     async fn shared_instance_client_without_an_answer_keeps_the_fallback() {
         let (timeout, jitter) = client_timeout("noanswer", false).await;

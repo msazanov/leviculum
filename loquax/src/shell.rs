@@ -1122,6 +1122,7 @@ pub(crate) async fn start(
     let attached = attach_as(
         AttachConfig {
             instance: instance.clone(),
+            config_dir: Some(config_dir.clone()),
             storage_dir,
             identity,
             display_name: display_name.name.into_bytes(),

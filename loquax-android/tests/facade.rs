@@ -143,7 +143,9 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
         std::process::id(),
         COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     );
-    let storage = tempfile::tempdir().expect("transport storage");
+    // The transport's Reticulum config directory, its storage under
+    // `storage/`, as lnsd keeps it: the home node takes its RPC key there.
+    let rns = tempfile::tempdir().expect("transport config dir");
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
     let port = listener.local_addr().expect("its address").port();
     let mut transport = ReticulumNodeBuilder::new()
@@ -151,7 +153,7 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
         .share_instance(true)
         .instance_name(instance.clone())
         .add_tcp_server_listener(listener)
-        .storage_path(storage.path().to_path_buf())
+        .storage_path(rns.path().join("storage"))
         .build_sync()
         .expect("the transport node");
     transport.start().await.expect("start it");
@@ -165,6 +167,7 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
         loquax::home::daemon::DaemonOptions {
             home: home.path().to_path_buf(),
             instance: instance.clone(),
+            config_dir: rns.path().to_path_buf(),
             storage_dir: daemon_storage,
             identity,
             display_name: b"home".to_vec(),

@@ -56,6 +56,8 @@ const OUTBOX_TICK: Duration = Duration::from_secs(1);
 pub struct DaemonOptions {
     pub home: PathBuf,
     pub instance: String,
+    /// The daemon's Reticulum config directory, for its RPC key.
+    pub config_dir: PathBuf,
     pub storage_dir: PathBuf,
     pub identity: leviculum_core::Identity,
     pub display_name: Vec<u8>,
@@ -114,6 +116,7 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
     let DaemonOptions {
         home,
         instance,
+        config_dir,
         storage_dir,
         identity,
         display_name,
@@ -153,6 +156,7 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
     let mut attached = attach_as(
         AttachConfig {
             instance,
+            config_dir: Some(config_dir),
             storage_dir,
             identity,
             display_name,

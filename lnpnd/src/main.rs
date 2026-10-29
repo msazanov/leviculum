@@ -709,6 +709,13 @@ async fn daemon(args: &Args, config_dir: &Path, instance: String) -> ExitCode {
     // this daemon has no application event channel (Codeberg #419).
     let mut node = match lnpnd::node_builder(engine, data_dir.join("storage"))
         .connect_to_shared_instance(&instance)
+        // The daemon's RPC key is under its config directory, not this
+        // node's identity (1119).
+        .shared_instance_config_dir(
+            args.rnsconfig
+                .clone()
+                .unwrap_or_else(Config::default_config_dir),
+        )
         .build()
         .await
     {

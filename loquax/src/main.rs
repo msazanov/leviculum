@@ -912,6 +912,7 @@ async fn run(args: SendArgs) -> ExitCode {
     };
     let mut attached = match attach(AttachConfig {
         instance: instance.clone(),
+        config_dir: Some(config_dir.clone()),
         storage_dir,
         identity,
         display_name: display_name.name.into_bytes(),
@@ -1062,6 +1063,7 @@ async fn run_fetch_command(args: FetchArgs) -> ExitCode {
     };
     let mut attached = match attach(AttachConfig {
         instance: instance.clone(),
+        config_dir: Some(config_dir.clone()),
         storage_dir,
         identity,
         display_name: display_name.name.into_bytes(),
@@ -1159,6 +1161,7 @@ async fn run_client_send(
     let mut attached = match loquax::engine::attach_as(
         AttachConfig {
             instance,
+            config_dir: Some(config_dir.clone()),
             storage_dir,
             identity: device.clone(),
             display_name: Vec::new(),
@@ -1290,6 +1293,7 @@ async fn run_daemon(args: TuiArgs) -> ExitCode {
     let outcome = loquax::home::daemon::run(loquax::home::daemon::DaemonOptions {
         home,
         instance,
+        config_dir,
         storage_dir,
         identity,
         display_name: display_name.name.into_bytes(),
@@ -1480,6 +1484,7 @@ async fn run_join(home: PathBuf, client: Option<[u8; 64]>, args: JoinArgs) -> Ex
     let attached = match loquax::engine::attach_as(
         AttachConfig {
             instance,
+            config_dir: Some(config_dir.clone()),
             storage_dir,
             identity: device.clone(),
             display_name: Vec::new(),
@@ -1544,6 +1549,7 @@ async fn run_client_fetch(home: PathBuf, public_key: [u8; 64], args: FetchArgs) 
     let mut attached = match loquax::engine::attach_as(
         AttachConfig {
             instance,
+            config_dir: Some(config_dir.clone()),
             storage_dir,
             identity: device.clone(),
             display_name: Vec::new(),
