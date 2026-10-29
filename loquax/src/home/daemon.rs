@@ -12,7 +12,11 @@
 //! - answers its admitted clients on `loquax.home` ([`super::server`]);
 //! - collects from its propagation node on the messenger's own schedule
 //!   ([`crate::sync::Schedule`]), so mail that senders propagated arrives
-//!   too.
+//!   too;
+//! - delivers what its clients hand in with `/send`, by the outbox policy
+//!   of [`super::outgoing`]: direct at once, a propagated copy on failure,
+//!   direct retries on every announce of the recipient and on a slow
+//!   cadence, each state change an archive entry.
 
 use std::future::Future;
 use std::path::PathBuf;
@@ -20,6 +24,7 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use leviculum_core::RequestError;
+use leviculum_lxmf::router::MessageState;
 use leviculum_std::ReticulumNode;
 use tokio::sync::mpsc::unbounded_channel;
 
@@ -28,8 +33,9 @@ use crate::effects::{Effects, Terminal};
 use crate::engine::{attach_as, AttachConfig, HomeRequest, Role};
 use crate::fanout::Fanout;
 use crate::fetch::{run_fetch, FetchOptions};
+use crate::home::outgoing::{Act, Change, Leg, Outcome, Outgoing, Policy};
 use crate::mailbox_state::{MailboxRun, Stored};
-use crate::outbox::{Command, Outbox, OutboxEvent};
+use crate::outbox::{Command, Outbox, OutboxEvent, Via};
 use crate::seen::{SeenStore, SeenWrite};
 use crate::store::Store;
 use crate::sync::{Schedule, SyncEvent};
@@ -42,6 +48,9 @@ pub const ANNOUNCE_EVERY: Duration = Duration::from_secs(360 * 60);
 
 /// How often the engine's events are read.
 const PUMP: Duration = Duration::from_millis(20);
+/// How often the outbox looks for a due retry or a passed horizon. Both are
+/// counted in seconds.
+const OUTBOX_TICK: Duration = Duration::from_secs(1);
 
 /// What starting the home node needs.
 pub struct DaemonOptions {
@@ -52,6 +61,10 @@ pub struct DaemonOptions {
     pub display_name: Vec<u8>,
     /// The archive's cap in bytes.
     pub archive_cap_bytes: u64,
+    /// How long an admission token stays good, in seconds.
+    pub token_ttl_secs: i64,
+    /// The outbox's retry cadence and horizon.
+    pub policy: Policy,
     /// The propagation node to collect from, as `--pn` and the config name
     /// it, with the word `LNMSG_PN` logs for where it came from.
     pub preferred_pn: Option<[u8; 16]>,
@@ -105,15 +118,29 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
         identity,
         display_name,
         archive_cap_bytes,
+        token_ttl_secs,
+        policy,
         preferred_pn,
         pn_source,
         sync_bound_ms,
         fetch_budget,
         mailbox,
     } = options;
+    let _lock = super::lock::DeliveryLock::acquire(&home, "the home node")?;
     let address = crate::engine::delivery_address(&identity)?;
     let home_destination = crate::home::destination_hash(&identity.public_key_bytes())?;
     let mut store = Store::open_in(&home, address).map_err(|e| e.to_string())?;
+    let signer = identity.clone();
+    let mut outgoing = Outgoing::new(policy);
+    for kept in store.outbox_open().map_err(|e| e.to_string())? {
+        outgoing.add(
+            kept.id,
+            kept.destination,
+            kept.packed,
+            kept.created_at,
+            kept.propagated,
+        );
+    }
     let collector = Collector {
         home: home.clone(),
         instance: instance.clone(),
@@ -139,11 +166,22 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
     .map_err(|e| e.to_string())?;
     let node = attached.node();
     tracing::warn!(
-        "HOME up address={} home={} archive_cap={}B",
+        "HOME up address={} home={} archive_cap={}B outbox={}",
         crate::address::to_hex(&address),
         crate::address::to_hex(&home_destination),
-        archive_cap_bytes
+        archive_cap_bytes,
+        outgoing.len()
     );
+    let serving = super::server::Home {
+        identity: &signer,
+        address,
+        token_ttl_secs,
+        cap_bytes: archive_cap_bytes,
+    };
+    let mut sender = Sender {
+        cap_bytes: archive_cap_bytes,
+        preferred_pn,
+    };
 
     let mut fanout = Fanout::default();
     let mut schedule = sync_bound_ms.map(|bound| Schedule::new(Some(bound)));
@@ -152,6 +190,7 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
     let origin = tokio::time::Instant::now();
     let now_ms = || u64::try_from(origin.elapsed().as_millis()).unwrap_or(u64::MAX);
     let mut pump = tokio::time::interval(PUMP);
+    let mut outbox_tick = tokio::time::interval(OUTBOX_TICK);
     let mut announce =
         tokio::time::interval_at(tokio::time::Instant::now() + ANNOUNCE_EVERY, ANNOUNCE_EVERY);
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
@@ -160,7 +199,21 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
     let outcome = loop {
         tokio::select! {
             Some(request) = requests.recv() => {
-                answer(&node, &mut store, request).await;
+                if let Some(accepted) = answer(&node, &mut store, &serving, request).await {
+                    outgoing.add(
+                        accepted.id,
+                        accepted.destination,
+                        accepted.packed,
+                        accepted.created_at,
+                        false,
+                    );
+                    let acts = outgoing.tick(unix_now());
+                    sender.carry_out(&mut attached.outbox, &mut store, &mut outgoing, acts, selected_pn);
+                }
+            }
+            _ = outbox_tick.tick() => {
+                let acts = outgoing.tick(unix_now());
+                sender.carry_out(&mut attached.outbox, &mut store, &mut outgoing, acts, selected_pn);
             }
             _ = pump.tick() => {
                 let events = match fanout.pump(&mut attached.outbox) {
@@ -179,6 +232,27 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                         }
                         OutboxEvent::PnSelected { destination, .. } => {
                             selected_pn = Some(destination);
+                        }
+                        OutboxEvent::Announced { destination, .. } => {
+                            let acts = outgoing.announced(destination, unix_now());
+                            sender.carry_out(&mut attached.outbox, &mut store, &mut outgoing, acts, selected_pn);
+                        }
+                        OutboxEvent::Left { message_id, last } => {
+                            let outcome = match last {
+                                Some(MessageState::Delivered) => Outcome::Delivered,
+                                Some(MessageState::Sent | MessageState::AwaitingCollection) => {
+                                    Outcome::Sent
+                                }
+                                _ => Outcome::Failed,
+                            };
+                            sender.left(&mut attached.outbox, &mut store, &mut outgoing, &message_id, outcome, selected_pn);
+                        }
+                        OutboxEvent::Unsent { message_id, detail } => {
+                            tracing::info!(
+                                "HOME outbox unsent message={} reason={detail}",
+                                crate::address::to_hex(&message_id)
+                            );
+                            sender.left(&mut attached.outbox, &mut store, &mut outgoing, &message_id, Outcome::Failed, selected_pn);
                         }
                         OutboxEvent::NodeAnnounced { destination }
                             if Some(destination) == selected_pn =>
@@ -245,22 +319,171 @@ fn archive(store: &mut Store, message_id: &[u8; 32], packed: &[u8], cap: u64) {
     }
 }
 
+/// The unix time in seconds, the outbox's clock.
+fn unix_now() -> i64 {
+    leviculum_std::local_time::unix_now_secs()
+}
+
 /// Answer one request, as a packet when it fits and as a resource when not.
-async fn answer(node: &ReticulumNode, store: &mut Store, request: HomeRequest) {
-    let now = leviculum_std::local_time::unix_now_secs();
-    let bytes = super::server::answer(store, &request.path, &request.data, request.remote, now);
+/// The message a `/send` put in the outbox comes back, when it is new.
+async fn answer(
+    node: &ReticulumNode,
+    store: &mut Store,
+    serving: &super::server::Home<'_>,
+    request: HomeRequest,
+) -> Option<crate::store::Outgoing> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0.0, |elapsed| elapsed.as_secs_f64());
+    let answer = super::server::answer(
+        store,
+        serving,
+        &request.path,
+        &request.data,
+        request.remote,
+        now,
+    );
+    let bytes = &answer.bytes;
     let sent = match node
-        .send_response(&request.link_id, &request.request_id, &bytes)
+        .send_response(&request.link_id, &request.request_id, bytes)
         .await
     {
         Err(leviculum_std::Error::Request(RequestError::PayloadTooLarge)) => {
-            node.send_response_resource(&request.link_id, &request.request_id, &bytes)
+            node.send_response_resource(&request.link_id, &request.request_id, bytes)
                 .await
         }
         other => other,
     };
     if let Err(error) = sent {
+        // The outbox has the message whether the answer arrived or not: a
+        // client that retries with the same id is answered from it.
         tracing::warn!("HOME answer to {}: {error}", request.path);
+    }
+    answer.accepted
+}
+
+/// What carrying out the outbox's acts needs besides the engine and the
+/// store.
+struct Sender {
+    cap_bytes: u64,
+    preferred_pn: Option<[u8; 16]>,
+}
+
+impl Sender {
+    /// The router let go of `id`: tell the outbox, and carry out what it
+    /// says.
+    fn left(
+        &mut self,
+        engine: &mut impl Outbox,
+        store: &mut Store,
+        outgoing: &mut Outgoing,
+        id: &[u8; 32],
+        outcome: Outcome,
+        selected_pn: Option<[u8; 16]>,
+    ) {
+        if let Some(leg) = outgoing.in_flight(id) {
+            tracing::info!(
+                "HOME outbox {} {} message={}",
+                leg_word(leg),
+                match outcome {
+                    Outcome::Delivered => "delivered",
+                    Outcome::Sent => "handed-on",
+                    Outcome::Failed => "failed",
+                },
+                crate::address::to_hex(id)
+            );
+        }
+        let acts = outgoing.left(id, outcome);
+        self.carry_out(engine, store, outgoing, acts, selected_pn);
+    }
+
+    /// Hand each message to the router on its leg, and record each state
+    /// change. A leg that cannot start is ended as failed at once, so the
+    /// outbox moves on.
+    fn carry_out(
+        &mut self,
+        engine: &mut impl Outbox,
+        store: &mut Store,
+        outgoing: &mut Outgoing,
+        acts: Vec<Act>,
+        selected_pn: Option<[u8; 16]>,
+    ) {
+        let mut acts = std::collections::VecDeque::from(acts);
+        while let Some(act) = acts.pop_front() {
+            match act {
+                Act::Record { id, change } => self.record(store, &id, change),
+                Act::Send { id, leg } => {
+                    let Some(packed) = outgoing.packed(&id).map(<[u8]>::to_vec) else {
+                        continue;
+                    };
+                    let started = match leg {
+                        Leg::Direct => engine
+                            .submit(Command::SendPacked {
+                                packed,
+                                via: Via::Link,
+                            })
+                            .is_ok(),
+                        Leg::Propagated => match selected_pn.or(self.preferred_pn) {
+                            Some(node) => {
+                                // The node the collections use, selected again
+                                // if none was this run: one command queue, so
+                                // the selection is in before the send.
+                                let selected = selected_pn.is_some()
+                                    || engine
+                                        .submit(Command::SelectPn {
+                                            preferred: Some(node),
+                                            mailbox: None,
+                                        })
+                                        .is_ok();
+                                selected
+                                    && engine
+                                        .submit(Command::SendPacked {
+                                            packed,
+                                            via: Via::Propagated,
+                                        })
+                                        .is_ok()
+                            }
+                            None => {
+                                tracing::info!(
+                                    "HOME outbox no propagation node message={}; direct \
+                                     retries only until a collection selects one",
+                                    crate::address::to_hex(&id)
+                                );
+                                false
+                            }
+                        },
+                    };
+                    if started {
+                        tracing::info!(
+                            "HOME outbox {} message={}",
+                            leg_word(leg),
+                            crate::address::to_hex(&id)
+                        );
+                    } else {
+                        acts.extend(outgoing.left(&id, Outcome::Failed));
+                    }
+                }
+            }
+        }
+    }
+
+    fn record(&mut self, store: &mut Store, id: &[u8; 32], change: Change) {
+        match store.outbox_record(id, change, unix_now(), self.cap_bytes) {
+            Ok(seq) => tracing::info!(
+                "HOME outbox {} message={} seq={}",
+                change.word(),
+                crate::address::to_hex(id),
+                seq.map_or_else(|| "-".to_string(), |seq| seq.to_string())
+            ),
+            Err(error) => tracing::warn!("HOME outbox record: {error}"),
+        }
+    }
+}
+
+fn leg_word(leg: Leg) -> &'static str {
+    match leg {
+        Leg::Direct => "direct",
+        Leg::Propagated => "propagated",
     }
 }
 

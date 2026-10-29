@@ -90,10 +90,12 @@ pub use shell::{
 /// the driver's 1 s idle cadence.
 const POLL_INTERVAL_MS: u64 = 200;
 
-/// Why a client of a home node does not send yet: sending through the home
-/// node is the next slice (`docs/src/concepts/loquax-home-node.md`).
-pub const CLIENT_SENDS: &str = "this device is a client of a home node, and sending through \
-                                the home node is not built yet";
+/// Why a client's engine sends nothing itself: a client holds no LXMF
+/// identity, and its messages go through the home node's `/send`
+/// (`docs/src/concepts/loquax-home-node.md`), which the shell asks, not the
+/// engine.
+pub const CLIENT_SENDS: &str = "this device is a client of a home node, and sends only \
+                                through the home node";
 
 /// How many path-table entries a selection asks the daemon to replay.
 ///
@@ -641,7 +643,59 @@ impl Engine {
                 } => self.hold(message_id, source, packed),
                 Command::Ingest { packed } => self.ingest(core, ready.address, &packed),
                 Command::Announce => self.announced = false,
+                Command::SendPacked { packed, via } => {
+                    self.send_packed(ready, core, &packed, via, out);
+                }
+                Command::Fence { token } => self.emit(OutboxEvent::Fenced { token }),
+                // A client's commands: a messenger learns its states from its
+                // own router.
+                Command::HomeAccepted { .. } | Command::HomeState { .. } => {}
             }
+        }
+    }
+
+    /// Queue a message packed and signed before, as it is: a home node's
+    /// outbox hands the same bytes to every leg, so the direct copy and the
+    /// propagated one have one hash, which the recipient keeps once
+    /// (`reference/LXMF/LXMF/LXMRouter.py:1906-1908`).
+    fn send_packed<R: CryptoRngCore, C: CoreClock, S: Storage>(
+        &mut self,
+        ready: &mut Ready,
+        core: &mut NodeCore<R, C, S>,
+        packed: &[u8],
+        via: Via,
+        out: &mut TickOutput,
+    ) {
+        let mut message =
+            match leviculum_lxmf::Message::unpack(packed, None, None, DeliveryMethod::Direct) {
+                Ok(message) => message,
+                Err(error) => {
+                    self.emit(OutboxEvent::Refused {
+                        detail: format!("not an LXMF message: {error:?}"),
+                    });
+                    return;
+                }
+            };
+        let message_id = message.message_id;
+        message.method = match via {
+            Via::Propagated => DeliveryMethod::Propagated,
+            Via::Direct | Via::Link => DeliveryMethod::Direct,
+        };
+        if message.method == DeliveryMethod::Propagated
+            && ready.router.outbound_propagation_node().is_none()
+        {
+            self.emit(OutboxEvent::Unsent {
+                message_id,
+                detail: "no propagation node is selected".to_string(),
+            });
+            return;
+        }
+        match ready.router.enqueue(core, message) {
+            Ok(output) => self.absorb(ready, core, output, out),
+            Err(e) => self.emit(OutboxEvent::Unsent {
+                message_id,
+                detail: format!("{e:?}"),
+            }),
         }
     }
 
@@ -732,6 +786,26 @@ impl Engine {
                 Command::Send(_) => self.emit(OutboxEvent::Refused {
                     detail: CLIENT_SENDS.to_string(),
                 }),
+                Command::SendPacked { packed, .. } => {
+                    let message_id = leviculum_lxmf::Message::unpack(
+                        &packed,
+                        None,
+                        None,
+                        DeliveryMethod::Direct,
+                    )
+                    .map_or([0; 32], |message| message.message_id);
+                    self.emit(OutboxEvent::Unsent {
+                        message_id,
+                        detail: CLIENT_SENDS.to_string(),
+                    });
+                }
+                Command::Fence { token } => self.emit(OutboxEvent::Fenced { token }),
+                Command::HomeAccepted { message_id } => {
+                    self.emit(OutboxEvent::Queued { message_id });
+                }
+                Command::HomeState { message_id, state } => {
+                    self.emit(OutboxEvent::State { message_id, state });
+                }
                 Command::Fetch { .. } => self.emit(OutboxEvent::SyncFailed {
                     detail: "a client of a home node pulls from the home node, not a \
                              propagation node"
@@ -2536,5 +2610,124 @@ mod tests {
     fn bytes_that_do_not_parse_are_invalid_not_unverified() {
         let alice = leviculum_std::generate_identity();
         assert_eq!(reverify(&[0u8; 40], &alice), Verification::Invalid);
+    }
+
+    /// One message signed by a fresh identity, packed, and its id.
+    fn packed_message(destination: [u8; 16]) -> (Vec<u8>, [u8; 32]) {
+        let sender = leviculum_std::generate_identity();
+        let source = delivery_address(&sender).expect("address");
+        let message = leviculum_lxmf::Message::create(
+            destination,
+            source,
+            &sender,
+            1_800_000_000.25,
+            Vec::new(),
+            b"durch das Zuhause".to_vec(),
+            Vec::new(),
+            DeliveryMethod::Direct,
+        )
+        .expect("message");
+        (message.pack(), message.message_id)
+    }
+
+    /// A home node's outbox hands the router the bytes it signed once: the
+    /// queued message has their id, on the direct leg as on any retry. A
+    /// propagated leg with no node selected is said as unsent, with the id,
+    /// so the outbox can move on; the fence comes back after both.
+    #[test]
+    fn a_packed_message_is_queued_under_its_own_id_or_said_unsent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut core = core(dir.path());
+        let mut engine = engine();
+        let now_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, now_ms);
+        drain(&mut engine);
+
+        let (packed, id) = packed_message([0x42; 16]);
+        engine.submit(Command::SendPacked {
+            packed: packed.clone(),
+            via: Via::Link,
+        });
+        engine.submit(Command::SendPacked {
+            packed: packed.clone(),
+            via: Via::Propagated,
+        });
+        engine.submit(Command::Fence { token: 7 });
+        let now_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, now_ms);
+        let events = drain(&mut engine);
+        let queued = events
+            .iter()
+            .position(|e| *e == OutboxEvent::Queued { message_id: id })
+            .unwrap_or_else(|| panic!("not queued under its id: {events:?}"));
+        let unsent = events
+            .iter()
+            .position(|e| matches!(e, OutboxEvent::Unsent { message_id, .. } if *message_id == id))
+            .unwrap_or_else(|| panic!("the propagated leg was not said unsent: {events:?}"));
+        let fenced = events
+            .iter()
+            .position(|e| *e == OutboxEvent::Fenced { token: 7 })
+            .unwrap_or_else(|| panic!("no fence: {events:?}"));
+        assert!(queued < unsent && unsent < fenced, "{events:?}");
+        // The same bytes again while the first is queued: the router holds one
+        // entry per id, and says so as unsent rather than queueing twice.
+        engine.submit(Command::SendPacked {
+            packed,
+            via: Via::Link,
+        });
+        let now_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, now_ms);
+        let events = drain(&mut engine);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, OutboxEvent::Unsent { message_id, .. } if *message_id == id)),
+            "{events:?}"
+        );
+    }
+
+    /// A client's engine names a bubble after the id the home node gave it,
+    /// and gives it the states pulled from the archive; it sends nothing
+    /// itself; its fence comes back behind the commands before it.
+    #[test]
+    fn a_client_engine_relays_what_its_home_node_said() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (_home, _address, mut engine, mut core) = client_setup(dir.path());
+        let now_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, now_ms);
+        drain(&mut engine);
+        let (packed, id) = packed_message([0x42; 16]);
+        for command in [
+            Command::HomeAccepted { message_id: id },
+            Command::HomeState {
+                message_id: id,
+                state: MessageState::Delivered,
+            },
+            Command::SendPacked {
+                packed,
+                via: Via::Link,
+            },
+            Command::Fence { token: 3 },
+        ] {
+            engine.submit(command);
+        }
+        let now_ms = core.now_ms();
+        let out = engine.on_tick(&mut core, now_ms);
+        assert!(out.actions.is_empty(), "a client put something on the wire");
+        let events = drain(&mut engine);
+        assert_eq!(events[0], OutboxEvent::Queued { message_id: id });
+        assert_eq!(
+            events[1],
+            OutboxEvent::State {
+                message_id: id,
+                state: MessageState::Delivered
+            }
+        );
+        assert!(
+            matches!(&events[2], OutboxEvent::Unsent { message_id, detail }
+                if *message_id == id && detail == CLIENT_SENDS),
+            "{events:?}"
+        );
+        assert_eq!(events[3], OutboxEvent::Fenced { token: 3 });
     }
 }

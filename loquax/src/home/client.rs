@@ -84,6 +84,71 @@ pub async fn join(
     }
 }
 
+/// Hand one message to the home node to send: link, identify as `device`,
+/// `/send`. The message id the home node gave it, also when the same
+/// `client_id` was handed in before.
+pub async fn send(
+    node: &ReticulumNode,
+    public_key: &[u8; 64],
+    device: &Identity,
+    submission: &wire::Submission,
+    budget: Duration,
+) -> Result<[u8; 32], HomeError> {
+    let deadline = tokio::time::Instant::now() + budget;
+    let link = open(node, public_key, device, deadline).await?;
+    let answer = request(
+        node,
+        &link,
+        super::SEND_PATH,
+        &wire::send_request(submission),
+        deadline,
+    )
+    .await;
+    let _ = node.close_link(&link).await;
+    wire::read_send_answer(&answer?)
+        .map_err(|_| HomeError::Malformed)?
+        .map_err(HomeError::Refused)
+}
+
+/// [`send`], asked again with the same submission when the answer was lost
+/// (the request or its answer failed, or ran out of time), up to three times
+/// within `budget`: the home node answers a client id it has seen with the
+/// message it made then, so a retry never sends twice.
+pub async fn send_retrying(
+    node: &ReticulumNode,
+    public_key: &[u8; 64],
+    device: &Identity,
+    submission: &wire::Submission,
+    budget: Duration,
+) -> Result<[u8; 32], HomeError> {
+    let deadline = tokio::time::Instant::now() + budget;
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match send(node, public_key, device, submission, left).await {
+            Err(HomeError::Transfer(detail)) if attempt < 3 && !left.is_zero() => {
+                tracing::info!("HOME send attempt {attempt} lost its answer: {detail}");
+            }
+            Err(HomeError::Timeout) if attempt < 3 && !left.is_zero() => {
+                tracing::info!("HOME send attempt {attempt} ran out of time");
+            }
+            other => return other,
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(HomeError::Timeout);
+        }
+    }
+}
+
+/// A fresh id for one submission. The same id handed in twice is one
+/// message, so a retry after a lost answer reuses it.
+pub fn client_id() -> [u8; 16] {
+    let mut id = [0u8; 16];
+    rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut id);
+    id
+}
+
 /// Pull everything after `cursor`, page by page over one link.
 pub async fn pull(
     node: &ReticulumNode,
@@ -241,7 +306,9 @@ pub fn load_cursor(home: &std::path::Path) -> u64 {
         .unwrap_or(0)
 }
 
-fn save_cursor(home: &std::path::Path, cursor: u64) -> Result<(), String> {
+/// Move the cursor: only once what was pulled up to it is kept where the
+/// caller keeps it ([`Pull::cursor`]).
+pub fn save_cursor(home: &std::path::Path, cursor: u64) -> Result<(), String> {
     write_atomically(&home.join(CURSOR_FILE), &format!("{cursor}\n"))
 }
 
@@ -252,12 +319,37 @@ fn write_atomically(path: &std::path::Path, text: &str) -> Result<(), String> {
         .map_err(|error| format!("{}: {error}", path.display()))
 }
 
+/// One pull into the engine, and what came of it.
+#[derive(Debug, Default)]
+pub struct Pull {
+    /// How many entries came.
+    pub entries: usize,
+    /// The engine's report of each received message, in order.
+    pub received: Vec<crate::outbox::OutboxEvent>,
+    /// Each entry of a message sent through the home node: its id and its
+    /// archive kind.
+    pub sent: Vec<([u8; 32], u8)>,
+    /// The cursor to save once what came is kept: `None` when nothing came,
+    /// or when the engine did not get through it in time, so the next pull
+    /// asks for the same entries again.
+    pub cursor: Option<u64>,
+}
+
+/// How long a pull waits for the engine to take the entries it was handed:
+/// the engine takes commands every 200 ms.
+const SETTLE: Duration = Duration::from_secs(5);
+
 /// One pull into the engine: everything after the saved cursor, handed to
-/// `outbox` as [`crate::outbox::Command::Ingest`] in sequence order, then the
-/// cursor moved past it. How many entries came.
+/// `outbox` in sequence order, a received message as
+/// [`crate::outbox::Command::Ingest`] and a state change of a message sent
+/// through the home node as [`crate::outbox::Command::HomeState`], then a
+/// [`crate::outbox::Command::Fence`] behind them.
 ///
-/// The cursor moves only after every entry was handed on, so a pull cut
-/// short is pulled again; the screen drops a message it already holds.
+/// The cursor is not moved here. Once the fence is answered, every event the
+/// entries caused was handed out before it, and [`Pull::cursor`] names the
+/// cursor to save; the caller saves it after it kept those events (the
+/// screen's store, the fetch's seen file), so a crash in between pulls the
+/// same entries again rather than losing them.
 pub async fn pull_into(
     outbox: &mut impl crate::outbox::Outbox,
     node: &ReticulumNode,
@@ -265,9 +357,20 @@ pub async fn pull_into(
     public_key: &[u8; 64],
     device: &Identity,
     budget: Duration,
-) -> Result<usize, HomeError> {
+) -> Result<Pull, HomeError> {
     let cursor = load_cursor(home);
     let pulled = pull(node, public_key, device, cursor, budget).await?;
+    take_in(outbox, cursor, pulled).await
+}
+
+/// The engine's half of [`pull_into`]: hand on what came after `cursor`,
+/// fence it, and wait for the fence. Moves no cursor.
+async fn take_in(
+    outbox: &mut impl crate::outbox::Outbox,
+    cursor: u64,
+    pulled: Pulled,
+) -> Result<Pull, HomeError> {
+    use crate::outbox::{Command, OutboxEvent};
     if pulled.first > cursor.saturating_add(1) && cursor > 0 {
         tracing::warn!(
             "HOME pull: the home node no longer holds entries {}..{} (its archive cap)",
@@ -275,31 +378,85 @@ pub async fn pull_into(
             pulled.first - 1
         );
     }
+    let gone = |gone: crate::outbox::OutboxGone| HomeError::Transfer(gone.to_string());
+    let mut pull = Pull {
+        entries: pulled.entries.len(),
+        ..Pull::default()
+    };
     let mut last = cursor;
     for entry in &pulled.entries {
-        outbox
-            .submit(crate::outbox::Command::Ingest {
-                packed: entry.packed.clone(),
-            })
-            .map_err(|gone| HomeError::Transfer(gone.to_string()))?;
         last = last.max(entry.seq);
+        if entry.kind == super::KIND_RECEIVED {
+            outbox
+                .submit(Command::Ingest {
+                    packed: entry.packed.clone(),
+                })
+                .map_err(gone)?;
+            continue;
+        }
+        let id = match entry.kind {
+            super::KIND_SENT => leviculum_lxmf::Message::unpack(
+                &entry.packed,
+                None,
+                None,
+                leviculum_lxmf::DeliveryMethod::Direct,
+            )
+            .ok()
+            .map(|message| message.message_id),
+            _ => <[u8; 32]>::try_from(entry.packed.as_slice()).ok(),
+        };
+        let Some(id) = id else {
+            tracing::warn!(
+                "HOME pull: entry {} of kind {} names no message",
+                entry.seq,
+                entry.kind
+            );
+            continue;
+        };
+        if super::sent_word(entry.kind).is_none() {
+            // A kind from a later home node: nothing this client can show.
+            continue;
+        }
+        pull.sent.push((id, entry.kind));
+        if let Some(state) = super::shown_state(entry.kind) {
+            outbox
+                .submit(Command::HomeState {
+                    message_id: id,
+                    state,
+                })
+                .map_err(gone)?;
+        }
     }
-    if last != cursor {
-        save_cursor(home, last).map_err(HomeError::Transfer)?;
+    if last == cursor {
+        tracing::info!("HOME pull cursor={cursor} entries=0");
+        return Ok(pull);
+    }
+    outbox
+        .submit(Command::Fence { token: last })
+        .map_err(gone)?;
+    let deadline = tokio::time::Instant::now() + SETTLE;
+    while tokio::time::Instant::now() < deadline {
+        match outbox.try_next_event().map_err(gone)? {
+            Some(OutboxEvent::Fenced { token }) if token == last => {
+                pull.cursor = Some(last);
+                break;
+            }
+            Some(event @ OutboxEvent::Received { .. }) => pull.received.push(event),
+            Some(_) => {}
+            None => tokio::time::sleep(Duration::from_millis(20)).await,
+        }
     }
     tracing::info!(
-        "HOME pull cursor={cursor} entries={} now={last}",
-        pulled.entries.len()
+        "HOME pull cursor={cursor} entries={} through={last} settled={}",
+        pull.entries,
+        pull.cursor.is_some()
     );
-    Ok(pulled.entries.len())
+    Ok(pull)
 }
 
-/// How long a client's fetch waits for the engine to report the messages it
-/// was handed, after the pull: the engine takes commands every 200 ms.
-const SETTLE: Duration = Duration::from_secs(5);
-
-/// `loquax fetch` on a client: pull from the home node, then print what is
-/// new as a fetch from a propagation node prints it. How many were new.
+/// `loquax fetch` on a client: pull from the home node, print what is new as
+/// a fetch from a propagation node prints it, and a line for each state
+/// change of a message sent through the home node. How many were new.
 #[allow(clippy::too_many_arguments)]
 pub async fn fetch<E: crate::effects::Effects>(
     outbox: &mut impl crate::outbox::Outbox,
@@ -313,29 +470,117 @@ pub async fn fetch<E: crate::effects::Effects>(
 ) -> Result<usize, crate::fetch::FetchError> {
     use crate::fetch::{take_received, FetchError};
     use crate::outbox::OutboxEvent;
-    let pulled = pull_into(outbox, node, home, public_key, device, budget)
+    let pull = pull_into(outbox, node, home, public_key, device, budget)
         .await
         .map_err(|error| FetchError::SyncFailed(error.to_string()))?;
-    let deadline = tokio::time::Instant::now() + SETTLE;
-    let (mut taken, mut new) = (0, 0);
-    while taken < pulled && tokio::time::Instant::now() < deadline {
-        match outbox.try_next_event()? {
-            Some(OutboxEvent::Received {
-                message_id,
-                source,
-                title,
-                body,
-                verified,
-                ..
-            }) => {
-                taken += 1;
-                if take_received(seen, effects, &message_id, &source, &title, &body, verified)? {
-                    new += 1;
-                }
+    let mut new = 0;
+    for event in &pull.received {
+        if let OutboxEvent::Received {
+            message_id,
+            source,
+            title,
+            body,
+            verified,
+            ..
+        } = event
+        {
+            if take_received(seen, effects, message_id, source, title, body, *verified)? {
+                new += 1;
             }
-            Some(_) => {}
-            None => tokio::time::sleep(Duration::from_millis(20)).await,
         }
     }
+    for (id, kind) in &pull.sent {
+        if let Some(word) = super::sent_word(*kind) {
+            let line = format!("message {} {word}\n", crate::address::to_hex(id));
+            effects
+                .print(line.as_bytes())
+                .map_err(FetchError::SyncFailed)?;
+        }
+    }
+    if let Some(cursor) = pull.cursor {
+        save_cursor(home, cursor).map_err(FetchError::SyncFailed)?;
+    }
     Ok(new)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::outbox::fake::FakeOutbox;
+    use crate::outbox::{Command, OutboxEvent};
+    use leviculum_lxmf::router::MessageState;
+
+    fn entry(seq: u64, kind: u8, packed: Vec<u8>) -> Entry {
+        Entry {
+            seq,
+            kind,
+            at: 0,
+            packed,
+        }
+    }
+
+    fn pulled() -> Pulled {
+        Pulled {
+            entries: vec![
+                entry(4, super::super::KIND_RECEIVED, vec![1, 2, 3]),
+                entry(5, super::super::KIND_DELIVERED, vec![9; 32]),
+                entry(6, super::super::KIND_RETRIES_ENDED, vec![8; 32]),
+            ],
+            first: 1,
+        }
+    }
+
+    /// The pull hands everything on in order, fenced, and names the cursor
+    /// only once the fence came back: the caller moves it after keeping what
+    /// came, so a crash before that pulls the same entries again.
+    #[tokio::test]
+    async fn the_cursor_is_named_only_behind_the_fence_and_never_saved_here() {
+        let home = tempfile::tempdir().expect("home");
+        save_cursor(home.path(), 3).expect("cursor");
+        let received = OutboxEvent::Received {
+            message_id: [1; 32],
+            source: [2; 16],
+            title: Vec::new(),
+            body: b"x".to_vec(),
+            fields: Vec::new(),
+            verified: true,
+        };
+        let mut outbox = FakeOutbox::new(vec![received.clone(), OutboxEvent::Fenced { token: 6 }]);
+        let pull = take_in(&mut outbox, 3, pulled()).await.expect("pull");
+        assert_eq!(pull.cursor, Some(6));
+        assert_eq!(pull.entries, 3);
+        assert_eq!(pull.received, [received]);
+        assert_eq!(
+            pull.sent,
+            [
+                ([9; 32], super::super::KIND_DELIVERED),
+                ([8; 32], super::super::KIND_RETRIES_ENDED)
+            ]
+        );
+        assert_eq!(
+            *outbox.commands.borrow(),
+            [
+                Command::Ingest {
+                    packed: vec![1, 2, 3]
+                },
+                Command::HomeState {
+                    message_id: [9; 32],
+                    state: MessageState::Delivered
+                },
+                Command::Fence { token: 6 },
+            ]
+        );
+        // Nothing here moved the file: that is the caller's, after its store.
+        assert_eq!(load_cursor(home.path()), 3);
+    }
+
+    /// Positive control for the above: without the fence there is no cursor
+    /// to save, so the next pull asks for the same entries.
+    #[tokio::test(start_paused = true)]
+    async fn without_the_fence_there_is_no_cursor_to_save() {
+        let mut outbox = FakeOutbox::new(vec![OutboxEvent::Fenced { token: 5 }]);
+        let pull = take_in(&mut outbox, 3, pulled()).await.expect("pull");
+        assert_eq!(pull.cursor, None);
+        assert_eq!(pull.entries, 3);
+    }
 }

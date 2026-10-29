@@ -114,6 +114,26 @@ pub enum Command {
     /// Announce our delivery destination again, on the next tick. The home
     /// node does it on a slow timer, as lxmd's `announce_interval` would.
     Announce,
+    /// Queue one message signed and packed before, as it is: the home
+    /// node's outbox (`crate::home::outgoing`), which hands the same bytes
+    /// to the direct leg and the propagated one. `via` is [`Via::Link`] or
+    /// [`Via::Propagated`]. A message the router will not take is reported
+    /// as [`OutboxEvent::Unsent`].
+    SendPacked { packed: Vec<u8>, via: Via },
+    /// Answered with [`OutboxEvent::Fenced`] once every command before it
+    /// was taken: a runner that waits for it knows the events those
+    /// commands caused were handed out before it.
+    Fence { token: u64 },
+    /// On a client: the home node accepted a message the shell handed it
+    /// with `/send`; reported as [`OutboxEvent::Queued`], so the screen
+    /// names its bubble as it names one its own router queued.
+    HomeAccepted { message_id: [u8; 32] },
+    /// On a client: a state change of a message sent through the home node,
+    /// pulled from its archive; reported as [`OutboxEvent::State`].
+    HomeState {
+        message_id: [u8; 32],
+        state: MessageState,
+    },
 }
 
 /// What the mailbox rule is fed from, read by the frontend before it selects:
@@ -230,6 +250,15 @@ pub enum OutboxEvent {
         detail: String,
         path: Option<PropagationPathAttempts>,
     },
+    /// A [`Command::SendPacked`] the router did not take: no queue entry, so
+    /// nothing else will be said of it.
+    Unsent {
+        message_id: [u8; 32],
+        detail: String,
+    },
+    /// Every command before the [`Command::Fence`] with this token was
+    /// taken.
+    Fenced { token: u64 },
     /// The message just [`OutboxEvent::Received`], packed as it came, for a
     /// home node's archive. Only an engine asked for it hands it out
     /// ([`crate::engine::Engine::handing_out_packed`]).
