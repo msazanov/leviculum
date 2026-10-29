@@ -43,13 +43,15 @@
 //! map_drawing.mosh:xterm-256color = braille-thin
 //! ```
 //!
-//! On a home node (`docs/src/concepts/loquax-home-node.md`) four keys more:
+//! On a home node (`docs/src/concepts/loquax-home-node.md`) five keys more:
 //! `archive_cap_mb`, how many megabytes of messages the archive keeps before
 //! the oldest go (1024 by default, `crate::home::DEFAULT_ARCHIVE_CAP_MB`);
 //! `home_token_hours`, how long an admission code stays good (24 by
 //! default); `outbox_retry_secs`, how often a message sent through the home
 //! node is tried direct again besides on every announce of its recipient
-//! (3600 by default); and `outbox_days`, for how many days (7 by default).
+//! (3600 by default); `outbox_days`, for how many days (7 by default); and
+//! `home_wake`, `on` (the default) or `off`, whether clients that keep a
+//! link are woken when mail arrives.
 //!
 //! A drawing's name is not checked here: the set is the frontend's, and a
 //! name an older loquax does not know falls back to its own choice, said
@@ -105,6 +107,8 @@ pub struct Config {
     pub propagation_node: Option<[u8; 16]>,
     /// `send_on_enter`, when the file sets it; unset is on.
     pub send_on_enter: Option<bool>,
+    /// `home_wake`, when the file sets it; unset is on.
+    pub home_wake: Option<bool>,
     /// `theme`, when the file sets it; unset is `auto`.
     pub theme: Option<ThemeFlag>,
     /// `sync_interval`, when the file sets it: the mailbox schedule's bound
@@ -188,18 +192,23 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
         };
         // Unknown keys pass silently: a config written by a newer loquax
         // must not stop an older one from sending at all.
-        if key.trim() == "send_on_enter" {
-            config.send_on_enter = Some(match value.trim().trim_matches('"') {
-                "true" | "yes" | "on" => true,
-                "false" | "no" | "off" => false,
-                other => {
-                    return Err(ConfigError::BadValue {
-                        line: index + 1,
-                        key: "send_on_enter",
-                        detail: alloc::format!("{other:?} is not true or false"),
-                    });
-                }
-            });
+        for (name, slot) in [
+            ("send_on_enter", &mut config.send_on_enter),
+            ("home_wake", &mut config.home_wake),
+        ] {
+            if key.trim() == name {
+                *slot = Some(match value.trim().trim_matches('"') {
+                    "true" | "yes" | "on" => true,
+                    "false" | "no" | "off" => false,
+                    other => {
+                        return Err(ConfigError::BadValue {
+                            line: index + 1,
+                            key: name,
+                            detail: alloc::format!("{other:?} is not true or false"),
+                        });
+                    }
+                });
+            }
         }
         for (name, slot) in [
             ("theme", &mut config.theme),
@@ -505,6 +514,12 @@ mod tests {
         let home = parse_str("home_token_hours = 2\noutbox_retry_secs = 30\noutbox_days = 1\n")
             .expect("home keys");
         assert_eq!(home.home_token_hours, Some(2));
+        assert_eq!(home.home_wake, None);
+        assert_eq!(
+            parse_str("home_wake = off\n").expect("off").home_wake,
+            Some(false)
+        );
+        assert!(parse_str("home_wake = sometimes\n").is_err());
         assert_eq!(home.outbox_retry_secs, Some(30));
         assert_eq!(home.outbox_days, Some(1));
         for (text, key) in [

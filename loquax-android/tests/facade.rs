@@ -318,6 +318,7 @@ impl HomeNode {
                 mailbox: Box::new(|| {
                     Box::pin(async { loquax::mailbox_state::MailboxRun { input: None } })
                 }),
+                wake: true,
             },
         ));
         Self { transport, daemon }

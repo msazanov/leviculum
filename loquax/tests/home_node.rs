@@ -789,6 +789,179 @@ async fn a_leaf_with_its_own_tcp_interface_joins_pulls_and_marks() {
     mesh.daemon.stop().await.expect("stop the Rust daemon");
 }
 
+/// What one run of [`wake_run`] saw: how long after the home node archived
+/// the message its wake reached the watching client, `None` when none came
+/// within the wait.
+struct Woken {
+    latency: Option<Duration>,
+}
+
+/// The wake end to end (1123): a leaf joins, keeps its watching link
+/// (`loquax::home::watch`), and a loquax sender on the daemon's instance
+/// delivers to the home node. With wakes on, the leaf hears one past its
+/// cursor within 2 s of the home node's archive line, without any fetch,
+/// and the pull it then makes brings the message. A client without the
+/// link, as every client was before, still gets it with `loquax fetch`.
+/// With `home_wake = off` in the home node's config, the positive control,
+/// the same wait runs out.
+async fn wake_run(wake: bool) -> Woken {
+    use loquax::engine::{attach_leaf, LeafConfig, Role};
+    use loquax::home::watch::{self, WatchEvent};
+    use loquax::outbox::OutboxEvent;
+
+    let mut mesh = Mesh::start_serving(&[]).await;
+    let port = mesh.tcp_port.expect("the daemon's TCP server");
+    let home = mesh.home.path().to_path_buf();
+    if !wake {
+        std::fs::write(home.join(loquax::config::CONFIG_FILE), "home_wake = off\n")
+            .expect("the home node's config");
+    }
+    let code = admit(&home, "phone");
+    let old = admit(&home, "old");
+    let code = loquax::home::code::HomeCode::parse(&code).expect("the code parses");
+    let address = loquax::home::lxmf_address(&code.public_key).expect("the home address");
+    let node = HomeNode::start(&home, &mesh.instance).await;
+
+    let phone = tempfile::tempdir().expect("phone home");
+    let storage = phone.path().join("storage");
+    std::fs::create_dir_all(&storage).expect("storage dir");
+    let config = LeafConfig {
+        server: format!("127.0.0.1:{port}"),
+        storage_dir: storage,
+        identity: leviculum_core::Identity::generate(&mut rand_core::OsRng),
+        display_name: Vec::new(),
+        notices: loquax::effects::Terminal::new(std::env::temp_dir()),
+    };
+    let device = config.identity.clone();
+    let mut attached = attach_leaf(config, Role::Client { address })
+        .await
+        .expect("the leaf's node comes up");
+    let link = attached.node();
+    loquax::home::client::join(
+        &link,
+        &code.public_key,
+        &device,
+        &code.token,
+        "phone",
+        Duration::from_secs(40),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("join: {error}\nhome node:\n{}", node.log()));
+    loquax::home::client::save_client(phone.path(), &code.public_key).expect("client file");
+
+    let (events_tx, mut events) = tokio::sync::mpsc::unbounded_channel();
+    let watching = tokio::spawn(watch::run(
+        watch::Watch {
+            node: link.clone(),
+            public_key: code.public_key,
+            device: device.clone(),
+            home: phone.path().to_path_buf(),
+        },
+        events_tx,
+    ));
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(40);
+    loop {
+        match tokio::time::timeout_at(deadline, events.recv()).await {
+            Ok(Some(WatchEvent::Watching(true))) => break,
+            Ok(Some(_)) => {}
+            _ => panic!("the link never watched:\n{}", node.log()),
+        }
+    }
+    node.wait_for("HOME watch device=", 5).await;
+
+    // A loquax messenger on the daemon's instance sends to the home node;
+    // meanwhile the archive line and the wake are timed as they come.
+    let sender = tempfile::tempdir().expect("sender home");
+    let body = "geweckt";
+    let send = mesh.run(
+        "send",
+        sender.path().to_path_buf(),
+        vec![
+            loquax::address::to_hex(&address),
+            "--timeout".to_string(),
+            "40".to_string(),
+        ],
+        body.as_bytes().to_vec(),
+    );
+    let watch_wake = async {
+        let mut archived = None;
+        let mut woken = None;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        while tokio::time::Instant::now() < deadline {
+            if archived.is_none() && node.log().contains("HOME archived message=") {
+                archived = Some(tokio::time::Instant::now());
+            }
+            while let Ok(event) = events.try_recv() {
+                if let WatchEvent::Wake(newest) = event {
+                    let cursor = loquax::home::client::load_cursor(phone.path());
+                    if watch::wants_pull(newest, cursor) && woken.is_none() {
+                        woken = Some(tokio::time::Instant::now());
+                    }
+                }
+            }
+            match (archived, woken) {
+                (Some(_), Some(_)) => break,
+                // The wait the client grants a wake: 2 s past the archive.
+                (Some(at), None) if at.elapsed() > Duration::from_secs(2) => break,
+                _ => tokio::time::sleep(Duration::from_millis(10)).await,
+            }
+        }
+        (archived, woken)
+    };
+    let (sent, (archived, woken)) = tokio::join!(send, watch_wake);
+    assert_eq!(sent.code, Some(0), "{sent}\nhome node:\n{}", node.log());
+    let archived = archived.unwrap_or_else(|| panic!("never archived:\n{}", node.log()));
+    let latency = woken.map(|woken| woken.saturating_duration_since(archived));
+
+    if latency.is_some() {
+        // The pull the wake calls for brings the message.
+        let pull = loquax::home::client::pull_into(
+            &mut attached.outbox,
+            &link,
+            phone.path(),
+            &code.public_key,
+            &device,
+            Duration::from_secs(40),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("pull: {error}\nhome node:\n{}", node.log()));
+        assert!(
+            pull.received.iter().any(|event| matches!(
+                event,
+                OutboxEvent::Received { body: b, .. } if b == body.as_bytes()
+            )),
+            "{pull:?}"
+        );
+    }
+
+    // The old way: no link kept, the message on fetch.
+    let client = joined(&mesh, &node, &old).await;
+    let fetched = fetch(&mesh, &node, client.path()).await;
+    assert!(fetched.stdout.contains(body), "{fetched}");
+
+    watching.abort();
+    drop(link);
+    attached.stop().await;
+    drop(node);
+    mesh.daemon.stop().await.expect("stop the Rust daemon");
+    Woken { latency }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_watching_client_hears_new_mail_within_two_seconds_and_the_old_way_still_fetches_it() {
+    let woken = wake_run(true).await;
+    let latency = woken.latency.expect("a wake within 2 s of the archive");
+    eprintln!("WAKE latency_ms={}", latency.as_millis());
+    assert!(latency <= Duration::from_secs(2), "{latency:?}");
+
+    // Positive control: the push off, the same wait runs out.
+    let control = wake_run(false).await;
+    assert_eq!(
+        control.latency, None,
+        "a wake came with home_wake = off: the wait above proves nothing"
+    );
+}
+
 /// The home node's propagated leg end to end (#232, slice 2): the client
 /// sends to a recipient that is offline and was never heard, so the direct
 /// leg fails and the home node hands the same packed message to a stock

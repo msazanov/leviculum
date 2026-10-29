@@ -1347,6 +1347,7 @@ async fn run_daemon(args: TuiArgs) -> ExitCode {
         sync_bound_ms,
         fetch_budget: Duration::from_secs(args.timeout.saturating_mul(2)),
         mailbox,
+        wake: config.home_wake.unwrap_or(true),
     })
     .await;
     match outcome {

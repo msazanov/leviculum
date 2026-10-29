@@ -28,11 +28,14 @@ pub struct Home<'a> {
     pub cap_bytes: u64,
 }
 
-/// One answer: the bytes for the client, and the message a `/send` put in
-/// the outbox, when it was a new one, for the daemon to start delivering.
+/// One answer: the bytes for the client, the message a `/send` put in
+/// the outbox, when it was a new one, for the daemon to start delivering,
+/// and for a `/watch` it took, the newest sequence the client was told, so
+/// the daemon keeps the link for its wakes.
 pub struct Answer {
     pub bytes: Vec<u8>,
     pub accepted: Option<Outgoing>,
+    pub watching: Option<u64>,
 }
 
 impl Answer {
@@ -40,6 +43,7 @@ impl Answer {
         Self {
             bytes,
             accepted: None,
+            watching: None,
         }
     }
 }
@@ -64,6 +68,7 @@ pub fn answer(
         super::SYNC_PATH => Answer::only(sync(store, data, device)),
         super::SEND_PATH => send(store, home, data, device, now),
         super::MARK_PATH => Answer::only(mark(store, home, data, device, now_secs)),
+        super::WATCH_PATH => watch(store, data, device),
         _ => Answer::only(wire::status_answer(Status::Malformed)),
     }
 }
@@ -152,6 +157,7 @@ fn send(store: &mut Store, home: &Home<'_>, data: &[u8], device: [u8; 16], now: 
                     created_at: at,
                     propagated: false,
                 }),
+                watching: None,
             }
         }
         Ok(Accepted::Again { id }) => Answer::only(wire::send_answer(&id)),
@@ -226,6 +232,34 @@ fn join(
         Err(error) => {
             tracing::warn!("HOME join: {error}");
             wire::status_answer(Status::Failed)
+        }
+    }
+}
+
+/// A client keeps its link for wakes: told the newest sequence now, so it
+/// pulls at once when its cursor is behind.
+fn watch(store: &mut Store, data: &[u8], device: [u8; 16]) -> Answer {
+    let Ok(cursor) = wire::read_watch_request(data) else {
+        return Answer::only(wire::status_answer(Status::Malformed));
+    };
+    if let Some(refused) = refuse_unless_admitted(store, &device, "watch") {
+        return Answer::only(refused);
+    }
+    match store.archive_newest() {
+        Ok(newest) => {
+            tracing::info!(
+                "HOME watch device={} cursor={cursor} newest={newest}",
+                crate::address::to_hex(&device)
+            );
+            Answer {
+                bytes: wire::watch_answer(newest),
+                accepted: None,
+                watching: Some(newest),
+            }
+        }
+        Err(error) => {
+            tracing::warn!("HOME watch: {error}");
+            Answer::only(wire::status_answer(Status::Failed))
         }
     }
 }
@@ -505,6 +539,40 @@ mod tests {
             1.0,
         );
         assert_eq!(read_status(&answer.bytes), Ok(Status::Malformed));
+    }
+
+    /// `/watch` is answered with the newest sequence and keeps the link,
+    /// for an admitted device only.
+    #[test]
+    fn a_watch_names_the_newest_sequence_for_an_admitted_device_only() {
+        let (_dir, mut store) = store();
+        let ask = |store: &mut Store, device| {
+            answer(
+                store,
+                &home(),
+                crate::home::WATCH_PATH,
+                &wire::watch_request(0),
+                device,
+                1.0,
+            )
+        };
+        let refused = ask(&mut store, Some(LAPTOP));
+        assert_eq!(read_status(&refused.bytes), Ok(Status::NotAdmitted));
+        assert_eq!(refused.watching, None);
+        assert_eq!(
+            read_status(&ask(&mut store, None).bytes),
+            Ok(Status::NotIdentified)
+        );
+        admitted(&mut store);
+        let empty = ask(&mut store, Some(LAPTOP));
+        assert_eq!(wire::read_watch_answer(&empty.bytes), Ok(Ok(0)));
+        assert_eq!(empty.watching, Some(0));
+        archive(&mut store, 1);
+        let newest = archive(&mut store, 2);
+        let full = ask(&mut store, Some(LAPTOP));
+        assert_eq!(wire::read_watch_answer(&full.bytes), Ok(Ok(newest)));
+        assert_eq!(full.watching, Some(newest));
+        assert_eq!(store.archive_newest().expect("newest"), newest);
     }
 
     #[test]

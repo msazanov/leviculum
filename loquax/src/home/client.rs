@@ -231,7 +231,7 @@ async fn pages(
 }
 
 /// A link to the home destination of `public_key`, identified as `device`.
-async fn open(
+pub(crate) async fn open(
     node: &ReticulumNode,
     public_key: &[u8; 64],
     device: &Identity,
@@ -276,7 +276,7 @@ async fn open(
 }
 
 /// One request on `link` and its answer's bytes.
-async fn request(
+pub(crate) async fn request(
     node: &ReticulumNode,
     link: &LinkId,
     path: &str,

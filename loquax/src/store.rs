@@ -1109,6 +1109,20 @@ impl Store {
         })
     }
 
+    /// The archive's newest sequence, 0 when it is empty: what a wake
+    /// tells a watching client.
+    pub fn archive_newest(&self) -> Result<u64, StoreError> {
+        let newest: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT MAX(seq) FROM archive WHERE identity = ?1",
+                params![&self.identity[..]],
+                |row| row.get(0),
+            )
+            .map_err(|e| self.failed(e))?;
+        Ok(newest.map_or(0, |seq| seq as u64))
+    }
+
     /// How many bytes of packed messages the archive holds.
     pub fn archive_bytes(&self) -> Result<u64, StoreError> {
         let total: i64 = self

@@ -7,8 +7,10 @@
 //! to the home node's own destination, `loquax.home`. Fetching never deletes.
 //!
 //! - [`code`]: the admission code `loquax home admit` prints.
-//! - [`wire`]: the four requests, `/join`, `/sync`, `/send` and `/mark`,
-//!   and their answers.
+//! - [`wire`]: the five requests, `/join`, `/sync`, `/send`, `/mark` and
+//!   `/watch`, their answers, and the wake.
+//! - [`wake`]: which watching link is owed a wake, on the home node.
+//! - `watch`: a client's watching link, kept up while it runs.
 //! - [`outgoing`]: the home node's outbox policy, direct at once, a
 //!   propagated copy on failure, direct retries for seven days.
 //! - `server`: how the home node answers them, from the store.
@@ -22,6 +24,7 @@ use leviculum_core::{Destination, DestinationType, Direction, Identity};
 
 pub mod code;
 pub mod outgoing;
+pub mod wake;
 pub mod wire;
 
 #[cfg(feature = "std")]
@@ -36,6 +39,8 @@ pub mod qr;
 pub mod runner;
 #[cfg(feature = "history")]
 pub mod server;
+#[cfg(feature = "std")]
+pub mod watch;
 
 /// The home destination's app name and aspect: `loquax.home`, a SINGLE
 /// destination of the home identity. It is never announced; a client learns
@@ -56,6 +61,12 @@ pub const SEND_PATH: &str = "/send";
 /// ids in, a status out. The home node keeps it as an archive entry, which
 /// every client applies on its next pull.
 pub const MARK_PATH: &str = "/mark";
+
+/// A client keeps its link: the cursor in, the newest sequence out, and a
+/// wake over the same link whenever the archive grows ([`wire::wake`]).
+/// A home node from before it answers nothing, and its clients pull on
+/// their schedule as they always did.
+pub const WATCH_PATH: &str = "/watch";
 
 /// The archive entry kind of a received message, packed as it came.
 pub const KIND_RECEIVED: u8 = 0;

@@ -16,14 +16,16 @@
 //! - delivers what its clients hand in with `/send`, by the outbox policy
 //!   of [`super::outgoing`]: direct at once, a propagated copy on failure,
 //!   direct retries on every announce of the recipient and on a slow
-//!   cadence, each state change an archive entry.
+//!   cadence, each state change an archive entry;
+//! - wakes every client that keeps a watching link ([`super::wake`]) when
+//!   the archive grows, so it pulls at once rather than on its schedule.
 
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::time::Duration;
 
-use leviculum_core::RequestError;
+use leviculum_core::{LinkId, RequestError, SendError};
 use leviculum_lxmf::router::MessageState;
 use leviculum_std::ReticulumNode;
 use tokio::sync::mpsc::unbounded_channel;
@@ -34,6 +36,7 @@ use crate::engine::{attach_as, AttachConfig, HomeRequest, Role};
 use crate::fanout::Fanout;
 use crate::fetch::{run_fetch, FetchOptions};
 use crate::home::outgoing::{Act, Change, Leg, Outcome, Outgoing, Policy};
+use crate::home::wake::{Due, Wakes};
 use crate::mailbox_state::{MailboxRun, Stored};
 use crate::outbox::{Command, Outbox, OutboxEvent, Via};
 use crate::seen::{SeenStore, SeenWrite};
@@ -78,6 +81,10 @@ pub struct DaemonOptions {
     /// How each collection selects its mailbox without a preference: `main`
     /// reads the daemon's path table for it.
     pub mailbox: MailboxSource,
+    /// Whether watching clients are woken when the archive grows
+    /// (`home_wake` in the config, on by default). Off, a `/watch` is still
+    /// answered, and the clients pull on their schedule.
+    pub wake: bool,
 }
 
 /// A source of [`MailboxRun`]s, read once per collection.
@@ -128,6 +135,7 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
         sync_bound_ms,
         fetch_budget,
         mailbox,
+        wake,
     } = options;
     let _lock = super::lock::DeliveryLock::acquire(&home, super::lock::HOME_NODE)?;
     let address = crate::engine::delivery_address(&identity)?;
@@ -187,7 +195,10 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
         preferred_pn,
         collecting: sync_bound_ms.is_some(),
         told: std::collections::HashSet::new(),
+        newest: 0,
     };
+    let mut wakes: Wakes<LinkId> = Wakes::default();
+    wakes.appended(store.archive_newest().map_err(|e| e.to_string())?);
 
     let mut fanout = Fanout::default();
     let mut schedule = sync_bound_ms.map(|bound| Schedule::new(Some(bound)));
@@ -208,7 +219,17 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
     let outcome = loop {
         tokio::select! {
             Some(request) = requests.recv() => {
-                if let Some(accepted) = answer(&node, &mut store, &serving, request).await {
+                let (link, remote) = (request.link_id, request.remote);
+                let (accepted, watching) = answer(&node, &mut store, &serving, request).await;
+                if let (Some(told), Some(device), true) = (watching, remote, wake) {
+                    wakes.watch(link, device, told);
+                }
+                // A send and a mark append; a failed read is said by the
+                // next append that reads it.
+                if let Ok(newest) = store.archive_newest() {
+                    wakes.appended(newest);
+                }
+                if let Some(accepted) = accepted {
                     outgoing.add(
                         accepted.id,
                         accepted.destination,
@@ -237,7 +258,11 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                             }
                         }
                         OutboxEvent::Packed { message_id, packed } => {
-                            archive(&mut store, &message_id, &packed, archive_cap_bytes);
+                            if let Some(seq) =
+                                archive(&mut store, &message_id, &packed, archive_cap_bytes)
+                            {
+                                wakes.appended(seq);
+                            }
                         }
                         OutboxEvent::PnSelected { destination, .. } => {
                             selected_pn = Some(destination);
@@ -288,6 +313,10 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                         schedule.on(event, now_ms());
                     }
                 }
+                wakes.appended(sender.newest);
+                for due in wakes.due(now_ms()) {
+                    send_wake(&node, &mut store, &mut wakes, due).await;
+                }
                 if fetch.is_none() {
                     if let Some(schedule) = &mut schedule {
                         if schedule.due(now_ms()).is_some() {
@@ -314,20 +343,72 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
     outcome
 }
 
-/// Keep one received message in the archive.
-fn archive(store: &mut Store, message_id: &[u8; 32], packed: &[u8], cap: u64) {
+/// Keep one received message in the archive: its sequence, when it is new.
+fn archive(store: &mut Store, message_id: &[u8; 32], packed: &[u8], cap: u64) -> Option<u64> {
     let now = leviculum_std::local_time::unix_now_secs();
     match store.archive_append(crate::home::KIND_RECEIVED, message_id, packed, now, cap) {
-        Ok(Some(seq)) => tracing::info!(
-            "HOME archived message={} seq={seq} bytes={}",
-            crate::address::to_hex(message_id),
-            packed.len()
-        ),
-        Ok(None) => tracing::info!(
-            "HOME archived already message={}",
-            crate::address::to_hex(message_id)
-        ),
-        Err(error) => tracing::warn!("HOME archive: {error}"),
+        Ok(Some(seq)) => {
+            tracing::info!(
+                "HOME archived message={} seq={seq} bytes={}",
+                crate::address::to_hex(message_id),
+                packed.len()
+            );
+            Some(seq)
+        }
+        Ok(None) => {
+            tracing::info!(
+                "HOME archived already message={}",
+                crate::address::to_hex(message_id)
+            );
+            None
+        }
+        Err(error) => {
+            tracing::warn!("HOME archive: {error}");
+            None
+        }
+    }
+}
+
+/// One wake, on the link that watches, to a device still admitted. A link
+/// that is busy owes the wake again; one that is gone, or whose device was
+/// revoked, is forgotten, and the revoked device's link is closed.
+///
+/// The store comes `&mut`, though only read, so the loop's future stays
+/// `Send`: a shared borrow of the store is not.
+async fn send_wake(
+    node: &ReticulumNode,
+    store: &mut Store,
+    wakes: &mut Wakes<LinkId>,
+    due: Due<LinkId>,
+) {
+    let device = crate::address::to_hex(&due.device);
+    match store.is_admitted(&due.device) {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::info!("HOME wake refused device={device} reason=not-admitted");
+            wakes.forget(&due.link);
+            let _ = node.close_link(&due.link).await;
+            return;
+        }
+        Err(error) => {
+            tracing::warn!("HOME wake: {error}");
+            wakes.unsent(&due.link, due.before);
+            return;
+        }
+    }
+    let sent = node
+        .link_handle(&due.link)
+        .try_send(&super::wire::wake(due.newest))
+        .await;
+    match sent {
+        Ok(()) => tracing::info!("HOME wake device={device} newest={}", due.newest),
+        Err(leviculum_std::Error::Send(SendError::Busy | SendError::PacingDelay { .. })) => {
+            wakes.unsent(&due.link, due.before);
+        }
+        Err(error) => {
+            tracing::info!("HOME wake device={device} link gone: {error}");
+            wakes.forget(&due.link);
+        }
     }
 }
 
@@ -337,13 +418,14 @@ fn unix_now() -> i64 {
 }
 
 /// Answer one request, as a packet when it fits and as a resource when not.
-/// The message a `/send` put in the outbox comes back, when it is new.
+/// The message a `/send` put in the outbox comes back, when it is new, and
+/// what a `/watch` told its client, when it took it.
 async fn answer(
     node: &ReticulumNode,
     store: &mut Store,
     serving: &super::server::Home<'_>,
     request: HomeRequest,
-) -> Option<crate::store::Outgoing> {
+) -> (Option<crate::store::Outgoing>, Option<u64>) {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0.0, |elapsed| elapsed.as_secs_f64());
@@ -370,8 +452,9 @@ async fn answer(
         // The outbox has the message whether the answer arrived or not: a
         // client that retries with the same id is answered from it.
         tracing::warn!("HOME answer to {}: {error}", request.path);
+        return (answer.accepted, None);
     }
-    answer.accepted
+    (answer.accepted, answer.watching)
 }
 
 /// What carrying out the outbox's acts needs besides the engine and the
@@ -385,6 +468,8 @@ struct Sender {
     /// The messages already told they have no propagation node: said once
     /// each, not on every failed direct retry.
     told: std::collections::HashSet<[u8; 32]>,
+    /// The newest archive sequence a state change took, for the wakes.
+    newest: u64,
 }
 
 impl Sender {
@@ -503,12 +588,15 @@ impl Sender {
             self.told.remove(id);
         }
         match store.outbox_record(id, change, unix_now(), self.cap_bytes) {
-            Ok(seq) => tracing::info!(
-                "HOME outbox {} message={} seq={}",
-                change.word(),
-                crate::address::to_hex(id),
-                seq.map_or_else(|| "-".to_string(), |seq| seq.to_string())
-            ),
+            Ok(seq) => {
+                self.newest = self.newest.max(seq.unwrap_or(0));
+                tracing::info!(
+                    "HOME outbox {} message={} seq={}",
+                    change.word(),
+                    crate::address::to_hex(id),
+                    seq.map_or_else(|| "-".to_string(), |seq| seq.to_string())
+                )
+            }
             Err(error) => tracing::warn!("HOME outbox record: {error}"),
         }
     }
