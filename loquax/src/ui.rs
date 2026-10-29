@@ -594,6 +594,17 @@ pub struct UiModel<B> {
     changed_peers: BTreeSet<[u8; 16]>,
     /// Deletions for the store, in the order they were made.
     forgotten: Vec<StoreWrite>,
+    /// Whether this device is a client of a home node: what the reader
+    /// reads and deletes here is marked for the home's other devices, and a
+    /// send is followed by a pull.
+    pub home_client: bool,
+    /// Marks for the home node, in the order they were made
+    /// ([`UiModel::take_marks`]).
+    marks: Vec<crate::home::wire::Mark>,
+    /// A pull a send asked for while one was running: started when that
+    /// one ends, since it may have begun before the home node had the
+    /// message.
+    pull_owed: bool,
     /// A delete waiting for its `y`, and the question on screen.
     pub confirm: Option<(Confirm, Toast)>,
     /// A stored search result to open once its page has loaded.
@@ -687,6 +698,9 @@ impl<B: InputBuffer + Default> UiModel<B> {
             changed: BTreeSet::new(),
             changed_peers: BTreeSet::new(),
             forgotten: Vec::new(),
+            home_client: false,
+            marks: Vec::new(),
+            pull_owed: false,
             confirm: None,
             reveal_pending: None,
             positions: BTreeMap::new(),
@@ -810,13 +824,50 @@ impl<B> UiModel<B> {
         self.selected = index;
         self.scroll_top = None;
         self.selection = None;
-        if let Some(conversation) = self.conversations.get_mut(index) {
-            if conversation.unread > 0 {
-                conversation.unread = 0;
-                self.changed_peers.insert(conversation.peer);
-            }
+        self.read_out(index);
+        if let Some(conversation) = self.conversations.get(index) {
             self.message_cursor = conversation.messages.len().saturating_sub(1);
         }
+    }
+
+    /// Conversation `index` was looked at: its unread are read, here and,
+    /// on a client of a home node, on the home's other devices.
+    pub(crate) fn read_out(&mut self, index: usize) {
+        let Some(conversation) = self.conversations.get_mut(index) else {
+            return;
+        };
+        if conversation.unread == 0 {
+            return;
+        }
+        let unread = core::mem::take(&mut conversation.unread);
+        self.changed_peers.insert(conversation.peer);
+        if !self.home_client {
+            return;
+        }
+        let ids: Vec<[u8; 32]> = conversation
+            .messages
+            .iter()
+            .rev()
+            .filter(|message| !message.outbound)
+            .take(unread)
+            .filter_map(|message| message.id)
+            .collect();
+        self.mark_out(crate::home::wire::MarkFlag::Read, ids);
+    }
+
+    /// Queue marks for the home node, split to the most one carries.
+    pub(crate) fn mark_out(&mut self, flag: crate::home::wire::MarkFlag, ids: Vec<[u8; 32]>) {
+        for chunk in ids.chunks(crate::home::wire::MARK_IDS_MAX) {
+            self.marks.push(crate::home::wire::Mark {
+                flag,
+                ids: chunk.to_vec(),
+            });
+        }
+    }
+
+    /// The marks a fold made, for the shell to hand the home node.
+    pub fn take_marks(&mut self) -> Vec<crate::home::wire::Mark> {
+        core::mem::take(&mut self.marks)
     }
 
     /// The conversations in the list's order: the pinned first, then the
@@ -1151,17 +1202,46 @@ fn on_fetch_done<B>(model: &mut UiModel<B>, result: Result<usize, String>) -> Ve
         model.mailbox.synced = model.now;
     }
     let asked = model.fetch_reason.is_none_or(|r| r == Reason::Key);
+    let mut effects = Vec::new();
     match result {
         Ok(0) if asked => model.toast(ToastKind::Info, "no new messages".to_string()),
         Ok(0) => {}
         Ok(new) => model.toast(ToastKind::Info, format!("{new} new message(s)")),
         Err(detail) if asked || failures == 1 => {
             model.toast(ToastKind::Error, format!("fetch failed: {detail}"));
-            return vec![UiEffect::Notice(format!("fetch: {detail}"))];
+            effects.push(UiEffect::Notice(format!("fetch: {detail}")));
         }
         Err(_) => {}
     }
-    Vec::new()
+    if core::mem::take(&mut model.pull_owed) {
+        effects.extend(start_pull(model));
+    }
+    effects
+}
+
+/// On a client of a home node, a send is followed by a pull, so the bubble
+/// takes the home node's word (sent, then whatever followed) without
+/// waiting for the schedule. A pull already running may have asked before
+/// the home node had the message, so another follows it.
+fn pull_after_send<B>(model: &mut UiModel<B>) -> Vec<UiEffect> {
+    if !model.home_client {
+        return Vec::new();
+    }
+    if model.fetching {
+        model.pull_owed = true;
+        return Vec::new();
+    }
+    start_pull(model)
+}
+
+fn start_pull<B>(model: &mut UiModel<B>) -> Vec<UiEffect> {
+    let now = model.elapsed_ms;
+    if let Some(sync) = model.sync.as_mut() {
+        sync.begin(now);
+    }
+    model.fetching = true;
+    model.fetch_reason = Some(Reason::Sent);
+    vec![UiEffect::Fetch]
 }
 
 /// Tell the schedule, and start the sync it then finds due.
@@ -2561,6 +2641,24 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
             }
         }
         OutboxEvent::State { message_id, state } => apply_state(model, message_id, state),
+        OutboxEvent::HomeSent {
+            message_id,
+            destination,
+            body,
+            fields,
+        } => home_sent(model, message_id, destination, body, fields),
+        OutboxEvent::HomeMarked { mark } => match mark.flag {
+            crate::home::wire::MarkFlag::Read => {
+                for id in &mark.ids {
+                    model.read_through(id);
+                }
+            }
+            crate::home::wire::MarkFlag::Deleted => {
+                for id in &mark.ids {
+                    model.forget_by_id(id);
+                }
+            }
+        },
         OutboxEvent::Left {
             message_id,
             last: Some(state),
@@ -2897,6 +2995,56 @@ fn apply_state<B>(model: &mut UiModel<B>, id: [u8; 32], state: MessageState) {
     }
 }
 
+/// A message one of the home's devices sent through the home node: the
+/// bubble this device has for it says sent, and a device without one gets
+/// it. A bubble further along (in the mailbox, delivered) stays: a pull
+/// asked again after a crash brings the sent entry a second time.
+fn home_sent<B>(
+    model: &mut UiModel<B>,
+    message_id: [u8; 32],
+    destination: [u8; 16],
+    body: Vec<u8>,
+    fields: Vec<leviculum_lxmf::Field>,
+) {
+    let now = model.now;
+    let mut found = false;
+    for conversation in &mut model.conversations {
+        for message in &mut conversation.messages {
+            if !message.outbound || message.id != Some(message_id) {
+                continue;
+            }
+            found = true;
+            if matches!(
+                message.delivery,
+                None | Some(DeliveryState::Queued | DeliveryState::InFlight)
+            ) {
+                message.delivery = Some(DeliveryState::Sent);
+                message.note(now, "taken by the home node");
+                model.changed.insert((conversation.peer, message.activity));
+            }
+        }
+    }
+    if found {
+        return;
+    }
+    let index = model.conversation(destination);
+    let activity = model.bump();
+    let mut message = Message::ours(String::from_utf8_lossy(&body).into_owned(), now);
+    message.id = Some(message_id);
+    message.delivery = Some(DeliveryState::Sent);
+    message.note(now, "sent from another device, taken by the home node");
+    message.activity = activity;
+    message.fields = fields;
+    let conversation = &mut model.conversations[index];
+    conversation.activity = activity;
+    conversation.messages.push(message);
+    let peer = conversation.peer;
+    model.changed.insert((peer, activity));
+    if index == model.selected && model.scroll_top.is_none() {
+        model.message_cursor = model.conversations[index].messages.len() - 1;
+    }
+}
+
 fn on_send_done<B>(model: &mut UiModel<B>, result: Result<(), String>) -> Vec<UiEffect> {
     let Some((c, m)) = model.sending.pop_front() else {
         return Vec::new();
@@ -2905,7 +3053,7 @@ fn on_send_done<B>(model: &mut UiModel<B>, result: Result<(), String>) -> Vec<Ui
         message.leg = None;
     }
     let Err(detail) = result else {
-        return Vec::new();
+        return pull_after_send(model);
     };
     // Each leg's reason as the runner worded it, its continuation lines cut:
     // an auto send that failed both ways says why each failed, not only why
@@ -4014,6 +4162,180 @@ mod tests {
         assert_eq!(model.selected, 1);
         assert_eq!(model.conversations[1].unread, 0);
         assert_eq!(model.messages_of_selected()[0].body, "hey");
+    }
+
+    fn received_from(source: [u8; 16], id: [u8; 32], body: &str) -> OutboxEvent {
+        OutboxEvent::Received {
+            message_id: id,
+            source,
+            title: Vec::new(),
+            body: body.as_bytes().to_vec(),
+            fields: Vec::new(),
+            verified: true,
+        }
+    }
+
+    /// On a client of a home node, opening a conversation marks its unread
+    /// read for the other devices; a device that is no client marks nothing.
+    #[test]
+    fn opening_a_conversation_on_a_client_marks_its_unread_read() {
+        use crate::home::wire::{Mark, MarkFlag};
+        for client in [false, true] {
+            let mut model = UiModel::<Field>::new(&[PEER]);
+            model.home_client = client;
+            engine(&mut model, received_from(OTHER, ID, "one"));
+            engine(&mut model, received_from(OTHER, ID2, "two"));
+            assert_eq!(model.conversations[1].unread, 2);
+            assert!(model.take_marks().is_empty(), "nothing read yet");
+            update(&mut model, key(KeyCode::Char('g')));
+            assert_eq!(model.selected, 1);
+            let marks = model.take_marks();
+            match client {
+                true => assert_eq!(
+                    marks,
+                    [Mark {
+                        flag: MarkFlag::Read,
+                        ids: vec![ID2, ID],
+                    }]
+                ),
+                false => assert!(marks.is_empty()),
+            }
+        }
+    }
+
+    /// Another device read a message: every received message up to it is
+    /// read here, the later ones stay unread, and the same mark twice
+    /// changes nothing more.
+    #[test]
+    fn a_read_mark_from_another_device_reads_up_to_its_message() {
+        use crate::home::wire::{Mark, MarkFlag};
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        engine(&mut model, received_from(OTHER, ID, "one"));
+        engine(&mut model, received_from(OTHER, ID2, "two"));
+        engine(&mut model, received_from(OTHER, [0x33; 32], "three"));
+        assert_eq!(model.conversations[1].unread, 3);
+        let read = OutboxEvent::HomeMarked {
+            mark: Mark {
+                flag: MarkFlag::Read,
+                ids: vec![ID2],
+            },
+        };
+        engine(&mut model, read.clone());
+        assert_eq!(model.conversations[1].unread, 1);
+        engine(&mut model, read);
+        assert_eq!(model.conversations[1].unread, 1);
+        // An id this device never had changes nothing.
+        engine(
+            &mut model,
+            OutboxEvent::HomeMarked {
+                mark: Mark {
+                    flag: MarkFlag::Read,
+                    ids: vec![[0x99; 32]],
+                },
+            },
+        );
+        assert_eq!(model.conversations[1].unread, 1);
+        // The store learns the new count; a mark applied is not marked again.
+        let writes = model.take_writes();
+        assert!(writes.iter().any(|w| matches!(
+            w,
+            StoreWrite::Conversation { peer, unread: 1, .. } if *peer == OTHER
+        )));
+        assert!(model.take_marks().is_empty());
+    }
+
+    /// Another device deleted a message: off the screen and out of the
+    /// store, by its id, whether this device shows it or not.
+    #[test]
+    fn a_deleted_mark_from_another_device_deletes_the_message_here() {
+        use crate::home::wire::{Mark, MarkFlag};
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        model.home_client = true;
+        engine(&mut model, received_from(OTHER, ID, "one"));
+        engine(&mut model, received_from(OTHER, ID2, "two"));
+        model.take_writes();
+        let deleted = OutboxEvent::HomeMarked {
+            mark: Mark {
+                flag: MarkFlag::Deleted,
+                ids: vec![ID, [0x99; 32]],
+            },
+        };
+        engine(&mut model, deleted);
+        assert_eq!(model.conversations[1].messages.len(), 1);
+        assert_eq!(model.conversations[1].messages[0].id, Some(ID2));
+        assert_eq!(
+            model.take_writes(),
+            [
+                StoreWrite::ForgetId { id: ID },
+                StoreWrite::ForgetId { id: [0x99; 32] }
+            ]
+        );
+        assert!(model.take_marks().is_empty(), "not marked back");
+    }
+
+    /// A message another device sent through the home node comes as a sent
+    /// bubble; the device that sent it keeps its own bubble, which leaves
+    /// queued; a bubble further along does not go back.
+    #[test]
+    fn a_message_sent_from_another_device_shows_as_a_sent_bubble() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        model.home_client = true;
+        let home_sent = |id: [u8; 32], to: [u8; 16]| OutboxEvent::HomeSent {
+            message_id: id,
+            destination: to,
+            body: b"from the laptop".to_vec(),
+            fields: Vec::new(),
+        };
+        engine(&mut model, home_sent(ID, OTHER));
+        assert_eq!(model.conversations.len(), 2);
+        let bubble = &model.conversations[1].messages[0];
+        assert!(bubble.outbound);
+        assert_eq!(bubble.body, "from the laptop");
+        assert_eq!(bubble.delivery, Some(DeliveryState::Sent));
+        assert_eq!(model.conversations[1].unread, 0, "ours, not unread");
+        // Again: one bubble.
+        engine(&mut model, home_sent(ID, OTHER));
+        assert_eq!(model.conversations[1].messages.len(), 1);
+        // Delivered, then the sent entry again: stays delivered.
+        state(&mut model, ID, MessageState::Delivered);
+        engine(&mut model, home_sent(ID, OTHER));
+        assert_eq!(
+            model.conversations[1].messages[0].delivery,
+            Some(DeliveryState::Delivered)
+        );
+        // The device that sent it: its queued bubble says sent.
+        sent(&mut model, "mine");
+        engine(&mut model, OutboxEvent::Queued { message_id: ID2 });
+        assert_eq!(last_delivery(&model), Some(DeliveryState::Queued));
+        engine(&mut model, home_sent(ID2, PEER));
+        assert_eq!(last_delivery(&model), Some(DeliveryState::Sent));
+        assert_eq!(model.conversations[0].messages.len(), 1);
+    }
+
+    /// A finished send on a client pulls at once; one finishing while a
+    /// pull runs pulls again after it.
+    #[test]
+    fn a_send_on_a_client_is_followed_by_a_pull() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        sent(&mut model, "not a client");
+        assert!(update(&mut model, UiEvent::SendDone(Ok(()))).is_empty());
+        model.home_client = true;
+        // Still in compose: the next sends are typed and sent from there.
+        typed(&mut model, "a client");
+        update(&mut model, key(KeyCode::Enter));
+        assert_eq!(
+            update(&mut model, UiEvent::SendDone(Ok(()))),
+            [UiEffect::Fetch]
+        );
+        assert_eq!(model.fetch_reason, Some(Reason::Sent));
+        typed(&mut model, "while it pulls");
+        update(&mut model, key(KeyCode::Enter));
+        assert!(update(&mut model, UiEvent::SendDone(Ok(()))).is_empty());
+        assert_eq!(
+            update(&mut model, UiEvent::FetchDone(Ok(0))),
+            [UiEffect::Fetch]
+        );
+        assert!(update(&mut model, UiEvent::FetchDone(Ok(0))).is_empty());
     }
 
     #[test]

@@ -1495,6 +1495,12 @@ fn apply(
                 params![*key as i64, &identity[..]],
             )?;
         }
+        StoreWrite::ForgetId { id } => {
+            tx.execute(
+                "DELETE FROM messages WHERE identity = ?1 AND id = ?2",
+                params![&identity[..], &id[..]],
+            )?;
+        }
         StoreWrite::ForgetConversation { peer } => {
             tx.execute(
                 "DELETE FROM messages WHERE identity = ?1 AND conversation = ?2",

@@ -959,7 +959,11 @@ struct ClientMessage {
 /// node with `/send`, which signs it, keeps it in its outbox and delivers it
 /// (`docs/src/concepts/loquax-home-node.md`). Done once the home node
 /// answered; `--via` and `--pn` are the home node's business, not read
-/// here. Its states come with the next `loquax fetch`.
+/// here. Then one pull, as `loquax fetch` runs it: the message's `accepted`
+/// line, and whatever else came, is printed now rather than at the next
+/// fetch, since the device has one cursor and what a pull took is shown or
+/// lost. A pull that fails is said and changes nothing: the home node has
+/// the message.
 async fn run_client_send(
     home: PathBuf,
     public_key: [u8; 64],
@@ -981,7 +985,11 @@ async fn run_client_send(
         Ok(dir) => dir,
         Err(error) => return failure(error, "no-daemon"),
     };
-    let attached = match loquax::engine::attach_as(
+    let mut seen = match SeenStore::load(&home) {
+        Ok(seen) => seen,
+        Err(error) => return failure(format!("seen store: {error}"), "no-home"),
+    };
+    let mut attached = match loquax::engine::attach_as(
         AttachConfig {
             instance,
             storage_dir,
@@ -1013,6 +1021,23 @@ async fn run_client_send(
         Duration::from_secs(timeout),
     )
     .await;
+    if accepted.is_ok() {
+        let mut effects = Terminal::new(home.clone());
+        if let Err(error) = loquax::home::client::fetch(
+            &mut attached.outbox,
+            &node,
+            &home,
+            &public_key,
+            &device,
+            Duration::from_secs(timeout),
+            &mut effects,
+            &mut seen,
+        )
+        .await
+        {
+            eprintln!("loquax: the home node took the message; the pull after it: {error}");
+        }
+    }
     drop(node);
     attached.stop().await;
     match accepted {

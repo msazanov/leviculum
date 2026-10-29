@@ -7,8 +7,8 @@
 //! to the home node's own destination, `loquax.home`. Fetching never deletes.
 //!
 //! - [`code`]: the admission code `loquax home admit` prints.
-//! - [`wire`]: the three requests, `/join`, `/sync` and `/send`, and their
-//!   answers.
+//! - [`wire`]: the four requests, `/join`, `/sync`, `/send` and `/mark`,
+//!   and their answers.
 //! - [`outgoing`]: the home node's outbox policy, direct at once, a
 //!   propagated copy on failure, direct retries for seven days.
 //! - `server`: how the home node answers them, from the store.
@@ -48,6 +48,11 @@ pub const SYNC_PATH: &str = "/sync";
 /// id out. The home node signs it, keeps it in its outbox and delivers.
 pub const SEND_PATH: &str = "/send";
 
+/// A client's word on messages, read or deleted: the flag and the message
+/// ids in, a status out. The home node keeps it as an archive entry, which
+/// every client applies on its next pull.
+pub const MARK_PATH: &str = "/mark";
+
 /// The archive entry kind of a received message, packed as it came.
 pub const KIND_RECEIVED: u8 = 0;
 /// A message a client handed in with `/send`, packed as the home node
@@ -64,14 +69,19 @@ pub const KIND_FAILED: u8 = 4;
 /// The direct retries of a propagated message ended without a proof; the
 /// copy on the propagation node may still reach the recipient.
 pub const KIND_RETRIES_ENDED: u8 = 5;
+/// A client's `/mark`: its bytes are the request as the client sent it, a
+/// flag and the message ids ([`wire::Mark`]).
+pub const KIND_MARK: u8 = 6;
 
 /// What a client shows for a state entry of a message it sent through the
 /// home node: the router state its bubble takes, `None` for an entry that
-/// changes nothing on screen (the sent entry itself, and direct retries
-/// that ended while a propagated copy waits).
+/// changes nothing on screen (direct retries that ended while a propagated
+/// copy waits). The sent entry is `Sent`: the message left the device and
+/// the home node has it, as a router's `Sent` says a hop took it.
 pub fn shown_state(kind: u8) -> Option<leviculum_lxmf::router::MessageState> {
     use leviculum_lxmf::router::MessageState;
     match kind {
+        KIND_SENT => Some(MessageState::Sent),
         KIND_PROPAGATED => Some(MessageState::AwaitingCollection),
         KIND_DELIVERED => Some(MessageState::Delivered),
         KIND_FAILED => Some(MessageState::Failed),

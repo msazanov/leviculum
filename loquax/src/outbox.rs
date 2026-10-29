@@ -134,6 +134,13 @@ pub enum Command {
         message_id: [u8; 32],
         state: MessageState,
     },
+    /// On a client: a message one of the home's devices sent through the
+    /// home node, pulled from its archive as the home node signed it;
+    /// reported as [`OutboxEvent::HomeSent`].
+    HomeSent { packed: Vec<u8> },
+    /// On a client: a mark one of the home's devices set, pulled from the
+    /// archive; reported as [`OutboxEvent::HomeMarked`].
+    HomeMark { mark: crate::home::wire::Mark },
 }
 
 /// What the mailbox rule is fed from, read by the frontend before it selects:
@@ -173,6 +180,17 @@ pub enum OutboxEvent {
         message_id: [u8; 32],
         state: MessageState,
     },
+    /// A message one of the home's devices sent through the home node
+    /// ([`Command::HomeSent`]): the screen shows it as sent, a bubble of its
+    /// own where this device does not have it yet.
+    HomeSent {
+        message_id: [u8; 32],
+        destination: [u8; 16],
+        body: Vec<u8>,
+        fields: Vec<Field>,
+    },
+    /// A mark one of the home's devices set ([`Command::HomeMark`]).
+    HomeMarked { mark: crate::home::wire::Mark },
     /// The message left the router's outbound queue, which the router does
     /// only in a terminal state (`leviculum-lxmf/src/router.rs:771-773`).
     /// `last` is the last state seen for it, when there was one.

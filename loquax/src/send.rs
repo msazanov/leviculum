@@ -430,7 +430,9 @@ async fn run_send_steps<O: Outbox>(
                 | OutboxEvent::SyncFailed { .. }
                 | OutboxEvent::Unsent { .. }
                 | OutboxEvent::Fenced { .. }
-                | OutboxEvent::Packed { .. } => {}
+                | OutboxEvent::Packed { .. }
+                | OutboxEvent::HomeSent { .. }
+                | OutboxEvent::HomeMarked { .. } => {}
             }
         }
 

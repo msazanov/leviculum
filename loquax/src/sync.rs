@@ -76,6 +76,8 @@ pub enum Reason {
     Announce,
     /// The bound, or the activity cadence, or a retry.
     Timer,
+    /// A client of a home node sent a message, and pulls its state.
+    Sent,
 }
 
 impl Reason {
@@ -86,6 +88,7 @@ impl Reason {
             Self::Key => "key",
             Self::Announce => "announce",
             Self::Timer => "timer",
+            Self::Sent => "send",
         }
     }
 }
