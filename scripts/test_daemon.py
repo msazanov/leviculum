@@ -1971,7 +1971,14 @@ class TestDaemon:
             stamp_cost = params.get("stamp_cost")  # None or int
             storage = os.path.join(self.config_dir, "lxmf")
             os.makedirs(storage, exist_ok=True)
-            self.lxmf_identity = RNS.Identity()
+            # A test that needs the address before the router exists (a
+            # recipient that comes online later) hands in the identity's
+            # private key; otherwise a fresh one.
+            identity_prv = params.get("identity_prv")
+            if identity_prv:
+                self.lxmf_identity = RNS.Identity.from_bytes(bytes.fromhex(identity_prv))
+            else:
+                self.lxmf_identity = RNS.Identity()
             # LXMRouter.__init__ installs SIGINT/SIGTERM handlers
             # (LXMRouter.py:308-309), which only works on the main thread;
             # this RPC handler runs on a worker thread, so shim signal.signal
