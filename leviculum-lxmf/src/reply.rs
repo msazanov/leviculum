@@ -6,10 +6,11 @@
 //! quoted content as UTF-8 bytes beside it; and `FIELD_COMMENT`, a dict
 //! `{COMMENT_FOR: the target's hash}`. The deployed clients write the first:
 //! Columba (`FIELD_REPLY_HASH = 0x30`, torlando-tech/columba `9222e38`,
-//! `rns-api/src/main/java/network/columba/app/rns/api/util/LxmfFields.kt:125-135`),
-//! MeshChatX (Quad4-Software/MeshChatX `4378392`,
-//! `meshchatx/meshchat.py:11003-11008`) and Ratspeak (`7da1fe3`,
-//! `crates/ratspeak-runtime/src/lxmf.rs:369-400`, read at `:540-551`). None
+//! `columba/rns-api/src/main/java/network/columba/app/rns/api/util/LxmfFields.kt:125-135`),
+//! MeshChatX (`send_message`, Quad4-Software/MeshChatX `4378392`,
+//! `meshchatx/meshchat.py`) and Ratspeak (`standard_chat_fields`, read in
+//! `decode_ratspeak_chat_extension_checked`, ratspeak/Ratspeak `7da1fe3`,
+//! `crates/ratspeak-runtime/src/lxmf.rs`). None
 //! of them writes or reads `FIELD_COMMENT`, so [`Reply::fields`] writes the
 //! pair and [`Reply::from_fields`] reads either.
 //!
