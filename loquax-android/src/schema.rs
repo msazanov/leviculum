@@ -37,7 +37,8 @@
 //! and the avatar's `initials`, `icon_fg` and `icon_bg` (1129) are fields.
 //! A request added is none either: an older app never sends `front`, and
 //! the session then counts itself in the back, pulling on wakes and its
-//! schedule as before.
+//! schedule as before. The map's margins and `moving` (1131) are such
+//! fields too: an app that sends none gets the frame of the screen.
 
 use serde::{Deserialize, Serialize};
 
@@ -311,6 +312,19 @@ pub struct MapRequest {
     /// Load the region of the view: "load this area", `d` in the terminal.
     #[serde(default)]
     pub load: bool,
+    /// Pixels drawn past the view on each side, left and right, top and
+    /// bottom (1131): a finger that pans first reveals drawn map, and a
+    /// pinch that zooms out shrinks a bitmap that still fills the screen.
+    /// The view's rules (fit, the one-world floor, a tap) are the `w` x
+    /// `h` screen's; the frame is that much larger about the same centre.
+    #[serde(default)]
+    pub margin_x: u32,
+    #[serde(default)]
+    pub margin_y: u32,
+    /// A finger is on the map: the frame goes without the map's names,
+    /// which take a while to set, and the next frame at rest has them.
+    #[serde(default)]
+    pub moving: bool,
 }
 
 /// The map frame's description; its pixels follow it (see the table
@@ -320,8 +334,15 @@ pub struct MapShown {
     pub v: u32,
     pub ok: bool,
     pub error: Option<String>,
+    /// The frame's size: the view's and the margins on both sides.
     pub w: u32,
     pub h: u32,
+    /// The margins drawn past the view on each side, the request's: the
+    /// view's top left corner is this pixel of the frame.
+    #[serde(default)]
+    pub margin_x: u32,
+    #[serde(default)]
+    pub margin_y: u32,
     /// The view drawn, for the next request.
     pub x: u32,
     pub y: u32,

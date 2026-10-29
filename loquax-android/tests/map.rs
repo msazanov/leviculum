@@ -353,3 +353,155 @@ fn same_as(name: &str, rgba: &[u8], w: u32, h: u32) {
         );
     }
 }
+
+/// The smallest shift by which every pixel column of `rgba`, `w` wide,
+/// repeats: the copies of the world side by side.
+fn period(rgba: &[u8], w: usize) -> Option<usize> {
+    let h = rgba.len() / 4 / w;
+    let px = |x: usize, y: usize| &rgba[(y * w + x) * 4..(y * w + x) * 4 + 4];
+    (1..w).find(|&p| (0..w - p).all(|x| (0..h).all(|y| px(x, y) == px(x + p, y))))
+}
+
+/// The phone shows one world at most (Lew 2026-10-29, 1131): a portrait
+/// screen asked for z0, where the world was drawn five times across a
+/// thin band, gets z3, the world 2048 pixels wide over its 1080, no
+/// column repeated; zooming out stops there; the first view with no pin
+/// and no region is that world, centred.
+#[test]
+fn the_phone_never_shows_the_world_twice() {
+    let home = tempfile::tempdir().expect("home");
+    std::fs::write(
+        home.path().join(loquax::config::CONFIG_FILE),
+        "map_autoload = off\n",
+    )
+    .expect("config");
+    let ask = MapRequest {
+        dir: home.path().display().to_string(),
+        w: 1080,
+        h: 2400,
+        density_milli: 1000,
+        x: Some(1 << 31),
+        y: Some(1 << 31),
+        zoom: Some(0),
+        moving: true,
+        ..MapRequest::default()
+    };
+    let (shown, rgba) = frame(&loquax_android::map::render(&ask, Some(Vec::new()), now()));
+    assert_eq!((shown.zoom, shown.min_zoom), (3, 3));
+    assert_eq!(period(&rgba, 1080), None);
+    let out = MapRequest {
+        zoom_by: -2,
+        about_x: 540,
+        about_y: 1200,
+        ..ask.clone()
+    };
+    let (shown, _) = frame(&loquax_android::map::render(&out, Some(Vec::new()), now()));
+    assert_eq!(shown.zoom, 3, "zooming out stops at one world");
+    let first = MapRequest {
+        x: None,
+        y: None,
+        zoom: None,
+        ..ask
+    };
+    let (shown, _) = frame(&loquax_android::map::render(
+        &first,
+        Some(Vec::new()),
+        now(),
+    ));
+    assert_eq!((shown.zoom, shown.y), (3, 1 << 31));
+}
+
+/// The first view with no pin is the newest region, the Florence fixture
+/// here, fitted whole, and not the world.
+#[test]
+fn the_first_view_without_pins_is_the_installed_region() {
+    let home = home();
+    let first = MapRequest {
+        x: None,
+        y: None,
+        zoom: None,
+        ..request(home.path(), false)
+    };
+    let (shown, _) = frame(&loquax_android::map::render(
+        &first,
+        Some(Vec::new()),
+        now(),
+    ));
+    assert!(shown.zoom >= 14, "z{}", shown.zoom);
+    let at = leviculum_map::mercator::unproject(leviculum_map::World {
+        x: shown.x,
+        y: shown.y,
+    });
+    assert!((at.lat_e7 - 437_756_000).abs() < 100_000, "{at:?}");
+}
+
+/// A frame with margins covers them (1131): the Florence view drawn with
+/// half a screen past each edge is twice the screen each way, and each
+/// margin holds exactly the pixels a frame panned half a screen that way
+/// shows, so a finger that pans reveals drawn map and no dark strip. The
+/// margins are echoed for Java to place the frame by, and a tap is still
+/// in the screen's pixels.
+#[test]
+fn a_frame_with_margins_covers_them() {
+    let home = home();
+    let (mx, my) = (W / 2, H / 2);
+    let wide = MapRequest {
+        margin_x: mx,
+        margin_y: my,
+        moving: true,
+        ..request(home.path(), false)
+    };
+    let (shown, big) = frame(&loquax_android::map::render(&wide, Some(Vec::new()), now()));
+    assert_eq!((shown.w, shown.h), (2 * W, 2 * H));
+    assert_eq!((shown.margin_x, shown.margin_y), (mx, my));
+    assert!(big.chunks(4).all(|px| px[3] == 0xff), "every pixel set");
+    let bw = (2 * W) as usize;
+    for (dx, dy) in [
+        (-(mx as i32), 0),
+        (mx as i32, 0),
+        (0, -(my as i32)),
+        (0, my as i32),
+        (mx as i32, my as i32),
+    ] {
+        let panned = MapRequest {
+            pan_x: dx,
+            pan_y: dy,
+            moving: true,
+            ..request(home.path(), false)
+        };
+        let (_, small) = frame(&loquax_android::map::render(
+            &panned,
+            Some(Vec::new()),
+            now(),
+        ));
+        // The panned screen is the big frame's window at the margin plus
+        // the pan.
+        let (x0, y0) = ((mx as i32 + dx) as usize, (my as i32 + dy) as usize);
+        let window: Vec<u8> = (0..H as usize)
+            .flat_map(|y| {
+                let at = ((y0 + y) * bw + x0) * 4;
+                big[at..at + W as usize * 4].to_vec()
+            })
+            .collect();
+        assert_eq!(same_share(&window, &small), 100, "pan {dx},{dy}");
+    }
+    // A tap on a pin's marker, in the screen's pixels.
+    let pins = vec![pin(7, "bob", 43.7752, 11.2640)];
+    let view = Viewport::new(project(LatLon::from_degrees(LAT, LON)), 16, W, H);
+    let marker = leviculum_map::pins::place(
+        &view,
+        &[leviculum_map::pins::Pin {
+            at: pins[0].at,
+            label: "bob",
+            stale: false,
+        }],
+    )[0];
+    let _ = loquax_android::map::render(&wide, Some(pins.clone()), now());
+    let tap = MapRequest {
+        tap_x: Some(marker.x as i32),
+        tap_y: Some(marker.y as i32),
+        ..wide
+    };
+    let (shown, _) = frame(&loquax_android::map::render(&tap, Some(pins), now()));
+    assert_eq!(shown.tapped.as_deref(), Some("07".repeat(16).as_str()));
+}

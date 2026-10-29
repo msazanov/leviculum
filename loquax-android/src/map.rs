@@ -11,8 +11,15 @@
 //! Java keeps the last frame's view and hands it back with what the finger
 //! did since: a pan in pixels, zoom steps about a point, a tap. The view's
 //! rules are the model's (`loquax::ui::map`: [`fit`], [`fit_at`],
-//! [`zoom_at`]), one pixel a cell as in the window. The pins are the
-//! running session's, or the store's when none runs ([`pins_in`]).
+//! [`zoom_at`], one world at most), one pixel a cell as in the window. The
+//! pins are the running session's, or the store's when none runs
+//! ([`pins_in`]).
+//!
+//! A frame is drawn with margins past the screen (1131), so a finger that
+//! pans reveals drawn map while the next frame is drawn, and without the
+//! map's names while a finger is on it, so frames come as fast as the
+//! renderer goes; Java asks again as the finger moves and shows each frame
+//! as it lands, moved by what the finger did since it asked.
 //!
 //! The autoload (1089) is the terminal's and the window's: the places of
 //! the first pins when they first fit, a report's place when it opens the
@@ -25,6 +32,7 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use leviculum_map::mercator::{project, LatLon, World};
+use leviculum_map::viewport::Viewport;
 use leviculum_mapfill::style::Style;
 use leviculum_ui::theme::{Theme, ThemeFlag};
 use loquax::mapload::{Loader, Source, Step, CACHE_DEFAULT_MB};
@@ -32,7 +40,8 @@ use loquax::mapnames::Typesetter;
 use loquax::picture::{map_theme, Maps, Painter};
 use loquax::screenmap::{self, Placed};
 use loquax::ui::map::{
-    fit, fit_at, viewport, want_pins, want_place, want_view, zoom_at, MapPin, MapState, MapWant,
+    fit, fit_at, settle, viewport, want_pins, want_place, want_view, zoom_at, zoom_floor, MapPin,
+    MapState, MapWant,
 };
 use loquax::when::WallTime;
 
@@ -189,6 +198,7 @@ impl Renderer {
             let mut view = viewport(&state, area, &setup);
             view.pan(request.pan_x, request.pan_y);
             state.centre = view.centre;
+            settle(&mut state, area, &setup);
         }
         if request.zoom_by != 0 {
             let zoom = (i32::from(state.zoom) + request.zoom_by)
@@ -203,9 +213,17 @@ impl Renderer {
                 u8::try_from(zoom).unwrap_or(setup.zooms.0),
             );
         }
+        // At most a screen on each side: a frame of nine screens is as
+        // far as any gesture between two frames reaches.
+        let (mx, my) = (
+            request.margin_x.min(area.width.into()),
+            request.margin_y.min(area.height.into()),
+        );
         let mut tapped = None;
         if let (Some(x), Some(y)) = (request.tap_x, request.tap_y) {
-            tapped = screenmap::hit(&self.placed, x as f32, y as f32, scale);
+            // The pins were placed in the last frame, margins included.
+            let (x, y) = (x as f32 + mx as f32, y as f32 + my as f32);
+            tapped = screenmap::hit(&self.placed, x, y, scale);
             if tapped.is_some() {
                 state.selected = tapped;
             }
@@ -224,29 +242,41 @@ impl Renderer {
         // Unset follows the phone; the config's `map_theme` still wins.
         let flag = self.theme.or(Some(ThemeFlag::Auto));
         let style = Style::PC.in_theme(map_theme(flag, Some(screen)));
+        // The screen's view with the margins drawn around it, the same
+        // centre: not held to one world itself, so a margin past the
+        // world's edge stays empty rather than moving the view.
+        let (sw, sh) = view.size();
+        let drawn = Viewport::new(
+            view.centre,
+            view.zoom(),
+            sw.saturating_add(mx.saturating_mul(2)),
+            sh.saturating_add(my.saturating_mul(2)),
+        );
         let rendered = screenmap::render(
             &mut self.painter,
             &mut self.type_,
-            &view,
+            &drawn,
             style,
             scale,
             pins,
             state.selected,
-            true,
+            !request.moving,
         );
         self.placed = rendered.placed;
         let name = |peer: [u8; 16]| pins.iter().find(|p| p.peer == peer).map(|p| p.words());
-        let (w, h) = view.size();
+        let (w, h) = drawn.size();
         let shown = MapShown {
             v: VERSION,
             ok: true,
             error: None,
             w,
             h,
+            margin_x: mx,
+            margin_y: my,
             x: view.centre.x,
             y: view.centre.y,
             zoom: view.zoom(),
-            min_zoom: setup.zooms.0,
+            min_zoom: zoom_floor(area, &setup),
             max_zoom: setup.zooms.1,
             selected: state.selected.map(|p| loquax::address::to_hex(&p)),
             attribution: rendered.picture.attribution.clone(),
