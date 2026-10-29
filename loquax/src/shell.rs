@@ -331,12 +331,56 @@ impl Shell {
                 }
                 UiEffect::Log(line) => tracing::warn!("{line}"),
                 UiEffect::LoadMap(want) => self.map_ask(want),
+                UiEffect::Import => answers.extend(self.import()),
             }
         }
         for answer in answers {
             self.apply(answer);
         }
         self.start_next();
+    }
+
+    /// The palette's `import`: contacts and history from every messenger
+    /// found in its default place, never the identity (`crate::import`).
+    /// What it did is said on screen and kept for after it; what it wrote
+    /// shows from the next start, when the store and the contacts are read.
+    fn import(&mut self) -> Vec<UiEvent> {
+        let Some(user_home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+            return vec![UiEvent::Notice("import: HOME is not set".to_string())];
+        };
+        let found = loquax::import::scan(&user_home, true);
+        let trees: Vec<_> = found
+            .iter()
+            .filter(|f| matches!(f.source, loquax::import::Source::NomadNet(_)))
+            .collect();
+        if trees.is_empty() {
+            return vec![UiEvent::Notice(
+                "import: no history found; `loquax import <path>` reads a file or directory"
+                    .to_string(),
+            )];
+        }
+        let choices = loquax::import::Choices {
+            contacts: true,
+            history: true,
+            identity: false,
+        };
+        let mut out = Vec::new();
+        for source in trees {
+            let lines = match loquax::import::import(source, &self.context.home, choices, false) {
+                Ok(report) => {
+                    let mut lines = vec![format!("imported from {}", source.path.display())];
+                    lines.extend(report.lines(false));
+                    lines.push(
+                        "it shows from the next start; the identity: `loquax import`".to_string(),
+                    );
+                    lines
+                }
+                Err(error) => vec![format!("import: {error}")],
+            };
+            self.afterwards.extend(lines.iter().cloned());
+            out.push(UiEvent::Notice(lines.join("; ")));
+        }
+        out
     }
 
     /// The fold's changes, in one transaction. A failed write is said on

@@ -1078,6 +1078,10 @@ pub enum UiEffect {
     /// Draw the map the `n`th way of [`map::MapSetup::drawings`]; the shell
     /// answers with a new [`UiEvent::MapSetup`] (1093).
     MapDrawing(usize),
+    /// Import contacts and history from the messengers found in their
+    /// default places (`crate::import`), never the identity, which needs a
+    /// typed yes outside the screen; the shell answers with notices.
+    Import,
 }
 
 /// Fold one event into the model.
@@ -2535,6 +2539,13 @@ fn run<B: InputBuffer + Default>(model: &mut UiModel<B>, command: PaletteCommand
         PaletteCommand::Blocked => {
             model.toggle_blocked_view();
             Vec::new()
+        }
+        PaletteCommand::Import => {
+            model.toast(
+                ToastKind::Info,
+                "importing from the other messengers' default places".to_string(),
+            );
+            vec![UiEffect::Import]
         }
         PaletteCommand::Theme => {
             model.theme = model.theme.toggle();

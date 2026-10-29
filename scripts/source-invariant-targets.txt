@@ -211,6 +211,7 @@ skip  lndecode        cli                        # spawns the lndecode binary
 skip  lnflash         cli                        # spawns the lnflash binary against temp dirs
 skip  lnflash         vendored_softdevice        # close to the line: reads the vendored image, but half its subject is the parser
 skip  loquax           home_node                  # spawns loquax --daemon and clients against Python over sockets; loquax-tui
+skip  loquax           import                     # its subject is the import code, and it spawns the loquax binary; loquax-tui
 skip  loquax           mailbox_cli                # spawns loquax against in-process daemons over sockets
 skip  loquax           python_interop             # drives Python over sockets; Tier 1
 skip  loquax           send_cli                   # spawns the loquax binary

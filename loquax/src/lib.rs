@@ -66,12 +66,16 @@ pub mod display_name;
 pub mod effects;
 pub mod engine;
 pub mod events;
+#[cfg(feature = "history")]
+pub mod export;
 #[cfg(feature = "std")]
 pub mod fanout;
 pub mod fetch;
 pub mod home;
 #[cfg(feature = "std")]
 pub mod identity;
+#[cfg(feature = "history")]
+pub mod import;
 pub mod keys;
 pub mod mailbox;
 pub mod mailbox_state;

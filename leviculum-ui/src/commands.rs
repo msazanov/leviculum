@@ -75,6 +75,9 @@ pub enum Command {
     Unblock,
     /// List the blocked conversations instead of the others, and back.
     Blocked,
+    /// Bring over contacts and history from another messenger found in its
+    /// default place.
+    Import,
 }
 
 /// One palette row: the words the reader filters on, and what it runs.
@@ -87,7 +90,7 @@ pub struct PaletteEntry {
 }
 
 /// The table, in the order the palette lists it unfiltered.
-pub const COMMANDS: [PaletteEntry; 27] = [
+pub const COMMANDS: [PaletteEntry; 28] = [
     entry("send", Command::Send),
     entry("fetch", Command::Fetch),
     entry("quit", Command::Quit),
@@ -115,6 +118,7 @@ pub const COMMANDS: [PaletteEntry; 27] = [
     entry("block", Command::Block),
     entry("unblock", Command::Unblock),
     entry("blocked", Command::Blocked),
+    entry("import", Command::Import),
 ];
 
 /// The entry that runs `command`.

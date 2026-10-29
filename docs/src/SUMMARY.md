@@ -35,6 +35,7 @@
   - [loquax: the mailbox, and who you talk to](concepts/loquax-mailbox.md)
   - [loquax: the map](concepts/loquax-map.md)
   - [loquax: the home node](concepts/loquax-home-node.md)
+  - [loquax: import and export](concepts/loquax-import.md)
 - [Public channels over LXMF](concepts/public-channels.md)
 - [Telemetry](concepts/telemetry.md)
 - [The ThinkNode M9](concepts/thinknode-m9.md)

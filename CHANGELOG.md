@@ -20,6 +20,15 @@ Toolchain: Rust 1.97.1
 
 ### Added
 
+- loquax import and export, slice one (#232, 1103): `loquax import` brings
+  over a NomadNet tree (contacts, blocks, the propagation node, the history
+  with signatures checked where the bytes are intact), raw identity files of
+  NomadNet, MeshChat, MeshChatX, Sideband and Ratspeak, and a pasted Base32
+  key; `--dry-run` lists and writes nothing; the identity is adopted only on
+  a typed `yes`, and the old one is set aside, not deleted. The first start
+  of the messenger scans the apps' default places and asks; the palette has
+  `import`. `loquax export <dir>` writes NomadNet's shape, which the import
+  reads back. Store schema 6. See `docs/src/concepts/loquax-import.md`.
 - loquax home node, slice one (#232, 1101): `loquax --daemon` holds the LXMF
   identity on an always-on host, takes DIRECT delivery, keeps every message
   in an archive with a sequence under a disk cap (`archive_cap_mb`, 1 GiB by

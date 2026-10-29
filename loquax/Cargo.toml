@@ -218,6 +218,11 @@ required-features = ["std"]
 name = "tui_snapshot"
 required-features = ["tui"]
 
+# The import and the export: the history feature's store.
+[[test]]
+name = "import"
+required-features = ["history"]
+
 # The home node end to end: `--daemon` and `home` are the terminal build's.
 [[test]]
 name = "home_node"
