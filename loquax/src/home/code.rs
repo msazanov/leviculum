@@ -9,9 +9,19 @@
 //! The 84 bytes are written in RFC 4648 base32, lower case and unpadded,
 //! behind the prefix `lqxh1`: 140 characters, which a terminal can copy and
 //! slice 5's QR code can carry.
+//!
+//! A phone has no shared instance to reach the home node through, so it
+//! also needs the home node's TCP server. `loquax home admit --server`
+//! writes it behind the code, `lqxh1...@host:port` (an IPv6 address in
+//! brackets), so one scan or one paste carries both. The base32 alphabet
+//! has no `@`, so the split is unambiguous, and a code without the address
+//! reads as before.
 
 use alloc::string::String;
 use alloc::vec::Vec;
+
+/// What separates the code from the home node's address in the combined form.
+pub const SERVER_SEPARATOR: char = '@';
 
 /// What every code starts with, so a code is told from an address or a hash
 /// at a glance, and a later format can take `lqxh2`.
@@ -64,14 +74,36 @@ impl HomeCode {
         text
     }
 
-    /// Read a code. Whitespace anywhere is ignored, and case is, so a code
-    /// that a terminal wrapped or a person typed in capitals still reads.
+    /// The code with the home node's TCP server behind it, `host:port`:
+    /// what a phone takes in one go.
+    pub fn encode_with_server(&self, server: &str) -> String {
+        let mut text = self.encode();
+        text.push(SERVER_SEPARATOR);
+        text.push_str(server.trim());
+        text
+    }
+
+    /// Read a code, in either form; an address behind it is dropped. A
+    /// device that joins through its shared instance has no use for it.
     pub fn parse(text: &str) -> Result<Self, CodeError> {
-        let compact: String = text
-            .chars()
-            .filter(|c| !c.is_whitespace())
-            .map(|c| c.to_ascii_lowercase())
-            .collect();
+        Self::parse_with_server(text).map(|(code, _)| code)
+    }
+
+    /// Read a code and the address behind it, if any. Whitespace anywhere
+    /// is ignored, and the code's case is, so a code that a terminal
+    /// wrapped or a person typed in capitals still reads. The address is
+    /// not checked here: whoever dials it says what is wrong with it.
+    pub fn parse_with_server(text: &str) -> Result<(Self, Option<String>), CodeError> {
+        let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+        let (code, server) = match compact.split_once(SERVER_SEPARATOR) {
+            Some((code, server)) => (code, Some(server).filter(|s| !s.is_empty())),
+            None => (compact.as_str(), None),
+        };
+        let code = Self::parse_code(&code.to_ascii_lowercase())?;
+        Ok((code, server.map(String::from)))
+    }
+
+    fn parse_code(compact: &str) -> Result<Self, CodeError> {
         let body = compact.strip_prefix(PREFIX).ok_or(CodeError::Prefix)?;
         let bytes = unbase32(body).ok_or(CodeError::Shape)?;
         if bytes.len() != BODY_LEN + CHECK_LEN {
@@ -162,6 +194,51 @@ mod tests {
         text[at] = if text[at] == b'a' { b'b' } else { b'a' };
         let text = String::from_utf8(text).expect("ascii");
         assert_eq!(HomeCode::parse(&text), Err(CodeError::Checksum));
+    }
+
+    #[test]
+    fn the_address_rides_behind_the_code() {
+        let text = code().encode_with_server("homenode.example:4242");
+        assert_eq!(
+            HomeCode::parse_with_server(&text),
+            Ok((code(), Some("homenode.example:4242".into())))
+        );
+        // A device that joins through its shared instance drops it.
+        assert_eq!(HomeCode::parse(&text), Ok(code()));
+        // An IPv6 address keeps its brackets, a host name its case.
+        let text = code().encode_with_server("[fd00::1]:4242");
+        assert_eq!(
+            HomeCode::parse_with_server(&text).map(|(_, server)| server),
+            Ok(Some("[fd00::1]:4242".into()))
+        );
+        let (a, b) = text.split_at(70);
+        let wrapped = alloc::format!("{}\n{}", a.to_ascii_uppercase(), b);
+        assert_eq!(
+            HomeCode::parse_with_server(&wrapped),
+            Ok((code(), Some("[fd00::1]:4242".into())))
+        );
+        let text = alloc::format!("{}@Home.Example:1", code().encode());
+        assert_eq!(
+            HomeCode::parse_with_server(&text).map(|(_, server)| server),
+            Ok(Some("Home.Example:1".into()))
+        );
+    }
+
+    #[test]
+    fn a_code_alone_or_with_an_empty_address_has_none() {
+        let text = code().encode();
+        assert_eq!(HomeCode::parse_with_server(&text), Ok((code(), None)));
+        let text = alloc::format!("{text}@");
+        assert_eq!(HomeCode::parse_with_server(&text), Ok((code(), None)));
+        // The checksum still guards the code in front of an address.
+        let mut broken = code().encode_with_server("h:1").into_bytes();
+        let at = PREFIX.len() + 20;
+        broken[at] = if broken[at] == b'a' { b'b' } else { b'a' };
+        let broken = String::from_utf8(broken).expect("ascii");
+        assert_eq!(
+            HomeCode::parse_with_server(&broken),
+            Err(CodeError::Checksum)
+        );
     }
 
     #[test]

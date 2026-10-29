@@ -93,6 +93,76 @@ impl Drop for HomeNode {
     }
 }
 
+/// Slice 5's pairing on the home node, without a network: `home admit
+/// --server` writes the address into the code and prints the QR code
+/// beside it; a bad address is refused before a token is issued;
+/// `home revoke-token` withdraws an open code by the start of its hash.
+#[test]
+fn admit_carries_the_address_and_an_open_code_can_be_withdrawn() {
+    let home = tempfile::tempdir().expect("home");
+    let home = home.path();
+    let admitted = local(
+        home,
+        &[
+            "home",
+            "admit",
+            "--name",
+            "phone",
+            "--server",
+            "homenode.example:4242",
+        ],
+    );
+    assert_eq!(admitted.code, Some(0), "{admitted}");
+    let text = admitted
+        .stdout
+        .split_whitespace()
+        .find(|word| word.starts_with("lqxh1"))
+        .unwrap_or_else(|| panic!("no code in {admitted}"));
+    let (code, server) =
+        loquax::home::code::HomeCode::parse_with_server(text).expect("the code parses");
+    assert_eq!(server.as_deref(), Some("homenode.example:4242"));
+    // The QR code: a block of equal lines of half blocks.
+    let drawn: Vec<&str> = admitted
+        .stdout
+        .lines()
+        .filter(|line| !line.is_empty() && line.chars().all(|c| " ▀▄█".contains(c)))
+        .collect();
+    assert!(drawn.len() > 20, "{admitted}");
+    let width = drawn[0].chars().count();
+    assert!(drawn.iter().all(|line| line.chars().count() == width));
+    assert_eq!(drawn.len(), width.div_ceil(2));
+    // The desktop's line carries the code alone.
+    assert!(
+        admitted
+            .stdout
+            .contains(&format!("loquax home join {}\n", code.encode())),
+        "{admitted}"
+    );
+
+    // Negative: an address without a port, refused, and no token issued.
+    let refused = local(home, &["home", "admit", "--server", "homenode.example"]);
+    assert_eq!(refused.code, Some(2), "{refused}");
+    assert!(refused.stderr.contains("has no port"), "{refused}");
+
+    let tokens = local(home, &["home", "tokens"]);
+    assert_eq!(tokens.stdout.lines().count(), 1, "{tokens}");
+    let prefix = hex::encode(&code.token[..2]);
+    assert!(tokens.stdout.starts_with(&prefix), "{tokens}");
+
+    // Negative: too short, and a prefix nothing starts with.
+    let short = local(home, &["home", "revoke-token", "ab"]);
+    assert_eq!(short.code, Some(2), "{short}");
+    let other = if prefix == "0000" { "1111" } else { "0000" };
+    let none = local(home, &["home", "revoke-token", other]);
+    assert_eq!(none.code, Some(1), "{none}");
+
+    let withdrawn = local(home, &["home", "revoke-token", &prefix]);
+    assert_eq!(withdrawn.code, Some(0), "{withdrawn}");
+    assert!(withdrawn.stdout.contains("withdrew") && withdrawn.stdout.contains("phone"));
+    let tokens = local(home, &["home", "tokens"]);
+    assert_eq!(tokens.stdout, "", "{tokens}");
+}
+
 /// The home node's slice 1 end to end (#232): a stock Python LXMF sender
 /// delivers DIRECT to `loquax --daemon` and gets DELIVERED; two admitted
 /// clients both pull the message, and pulling deletes nothing; a reused

@@ -30,6 +30,8 @@ pub mod client;
 pub mod daemon;
 #[cfg(feature = "std")]
 pub mod lock;
+#[cfg(feature = "tui")]
+pub mod qr;
 #[cfg(feature = "history")]
 pub mod runner;
 #[cfg(feature = "history")]

@@ -537,6 +537,47 @@ mod tests {
         assert_eq!(store.open_tokens(2 * DAY, DAY).expect("tokens"), []);
     }
 
+    #[test]
+    fn a_withdrawn_token_admits_nobody() {
+        use crate::store::TokenRevoked;
+        let (_dir, mut store) = store();
+        store.issue_token(&TOKEN, "laptop", 0).expect("issue");
+        let mut twin = [0x44; 16];
+        twin[3] = 0x01;
+        store.issue_token(&[0x44; 16], "desk", 0).expect("issue");
+        store.issue_token(&twin, "desk2", 0).expect("issue");
+        assert_eq!(
+            store.revoke_token("44").expect("revoke"),
+            TokenRevoked::TooShort
+        );
+        assert_eq!(
+            store.revoke_token("44zz").expect("revoke"),
+            TokenRevoked::TooShort
+        );
+        assert_eq!(
+            store.revoke_token("abcd").expect("revoke"),
+            TokenRevoked::None
+        );
+        // "444444" starts both desk tokens: neither goes.
+        match store.revoke_token("444444").expect("revoke") {
+            TokenRevoked::Ambiguous(matched) => assert_eq!(matched.len(), 2),
+            other => panic!("{other:?}"),
+        }
+        match store.revoke_token(" 44444401 ").expect("revoke") {
+            TokenRevoked::One(gone) => assert_eq!(gone.name, "desk2"),
+            other => panic!("{other:?}"),
+        }
+        let laptop = crate::address::to_hex(&TOKEN[..2]).to_ascii_uppercase();
+        match store.revoke_token(&laptop).expect("revoke") {
+            TokenRevoked::One(gone) => assert_eq!(gone.token, TOKEN),
+            other => panic!("{other:?}"),
+        }
+        // The withdrawn code is refused as an unknown one; the other admits.
+        assert_eq!(join_at(&mut store, LAPTOP, TOKEN, 1.0), Status::BadToken);
+        assert_eq!(join_at(&mut store, LAPTOP, twin, 1.0), Status::BadToken);
+        assert_eq!(join_at(&mut store, LAPTOP, [0x44; 16], 1.0), Status::Ok);
+    }
+
     fn archive(store: &mut Store, n: u8) -> u64 {
         store
             .archive_append(KIND_RECEIVED, &[n; 32], &[n; 120], 50, u64::MAX)
