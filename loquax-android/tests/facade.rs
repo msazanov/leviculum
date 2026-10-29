@@ -238,7 +238,8 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
             60,
             |m: &schema::Messages| m.messages[0].chips.len() == 1,
         );
-        let bubble = &messages.messages[0];
+        let chip = &messages.messages[0].chips[0];
+        assert_eq!((chip.content.as_str(), chip.ours), ("\u{1F44D}", true));
         // A peer without a name: the avatar shows its address's first byte,
         // in the app's colour since it sent no icon appearance (1129).
         assert_eq!(messages.initials, peer[..2].to_uppercase());
