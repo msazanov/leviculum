@@ -14,6 +14,8 @@
 //!   lines alone, at the line widths of the view's zoom.
 //! - [`outline`]: the world outline, Natural Earth 1:50m land, where no
 //!   region covers the view.
+//! - [`cells`]: a view as terminal cells, the text techniques of the
+//!   terminal map, for every terminal frontend.
 //! - [`choice`]: which installed region a view draws, and the zooms a
 //!   frontend offers.
 //! - [`style`]: the colour tables, `leviculum-mapfill`'s own.
@@ -27,6 +29,7 @@ extern crate alloc;
 #[cfg(feature = "std")]
 extern crate std;
 
+pub mod cells;
 pub mod choice;
 pub mod draw;
 pub mod mercator;

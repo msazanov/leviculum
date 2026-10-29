@@ -129,6 +129,35 @@ pub fn line_style(c: Class) -> (Rgb565, i32) {
     }
 }
 
+/// The index among the sixteen ANSI colours each colour of the tables is
+/// drawn in on a 16-colour terminal: chosen per class, not the nearest of
+/// the sixteen, which turns parks, earth and water all into white or grey
+/// (`docs/drafts/terminal-map-rendering-2026-10.md`, section 2, `-16` against
+/// `-16tok`). The rule of `leviculum_ui::color`'s 16-colour tokens, applied
+/// to the map's classes; `None` for a colour no table holds.
+pub fn ansi16(c: Rgb565) -> Option<u8> {
+    let table: [(Rgb565, u8); 14] = [
+        (BACKGROUND, 7),
+        (BORDER, 5),
+        (area_color(Class::Earth), 7),
+        (area_color(Class::Urban), 7),
+        (area_color(Class::Park), 2),
+        (area_color(Class::Pedestrian), 7),
+        (area_color(Class::Sand), 11),
+        (area_color(Class::Water), 12),
+        (area_color(Class::Building), 8),
+        (line_style(Class::Waterway).0, 4),
+        (line_style(Class::Path).0, 8),
+        (line_style(Class::MinorRoad).0, 15),
+        (line_style(Class::MajorRoad).0, 3),
+        (line_style(Class::Rail).0, 0),
+    ];
+    table
+        .iter()
+        .find(|(colour, _)| *colour == c)
+        .map(|&(_, i)| i)
+}
+
 /// Which features a view draws: the draft's two layer profiles.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Profile {
