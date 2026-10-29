@@ -216,3 +216,9 @@ required-features = ["tui"]
 [[example]]
 name = "term_map_samples"
 required-features = ["picture"]
+
+# The host draw time per map profile (1099), for the reviewer and the
+# commit messages; the gates count instead. Never in a package.
+[[example]]
+name = "map_bench"
+required-features = ["picture"]
