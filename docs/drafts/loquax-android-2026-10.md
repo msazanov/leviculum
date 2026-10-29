@@ -56,9 +56,10 @@ What the first build does, grown up.
   `enable_transport(false)` and one `add_tcp_client`
   (`leviculum-std/src/driver/builder.rs:285`); a host name goes through
   `host_resolver` (`:703`); the quiet link's keepalive is the builder's
-  `link_keepalive` (`:722`). Today the engine's shell only attaches to a
-  shared instance (`loquax/src/engine/shell.rs:316-318`), so the one change
-  in loquax is an attach that brings its own interfaces. The phone is a
+  `link_keepalive` (`:722`). When this was written the engine's shell
+  only attached to a shared instance, so the one change in loquax was an
+  attach that brings its own interfaces; 1113 added it (`attach_leaf`,
+  section 6). The phone is a
   leaf, never a transport node, and runs no lnsd.
 - **What it reuses.** All of loquax's std shell and core, leviculum-std's
   node and TCP interface, the store (`history`, bundled SQLite) unchanged.
@@ -247,7 +248,41 @@ loquax already has an iced window (`gui` feature,
   client yet; that is the join screen.
 - Not installed on any device.
 
-## 6. Open questions for Lew
+## 6. Status after order 1113 (2026-10-29)
+
+Lew decided the open questions below the same day: package
+`network.leviculum.loquax`, both ABIs, minSdk 26, a usable app first,
+then the service and the battery measurement.
+
+- **The leaf attach** is in loquax: `loquax::engine::attach_leaf`, an
+  in-process node with transport off and one TCP client interface to
+  `host:port`, given as a config section so a host name is looked up again
+  on each reconnect. `loquax/tests/home_node.rs` joins, pulls and marks
+  through it against `loquax --daemon`, no Python.
+- **The facade** sits on the shell as section 1 recommends
+  (`loquax-android/src/lib.rs`, `schema.rs`, `session.rs`): `start`,
+  `command`, `query`, a blocking `nextEvent`, `stop`; msgpack maps in a
+  versioned schema. Behind it the session holds loquax's screen model
+  headless, so a message, a send and a mark do on the phone what they do
+  in the terminal. Three events were added to the model for a frontend
+  without keys (`Open`, `Write`, `React`), and a `Close` with the
+  `list_apart` flag, because on a phone the list is a screen of its own and
+  the terminal's habit of opening the conversation a message arrives in
+  would read it unseen. `loquax-android/tests/facade.rs` runs the facade
+  without JNI against an in-process home node.
+- **The screens**: join, conversation list, chat with states and reaction
+  chips (`loquax-android/README.md`). Not installed on a device yet.
+- **Size, measured**: APK with both ABIs 8 651 915 B; libraries
+  10 239 760 B (arm64-v8a) and 7 578 700 B (armeabi-v7a), stripped of the
+  symbol table, `history` included. Below the "about 5 MB per ABI" of
+  section 1 once compressed.
+- **Reproducible**: two `make debug` from `make clean`, the second with a
+  fresh cargo target directory and sccache off, gave the same APK and
+  libraries (sha256 in the report of 1113).
+- **Next**: the foreground service (`remoteMessaging`) holding the quiet
+  link, the battery exemption intent, then the measurement of section 3.
+
+## 7. Open questions for Lew (answered 2026-10-29, see section 6)
 
 1. **Package name.** `network.leviculum.loquax` assumes the domain
    `leviculum.network`. If we do not hold it, `de.lew_palm.loquax` (your
