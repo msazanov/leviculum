@@ -102,7 +102,7 @@ registered locally, as the reference answers for any local destination
 (`reference/Reticulum/RNS/Transport.py:2936-2941`). Peers other than the
 user's own devices never see it.
 
-Its five request handlers admit every link at the RNS level; the home node
+Its six request handlers admit every link at the RNS level; the home node
 reads the identity the link was identified with and decides itself. A
 request on a link that was not identified is answered with a refusal.
 
@@ -117,6 +117,7 @@ Link requests on `loquax.home`, msgpack on the wire:
 /send  [client_id: bin16, destination: bin16, title: bin, content: bin,
         [[key: int, value: bin], ...]] -> [status, id: bin32]
 /mark  [flag: uint, [id: bin32, ...]] -> [status]
+/petname [address: bin16, name: str] -> [status]
 /watch [cursor: uint]              -> [status, newest: uint]
 ```
 
@@ -353,6 +354,29 @@ engine on the shared instance it is.
 - **Before 1132** the archive has no name entries: a client learns a
   peer's name from the first announce the home node hears after it runs
   this version.
+
+## The reader's names on every device
+
+1139. A petname, the reader's own name for a peer, is the same on every
+device of the home. The phone's address book link is not: which contact
+and photo a phone shows stays on that phone
+(`docs/drafts/loquax-android-contacts-2026-10.md`, section 6).
+
+- **`/petname`** hands the home node the peer's address and the name, the
+  empty string clearing it. The palette's `rename` in the terminal and the
+  phone's Rename dialog send it on a client, after the contacts file took
+  the name, on a task of its own, as a mark goes (`runner::hand_petnames`).
+- **A petname entry**, kind 8, keeps the request's bytes. The same bytes
+  as the peer's newest petname entry append nothing; a new one removes
+  the peer's older ones, so a client behind the cursor gets only the name
+  given last (`Store::archive_petname`). Like a name entry it wakes no
+  client (`Store::archive_newest_waking`): it rides along with the next
+  pull.
+- **On pull** the client hands it to its engine (`Command::HomePetname`,
+  `OutboxEvent::HomePetname`); the screen sanitises it as a petname from
+  the contacts file, takes it as the reader's word and writes the
+  contacts file, and never hands it back. A home node from before 1139
+  answers `/petname` as malformed, which the client says in its log.
 
 ## The archive
 
