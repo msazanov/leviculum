@@ -1,6 +1,6 @@
 # loquax: the home node
 
-Status: slice 1 built (order 1101, Refs #232). The research and the
+Status: slices 1 and 2 built (orders 1101 and 1106, Refs #232). The research and the
 critique behind it are the draft `docs/drafts/home-node-2026-10.md` (order
 1096); this page keeps what is decided and what is built.
 
@@ -67,7 +67,10 @@ asks for the path to the home destination, opens a link to it, identifies
 with the device identity and sends the token. The home node admits the
 identity under the name given at `admit`, records when, and deletes the
 token, all in one transaction. A token used once is refused the second
-time.
+time, and so is one older than `home_token_hours` in the config (24 by
+default: time to carry the code to the other device, short enough that a
+code left in a chat log or a screenshot is dead by the next day). `loquax
+home tokens` lists the codes still open, with when each expires.
 
 `loquax home devices` lists the admitted devices, `loquax home revoke
 <device>` removes one, by its name or by its hash (four hex characters are
@@ -85,7 +88,7 @@ registered locally, as the reference answers for any local destination
 (`reference/Reticulum/RNS/Transport.py:2936-2941`). Peers other than the
 user's own devices never see it.
 
-Its two request handlers admit every link at the RNS level; the home node
+Its three request handlers admit every link at the RNS level; the home node
 reads the identity the link was identified with and decides itself. A
 request on a link that was not identified is answered with a refusal.
 
@@ -97,6 +100,8 @@ Link requests on `loquax.home`, msgpack on the wire:
 /join  [token: bin16, name: str]   -> [status]
 /sync  [cursor: uint]              -> [status, first: uint, more: bool,
                                        [[seq: uint, kind: uint, at: int, packed: bin], ...]]
+/send  [client_id: bin16, destination: bin16, title: bin, content: bin,
+        [[key: int, value: bin], ...]] -> [status, id: bin32]
 ```
 
 The status comes first in every answer: 0 ok, 1 not identified, 2 not
@@ -110,9 +115,13 @@ so a client whose cursor fell behind an eviction says so in its log.
 
 - **Fetching never deletes.** Only a later slice's `/mark` changes state.
 - **Idempotent.** The same cursor gets the same entries. A client keeps its
-  cursor in `$LNMSG_HOME/home-cursor` and moves it only after every entry was
-  handed on, so a pull cut short is pulled again; the screen and `fetch`
-  drop a message they already hold.
+  cursor in `$LNMSG_HOME/home-cursor` and moves it only after what it pulled
+  is kept: the pull hands the entries to the engine with a fence behind them
+  (`Command::Fence`), and once the fence is answered every event the entries
+  caused has gone out before it. The screen saves the cursor when it takes
+  the pull's end, after its store wrote those events; `fetch` saves it
+  after its seen file. A crash in between pulls the same entries again, and
+  the screen and `fetch` drop a message they already hold.
 - **Each client has its own cursor**, so any number of them read the same
   archive.
 - **The client checks authorship itself.** An entry is the LXMF message as
@@ -122,9 +131,60 @@ so a client whose cursor fell behind an eviction says so in its log.
   (leviculum 1079). A message addressed to anyone but the home identity, or
   whose signature does not hold, is dropped.
 
-The later slices add `/send` (slice 2, with an outbox that retries direct
-delivery for 7 days), `/mark` (slice 4) and `/register` for wake paths
+The later slices add `/mark` (slice 4) and `/register` for wake paths
 (slice 3).
+
+## Sending through the home node
+
+Slice 2. A client hands each message to the home node with `/send`: a
+16-byte id of its own making, the destination, title, content and fields
+(each field's value as its raw msgpack, so the home node signs what the
+client composed). The home node signs the message once with the identity,
+puts it in its outbox and answers with the message id. The client is done
+then and may sleep.
+
+- **Idempotent by the client's id.** The same id handed in again is
+  answered from the outbox with the message it made the first time, also
+  after a restart; nothing is signed twice. A client whose answer was lost
+  asks again with the same id, up to three times
+  (`home::client::send_retrying`).
+- **The outbox is a table** (`home_outbox`, schema 5 of the store), one row
+  a message: the client's id, the message id, the destination, the packed
+  bytes, when it came, whether it is still retried, and whether a
+  propagation node took a copy. A restart goes on with every message still
+  retried, each due direct at once.
+- **The policy**, a pure state machine in `loquax/src/home/outgoing.rs` with
+  its tests beside it: direct over a link at once, so a recipient that is
+  not there fails crisply. When the router's stock attempts end without a
+  proof, the same packed message goes to the propagation node (the one
+  `--pn`, the config or the last collection selected; with none, the
+  message waits for the direct retries alone), and direct delivery is tried
+  again on every announce of the recipient and every `outbox_retry_secs`
+  (3600 by default), for `outbox_days` (7 by default, Lew's decision of
+  2026-10-29). The announce is the retry that matters, since it says the
+  recipient is there; the cadence covers an announce the home node missed,
+  at one link attempt an hour. The router holds one entry per message id,
+  so a message is never on two legs at once.
+- **DELIVERED when a direct proof arrives**, even after the propagation node
+  took a copy. Both legs carry the same bytes, so the same hash, and the
+  recipient keeps one message per hash
+  (`reference/LXMF/LXMF/LXMRouter.py:1906-1908`): the copy it later collects
+  is dropped there.
+- **Every state change is an archive entry**, appended in the same
+  transaction as the outbox row changes: `sent` (kind 1, the packed message
+  as signed), `propagated` (2), `delivered` (3), `failed` (4: the seven days
+  ended with no propagation node ever taking it) and `retries ended` (5: the
+  direct retries ended while a copy waits on the propagation node). Kinds 2
+  to 5 carry the message id as their bytes.
+
+On the client the compose line and `loquax send` go through `/send`. The
+screen names the bubble after the id the home node answered with
+(`Command::HomeAccepted`, reported as the router's `Queued` would be), and
+each pull turns the state entries into the bubble's state
+(`Command::HomeState`): propagated shows as in the mailbox, delivered as
+delivered, failed as failed. `loquax fetch` prints a line `message <id>
+<state>` for each. Read and sent state on every client, including the
+sent messages another client wrote, is slice 4.
 
 ## The archive
 
@@ -134,14 +194,14 @@ message, with a sequence that only grows (`AUTOINCREMENT`, so a number is
 never handed out twice, even after the newest entry was evicted), the kind
 of entry, when it was recorded and the packed LXMF bytes. A message that
 arrives twice, direct and again from the propagation node, is one entry.
-The later slices append sent, delivered and read entries to the same log.
 
 **The cap.** 1 GiB by default, `archive_cap_mb` in `$LNMSG_HOME/config`.
 That is twice what a stock lxmd propagation node keeps by default
 (`reference/LXMF/LXMF/Utilities/lxmd.py:159-163`, 500 MB) for everybody's
 mail, here for one person's. A text message packs to well under a
 kilobyte, so the default holds about a million of them, and a home host
-has the gigabyte to spare. When an append takes the archive over the cap,
+has the gigabyte to spare. The sent messages and their state changes go into the same log (see
+"Sending through the home node"). When an append takes the archive over the cap,
 the oldest entries go until it fits again; the entry just appended stays,
 even when it alone is larger than the cap.
 
@@ -181,29 +241,39 @@ WantedBy=default.target
 $USER` so it runs without a login. The package's `lnsd` is a system
 service, which a user unit cannot be ordered after; a home node started
 before `lnsd` exits 1 with "could not join the Reticulum shared instance",
-and `Restart=on-failure` tries again ten seconds later. Do not open the messenger on the home
-node while the daemon runs: both would register the same delivery
-destination.
+and `Restart=on-failure` tries again ten seconds later. The daemon and the
+messenger never run on one home at once: both would register the same
+delivery destination, so each takes an `flock` on
+`$LNMSG_HOME/delivery.lock` first and the second refuses to start, naming
+the first (`loquax/src/home/lock.rs`). The kernel lets go with the
+process, so a crash leaves nothing to clean up.
 
 A client is a laptop that ran `loquax home join`. Its messenger pulls at
 start and on the mailbox schedule (`F5` and `Ctrl-r` too) and shows the
 home node's address as its own, as does `loquax address`; `loquax fetch`
-pulls and prints. Sending from a client is refused until slice 2.
+pulls and prints. It sends through the home node (see "Sending through the
+home node").
 
 ## Compatibility with Python peers
 
 No wire change. Senders see an ordinary LXMF destination that announces
 and accepts DIRECT, OPPORTUNISTIC and propagated-and-collected mail.
-`loquax.home` is a new aspect that is never announced. The end-to-end test
-`loquax/tests/home_node.rs` runs a stock Python LXMF sender against the
-shipped binary: DIRECT delivery and DELIVERED, two clients pulling the same
-message, a reused code refused, a revoked client getting nothing.
+`loquax.home` is a new aspect that is never announced. The end-to-end tests in
+`loquax/tests/home_node.rs` run stock Python LXMF peers against the
+shipped binary. Slice 1: DIRECT delivery and DELIVERED, two clients pulling
+the same message, a reused code refused, a revoked client getting nothing.
+Slice 2: a client sends through the home node to a Python recipient that
+is offline and exits; the direct leg fails, the recipient comes up later
+and announces, the message arrives DIRECT and once, and the client's next
+fetch shows it delivered; a second daemon on the same home is refused.
 
 ## Slices
 
-1. Home archive and pull: this page. Built.
+1. Home archive and pull. Built.
 2. Send through the home node: `/send`, the outbox, direct with a
-   propagated copy and seven days of direct retries.
+   propagated copy and seven days of direct retries. Built, with the three
+   limits slice 1 left: the delivery lock, the cursor after the store, and
+   token expiry.
 3. Quiet link: TCP liveness in lnsd, the per-link keepalive, AP mode, a
    wake push. After the battery measurement.
 4. Multi-client state: `/mark`, read and sent state on every client.
