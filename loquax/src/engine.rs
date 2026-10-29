@@ -649,7 +649,10 @@ impl Engine {
                 Command::Fence { token } => self.emit(OutboxEvent::Fenced { token }),
                 // A client's commands: a messenger learns its states from its
                 // own router.
-                Command::HomeAccepted { .. } | Command::HomeState { .. } => {}
+                Command::HomeAccepted { .. }
+                | Command::HomeState { .. }
+                | Command::HomeSent { .. }
+                | Command::HomeMark { .. } => {}
             }
         }
     }
@@ -806,6 +809,25 @@ impl Engine {
                 Command::HomeState { message_id, state } => {
                     self.emit(OutboxEvent::State { message_id, state });
                 }
+                Command::HomeSent { packed } => {
+                    match leviculum_lxmf::Message::unpack(
+                        &packed,
+                        None,
+                        None,
+                        DeliveryMethod::Direct,
+                    ) {
+                        Ok(message) => self.emit(OutboxEvent::HomeSent {
+                            message_id: message.message_id,
+                            destination: message.destination_hash,
+                            body: message.content,
+                            fields: message.fields,
+                        }),
+                        Err(error) => {
+                            tracing::warn!("HOME sent entry does not unpack: {error}")
+                        }
+                    }
+                }
+                Command::HomeMark { mark } => self.emit(OutboxEvent::HomeMarked { mark }),
                 Command::Fetch { .. } => self.emit(OutboxEvent::SyncFailed {
                     detail: "a client of a home node pulls from the home node, not a \
                              propagation node"

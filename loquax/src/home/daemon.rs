@@ -126,7 +126,7 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
         fetch_budget,
         mailbox,
     } = options;
-    let _lock = super::lock::DeliveryLock::acquire(&home, "the home node")?;
+    let _lock = super::lock::DeliveryLock::acquire(&home, super::lock::HOME_NODE)?;
     let address = crate::engine::delivery_address(&identity)?;
     let home_destination = crate::home::destination_hash(&identity.public_key_bytes())?;
     let mut store = Store::open_in(&home, address).map_err(|e| e.to_string())?;
@@ -181,12 +181,17 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
     let mut sender = Sender {
         cap_bytes: archive_cap_bytes,
         preferred_pn,
+        collecting: sync_bound_ms.is_some(),
+        told: std::collections::HashSet::new(),
     };
 
     let mut fanout = Fanout::default();
     let mut schedule = sync_bound_ms.map(|bound| Schedule::new(Some(bound)));
     let mut fetch: Option<tokio::task::JoinHandle<Option<usize>>> = None;
-    let mut selected_pn = preferred_pn;
+    // The node the engine's router has selected, as its PnSelected said:
+    // not `--pn` itself, which the router learns only from a SelectPn, and
+    // with collections off nothing else sends one.
+    let mut selected_pn = None;
     let origin = tokio::time::Instant::now();
     let now_ms = || u64::try_from(origin.elapsed().as_millis()).unwrap_or(u64::MAX);
     let mut pump = tokio::time::interval(PUMP);
@@ -232,6 +237,9 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                         }
                         OutboxEvent::PnSelected { destination, .. } => {
                             selected_pn = Some(destination);
+                        }
+                        OutboxEvent::PnUnavailable { detail } => {
+                            tracing::info!("HOME no propagation node: {detail}");
                         }
                         OutboxEvent::Announced { destination, .. } => {
                             let acts = outgoing.announced(destination, unix_now());
@@ -367,6 +375,12 @@ async fn answer(
 struct Sender {
     cap_bytes: u64,
     preferred_pn: Option<[u8; 16]>,
+    /// Whether collections run, the only thing that selects a propagation
+    /// node when none is named.
+    collecting: bool,
+    /// The messages already told they have no propagation node: said once
+    /// each, not on every failed direct retry.
+    told: std::collections::HashSet<[u8; 32]>,
 }
 
 impl Sender {
@@ -443,12 +457,25 @@ impl Sender {
                                         })
                                         .is_ok()
                             }
+                            // Not selected here by the mailbox rule: that
+                            // reads the daemon's path table and may wait for
+                            // announce replays, which this path cannot. A
+                            // collection selects one, or --pn names it.
                             None => {
-                                tracing::info!(
-                                    "HOME outbox no propagation node message={}; direct \
-                                     retries only until a collection selects one",
-                                    crate::address::to_hex(&id)
-                                );
+                                if self.told.insert(id) {
+                                    tracing::info!(
+                                        "HOME outbox no propagation node message={}; direct \
+                                         retries only{}",
+                                        crate::address::to_hex(&id),
+                                        match self.collecting {
+                                            true => " until a collection selects one",
+                                            false =>
+                                                ", since collections are off \
+                                                      (--sync-interval off) and no --pn \
+                                                      names one",
+                                        }
+                                    );
+                                }
                                 false
                             }
                         },
@@ -468,6 +495,9 @@ impl Sender {
     }
 
     fn record(&mut self, store: &mut Store, id: &[u8; 32], change: Change) {
+        if change != Change::Propagated {
+            self.told.remove(id);
+        }
         match store.outbox_record(id, change, unix_now(), self.cap_bytes) {
             Ok(seq) => tracing::info!(
                 "HOME outbox {} message={} seq={}",

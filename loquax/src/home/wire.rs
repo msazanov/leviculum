@@ -1,4 +1,4 @@
-//! The two requests a client sends the home node, and their answers, as
+//! The requests a client sends the home node, and their answers, as
 //! msgpack values on an RNS link (`docs/src/concepts/loquax-home-node.md`,
 //! "The client protocol").
 //!
@@ -8,7 +8,12 @@
 //!                                                 [[seq: uint, kind: uint, at: int, packed: bin], ...]]
 //! /send  [client_id: bin16, destination: bin16, title: bin, content: bin,
 //!         [[key: int, value: bin], ...]]      -> [status, id: bin32]
+//! /mark  [flag: uint, [id: bin32, ...]]       -> [status]
 //! ```
+//!
+//! A mark's flag is 0 for read and 1 for deleted ([`MarkFlag`]). The home
+//! node keeps the request's bytes as the archive entry, so every client
+//! reads the same mark the way the home node did.
 //!
 //! A field's value is its raw msgpack, carried as bytes, so the home node
 //! signs exactly what the client composed.
@@ -46,6 +51,52 @@ pub struct Submission {
     pub content: Vec<u8>,
     pub fields: Vec<leviculum_lxmf::Field>,
 }
+
+/// What a mark says of its messages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarkFlag {
+    /// Read on one device: read on all.
+    Read,
+    /// Deleted on one device: deleted on all.
+    Deleted,
+}
+
+impl MarkFlag {
+    fn code(self) -> u64 {
+        match self {
+            Self::Read => 0,
+            Self::Deleted => 1,
+        }
+    }
+
+    fn from_code(code: u64) -> Option<Self> {
+        match code {
+            0 => Some(Self::Read),
+            1 => Some(Self::Deleted),
+            _ => None,
+        }
+    }
+
+    /// The word logs use.
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Deleted => "deleted",
+        }
+    }
+}
+
+/// One `/mark`: a flag over one or more messages.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mark {
+    pub flag: MarkFlag,
+    pub ids: Vec<[u8; 32]>,
+}
+
+/// The most message ids one mark carries: a conversation of unread
+/// messages opened at once fits in one packet's worth of requests at most a
+/// few times over, and a mark larger than this is split by the client.
+pub const MARK_IDS_MAX: usize = 64;
 
 /// One `/sync` answer's worth of the archive.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -240,6 +291,37 @@ pub fn send_answer(id: &[u8; 32]) -> Vec<u8> {
     out
 }
 
+pub fn mark_request(mark: &Mark) -> Vec<u8> {
+    let mut out = Vec::new();
+    msgpack::array(&mut out, 2);
+    msgpack::uint(&mut out, mark.flag.code());
+    msgpack::array(&mut out, mark.ids.len());
+    for id in &mark.ids {
+        msgpack::bin(&mut out, id);
+    }
+    out
+}
+
+/// A mark, from a request or from the archive entry that keeps one. One
+/// without ids, with more than [`MARK_IDS_MAX`] or with a flag this loquax
+/// does not know is malformed.
+pub fn read_mark(data: &[u8]) -> Result<Mark, Malformed> {
+    let mut p = 0;
+    if msgpack::array_len(data, &mut p)? != 2 {
+        return Err(Malformed);
+    }
+    let flag = MarkFlag::from_code(msgpack::read_uint(data, &mut p)?).ok_or(Malformed)?;
+    let count = msgpack::array_len(data, &mut p)?;
+    if count == 0 || count > MARK_IDS_MAX {
+        return Err(Malformed);
+    }
+    let mut ids = Vec::new();
+    for _ in 0..count {
+        ids.push(<[u8; 32]>::try_from(msgpack::read_bin(data, &mut p)?).map_err(|_| Malformed)?);
+    }
+    Ok(Mark { flag, ids })
+}
+
 /// A `/send` answer: the message id, or the status that refused it.
 pub fn read_send_answer(data: &[u8]) -> Result<Result<[u8; 32], Status>, Malformed> {
     let status = read_status(data)?;
@@ -350,6 +432,26 @@ mod tests {
             read_send_answer(&status_answer(Status::NotAdmitted)),
             Ok(Err(Status::NotAdmitted))
         );
+    }
+
+    #[test]
+    fn a_mark_round_trips_and_an_empty_or_unknown_one_is_malformed() {
+        let mark = Mark {
+            flag: MarkFlag::Deleted,
+            ids: alloc::vec![[1; 32], [2; 32]],
+        };
+        assert_eq!(read_mark(&mark_request(&mark)), Ok(mark));
+        let empty = Mark {
+            flag: MarkFlag::Read,
+            ids: Vec::new(),
+        };
+        assert_eq!(read_mark(&mark_request(&empty)), Err(Malformed));
+        let mut unknown = Vec::new();
+        msgpack::array(&mut unknown, 2);
+        msgpack::uint(&mut unknown, 7);
+        msgpack::array(&mut unknown, 1);
+        msgpack::bin(&mut unknown, &[1; 32]);
+        assert_eq!(read_mark(&unknown), Err(Malformed));
     }
 
     #[test]

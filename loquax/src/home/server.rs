@@ -63,6 +63,7 @@ pub fn answer(
         super::JOIN_PATH => Answer::only(join(store, home, data, device, now_secs)),
         super::SYNC_PATH => Answer::only(sync(store, data, device)),
         super::SEND_PATH => send(store, home, data, device, now),
+        super::MARK_PATH => Answer::only(mark(store, home, data, device, now_secs)),
         _ => Answer::only(wire::status_answer(Status::Malformed)),
     }
 }
@@ -157,6 +158,35 @@ fn send(store: &mut Store, home: &Home<'_>, data: &[u8], device: [u8; 16], now: 
         Err(error) => {
             tracing::warn!("HOME send: {error}");
             Answer::only(wire::status_answer(Status::Failed))
+        }
+    }
+}
+
+/// A client's mark, kept as an archive entry under the hash of its bytes:
+/// the same mark handed in again, from this client or another, is one
+/// entry.
+fn mark(store: &mut Store, home: &Home<'_>, data: &[u8], device: [u8; 16], now: i64) -> Vec<u8> {
+    let Ok(mark) = wire::read_mark(data) else {
+        return wire::status_answer(Status::Malformed);
+    };
+    if let Some(refused) = refuse_unless_admitted(store, &device, "mark") {
+        return refused;
+    }
+    let id = leviculum_core::crypto::sha256(data);
+    match store.archive_append(super::KIND_MARK, &id, data, now, home.cap_bytes) {
+        Ok(seq) => {
+            tracing::info!(
+                "HOME mark {} device={} messages={} seq={}",
+                mark.flag.word(),
+                crate::address::to_hex(&device),
+                mark.ids.len(),
+                seq.map_or_else(|| "-".to_string(), |seq| seq.to_string())
+            );
+            wire::status_answer(Status::Ok)
+        }
+        Err(error) => {
+            tracing::warn!("HOME mark: {error}");
+            wire::status_answer(Status::Failed)
         }
     }
 }
@@ -427,6 +457,54 @@ mod tests {
             .outbox_record(&id, Change::Ended { propagated: true }, 500, u64::MAX)
             .expect("record");
         assert!(store.outbox_open().expect("open").is_empty());
+    }
+
+    fn mark(store: &mut Store, device: [u8; 16], mark: &wire::Mark) -> Status {
+        let answer = answer(
+            store,
+            &home(),
+            crate::home::MARK_PATH,
+            &wire::mark_request(mark),
+            Some(device),
+            300.0,
+        );
+        read_status(&answer.bytes).expect("status")
+    }
+
+    #[test]
+    fn a_mark_is_one_archive_entry_however_often_it_comes() {
+        let (_dir, mut store) = store();
+        let read = wire::Mark {
+            flag: wire::MarkFlag::Read,
+            ids: alloc::vec![[7; 32]],
+        };
+        // Not admitted: refused, nothing kept.
+        assert_eq!(mark(&mut store, LAPTOP, &read), Status::NotAdmitted);
+        admitted(&mut store);
+        assert_eq!(mark(&mut store, LAPTOP, &read), Status::Ok);
+        assert_eq!(mark(&mut store, LAPTOP, &read), Status::Ok);
+        let deleted = wire::Mark {
+            flag: wire::MarkFlag::Deleted,
+            ids: alloc::vec![[7; 32]],
+        };
+        assert_eq!(mark(&mut store, LAPTOP, &deleted), Status::Ok);
+        let page = store.archive_since(0, usize::MAX).expect("page");
+        assert_eq!(
+            page.entries.iter().map(|e| e.kind).collect::<Vec<_>>(),
+            [crate::home::KIND_MARK, crate::home::KIND_MARK]
+        );
+        assert_eq!(wire::read_mark(&page.entries[0].packed), Ok(read));
+        assert_eq!(wire::read_mark(&page.entries[1].packed), Ok(deleted));
+        // A mark that does not decode is refused.
+        let answer = answer(
+            &mut store,
+            &home(),
+            crate::home::MARK_PATH,
+            &[0x90],
+            Some(LAPTOP),
+            1.0,
+        );
+        assert_eq!(read_status(&answer.bytes), Ok(Status::Malformed));
     }
 
     #[test]

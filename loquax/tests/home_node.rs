@@ -1,8 +1,9 @@
-//! The home node against the real Python LXMF stack (#232, slices 1 and 2
-//! of `docs/src/concepts/loquax-home-node.md`): `loquax --daemon`, `loquax
-//! home admit|join|revoke|devices` and a client's `loquax fetch` and `loquax
-//! send`, each as the shipped binary, around a stock Python sender and
-//! recipient. Needs the `tui` feature, which carries the home node's store.
+//! The home node against the real Python LXMF stack (#232, slices 1, 2 and
+//! 4 of `docs/src/concepts/loquax-home-node.md`): `loquax --daemon`,
+//! `loquax home admit|join|revoke|devices`, a client's `loquax fetch` and
+//! `loquax send` and two scripted `loquax tui` clients, each as the shipped
+//! binary, around a stock Python sender, recipient and propagation node.
+//! Needs the `tui` feature, which carries the home node's store.
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -51,11 +52,17 @@ impl HomeNode {
     }
 
     async fn start(home: &std::path::Path, instance: &str) -> Self {
+        Self::start_with(home, instance, &[]).await
+    }
+
+    /// [`HomeNode::start`] with more arguments, `--pn` for one.
+    async fn start_with(home: &std::path::Path, instance: &str, more: &[&str]) -> Self {
         let stderr = home.join("daemon.stderr");
         let file = std::fs::File::create(&stderr).expect("the daemon's stderr file");
         let mut command = Command::new(LNMSG);
         command
             .args(["--daemon", "--instance", instance, "--sync-interval", "off"])
+            .args(more)
             .env("LNMSG_HOME", home)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -328,6 +335,18 @@ async fn a_client_sends_through_its_home_node_to_a_recipient_that_comes_up_later
         refusal.contains("the home node (pid") && refusal.contains("already runs"),
         "{refusal}"
     );
+    // Negative: nor do a local send and fetch, which would register the
+    // same destination beside it.
+    let pid = format!("the home node (pid {})", node.process.id());
+    let nobody = "00112233445566778899aabbccddeeff".to_string();
+    for (command, args, stdin) in [
+        ("send", vec![nobody], b"x".to_vec()),
+        ("fetch", Vec::new(), Vec::new()),
+    ] {
+        let refused = mesh.run(command, home.clone(), args, stdin).await;
+        assert_eq!(refused.code, Some(1), "{command}: {refused}");
+        assert!(refused.stderr.contains(&pid), "{command}: {refused}");
+    }
 
     let client = tempfile::tempdir().expect("client home");
     let joined = mesh
@@ -368,6 +387,12 @@ async fn a_client_sends_through_its_home_node_to_a_recipient_that_comes_up_later
     assert_eq!(sent.code, Some(0), "{sent}\nhome node:\n{}", node.log());
     let message_id = sent.enqueued_id();
     node.wait_for("HOME send accepted", 5).await;
+    // The send pulled right after: its own entry is there already.
+    assert!(
+        sent.stdout
+            .contains(&format!("message {message_id} accepted")),
+        "{sent}"
+    );
 
     // The client is gone. The home node's direct leg runs out of the
     // router's attempts against a recipient that is not there, and with no
@@ -438,10 +463,8 @@ async fn a_client_sends_through_its_home_node_to_a_recipient_that_comes_up_later
         node.log()
     );
     assert!(
-        fetched
-            .stdout
-            .contains(&format!("message {message_id} accepted")),
-        "{fetched}"
+        !fetched.stdout.contains("accepted"),
+        "the send's own pull took that entry: {fetched}"
     );
     assert!(
         fetched
@@ -460,6 +483,399 @@ async fn a_client_sends_through_its_home_node_to_a_recipient_that_comes_up_later
         .await;
     assert_eq!(again.code, Some(0), "{again}");
     assert_eq!(again.stdout, "", "{again}");
+
+    drop(node);
+    mesh.daemon.stop().await.expect("stop the Rust daemon");
+}
+
+/// `loquax home admit --name <name>` on the home node: the code it prints.
+fn admit(home: &std::path::Path, name: &str) -> String {
+    let admitted = local(home, &["home", "admit", "--name", name]);
+    assert_eq!(admitted.code, Some(0), "{admitted}");
+    admitted
+        .stdout
+        .split_whitespace()
+        .find(|word| word.starts_with("lqxh1"))
+        .unwrap_or_else(|| panic!("no code in {admitted}"))
+        .to_string()
+}
+
+/// A fresh client home, joined to the home node with `code`.
+async fn joined(mesh: &Mesh, node: &HomeNode, code: &str) -> tempfile::TempDir {
+    let client = tempfile::tempdir().expect("client home");
+    let joined = mesh
+        .run(
+            "home",
+            client.path().to_path_buf(),
+            vec![
+                "join".to_string(),
+                code.to_string(),
+                "--timeout".to_string(),
+                "40".to_string(),
+            ],
+            Vec::new(),
+        )
+        .await;
+    assert_eq!(joined.code, Some(0), "{joined}\nhome node:\n{}", node.log());
+    client
+}
+
+/// A client's `loquax fetch`, which must succeed.
+async fn fetch(mesh: &Mesh, node: &HomeNode, client: &std::path::Path) -> Sent {
+    let fetched = mesh
+        .run(
+            "fetch",
+            client.to_path_buf(),
+            vec!["--timeout".to_string(), "40".to_string()],
+            Vec::new(),
+        )
+        .await;
+    assert_eq!(
+        fetched.code,
+        Some(0),
+        "{fetched}\nhome node:\n{}",
+        node.log()
+    );
+    fetched
+}
+
+/// Wait until `peer` received a message with `body`: every copy it holds.
+async fn received_by(peer: &PythonPeer, body: &str, secs: u64, node: &HomeNode) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
+    let content = hex::encode(body);
+    while !peer
+        .received()
+        .iter()
+        .any(|m| m.get("content").and_then(|v| v.as_str()) == Some(content.as_str()))
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the recipient never got {body:?}:\n{}",
+            node.log()
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+/// The home node's propagated leg end to end (#232, slice 2): the client
+/// sends to a recipient that is offline and was never heard, so the direct
+/// leg fails and the home node hands the same packed message to a stock
+/// Python propagation node. That leg waits for the recipient's key (the
+/// copy on the node is encrypted for it), which a short run of the
+/// recipient's announces before it leaves again; the client then sees
+/// `propagated`. The recipient comes up, collects from the node and
+/// announces; the home node's direct retry gets its proof, which the
+/// recipient answers for a message it already holds. The recipient keeps
+/// one message, and the client sees `delivered`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_the_recipient_cannot_take_goes_to_a_propagation_node_and_arrives_once() {
+    let node_peer = PythonPeer::start();
+    node_peer.lxmf_init();
+    let pn_hash = node_peer
+        .rpc("lxmf_enable_propagation", serde_json::json!({}))
+        .get("propagation_hash")
+        .and_then(|v| v.as_str())
+        .expect("the Python node reports its propagation hash")
+        .to_string();
+    let recipient_peer = PythonPeer::start();
+    let mut mesh = Mesh::start_many(&[node_peer.rns_port, recipient_peer.rns_port]).await;
+    // After the mesh is up, so the announce crosses to the recipient's side.
+    node_peer.rpc("lxmf_announce_propagation_node", serde_json::json!({}));
+    let home = mesh.home.path().to_path_buf();
+    let code = admit(&home, "laptop");
+    let node = HomeNode::start_with(&home, &mesh.instance, &["--pn", &pn_hash]).await;
+    let client = joined(&mesh, &node, &code).await;
+
+    let recipient = leviculum_std::generate_identity();
+    let recipient_address =
+        hex::encode(loquax::engine::delivery_address(&recipient).expect("address"));
+    let body = "ueber den Briefkasten";
+    let sent = mesh
+        .run(
+            "send",
+            client.path().to_path_buf(),
+            vec![
+                recipient_address.clone(),
+                "--timeout".to_string(),
+                "40".to_string(),
+            ],
+            body.as_bytes().to_vec(),
+        )
+        .await;
+    assert_eq!(sent.code, Some(0), "{sent}\nhome node:\n{}", node.log());
+    let message_id = sent.enqueued_id();
+
+    // Direct fails against nobody, and the propagated leg starts.
+    node.wait_for(
+        &format!("HOME outbox direct failed message={message_id}"),
+        120,
+    )
+    .await;
+    node.wait_for(&format!("HOME outbox propagated message={message_id}"), 5)
+        .await;
+    // The recipient is heard once: a loquax run on its identity announces
+    // on attach and leaves, failing on a node that does not exist rather
+    // than collecting from the real one.
+    let once = tempfile::tempdir().expect("the recipient's earlier home");
+    std::fs::write(
+        once.path().join("identity"),
+        leviculum_core::identity_store::encode_identity(&recipient).expect("storable"),
+    )
+    .expect("the recipient's identity");
+    let heard = mesh
+        .run(
+            "fetch",
+            once.path().to_path_buf(),
+            vec![
+                "--pn".to_string(),
+                "0123456789abcdef0123456789abcdef".to_string(),
+                "--timeout".to_string(),
+                "10".to_string(),
+            ],
+            Vec::new(),
+        )
+        .await;
+    assert_eq!(heard.code, Some(1), "{heard}");
+    node.wait_for(
+        &format!("HOME outbox propagated message={message_id} seq="),
+        120,
+    )
+    .await;
+    let fetched = fetch(&mesh, &node, client.path()).await;
+    assert!(
+        fetched
+            .stdout
+            .contains(&format!("message {message_id} propagated")),
+        "{fetched}"
+    );
+
+    // The recipient comes up and collects from the propagation node.
+    let started = recipient_peer.rpc(
+        "lxmf_init",
+        serde_json::json!({
+            "identity_prv": hex::encode(recipient.private_key_bytes().expect("private key")),
+        }),
+    );
+    assert_eq!(
+        started.get("delivery_hash").and_then(|v| v.as_str()),
+        Some(recipient_address.as_str())
+    );
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while let Err(error) = recipient_peer.try_rpc(
+        "lxmf_set_propagation_node",
+        serde_json::json!({ "dest_hash": pn_hash }),
+    ) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the recipient never heard the propagation node: {error}"
+        );
+        node_peer.rpc("lxmf_announce_propagation_node", serde_json::json!({}));
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    recipient_peer.rpc("lxmf_request_from_propagation_node", serde_json::json!({}));
+    received_by(&recipient_peer, body, 60, &node).await;
+    let first = recipient_peer.received();
+    let collected: Vec<_> = first
+        .iter()
+        .filter(|m| m["message_hash"] == message_id.as_str())
+        .collect();
+    assert_eq!(collected.len(), 1, "{first:?}");
+    assert_eq!(collected[0]["method"], "propagated", "{first:?}");
+
+    // It announces; the home node's direct retry is proven, and the
+    // recipient keeps the copy it has.
+    recipient_peer.lxmf_announce();
+    node.wait_for(&format!("HOME outbox delivered message={message_id}"), 60)
+        .await;
+    let all = recipient_peer.received();
+    assert_eq!(
+        all.iter()
+            .filter(|m| m["message_hash"] == message_id.as_str())
+            .count(),
+        1,
+        "the recipient keeps one message per hash: {all:?}"
+    );
+    let fetched = fetch(&mesh, &node, client.path()).await;
+    assert!(
+        fetched
+            .stdout
+            .contains(&format!("message {message_id} delivered")),
+        "{fetched}"
+    );
+
+    drop(node);
+    mesh.daemon.stop().await.expect("stop the Rust daemon");
+}
+
+/// One scripted `loquax tui` run on a client home: the script runs to its
+/// end, and the run must leave with 0.
+async fn tui(mesh: &Mesh, client: &std::path::Path, to: &str, script: &str, node: &HomeNode) {
+    let script_file = client.join("session.script");
+    std::fs::write(&script_file, script).expect("the script");
+    let args: Vec<String> = vec![
+        "tui".into(),
+        "--instance".into(),
+        mesh.instance.clone(),
+        "--to".into(),
+        to.into(),
+        "--sync-interval".into(),
+        "15m".into(),
+        "--script".into(),
+        script_file.display().to_string(),
+        "--size".into(),
+        "80x24".into(),
+    ];
+    let home = client.to_path_buf();
+    let output = tokio::task::spawn_blocking(move || {
+        let mut command = Command::new(LNMSG);
+        command
+            .args(&args)
+            .env("LNMSG_HOME", &home)
+            .env_remove("LEVICULUM_EVENT_LOG")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let child = leviculum_std::process::spawn_supervised(command).expect("spawn loquax tui");
+        child.wait_with_output().expect("wait for loquax tui")
+    })
+    .await
+    .expect("the tui thread");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}\ntui.log:\n{}\nhome node:\n{}",
+        String::from_utf8_lossy(&output.stderr),
+        std::fs::read_to_string(client.join("tui.log")).unwrap_or_default(),
+        node.log()
+    );
+}
+
+/// What a client's history holds of the conversation with `peer`.
+fn conversation(
+    client: &std::path::Path,
+    address: [u8; 16],
+    peer: [u8; 16],
+) -> loquax::ui::history::Restored {
+    let store = loquax::store::Store::open_in(client, address).expect("the client's history");
+    store
+        .restore()
+        .expect("restore")
+        .into_iter()
+        .find(|c| c.peer == peer)
+        .expect("a conversation with the peer")
+}
+
+/// Slice 4 end to end (#232): read and sent state across two scripted TUI
+/// clients. A stock Python sender writes to the home node. Client B pulls
+/// it unread, with another conversation open. Client A pulls it, opens its
+/// conversation (read) and answers through the home node. B pulls again:
+/// the message is read there, and A's answer is a sent bubble B never
+/// composed.
+#[tokio::test(flavor = "multi_thread")]
+async fn what_one_client_reads_and_sends_shows_on_the_other() {
+    let peer = PythonPeer::start();
+    let sender_address = peer.lxmf_init();
+    let mut mesh = Mesh::start(peer.rns_port).await;
+    let home = mesh.home.path().to_path_buf();
+    let codes = [admit(&home, "a"), admit(&home, "b")];
+    let address = local(&home, &["address"]);
+    let address = address.stdout.trim().to_string();
+    let node = HomeNode::start(&home, &mesh.instance).await;
+    let a = joined(&mesh, &node, &codes[0]).await;
+    let b = joined(&mesh, &node, &codes[1]).await;
+
+    // The Python sender delivers to the home node, retried until it knows
+    // the home node's key from its announce.
+    let body = "fuer beide Geraete";
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while let Err(error) = peer.try_rpc(
+        "lxmf_send",
+        serde_json::json!({
+            "dest_hash": address,
+            "method": "direct",
+            "content": hex::encode(body),
+        }),
+    ) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "Python never learned the home node: {error}"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    node.wait_for("HOME archived message=", 40).await;
+
+    let parse = |hex_address: &str| -> [u8; 16] {
+        hex::decode(hex_address)
+            .expect("hex")
+            .try_into()
+            .expect("16 bytes")
+    };
+    let (home_address, sender) = (parse(&address), parse(&sender_address));
+    // Another conversation open, so the message lands unread.
+    let elsewhere = "00112233445566778899aabbccddeeff";
+
+    tui(
+        &mesh,
+        b.path(),
+        elsewhere,
+        "until ready 20\nuntil synced 1 40\nkey q\n",
+        &node,
+    )
+    .await;
+    let seen = conversation(b.path(), home_address, sender);
+    assert_eq!(seen.unread, 1, "B pulled it unread");
+
+    // A opens the sender's conversation, the newest on the list, and answers.
+    tui(
+        &mesh,
+        a.path(),
+        elsewhere,
+        "until ready 20\nuntil synced 1 40\nkey g\nkey tab\nkey tab\n\
+         type reply from A\nkey enter\nuntil synced 2 40\nkey esc\nkey q\n",
+        &node,
+    )
+    .await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while !node.log().contains("HOME mark read") {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no read mark reached the home node:\n{}\nA's tui.log:\n{}",
+            node.log(),
+            std::fs::read_to_string(a.path().join("tui.log")).unwrap_or_default()
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let on_a = conversation(a.path(), home_address, sender);
+    assert_eq!(on_a.unread, 0);
+    let answer = on_a
+        .messages
+        .iter()
+        .find(|m| m.outbound)
+        .expect("A's answer");
+    assert_eq!(answer.body, "reply from A");
+    assert_ne!(
+        answer.delivery,
+        Some(leviculum_ui::delivery::DeliveryState::Queued),
+        "the pull after the send moved it on"
+    );
+
+    tui(
+        &mesh,
+        b.path(),
+        elsewhere,
+        "until ready 20\nuntil synced 1 40\nkey q\n",
+        &node,
+    )
+    .await;
+    let on_b = conversation(b.path(), home_address, sender);
+    assert_eq!(on_b.unread, 0, "read on A, read on B");
+    let shown: Vec<_> = on_b.messages.iter().filter(|m| m.outbound).collect();
+    assert_eq!(shown.len(), 1, "{:?}", on_b.messages);
+    assert_eq!(shown[0].body, "reply from A");
+    assert_ne!(
+        shown[0].delivery,
+        Some(leviculum_ui::delivery::DeliveryState::Queued)
+    );
 
     drop(node);
     mesh.daemon.stop().await.expect("stop the Rust daemon");

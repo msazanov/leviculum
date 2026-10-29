@@ -62,7 +62,7 @@ pub enum Role {
     Client { address: [u8; 16] },
     /// The home node: the messenger's engine, handing every received message
     /// out packed for the archive, plus the home destination `loquax.home`
-    /// with its three request handlers, whose requests go to `requests`.
+    /// with its four request handlers, whose requests go to `requests`.
     Home {
         requests: UnboundedSender<HomeRequest>,
     },
@@ -343,6 +343,7 @@ pub async fn attach_as<N: Effects + Send + 'static>(
             crate::home::JOIN_PATH,
             crate::home::SYNC_PATH,
             crate::home::SEND_PATH,
+            crate::home::MARK_PATH,
         ] {
             node.register_request_handler(hash, path, RequestPolicy::AllowAll);
         }

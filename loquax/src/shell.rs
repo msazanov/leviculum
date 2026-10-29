@@ -239,6 +239,8 @@ pub(crate) struct Shell {
     send_task: Option<tokio::task::JoinHandle<()>>,
     /// The running fetch's task and its reason's word.
     fetch_task: Option<(tokio::task::JoinHandle<()>, &'static str)>,
+    /// The tasks handing marks to the home node, waited for before leaving.
+    mark_tasks: Vec<tokio::task::JoinHandle<()>>,
     /// The mailbox's syncs that failed before a link, and the nodes they
     /// excluded.
     unanswered: Unanswered,
@@ -386,6 +388,7 @@ impl Shell {
     /// screen and kept for after the screen: the message is still shown,
     /// but the reader must know it will not be there after a restart.
     fn persist(&mut self) {
+        self.hand_marks();
         let writes = self.model.take_writes();
         if let Err(error) = self.store.write(&writes) {
             loquax::events::store_failed(&error.to_string());
@@ -398,6 +401,44 @@ impl Shell {
                 UiEvent::Notice(format!("not saved: {error}")),
             );
         }
+    }
+
+    /// The marks a fold made, handed to the home node in order, on a task
+    /// of their own: the screen already shows them. A mark the home node did
+    /// not take is said in `tui.log`; the other devices keep the message
+    /// unread until this one marks it again.
+    fn hand_marks(&mut self) {
+        let marks = self.model.take_marks();
+        let Some(client) = self.context.client.clone() else {
+            return;
+        };
+        if marks.is_empty() {
+            return;
+        }
+        self.mark_tasks.retain(|task| !task.is_finished());
+        let budget = self.context.timeout;
+        self.mark_tasks.push(tokio::spawn(async move {
+            for mark in marks {
+                let outcome = loquax::home::client::mark(
+                    &client.node,
+                    &client.public_key,
+                    &client.device,
+                    &mark,
+                    budget,
+                )
+                .await;
+                match outcome {
+                    Ok(()) => {
+                        tracing::info!("HOME mark {} messages={}", mark.flag.word(), mark.ids.len())
+                    }
+                    Err(error) => tracing::warn!(
+                        "HOME mark {} messages={} not taken: {error}",
+                        mark.flag.word(),
+                        mark.ids.len()
+                    ),
+                }
+            }
+        }));
     }
 
     /// What the screen asked the store, answered as the event the model
@@ -752,6 +793,15 @@ impl Shell {
     /// `proof`: a script that quits on `until delivery delivered` leaves in
     /// the same pump that delivered the proof (leviculum 1014).
     pub(crate) async fn settle(&mut self) {
+        // The marks the reader made before leaving reach the home node, or
+        // run out of a send's budget.
+        self.hand_marks();
+        let budget = tokio::time::Instant::now() + self.context.timeout;
+        for task in std::mem::take(&mut self.mark_tasks) {
+            if tokio::time::timeout_at(budget, task).await.is_err() {
+                tracing::warn!("HOME mark still running at the end; given up");
+            }
+        }
         let mut tasks: Vec<tokio::task::JoinHandle<()>> =
             self.send_task.take().into_iter().collect();
         tasks.extend(self.fetch_task.take().map(|(task, _)| task));
@@ -1091,6 +1141,7 @@ pub(crate) async fn start(
     let contacts =
         loquax::names::load_contacts(&home).map_err(|error| crate::usage(error.to_string()))?;
     let mut model = Model::new(&options.to);
+    model.home_client = client.is_some();
     model.names = loquax::names::Names::new(contacts);
     let (restored, names, last_key, positions, unverified) = history;
     // The messages an earlier run kept unverified: the engine checks each
@@ -1198,6 +1249,7 @@ pub(crate) async fn start(
         fetch_owed: None,
         send_task: None,
         fetch_task: None,
+        mark_tasks: Vec::new(),
         unanswered: Unanswered::default(),
         replacing: None,
         legs_seen: Vec::new(),

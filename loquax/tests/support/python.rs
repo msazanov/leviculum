@@ -178,6 +178,12 @@ pub struct Mesh {
 
 impl Mesh {
     pub async fn start(python_rns_port: u16) -> Self {
+        Self::start_many(&[python_rns_port]).await
+    }
+
+    /// [`Mesh::start`] with a TCP link to each of several Python daemons,
+    /// so they reach each other through the Rust transport.
+    pub async fn start_many(python_rns_ports: &[u16]) -> Self {
         // Unique per process AND per call: two tests in one binary run in
         // parallel threads and would otherwise fight over one abstract socket.
         static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -187,15 +193,17 @@ impl Mesh {
             COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         );
         let storage = tempfile::tempdir().expect("daemon storage");
-        let python: SocketAddr = format!("127.0.0.1:{python_rns_port}")
-            .parse()
-            .expect("loopback address");
-
-        let mut daemon = ReticulumNodeBuilder::new()
+        let mut builder = ReticulumNodeBuilder::new()
             .enable_transport(true)
             .share_instance(true)
-            .instance_name(instance.clone())
-            .add_tcp_client(python)
+            .instance_name(instance.clone());
+        for port in python_rns_ports {
+            let python: SocketAddr = format!("127.0.0.1:{port}")
+                .parse()
+                .expect("loopback address");
+            builder = builder.add_tcp_client(python);
+        }
+        let mut daemon = builder
             .storage_path(storage.path().to_path_buf())
             .build_sync()
             .expect("build the Rust daemon");

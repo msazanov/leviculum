@@ -102,6 +102,7 @@ Link requests on `loquax.home`, msgpack on the wire:
                                        [[seq: uint, kind: uint, at: int, packed: bin], ...]]
 /send  [client_id: bin16, destination: bin16, title: bin, content: bin,
         [[key: int, value: bin], ...]] -> [status, id: bin32]
+/mark  [flag: uint, [id: bin32, ...]] -> [status]
 ```
 
 The status comes first in every answer: 0 ok, 1 not identified, 2 not
@@ -113,7 +114,9 @@ got, over the same link. An answer too large for one packet goes as a
 response resource. `first` is the oldest sequence the archive still holds,
 so a client whose cursor fell behind an eviction says so in its log.
 
-- **Fetching never deletes.** Only a later slice's `/mark` changes state.
+- **Fetching never deletes.** Only `/mark` changes state, and it does so
+  by appending an entry, not by removing one (see "Read and sent state on
+  every client").
 - **Idempotent.** The same cursor gets the same entries. A client keeps its
   cursor in `$LNMSG_HOME/home-cursor` and moves it only after what it pulled
   is kept: the pull hands the entries to the engine with a fence behind them
@@ -131,8 +134,7 @@ so a client whose cursor fell behind an eviction says so in its log.
   (leviculum 1079). A message addressed to anyone but the home identity, or
   whose signature does not hold, is dropped.
 
-The later slices add `/mark` (slice 4) and `/register` for wake paths
-(slice 3).
+A later slice adds `/register` for wake paths (slice 3).
 
 ## Sending through the home node
 
@@ -165,6 +167,18 @@ then and may sleep.
   recipient is there; the cadence covers an announce the home node missed,
   at one link attempt an hour. The router holds one entry per message id,
   so a message is never on two legs at once.
+- **No propagation node selected.** With neither `--pn` nor a config entry
+  and `--sync-interval off`, nothing selects one: a collection is what
+  applies the mailbox rule of `loquax-mailbox.md`. The home node does not
+  select one from the outbox path, because the rule reads the daemon's path
+  table and may wait for announce replays, and the outbox's path must not
+  wait. It logs once per message that only direct retries remain and why.
+  With `--pn` it selects that node before the first upload.
+- **A propagated copy needs the recipient's key.** The copy on the node is
+  encrypted for the recipient, so a recipient never heard (no announce ever
+  reached the home node) cannot be propagated to: the leg waits for its
+  path, and goes out as soon as the recipient announces once. A sender
+  writing to a known contact has its key.
 - **DELIVERED when a direct proof arrives**, even after the propagation node
   took a copy. Both legs carry the same bytes, so the same hash, and the
   recipient keeps one message per hash
@@ -180,11 +194,54 @@ then and may sleep.
 On the client the compose line and `loquax send` go through `/send`. The
 screen names the bubble after the id the home node answered with
 (`Command::HomeAccepted`, reported as the router's `Queued` would be), and
-each pull turns the state entries into the bubble's state
-(`Command::HomeState`): propagated shows as in the mailbox, delivered as
-delivered, failed as failed. `loquax fetch` prints a line `message <id>
-<state>` for each. Read and sent state on every client, including the
-sent messages another client wrote, is slice 4.
+each pull turns the state entries into the bubble's state: the sent entry
+as sent (`Command::HomeSent`; the message left the device and the home node
+has it), and through `Command::HomeState` propagated as in the mailbox,
+delivered as delivered, failed as failed. `loquax fetch` prints a line
+`message <id> <state>` for each.
+
+**A client pulls right after it sends**, so the bubble leaves queued
+without waiting for the schedule: the screen starts a pull (sync reason
+`send`) when the send runner ends, and another after a pull that was
+already running, which may have asked before the home node had the
+message. `loquax send` on a client pulls once after the home node took the
+message and prints what that brings as `fetch` does, its own `accepted`
+line among it: the device has one cursor, and what a pull took is shown or
+lost.
+
+## Read and sent state on every client
+
+Slice 4. Every client shows the same conversations: what one reads is read
+on all, what one deletes is gone on all, and what one sends appears as a
+sent bubble on the others.
+
+- **`/mark`** hands the home node a flag, read (0) or deleted (1), and one
+  to 64 message ids. The home node keeps the request's bytes as an archive
+  entry of kind 6, under the SHA-256 of those bytes, so the same mark twice,
+  from one client or two, is one entry. Every client applies the entry on
+  its next pull (`Command::HomeMark`, `OutboxEvent::HomeMarked`).
+- **Read** means every received message up to the marked one in its
+  conversation is read, as opening the conversation there read them: the
+  unread count becomes the number of received messages after it. A device
+  that has not pulled the message yet counts it unread when it comes, and
+  the mark, which follows it in the archive, reads it. The screen marks the
+  unread a conversation had when it is opened, and a message that arrives
+  in the open conversation, which the screen never counts unread.
+- **Deleted** removes the message by its id, from the screen if it shows it
+  and from the store either way (`StoreWrite::ForgetId`). On a client the
+  delete question says it reaches every device of the home; deleting a
+  conversation marks every message of it the screen loaded.
+- **Sent** is the `sent` entry of "Sending through the home node": a client
+  that has no bubble with that id makes one from the packed message, as
+  sent, and later entries move it on like any other.
+- **Idempotent.** A mark applied twice changes nothing more, a message
+  deleted twice is gone once, and a sent entry pulled again does not take a
+  delivered bubble back to sent.
+
+A mark goes on a task of its own once the fold made it; the screen does not
+wait for it, and at the end waits for it up to a send's budget. A mark the
+home node did not take is said in `tui.log` and not retried in this slice:
+the other devices keep the message unread until the reader marks it again.
 
 ## The archive
 
@@ -246,7 +303,12 @@ messenger never run on one home at once: both would register the same
 delivery destination, so each takes an `flock` on
 `$LNMSG_HOME/delivery.lock` first and the second refuses to start, naming
 the first (`loquax/src/home/lock.rs`). The kernel lets go with the
-process, so a crash leaves nothing to clean up.
+process, so a crash leaves nothing to clean up. `loquax send` and `loquax
+fetch` on the home node's own home register the destination too, for their
+run: they take the lock shared, so any number of them run side by side, none
+runs while the daemon does (each refuses, naming its pid), and the daemon
+does not start under one. Beside the messenger they run unlocked, as before
+the lock existed.
 
 A client is a laptop that ran `loquax home join`. Its messenger pulls at
 start and on the mailbox schedule (`F5` and `Ctrl-r` too) and shows the
@@ -265,7 +327,15 @@ the same message, a reused code refused, a revoked client getting nothing.
 Slice 2: a client sends through the home node to a Python recipient that
 is offline and exits; the direct leg fails, the recipient comes up later
 and announces, the message arrives DIRECT and once, and the client's next
-fetch shows it delivered; a second daemon on the same home is refused.
+fetch shows it delivered; a second daemon on the same home is refused, and
+so are a local `send` and `fetch` beside it. The propagated leg: the
+recipient is offline and never heard, the direct leg fails, the home node
+uploads the same bytes to a Python propagation node once the recipient has
+announced once, the recipient collects it there and announces, the home
+node's direct retry is proven, and the recipient holds one message; the
+client sees propagated, then delivered. Slice 4: two scripted TUI clients,
+one reads a Python sender's message and answers, the other shows it read
+and the answer as a sent bubble.
 
 ## Slices
 
@@ -277,6 +347,7 @@ fetch shows it delivered; a second daemon on the same home is refused.
 3. Quiet link: TCP liveness in lnsd, the per-link keepalive, AP mode, a
    wake push. After the battery measurement.
 4. Multi-client state: `/mark`, read and sent state on every client.
+   Built, without a retry for a mark the home node did not take.
 5. Pairing UX: the QR code in the GUI, the text code in the TUI, hand-over
    from a one-device setup.
 

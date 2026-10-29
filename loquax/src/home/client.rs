@@ -141,6 +141,43 @@ pub async fn send_retrying(
     }
 }
 
+/// Hand the home node one mark: link, identify as `device`, `/mark`,
+/// asked again up to three times when the answer was lost, as
+/// [`send_retrying`] does: the home node keeps a mark it has once.
+pub async fn mark(
+    node: &ReticulumNode,
+    public_key: &[u8; 64],
+    device: &Identity,
+    mark: &wire::Mark,
+    budget: Duration,
+) -> Result<(), HomeError> {
+    let deadline = tokio::time::Instant::now() + budget;
+    let data = wire::mark_request(mark);
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let answer = match open(node, public_key, device, deadline).await {
+            Ok(link) => {
+                let answer = request(node, &link, super::MARK_PATH, &data, deadline).await;
+                let _ = node.close_link(&link).await;
+                answer
+            }
+            Err(error) => Err(error),
+        };
+        match answer {
+            Ok(bytes) => {
+                return match wire::read_status(&bytes).map_err(|_| HomeError::Malformed)? {
+                    Status::Ok => Ok(()),
+                    status => Err(HomeError::Refused(status)),
+                }
+            }
+            Err(HomeError::Transfer(_) | HomeError::Timeout)
+                if attempt < 3 && tokio::time::Instant::now() < deadline => {}
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 /// A fresh id for one submission. The same id handed in twice is one
 /// message, so a retry after a lost answer reuses it.
 pub fn client_id() -> [u8; 16] {
@@ -394,6 +431,13 @@ async fn take_in(
                 .map_err(gone)?;
             continue;
         }
+        if entry.kind == super::KIND_MARK {
+            match wire::read_mark(&entry.packed) {
+                Ok(mark) => outbox.submit(Command::HomeMark { mark }).map_err(gone)?,
+                Err(_) => tracing::warn!("HOME pull: entry {} is no mark", entry.seq),
+            }
+            continue;
+        }
         let id = match entry.kind {
             super::KIND_SENT => leviculum_lxmf::Message::unpack(
                 &entry.packed,
@@ -418,7 +462,14 @@ async fn take_in(
             continue;
         }
         pull.sent.push((id, entry.kind));
-        if let Some(state) = super::shown_state(entry.kind) {
+        if entry.kind == super::KIND_SENT {
+            // The bubble itself, on a device that does not have it yet.
+            outbox
+                .submit(Command::HomeSent {
+                    packed: entry.packed.clone(),
+                })
+                .map_err(gone)?;
+        } else if let Some(state) = super::shown_state(entry.kind) {
             outbox
                 .submit(Command::HomeState {
                     message_id: id,
@@ -572,6 +623,52 @@ mod tests {
         );
         // Nothing here moved the file: that is the caller's, after its store.
         assert_eq!(load_cursor(home.path()), 3);
+    }
+
+    /// A sent entry goes to the engine whole, for a bubble on a device that
+    /// does not have one; a mark goes as the mark; one that does not decode
+    /// is passed over and still counted into the cursor.
+    #[tokio::test]
+    async fn sent_and_mark_entries_reach_the_engine() {
+        use leviculum_core::Identity;
+        let home = Identity::generate(&mut rand_core::OsRng);
+        let message = leviculum_lxmf::Message::create(
+            [4; 16],
+            [5; 16],
+            &home,
+            1.0,
+            Vec::new(),
+            b"x".to_vec(),
+            Vec::new(),
+            leviculum_lxmf::DeliveryMethod::Direct,
+        )
+        .expect("message");
+        let mark = wire::Mark {
+            flag: wire::MarkFlag::Read,
+            ids: vec![[6; 32]],
+        };
+        let pulled = Pulled {
+            entries: vec![
+                entry(1, super::super::KIND_SENT, message.pack()),
+                entry(2, super::super::KIND_MARK, wire::mark_request(&mark)),
+                entry(3, super::super::KIND_MARK, vec![0x90]),
+            ],
+            first: 1,
+        };
+        let mut outbox = FakeOutbox::new(vec![OutboxEvent::Fenced { token: 3 }]);
+        let pull = take_in(&mut outbox, 0, pulled).await.expect("pull");
+        assert_eq!(pull.cursor, Some(3));
+        assert_eq!(pull.sent, [(message.message_id, super::super::KIND_SENT)]);
+        assert_eq!(
+            *outbox.commands.borrow(),
+            [
+                Command::HomeSent {
+                    packed: message.pack()
+                },
+                Command::HomeMark { mark },
+                Command::Fence { token: 3 },
+            ]
+        );
     }
 
     /// Positive control for the above: without the fence there is no cursor

@@ -30,6 +30,7 @@ use leviculum_ui::input::InputBuffer;
 use leviculum_ui::toast::{Toast, ToastKind};
 
 use super::{Message, NewRule, UiEffect, UiModel};
+use crate::home::wire::MarkFlag;
 use crate::telemetry::Fix;
 use crate::when::WallTime;
 
@@ -68,6 +69,9 @@ pub enum StoreWrite {
     },
     /// Delete the message with this key from the device.
     ForgetMessage { key: u64 },
+    /// Delete the message with this LXMF id from the device, loaded or not:
+    /// another device of the home deleted it.
+    ForgetId { id: [u8; 32] },
     /// Delete the conversation and every message in it from the device,
     /// the positions it measured with them.
     ForgetConversation { peer: [u8; 16] },
@@ -165,11 +169,8 @@ impl<B> UiModel<B> {
             false => self.order().first().copied().unwrap_or(0),
         };
         self.selected = open;
-        if let Some(conversation) = self.conversations.get_mut(open) {
-            if conversation.unread > 0 {
-                conversation.unread = 0;
-                self.changed_peers.insert(conversation.peer);
-            }
+        self.read_out(open);
+        if let Some(conversation) = self.conversations.get(open) {
             self.message_cursor = conversation.messages.len().saturating_sub(1);
         }
         // A `--to` peer the reader blocked is not the one to open.
@@ -340,9 +341,10 @@ impl<B> UiModel<B> {
             peer: conversation.peer,
             key: message.activity,
         };
+        let place = self.deleted_from();
         self.arm(
             confirm,
-            "delete this message from this device? y deletes, any other key keeps it".to_string(),
+            format!("delete this message from {place}? y deletes, any other key keeps it"),
         );
     }
 
@@ -366,9 +368,19 @@ impl<B> UiModel<B> {
         self.arm(
             confirm,
             format!(
-                "delete the conversation with {label} from this device? y deletes, any other key keeps it"
+                "delete the conversation with {label} from {}? y deletes, any other key keeps it",
+                self.deleted_from()
             ),
         );
+    }
+
+    /// Where a delete reaches: on a client of a home node, every device of
+    /// the home, since the delete is marked for the others.
+    fn deleted_from(&self) -> &'static str {
+        match self.home_client {
+            true => "every device of this home",
+            false => "this device",
+        }
     }
 
     fn arm(&mut self, confirm: Confirm, text: String) {
@@ -398,20 +410,76 @@ impl<B> UiModel<B> {
         }
     }
 
-    /// Delete one message from the device: the screen and the store.
+    /// Delete one message from the device: the screen and the store. On a
+    /// client of a home node, from the home's other devices too.
     fn delete_message(&mut self, peer: [u8; 16], key: u64) {
-        let Some(c) = self.conversations.iter().position(|c| c.peer == peer) else {
+        let Some(id) = self.remove_message(peer, key) else {
             return;
         };
-        let Some(m) = self.conversations[c]
-            .messages
-            .iter()
-            .position(|message| message.activity == key)
+        self.forgotten.push(StoreWrite::ForgetMessage { key });
+        let text = match (self.home_client, id) {
+            (true, Some(id)) => {
+                self.mark_out(MarkFlag::Deleted, vec![id]);
+                "message deleted from every device of this home"
+            }
+            _ => "message deleted from this device",
+        };
+        self.toast(ToastKind::Info, text.to_string());
+    }
+
+    /// Another device of the home deleted the message `id`: gone here too,
+    /// from the screen if it shows it and from the store either way.
+    pub(super) fn forget_by_id(&mut self, id: &[u8; 32]) {
+        let shown = self.conversations.iter().find_map(|c| {
+            c.messages
+                .iter()
+                .find(|m| m.id == Some(*id))
+                .map(|m| (c.peer, m.activity))
+        });
+        if let Some((peer, key)) = shown {
+            self.remove_message(peer, key);
+        }
+        self.forgotten.push(StoreWrite::ForgetId { id: *id });
+    }
+
+    /// Another device of the home read the message `id`: every received
+    /// message up to it in its conversation is read, as opening the
+    /// conversation there read them.
+    pub(super) fn read_through(&mut self, id: &[u8; 32]) {
+        let Some(conversation) = self
+            .conversations
+            .iter_mut()
+            .find(|c| c.messages.iter().any(|m| !m.outbound && m.id == Some(*id)))
         else {
             return;
         };
+        let after = conversation
+            .messages
+            .iter()
+            .rev()
+            .take_while(|m| m.id != Some(*id))
+            .filter(|m| !m.outbound)
+            .count();
+        if conversation.unread > after {
+            conversation.unread = after;
+            if after == 0 {
+                conversation.new_rule = None;
+            }
+            self.changed_peers.insert(conversation.peer);
+        }
+    }
+
+    /// Take one message off the screen, every index into its conversation
+    /// moved with it: its LXMF id, `None` when it is not there, `Some(None)`
+    /// for one that never had an id.
+    fn remove_message(&mut self, peer: [u8; 16], key: u64) -> Option<Option<[u8; 32]>> {
+        let c = self.conversations.iter().position(|c| c.peer == peer)?;
+        let m = self.conversations[c]
+            .messages
+            .iter()
+            .position(|message| message.activity == key)?;
         let conversation = &mut self.conversations[c];
-        conversation.messages.remove(m);
+        let id = conversation.messages.remove(m).id;
         let len = conversation.messages.len();
         if let Some(rule) = conversation.new_rule {
             conversation.new_rule = match rule.at {
@@ -444,11 +512,7 @@ impl<B> UiModel<B> {
             self.press = None;
         }
         self.changed.remove(&(peer, key));
-        self.forgotten.push(StoreWrite::ForgetMessage { key });
-        self.toast(
-            ToastKind::Info,
-            "message deleted from this device".to_string(),
-        );
+        Some(id)
     }
 
     /// Delete a conversation and its messages from the device.
@@ -457,7 +521,12 @@ impl<B> UiModel<B> {
             return;
         };
         let label = self.names.label(&peer);
-        self.conversations.remove(c);
+        let removed = self.conversations.remove(c);
+        let everywhere = self.home_client;
+        if everywhere {
+            let ids = removed.messages.iter().filter_map(|m| m.id).collect();
+            self.mark_out(MarkFlag::Deleted, ids);
+        }
         for (sc, _) in self.sending.iter_mut() {
             if *sc > c {
                 *sc -= 1;
@@ -489,9 +558,13 @@ impl<B> UiModel<B> {
             search.selected = 0;
             search.stored.clear();
         }
+        let place = match everywhere {
+            true => "every device of this home",
+            false => "this device",
+        };
         self.toast(
             ToastKind::Info,
-            format!("conversation with {label} deleted from this device"),
+            format!("conversation with {label} deleted from {place}"),
         );
     }
 
