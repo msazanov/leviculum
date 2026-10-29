@@ -313,6 +313,7 @@ impl Session {
                 target: parse_id(&target)?,
                 content,
             },
+            schema::Request::Close => UiEvent::Close,
             schema::Request::Pull => UiEvent::Run(PaletteCommand::Fetch),
         };
         self.lock().apply(event);
@@ -387,6 +388,7 @@ impl Inner {
         let contacts = loquax::names::load_contacts(home).map_err(|error| error.to_string())?;
         let mut model = UiModel::<Line>::new(&[]);
         model.home_client = true;
+        model.list_apart = true;
         model.names = loquax::names::Names::new(contacts);
         for (peer, name) in store.names().map_err(|error| error.to_string())? {
             model.names.remember(peer, &name);
@@ -404,6 +406,10 @@ impl Inner {
         let now = wall_now(offset);
         update(&mut model, UiEvent::Clock(now));
         model.restore(store.restore().map_err(|error| error.to_string())?);
+        // The phone starts on the list, with nothing open: the model's
+        // terminal habit of opening the first conversation would read what
+        // arrives there before anyone looked.
+        update(&mut model, UiEvent::Close);
         model.activity = model
             .activity
             .max(store.last_key().map_err(|error| error.to_string())?);
@@ -504,6 +510,7 @@ impl Inner {
                 | UiEvent::SendUnproven(_)
                 | UiEvent::FetchDone(_)
                 | UiEvent::Open { .. }
+                | UiEvent::Close
                 | UiEvent::Write { .. }
                 | UiEvent::React { .. }
         );

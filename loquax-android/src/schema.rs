@@ -11,7 +11,7 @@
 //! | call | payload |
 //! |---|---|
 //! | `start` | [`Start`] |
-//! | `command` | [`Request`], tagged by `t`: `open`, `send`, `react`, `pull` |
+//! | `command` | [`Request`], tagged by `t`: `open`, `close`, `send`, `react`, `pull` |
 //! | `query` | [`Query`], tagged by `t`: `conversations`, `messages` |
 //!
 //! Rust to Java:
@@ -76,6 +76,9 @@ pub enum Request {
     /// Opened a conversation, a new one by typing the address: its unread
     /// are read and marked so, and a pull starts.
     Open { peer: String },
+    /// Went back to the list: no conversation is open, so what arrives
+    /// stays unread.
+    Close,
     /// Sent text in a conversation, through the home node's `/send`.
     Send { peer: String, body: String },
     /// Reacted to a message.

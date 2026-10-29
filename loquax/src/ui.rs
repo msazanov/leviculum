@@ -602,6 +602,10 @@ pub struct UiModel<B> {
     /// reads and deletes here is marked for the home's other devices, and a
     /// send is followed by a pull.
     pub home_client: bool,
+    /// The list is a screen of its own, as on a phone: a message arriving
+    /// while no conversation is open leaves it closed and unread, where the
+    /// terminal, which shows the list beside the conversation, opens it.
+    pub list_apart: bool,
     /// Marks for the home node, in the order they were made
     /// ([`UiModel::take_marks`]).
     marks: Vec<crate::home::wire::Mark>,
@@ -704,6 +708,7 @@ impl<B: InputBuffer + Default> UiModel<B> {
             changed_peers: BTreeSet::new(),
             forgotten: Vec::new(),
             home_client: false,
+            list_apart: false,
             marks: Vec::new(),
             pull_owed: false,
             confirm: None,
@@ -1027,6 +1032,9 @@ pub enum UiEvent {
     /// frontend without keys (the Android app): its unread are read, and on
     /// a client of a home node marked read for the home's other devices.
     Open { peer: [u8; 16] },
+    /// Leave the open conversation for the list, as the system's back
+    /// button does on a phone: none is open, so what arrives stays unread.
+    Close,
     /// Send `body` to `peer` in their conversation, opened first, as the
     /// compose pane's `Enter` does with its text.
     Write { peer: [u8; 16], body: String },
@@ -1212,6 +1220,16 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
         UiEvent::Open { peer } => {
             let index = model.conversation(peer);
             model.select(index);
+            Vec::new()
+        }
+        UiEvent::Close => {
+            if let Some(left) = model.conversations.get_mut(model.selected) {
+                left.new_rule = None;
+            }
+            model.selected = NONE_OPEN;
+            model.scroll_top = None;
+            model.selection = None;
+            model.message_cursor = 0;
             Vec::new()
         }
         UiEvent::Write { peer, body } => {
@@ -2783,7 +2801,7 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
             let index = model.conversation(source);
             // A message to a screen with no conversation open opens its
             // own, where the list shows it.
-            if shown && model.conversations.get(model.selected).is_none() {
+            if shown && !model.list_apart && model.conversations.get(model.selected).is_none() {
                 model.selected = index;
             }
             let open = index == model.selected && shown;
@@ -4348,6 +4366,16 @@ mod tests {
         let new = [0x5a; 16];
         update(&mut model, UiEvent::Open { peer: new });
         assert_eq!(model.conversations[model.selected].peer, new);
+        // Back to the list: none open, so what arrives stays unread and
+        // nothing is marked, where the list is a screen of its own.
+        model.list_apart = true;
+        update(&mut model, UiEvent::Close);
+        assert_eq!(model.selected, NONE_OPEN);
+        engine(&mut model, received_from(new, ID2, "later"));
+        assert_eq!(model.selected, NONE_OPEN);
+        let index = model.conversations.iter().position(|c| c.peer == new);
+        assert_eq!(model.conversations[index.expect("listed")].unread, 1);
+        assert!(model.take_marks().is_empty());
     }
 
     /// A frontend's text goes out as compose's does: a bubble of ours,
