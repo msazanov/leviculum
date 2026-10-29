@@ -395,6 +395,15 @@ pub fn name_entry(peer: &[u8; 16], name: &str) -> Vec<u8> {
     out
 }
 
+/// The bytes every name entry of `peer` begins with, whatever its name:
+/// the store finds a peer's older entries by them.
+pub fn name_entry_prefix(peer: &[u8; 16]) -> Vec<u8> {
+    let mut out = Vec::new();
+    msgpack::array(&mut out, 2);
+    msgpack::bin(&mut out, peer);
+    out
+}
+
 /// A name entry, which has a join request's shape: sixteen bytes and a
 /// string.
 pub fn read_name_entry(data: &[u8]) -> Result<([u8; 16], alloc::string::String), Malformed> {

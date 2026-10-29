@@ -165,7 +165,8 @@ schedule, fifteen minutes by default.
   doubling to five minutes, and after 2 s again once one stood
   (`loquax::home::watch::Backoff`).
 - **The home node wakes every watching link** when the archive grows: a
-  received message, a state change of a sent one, a mark. The wake is a
+  received message, a state change of a sent one, a mark. A name entry
+  wakes nobody; it rides along with the next pull (1136). The wake is a
   channel message on that link, no content, only the newest sequence:
 
   ```text
@@ -179,6 +180,16 @@ schedule, fifteen minutes by default.
 - **The client pulls on a wake past its cursor**, with the `/sync` above
   on a link of its own; the phone notifies as for any pull. A wake older
   than the cursor pulls nothing.
+- **A wake's pull is quiet** (1136). A pull counts the received messages
+  it brought (`Pull::messages`), never entries: the user's own sent
+  message coming back, a state change, a mark and a name are entries,
+  and none is a new message. The status line says "pulling" only for a
+  pull the user asked for (Refresh) or one that runs longer than a second
+  (`loquax_android::pull_line`, `QUIET_PULL_MS` on the terminal); a quiet
+  pull says its end only when it brought a message, and a result hides
+  after four seconds. Before 1136 every heard name woke the phone, which
+  pulled one entry and said "1 new message(s)" and "pulling" in turn
+  without end.
 - **The fallback stays**: pulls on open, on Refresh and on the schedule.
   While a screen of the app is in front (the `front` request of the
   phone's facade; the terminal is in front whenever it runs) and the
@@ -309,15 +320,26 @@ announces, so on its own it would never learn a display name and would
 name every peer by its hash. The home node hears them, as the messenger
 engine on the shared instance it is.
 
-- **A name entry**, kind 7, is appended when a peer announces a display
+- **Only names that matter** (1136). The home node hangs on a transport
+  that hears the whole network's LXMF announces; it archives the name of
+  a peer the user has a relation to and of no other
+  (`loquax::home::relation`): the sender of a message in the archive, the
+  recipient of one sent, a destination a client handed in with `/send`,
+  or a petname in the home node's contacts file (read at start). Every
+  name heard is remembered, so when a conversation with a new peer
+  starts, the peer's newest name goes into the archive at once. On the
+  hamster home node before 1136, nine minutes brought 184 name entries of
+  strangers and 167 wakes.
+- **A name entry**, kind 7, is appended when such a peer announces a display
   name that differs from the last one the home node appended for it:
   `[address: bin16, name: str]`, the name as announced, and the entry's
   time is when the home node heard it. The home node compares the name
   sanitised as every screen sanitises it (`loquax::names::sanitise`) and
   keeps that in its own names table, so an unchanged announce, or one
   whose name sanitises to nothing, appends nothing, and a peer that goes
-  back to an earlier name gets an entry again (`Store::archive_name`). The
-  home node's own announce, echoed back, appends nothing.
+  back to an earlier name gets an entry again (`Store::archive_name`).
+  Only a peer's newest name entry is kept: a new one removes those before
+  it. The home node's own announce, echoed back, appends nothing.
 - **On pull** the client hands each name entry to its engine
   (`Command::HomeName`), which reports it as `OutboxEvent::Announced`,
   exactly as an announce the client heard itself: the screen's `Names`

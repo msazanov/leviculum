@@ -1103,11 +1103,26 @@ impl Store {
             cap_bytes,
         )
         .map_err(|e| failed(&path, e))?;
-        if seq.is_some() {
+        if let Some(seq) = seq {
             tx.execute(
                 "INSERT INTO names(identity, peer, name) VALUES (?1, ?2, ?3) \
                  ON CONFLICT(identity, peer) DO UPDATE SET name = excluded.name",
                 params![&identity[..], &peer[..], shown],
+            )
+            .map_err(|e| failed(&path, e))?;
+            // Only the newest name of a peer is kept: a client behind the
+            // cursor needs the name it shows, not each one before it.
+            let prefix = crate::home::wire::name_entry_prefix(&peer);
+            tx.execute(
+                "DELETE FROM archive WHERE identity = ?1 AND kind = ?2 AND seq <> ?3 \
+                 AND substr(packed, 1, ?4) = ?5",
+                params![
+                    &identity[..],
+                    i64::from(crate::home::KIND_NAME),
+                    i64::try_from(seq).unwrap_or(i64::MAX),
+                    i64::try_from(prefix.len()).unwrap_or(i64::MAX),
+                    &prefix[..]
+                ],
             )
             .map_err(|e| failed(&path, e))?;
         }
@@ -1181,6 +1196,55 @@ impl Store {
             )
             .map_err(|e| self.failed(e))?;
         Ok(newest.map_or(0, |seq| seq as u64))
+    }
+
+    /// The newest sequence a client is woken for: every entry's but a
+    /// name's, which rides along with the next pull (1136).
+    pub fn archive_newest_waking(&self) -> Result<u64, StoreError> {
+        let newest: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT MAX(seq) FROM archive WHERE identity = ?1 AND kind <> ?2",
+                params![&self.identity[..], i64::from(crate::home::KIND_NAME)],
+                |row| row.get(0),
+            )
+            .map_err(|e| self.failed(e))?;
+        Ok(newest.map_or(0, |seq| seq as u64))
+    }
+
+    /// The peers the archive and the outbox hold a conversation with: the
+    /// source of each received message, the destination of each sent one
+    /// and of each message a client handed in. The home node archives the
+    /// names of these alone ([`crate::home::relation`]).
+    pub fn archive_peers(&self) -> Result<std::collections::BTreeSet<[u8; 16]>, StoreError> {
+        let mut peers = std::collections::BTreeSet::new();
+        // An LXMF message packs its destination, then its source.
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT CASE kind WHEN ?2 THEN substr(packed, 17, 16) ELSE substr(packed, 1, 16) END \
+                 FROM archive WHERE identity = ?1 AND kind IN (?2, ?3) \
+                 UNION SELECT destination FROM home_outbox WHERE identity = ?1 \
+                 UNION SELECT peer FROM conversations WHERE identity = ?1",
+            )
+            .map_err(|e| self.failed(e))?;
+        let rows = statement
+            .query_map(
+                params![
+                    &self.identity[..],
+                    i64::from(crate::home::KIND_RECEIVED),
+                    i64::from(crate::home::KIND_SENT)
+                ],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .map_err(|e| self.failed(e))?;
+        for row in rows {
+            let bytes = row.map_err(|e| self.failed(e))?;
+            if let Ok(peer) = <[u8; 16]>::try_from(bytes.as_slice()) {
+                peers.insert(peer);
+            }
+        }
+        Ok(peers)
     }
 
     /// How many bytes of packed messages the archive holds.
@@ -2428,6 +2492,10 @@ mod tests {
     fn a_heard_name_is_archived_once_until_it_changes() {
         let home = tempfile::tempdir().expect("home");
         let mut store = Store::open_in(home.path(), US).expect("open");
+        store
+            .archive_name(BOB, "Bob", 5, u64::MAX)
+            .expect("append")
+            .expect("Bob's name is news");
         let first = store
             .archive_name(ALICE, "Alice", 10, u64::MAX)
             .expect("append");
@@ -2460,21 +2528,19 @@ mod tests {
                 crate::home::wire::read_name_entry(&entry.packed).expect("a name entry")
             })
             .collect();
+        // 1136: only the newest name entry of a peer is kept, and another
+        // peer's stays.
         assert_eq!(
             names,
-            [
-                (ALICE, "Alice".to_string()),
-                (ALICE, "Ally".to_string()),
-                (ALICE, "Alice".to_string())
-            ]
+            [(BOB, "Bob".to_string()), (ALICE, "Alice".to_string())]
         );
         assert_eq!(
-            page.entries[1].at, 30,
+            page.entries[1].at, 40,
             "the entry's time is when it was heard"
         );
         assert_eq!(
             store.names().expect("names"),
-            [(ALICE, "Alice".to_string())]
+            [(ALICE, "Alice".to_string()), (BOB, "Bob".to_string())]
         );
     }
 

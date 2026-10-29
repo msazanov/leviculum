@@ -10,6 +10,7 @@
 //! - [`wire`]: the five requests, `/join`, `/sync`, `/send`, `/mark` and
 //!   `/watch`, their answers, and the wake.
 //! - [`wake`]: which watching link is owed a wake, on the home node.
+//! - [`relation`]: which announced names the home node archives.
 //! - `watch`: a client's watching link, kept up while it runs.
 //! - [`outgoing`]: the home node's outbox policy, direct at once, a
 //!   propagated copy on failure, direct retries for seven days.
@@ -24,6 +25,7 @@ use leviculum_core::{Destination, DestinationType, Direction, Identity};
 
 pub mod code;
 pub mod outgoing;
+pub mod relation;
 pub mod wake;
 pub mod wire;
 

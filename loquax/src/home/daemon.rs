@@ -18,7 +18,10 @@
 //!   direct retries on every announce of the recipient and on a slow
 //!   cadence, each state change an archive entry;
 //! - wakes every client that keeps a watching link ([`super::wake`]) when
-//!   the archive grows, so it pulls at once rather than on its schedule.
+//!   the archive grows, so it pulls at once rather than on its schedule;
+//! - archives the announced name of a peer the user has a relation to
+//!   ([`super::relation`]), and of no other, and wakes nobody for it: a
+//!   name rides along with the next pull (1136).
 
 use std::future::Future;
 use std::path::PathBuf;
@@ -36,6 +39,7 @@ use crate::engine::{attach_as, AttachConfig, HomeRequest, Role};
 use crate::fanout::Fanout;
 use crate::fetch::{run_fetch, FetchOptions};
 use crate::home::outgoing::{Act, Change, Leg, Outcome, Outgoing, Policy};
+use crate::home::relation::Relations;
 use crate::home::wake::{Due, Wakes};
 use crate::mailbox_state::{MailboxRun, Stored};
 use crate::outbox::{Command, Outbox, OutboxEvent, Via};
@@ -141,6 +145,7 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
     let address = crate::engine::delivery_address(&identity)?;
     let home_destination = crate::home::destination_hash(&identity.public_key_bytes())?;
     let mut store = Store::open_in(&home, address).map_err(|e| e.to_string())?;
+    let mut relations = relations_at_start(&store, &home)?;
     let signer = identity.clone();
     let mut outgoing = Outgoing::new(policy);
     for kept in store.outbox_open().map_err(|e| e.to_string())? {
@@ -198,7 +203,7 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
         newest: 0,
     };
     let mut wakes: Wakes<LinkId> = Wakes::default();
-    wakes.appended(store.archive_newest().map_err(|e| e.to_string())?);
+    wakes.appended(store.archive_newest_waking().map_err(|e| e.to_string())?);
 
     let mut fanout = Fanout::default();
     let mut schedule = sync_bound_ms.map(|bound| Schedule::new(Some(bound)));
@@ -226,10 +231,11 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                 }
                 // A send and a mark append; a failed read is said by the
                 // next append that reads it.
-                if let Ok(newest) = store.archive_newest() {
+                if let Ok(newest) = store.archive_newest_waking() {
                     wakes.appended(newest);
                 }
                 if let Some(accepted) = accepted {
+                    related(&mut store, &mut relations, accepted.destination, archive_cap_bytes);
                     outgoing.add(
                         accepted.id,
                         accepted.destination,
@@ -262,6 +268,9 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                                 archive(&mut store, &message_id, &packed, archive_cap_bytes)
                             {
                                 wakes.appended(seq);
+                                if let Some(source) = source_of(&packed) {
+                                    related(&mut store, &mut relations, source, archive_cap_bytes);
+                                }
                             }
                         }
                         OutboxEvent::PnSelected { destination, .. } => {
@@ -272,11 +281,13 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                         }
                         OutboxEvent::Announced { destination, name } => {
                             if let Some(name) = name.filter(|_| destination != address) {
-                                if let Some(seq) =
-                                    archive_name(&mut store, destination, &name, archive_cap_bytes)
-                                {
-                                    wakes.appended(seq);
-                                }
+                                heard_name(
+                                    &mut store,
+                                    &mut relations,
+                                    destination,
+                                    &name,
+                                    archive_cap_bytes,
+                                );
                             }
                             let acts = outgoing.announced(destination, unix_now());
                             sender.carry_out(&mut attached.outbox, &mut store, &mut outgoing, acts, selected_pn);
@@ -348,6 +359,43 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
     drop(node);
     attached.stop().await;
     outcome
+}
+
+/// The relations at start: the conversations the store holds and the
+/// petnames of the home node's contacts file. A contacts file that cannot
+/// be read is said and counts no petname.
+fn relations_at_start(store: &Store, home: &std::path::Path) -> Result<Relations, String> {
+    let mut related = store.archive_peers().map_err(|e| e.to_string())?;
+    match crate::names::load_contacts(home) {
+        Ok(contacts) => related.extend(contacts.petnames.into_keys()),
+        Err(error) => tracing::warn!("HOME contacts: {error}"),
+    }
+    Ok(Relations::new(related))
+}
+
+/// The source of an LXMF message as packed: its second sixteen bytes.
+fn source_of(packed: &[u8]) -> Option<[u8; 16]> {
+    packed.get(16..32)?.try_into().ok()
+}
+
+/// `peer` announced `name`: archived when the user has a relation to the
+/// peer, only remembered when not. Its sequence, which wakes nobody.
+fn heard_name(
+    store: &mut Store,
+    relations: &mut Relations,
+    peer: [u8; 16],
+    name: &str,
+    cap: u64,
+) -> Option<u64> {
+    let name = relations.announced(peer, name)?;
+    archive_name(store, peer, &name, cap)
+}
+
+/// A conversation with `peer` went on: when it is a new one, the newest
+/// name heard from the peer goes into the archive at once.
+fn related(store: &mut Store, relations: &mut Relations, peer: [u8; 16], cap: u64) -> Option<u64> {
+    let name = relations.relate(peer)?;
+    archive_name(store, peer, &name, cap)
 }
 
 /// Keep a name a peer announced in the archive, for the clients that hear
@@ -683,5 +731,111 @@ impl Collector {
                 }
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const US: [u8; 16] = [0x11; 16];
+    const FRIEND: [u8; 16] = [0x22; 16];
+    const STRANGER: [u8; 16] = [0x33; 16];
+
+    fn names_archived(store: &Store) -> Vec<([u8; 16], String)> {
+        store
+            .archive_since(0, usize::MAX)
+            .expect("page")
+            .entries
+            .iter()
+            .filter(|entry| entry.kind == crate::home::KIND_NAME)
+            .map(|entry| crate::home::wire::read_name_entry(&entry.packed).expect("a name"))
+            .collect()
+    }
+
+    /// 1136: the home node hears the whole network. A stranger's announce
+    /// appends nothing; a conversation peer's appends once per name; a
+    /// stranger heard before a conversation starts has its name archived
+    /// when it does.
+    #[test]
+    fn only_a_peer_with_a_relation_has_its_name_archived() {
+        let home = tempfile::tempdir().expect("home");
+        let mut store = Store::open_in(home.path(), US).expect("open");
+        let mut relations = Relations::new([FRIEND]);
+        for n in 0..50 {
+            let name = format!("Stranger {n}");
+            assert_eq!(
+                heard_name(&mut store, &mut relations, STRANGER, &name, u64::MAX),
+                None
+            );
+        }
+        assert!(names_archived(&store).is_empty(), "no stranger's name");
+        assert!(heard_name(&mut store, &mut relations, FRIEND, "Friend", u64::MAX).is_some());
+        assert_eq!(
+            heard_name(&mut store, &mut relations, FRIEND, "Friend", u64::MAX),
+            None,
+            "the same name again appends nothing"
+        );
+        assert_eq!(names_archived(&store), [(FRIEND, "Friend".to_string())]);
+        // The stranger's first message: its newest name, at once, once.
+        assert!(related(&mut store, &mut relations, STRANGER, u64::MAX).is_some());
+        assert_eq!(
+            related(&mut store, &mut relations, STRANGER, u64::MAX),
+            None
+        );
+        assert_eq!(
+            names_archived(&store),
+            [
+                (FRIEND, "Friend".to_string()),
+                (STRANGER, "Stranger 49".to_string())
+            ]
+        );
+    }
+
+    /// A peer's names are capped to its newest: a rename replaces the entry
+    /// before it, and the relations at start come from the archive.
+    #[test]
+    fn a_rename_keeps_only_the_newest_name_and_the_archive_relates_at_start() {
+        let home = tempfile::tempdir().expect("home");
+        let mut store = Store::open_in(home.path(), US).expect("open");
+        let mut relations = Relations::new([FRIEND]);
+        heard_name(&mut store, &mut relations, FRIEND, "Friend", u64::MAX).expect("first");
+        heard_name(&mut store, &mut relations, FRIEND, "Renamed", u64::MAX).expect("rename");
+        assert_eq!(names_archived(&store), [(FRIEND, "Renamed".to_string())]);
+
+        let mut packed = vec![0u8; 120];
+        packed[..16].copy_from_slice(&US);
+        packed[16..32].copy_from_slice(&STRANGER);
+        assert_eq!(source_of(&packed), Some(STRANGER));
+        store
+            .archive_append(crate::home::KIND_RECEIVED, &[7; 32], &packed, 1, u64::MAX)
+            .expect("append")
+            .expect("new");
+        let again = relations_at_start(&store, home.path()).expect("relations");
+        assert!(again.is_related(&STRANGER), "the sender of a message");
+        assert!(!again.is_related(&FRIEND), "a name alone is no relation");
+    }
+
+    /// A name entry wakes nobody: the newest waking sequence passes it by,
+    /// so a client told the message before it is owed nothing.
+    #[test]
+    fn a_name_entry_causes_no_wake() {
+        let home = tempfile::tempdir().expect("home");
+        let mut store = Store::open_in(home.path(), US).expect("open");
+        let message = store
+            .archive_append(crate::home::KIND_RECEIVED, &[7; 32], &[0; 40], 1, u64::MAX)
+            .expect("append")
+            .expect("new");
+        let mut wakes: Wakes<u8> = Wakes::default();
+        wakes.watch(1, [9; 16], message);
+        let mut relations = Relations::new([FRIEND]);
+        let name =
+            heard_name(&mut store, &mut relations, FRIEND, "Friend", u64::MAX).expect("archived");
+        assert!(name > message);
+        wakes.appended(store.archive_newest_waking().expect("newest"));
+        assert!(wakes.due(10_000).is_empty(), "no wake for a name");
+        // Positive control: the newest of all entries would have woken it.
+        wakes.appended(store.archive_newest().expect("newest"));
+        assert_eq!(wakes.due(20_000).len(), 1);
     }
 }
