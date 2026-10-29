@@ -5,8 +5,8 @@ import android.os.Looper;
 import java.util.Map;
 
 /**
- * The library's events, read on a thread of their own and handed to the
- * screen in front on the UI thread.
+ * The library's events, read on a thread of their own and handed on the UI
+ * thread to the screen in front and to the service that holds the session.
  */
 final class Events {
     interface Listener {
@@ -15,6 +15,7 @@ final class Events {
 
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
     private static Listener listener;
+    private static Listener service;
     private static Thread reader;
 
     private Events() {}
@@ -22,6 +23,11 @@ final class Events {
     /** The screen in front, or null; UI thread only. */
     static void listen(Listener screen) {
         listener = screen;
+    }
+
+    /** The running service, or null; UI thread only. */
+    static void service(Listener holder) {
+        service = holder;
     }
 
     /** Read events from now on, once per session. */
@@ -50,6 +56,9 @@ final class Events {
                 public void run() {
                     if (listener != null) {
                         listener.onEvent(event);
+                    }
+                    if (service != null) {
+                        service.onEvent(event);
                     }
                 }
             });

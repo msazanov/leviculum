@@ -24,8 +24,20 @@ What it does today:
   while the app runs. Leaving the chat closes it, so what arrives then
   stays unread.
 
-Not yet: the foreground service that keeps the link up with the app in the
-background, and the battery measurement of that (study, section 3).
+- **In the background.** After the start a foreground service
+  (`LoquaxService`, type `remoteMessaging`) holds the session: the link to
+  the home node and the sync schedule's quiet pulls go on with no screen in
+  front. Its notification says the home node and the unread count and has
+  a stop button, which ends the session and closes the app. A conversation
+  with new messages gets a notification of its own, sender and last line,
+  which opens the chat; none while a screen of the app is visible. When
+  the system ends the process, the service comes back and starts the
+  session from the saved code and address.
+- **Asked once.** On the first conversation list: notifications (Android
+  13 and later), and on a later look the battery optimisation exemption,
+  with a plain reason. Neither is forced, neither is asked again.
+
+Not yet: the battery measurement (study, section 3), UnifiedPush.
 
 ## How it is built
 
@@ -33,8 +45,8 @@ One Rust library holds the node, the engine, the store and loquax's screen
 model; Java only draws. The library's node is a leaf: transport off, one
 TCP client interface to the home node, no lnsd and no shared instance on
 the phone (`loquax::engine::attach_leaf`). Its session
-(`src/session.rs`) does with the model's effects what the terminal's shell
-does for a client of a home node. Java calls five functions with msgpack
+(`src/session.rs`) runs the model's effects through the client runners the
+terminal's shell runs too (`loquax::home::runner`). Java calls five functions with msgpack
 bytes in the versioned schema of `src/schema.rs`:
 
 | Call | What |
@@ -85,7 +97,7 @@ keytool -genkeypair -keystore android/loquax.keystore \
 | `src/schema.rs`, `src/session.rs` | the payloads, and the session behind them |
 | `Makefile` | the template's, with the `native` step and the Android settings below |
 | `android/AndroidManifest.xml` | with the template's build-time tokens |
-| `android/src/network/leviculum/loquax/` | the three screens (`MainActivity` joins, `ConversationsActivity`, `ChatActivity`), `Native`, the Java face of the library, `Core` and `MsgPack`, which read it, and `Events` |
+| `android/src/network/leviculum/loquax/` | the three screens (`MainActivity` joins, `ConversationsActivity`, `ChatActivity`), `LoquaxService`, which holds the session, and `ServiceLink`, the screens' binding to it, `Asks`, the two questions asked once, `Native`, the Java face of the library, `Core` and `MsgPack`, which read it, and `Events` |
 | `android/res/` | layouts, the bubbles' shapes, strings |
 | `install-toolchain.sh` | the SDK and NDK pieces, checked by SHA-1 |
 

@@ -79,6 +79,8 @@ public class MainActivity extends Activity {
         join.setEnabled(true);
         if (Core.bool(started, "ok")) {
             Events.start();
+            // The session outlives this screen from here on.
+            LoquaxService.start(this);
             startActivity(new Intent(this, ConversationsActivity.class));
             finish();
             return;

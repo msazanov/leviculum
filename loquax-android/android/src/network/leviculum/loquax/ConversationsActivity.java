@@ -20,6 +20,7 @@ public class ConversationsActivity extends Activity implements Events.Listener {
     private final List<Map<String, Object>> rows = new ArrayList<>();
     private TextView status;
     private Adapter adapter;
+    private final ServiceLink link = new ServiceLink(this);
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -49,6 +50,7 @@ public class ConversationsActivity extends Activity implements Events.Listener {
                 openTyped(address);
             }
         });
+        Asks.once(this);
     }
 
     /** A new conversation, by the address typed below the list. */
@@ -71,10 +73,28 @@ public class ConversationsActivity extends Activity implements Events.Listener {
     }
 
     @Override
+    protected void onStart() {
+        super.onStart();
+        link.bind();
+    }
+
+    @Override
+    protected void onStop() {
+        link.unbind();
+        super.onStop();
+    }
+
+    @Override
     protected void onResume() {
         super.onResume();
         Events.listen(this);
-        Core.close();
+        if (Ui.NOT_STARTED.equals(Core.close())) {
+            // Back from the recent apps after the session was stopped: the
+            // first screen starts it again.
+            startActivity(new Intent(this, MainActivity.class));
+            finish();
+            return;
+        }
         refresh();
     }
 
@@ -106,6 +126,10 @@ public class ConversationsActivity extends Activity implements Events.Listener {
         String kind = Core.str(event, "t");
         if ("changed".equals(kind)) {
             refresh();
+        } else if ("stopped".equals(kind)) {
+            // The notification's stop button, or the engine gone: the
+            // session is over, and so is the app until it starts again.
+            finish();
         } else {
             String line = Ui.eventLine(this, event);
             if (line != null) {
