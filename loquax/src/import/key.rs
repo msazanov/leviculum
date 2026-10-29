@@ -7,7 +7,6 @@
 //! Nothing here logs or prints key material; callers name paths and
 //! addresses only.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use leviculum_core::identity_store::{decode_identity, encode_identity};
@@ -135,34 +134,13 @@ fn free_name(dir: &Path, name: &str) -> PathBuf {
 }
 
 /// Write `bytes` to `path` with mode 0600, through a temporary name in the
-/// same directory and a rename, so the file is whole or absent.
+/// same directory and a rename, so the file is whole or absent: the stack's
+/// one writer for a secret ([`leviculum_std::atomic_write_secret`]), after
+/// the directory is made.
 pub fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let dir = path.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let tmp = dir.join(format!(".{name}.new"));
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let result = options.open(&tmp).and_then(|mut file| {
-        // An older file under the temporary name may have had wider bits.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-        }
-        file.write_all(bytes)?;
-        file.sync_all()
-    });
-    result.map_err(|e| format!("{}: {e}", tmp.display()))?;
-    std::fs::rename(&tmp, path).map_err(|e| format!("{}: {e}", path.display()))
+    leviculum_std::atomic_write_secret(path, bytes).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 #[cfg(test)]

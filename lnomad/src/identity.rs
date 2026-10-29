@@ -39,6 +39,7 @@ pub fn default_path() -> Option<PathBuf> {
 pub fn load_or_create(path: &Path) -> std::io::Result<Identity> {
     if let Ok(bytes) = std::fs::read(path) {
         if let Some(identity) = decode_identity(&bytes) {
+            leviculum_std::narrow_secret_mode(path)?;
             return Ok(identity);
         }
     }

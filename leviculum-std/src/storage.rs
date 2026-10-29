@@ -374,12 +374,52 @@ pub fn create_secret_dir_all(path: &Path) -> std::io::Result<()> {
 /// identity, its ratchet keys) go through here; the RPC authkey of a shared
 /// instance is the hash of `transport_identity`, so a readable identity
 /// file hands out the control socket too.
+///
+/// Durable as well: the data reaches the disk before the rename and, on
+/// Unix, the directory entry after it, so a power cut leaves the old key or
+/// the new one, never a short file a loader refuses to start on.
 pub fn atomic_write_secret(path: &Path, data: &[u8]) -> std::io::Result<()> {
     use std::io::Write as _;
 
     let temp_path = path.with_extension("tmp");
-    create_secret_file(&temp_path)?.write_all(data)?;
-    std::fs::rename(&temp_path, path)
+    {
+        let mut file = create_secret_file(&temp_path)?;
+        file.write_all(data)?;
+        file.sync_all()?;
+    }
+    std::fs::rename(&temp_path, path)?;
+    // Windows cannot open a directory as a file, and NTFS commits the
+    // rename's metadata with the rename (see `FileIdentityStore::save`).
+    #[cfg(unix)]
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::File::open(dir)?.sync_all()?;
+    }
+    Ok(())
+}
+
+/// Narrow a secret file that is readable beyond its owner back to 0600, for
+/// a key a loader is about to use. Files written before every writer went
+/// through [`atomic_write_secret`] took the umask (0664 under 0002), and
+/// rewriting the key to fix that would risk the key itself; a chmod does
+/// not. Logs once, when it narrows, which is once per file. Returns whether
+/// it did; never refuses, the key is still the node's address.
+pub fn narrow_secret_mode(path: &Path) -> std::io::Result<bool> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(path)?.permissions().mode() & 0o777;
+        if mode & 0o077 != 0 {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+            tracing::warn!(
+                "{} holds a private key and was mode {mode:03o}; narrowed to 600",
+                path.display()
+            );
+            return Ok(true);
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(false)
 }
 
 /// Current Unix timestamp in seconds (f64), matching Python `time.time()`.

@@ -517,7 +517,7 @@ queue on either side, which is exactly the shape that tests well.
 **A. One process. TUI plus an in-driver `CoreProcessor`.** The binary
 builds a `ReticulumNode` as a shared-instance client with
 `core_processor(...)` installed, exactly as `leviculum-lxmf-node` does
-(`leviculum-lxmf-node/src/main.rs:389-395`). The processor owns the
+(`leviculum-lxmf-node/src/main.rs:389-398`). The processor owns the
 `LxmfRouter`; the TUI owns the model. They talk over two unbounded
 channels.
 
@@ -977,7 +977,7 @@ not a list of open work.
 10. **Codeberg #203** (`StampExecutor::generate` returns a `!Send` future)
     applies to us as it applied to `leviculum-lxmf-node`, which worked
     around it with a dedicated thread running a current-thread runtime
-    (`leviculum-lxmf-node/src/main.rs:438-489`). We will make the same
+    (`leviculum-lxmf-node/src/main.rs:441-492`). We will make the same
     workaround.
 11. **Codeberg #204** (a hook owns the events its own core calls return) is
     a documentation gap we will hit on day one. The bounded re-feed loop is

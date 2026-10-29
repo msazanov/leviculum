@@ -390,6 +390,9 @@ async fn run(args: Args) -> Result<(), String> {
     let mut builder = ReticulumNodeBuilder::new()
         .enable_transport(false)
         .connect_to_shared_instance(&instance)
+        // The daemon's RPC key is under its config directory, not this
+        // node's identity (1119).
+        .shared_instance_config_dir(args.config_dir.clone())
         .max_links(daemon_keys.max_links)
         .storage_path(storage_dir)
         .core_processor(processor);

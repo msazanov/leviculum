@@ -494,3 +494,94 @@ fn the_event_log_records_the_run_in_the_documented_format() {
         "the emitted events must satisfy their catalogue entries:\n{text}"
     );
 }
+
+/// `loquax address` under `umask 0002`, in a fresh state directory.
+#[cfg(unix)]
+fn address_under_umask_0002(home: &std::path::Path) -> std::process::Output {
+    Command::new("sh")
+        .args(["-c", "umask 0002 && exec \"$0\" address", LNMSG])
+        .env("LNMSG_HOME", home)
+        .env_remove("LEVICULUM_EVENT_LOG")
+        .stdin(Stdio::null())
+        .output()
+        .expect("run loquax")
+}
+
+#[cfg(unix)]
+fn mode(path: &std::path::Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).expect("stat").permissions().mode() & 0o777
+}
+
+/// The identity is the private key: 0600 whatever the umask. Under 0002 it
+/// came out 0664, readable by the whole group (found 2026-10-29, 1119).
+#[cfg(unix)]
+#[test]
+fn a_minted_identity_is_owner_only_under_a_group_umask() {
+    let home = tempfile::tempdir().expect("state dir");
+    let output = address_under_umask_0002(home.path());
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(mode(&home.path().join("identity")), 0o600);
+}
+
+/// A key an older loquax left group-readable is narrowed when it is loaded,
+/// and stays the same key: the address does not change.
+#[cfg(unix)]
+#[test]
+fn a_group_readable_identity_is_narrowed_at_load() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().expect("state dir");
+    let first = address_under_umask_0002(home.path());
+    assert!(first.status.success(), "{first:?}");
+    let path = home.path().join("identity");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o664)).expect("chmod");
+    let key = std::fs::read(&path).expect("read");
+
+    let second = address_under_umask_0002(home.path());
+    assert!(second.status.success(), "{second:?}");
+    assert_eq!(mode(&path), 0o600);
+    assert_eq!(std::fs::read(&path).expect("read"), key, "the same key");
+    assert_eq!(first.stdout, second.stdout, "the same address");
+}
+
+/// 1119: `--config` goes before the subcommand as well as after it, for every
+/// subcommand. `loquax --config X home join CODE` was refused ("cannot be used
+/// with '--config'") while `loquax home join CODE --config X` worked. The
+/// directory names an instance no daemon serves, so a run that read it fails
+/// naming that instance: the value arrived, not just the parse.
+#[cfg(feature = "tui")]
+#[test]
+fn config_is_taken_before_and_after_the_subcommand() {
+    let config = tempfile::tempdir().expect("config dir");
+    let instance = format!("loquax-config-probe-{}", std::process::id());
+    std::fs::write(
+        config.path().join("config"),
+        format!("[reticulum]\n  instance_name = {instance}\n"),
+    )
+    .expect("config");
+    let dir = config.path().to_str().expect("utf-8 path");
+    let code = "lqxh1notacode";
+    let runs: [&[&str]; 6] = [
+        &["--config", dir, "send", NOWHERE, "hi"],
+        &["send", "--config", dir, NOWHERE, "hi"],
+        &["--config", dir, "fetch", "--timeout", "1"],
+        &["fetch", "--timeout", "1", "--config", dir],
+        &["--config", dir, "home", "join", code],
+        &["home", "join", code, "--config", dir],
+    ];
+    for args in runs {
+        let run = run(args, b"");
+        assert!(
+            !run.stderr.contains("cannot be used with"),
+            "{args:?}: {}",
+            run.stderr
+        );
+        if args.contains(&"join") {
+            // The code is refused before the config is read; the parse is
+            // what this run is for.
+            assert!(run.stderr.contains("home code"), "{args:?}: {}", run.stderr);
+        } else {
+            assert!(run.stderr.contains(&instance), "{args:?}: {}", run.stderr);
+        }
+    }
+}

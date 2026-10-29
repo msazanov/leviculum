@@ -229,7 +229,12 @@ pub unsafe extern "C" fn lev_identity_load_file(path: *const c_char) -> *mut lev
             }
         };
         match Identity::from_private_key_bytes(&bytes) {
-            Ok(inner) => Box::into_raw(Box::new(lev_identity_t { inner })),
+            Ok(inner) => {
+                // A key an older writer left wider than 0600 (1119); a chmod
+                // that fails leaves the key usable, so it does not refuse.
+                let _ = leviculum_std::narrow_secret_mode(std::path::Path::new(path));
+                Box::into_raw(Box::new(lev_identity_t { inner }))
+            }
             Err(e) => {
                 set_last_error(format!("{e:?}"));
                 std::ptr::null_mut()

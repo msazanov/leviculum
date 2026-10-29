@@ -44,20 +44,20 @@ returns `self`.
 |-----------|---------|
 | `fn new() -> Self` — `builder.rs:102` | Builder with defaults |
 | `fn identity(self, identity: Identity) -> Self` — `builder.rs:228` | Pin an explicit identity (else one is generated/persisted) |
-| `fn add_tcp_client(self, addr: SocketAddr) -> Self` — `builder.rs:279` | Connect outward to a Reticulum node |
-| `fn add_tcp_server(self, addr: SocketAddr) -> Self` — `builder.rs:332` | Listen for inbound connections |
-| `fn add_udp_interface(self, listen: SocketAddr, forward: SocketAddr) -> Self` — `builder.rs:417` | One datagram per packet |
+| `fn add_tcp_client(self, addr: SocketAddr) -> Self` — `builder.rs:283` | Connect outward to a Reticulum node |
+| `fn add_tcp_server(self, addr: SocketAddr) -> Self` — `builder.rs:336` | Listen for inbound connections |
+| `fn add_udp_interface(self, listen: SocketAddr, forward: SocketAddr) -> Self` — `builder.rs:421` | One datagram per packet |
 | `fn add_rnode_interface(self, port: String, frequency: u64, bandwidth: u32, spreading_factor: u8, coding_rate: u8, tx_power: i8) -> Self` — `builder.rs:460` | LoRa interface; required radio settings |
-| `fn add_serial_interface(self, port: String, speed: u32, databits: u8, parity: String, stopbits: u8) -> Self` — `builder.rs:516` | KISS over raw serial |
-| `fn add_auto_interface(self) -> Self` — `builder.rs:643` | IPv6 multicast LAN discovery |
-| `fn enable_transport(self, enabled: bool) -> Self` — `builder.rs:712` | Act as a relay/forwarder |
+| `fn add_serial_interface(self, port: String, speed: u32, databits: u8, parity: String, stopbits: u8) -> Self` — `builder.rs:520` | KISS over raw serial |
+| `fn add_auto_interface(self) -> Self` — `builder.rs:647` | IPv6 multicast LAN discovery |
+| `fn enable_transport(self, enabled: bool) -> Self` — `builder.rs:716` | Act as a relay/forwarder |
 | `fn config(self, config: Config) -> Self` — `builder.rs:253` | Use a pre-loaded `Config` |
 | `fn config_file(self, path: PathBuf) -> Self` — `builder.rs:263` | Load an INI config file |
-| `fn storage_path(self, path: PathBuf) -> Self` — `builder.rs:271` | Identity / known-destinations / ratchet store dir |
-| `fn connect_to_shared_instance(self, name: impl Into<String>) -> Self` — `builder.rs:777` | Attach to a running `lnsd`/`rnsd` instead of bringing up own interfaces |
-| `fn without_events(self) -> Self` — `builder.rs:220` | Daemon mode: no application event channel |
-| `async fn build(self) -> Result<ReticulumNode, Error>` — `builder.rs:1164` | Build the node (not yet running) |
-| `fn build_sync(self) -> Result<ReticulumNode, Error>` — `builder.rs:881` | Same as `build`, outside an async context |
+| `fn storage_path(self, path: PathBuf) -> Self` — `builder.rs:275` | Identity / known-destinations / ratchet store dir |
+| `fn connect_to_shared_instance(self, name: impl Into<String>) -> Self` — `builder.rs:781` | Attach to a running `lnsd`/`rnsd` instead of bringing up own interfaces |
+| `fn without_events(self) -> Self` — `builder.rs:224` | Daemon mode: no application event channel |
+| `async fn build(self) -> Result<ReticulumNode, Error>` — `builder.rs:1202` | Build the node (not yet running) |
+| `fn build_sync(self) -> Result<ReticulumNode, Error>` — `builder.rs:903` | Same as `build`, outside an async context |
 
 ### `ReticulumNode`
 

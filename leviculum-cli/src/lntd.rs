@@ -168,17 +168,23 @@ fn instance_name(config_dir: &Path) -> String {
 /// and a silent re-mint would strand all of them at once with no trace.
 fn load_or_create_identity(path: &Path) -> Result<Identity, String> {
     match std::fs::read(path) {
-        Ok(bytes) => leviculum_core::identity_store::decode_identity(&bytes).ok_or_else(|| {
-            format!(
-                "{} is not a readable identity record.\n  \
-                 This file is the address your boards report to: it is not replaced \
-                 automatically, because a new one would strand every board flashed \
-                 with the old hash.\n  \
-                 Restore it from a backup, or move it aside to start over with a \
-                 new address and reflash the boards.",
-                path.display()
-            )
-        }),
+        Ok(bytes) => leviculum_core::identity_store::decode_identity(&bytes)
+            .ok_or_else(|| {
+                format!(
+                    "{} is not a readable identity record.\n  \
+                     This file is the address your boards report to: it is not replaced \
+                     automatically, because a new one would strand every board flashed \
+                     with the old hash.\n  \
+                     Restore it from a backup, or move it aside to start over with a \
+                     new address and reflash the boards.",
+                    path.display()
+                )
+            })
+            .and_then(|identity| {
+                leviculum_std::narrow_secret_mode(path)
+                    .map(|_| identity)
+                    .map_err(|e| format!("{}: {e}", path.display()))
+            }),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             let identity = leviculum_std::generate_identity();
             let encoded = leviculum_core::identity_store::encode_identity(&identity)

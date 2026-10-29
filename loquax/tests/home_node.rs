@@ -142,6 +142,7 @@ async fn a_home_node_takes_direct_mail_and_its_admitted_clients_pull_it() {
             )
             .await;
         assert_eq!(joined.code, Some(0), "{joined}\nhome node:\n{}", node.log());
+        assert_first_hop_answered(&joined);
         assert!(joined.stdout.contains(&address), "{joined}");
         // A client's address is its home node's.
         let shown = local(client.path(), &["address"]);
@@ -517,7 +518,18 @@ async fn joined(mesh: &Mesh, node: &HomeNode, code: &str) -> tempfile::TempDir {
         )
         .await;
     assert_eq!(joined.code, Some(0), "{joined}\nhome node:\n{}", node.log());
+    assert_first_hop_answered(&joined);
     client
+}
+
+/// 1119: a client asks the daemon's RPC with the daemon's key, so the
+/// first hop's timeout is the daemon's answer, not the local fallback that
+/// followed "authentication failed" on every join and fetch.
+fn assert_first_hop_answered(run: &Sent) {
+    assert!(
+        !run.stderr.contains("authentication failed") && !run.log.contains("authentication failed"),
+        "{run}"
+    );
 }
 
 /// A client's `loquax fetch`, which must succeed.
@@ -536,6 +548,7 @@ async fn fetch(mesh: &Mesh, node: &HomeNode, client: &std::path::Path) -> Sent {
         "{fetched}\nhome node:\n{}",
         node.log()
     );
+    assert_first_hop_answered(&fetched);
     fetched
 }
 

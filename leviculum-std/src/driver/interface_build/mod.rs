@@ -204,9 +204,73 @@ pub(super) fn rnode_wire_bandwidth(name: &str, bandwidth: u32) -> u32 {
     wire
 }
 
+/// The socket address a listener binds for a configured `listen_ip` and port.
+///
+/// The ip and the port are joined as values, not as text: `"{ip}:{port}"`
+/// turns `::` into `:::4343`, which nothing parses, while rnsd binds `::` and
+/// every IPv6 literal (1119). A bracketed `[::]` is taken too, as it always
+/// was here. Anything that is not an IP literal is a name, looked up as the
+/// reference looks it up (`TCPServerInterface.get_address_for_host`,
+/// TCPInterface.py:478-492: `getaddrinfo`, the first IPv4 answer unless
+/// `prefer_ipv6`, else the first answer); a link-local `fe80::1%eth0` goes
+/// the same way, since only the system resolver knows the scope.
+pub(super) fn bind_address(
+    listen_ip: &str,
+    port: u16,
+    prefer_ipv6: bool,
+) -> Result<std::net::SocketAddr, String> {
+    use std::net::{IpAddr, SocketAddr, ToSocketAddrs as _};
+
+    let host = listen_ip.trim();
+    let host = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    if host.is_empty() {
+        return Err("no address".to_string());
+    }
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return Ok(SocketAddr::new(ip, port));
+    }
+    let answers: Vec<SocketAddr> = (host, port)
+        .to_socket_addrs()
+        .map_err(|e| e.to_string())?
+        .collect();
+    answers
+        .iter()
+        .find(|a| a.is_ipv6() == prefer_ipv6)
+        .or_else(|| answers.first())
+        .copied()
+        .ok_or_else(|| format!("no addresses for {host}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 1119: rnsd binds `listen_ip = ::` and any IPv6 literal
+    /// (`TCPServerInterface.get_address_for_host`, TCPInterface.py:478-492,
+    /// which is `getaddrinfo`); gluing `{ip}:{port}` made `:::4343`, which no
+    /// socket-address parser takes.
+    #[test]
+    fn a_listen_ip_binds_as_rnsd_binds_it() {
+        use std::net::SocketAddr;
+        let bound = |ip: &str| bind_address(ip, 4343, false);
+        let addr = |s: &str| s.parse::<SocketAddr>().expect("literal");
+        assert_eq!(bound("::"), Ok(addr("[::]:4343")));
+        assert_eq!(bound("::1"), Ok(addr("[::1]:4343")));
+        assert_eq!(bound("0.0.0.0"), Ok(addr("0.0.0.0:4343")));
+        assert_eq!(
+            bound("[::]"),
+            Ok(addr("[::]:4343")),
+            "the bracketed form stays"
+        );
+        assert_eq!(bound(" 127.0.0.1 "), Ok(addr("127.0.0.1:4343")));
+        // A name resolves, IPv4 first unless `prefer_ipv6` (the reference's
+        // pick from the getaddrinfo answer).
+        assert_eq!(bound("localhost"), Ok(addr("127.0.0.1:4343")));
+        assert!(bound("").is_err());
+    }
 
     /// L-0007: every spelling an operator may write reaches an RNode as the
     /// one RNode_Firmware's `getSignalBandwidth` reports for the register it

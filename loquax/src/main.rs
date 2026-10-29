@@ -79,9 +79,10 @@ const DEFAULT_FETCH_TIMEOUT_SECS: u64 = 60;
 // No subcommand is the messenger (Lew, 2026-10-26), so the subcommand is an
 // `Option` and the messenger's options sit at the top level; `tui` stays as
 // a subcommand so every script and cell that names it keeps working.
-// `args_conflicts_with_subcommands` keeps the two forms apart: `loquax --to X
-// send` is an argument error, not a send with a stray flag.
-#[command(args_conflicts_with_subcommands = true)]
+// [`parse_args`] keeps the two forms apart: `loquax --to X send` is an
+// argument error, not a send with a stray flag. `--config` alone may go
+// before a subcommand (1119), which clap's `args_conflicts_with_subcommands`
+// cannot allow: it exempts no argument, global ones included.
 struct Args {
     /// Run as the home node, headless, until SIGINT or SIGTERM: receive for
     /// this identity, archive every message, answer the admitted devices,
@@ -221,8 +222,10 @@ struct TuiArgs {
     #[arg(long)]
     instance: Option<String>,
 
-    /// Reticulum config directory (default: the platform default).
-    #[arg(long)]
+    /// Reticulum config directory (default: the platform default). Taken
+    /// before a subcommand too, for every subcommand: `loquax --config X
+    /// home join CODE` as well as `loquax home join CODE --config X` (1119).
+    #[arg(long, global = true)]
     config: Option<PathBuf>,
 
     /// Seconds each send's leg may take, as `send --timeout`; a fetch gets
@@ -546,9 +549,39 @@ async fn read_routes(config_dir: &Path, instance: &str) -> Result<Vec<Route>, St
     Ok(routes)
 }
 
+/// [`Args`] from the command line, refusing a subcommand together with any of
+/// the messenger's own options except `--config`, which every subcommand
+/// takes before it as well as after it (1119).
+fn parse_args() -> Args {
+    use clap::{parser::ValueSource, CommandFactory as _, FromArgMatches as _};
+
+    let mut command = Args::command();
+    let matches = command.get_matches_mut();
+    if let Some((name, _)) = matches.subcommand() {
+        // The command's own arguments, not `matches.ids()`: that also holds
+        // the group id the flattened `TuiArgs` brings, which counts as given.
+        let stray = command
+            .get_arguments()
+            .filter(|arg| arg.get_id() != "config")
+            .find(|arg| {
+                matches.value_source(arg.get_id().as_str()) == Some(ValueSource::CommandLine)
+            })
+            .map(ToString::to_string);
+        if let Some(flag) = stray {
+            command
+                .error(
+                    clap::error::ErrorKind::ArgumentConflict,
+                    format!("the subcommand '{name}' cannot be used with '{flag}'"),
+                )
+                .exit();
+        }
+    }
+    Args::from_arg_matches(&matches).unwrap_or_else(|error| error.exit())
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
-    let args = Args::parse();
+    let args = parse_args();
     // Once, before any subcommand resolves the state directory: a first
     // start after the rename must find the address it had as lnmsg.
     match identity::migrate_legacy_home() {
@@ -912,6 +945,7 @@ async fn run(args: SendArgs) -> ExitCode {
     };
     let mut attached = match attach(AttachConfig {
         instance: instance.clone(),
+        config_dir: Some(config_dir.clone()),
         storage_dir,
         identity,
         display_name: display_name.name.into_bytes(),
@@ -1062,6 +1096,7 @@ async fn run_fetch_command(args: FetchArgs) -> ExitCode {
     };
     let mut attached = match attach(AttachConfig {
         instance: instance.clone(),
+        config_dir: Some(config_dir.clone()),
         storage_dir,
         identity,
         display_name: display_name.name.into_bytes(),
@@ -1159,6 +1194,7 @@ async fn run_client_send(
     let mut attached = match loquax::engine::attach_as(
         AttachConfig {
             instance,
+            config_dir: Some(config_dir.clone()),
             storage_dir,
             identity: device.clone(),
             display_name: Vec::new(),
@@ -1290,6 +1326,7 @@ async fn run_daemon(args: TuiArgs) -> ExitCode {
     let outcome = loquax::home::daemon::run(loquax::home::daemon::DaemonOptions {
         home,
         instance,
+        config_dir,
         storage_dir,
         identity,
         display_name: display_name.name.into_bytes(),
@@ -1480,6 +1517,7 @@ async fn run_join(home: PathBuf, client: Option<[u8; 64]>, args: JoinArgs) -> Ex
     let attached = match loquax::engine::attach_as(
         AttachConfig {
             instance,
+            config_dir: Some(config_dir.clone()),
             storage_dir,
             identity: device.clone(),
             display_name: Vec::new(),
@@ -1544,6 +1582,7 @@ async fn run_client_fetch(home: PathBuf, public_key: [u8; 64], args: FetchArgs) 
     let mut attached = match loquax::engine::attach_as(
         AttachConfig {
             instance,
+            config_dir: Some(config_dir.clone()),
             storage_dir,
             identity: device.clone(),
             display_name: Vec::new(),

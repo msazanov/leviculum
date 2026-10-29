@@ -106,4 +106,6 @@ pub use rpc::{
     TRANSPORT_TABLE_NAMES,
 };
 /// Writers for private key material: owner-only from creation (L-0039).
-pub use storage::{atomic_write_secret, create_secret_dir_all, create_secret_file};
+pub use storage::{
+    atomic_write_secret, create_secret_dir_all, create_secret_file, narrow_secret_mode,
+};

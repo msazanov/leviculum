@@ -229,6 +229,7 @@ async fn a_scripted_session_sends_sees_the_proof_and_reads_the_reply() {
     let storage = tempfile::tempdir().expect("their storage");
     let mut them = attach(AttachConfig {
         instance: daemon.instance.clone(),
+        config_dir: Some(daemon.config_dir.path().to_path_buf()),
         storage_dir: storage.path().to_path_buf(),
         identity: theirs,
         display_name: b"them".to_vec(),
@@ -335,6 +336,7 @@ async fn a_late_recipient_shows_the_direct_leg_and_the_log_keeps_its_steps() {
     let storage = tempfile::tempdir().expect("their storage");
     let them = attach(AttachConfig {
         instance: daemon.instance.clone(),
+        config_dir: Some(daemon.config_dir.path().to_path_buf()),
         storage_dir: storage.path().to_path_buf(),
         identity: theirs,
         display_name: b"them".to_vec(),
@@ -826,6 +828,7 @@ async fn chat_session(size: &str) -> (String, String) {
     let storage = tempfile::tempdir().expect("their storage");
     let mut them = attach(AttachConfig {
         instance: daemon.instance.clone(),
+        config_dir: Some(daemon.config_dir.path().to_path_buf()),
         storage_dir: storage.path().to_path_buf(),
         identity: theirs,
         display_name: b"them".to_vec(),
@@ -1340,6 +1343,7 @@ async fn names_from_announces_carry_their_hash_collide_and_yield_to_a_petname() 
         let storage = tempfile::tempdir().expect("their storage");
         let them = attach(AttachConfig {
             instance: daemon.instance.clone(),
+            config_dir: Some(daemon.config_dir.path().to_path_buf()),
             storage_dir: storage.path().to_path_buf(),
             identity: fixed_identity(seed),
             display_name: name.as_bytes().to_vec(),
@@ -1559,6 +1563,7 @@ async fn a_restart_shows_the_earlier_exchange_with_its_marks() {
     let storage = tempfile::tempdir().expect("bob's storage");
     let mut bob = attach(AttachConfig {
         instance: daemon.instance.clone(),
+        config_dir: Some(daemon.config_dir.path().to_path_buf()),
         storage_dir: storage.path().to_path_buf(),
         identity: fixed_identity(0x22),
         display_name: b"Bob".to_vec(),
@@ -1769,6 +1774,7 @@ async fn peer_session(
     let storage = tempfile::tempdir().expect("their storage");
     let mut them = attach(AttachConfig {
         instance: daemon.instance.clone(),
+        config_dir: Some(daemon.config_dir.path().to_path_buf()),
         storage_dir: storage.path().to_path_buf(),
         identity: theirs,
         display_name: b"them".to_vec(),
@@ -2467,6 +2473,7 @@ async fn a_message_left_at_the_mailbox_arrives_without_a_key() {
     let storage = tempfile::tempdir().expect("our storage");
     let early = attach(AttachConfig {
         instance: daemon.instance.clone(),
+        config_dir: Some(daemon.config_dir.path().to_path_buf()),
         storage_dir: storage.path().to_path_buf(),
         identity: fixed_identity(0x11),
         display_name: b"tui".to_vec(),
@@ -2696,6 +2703,7 @@ async fn a_send_does_not_wait_behind_a_fetch_that_stalls() {
             them = Some(
                 attach(AttachConfig {
                     instance: daemon.instance.clone(),
+                    config_dir: Some(daemon.config_dir.path().to_path_buf()),
                     storage_dir: storage.path().to_path_buf(),
                     identity: theirs,
                     display_name: b"them".to_vec(),
@@ -2851,6 +2859,7 @@ async fn a_message_from_an_unheard_sender_is_verified_once_its_key_arrives() {
     let storage = tempfile::tempdir().expect("their storage");
     let mut them = attach(AttachConfig {
         instance: daemon.instance.clone(),
+        config_dir: Some(daemon.config_dir.path().to_path_buf()),
         storage_dir: storage.path().to_path_buf(),
         identity: theirs,
         display_name: b"them".to_vec(),
