@@ -653,7 +653,8 @@ impl Engine {
                 Command::HomeAccepted { .. }
                 | Command::HomeState { .. }
                 | Command::HomeSent { .. }
-                | Command::HomeMark { .. } => {}
+                | Command::HomeMark { .. }
+                | Command::HomeName { .. } => {}
             }
         }
     }
@@ -829,6 +830,10 @@ impl Engine {
                     }
                 }
                 Command::HomeMark { mark } => self.emit(OutboxEvent::HomeMarked { mark }),
+                Command::HomeName { destination, name } => self.emit(OutboxEvent::Announced {
+                    destination,
+                    name: Some(name),
+                }),
                 Command::Fetch { .. } => self.emit(OutboxEvent::SyncFailed {
                     detail: "a client of a home node pulls from the home node, not a \
                              propagation node"

@@ -270,7 +270,14 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                         OutboxEvent::PnUnavailable { detail } => {
                             tracing::info!("HOME no propagation node: {detail}");
                         }
-                        OutboxEvent::Announced { destination, .. } => {
+                        OutboxEvent::Announced { destination, name } => {
+                            if let Some(name) = name.filter(|_| destination != address) {
+                                if let Some(seq) =
+                                    archive_name(&mut store, destination, &name, archive_cap_bytes)
+                                {
+                                    wakes.appended(seq);
+                                }
+                            }
                             let acts = outgoing.announced(destination, unix_now());
                             sender.carry_out(&mut attached.outbox, &mut store, &mut outgoing, acts, selected_pn);
                         }
@@ -341,6 +348,26 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
     drop(node);
     attached.stop().await;
     outcome
+}
+
+/// Keep a name a peer announced in the archive, for the clients that hear
+/// no announces: its sequence, when the name is new for the peer.
+fn archive_name(store: &mut Store, peer: [u8; 16], name: &str, cap: u64) -> Option<u64> {
+    let now = leviculum_std::local_time::unix_now_secs();
+    match store.archive_name(peer, name, now, cap) {
+        Ok(Some(seq)) => {
+            tracing::info!(
+                "HOME name archived peer={} seq={seq}",
+                crate::address::to_hex(&peer)
+            );
+            Some(seq)
+        }
+        Ok(None) => None,
+        Err(error) => {
+            tracing::warn!("HOME archive: {error}");
+            None
+        }
+    }
 }
 
 /// Keep one received message in the archive: its sequence, when it is new.

@@ -141,6 +141,10 @@ pub enum Command {
     /// On a client: a mark one of the home's devices set, pulled from the
     /// archive; reported as [`OutboxEvent::HomeMarked`].
     HomeMark { mark: crate::home::wire::Mark },
+    /// On a client: a name the home node heard a peer announce, pulled from
+    /// the archive; reported as [`OutboxEvent::Announced`], as an announce
+    /// the client heard itself would be.
+    HomeName { destination: [u8; 16], name: String },
 }
 
 /// What the mailbox rule is fed from, read by the frontend before it selects:

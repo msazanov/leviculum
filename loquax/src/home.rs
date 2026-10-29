@@ -87,6 +87,12 @@ pub const KIND_RETRIES_ENDED: u8 = 5;
 /// A client's `/mark`: its bytes are the request as the client sent it, a
 /// flag and the message ids ([`wire::Mark`]).
 pub const KIND_MARK: u8 = 6;
+/// A display name the home node heard a peer announce, appended when it
+/// differs from the last one it appended for that peer: a client is a leaf
+/// that hears no announces itself. Its bytes are the peer's address and
+/// the name as announced ([`wire::name_entry`]); the entry's time is when
+/// the home node heard it.
+pub const KIND_NAME: u8 = 7;
 
 /// What a client shows for a state entry of a message it sent through the
 /// home node: the router state its bubble takes, `None` for an entry that

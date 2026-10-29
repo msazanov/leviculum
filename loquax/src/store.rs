@@ -1055,6 +1055,66 @@ impl Store {
         Ok(seq)
     }
 
+    /// Append a name entry ([`crate::home::KIND_NAME`]) for the display
+    /// name `peer` announced, heard at `at`, when it says something new: a
+    /// name that sanitises to nothing, or to the name kept for `peer`
+    /// already, appends nothing (`None`). The entry carries the name as
+    /// announced, which each client sanitises as it does an announce; the
+    /// names table keeps the sanitised one, as on any device.
+    pub fn archive_name(
+        &mut self,
+        peer: [u8; 16],
+        name: &str,
+        at: i64,
+        cap_bytes: u64,
+    ) -> Result<Option<u64>, StoreError> {
+        let Some(shown) = crate::names::sanitise(name) else {
+            return Ok(None);
+        };
+        let identity = self.identity;
+        let path = self.path.clone();
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| failed(&path, e))?;
+        let kept: Option<String> = tx
+            .query_row(
+                "SELECT name FROM names WHERE identity = ?1 AND peer = ?2",
+                params![&identity[..], &peer[..]],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| failed(&path, e))?;
+        if kept.as_deref() == Some(shown.as_str()) {
+            return Ok(None);
+        }
+        let packed = crate::home::wire::name_entry(&peer, name);
+        // A name may come back after another: the time makes it a new entry.
+        let mut keyed = packed.clone();
+        keyed.extend_from_slice(&at.to_be_bytes());
+        let id = leviculum_core::crypto::sha256(&keyed);
+        let seq = append_in(
+            &tx,
+            &identity,
+            crate::home::KIND_NAME,
+            &id,
+            &packed,
+            at,
+            cap_bytes,
+        )
+        .map_err(|e| failed(&path, e))?;
+        if seq.is_some() {
+            tx.execute(
+                "INSERT INTO names(identity, peer, name) VALUES (?1, ?2, ?3) \
+                 ON CONFLICT(identity, peer) DO UPDATE SET name = excluded.name",
+                params![&identity[..], &peer[..], shown],
+            )
+            .map_err(|e| failed(&path, e))?;
+        }
+        tx.commit().map_err(|e| failed(&path, e))?;
+        Ok(seq)
+    }
+
     /// The archive entries after `cursor`, oldest first, up to about
     /// `max_bytes` of packed messages but always at least one when there is
     /// one, and whether more follow. `first` is the oldest sequence still
@@ -2361,6 +2421,60 @@ mod tests {
         assert_eq!(
             names,
             vec![(ALICE, "Ally".to_string()), (BOB, "Bob".to_string())]
+        );
+    }
+
+    #[test]
+    fn a_heard_name_is_archived_once_until_it_changes() {
+        let home = tempfile::tempdir().expect("home");
+        let mut store = Store::open_in(home.path(), US).expect("open");
+        let first = store
+            .archive_name(ALICE, "Alice", 10, u64::MAX)
+            .expect("append");
+        assert!(first.is_some(), "a first name is news");
+        assert_eq!(
+            store
+                .archive_name(ALICE, " Alice ", 20, u64::MAX)
+                .expect("ask"),
+            None,
+            "the same name, as the clients will read it, appends nothing"
+        );
+        let blank = store
+            .archive_name(ALICE, "\u{200b}", 25, u64::MAX)
+            .expect("ask");
+        assert_eq!(blank, None, "a name that sanitises to nothing says nothing");
+        let renamed = store
+            .archive_name(ALICE, "Ally", 30, u64::MAX)
+            .expect("append");
+        assert!(renamed > first, "a new name is a new entry");
+        let back = store
+            .archive_name(ALICE, "Alice", 40, u64::MAX)
+            .expect("append");
+        assert!(back > renamed, "and the old name again is one too");
+        let page = store.archive_since(0, usize::MAX).expect("page");
+        let names: Vec<_> = page
+            .entries
+            .iter()
+            .map(|entry| {
+                assert_eq!(entry.kind, crate::home::KIND_NAME);
+                crate::home::wire::read_name_entry(&entry.packed).expect("a name entry")
+            })
+            .collect();
+        assert_eq!(
+            names,
+            [
+                (ALICE, "Alice".to_string()),
+                (ALICE, "Ally".to_string()),
+                (ALICE, "Alice".to_string())
+            ]
+        );
+        assert_eq!(
+            page.entries[1].at, 30,
+            "the entry's time is when it was heard"
+        );
+        assert_eq!(
+            store.names().expect("names"),
+            [(ALICE, "Alice".to_string())]
         );
     }
 

@@ -440,6 +440,15 @@ async fn take_in(
             }
             continue;
         }
+        if entry.kind == super::KIND_NAME {
+            match wire::read_name_entry(&entry.packed) {
+                Ok((destination, name)) => outbox
+                    .submit(Command::HomeName { destination, name })
+                    .map_err(gone)?,
+                Err(_) => tracing::warn!("HOME pull: entry {} is no name", entry.seq),
+            }
+            continue;
+        }
         let id = match entry.kind {
             super::KIND_SENT => leviculum_lxmf::Message::unpack(
                 &entry.packed,
@@ -628,10 +637,11 @@ mod tests {
     }
 
     /// A sent entry goes to the engine whole, for a bubble on a device that
-    /// does not have one; a mark goes as the mark; one that does not decode
-    /// is passed over and still counted into the cursor.
+    /// does not have one; a mark goes as the mark, a heard name as the name;
+    /// one that does not decode is passed over and still counted into the
+    /// cursor.
     #[tokio::test]
-    async fn sent_and_mark_entries_reach_the_engine() {
+    async fn sent_mark_and_name_entries_reach_the_engine() {
         use leviculum_core::Identity;
         let home = Identity::generate(&mut rand_core::OsRng);
         let message = leviculum_lxmf::Message::create(
@@ -654,12 +664,18 @@ mod tests {
                 entry(1, super::super::KIND_SENT, message.pack()),
                 entry(2, super::super::KIND_MARK, wire::mark_request(&mark)),
                 entry(3, super::super::KIND_MARK, vec![0x90]),
+                entry(
+                    4,
+                    super::super::KIND_NAME,
+                    wire::name_entry(&[5; 16], "Reviewer Berlin"),
+                ),
+                entry(5, super::super::KIND_NAME, vec![0x90]),
             ],
             first: 1,
         };
-        let mut outbox = FakeOutbox::new(vec![OutboxEvent::Fenced { token: 3 }]);
+        let mut outbox = FakeOutbox::new(vec![OutboxEvent::Fenced { token: 5 }]);
         let pull = take_in(&mut outbox, 0, pulled).await.expect("pull");
-        assert_eq!(pull.cursor, Some(3));
+        assert_eq!(pull.cursor, Some(5));
         assert_eq!(pull.sent, [(message.message_id, super::super::KIND_SENT)]);
         assert_eq!(
             *outbox.commands.borrow(),
@@ -668,7 +684,11 @@ mod tests {
                     packed: message.pack()
                 },
                 Command::HomeMark { mark },
-                Command::Fence { token: 3 },
+                Command::HomeName {
+                    destination: [5; 16],
+                    name: "Reviewer Berlin".to_string()
+                },
+                Command::Fence { token: 5 },
             ]
         );
     }

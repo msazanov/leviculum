@@ -1175,7 +1175,8 @@ fn conversation(
 /// it unread, with another conversation open. Client A pulls it, opens its
 /// conversation (read) and answers through the home node. B pulls again:
 /// the message is read there, and A's answer is a sent bubble B never
-/// composed.
+/// composed. The sender's announced name, heard by the home node alone,
+/// reaches B's name table on its pull (1132).
 #[tokio::test(flavor = "multi_thread")]
 async fn what_one_client_reads_and_sends_shows_on_the_other() {
     let peer = PythonPeer::start();
@@ -1208,6 +1209,11 @@ async fn what_one_client_reads_and_sends_shows_on_the_other() {
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
     node.wait_for("HOME archived message=", 40).await;
+    // The sender announces its display name, which only the home node
+    // hears; it goes into the archive once.
+    peer.lxmf_announce();
+    node.wait_for(&format!("HOME name archived peer={sender_address}"), 30)
+        .await;
 
     let parse = |hex_address: &str| -> [u8; 16] {
         hex::decode(hex_address)
@@ -1229,6 +1235,16 @@ async fn what_one_client_reads_and_sends_shows_on_the_other() {
     .await;
     let seen = conversation(b.path(), home_address, sender);
     assert_eq!(seen.unread, 1, "B pulled it unread");
+    // The sender's name, which B never heard announced: the home node
+    // heard it and B took it from the archive (1132).
+    let names = loquax::store::Store::open_in(b.path(), home_address)
+        .expect("B's store")
+        .names()
+        .expect("B's names");
+    assert!(
+        names.contains(&(sender, "test-daemon".to_string())),
+        "B knows the sender by name: {names:?}"
+    );
 
     // A opens the sender's conversation, the newest on the list, and answers.
     tui(

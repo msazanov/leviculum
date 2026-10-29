@@ -302,6 +302,36 @@ wait for it, and at the end waits for it up to a send's budget. A mark the
 home node did not take is said in `tui.log` and not retried in this slice:
 the other devices keep the message unread until the reader marks it again.
 
+## Names the home node heard
+
+1132. A client is a leaf with one interface, to the home node: it hears no
+announces, so on its own it would never learn a display name and would
+name every peer by its hash. The home node hears them, as the messenger
+engine on the shared instance it is.
+
+- **A name entry**, kind 7, is appended when a peer announces a display
+  name that differs from the last one the home node appended for it:
+  `[address: bin16, name: str]`, the name as announced, and the entry's
+  time is when the home node heard it. The home node compares the name
+  sanitised as every screen sanitises it (`loquax::names::sanitise`) and
+  keeps that in its own names table, so an unchanged announce, or one
+  whose name sanitises to nothing, appends nothing, and a peer that goes
+  back to an earlier name gets an entry again (`Store::archive_name`). The
+  home node's own announce, echoed back, appends nothing.
+- **On pull** the client hands each name entry to its engine
+  (`Command::HomeName`), which reports it as `OutboxEvent::Announced`,
+  exactly as an announce the client heard itself: the screen's `Names`
+  sanitise it, mark a collision and note a change in the conversation as
+  for any announce (1047), and the runner keeps it in the client's store.
+- **Appearance.** An LXMF announce carries the display name, the stamp
+  cost and the supported functions
+  (`reference/LXMF/LXMF/LXMRouter.py:1048`), no icon; a peer's icon appearance comes in its messages' fields,
+  which the archive already carries whole, so the avatars of 1129 need no
+  entry of their own.
+- **Before 1132** the archive has no name entries: a client learns a
+  peer's name from the first announce the home node hears after it runs
+  this version.
+
 ## The archive
 
 A table of the loquax store (`archive`, schema 4 of
