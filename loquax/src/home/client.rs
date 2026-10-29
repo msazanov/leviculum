@@ -349,7 +349,9 @@ pub fn save_cursor(home: &std::path::Path, cursor: u64) -> Result<(), String> {
     write_atomically(&home.join(CURSOR_FILE), &format!("{cursor}\n"))
 }
 
-fn write_atomically(path: &std::path::Path, text: &str) -> Result<(), String> {
+/// Write `text` to `path` through a temporary file beside it, so a reader
+/// sees the old content or the new, never half of it.
+pub fn write_atomically(path: &std::path::Path, text: &str) -> Result<(), String> {
     let temporary = path.with_extension("new");
     std::fs::write(&temporary, text)
         .and_then(|()| std::fs::rename(&temporary, path))

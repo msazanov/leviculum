@@ -62,7 +62,7 @@ impl SeenStore {
     pub fn from_text(text: &str) -> (Self, Option<SeenWrite>) {
         let mut store = Self::default();
         for line in text.lines() {
-            if let Some(id) = parse_id(line.trim()) {
+            if let Some(id) = crate::address::parse_id(line.trim()) {
                 if store.seen.insert(id) {
                     store.order.push(id);
                 }
@@ -144,22 +144,6 @@ pub fn apply(home: &std::path::Path, write: &SeenWrite) -> std::io::Result<()> {
             std::fs::rename(&tmp, &path)
         }
     }
-}
-
-fn parse_id(line: &str) -> Option<[u8; 32]> {
-    if line.len() != 64 || !line.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return None;
-    }
-    let mut id = [0u8; 32];
-    for (byte, pair) in id.iter_mut().zip(line.as_bytes().chunks_exact(2)) {
-        let digit = |c: u8| match c {
-            b'0'..=b'9' => c - b'0',
-            b'a'..=b'f' => c - b'a' + 10,
-            _ => c.to_ascii_lowercase() - b'a' + 10,
-        };
-        *byte = (digit(pair[0]) << 4) | digit(pair[1]);
-    }
-    Some(id)
 }
 
 #[cfg(test)]

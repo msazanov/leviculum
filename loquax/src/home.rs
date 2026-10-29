@@ -31,6 +31,8 @@ pub mod daemon;
 #[cfg(feature = "std")]
 pub mod lock;
 #[cfg(feature = "history")]
+pub mod runner;
+#[cfg(feature = "history")]
 pub mod server;
 
 /// The home destination's app name and aspect: `loquax.home`, a SINGLE

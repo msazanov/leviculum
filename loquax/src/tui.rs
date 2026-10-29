@@ -1443,7 +1443,7 @@ fn from_rect(rect: Rect) -> leviculum_ui::Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shell::already_held;
+    use loquax::home::runner::already_held;
     use loquax::send::SendError;
     use loquax::store::Store;
     use loquax::ui::update;
