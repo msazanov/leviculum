@@ -76,6 +76,10 @@ const fn rgb(r: u8, g: u8, b: u8) -> Rgb565 {
 /// The background a frame is cleared to before drawing.
 pub const BACKGROUND: Rgb565 = rgb(242, 239, 233);
 
+/// Country borders over the world outline: a muted mauve, apart from the
+/// water and coasts it crosses and from every road and rail colour.
+pub const BORDER: Rgb565 = rgb(170, 140, 175);
+
 /// Area colours, the first table.
 pub fn area_color(c: Class) -> Rgb565 {
     match c {

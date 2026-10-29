@@ -8,14 +8,14 @@ use embedded_graphics::prelude::*;
 use leviculum_map::choice::{choose, drawn, fit_ceiling, useful_zooms, view_zooms};
 use leviculum_map::draw::{draw, Ink};
 use leviculum_map::mercator::{project, unproject, LatLon, World};
-use leviculum_map::outline::{self, OutlineStats, WORLD_50M};
+use leviculum_map::outline::{self, OutlineStats, BORDERS_50M, WORLD_50M};
 use leviculum_map::pins::{order, Pin};
 use leviculum_map::region::{Bounds, Header, Region};
 use leviculum_map::viewport::Viewport;
 use leviculum_mapfill::fill::{Edge, Scratch};
 use leviculum_mapfill::frame::Frame;
 use leviculum_mapfill::render::{NoClock, RenderStats, Work};
-use leviculum_mapfill::style::{Profile, BACKGROUND};
+use leviculum_mapfill::style::{Profile, BACKGROUND, BORDER};
 
 const FLORENCE: &[u8] = include_bytes!("../fixtures/firenze.lmr");
 
@@ -124,20 +124,54 @@ fn the_outline_table_is_natural_earth_50m() {
     }
 }
 
+/// The 1:50m land boundary lines: every line decodes inside its box, the
+/// ring reader sees none of them, and a table cut short anywhere yields
+/// fewer lines and never panics.
+#[test]
+fn the_border_table_is_natural_earth_50m() {
+    let lines: Vec<_> = outline::lines(BORDERS_50M).collect();
+    assert_eq!(outline::bits(BORDERS_50M), Some(18));
+    assert_eq!(lines.len(), 393);
+    assert_eq!(lines.iter().map(|l| l.len()).sum::<usize>(), 19_760);
+    assert!(lines.iter().all(|l| !l.hole && l.len() >= 2));
+    assert_eq!(BORDERS_50M.len(), 49_512);
+    assert!(BORDERS_50M.len() <= 100 * 1024);
+    for l in &lines {
+        let [w, n, e, s] = l.bbox;
+        assert!(e < 1 << 18 && s < 1 << 18, "{:?}", l.bbox);
+        assert_eq!(l.points().count(), l.len());
+        assert!(l
+            .points()
+            .all(|(x, y)| (w..=e).contains(&x) && (n..=s).contains(&y)));
+    }
+    assert_eq!(outline::rings(BORDERS_50M).count(), 0);
+    assert_eq!(outline::lines(WORLD_50M).count(), 0);
+    for cut in [0, 4, 5, 6, 15, 1000, BORDERS_50M.len() - 1] {
+        assert!(outline::lines(&BORDERS_50M[..cut]).count() < 393);
+    }
+}
+
 fn outline_view(view: &Viewport, ink: Ink, fb: &mut [u16]) -> OutlineStats {
     let (w, h) = view.size();
     let mut frame = Frame::new(fb, w, h).expect("frame");
-    let Ok(st) = outline::draw(WORLD_50M, view, ink, &mut frame);
+    let Ok(st) = outline::draw(WORLD_50M, BORDERS_50M, view, ink, &mut frame);
+    st
+}
+
+fn land_view(view: &Viewport, ink: Ink, fb: &mut [u16]) -> OutlineStats {
+    let (w, h) = view.size();
+    let mut frame = Frame::new(fb, w, h).expect("frame");
+    let Ok(st) = outline::draw(WORLD_50M, &[], view, ink, &mut frame);
     st
 }
 
 /// The world at z2 with no region: land in the earth colour over water,
-/// and the same view as coasts alone.
+/// and the same view as coasts alone; then both again with the borders.
 #[test]
 fn the_outline_draws_the_world_at_z2() {
     let view = Viewport::new(project(LatLon::from_degrees(20.0, 10.0)), 2, 240, 160);
     let mut fb = vec![0u16; 240 * 160];
-    let st = outline_view(&view, Ink::Colour, &mut fb);
+    let st = land_view(&view, Ink::Colour, &mut fb);
     assert_eq!(st.overflows, 0);
     let land = count(&mut fb, 240, 160, BACKGROUND);
     let water = count(&mut fb, 240, 160, outline::water());
@@ -146,28 +180,120 @@ fn the_outline_draws_the_world_at_z2() {
         (st.rings, st.culled, st.vertices, st.fill.pixels, land),
         (122, 1_300, 4_695, 22_074, 22_074)
     );
+    assert_eq!((st.borders, st.border.pixels), (0, 0));
+    let st = outline_view(&view, Ink::Colour, &mut fb);
+    let land = count(&mut fb, 240, 160, BACKGROUND);
+    let water = count(&mut fb, 240, 160, outline::water());
+    let border = count(&mut fb, 240, 160, BORDER);
+    assert_eq!(land + water + border, 240 * 160);
+    assert_eq!(
+        (
+            st.rings,
+            st.fill.pixels,
+            st.borders,
+            st.border.pixels,
+            land,
+            border
+        ),
+        (122, 22_074, 166, 2_521, 19_819, 2_292)
+    );
     let ink = Rgb565::new(0, 0, 0);
-    let st = outline_view(&view, Ink::Lines(ink), &mut fb);
+    let st = land_view(&view, Ink::Lines(ink), &mut fb);
     assert_eq!(st.fill.pixels, 0);
     let coast = count(&mut fb, 240, 160, ink);
     assert_eq!((st.rings, st.stroke.pixels, coast), (122, 1_931, 1_812));
+    let st = outline_view(&view, Ink::Lines(ink), &mut fb);
+    let inked = count(&mut fb, 240, 160, ink);
+    assert_eq!(
+        (st.stroke.pixels, st.borders, st.border.pixels, inked),
+        (1_931, 166, 2_521, 3_997)
+    );
+}
+
+/// Central Europe at z5 with no region, where the borders are dense: they
+/// lie over the land in the border colour, and as dots of the ink when the
+/// coasts are lines alone.
+#[test]
+fn the_outline_draws_borders_at_z5() {
+    let view = Viewport::new(project(LatLon::from_degrees(48.0, 12.0)), 5, 240, 160);
+    let mut fb = vec![0u16; 240 * 160];
+    let st = land_view(&view, Ink::Colour, &mut fb);
+    let bare = count(&mut fb, 240, 160, BACKGROUND);
+    assert_eq!((st.rings, st.fill.pixels, bare), (1, 38_325, 38_325));
+    let st = outline_view(&view, Ink::Colour, &mut fb);
+    assert_eq!(st.overflows, 0);
+    let land = count(&mut fb, 240, 160, BACKGROUND);
+    let water = count(&mut fb, 240, 160, outline::water());
+    let border = count(&mut fb, 240, 160, BORDER);
+    assert_eq!(land + water + border, 240 * 160);
+    assert_eq!(bare, land + border, "the borders lie on the land");
+    assert_eq!(
+        (
+            st.rings,
+            st.fill.pixels,
+            st.borders,
+            st.border.pixels,
+            land,
+            border
+        ),
+        (1, 38_325, 23, 1_181, 37_167, 1_158)
+    );
+    let ink = Rgb565::new(0, 0, 0);
+    let st = land_view(&view, Ink::Lines(ink), &mut fb);
+    let coast = count(&mut fb, 240, 160, ink);
+    let st2 = outline_view(&view, Ink::Lines(ink), &mut fb);
+    let inked = count(&mut fb, 240, 160, ink);
+    assert_eq!(
+        (st.stroke.pixels, coast, st2.border.pixels, inked),
+        (27, 27, 1_181, 1_185)
+    );
+}
+
+/// The borders stop at the outline's deepest zoom: the Alps where Austria,
+/// Switzerland and Liechtenstein meet have borders at z10 and none at z11.
+#[test]
+fn the_borders_stop_below_max_zoom() {
+    let at = project(LatLon::from_degrees(47.1, 9.55));
+    let mut fb = vec![0u16; 100 * 100];
+    let st = outline_view(
+        &Viewport::new(at, outline::MAX_ZOOM, 100, 100),
+        Ink::Colour,
+        &mut fb,
+    );
+    assert!(st.borders > 0 && st.border.pixels > 0, "{st:?}");
+    assert!(count(&mut fb, 100, 100, BORDER) > 0);
+    let st = outline_view(
+        &Viewport::new(at, outline::MAX_ZOOM + 1, 100, 100),
+        Ink::Colour,
+        &mut fb,
+    );
+    assert_eq!((st.borders, st.border.pixels), (0, 0));
+    assert_eq!(count(&mut fb, 100, 100, BORDER), 0);
 }
 
 /// Italy at z6, the zoom a reader passes on the way from the world to a
-/// region: the coast and its islands, filled and stroked.
+/// region: the coast and its islands, filled and stroked, and the Vatican's
+/// border, the one line in view.
 #[test]
 fn the_outline_draws_italy_at_z6() {
     let view = Viewport::new(project(LatLon::from_degrees(42.0, 12.5)), 6, 240, 160);
     let mut fb = vec![0u16; 240 * 160];
-    let st = outline_view(&view, Ink::Colour, &mut fb);
+    let st = land_view(&view, Ink::Colour, &mut fb);
     assert_eq!(st.overflows, 0);
     let land = count(&mut fb, 240, 160, BACKGROUND);
     assert_eq!(
         (st.rings, st.culled, st.vertices, st.fill.pixels, land),
         (4, 1_418, 87, 18_549, 18_549)
     );
+    let st = outline_view(&view, Ink::Colour, &mut fb);
+    let land = count(&mut fb, 240, 160, BACKGROUND);
+    let border = count(&mut fb, 240, 160, BORDER);
+    assert_eq!(
+        (st.borders, st.border.pixels, land, border),
+        (1, 4, 18_545, 4)
+    );
     let ink = Rgb565::new(0, 0, 0);
-    let st = outline_view(&view, Ink::Lines(ink), &mut fb);
+    let st = land_view(&view, Ink::Lines(ink), &mut fb);
     let coast = count(&mut fb, 240, 160, ink);
     assert_eq!((st.rings, st.stroke.pixels, coast), (4, 409, 409));
 }
@@ -181,6 +307,7 @@ fn the_outline_wraps_and_holds_at_every_zoom() {
     let wide = Viewport::new(World { x: 0, y: 1 << 31 }, 0, 400, 100);
     let st = outline_view(&wide, Ink::Colour, &mut fb);
     assert_eq!(st.rings + st.culled, 2 * 1422, "two copies of the world");
+    assert!(st.borders > 393, "borders of both copies: {}", st.borders);
     let land = count(&mut fb, 400, 100, BACKGROUND);
     assert!(land > 0);
     for zoom in [8, 14, 20] {

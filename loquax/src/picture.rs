@@ -244,7 +244,13 @@ impl Painter {
                 .iter()
                 .any(|&i| self.regions[i].region.area(view) == whole);
             if !filled {
-                let Ok(_) = outline::draw(outline::WORLD_50M, view, ink, &mut frame);
+                let Ok(_) = outline::draw(
+                    outline::WORLD_50M,
+                    outline::BORDERS_50M,
+                    view,
+                    ink,
+                    &mut frame,
+                );
             }
             for &i in &order {
                 let installed = &self.regions[i];

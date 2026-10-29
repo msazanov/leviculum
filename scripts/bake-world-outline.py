@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
-"""Bake Natural Earth's 1:50m land polygons into the world outline table
-leviculum-map draws when no region covers the view
+"""Bake Natural Earth's 1:50m land polygons and land boundary lines into
+the world outline tables leviculum-map draws when no region covers the view
 (leviculum-map/src/outline.rs, docs/src/concepts/loquax-map.md).
 
-Input: ne_50m_land.geojson of Natural Earth 5.1.2, public domain
+Input: ne_50m_land.geojson or ne_50m_admin_0_boundary_lines_land.geojson
+of Natural Earth 5.1.2, public domain
 (https://www.naturalearthdata.com/about/terms-of-use/), from
-https://raw.githubusercontent.com/nvkelso/natural-earth-vector/v5.1.2/geojson/ne_50m_land.geojson
-(sha256 e874b27a51d146452be360cafb3cc50c86001074a67d534113e6534682f9826b).
+https://raw.githubusercontent.com/nvkelso/natural-earth-vector/v5.1.2/geojson/
+(sources and checksums in leviculum-map/fixtures/README.md). Polygons make
+a table of rings, "LWO2"; line strings a table of lines, "LWL2", in the
+same format, whose hole flag is always clear and whose last point is not
+joined back to its first.
 
 A point is the Web Mercator world coordinate of leviculum-map's
 mercator.rs shifted right by 32 - BITS: with BITS = 18, 262,144 steps
@@ -21,7 +25,7 @@ the repeated points the quantisation makes.
 
 Output, "uv" an unsigned LEB128 varint:
 
-    "LWO2"  u8 BITS  uv ring count
+    "LWO2" or "LWL2"  u8 BITS  uv ring or line count
     per ring: uv point count * 2 + (1 for a hole of the ring before)
               uv byte length of its deltas
               uv x, uv y of its first point
@@ -35,7 +39,7 @@ k is chosen per ring for the fewest bits, the smallest k on a tie, so a
 ring of short steps packs tight and one long step costs only its escape.
 Baking the same input again gives the same bytes.
 
-Usage: scripts/bake-world-outline.py IN.geojson OUT.lwo
+Usage: scripts/bake-world-outline.py IN.geojson OUT.lwo (or OUT.lwl for lines)
 """
 
 import json
@@ -56,12 +60,17 @@ def project(lon, lat):
     return x, y
 
 
-def ring_points(coords):
+def line_points(coords):
     out = []
     for lon, lat in coords:
         p = project(lon, lat)
         if not out or out[-1] != p:
             out.append(p)
+    return out
+
+
+def ring_points(coords):
+    out = line_points(coords)
     # GeoJSON repeats the first point last; the drawer closes rings itself.
     while len(out) > 1 and out[-1] == out[0]:
         out.pop()
@@ -137,15 +146,29 @@ def main():
     with open(src) as f:
         doc = json.load(f)
     rings = []
+    magic = None
     for feature in doc["features"]:
         geom = feature["geometry"]
-        polys = [geom["coordinates"]] if geom["type"] == "Polygon" else geom["coordinates"]
+        kind = geom["type"]
+        lines = kind in ("LineString", "MultiLineString")
+        this = b"LWL2" if lines else b"LWO2"
+        if magic not in (None, this):
+            sys.exit(f"{src}: lines and polygons in one input")
+        magic = this
+        if lines:
+            parts = [geom["coordinates"]] if kind == "LineString" else geom["coordinates"]
+            for coords in parts:
+                pts = line_points(coords)
+                if len(pts) >= 2:
+                    rings.append((False, pts))
+            continue
+        polys = [geom["coordinates"]] if kind == "Polygon" else geom["coordinates"]
         for poly in polys:
             for i, coords in enumerate(poly):
                 pts = ring_points(coords)
                 if len(pts) >= 3:
                     rings.append((i > 0, pts))
-    body = bytearray(b"LWO2")
+    body = bytearray(magic or b"LWO2")
     body.append(BITS)
     body += uv(len(rings))
     for hole, pts in rings:
@@ -154,7 +177,8 @@ def main():
         f.write(body)
     points = sum(len(p) for _, p in rings)
     holes = sum(1 for h, _ in rings if h)
-    print(f"OUTLINE rings={len(rings)} holes={holes} points={points} bytes={len(body)}")
+    name = "lines" if magic == b"LWL2" else "rings"
+    print(f"OUTLINE {name}={len(rings)} holes={holes} points={points} bytes={len(body)}")
 
 
 if __name__ == "__main__":

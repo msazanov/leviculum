@@ -13,12 +13,21 @@
 //! pixel at [`MAX_ZOOM`], so a coast there is never more than half a pixel
 //! off.
 //!
+//! The country borders are a second table in the same format, `LWL2`:
+//! Natural Earth's 1:50m land boundary lines of the same version, 393 lines
+//! and 19,760 points in 49,512 bytes ([`BORDERS_50M`]). A line is a ring
+//! that is not closed and has no holes. Maritime boundaries are left out:
+//! over water the coasts already part the countries.
+//!
 //! [`Ink::Colour`] fills the land in the earth colour over water;
 //! [`Ink::Lines`] draws the coasts alone, one pixel wide. A ring is clipped
 //! to a box a few pixels outside the view before it reaches the filler, so
 //! every coordinate stays inside the filler's limit at any zoom, and the
 //! edges the clip adds lie outside the view, where a stroked coast does not
-//! show them.
+//! show them. The borders go over either, one pixel wide, in [`BORDER`]
+//! under [`Ink::Colour`] and in the ink under [`Ink::Lines`], clipped
+//! segment by segment; only down to [`MAX_ZOOM`], below which 1:50m lines
+//! would be off by more than a pixel beside a region's own data.
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -27,7 +36,7 @@ use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::*;
 use leviculum_mapfill::fill::{Edge, FillRule, FillStats, Filler, Scratch};
 use leviculum_mapfill::stroke::stroke;
-use leviculum_mapfill::style::{area_color, Class, BACKGROUND};
+use leviculum_mapfill::style::{area_color, Class, BACKGROUND, BORDER};
 use leviculum_mapfill::SUBPIXEL;
 
 use crate::draw::Ink;
@@ -35,6 +44,9 @@ use crate::viewport::Viewport;
 
 /// The table, Natural Earth 1:50m land.
 pub const WORLD_50M: &[u8] = include_bytes!("../data/ne_50m_land.lwo");
+
+/// The borders, Natural Earth 1:50m land boundary lines.
+pub const BORDERS_50M: &[u8] = include_bytes!("../data/ne_50m_admin_0_boundary_lines_land.lwl");
 
 /// The attribution line a view of the outline carries.
 pub const ATTRIBUTION: &str = "Natural Earth";
@@ -48,7 +60,7 @@ pub const MAX_ZOOM: u8 = 10;
 /// the coast's width, so the clip's own edges never show.
 const GUARD: i64 = 4 * SUBPIXEL as i64;
 
-/// One ring of the table.
+/// One ring of a ring table, or one line of a line table.
 #[derive(Clone, Copy, Debug)]
 pub struct Ring<'a> {
     /// A hole in the ring before it.
@@ -134,23 +146,41 @@ fn varint(table: &[u8], at: &mut usize) -> Option<u32> {
     None
 }
 
-/// The bits a coordinate of `table` has, `None` for no table.
+/// The magic of a ring table and of a line table.
+const RINGS: &[u8; 4] = b"LWO2";
+const LINES: &[u8; 4] = b"LWL2";
+
+/// The bits a coordinate of `table` has, `None` for no table of either
+/// kind.
 pub fn bits(table: &[u8]) -> Option<u32> {
     match table.get(..5) {
-        Some(head) if head[..4] == *b"LWO2" && (8..=24).contains(&head[4]) => {
+        Some(head)
+            if (head[..4] == *RINGS || head[..4] == *LINES) && (8..=24).contains(&head[4]) =>
+        {
             Some(u32::from(head[4]))
         }
         _ => None,
     }
 }
 
-/// The rings of a table; a table cut short ends early, it never panics.
+/// The rings of a ring table, none of a line table; a table cut short ends
+/// early, it never panics.
 pub fn rings(table: &[u8]) -> impl Iterator<Item = Ring<'_>> {
+    entries(table, RINGS)
+}
+
+/// The lines of a line table, none of a ring table, as [`Ring`]s that are
+/// not closed; a table cut short ends early, it never panics.
+pub fn lines(table: &[u8]) -> impl Iterator<Item = Ring<'_>> {
+    entries(table, LINES)
+}
+
+fn entries<'a>(table: &'a [u8], magic: &[u8; 4]) -> impl Iterator<Item = Ring<'a>> {
     let bits = bits(table).unwrap_or(16);
     let mut at = 5usize;
     let count = match self::bits(table) {
-        Some(_) => varint(table, &mut at).unwrap_or(0),
-        None => 0,
+        Some(_) if table[..4] == *magic => varint(table, &mut at).unwrap_or(0),
+        _ => 0,
     };
     (0..count).map_while(move |_| {
         let mut v = || varint(table, &mut at);
@@ -197,6 +227,10 @@ pub struct OutlineStats {
     pub fill: FillStats,
     /// Coasts stroked ([`Ink::Lines`]).
     pub stroke: FillStats,
+    /// Border line copies at least partly in view.
+    pub borders: u32,
+    /// Borders stroked.
+    pub border: FillStats,
     /// Rings dropped because the edge storage was too small.
     pub overflows: u32,
 }
@@ -248,11 +282,57 @@ fn clip(ring: &[(i64, i64)], x0: i64, y0: i64, x1: i64, y1: i64, out: &mut Vec<(
     out.extend(cur);
 }
 
-/// Draw the outline of `table` (normally [`WORLD_50M`]) for `view` into
+/// Clip the segment `a`-`b` to `[x0, x1] x [y0, y1]`, side by side; `None`
+/// when it lies wholly outside.
+fn clip_segment(
+    mut a: (i64, i64),
+    mut b: (i64, i64),
+    x0: i64,
+    y0: i64,
+    x1: i64,
+    y1: i64,
+) -> Option<((i64, i64), (i64, i64))> {
+    // Each side: the coordinate it bounds, its limit, and whether inside
+    // is above the limit.
+    for (vertical, lim, above) in [
+        (true, x0, true),
+        (true, x1, false),
+        (false, y0, true),
+        (false, y1, false),
+    ] {
+        let inside = |p: (i64, i64)| {
+            let v = if vertical { p.0 } else { p.1 };
+            if above {
+                v >= lim
+            } else {
+                v <= lim
+            }
+        };
+        let (ain, bin) = (inside(a), inside(b));
+        if !ain && !bin {
+            return None;
+        }
+        if ain != bin {
+            let cross = match vertical {
+                true => (lim, a.1 + (b.1 - a.1) * (lim - a.0) / (b.0 - a.0)),
+                false => (a.0 + (b.0 - a.0) * (lim - a.1) / (b.1 - a.1), lim),
+            };
+            match ain {
+                true => b = cross,
+                false => a = cross,
+            }
+        }
+    }
+    Some((a, b))
+}
+
+/// Draw the outline of `table` (normally [`WORLD_50M`]) and the borders of
+/// `borders` (normally [`BORDERS_50M`], or empty for none) for `view` into
 /// `target`, which is cleared first: to water under [`Ink::Colour`], to the
 /// background under [`Ink::Lines`].
 pub fn draw<D>(
     table: &[u8],
+    borders: &[u8],
     view: &Viewport,
     ink: Ink,
     target: &mut D,
@@ -347,6 +427,55 @@ where
         }
         if ink == Ink::Colour && !filler.is_empty() {
             st.fill += filler.fill(target, BACKGROUND, FillRule::EvenOdd)?;
+        }
+    }
+    if view.zoom() > MAX_ZOOM || self::bits(borders) != Some(bits) {
+        return Ok(st);
+    }
+    let colour = match ink {
+        Ink::Colour => BORDER,
+        Ink::Lines(colour) => colour,
+    };
+    for k in left.div_euclid(world)..=(left + vw - 1).div_euclid(world) {
+        let dx = k * world - left;
+        for l in lines(borders) {
+            let [x0, y0, x1, y1] = l.bbox;
+            if scale(x1) + dx < -GUARD
+                || scale(x0) + dx > vw + GUARD
+                || scale(y1) - top < -GUARD
+                || scale(y0) - top > vh + GUARD
+            {
+                continue;
+            }
+            st.borders += 1;
+            // Runs of segments the clip keeps joined, stroked one by one.
+            points.clear();
+            let mut prev: Option<(i64, i64)> = None;
+            for (x, y) in l.points() {
+                let p = (scale(x) + dx, scale(y) - top);
+                let Some(a) = prev.replace(p) else {
+                    continue;
+                };
+                let Some((a, b)) = clip_segment(a, p, -GUARD, -GUARD, vw + GUARD, vh + GUARD)
+                else {
+                    continue;
+                };
+                let (a, b) = (
+                    Point::new(a.0 as i32, a.1 as i32),
+                    Point::new(b.0 as i32, b.1 as i32),
+                );
+                if points.last() != Some(&a) {
+                    if points.len() > 1 {
+                        st.border += stroke(&mut filler, &points, SUBPIXEL, target, colour)?;
+                    }
+                    points.clear();
+                    points.push(a);
+                }
+                points.push(b);
+            }
+            if points.len() > 1 {
+                st.border += stroke(&mut filler, &points, SUBPIXEL, target, colour)?;
+            }
         }
     }
     Ok(st)

@@ -643,7 +643,11 @@ The reviewer decided three more for slice (c), 2026-10-27 (leviculum 1065):
   59,239 points, a step one pixel at zoom 10) and built into the binary;
   source and checksum in `leviculum-map/fixtures/README.md` and
   THIRD-PARTY.md. Drawn as land over water in colour and as coasts in
-  braille, down to zoom 10. Until leviculum 1073 it was the 1:110m
+  braille, down to zoom 10. Since leviculum 1092 the country borders lie
+  over it, Natural Earth's 1:50m land boundary lines of the same version
+  (`ne_50m_admin_0_boundary_lines_land.lwl`, 49,512 bytes, 393 lines),
+  thin lines in the style tables' border colour, dots in braille, down to
+  zoom 10 as well; maritime boundaries are left out. Until leviculum 1073 it was the 1:110m
   polygons quantised to 611 m, 21,298 bytes, which looked coarse without
   a region; one table serves every zoom, a z2 view of a sixel pane
   rendering in under 6 ms.

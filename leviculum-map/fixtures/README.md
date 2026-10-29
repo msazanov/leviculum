@@ -40,6 +40,26 @@ from
 again gives the same bytes (sha256
 `a154e60ef141e605a707441bb11215efcb97b5a013da08acc8ddfca90c0e2579`).
 
+The borders drawn over it, `../data/ne_50m_admin_0_boundary_lines_land.lwl`
+(`LWL2`, lines rather than rings, the same quantisation), are Natural
+Earth's 1:50m land boundary lines of the same version, 393 lines and 19,760
+points in 49,512 bytes. Maritime boundaries are left out: over water the
+coasts already part the countries. The 1:110m lines would be 12,679 bytes,
+but 1:50m fits the budget of about 100 KB and matches the land it lies on.
+Baked with
+
+```sh
+scripts/bake-world-outline.py ne_50m_admin_0_boundary_lines_land.geojson \
+    leviculum-map/data/ne_50m_admin_0_boundary_lines_land.lwl
+```
+
+from
+`https://raw.githubusercontent.com/nvkelso/natural-earth-vector/v5.1.2/geojson/ne_50m_admin_0_boundary_lines_land.geojson`
+(760,189 bytes, sha256
+`2faac4f6b34386f3d21b6e018cf151f241f00e5c936d44dd17d7d9bfb147fa48`). Baking
+again gives the same bytes (sha256
+`bf43e6ed683d1aca77f9c737e5e8d702fb24185c1580a7a3c65494a3273eeb6e`).
+
 **Natural Earth** is in the public domain
 (<https://www.naturalearthdata.com/about/terms-of-use/>); no permission is
 needed and none is claimed. The map names it on the view anyway, as the

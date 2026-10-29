@@ -1865,7 +1865,8 @@ async fn a_peers_position_shows_in_the_header_and_its_reports_fold_into_one_line
 /// moves the selection; a drag that starts on the selected pin moves the
 /// map ten cells left and three up under the pointer and opens nothing;
 /// zooming out past the region's shallowest zoom
-/// to z5 draws the world outline, the coast of Italy; `0` fits again; `Enter` opens the selected
+/// to z5 draws the world outline, the coast of Italy and San Marino's
+/// border; `0` fits again; `Enter` opens the selected
 /// peer's conversation; the map again and `Esc` bring the conversation
 /// back.
 const MAP_SCRIPT: &str = "\
