@@ -31,4 +31,12 @@
          the sign 7.2:1 on it. -->
     <color name="list_failed_ground">#ffdad6</color>
     <color name="list_failed_mark">#93000a</color>
+    <!-- The long press (1137): text 11.6:1 and delete 8.1:1 on the panels,
+         our reaction's circle 3.6:1 on them. -->
+    <color name="dim">#b3000000</color>
+    <color name="panel">#2c2d31</color>
+    <color name="failed_mark_on_panel">#ffb4ab</color>
+    <color name="reaction_ours">#4f8f5b</color>
+    <!-- A selected message's row: the accent at a quarter. -->
+    <color name="selected_row">#4081c784</color>
 </resources>

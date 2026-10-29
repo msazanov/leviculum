@@ -35,9 +35,17 @@ What it does today:
   with its time (the newest group's in minutes ago). A day separator
   ("Today", "Yesterday", the weekday, the date; German on a German phone)
   between days. Reactions are pills over a bubble's bottom edge, the emoji
-  and a count above one; a long press reacts with one of loquax's quick
-  six. The compose field is a pill with an emoji button, and a round send
-  button beside it. Send goes through the home node's `/send`. Opening the
+  and a count above one. A long press (1137, after Signal's) dims the
+  chat around the bubble: above it Signal's six quick reactions, ours
+  marked, and "…" for the full picker; below it reply, forward, copy,
+  select, info, pin and delete. A reply shows its quote in the bubble and
+  goes out with FIELD_REPLY_TO and FIELD_REPLY_QUOTE, as Columba,
+  MeshChatX and Ratspeak send and read it; a forward is the text and the
+  content fields again, unmarked; select copies or deletes several; info
+  is the terminal's detail view; a pin is this phone's alone, a bar at the
+  top. The compose field is a pill with the same full emoji picker behind
+  its emoji button (categories, recents, search by English and German
+  name, skin tones on a long press), and a round send button beside it. Send goes through the home node's `/send`. Opening the
   chat reads it (a read mark for the home's other devices) and pulls; the
   menu pulls; the sync schedule pulls while the app runs. Leaving the chat
   closes it, so what arrives then stays unread.
@@ -157,6 +165,10 @@ keytool -genkeypair -keystore android/loquax.keystore \
   and without its symbol table (the dynamic one JNI needs stays).
 - `pack` adds `assets/FiraSans-OFL.txt`, the licence of the font the
   map's names are set in.
+- `pack` adds `assets/emoji.tsv`, the picker's table from
+  `loquax/emoji/` (Emoji 15.1, what Android 15 draws; an older phone's
+  picker leaves out what its font cannot), and
+  `assets/emoji-LICENSE-UNICODE.txt`, the Unicode licence it is under.
 - SQLite inside the store is C, compiled by the NDK's clang, which the
   Makefile names for the cc crate.
 - The Java has no lambdas: javac compiles them against

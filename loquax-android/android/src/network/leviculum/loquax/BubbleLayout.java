@@ -11,12 +11,16 @@ import android.widget.TextView;
  * A bubble: the body, and in its bottom right corner the time and the
  * delivery mark (1129). They sit on the body's last line when it leaves
  * room for them, as in a modern messenger, and on a line of their own
- * below otherwise. The bubble is at most {@link #setMaxWidth} wide.
+ * below otherwise. A reply's quote (1137), the third child when there
+ * is one, sits above the body across the bubble's width. The bubble is
+ * at most {@link #setMaxWidth} wide.
  */
 public class BubbleLayout extends ViewGroup {
     private int maxWidth = Integer.MAX_VALUE;
     private int gap;
     private boolean below;
+    /** The quote's height with its gap to the body, 0 without one. */
+    private int quoteH;
 
     public BubbleLayout(Context context, AttributeSet attrs) {
         super(context, attrs);
@@ -60,7 +64,22 @@ public class BubbleLayout extends ViewGroup {
                 h += mh;
             }
         }
+        View quote = quote();
+        quoteH = 0;
+        if (quote != null) {
+            quote.measure(MeasureSpec.makeMeasureSpec(room, MeasureSpec.AT_MOST), unspecified);
+            w = Math.max(w, quote.getMeasuredWidth());
+            quote.measure(MeasureSpec.makeMeasureSpec(w, MeasureSpec.EXACTLY), unspecified);
+            quoteH = quote.getMeasuredHeight() + gap / 2;
+            h += quoteH;
+        }
         setMeasuredDimension(w + pads, h + getPaddingTop() + getPaddingBottom());
+    }
+
+    /** The quote, when there is one and it shows. */
+    private View quote() {
+        View quote = getChildCount() > 2 ? getChildAt(2) : null;
+        return quote != null && quote.getVisibility() != GONE ? quote : null;
     }
 
     @Override
@@ -70,7 +89,11 @@ public class BubbleLayout extends ViewGroup {
         int left = getPaddingLeft();
         int top = getPaddingTop();
         int bottom = getHeight() - getPaddingBottom();
-        int bodyTop = below ? top : bottom - body.getMeasuredHeight();
+        View quote = quote();
+        if (quote != null) {
+            quote.layout(left, top, left + quote.getMeasuredWidth(), top + quote.getMeasuredHeight());
+        }
+        int bodyTop = below ? top + quoteH : bottom - body.getMeasuredHeight();
         body.layout(left, bodyTop, left + body.getMeasuredWidth(), bodyTop + body.getMeasuredHeight());
         if (meta.getVisibility() != GONE) {
             int right = getWidth() - getPaddingRight();

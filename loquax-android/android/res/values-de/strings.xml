@@ -1,6 +1,6 @@
 <?xml version='1.0' encoding='utf-8'?>
 <!-- The chat's and the list's times, words and icons' names in German
-     (1129, 1130); every other string falls back to values/strings.xml. -->
+     (1129, 1130), and the long press with its picker (1137); every other string falls back to values/strings.xml. -->
 <resources>
     <string name="back">Zurück</string>
     <string name="menu">Mehr</string>
@@ -24,4 +24,42 @@
     <string name="map">Karte</string>
     <string name="stop_service">Dienst beenden</string>
     <string name="no_conversations">Noch keine Unterhaltungen. Aktualisieren im Menü holt vom Heimknoten; der Stift beginnt eine.</string>
+    <string name="emoji_more">Mehr Emoji</string>
+    <string name="emoji_search">Emoji suchen</string>
+    <string name="emoji_recent">Zuletzt verwendet</string>
+    <string name="emoji_smileys">Smileys und Gefühle</string>
+    <string name="emoji_people">Menschen und Körper</string>
+    <string name="emoji_animals">Tiere und Natur</string>
+    <string name="emoji_food">Essen und Trinken</string>
+    <string name="emoji_travel">Reisen und Orte</string>
+    <string name="emoji_activities">Aktivitäten</string>
+    <string name="emoji_objects">Gegenstände</string>
+    <string name="emoji_symbols">Symbole</string>
+    <string name="emoji_flags">Flaggen</string>
+    <string name="action_reply">Antworten</string>
+    <string name="action_forward">Weiterleiten</string>
+    <string name="action_copy">Kopieren</string>
+    <string name="action_select">Auswählen</string>
+    <string name="action_info">Info</string>
+    <string name="action_pin">Fixieren</string>
+    <string name="action_unpin">Lösen</string>
+    <string name="action_delete">Löschen</string>
+    <string name="copied">Kopiert.</string>
+    <string name="reply_to_ours">Antwort an dich selbst</string>
+    <string name="reply_to_theirs">Antwort an %1$s</string>
+    <string name="quote_you">Du</string>
+    <string name="cancel_reply">Antwort verwerfen</string>
+    <string name="forward_to">Weiterleiten an</string>
+    <string name="forwarded">An %1$s weitergeleitet.</string>
+    <string name="no_id_yet">Diese Nachricht hat noch keine ID; versuch es, sobald der Home-Node sie angenommen hat.</string>
+    <string name="selected">%1$d ausgewählt</string>
+    <string name="close_selection">Auswahl beenden</string>
+    <string name="delete_one_here">Diese Nachricht von diesem Gerät löschen?</string>
+    <string name="delete_one_home">Diese Nachricht von allen Geräten an diesem Home-Node löschen?</string>
+    <string name="delete_many_here">%1$d Nachrichten von diesem Gerät löschen?</string>
+    <string name="delete_many_home">%1$d Nachrichten von allen Geräten an diesem Home-Node löschen?</string>
+    <string name="delete">Löschen</string>
+    <string name="keep">Behalten</string>
+    <string name="info">Nachrichtendetails</string>
+    <string name="pinned">Fixiert</string>
 </resources>

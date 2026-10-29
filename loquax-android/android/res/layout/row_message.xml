@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- One bubble: the day above it when a day begins, the body with its time
-     and mark inside, the reactions as pills over its bottom edge. The row's
-     gravity puts ours right and theirs left; ChatActivity sets the gaps,
-     the corners and the colours. -->
+     and mark inside, a reply's quote above the body, the reactions as pills
+     over its bottom edge. The row's gravity puts ours right and theirs
+     left; ChatActivity sets the gaps, the corners and the colours. -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
@@ -55,6 +55,42 @@
                 android:layout_width="16dp"
                 android:layout_height="16dp"
                 android:layout_marginStart="4dp" />
+        </LinearLayout>
+
+        <!-- A reply's quote (1137): a stripe, who wrote it, its first line. -->
+        <LinearLayout
+            android:id="@+id/quote"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:visibility="gone">
+
+            <View
+                android:id="@+id/quote_stripe"
+                android:layout_width="3dp"
+                android:layout_height="match_parent" />
+
+            <LinearLayout
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:paddingStart="8dp">
+
+                <TextView
+                    android:id="@+id/quote_who"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:textSize="13sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/quote_text"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:ellipsize="end"
+                    android:maxLines="2"
+                    android:textSize="14sp" />
+            </LinearLayout>
         </LinearLayout>
     </network.leviculum.loquax.BubbleLayout>
 

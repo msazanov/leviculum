@@ -34,4 +34,14 @@
          the sign 9.4:1 on it. -->
     <color name="list_failed_ground">#93000a</color>
     <color name="list_failed_mark">#ffffff</color>
+    <!-- The long press (1137): the dim over the chat; the panels of the
+         reactions and the actions, text 17.2:1 and delete 6.5:1 on them;
+         our reaction's circle 3.3:1 on the panel. -->
+    <color name="dim">#99000000</color>
+    <color name="panel">#ffffff</color>
+    <color name="failed_mark_on_panel">#ba1a1a</color>
+    <color name="reaction_ours">#5f9a69</color>
+    <!-- A selected message's row: the accent at a quarter over the
+         background, under bubbles that keep their own contrast. -->
+    <color name="selected_row">#403a7d44</color>
 </resources>

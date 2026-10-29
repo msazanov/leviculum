@@ -1,12 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- One conversation, after a modern messenger's layout (1129): a bar with
-     back, avatar, name and menu; the bubbles; a pill-shaped compose field
-     with a round send button. -->
+     back, avatar, name and menu, which the selection's bar covers while
+     messages are selected (1137); a pinned message's bar; the bubbles; the
+     reply's quote over a pill-shaped compose field with a round send
+     button. -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:fitsSystemWindows="true"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical">
+
+    <FrameLayout
+        android:layout_width="match_parent"
+        android:layout_height="64dp">
 
     <LinearLayout
         android:layout_width="match_parent"
@@ -51,6 +57,53 @@
             android:padding="12dp" />
     </LinearLayout>
 
+    <LinearLayout
+        android:id="@+id/selection_bar"
+        android:layout_width="match_parent"
+        android:layout_height="64dp"
+        android:background="@color/bar"
+        android:clickable="true"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingStart="4dp"
+        android:paddingEnd="8dp"
+        android:visibility="gone">
+
+        <ImageButton
+            android:id="@+id/selection_close"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:contentDescription="@string/close_selection"
+            android:padding="12dp" />
+
+        <TextView
+            android:id="@+id/selection_count"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="12dp"
+            android:layout_weight="1"
+            android:textColor="@color/text"
+            android:textSize="20sp" />
+
+        <Button
+            android:id="@+id/selection_copy"
+            style="?android:attr/borderlessButtonStyle"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/action_copy"
+            android:textColor="@color/accent" />
+
+        <Button
+            android:id="@+id/selection_delete"
+            style="?android:attr/borderlessButtonStyle"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/action_delete"
+            android:textColor="@color/accent" />
+    </LinearLayout>
+    </FrameLayout>
+
     <TextView
         android:id="@+id/status"
         android:layout_width="match_parent"
@@ -60,6 +113,23 @@
         android:paddingEnd="16dp"
         android:textColor="@color/text_secondary"
         android:textSize="12sp"
+        android:visibility="gone" />
+
+    <!-- The pinned message (1137), kept on this phone only: a tap goes to
+         it, a long press unpins it. -->
+    <TextView
+        android:id="@+id/pinned"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="@color/bar"
+        android:ellipsize="end"
+        android:maxLines="1"
+        android:paddingStart="16dp"
+        android:paddingTop="8dp"
+        android:paddingEnd="16dp"
+        android:paddingBottom="8dp"
+        android:textColor="@color/text"
+        android:textSize="14sp"
         android:visibility="gone" />
 
     <!-- "normal" follows a new message only while the newest is in view:
@@ -76,6 +146,59 @@
         android:paddingBottom="8dp"
         android:stackFromBottom="true"
         android:transcriptMode="normal" />
+
+    <!-- The message a reply answers, above the field while composing it. -->
+    <LinearLayout
+        android:id="@+id/reply_bar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="16dp"
+        android:layout_marginEnd="16dp"
+        android:background="@color/bar"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:visibility="gone">
+
+        <View
+            android:layout_width="3dp"
+            android:layout_height="match_parent"
+            android:background="@color/accent" />
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:orientation="vertical"
+            android:paddingStart="10dp"
+            android:paddingTop="6dp"
+            android:paddingBottom="6dp">
+
+            <TextView
+                android:id="@+id/reply_who"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:textColor="@color/accent"
+                android:textSize="13sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/reply_text"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:ellipsize="end"
+                android:maxLines="1"
+                android:textColor="@color/text_secondary"
+                android:textSize="14sp" />
+        </LinearLayout>
+
+        <ImageButton
+            android:id="@+id/reply_cancel"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:contentDescription="@string/cancel_reply"
+            android:padding="10dp" />
+    </LinearLayout>
 
     <LinearLayout
         android:layout_width="match_parent"

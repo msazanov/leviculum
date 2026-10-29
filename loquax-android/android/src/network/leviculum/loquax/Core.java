@@ -105,6 +105,54 @@ final class Core {
         return command(map("t", "react", "peer", peer, "target", target, "content", content));
     }
 
+    /** A reply to the message `target` (1137): sent with its id and a quote of it. */
+    static String reply(String peer, String target, String body) {
+        return command(map("t", "reply", "peer", peer, "target", target, "body", body));
+    }
+
+    /** A copy of the message `key` of `peer`'s conversation to `to`. */
+    static String forward(String peer, long key, String to) {
+        return command(map("t", "forward", "peer", peer, "key", key, "to", to));
+    }
+
+    /** Delete the messages `keys`, asked already. */
+    static String delete(String peer, List<Long> keys) {
+        return command(map("t", "delete", "peer", peer, "keys", keys));
+    }
+
+    /** An emoji picked into a message: first in the recents. */
+    static String used(String emoji) {
+        return command(map("t", "used", "emoji", emoji));
+    }
+
+    /** A message's detail lines, the terminal's `v` view; null with the error in `error[0]`. */
+    @SuppressWarnings("unchecked")
+    static List<String> info(String peer, long key, String[] error) {
+        Map<String, Object> answer = answer(Native.query(MsgPack.pack(
+                map("t", "info", "peer", peer, "key", key))));
+        if (!(answer.get("rows") instanceof List)) {
+            error[0] = str(answer, "error");
+            return null;
+        }
+        return strings(answer.get("rows"));
+    }
+
+    /** The emoji used last, newest first; none without a session. */
+    static List<String> recents() {
+        return strings(answer(Native.query(MsgPack.pack(map("t", "recents")))).get("emoji"));
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<String> strings(Object value) {
+        List<String> out = new ArrayList<>();
+        if (value instanceof List) {
+            for (Object item : (List<Object>) value) {
+                out.add(String.valueOf(item));
+            }
+        }
+        return out;
+    }
+
     static String pull() {
         return command(map("t", "pull"));
     }

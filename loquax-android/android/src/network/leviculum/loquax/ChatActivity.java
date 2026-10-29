@@ -2,8 +2,12 @@ package network.leviculum.loquax;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.DialogInterface;
 import android.content.Intent;
+import android.content.SharedPreferences;
+import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
 import android.os.Handler;
@@ -14,24 +18,27 @@ import android.text.Spanned;
 import android.text.TextWatcher;
 import android.text.style.ForegroundColorSpan;
 import android.text.style.RelativeSizeSpan;
+import android.os.Build;
 import android.view.Gravity;
 import android.view.MenuItem;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.AdapterView;
-import android.widget.ArrayAdapter;
 import android.widget.BaseAdapter;
+import android.widget.Button;
 import android.widget.EditText;
-import android.widget.GridView;
 import android.widget.ImageButton;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ListView;
 import android.widget.PopupMenu;
+import android.widget.ScrollView;
 import android.widget.TextView;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * One conversation, after a modern messenger's layout (1129): a bar with
@@ -41,20 +48,23 @@ import java.util.Map;
  * over a bubble's edge; a pill-shaped compose field with a round send
  * button. Opening it reads the conversation and pulls; leaving it closes
  * it, so what arrives then stays unread.
+ *
+ * A long press on a bubble (1137) opens Signal's menu (LongPress): the
+ * quick reactions with the full picker behind "…", and reply, forward,
+ * copy, select, info, pin and delete. What goes on the wire is Rust's
+ * (loquax::ui::replies); a pin is this phone's alone.
  */
 public class ChatActivity extends Activity implements Events.Listener {
     static final String PEER = "peer";
-    /** loquax's quick reactions (loquax/src/ui/reactions.rs, QUICK). */
+    /**
+     * The long press's quick reactions: Signal's default six, the same
+     * strings as loquax/src/ui/reactions.rs's SIGNAL_QUICK, U+FE0F and all.
+     */
     private static final String[] QUICK = {
-        "👍", "❤️", "😂", "😮", "😢", "😡",
+        "\u2764\uFE0F", "\uD83D\uDC4D", "\uD83D\uDC4E", "\uD83D\uDE02", "\uD83D\uDE2E", "\uD83D\uDE22",
     };
-
-    /** A few common emoji for the compose field's emoji button. */
-    private static final String[] EMOJI = {
-        "😀", "😂", "😊", "😍", "😘", "😉", "🤔", "😮",
-        "😢", "😡", "👍", "👎", "👏", "🙏", "💪", "👋",
-        "❤️", "🔥", "🎉", "✅", "❌", "📍", "☕", "🍺",
-    };
+    /** The pins, by peer: the key of the pinned message, this phone only. */
+    private static final String PINS = "pins";
     /** Messages of one sender this close together form a group. */
     private static final long GROUP_SECS = 180;
     /** The bubble's corner, and a grouped bubble's inner one, in dp. */
@@ -69,6 +79,16 @@ public class ChatActivity extends Activity implements Events.Listener {
     private EditText compose;
     private ImageButton send;
     private Adapter adapter;
+    private ListView list;
+    private boolean homeClient;
+    /** The message a reply being written answers, or null. */
+    private Map<String, Object> replyTo;
+    private View replyBar;
+    /** The selection's keys while selecting, else null. */
+    private Set<Long> selection;
+    private View selectionBar;
+    private TextView selectionCount;
+    private TextView pinned;
     private final ServiceLink link = new ServiceLink(this);
     /** Redraws the relative times of the newest group while the screen is up. */
     private final Handler ticker = new Handler(Looper.getMainLooper());
@@ -115,6 +135,52 @@ public class ChatActivity extends Activity implements Events.Listener {
                 pickEmoji();
             }
         });
+        replyBar = findViewById(R.id.reply_bar);
+        ImageButton cancel = (ImageButton) findViewById(R.id.reply_cancel);
+        cancel.setImageDrawable(new Glyph(Glyph.Kind.CLOSE, getColor(R.color.text_secondary)));
+        cancel.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                replyTo(null);
+            }
+        });
+        selectionBar = findViewById(R.id.selection_bar);
+        selectionCount = (TextView) findViewById(R.id.selection_count);
+        ImageButton close = (ImageButton) findViewById(R.id.selection_close);
+        close.setImageDrawable(new Glyph(Glyph.Kind.CLOSE, text));
+        close.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                select(null);
+            }
+        });
+        ((Button) findViewById(R.id.selection_copy)).setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                copy(selected());
+                select(null);
+            }
+        });
+        ((Button) findViewById(R.id.selection_delete)).setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                askDelete(selected());
+            }
+        });
+        pinned = (TextView) findViewById(R.id.pinned);
+        pinned.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                goToPinned();
+            }
+        });
+        pinned.setOnLongClickListener(new View.OnLongClickListener() {
+            @Override
+            public boolean onLongClick(View v) {
+                pin(0);
+                return true;
+            }
+        });
         send.setImageDrawable(new Glyph(Glyph.Kind.SEND, getColor(R.color.on_send)));
         compose.addTextChangedListener(new TextWatcher() {
             @Override
@@ -129,19 +195,27 @@ public class ChatActivity extends Activity implements Events.Listener {
             }
         });
         sendable();
-        ListView list = (ListView) findViewById(R.id.list);
+        list = (ListView) findViewById(R.id.list);
         adapter = new Adapter();
         list.setAdapter(adapter);
         list.setOnItemClickListener(new AdapterView.OnItemClickListener() {
             @Override
             public void onItemClick(AdapterView<?> parent, View view, int position, long id) {
-                showFix(rows.get(position));
+                if (selection != null) {
+                    toggle(rows.get(position));
+                } else {
+                    showFix(rows.get(position));
+                }
             }
         });
         list.setOnItemLongClickListener(new AdapterView.OnItemLongClickListener() {
             @Override
             public boolean onItemLongClick(AdapterView<?> parent, View view, int position, long id) {
-                react(rows.get(position));
+                if (selection != null) {
+                    toggle(rows.get(position));
+                } else {
+                    longPress(view, rows.get(position));
+                }
                 return true;
             }
         });
@@ -189,6 +263,18 @@ public class ChatActivity extends Activity implements Events.Listener {
         super.onPause();
     }
 
+    /** Back ends a selection first, then a reply being written, then the screen. */
+    @Override
+    public void onBackPressed() {
+        if (selection != null) {
+            select(null);
+        } else if (replyTo != null) {
+            replyTo(null);
+        } else {
+            super.onBackPressed();
+        }
+    }
+
     private void say(String error) {
         if (error != null) {
             line(error);
@@ -226,32 +312,17 @@ public class ChatActivity extends Activity implements Events.Listener {
         popup.show();
     }
 
-    /** One of a few emoji into the compose field, at the cursor. */
+    /** An emoji from the full picker into the compose field, at the cursor. */
     private void pickEmoji() {
-        GridView grid = new GridView(this);
-        grid.setNumColumns(6);
-        int pad = dp(8);
-        grid.setPadding(pad, pad, pad, pad);
-        grid.setAdapter(new ArrayAdapter<String>(this, android.R.layout.simple_list_item_1, EMOJI) {
+        EmojiPicker.show(this, new EmojiPicker.Listener() {
             @Override
-            public View getView(int position, View view, ViewGroup parent) {
-                TextView cell = (TextView) super.getView(position, view, parent);
-                cell.setGravity(Gravity.CENTER);
-                cell.setTextSize(26);
-                return cell;
-            }
-        });
-        final AlertDialog dialog = new AlertDialog.Builder(this).setView(grid).create();
-        grid.setOnItemClickListener(new AdapterView.OnItemClickListener() {
-            @Override
-            public void onItemClick(AdapterView<?> parent, View view, int position, long id) {
+            public void picked(String emoji) {
                 int at = Math.max(compose.getSelectionStart(), 0);
                 int end = Math.max(compose.getSelectionEnd(), 0);
-                compose.getText().replace(Math.min(at, end), Math.max(at, end), EMOJI[position]);
-                dialog.dismiss();
+                compose.getText().replace(Math.min(at, end), Math.max(at, end), emoji);
+                say(Core.used(emoji));
             }
         });
-        dialog.show();
     }
 
     private int dp(float dp) {
@@ -263,12 +334,14 @@ public class ChatActivity extends Activity implements Events.Listener {
         if (body.trim().isEmpty()) {
             return;
         }
-        String error = Core.send(peer, body);
+        String error = replyTo == null
+                ? Core.send(peer, body) : Core.reply(peer, Core.str(replyTo, "id"), body);
         if (error != null) {
             line(error);
             return;
         }
         compose.setText("");
+        replyTo(null);
         refresh();
     }
 
@@ -322,22 +395,252 @@ public class ChatActivity extends Activity implements Events.Listener {
         return out;
     }
 
-    /** A message's reactions: one of loquax's quick six. */
-    private void react(Map<String, Object> row) {
-        final String target = Core.str(row, "id");
-        if (target.isEmpty()) {
-            line(getString(R.string.no_reaction_yet));
+    /** Our reaction on `row`, or null: the chip that is ours. */
+    private static String ourReaction(Map<String, Object> row) {
+        for (Map<String, Object> chip : Core.list(row, "chips")) {
+            if (Core.bool(chip, "ours")) {
+                return Core.str(chip, "content");
+            }
+        }
+        return null;
+    }
+
+    /** The long press on the bubble of `row`, in the row's `view`. */
+    private void longPress(View view, final Map<String, Object> row) {
+        final boolean hasId = !Core.str(row, "id").isEmpty();
+        boolean isPinned = pinnedKey() == Core.num(row, "key");
+        int[] actions = {
+            R.string.action_reply, R.string.action_forward, R.string.action_copy,
+            R.string.action_select, R.string.action_info,
+            isPinned ? R.string.action_unpin : R.string.action_pin, R.string.action_delete,
+        };
+        LongPress.show(this, view.findViewById(R.id.bubble), Core.bool(row, "ours"), hasId,
+                QUICK, ourReaction(row), actions, new LongPress.Listener() {
+                    @Override
+                    public void react(String emoji) {
+                        say(Core.react(peer, Core.str(row, "id"), emoji));
+                    }
+
+                    @Override
+                    public void action(int action) {
+                        act(action, row);
+                    }
+                });
+    }
+
+    private void act(int action, Map<String, Object> row) {
+        List<Map<String, Object>> one = new ArrayList<>();
+        one.add(row);
+        if (action == R.string.action_reply) {
+            if (Core.str(row, "id").isEmpty()) {
+                line(getString(R.string.no_id_yet));
+            } else {
+                replyTo(row);
+            }
+        } else if (action == R.string.action_forward) {
+            forward(row);
+        } else if (action == R.string.action_copy) {
+            copy(one);
+        } else if (action == R.string.action_select) {
+            select(new LinkedHashSet<Long>());
+            toggle(row);
+        } else if (action == R.string.action_info) {
+            info(row);
+        } else if (action == R.string.action_pin) {
+            pin(Core.num(row, "key"));
+        } else if (action == R.string.action_unpin) {
+            pin(0);
+        } else if (action == R.string.action_delete) {
+            askDelete(one);
+        }
+    }
+
+    /** Write a reply to `row`, its quote above the field; null ends it. */
+    private void replyTo(Map<String, Object> row) {
+        replyTo = row;
+        replyBar.setVisibility(row == null ? View.GONE : View.VISIBLE);
+        if (row == null) {
             return;
         }
+        ((TextView) findViewById(R.id.reply_who)).setText(Core.bool(row, "ours")
+                ? getString(R.string.reply_to_ours)
+                : getString(R.string.reply_to_theirs, title.getText()));
+        ((TextView) findViewById(R.id.reply_text)).setText(Core.str(row, "body"));
+        compose.requestFocus();
+    }
+
+    /** Pick a conversation and send it a copy of `row`. */
+    private void forward(final Map<String, Object> row) {
+        final List<Map<String, Object>> all = Core.list(Core.conversations(), "conversations");
+        String[] names = new String[all.size()];
+        for (int i = 0; i < all.size(); i++) {
+            names[i] = Core.str(all.get(i), "name");
+        }
         new AlertDialog.Builder(this)
-                .setTitle(R.string.react)
-                .setItems(QUICK, new DialogInterface.OnClickListener() {
+                .setTitle(R.string.forward_to)
+                .setItems(names, new DialogInterface.OnClickListener() {
                     @Override
                     public void onClick(DialogInterface dialog, int which) {
-                        say(Core.react(peer, target, QUICK[which]));
+                        Map<String, Object> to = all.get(which);
+                        String error = Core.forward(peer, Core.num(row, "key"), Core.str(to, "peer"));
+                        line(error != null ? error : getString(R.string.forwarded, Core.str(to, "name")));
                     }
                 })
                 .show();
+    }
+
+    /** The texts of `picked` to the clipboard, one after the other. */
+    private void copy(List<Map<String, Object>> picked) {
+        StringBuilder text = new StringBuilder();
+        for (Map<String, Object> row : picked) {
+            if (text.length() > 0) {
+                text.append("\n\n");
+            }
+            text.append(Core.str(row, "body"));
+        }
+        ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+        if (clipboard == null) {
+            return;
+        }
+        clipboard.setPrimaryClip(ClipData.newPlainText(getString(R.string.app_name), text));
+        // Android 13 and later say so themselves.
+        if (Build.VERSION.SDK_INT < 33) {
+            line(getString(R.string.copied));
+        }
+    }
+
+    /** Start selecting with `keys`, or end it with null. */
+    private void select(Set<Long> keys) {
+        selection = keys;
+        selectionBar.setVisibility(keys == null ? View.GONE : View.VISIBLE);
+        adapter.notifyDataSetChanged();
+    }
+
+    private void toggle(Map<String, Object> row) {
+        Long key = Core.num(row, "key");
+        if (!selection.remove(key)) {
+            selection.add(key);
+        }
+        if (selection.isEmpty()) {
+            select(null);
+            return;
+        }
+        selectionCount.setText(getString(R.string.selected, selection.size()));
+        adapter.notifyDataSetChanged();
+    }
+
+    /** The selected rows, in the conversation's order. */
+    private List<Map<String, Object>> selected() {
+        List<Map<String, Object>> picked = new ArrayList<>();
+        for (Map<String, Object> row : rows) {
+            if (selection != null && selection.contains(Core.num(row, "key"))) {
+                picked.add(row);
+            }
+        }
+        return picked;
+    }
+
+    /** Ask, then delete `picked`: from every device of the home on a client of one. */
+    private void askDelete(final List<Map<String, Object>> picked) {
+        if (picked.isEmpty()) {
+            return;
+        }
+        int n = picked.size();
+        String question = n == 1
+                ? getString(homeClient ? R.string.delete_one_home : R.string.delete_one_here)
+                : getString(homeClient ? R.string.delete_many_home : R.string.delete_many_here, n);
+        new AlertDialog.Builder(this)
+                .setMessage(question)
+                .setPositiveButton(R.string.delete, new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface dialog, int which) {
+                        List<Long> keys = new ArrayList<>();
+                        for (Map<String, Object> row : picked) {
+                            keys.add(Core.num(row, "key"));
+                        }
+                        say(Core.delete(peer, keys));
+                        if (selection != null) {
+                            select(null);
+                        }
+                        refresh();
+                    }
+                })
+                .setNegativeButton(R.string.keep, null)
+                .show();
+    }
+
+    /** The message's detail, the terminal's `v` view, in a dialog. */
+    private void info(Map<String, Object> row) {
+        String[] error = new String[1];
+        List<String> lines = Core.info(peer, Core.num(row, "key"), error);
+        if (lines == null) {
+            line(error[0]);
+            return;
+        }
+        StringBuilder text = new StringBuilder();
+        for (String l : lines) {
+            text.append(l).append('\n');
+        }
+        TextView view = new TextView(this);
+        view.setText(text.toString().trim());
+        view.setTypeface(Typeface.MONOSPACE);
+        view.setTextSize(13);
+        view.setTextIsSelectable(true);
+        view.setTextColor(getColor(R.color.text));
+        view.setPadding(dp(20), dp(12), dp(20), dp(12));
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(view);
+        new AlertDialog.Builder(this)
+                .setTitle(R.string.info)
+                .setView(scroll)
+                .setPositiveButton(android.R.string.ok, null)
+                .show();
+    }
+
+    private SharedPreferences pins() {
+        return getSharedPreferences(PINS, MODE_PRIVATE);
+    }
+
+    /** The key of this conversation's pinned message, 0 for none. */
+    private long pinnedKey() {
+        return pins().getLong(peer, 0);
+    }
+
+    /** Pin the message `key`, or none with 0; one per conversation. */
+    private void pin(long key) {
+        if (key == 0) {
+            pins().edit().remove(peer).apply();
+        } else {
+            pins().edit().putLong(peer, key).apply();
+        }
+        showPinned();
+    }
+
+    /** The pinned bar: the pinned message's text, while it is still here. */
+    private void showPinned() {
+        long key = pinnedKey();
+        Map<String, Object> row = null;
+        for (Map<String, Object> r : rows) {
+            if (key != 0 && Core.num(r, "key") == key) {
+                row = r;
+            }
+        }
+        pinned.setVisibility(row == null ? View.GONE : View.VISIBLE);
+        if (row != null) {
+            String body = Core.str(row, "body");
+            pinned.setText("\uD83D\uDCCC " + (body.isEmpty() ? Core.str(row, "place") : body));
+            pinned.setContentDescription(getString(R.string.pinned) + ": " + body);
+        }
+    }
+
+    private void goToPinned() {
+        long key = pinnedKey();
+        for (int i = 0; i < rows.size(); i++) {
+            if (Core.num(rows.get(i), "key") == key) {
+                list.setSelection(i);
+                return;
+            }
+        }
     }
 
     private void refresh() {
@@ -348,8 +651,23 @@ public class ChatActivity extends Activity implements Events.Listener {
         }
         title.setText(Core.str(answer, "name"));
         avatar.show(peer, answer);
+        homeClient = Core.bool(answer, "home_client");
         rows.clear();
         rows.addAll(Core.list(answer, "messages"));
+        if (selection != null) {
+            // What another device deleted is no longer selected.
+            Set<Long> here = new LinkedHashSet<>();
+            for (Map<String, Object> row : rows) {
+                here.add(Core.num(row, "key"));
+            }
+            selection.retainAll(here);
+            if (selection.isEmpty()) {
+                select(null);
+            } else {
+                selectionCount.setText(getString(R.string.selected, selection.size()));
+            }
+        }
+        showPinned();
         adapter.notifyDataSetChanged();
     }
 
@@ -436,6 +754,8 @@ public class ChatActivity extends Activity implements Events.Listener {
             long now = Ui.nowSecs();
             LinearLayout root = (LinearLayout) view;
             root.setGravity(ours ? Gravity.END : Gravity.START);
+            boolean picked = selection != null && selection.contains(Core.num(row, "key"));
+            root.setBackgroundColor(picked ? getColor(R.color.selected_row) : 0);
 
             TextView day = (TextView) view.findViewById(R.id.day);
             boolean begins = dayBegins(position);
@@ -466,6 +786,7 @@ public class ChatActivity extends Activity implements Events.Listener {
             TextView body = (TextView) view.findViewById(R.id.body);
             body.setText(text(row, ours, now));
             body.setTextColor(getColor(ours ? R.color.bubble_ours_text : R.color.bubble_theirs_text));
+            quote(view, row, ours);
 
             // Only a group's last shows its time, and one of ours whose
             // state differs from the next one's keeps its mark.
@@ -495,6 +816,29 @@ public class ChatActivity extends Activity implements Events.Listener {
             }
             chips.setVisibility(chips.getChildCount() > 0 ? View.VISIBLE : View.GONE);
             return view;
+        }
+
+        /**
+         * A reply's quote above the body: a stripe, who wrote the message
+         * answered, its first line; in the bubble's meta colour.
+         */
+        private void quote(View view, Map<String, Object> row, boolean ours) {
+            View quote = view.findViewById(R.id.quote);
+            boolean has = row.get("quote") != null;
+            quote.setVisibility(has ? View.VISIBLE : View.GONE);
+            if (!has) {
+                return;
+            }
+            int meta = getColor(ours ? R.color.bubble_ours_meta : R.color.bubble_theirs_meta);
+            view.findViewById(R.id.quote_stripe).setBackgroundColor(meta);
+            TextView who = (TextView) view.findViewById(R.id.quote_who);
+            Object quoteOurs = row.get("quote_ours");
+            who.setVisibility(quoteOurs == null ? View.GONE : View.VISIBLE);
+            who.setText(Boolean.TRUE.equals(quoteOurs) ? getString(R.string.quote_you) : title.getText());
+            who.setTextColor(meta);
+            TextView text = (TextView) view.findViewById(R.id.quote_text);
+            text.setText(Core.str(row, "quote"));
+            text.setTextColor(meta);
         }
 
         /** A reaction: its emoji, a count above one, ours in our bubble's colour. */
