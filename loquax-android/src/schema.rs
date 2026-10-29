@@ -11,8 +11,8 @@
 //! | call | payload |
 //! |---|---|
 //! | `start` | [`Start`] |
-//! | `command` | [`Request`], tagged by `t`: `open`, `close`, `send`, `react`, `reply`, `forward`, `delete`, `used`, `pull`, `front` |
-//! | `query` | [`Query`], tagged by `t`: `conversations`, `messages`, `info`, `recents` |
+//! | `command` | [`Request`], tagged by `t`: `open`, `close`, `send`, `react`, `reply`, `forward`, `delete`, `used`, `pull`, `front`, `link`, `unlink`, `notnow`, `rename`, `relink` |
+//! | `query` | [`Query`], tagged by `t`: `conversations`, `messages`, `info`, `recents`, `suggest`, `contact`, `links` |
 //! | `renderMap` | [`MapRequest`] |
 //!
 //! Rust to Java:
@@ -21,7 +21,7 @@
 //! |---|---|
 //! | `start` | [`Started`] |
 //! | `command` | [`Done`] |
-//! | `query` | [`Conversations`], [`Messages`], [`Info`] or [`Recents`], or [`Done`] with the error |
+//! | `query` | [`Conversations`], [`Messages`], [`Info`], [`Recents`], [`Suggestions`], [`Addresses`] or [`Links`], or [`Done`] with the error |
 //! | `nextEvent` | [`Event`], tagged by `t`: `changed`, `notice`, `sync`, `link`, `stopped`; none when the wait ran out |
 //! | `renderMap` | a frame: four bytes big endian, the length of a [`MapShown`], the [`MapShown`], and its `w` times `h` RGBA pixels |
 //!
@@ -42,7 +42,9 @@
 //! schedule as before. The map's margins and `moving` (1131) are such
 //! fields too: an app that sends none gets the frame of the screen. The
 //! long press's requests and queries (1137) and a row's `key` and quote
-//! came the same way.
+//! came the same way, and so did the address book's (1139): the link
+//! requests and queries, a row's `photo` and `linked`, and the header's
+//! link fields.
 
 use serde::{Deserialize, Serialize};
 
@@ -133,6 +135,91 @@ pub enum Request {
     /// front and with the watching link down, the session pulls every
     /// minute.
     Front { front: bool },
+    /// Linked `peer` to a contact of the address book the user picked or
+    /// confirmed (1139), or the link's copy refreshed: what the contact
+    /// said right then, its thumbnail's bytes among it.
+    Link {
+        peer: String,
+        #[serde(flatten)]
+        contact: ContactCopy,
+    },
+    /// Took `peer`'s link away; its copied name and photo go with it.
+    Unlink { peer: String },
+    /// "Not now" on `peer`'s banner: it does not ask again.
+    #[serde(rename = "notnow")]
+    NotNow { peer: String },
+    /// The user's own name for `peer`, the empty one clearing it: kept
+    /// here and handed to the home node for the home's other devices.
+    Rename { peer: String, name: String },
+    /// The address book's IM rows with protocol LXMF (with
+    /// `READ_CONTACTS`): each address loquax knows and has not linked
+    /// becomes a link, unless two contacts carry it.
+    Relink { rows: Vec<ImRow> },
+}
+
+/// What a contact said when loquax read it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContactCopy {
+    /// Its `LOOKUP_KEY` and `_ID`.
+    pub lookup: String,
+    #[serde(default)]
+    pub contact_id: i64,
+    /// Its display name.
+    pub name: String,
+    /// Its thumbnail's bytes, as the provider gave them; none for none.
+    #[serde(default)]
+    pub photo: Option<Blob>,
+}
+
+/// One IM row of protocol LXMF, and the contact it belongs to.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImRow {
+    /// The row's data: the address, as the user or loquax wrote it.
+    pub address: String,
+    #[serde(flatten)]
+    pub contact: ContactCopy,
+}
+
+/// Bytes that cross as msgpack `bin`, as Java's codec writes a `byte[]`.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct Blob(pub Vec<u8>);
+
+impl std::fmt::Debug for Blob {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Blob({} bytes)", self.0.len())
+    }
+}
+
+impl Serialize for Blob {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_bytes(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for Blob {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = Blob;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("bytes")
+            }
+            fn visit_bytes<E: serde::de::Error>(self, bytes: &[u8]) -> Result<Blob, E> {
+                Ok(Blob(bytes.to_vec()))
+            }
+            fn visit_byte_buf<E: serde::de::Error>(self, bytes: Vec<u8>) -> Result<Blob, E> {
+                Ok(Blob(bytes))
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Blob, A::Error> {
+                let mut out = Vec::new();
+                while let Some(byte) = seq.next_element::<u8>()? {
+                    out.push(byte);
+                }
+                Ok(Blob(out))
+            }
+        }
+        deserializer.deserialize_bytes(Visitor)
+    }
 }
 
 /// What the screen wants to show.
@@ -147,6 +234,85 @@ pub enum Query {
     Info { peer: String, key: u64 },
     /// The emoji the user used last, newest first.
     Recents,
+    /// Which of `candidates`, contacts of the address book, `peer`'s
+    /// announced name may be, best first (`loquax::name_match`).
+    Suggest {
+        peer: String,
+        candidates: Vec<CandidateRow>,
+    },
+    /// Every address linked to the contact `lookup`: its detail screen.
+    Contact { lookup: String },
+    /// Every link, for the refresh that reads the contacts again.
+    Links,
+}
+
+/// One contact's name fields, for [`Query::Suggest`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CandidateRow {
+    /// The app's handle on it, handed back: the lookup key.
+    pub key: String,
+    #[serde(default)]
+    pub display: String,
+    #[serde(default)]
+    pub given: String,
+    #[serde(default)]
+    pub middle: String,
+    #[serde(default)]
+    pub family: String,
+    #[serde(default)]
+    pub nicknames: Vec<String>,
+    #[serde(default)]
+    pub last_contacted: i64,
+}
+
+/// The suggestions, best first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Suggestions {
+    pub v: u32,
+    pub suggestions: Vec<SuggestionRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SuggestionRow {
+    pub key: String,
+    pub score: u32,
+    /// What matched: `display`, `nickname`, `name`, `given`, `words` or
+    /// `prefix`; and the nickname when it was one.
+    pub field: String,
+    #[serde(default)]
+    pub nickname: Option<String>,
+}
+
+/// The addresses of one contact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Addresses {
+    pub v: u32,
+    pub addresses: Vec<AddressRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AddressRow {
+    pub peer: String,
+    /// As every screen names it.
+    pub name: String,
+    /// The announced name, when one was heard.
+    #[serde(default)]
+    pub announced: Option<String>,
+}
+
+/// Every link.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Links {
+    pub v: u32,
+    pub links: Vec<LinkRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkRow {
+    pub peer: String,
+    pub lookup: String,
+    pub contact_id: i64,
+    pub name: String,
 }
 
 /// A message's detail, what the terminal's `v` shows: who, the peer, the
@@ -229,6 +395,13 @@ pub struct ConversationRow {
     /// the list draws its mark where an unread count would be.
     #[serde(default)]
     pub state: String,
+    /// The linked contact's thumbnail as loquax copied it, a file the app
+    /// decodes (1139); absent, the avatar is the initials.
+    #[serde(default)]
+    pub photo: Option<String>,
+    /// Whether the peer is linked to a contact of the address book.
+    #[serde(default)]
+    pub linked: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -316,6 +489,28 @@ pub struct Messages {
     /// question says where it deletes.
     #[serde(default)]
     pub home_client: bool,
+    /// The address book (1139): the photo and whether it is linked, as in
+    /// [`ConversationRow`]; the contact's lookup key and `_ID` for "Open
+    /// contact"; whether the banner asks to add the peer (unlinked, not
+    /// answered "Not now", a message came from it); the announced name for
+    /// a new contact; the user's own name for the rename dialog; the
+    /// contact's other addresses as every screen names them.
+    #[serde(default)]
+    pub photo: Option<String>,
+    #[serde(default)]
+    pub linked: bool,
+    #[serde(default)]
+    pub lookup: Option<String>,
+    #[serde(default)]
+    pub contact_id: Option<i64>,
+    #[serde(default)]
+    pub ask_link: bool,
+    #[serde(default)]
+    pub announced: Option<String>,
+    #[serde(default)]
+    pub petname: Option<String>,
+    #[serde(default)]
+    pub others: Vec<String>,
 }
 
 /// What happened, for the screen.
@@ -555,6 +750,33 @@ mod tests {
             decode::<Request>(&encode(&Request::Front { front: true })),
             Ok(Request::Front { front: true })
         );
+    }
+
+    /// A link carries the thumbnail as `bin`, Java's `byte[]`, and decodes
+    /// from the flat map Java sends.
+    #[test]
+    fn a_link_carries_its_photo_as_bin() {
+        let link = Request::Link {
+            peer: "ab".repeat(16),
+            contact: ContactCopy {
+                lookup: "0r1-2C".to_string(),
+                contact_id: 7,
+                name: "Alice".to_string(),
+                photo: Some(Blob(vec![0x89, b'P', b'N', b'G'])),
+            },
+        };
+        let bytes = encode(&link);
+        assert!(
+            bytes
+                .windows(6)
+                .any(|w| w == [0xc4, 4, 0x89, b'P', b'N', b'G']),
+            "{bytes:02x?}"
+        );
+        assert_eq!(decode::<Request>(&bytes), Ok(link));
+        let bare = encode(&Request::NotNow {
+            peer: "ab".repeat(16),
+        });
+        assert_eq!(&bare[3..10], b"\xa6notnow");
     }
 
     #[test]

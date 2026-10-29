@@ -151,6 +151,7 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
     let home = tempfile::tempdir().expect("home node dir");
     let code = admit(home.path());
     let node = HomeNode::start(listener, &instance, rns.path(), home.path()).await;
+    let home_dir = home.path().to_path_buf();
 
     let phone = tempfile::tempdir().expect("app dir");
     let dir = phone.path().display().to_string();
@@ -275,6 +276,117 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
         assert_eq!(list.initials.chars().count(), 2);
         assert_eq!(list.address.len(), 32);
 
+        // The address book (1139): linked with what the picker gave, the
+        // contact's name shows and its photo, under the user's own name,
+        // which the home node keeps for the home's other devices.
+        let lookup = "0r1-ALICE".to_string();
+        let thumbnail = vec![0x89, b'P', b'N', b'G', 1, 2, 3];
+        assert!(
+            !messages.linked && !messages.ask_link,
+            "only ours: no banner"
+        );
+        session
+            .request(Request::Rename {
+                peer: peer.clone(),
+                name: "Mum".to_string(),
+            })
+            .expect("rename");
+        session
+            .request(Request::Link {
+                peer: peer.clone(),
+                contact: schema::ContactCopy {
+                    lookup: lookup.clone(),
+                    contact_id: 17,
+                    name: "Alice Schmidt".to_string(),
+                    photo: Some(schema::Blob(thumbnail.clone())),
+                },
+            })
+            .expect("link");
+        let short = &peer[..4];
+        let shown: schema::Messages = rmp_serde::from_slice(
+            &session
+                .query(schema::Query::Messages { peer: peer.clone() })
+                .expect("query"),
+        )
+        .expect("decode");
+        assert_eq!(shown.name, format!("Mum ·{short}"), "the petname first");
+        assert!(shown.linked);
+        assert_eq!(
+            (shown.lookup.as_deref(), shown.contact_id),
+            (Some(lookup.as_str()), Some(17))
+        );
+        assert_eq!(shown.petname.as_deref(), Some("Mum"));
+        let photo = shown.photo.clone().expect("the photo");
+        assert_eq!(std::fs::read(&photo).expect("the copy"), thumbnail);
+        // The petname at the home node: an archive entry of its own.
+        let home_store = loquax::store::Store::open_read_only(
+            &home_dir.join(loquax::store::STORE_FILE),
+            session.address(),
+        )
+        .expect("the home store")
+        .expect("there");
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            let page = home_store.archive_since(0, usize::MAX).expect("page");
+            let petnames: Vec<_> = page
+                .entries
+                .iter()
+                .filter(|e| e.kind == loquax::home::KIND_PETNAME)
+                .map(|e| loquax::home::wire::read_petname_entry(&e.packed).expect("petname"))
+                .collect();
+            if !petnames.is_empty() {
+                assert_eq!(petnames, [([0x5a; 16], Some("Mum".to_string()))]);
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no petname reached home"
+            );
+            let _ = session.next_event(Duration::from_millis(200));
+        }
+        // The petname cleared, the contact's name; the list says it too.
+        session
+            .request(Request::Rename {
+                peer: peer.clone(),
+                name: String::new(),
+            })
+            .expect("clear");
+        let list: schema::Conversations =
+            rmp_serde::from_slice(&session.query(schema::Query::Conversations).expect("list"))
+                .expect("decode");
+        let row = &list.conversations[0];
+        assert_eq!(row.name, format!("Alice Schmidt ·{short}"));
+        assert_eq!(row.initials, "AS");
+        assert_eq!(
+            (row.linked, row.photo.as_deref()),
+            (true, Some(photo.as_str()))
+        );
+        let detail: schema::Addresses = rmp_serde::from_slice(
+            &session
+                .query(schema::Query::Contact {
+                    lookup: lookup.clone(),
+                })
+                .expect("detail"),
+        )
+        .expect("decode");
+        assert_eq!(detail.addresses.len(), 1);
+        assert_eq!(detail.addresses[0].peer, peer);
+        // A peer that announced nothing gets no suggestion.
+        let none: schema::Suggestions = rmp_serde::from_slice(
+            &session
+                .query(schema::Query::Suggest {
+                    peer: peer.clone(),
+                    candidates: vec![schema::CandidateRow {
+                        key: lookup.clone(),
+                        display: "Alice Schmidt".to_string(),
+                        ..schema::CandidateRow::default()
+                    }],
+                })
+                .expect("suggest"),
+        )
+        .expect("decode");
+        assert!(none.suggestions.is_empty());
+
         // Negative: an address that is none, and a message id that is none.
         assert!(session
             .request(Request::Open {
@@ -314,6 +426,23 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
         .expect("decode");
         assert_eq!(messages.messages.len(), 2, "{messages:?}");
         assert_eq!(messages.messages[0].body, "hallo vom Telefon");
+        // The link outlived the session; unlinked, the address again and
+        // no photo kept.
+        let short = &peer[..4];
+        assert_eq!(messages.name, format!("Alice Schmidt ·{short}"));
+        let photo = messages.photo.clone().expect("the photo kept");
+        session
+            .request(Request::Unlink { peer: peer.clone() })
+            .expect("unlink");
+        let unlinked: schema::Messages = rmp_serde::from_slice(
+            &session
+                .query(schema::Query::Messages { peer: peer.clone() })
+                .expect("query"),
+        )
+        .expect("decode");
+        assert_eq!(unlinked.name, format!("<{}…>", &peer[..8]));
+        assert!(!unlinked.linked && unlinked.photo.is_none() && unlinked.lookup.is_none());
+        assert!(!Path::new(&photo).exists());
         // The reply's field came back from the store with the message.
         assert_eq!(
             messages.messages[1].quote_to.as_deref(),

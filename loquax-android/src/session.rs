@@ -33,6 +33,7 @@ use loquax::ui::{reactions, update, Message, UiEffect, UiEvent, UiModel};
 use loquax::when::WallTime;
 
 use crate::avatar;
+use crate::links::{self, Book};
 use crate::pull_line::{PullLine, Say};
 use crate::schema::{self, Event, VERSION};
 
@@ -133,6 +134,8 @@ struct Inner {
     watching: bool,
     front: bool,
     fallback: Fallback,
+    /// loquax's links to the phone's address book (1139).
+    book: Book,
 }
 
 /// A running session.
@@ -395,6 +398,36 @@ impl Session {
                 self.lock().front = front;
                 return Ok(());
             }
+            schema::Request::Link { peer, contact } => {
+                let peer = parse_peer(&peer)?;
+                return self.lock().link(peer, &contact);
+            }
+            schema::Request::Unlink { peer } => {
+                let peer = parse_peer(&peer)?;
+                return self.lock().unlink(peer);
+            }
+            schema::Request::NotNow { peer } => {
+                let peer = parse_peer(&peer)?;
+                let mut inner = self.lock();
+                inner.book.not_now.insert(peer);
+                inner.dirty = true;
+                return links::save(&inner.home, &inner.book);
+            }
+            schema::Request::Rename { peer, name } => UiEvent::Rename {
+                peer: parse_peer(&peer)?,
+                name,
+            },
+            schema::Request::Relink { rows } => {
+                let mut inner = self.lock();
+                let linked = inner.relink(&rows)?;
+                if linked > 0 {
+                    let _ = inner.events.send(Event::Notice {
+                        v: VERSION,
+                        text: format!("linked {linked} from your contacts"),
+                    });
+                }
+                return Ok(());
+            }
         };
         self.lock().apply(event);
         Ok(())
@@ -418,6 +451,37 @@ impl Session {
             schema::Query::Recents => schema::encode(&schema::Recents {
                 v: VERSION,
                 emoji: loquax::emoji::load_recents(&inner.home).0,
+            }),
+            schema::Query::Suggest { peer, candidates } => {
+                let peer = parse_peer(&peer)?;
+                schema::encode(&suggest(&inner.model.names, &peer, &candidates))
+            }
+            schema::Query::Contact { lookup } => schema::encode(&schema::Addresses {
+                v: VERSION,
+                addresses: inner
+                    .book
+                    .of_contact(&lookup)
+                    .iter()
+                    .map(|peer| schema::AddressRow {
+                        peer: loquax::address::to_hex(peer),
+                        name: inner.model.names.label(peer),
+                        announced: inner.model.names.announced(peer).map(str::to_string),
+                    })
+                    .collect(),
+            }),
+            schema::Query::Links => schema::encode(&schema::Links {
+                v: VERSION,
+                links: inner
+                    .book
+                    .links
+                    .iter()
+                    .map(|(peer, link)| schema::LinkRow {
+                        peer: loquax::address::to_hex(peer),
+                        lookup: link.lookup.clone(),
+                        contact_id: link.contact_id,
+                        name: link.name.clone(),
+                    })
+                    .collect(),
             }),
         })
     }
@@ -543,6 +607,7 @@ impl Inner {
             watching: false,
             front: false,
             fallback: Fallback::default(),
+            book: links::load(home),
         })
     }
 
@@ -747,8 +812,19 @@ impl Inner {
                 UiEffect::Send { to, body, fields } => self.sends.push_back((to, body, fields)),
                 UiEffect::Fetch => self.pull_owed = true,
                 UiEffect::Log(line) | UiEffect::Notice(line) => tracing::info!("{line}"),
-                // What the terminal does with its screen, its contacts file
-                // and its maps has no place here yet.
+                // A petname set here or pulled (1139): the contacts file
+                // in the app's directory, which the next start reads.
+                UiEffect::Contact(contact) => {
+                    if let Err(error) = loquax::names::save_contact(&self.home, &contact) {
+                        let _ = self.events.send(Event::Notice {
+                            v: VERSION,
+                            text: format!("name not saved: {error}"),
+                        });
+                    }
+                    self.dirty = true;
+                }
+                // What the terminal does with its screen and its maps has
+                // no place here yet.
                 _ => {}
             }
         }
@@ -764,12 +840,87 @@ impl Inner {
                 text: format!("not saved: {error}"),
             });
         }
+        let petnames = self.model.take_petnames();
+        if !petnames.is_empty() {
+            self.runtime
+                .spawn(runner::hand_petnames(self.client.clone(), petnames, BUDGET));
+        }
         let marks = self.model.take_marks();
         if marks.is_empty() {
             return;
         }
         self.runtime
             .spawn(runner::hand_marks(self.client.clone(), marks, BUDGET));
+    }
+
+    /// Link `peer` to the contact `contact` describes, or refresh the
+    /// link's copy: the table, the photo, the name every screen shows.
+    fn link(&mut self, peer: [u8; 16], contact: &schema::ContactCopy) -> Result<(), String> {
+        let name = loquax::names::sanitise(&contact.name)
+            .ok_or_else(|| "the contact has no name to show".to_string())?;
+        if contact.lookup.trim().is_empty() || contact.lookup.contains('\n') {
+            return Err("the contact has no lookup key".to_string());
+        }
+        links::keep_photo(
+            &self.home,
+            &peer,
+            contact.photo.as_ref().map(|photo| photo.0.as_slice()),
+        )?;
+        self.book.links.insert(
+            peer,
+            links::Link {
+                contact_id: contact.contact_id,
+                lookup: contact.lookup.clone(),
+                name: name.clone(),
+            },
+        );
+        links::save(&self.home, &self.book)?;
+        self.model.names.link(peer, &name, &contact.lookup);
+        self.dirty = true;
+        Ok(())
+    }
+
+    fn unlink(&mut self, peer: [u8; 16]) -> Result<(), String> {
+        if self.book.links.remove(&peer).is_none() {
+            return Ok(());
+        }
+        links::save(&self.home, &self.book)?;
+        self.model.names.unlink(&peer);
+        self.dirty = true;
+        links::keep_photo(&self.home, &peer, None)
+    }
+
+    /// The IM rows of protocol LXMF the address book holds: those of an
+    /// address loquax knows and has not linked become links. An address
+    /// two contacts carry is left for the user to choose. How many were
+    /// linked.
+    fn relink(&mut self, rows: &[schema::ImRow]) -> Result<usize, String> {
+        let mut by_address: std::collections::BTreeMap<[u8; 16], Vec<&schema::ImRow>> =
+            std::collections::BTreeMap::new();
+        for row in rows {
+            if let Ok(peer) = loquax::address::parse(row.address.trim()) {
+                by_address.entry(peer).or_default().push(row);
+            }
+        }
+        let mut linked = 0;
+        for (peer, rows) in by_address {
+            let first = rows[0];
+            let one_contact = rows
+                .iter()
+                .all(|r| r.contact.lookup == first.contact.lookup);
+            if !one_contact || self.book.links.contains_key(&peer) || !self.knows(&peer) {
+                continue;
+            }
+            self.link(peer, &first.contact)?;
+            linked += 1;
+        }
+        Ok(linked)
+    }
+
+    /// Whether loquax knows `peer`: a conversation, a name heard or given.
+    fn knows(&self, peer: &[u8; 16]) -> bool {
+        self.model.conversations.iter().any(|c| c.peer == *peer)
+            || self.model.names.shown(peer).is_some()
     }
 
     /// The oldest send, if none runs; the owed pull, if none runs.
@@ -845,6 +996,8 @@ impl Inner {
                         Some(m) if m.outbound => state_word(m.delivery).to_string(),
                         _ => String::new(),
                     },
+                    photo: self.photo(&conversation.peer),
+                    linked: self.book.links.contains_key(&conversation.peer),
                 }
             })
             .collect();
@@ -864,6 +1017,14 @@ impl Inner {
         let icon =
             index.and_then(|c| avatar::latest_appearance(&self.model.conversations[c].messages));
         let rows = index.map_or_else(Vec::new, |c| rows(&self.model, c));
+        let link = self.book.links.get(&peer);
+        let heard = index.is_some_and(|c| {
+            self.model.conversations[c]
+                .messages
+                .iter()
+                .any(|m| !m.outbound)
+        });
+        let names = &self.model.names;
         schema::Messages {
             v: VERSION,
             peer: loquax::address::to_hex(&peer),
@@ -873,7 +1034,28 @@ impl Inner {
             icon_fg: icon.as_ref().map(|(fg, _)| fg.clone()),
             icon_bg: icon.map(|(_, bg)| bg),
             home_client: self.model.home_client,
+            photo: self.photo(&peer),
+            linked: link.is_some(),
+            lookup: link.map(|link| link.lookup.clone()),
+            contact_id: link.map(|link| link.contact_id),
+            ask_link: link.is_none() && heard && !self.book.not_now.contains(&peer),
+            announced: names.announced(&peer).map(str::to_string),
+            petname: names.petname(&peer).map(str::to_string),
+            others: names
+                .same_contact(&peer)
+                .iter()
+                .map(|other| names.label(other))
+                .collect(),
         }
+    }
+
+    /// A linked peer's copied thumbnail.
+    fn photo(&self, peer: &[u8; 16]) -> Option<String> {
+        self.book
+            .links
+            .contains_key(peer)
+            .then(|| links::photo(&self.home, peer))
+            .flatten()
     }
 
     /// `emoji` was used: first in the recents kept in the home. A file that
@@ -901,8 +1083,59 @@ pub fn known(home: &Path, store: &Store) -> Result<UiModel<Line>, String> {
     for (peer, name) in store.names().map_err(|error| error.to_string())? {
         model.names.remember(peer, &name);
     }
+    for (peer, link) in links::load(home).links {
+        model.names.link(peer, &link.name, &link.lookup);
+    }
     model.restore_positions(store.positions().map_err(|error| error.to_string())?);
     Ok(model)
+}
+
+/// The candidates `peer`'s announced name may be, best first; none for a
+/// peer that announced none.
+pub fn suggest(
+    names: &loquax::names::Names,
+    peer: &[u8; 16],
+    rows: &[schema::CandidateRow],
+) -> schema::Suggestions {
+    use loquax::name_match::{rank, Candidate, Field};
+    let candidates: Vec<Candidate> = rows
+        .iter()
+        .map(|row| Candidate {
+            key: row.key.clone(),
+            display: row.display.clone(),
+            given: row.given.clone(),
+            middle: row.middle.clone(),
+            family: row.family.clone(),
+            nicknames: row.nicknames.clone(),
+            last_contacted: row.last_contacted,
+        })
+        .collect();
+    let ranked = names
+        .announced(peer)
+        .map(|announced| rank(announced, &candidates))
+        .unwrap_or_default();
+    schema::Suggestions {
+        v: VERSION,
+        suggestions: ranked
+            .into_iter()
+            .map(|s| {
+                let (field, nickname) = match s.field {
+                    Field::Display => ("display", None),
+                    Field::Nickname(nick) => ("nickname", Some(nick)),
+                    Field::Name => ("name", None),
+                    Field::Given => ("given", None),
+                    Field::Words => ("words", None),
+                    Field::Prefix => ("prefix", None),
+                };
+                schema::SuggestionRow {
+                    key: s.key,
+                    score: u32::from(s.score),
+                    field: field.to_string(),
+                    nickname,
+                }
+            })
+            .collect(),
+    }
 }
 
 /// The map's pins as a model `known` from `home`'s store names them, at
