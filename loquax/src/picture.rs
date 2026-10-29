@@ -126,9 +126,14 @@ impl Maps {
         self.dir().map(load).unwrap_or_default()
     }
 
-    /// The headers of the regions there now.
+    /// The headers of the regions there now, newest first
+    /// ([`newest_first`]).
     pub fn headers(&self) -> Vec<Header> {
-        self.load().0.iter().map(|r| *r.region.header()).collect()
+        let (regions, _) = self.load();
+        newest_first(&regions)
+            .into_iter()
+            .map(|r| *r.region.header())
+            .collect()
     }
 }
 
@@ -136,6 +141,18 @@ impl Maps {
 pub struct Installed {
     pub name: String,
     pub region: Region<File>,
+    /// The file's modification time, which a view of an autoloaded region
+    /// renews ([`Painter`]); `None` where the file system keeps none.
+    pub modified: Option<SystemTime>,
+}
+
+/// `regions`, the newest file first, ties by name: a map opened without
+/// pins shows the first (`crate::ui::map::fit`), the region last installed
+/// or viewed.
+pub fn newest_first(regions: &[Installed]) -> Vec<&Installed> {
+    let mut order: Vec<&Installed> = regions.iter().collect();
+    order.sort_by(|a, b| b.modified.cmp(&a.modified).then(a.name.cmp(&b.name)));
+    order
 }
 
 /// Every `*.lmr` in `dir`, by name, and a line for each that did not open.
@@ -156,11 +173,16 @@ pub fn load(dir: &Path) -> (Vec<Installed>, Vec<String>) {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
+        let modified = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
         match File::open(&path)
             .map_err(|e| e.to_string())
             .and_then(|f| Region::open(f).map_err(|e| format!("{e:?}")))
         {
-            Ok(region) => regions.push(Installed { name, region }),
+            Ok(region) => regions.push(Installed {
+                name,
+                region,
+                modified,
+            }),
             Err(error) => problems.push(format!("map {}: {error}", path.display())),
         }
     }
@@ -220,9 +242,13 @@ impl Painter {
         &self.regions
     }
 
-    /// The regions' headers, which say how deep a fit goes.
+    /// The regions' headers, which say how deep a fit goes, newest first
+    /// ([`newest_first`]).
     pub fn headers(&self) -> Vec<Header> {
-        self.regions.iter().map(|r| *r.region.header()).collect()
+        newest_first(&self.regions)
+            .into_iter()
+            .map(|r| *r.region.header())
+            .collect()
     }
 
     /// The zooms a frontend offers over these regions and the outline.
@@ -427,6 +453,34 @@ mod tests {
         let (regions, problems) = load(empty.path());
         assert!(regions.is_empty());
         assert_eq!(problems.len(), 1, "{problems:?}");
+    }
+
+    /// The regions newest first, ties by name (1131): the first view of a
+    /// map without pins goes to the region last installed or viewed.
+    #[test]
+    fn regions_are_listed_newest_first() {
+        const FLORENCE: &[u8] = include_bytes!("../../leviculum-map/fixtures/firenze.lmr");
+        let dir = tempfile::tempdir().expect("tmp");
+        for name in ["a.lmr", "b.lmr", "c.lmr"] {
+            std::fs::write(dir.path().join(name), FLORENCE).expect("write");
+        }
+        let age = |name: &str, secs: u64| {
+            let file = File::options()
+                .write(true)
+                .open(dir.path().join(name))
+                .expect("open");
+            file.set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
+                .expect("mtime");
+        };
+        age("a.lmr", 1_000);
+        age("b.lmr", 3_000);
+        age("c.lmr", 1_000);
+        let (regions, _) = load(dir.path());
+        let names: Vec<&str> = newest_first(&regions)
+            .iter()
+            .map(|r| r.name.as_str())
+            .collect();
+        assert_eq!(names, ["b.lmr", "a.lmr", "c.lmr"]);
     }
 
     /// Two regions loaded side by side draw together (1089): over a view

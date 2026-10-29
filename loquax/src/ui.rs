@@ -1702,6 +1702,7 @@ fn pan_map(state: &mut map::MapState, area: Rect, setup: &map::MapSetup, dx: i8,
     let step = |n: i8, of: u32| i32::from(n) * (of / 8).max(1) as i32;
     view.pan(step(dx, w), step(dy, h));
     state.centre = view.centre;
+    map::settle(state, area, setup);
 }
 
 /// A key on the open map.
@@ -1715,7 +1716,10 @@ fn map_key<B: InputBuffer>(model: &mut UiModel<B>, cmd: keys::MapCmd) -> Vec<UiE
     };
     match cmd {
         MapCmd::ZoomIn => state.zoom = state.zoom.saturating_add(1).min(setup.zooms.1),
-        MapCmd::ZoomOut => state.zoom = state.zoom.saturating_sub(1).max(setup.zooms.0),
+        MapCmd::ZoomOut => {
+            state.zoom = state.zoom.saturating_sub(1).max(setup.zooms.0);
+            map::settle(state, area, &setup);
+        }
         MapCmd::Pan(dx, dy) => pan_map(state, area, &setup, dx, dy),
         MapCmd::Fit => {
             let (centre, zoom) = map::fit(&pins, area, &setup);
@@ -2103,11 +2107,13 @@ fn drag<B: InputBuffer>(model: &mut UiModel<B>, col: u16, row: u16) {
 /// press is a drag ([`map::DRAG_CELLS`]).
 fn map_drag<B: InputBuffer>(model: &mut UiModel<B>, col: u16, row: u16) {
     let setup = model.map_setup.clone();
+    let area = model.map_area();
     let (Some(press), Some(state)) = (model.map_press.as_mut(), model.map.as_mut()) else {
         return;
     };
     press.reach(col, row);
     state.centre = press.centre_at(col, row, state, &setup);
+    map::settle(state, area, &setup);
 }
 
 /// The left button came up: on the map a drag ends where the pointer is

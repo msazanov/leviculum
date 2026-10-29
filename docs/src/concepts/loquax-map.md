@@ -32,7 +32,7 @@ fields beside id, source, title, body and the verification
 the two telemetry fields into positions (`telemetry::read`,
 `loquax/src/telemetry.rs:130`), the screen model keeps each peer's latest
 and hands every one to the store (`take_telemetry`,
-`loquax/src/ui.rs:2961`), and the store keeps the fields whole in its
+`loquax/src/ui.rs:2967`), and the store keeps the fields whole in its
 `fields` column (`loquax/src/store.rs:1902`) and the positions in a table of
 their own (`SCHEMA_V2`, `loquax/src/store.rs:173`). The sender's timestamp
 is still not carried: `OutboxEvent`, the screen's `Message` and every type
@@ -344,6 +344,21 @@ to y uses `f64` through `libm` (software on the M9's single-precision FPU),
 once per pin and per viewport change, never per vertex, since the region
 holds geometry already projected. Both round-trip to the same 10^-7 degree
 step. x wraps, so the antimeridian is wrapping arithmetic.
+
+**One world at most** (Lew 2026-10-29, 1131). No frontend shows the
+world twice. `Viewport::min_zoom` is the shallowest zoom at which the
+world, 256 x 2^z pixels, is at least as wide as the view, so no copy
+stands beside another; zooming out stops there. `Viewport::one_world`
+holds a view to it: the zoom at least that, y inside the projection
+(85.05 degrees north and south), and a world shorter than the view, as
+on a portrait phone at its floor, centred in it. x still wraps, by moving
+the one world. The terminal, the window and the phone get their view
+through `loquax::ui::map::viewport`, which applies it, and `settle` writes
+it back into the state after a zoom or a pan. The first view without pins
+fits the newest installed or cached region (by file time, which a view of
+an autoloaded region renews), else the world at that floor; the phone's
+locale country is not used, since nothing maps a country to its box
+cheaply yet.
 
 **Where it comes from.** The cut lives in `leviculum-mapcut`, which
 `leviculum-map-tool cut` and loquax's autoload both call (1089). It reads

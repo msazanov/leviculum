@@ -1979,6 +1979,61 @@ mod tests {
         assert!(text.contains("● bob · 4 min"));
     }
 
+    /// The smallest shift by which every column of `cols` repeats, the
+    /// copies of the world side by side; `None` where none does.
+    fn period<T: PartialEq>(cols: &[T]) -> Option<usize> {
+        (1..cols.len()).find(|&p| (0..cols.len() - p).all(|i| cols[i] == cols[i + p]))
+    }
+
+    /// The picture of `view` in half-blocks, 1 x 2 pixels a cell, as its
+    /// columns of cell colours.
+    fn halfblock_columns(view: Viewport) -> Vec<Vec<(Color, Color)>> {
+        let mut painter = MapPainter::new(Maps::default(), Graphics::Halfblocks, None);
+        let (w, h) = view.size();
+        let (cols, rows) = (w as u16, (h / 2) as u16);
+        let shown = MapView {
+            area: leviculum_ui::Rect::new(1, 1, cols, rows),
+            viewport: view,
+            cell_px: (1, 2),
+            pins: Vec::new(),
+        };
+        let mut terminal = Terminal::new(TestBackend::new(cols + 2, rows + 2)).expect("terminal");
+        let Ok(_) = terminal.draw(|f| painter.render(f, &shown, Style::default()));
+        let buffer = terminal.backend().buffer().clone();
+        // The bottom row carries the attribution; the rows above it are
+        // the picture.
+        (1..=cols)
+            .map(|x| {
+                (1..rows)
+                    .filter_map(|y| buffer.cell((x, y)).map(|c| (c.fg, c.bg)))
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// The terminal shows one world at most (1131): a pane 300 pixels wide
+    /// asked for z0, where the world is 256 wide, is drawn at z1 by the
+    /// model's view, and no column of it repeats. The view as asked, the
+    /// control, repeats every 256 columns.
+    #[test]
+    fn the_terminal_never_shows_the_world_twice() {
+        let setup = MapSetup {
+            cell_px: (1, 2),
+            ..MapSetup::default()
+        };
+        let area = leviculum_ui::Rect::new(1, 1, 300, 60);
+        let state = loquax::ui::map::MapState {
+            centre: project(LatLon::from_degrees(30.0, 10.0)),
+            zoom: 0,
+            selected: None,
+        };
+        let asked = Viewport::new(state.centre, 0, 300, 120);
+        assert_eq!(period(&halfblock_columns(asked)), Some(256), "the control");
+        let view = loquax::ui::map::viewport(&state, area, &setup);
+        assert_eq!(view.zoom(), 1);
+        assert_eq!(period(&halfblock_columns(view)), None);
+    }
+
     /// The names of the Florence fixture over its picture in braille, with
     /// a pin: the park names the view's zoom shows set by the density
     /// rule, each with its cells' background as its halo at truecolor, none

@@ -184,6 +184,35 @@ impl Viewport {
         };
     }
 
+    /// The shallowest zoom at which the world, `256 << zoom` pixels
+    /// across, is at least `width` wide: no view at that zoom or deeper
+    /// shows a second copy of the world beside the first (Lew 2026-10-29,
+    /// 1131). Height does not count: a world shorter than the view is
+    /// centred in it ([`one_world`](Self::one_world)).
+    pub fn min_zoom(width: u32) -> u8 {
+        let mut zoom = 0;
+        while zoom < MAX_VIEW_ZOOM && (256u64 << zoom) < u64::from(width) {
+            zoom += 1;
+        }
+        zoom
+    }
+
+    /// The view as every frontend shows it: one world at most. The zoom is
+    /// at least [`min_zoom`](Self::min_zoom) of the width, so x shows the
+    /// world once and wraps only by moving it; y keeps the view inside
+    /// the projection (Mercator's 85.05 degrees north and south), and a
+    /// world shorter than the view sits in its middle.
+    pub fn one_world(mut self) -> Self {
+        self.set_zoom(self.zoom.max(Self::min_zoom(self.width)));
+        let half = (i64::from(self.height) * SUB / 2) << self.sub_shift();
+        let full = 1i64 << 32;
+        self.centre.y = match 2 * half >= full {
+            true => 1 << 31,
+            false => i64::from(self.centre.y).clamp(half, full - half) as u32,
+        };
+        self
+    }
+
     /// Move the centre by whole pixels; x wraps, y stops at the edges.
     pub fn pan(&mut self, dx: i32, dy: i32) {
         let px = 24 - u32::from(self.zoom);

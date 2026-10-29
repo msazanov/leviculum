@@ -40,7 +40,8 @@ use tokio::sync::oneshot;
 use leviculum_mapfill::style::Style;
 use loquax::picture::{map_theme, Painter};
 use loquax::ui::map::{
-    fit, viewport, want_pins, want_view, zoom_at, MapPin, MapPress, MapSetup, MapState, MapWant,
+    fit, settle, viewport, want_pins, want_view, zoom_at, MapPin, MapPress, MapSetup, MapState,
+    MapWant,
 };
 use loquax::ui::{UiEvent, MAP_LOADED_ALREADY};
 
@@ -429,7 +430,12 @@ impl App {
         let zooms = self.setup.zooms;
         match c {
             "+" | "=" => self.state.zoom = self.state.zoom.saturating_add(1).min(zooms.1),
-            "-" => self.state.zoom = self.state.zoom.saturating_sub(1).max(zooms.0),
+            "-" => {
+                self.state.zoom = self.state.zoom.saturating_sub(1).max(zooms.0);
+                if let Some(size) = self.pixels() {
+                    settle(&mut self.state, map::area(size), &self.setup);
+                }
+            }
             "0" => {
                 let selected = self.state.selected;
                 self.fit();
@@ -473,6 +479,7 @@ impl App {
                 press.dragging |=
                     x.abs_diff(press.from.0) >= far || y.abs_diff(press.from.1) >= far;
                 self.state.centre = press.centre_at(x, y, &self.state, &self.setup);
+                settle(&mut self.state, map::area(size), &self.setup);
             }
             Pointer::Up => {
                 if let Some(press) = self.press.take() {

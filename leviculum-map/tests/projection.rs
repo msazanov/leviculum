@@ -332,3 +332,106 @@ fn zooming_in_and_out_keeps_the_centre_exactly() {
         }
     }
 }
+
+/// The view sizes the one-world rule is held to: a portrait phone, the
+/// same turned, a square, a terminal pane in braille (2 x 4 a cell), a
+/// window and a 4K screen.
+const SIZES: [(u32, u32); 6] = [
+    (1080, 2400),
+    (2400, 1080),
+    (512, 512),
+    (160, 96),
+    (1280, 800),
+    (3840, 2160),
+];
+
+#[test]
+fn the_minimum_zoom_makes_the_world_at_least_as_wide_as_the_view() {
+    for (width, zoom) in [
+        (1, 0),
+        (256, 0),
+        (257, 1),
+        (512, 1),
+        (1080, 3),
+        (2400, 4),
+        (3840, 4),
+        (4097, 5),
+    ] {
+        assert_eq!(Viewport::min_zoom(width), zoom, "width {width}");
+    }
+    for (w, _) in SIZES {
+        let z = Viewport::min_zoom(w);
+        assert!(256u64 << z >= u64::from(w), "{w} at z{z}");
+        assert!(
+            z == 0 || 256u64 << (z - 1) < u64::from(w),
+            "{w}: z{z} is not the least"
+        );
+    }
+}
+
+#[test]
+fn one_world_lifts_the_zoom_and_never_shows_a_second_copy() {
+    let middle = World {
+        x: 1 << 31,
+        y: 1 << 31,
+    };
+    for (w, h) in SIZES {
+        let view = Viewport::new(middle, 0, w, h).one_world();
+        let world_px = 256u64 << view.zoom();
+        assert_eq!(view.zoom(), Viewport::min_zoom(w), "{w}x{h}");
+        assert!(
+            world_px >= u64::from(w),
+            "{w}x{h}: a second copy beside the first"
+        );
+        // A deeper zoom stays where it is.
+        let deep = Viewport::new(middle, 12, w, h).one_world();
+        assert_eq!(deep.zoom(), 12, "{w}x{h}");
+        // No two pixels of a row are the same world point.
+        let xs: Vec<u32> = (0..w as i32).map(|x| view.to_world(x, 0).x).collect();
+        let mut sorted = xs.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            xs.len(),
+            "{w}x{h}: a world point twice in a row"
+        );
+    }
+}
+
+#[test]
+fn one_world_keeps_the_view_inside_the_projection_or_centres_it() {
+    let north = project(LatLon::from_degrees(85.0, 10.0));
+    let south = project(LatLon::from_degrees(-85.0, 10.0));
+    for (w, h) in SIZES {
+        for zoom in [0, 3, 4, 6, 10] {
+            for at in [north, south, project(DUOMO)] {
+                let view = Viewport::new(at, zoom, w, h).one_world();
+                let world_sub = 1i64 << (12 + u32::from(view.zoom()));
+                let (_, top) = view.top_left_sub();
+                let bottom = top + i64::from(h) * 16;
+                if world_sub >= i64::from(h) * 16 {
+                    assert!(top >= 0, "{w}x{h} z{zoom}: the view leaves the world north");
+                    assert!(bottom <= world_sub, "{w}x{h} z{zoom}: leaves it south");
+                } else {
+                    // Shorter than the view: centred, the same room above
+                    // and below, to the sub-pixel.
+                    assert_eq!(view.centre.y, 1 << 31, "{w}x{h} z{zoom}");
+                    assert_eq!(-top, bottom - world_sub, "{w}x{h} z{zoom}");
+                }
+                // x is never touched: the world wraps by moving.
+                assert_eq!(view.centre.x, at.x, "{w}x{h} z{zoom}");
+            }
+        }
+    }
+    // The portrait phone at its minimum zoom: the world fills the width,
+    // 2048 pixels of it, and is shorter than the 2400 rows, so it is
+    // centred with 176 rows to spare above and below.
+    let phone = Viewport::new(north, 0, 1080, 2400).one_world();
+    assert_eq!(phone.zoom(), 3);
+    assert_eq!(phone.top_left_sub().1, -176 * 16);
+    // One zoom in, the world is 4096 rows tall and the view stops at its
+    // top.
+    let deeper = Viewport::new(north, 4, 1080, 2400).one_world();
+    assert_eq!(deeper.top_left_sub().1, 0);
+}

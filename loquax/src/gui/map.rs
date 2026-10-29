@@ -144,6 +144,37 @@ mod tests {
         assert!(fitted > 11, "three pins in the old town fit deep: {fitted}");
     }
 
+    /// The smallest shift by which every pixel column of `rgba`, `w`
+    /// wide, repeats: the copies of the world side by side.
+    fn period(rgba: &[u8], w: usize) -> Option<usize> {
+        let h = rgba.len() / 4 / w;
+        let px = |x: usize, y: usize| &rgba[(y * w + x) * 4..(y * w + x) * 4 + 4];
+        (1..w).find(|&p| (0..w - p).all(|x| (0..h).all(|y| px(x, y) == px(x + p, y))))
+    }
+
+    /// The window shows one world at most (1131): a window of 1280 x 800
+    /// asked for z0 is drawn at z3, the world 2048 pixels wide, and no
+    /// column of its picture repeats. The view as asked, the control,
+    /// repeats every 256.
+    #[test]
+    fn the_window_never_shows_the_world_twice() {
+        let mut painter = Painter::new(Maps::new(None));
+        let setup = setup(&painter);
+        let size = (1280u32, 800u32);
+        let state = MapState {
+            centre: project(LatLon::from_degrees(30.0, 10.0)),
+            zoom: 0,
+            selected: None,
+        };
+        let asked = Viewport::new(state.centre, 0, size.0, size.1);
+        let control = paint(&mut painter, &asked, Style::PC, 1.0, None);
+        assert_eq!(period(&control.rgba, 1280), Some(256), "the control");
+        let view = viewport(&state, area(size), &setup);
+        assert_eq!(view.zoom(), 3);
+        let picture = paint(&mut painter, &view, Style::PC, 1.0, None);
+        assert_eq!(period(&picture.rgba, 1280), None);
+    }
+
     /// The same view on a screen of twice the density: twice the pixels,
     /// the pins at twice the coordinates, and the lines drawn wider rather
     /// than the picture scaled up.
