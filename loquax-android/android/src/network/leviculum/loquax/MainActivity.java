@@ -62,7 +62,10 @@ public class MainActivity extends Activity {
                 fillServer(s.toString());
             }
         });
-        start(shared(getIntent()));
+        // Recreated (a rotation, the phone's dark setting) the shared code
+        // already joined or failed once: the fields restore what was typed,
+        // and a second join with a code the home node took would fail.
+        start(savedInstanceState == null && shared(getIntent()));
     }
 
     @Override
