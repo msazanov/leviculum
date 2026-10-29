@@ -7,10 +7,11 @@
 //! `physical_line`, `natural`) and 4.x (the daily builds, kind under
 //! `kind`, waterways as lines of `water`, `landcover`).
 
-use leviculum_mapfill::fixture::Kind;
+use leviculum_mapfill::fixture::{Kind, BRIDGE, TUNNEL};
 use leviculum_mapfill::style::Class;
 use prost::Message;
 use tinymvt::geometry::GeometryDecoder;
+use tinymvt::vector_tile::tile::{Feature, Layer};
 use tinymvt::vector_tile::Tile;
 
 use crate::Res;
@@ -26,6 +27,8 @@ const LINESTRING: i32 = 2;
 pub struct SourceFeature {
     pub kind: Kind,
     pub class: Class,
+    /// [`BRIDGE`] or [`TUNNEL`] for a line that runs on one or in one.
+    pub flags: u8,
     pub parts: Vec<Vec<Vec<[i32; 2]>>>,
 }
 
@@ -36,37 +39,42 @@ pub struct Decoded {
     pub skipped: usize,
 }
 
+/// The class of a landuse, natural or landcover area of `kind`, `other`
+/// for a kind none of the classes names: the study's mapping
+/// (`docs/drafts/map-renderer-roadmap-2026-10.md`, section 4), wood and
+/// forest apart from the parks, meadows and fields with them.
+fn cover(kind: &str, other: Class) -> Class {
+    use Class::*;
+    match kind {
+        "wood" | "forest" | "scrub" => Forest,
+        "garden" | "grass" | "park" | "playground" | "pitch" | "greenfield" | "meadow"
+        | "cemetery" | "golf_course" | "allotments" | "farmland" | "grassland" => Park,
+        "pedestrian" => Pedestrian,
+        "sand" | "beach" | "barren" => Sand,
+        "urban_area" => Urban,
+        _ => other,
+    }
+}
+
 /// The class of a feature of `layer` with `kind`, drawn as an area for a
 /// polygon and as a line for a line string.
 pub fn class_of(layer: &str, kind: &str, geometry: i32) -> Option<(Kind, Class)> {
     use Class::*;
     Some(match layer {
         "earth" => (Kind::Area, Earth),
-        "landuse" => (
-            Kind::Area,
-            match kind {
-                "garden" | "grass" | "park" | "playground" | "pitch" | "greenfield" => Park,
-                "pedestrian" => Pedestrian,
-                _ => Urban,
-            },
-        ),
-        "natural" => (Kind::Area, if kind == "sand" { Sand } else { Park }),
-        "landcover" => (
-            Kind::Area,
-            match kind {
-                "urban_area" => Urban,
-                "barren" => Sand,
-                _ => Park,
-            },
-        ),
+        "landuse" => (Kind::Area, cover(kind, Urban)),
+        "natural" | "landcover" => (Kind::Area, cover(kind, Park)),
         "water" if geometry == LINESTRING => (Kind::Line, Waterway),
         "water" => (Kind::Area, Water),
         "buildings" => (Kind::Area, Building),
         "roads" => (
             Kind::Line,
             match kind {
-                "highway" | "major_road" | "medium_road" => MajorRoad,
+                "highway" => MajorRoad,
+                "major_road" | "medium_road" => SecondaryRoad,
                 "path" => Path,
+                // 4.x carries the railways here, not in `transit`.
+                "rail" => Rail,
                 _ => MinorRoad,
             },
         ),
@@ -74,6 +82,28 @@ pub fn class_of(layer: &str, kind: &str, geometry: i32) -> Option<(Kind, Class)>
         "physical_line" => (Kind::Line, Waterway),
         _ => return None,
     })
+}
+
+/// The flags of a line from its properties: [`BRIDGE`] and [`TUNNEL`] from
+/// `is_bridge` and `is_tunnel` (schema 4.x) or from `pmap:level`, 1 and -1
+/// (3.x).
+fn line_flags(l: &Layer, f: &Feature) -> u8 {
+    let mut flags = 0;
+    for c in f.tags.chunks_exact(2) {
+        let (Some(key), Some(v)) = (l.keys.get(c[0] as usize), l.values.get(c[1] as usize)) else {
+            continue;
+        };
+        let yes = v.bool_value == Some(true);
+        let level = v.sint_value.or(v.int_value).unwrap_or(0);
+        flags |= match key.as_str() {
+            "is_bridge" if yes => BRIDGE,
+            "is_tunnel" if yes => TUNNEL,
+            "pmap:level" if level > 0 => BRIDGE,
+            "pmap:level" if level < 0 => TUNNEL,
+            _ => 0,
+        };
+    }
+    flags
 }
 
 /// Decode one uncompressed MVT tile.
@@ -123,9 +153,14 @@ pub fn decode(raw: &[u8]) -> Res<Decoded> {
                     continue;
                 }
             };
+            let flags = match k {
+                Kind::Line => line_flags(l, f),
+                Kind::Area => 0,
+            };
             out.features.push(SourceFeature {
                 kind: k,
                 class,
+                flags,
                 parts,
             });
         }

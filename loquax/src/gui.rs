@@ -37,7 +37,8 @@ use iced::{
 };
 use tokio::sync::oneshot;
 
-use loquax::picture::Painter;
+use leviculum_mapfill::style::Style;
+use loquax::picture::{map_theme, Painter};
 use loquax::ui::map::{
     fit, viewport, want_pins, want_view, zoom_at, MapPin, MapPress, MapSetup, MapState, MapWant,
 };
@@ -64,6 +65,9 @@ pub struct Seen {
     pub maps: u64,
     /// Whether going to a place loads its region (`map_autoload`).
     pub autoload: bool,
+    /// How the map is drawn: the PC's finish in the table `map_theme`
+    /// names, light for `auto`, the window having no theme of its own.
+    pub style: Style,
 }
 
 impl Seen {
@@ -74,6 +78,7 @@ impl Seen {
             loading: shell.model.map_loading.clone(),
             maps: shell.maps.epoch(),
             autoload: shell.model.map_autoload,
+            style: Style::PC.in_theme(map_theme(shell.model.map_theme, None)),
         }
     }
 }
@@ -231,6 +236,7 @@ impl App {
                 loading: None,
                 maps: 0,
                 autoload: false,
+                style: Style::PC,
             },
             asks,
             fitted_at: None,
@@ -377,19 +383,18 @@ impl App {
             return Task::none();
         };
         let view = viewport(&self.state, map::area(size), &self.setup);
-        let current = self
-            .picture
-            .as_ref()
-            .is_some_and(|(p, _)| p.view == view && p.epoch == self.seen.maps);
+        let current = self.picture.as_ref().is_some_and(|(p, _)| {
+            p.view == view && p.epoch == self.seen.maps && p.style == self.seen.style
+        });
         if current || self.painting {
             return Task::none();
         }
         self.painting = true;
-        let (painter, scale) = (self.painter.clone(), self.scale);
+        let (painter, scale, style) = (self.painter.clone(), self.scale, self.seen.style);
         Task::perform(
             async move {
                 let mut painter = painter.lock().unwrap_or_else(PoisonError::into_inner);
-                Arc::new(map::paint(&mut painter, &view, scale))
+                Arc::new(map::paint(&mut painter, &view, style, scale))
             },
             Message::Painted,
         )

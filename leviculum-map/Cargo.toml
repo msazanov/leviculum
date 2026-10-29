@@ -26,3 +26,8 @@ embedded-graphics = "0.8"
 # `atan`, `sinh`), which `core` does not have. Already in the lock through
 # num-traits. Used per pin and per viewport change, never per vertex.
 libm = "0.2"
+
+[dev-dependencies]
+# The golden images of `tests/golden.rs` are PNG files; the crate is in the
+# lock already, through ratatui-image's `image`.
+png = "0.18"

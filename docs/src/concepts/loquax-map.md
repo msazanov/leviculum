@@ -32,9 +32,15 @@ fields beside id, source, title, body and the verification
 the two telemetry fields into positions (`telemetry::read`,
 `loquax/src/telemetry.rs:130`), the screen model keeps each peer's latest
 and hands every one to the store (`take_telemetry`,
+<<<<<<< HEAD
 `loquax/src/ui.rs:2701`), and the store keeps the fields whole in its
 `fields` column (`loquax/src/store.rs:1195`) and the positions in a table of
 their own (`SCHEMA_V2`, `loquax/src/store.rs:158`). The sender's timestamp
+=======
+`loquax/src/ui.rs:2706`), and the store keeps the fields whole in its
+`fields` column (`loquax/src/store.rs:858`) and the positions in a table of
+their own (`SCHEMA_V2`, `loquax/src/store.rs:151`). The sender's timestamp
+>>>>>>> master
 is still not carried: `OutboxEvent`, the screen's `Message` and every type
 the model folds derive `Eq`, which an `f64` cannot, so carrying it is a
 change of its own and not the one line of plumbing the fields were.
@@ -252,7 +258,12 @@ offsets from the start of the file:
   cut from (name, schema version, OSM replication time);
 - one `.lmf` blob per tile, the fixture layout `leviculum-mapfill` reads,
   written for a 256 x 256 view with one tile at offset (0, 0) and the shift
-  that takes its extent to 4,096 sub-pixels;
+  that takes its extent to 4,096 sub-pixels. Each feature's flags byte,
+  a zero until 1099 and never read by a reader of that age, carries a
+  line's bridge and tunnel and the class byte's newer half: forest on a
+  park's byte, a secondary road on a major road's. An older reader draws
+  those as the park and the major road it drew before, so the version
+  stays 1 (`leviculum-mapfill/src/fixture.rs`);
 - the index last, 20 bytes per tile ascending by (z, x, y): z, x, y,
   offset, length. Last, so the cut can stream tiles and learn their count
   at the end.

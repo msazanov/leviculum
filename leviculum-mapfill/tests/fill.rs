@@ -5,7 +5,7 @@ use embedded_graphics::pixelcolor::BinaryColor;
 use embedded_graphics::prelude::*;
 use embedded_graphics::primitives::Rectangle;
 use leviculum_mapfill::fill::{fill_rings, Edge, FillError, FillRule, Filler, Scratch};
-use leviculum_mapfill::stroke::{isqrt, stroke};
+use leviculum_mapfill::stroke::{isqrt, stroke, stroke_pen, Pen};
 use leviculum_mapfill::SUBPIXEL;
 
 /// Counts how often each pixel was painted, so overlaps show as well as gaps.
@@ -316,6 +316,82 @@ fn wide_lines() {
     assert_eq!(
         c.picture(),
         pic(&[".......", ".......", "#####..", "#####..", "#####..", "..###..", "..###.."])
+    );
+}
+
+/// Stroke `line` with `pen` on a `w` x `h` canvas.
+fn pen_picture(w: u32, h: u32, line: &[Point], pen: Pen) -> String {
+    let mut c = Canvas::new(w, h);
+    let mut st = Store::new(256, h as usize);
+    let mut s = st.scratch();
+    let mut f = Filler::new(&mut s, c.bounding_box());
+    stroke_pen(&mut f, line, pen, &mut c, BinaryColor::On).expect("stroke");
+    c.picture()
+}
+
+#[test]
+fn round_caps_and_joins_add_to_the_quads() {
+    // Five pixels wide from x 4.5 to 8.5: flat-ended quad, a disc of
+    // radius 2.5 at each end. A disc turning against the quad would cancel
+    // its winding where the two overlap and leave a hole; every pixel is
+    // painted exactly once.
+    let half = SUBPIXEL / 2;
+    let round = |width| Pen {
+        width,
+        round: true,
+        dash: None,
+    };
+    let line = [
+        Point::new(4 * SUBPIXEL + half, 4 * SUBPIXEL + half),
+        Point::new(8 * SUBPIXEL + half, 4 * SUBPIXEL + half),
+    ];
+    assert_eq!(
+        pen_picture(13, 9, &line, round(5 * SUBPIXEL)),
+        pic(&[
+            ".............",
+            ".............",
+            "...#######...",
+            "..#########..",
+            "..#########..",
+            "..#########..",
+            "...#######...",
+            ".............",
+            ".............",
+        ])
+    );
+    // Three pixels wide around a right angle: the outer corner is round
+    // where square caps fill it (`wide_lines`).
+    let corner = [
+        Point::new(half, 3 * SUBPIXEL + half),
+        Point::new(3 * SUBPIXEL + half, 3 * SUBPIXEL + half),
+        Point::new(3 * SUBPIXEL + half, 7 * SUBPIXEL),
+    ];
+    assert_eq!(
+        pen_picture(7, 7, &corner, round(3 * SUBPIXEL)),
+        pic(&[".......", ".......", "####...", "#####..", "#####..", "..###..", "..###.."])
+    );
+}
+
+#[test]
+fn dashes_follow_the_pattern_across_vertices() {
+    // One pixel wide, three on and two off, flat ends; the pattern runs on
+    // through the vertex at x 7.5 instead of starting again there. The
+    // line is 15 pixels long, so the fourth dash would start at its end.
+    let half = SUBPIXEL / 2;
+    let y = SUBPIXEL + half;
+    let line = [
+        Point::new(half, y),
+        Point::new(7 * SUBPIXEL + half, y),
+        Point::new(15 * SUBPIXEL + half, y),
+    ];
+    let pen = Pen {
+        width: SUBPIXEL,
+        round: false,
+        dash: Some((3 * SUBPIXEL, 2 * SUBPIXEL)),
+    };
+    assert_eq!(
+        pen_picture(16, 3, &line, pen),
+        pic(&["................", "###..###..###...", "................"])
     );
 }
 

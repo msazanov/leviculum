@@ -37,7 +37,7 @@ use leviculum_map::cells::{self, Encoding, Sets};
 use leviculum_map::draw::Ink;
 use leviculum_map::viewport::{Viewport, MAX_VIEW_ZOOM};
 use leviculum_mapfill::frame::{rgb888, Frame};
-use leviculum_mapfill::style::BACKGROUND;
+use leviculum_mapfill::style::{MapTheme, Style as MapStyle};
 use leviculum_ui::color::Tier;
 use leviculum_ui_ratatui::images::{
     self, Backend, Between, FontSize, Picker, Pictures, ProtocolType, SlicedProtocol,
@@ -607,6 +607,8 @@ enum Picture {
 struct Painted {
     view: Viewport,
     cells: (u16, u16),
+    /// The style it was drawn in.
+    style: MapStyle,
     /// The maps directory's epoch it was painted at.
     epoch: u64,
     fb: Vec<u16>,
@@ -624,6 +626,8 @@ struct Ask {
     view: Viewport,
     cells: (u16, u16),
     epoch: u64,
+    /// The map's style, which follows the theme ([`MapPainter::set_theme`]).
+    style: MapStyle,
 }
 
 /// What draws a view: the regions, the backend, the scratch. It does not
@@ -651,10 +655,11 @@ impl Canvas {
     fn paint(&mut self, ask: Ask) -> Painted {
         let view = &ask.view;
         if let Some(encoding) = self.graphics.encoding() {
-            let (source, attribution) = self.source(view, ask.cells, encoding);
+            let (source, attribution) = self.source(view, ask.cells, encoding, ask.style);
             return Painted {
                 view: *view,
                 cells: ask.cells,
+                style: ask.style,
                 epoch: ask.epoch,
                 fb: Vec::new(),
                 attribution,
@@ -666,7 +671,7 @@ impl Canvas {
         let Drawn {
             mut fb,
             attribution,
-        } = self.painter.draw(view, self.ink(), 100);
+        } = self.painter.draw(view, self.ink(), ask.style, 100);
         let picture = match self.graphics {
             Graphics::Kitty | Graphics::Sixel => self.encode(&mut fb, w, h, ask.cells),
             _ => None,
@@ -674,6 +679,7 @@ impl Canvas {
         Painted {
             view: *view,
             cells: ask.cells,
+            style: ask.style,
             epoch: ask.epoch,
             fb,
             attribution,
@@ -694,6 +700,7 @@ impl Canvas {
         view: &Viewport,
         (cols, rows): (u16, u16),
         encoding: Encoding,
+        style: MapStyle,
     ) -> (cells::Source, String) {
         let (cols, rows) = (usize::from(cols), usize::from(rows));
         let (fw, fh) = ((cols * cells::SX) as u32, (rows * cells::SY) as u32);
@@ -705,7 +712,7 @@ impl Canvas {
         let percent = |p: u32| p / scale as u32;
         let mut draw = |ink: Ink, p: u32| -> (Vec<cells::Rgb>, String) {
             let (w, h) = fine.size();
-            let mut drawn = self.painter.draw(&fine, ink, percent(p));
+            let mut drawn = self.painter.draw(&fine, ink, style, percent(p));
             let mut flat = Vec::with_capacity(drawn.fb.len() * 3);
             if let Some(f) = Frame::new(&mut drawn.fb, w, h) {
                 f.rgb888_into(&mut flat);
@@ -715,7 +722,7 @@ impl Canvas {
         };
         let (rgb, attribution) = draw(Ink::Colour, 200);
         let lines_of = |rgb: Vec<cells::Rgb>| -> Vec<bool> {
-            let ground = cells::rgb_of(BACKGROUND);
+            let ground = cells::rgb_of(style.theme.palette().background);
             rgb.into_iter().map(|c| c != ground).collect()
         };
         let (line, thin) = match encoding {
@@ -734,6 +741,7 @@ impl Canvas {
             rgb,
             line,
             thin,
+            theme: style.theme,
         };
         (source, attribution)
     }
@@ -944,6 +952,8 @@ pub struct MapPainter {
     /// The screen's colour tier: at 16 colours a text technique's class
     /// colours are drawn in their own of the sixteen ([`cells::ansi16`]).
     tier: Tier,
+    /// The map's colour table.
+    theme: MapTheme,
 }
 
 impl MapPainter {
@@ -995,12 +1005,30 @@ impl MapPainter {
             labels_view: None,
             nudge: false,
             tier: Tier::Truecolor,
+            theme: MapTheme::Light,
         }
     }
 
     /// Draw for a screen in `tier` from the next frame on.
     pub fn set_tier(&mut self, tier: Tier) {
         self.tier = tier;
+    }
+
+    /// Draw the map in `theme`'s table from the next frame on; a change
+    /// paints the view again.
+    pub fn set_theme(&mut self, theme: MapTheme) {
+        self.theme = theme;
+    }
+
+    /// The style a paint asks for: the PC's finish where the picture has
+    /// the pixels for casings and round joins (kitty, sixel, octant), the
+    /// M9's plain strokes in the coarser techniques.
+    fn style(&self) -> MapStyle {
+        let finish = match self.graphics {
+            Graphics::Kitty | Graphics::Sixel | Graphics::Octant => MapStyle::PC,
+            _ => MapStyle::M9,
+        };
+        finish.in_theme(self.theme)
     }
 
     /// The same painter drawing on its own thread: a frame shows the
@@ -1047,8 +1075,12 @@ impl MapPainter {
     /// and the newest paint finished taken when [`keep`] says so.
     fn paint(&mut self, ask: Ask, now: Instant) {
         let current = |p: &Option<Painted>| {
-            p.as_ref()
-                .is_some_and(|p| p.view == ask.view && p.cells == ask.cells && p.epoch == ask.epoch)
+            p.as_ref().is_some_and(|p| {
+                p.view == ask.view
+                    && p.cells == ask.cells
+                    && p.epoch == ask.epoch
+                    && p.style == ask.style
+            })
         };
         match &mut self.engine {
             Engine::Inline(canvas) => {
@@ -1065,6 +1097,7 @@ impl MapPainter {
                         view: done.view,
                         cells: done.cells,
                         epoch: done.epoch,
+                        style: done.style,
                     };
                     if keep(&of, &ask, shown_for) {
                         self.painted = Some(done);
@@ -1088,6 +1121,7 @@ impl MapPainter {
             view: shown.viewport,
             cells: (shown.area.width, shown.area.height),
             epoch: self.maps.epoch(),
+            style: self.style(),
         };
         self.paint(ask, Instant::now());
         let graphics = self.graphics;
@@ -1131,12 +1165,13 @@ impl MapPainter {
                 }
             }
             Graphics::Braille => {
+                let ground = painted.style.theme.palette().background;
                 let ink = |x: u32, y: u32| {
                     let i = (y as usize) * (w as usize) + x as usize;
                     painted
                         .fb
                         .get(i)
-                        .is_some_and(|&v| Rgb565::from(raw(v)) != BACKGROUND)
+                        .is_some_and(|&v| Rgb565::from(raw(v)) != ground)
                 };
                 let buf = frame.buffer_mut();
                 for row in 0..area.height {
@@ -1155,10 +1190,10 @@ impl MapPainter {
                 None => {}
             },
             Graphics::Octant | Graphics::Blocks | Graphics::BrailleThin | Graphics::Mosaic => {
-                let tier = self.tier;
+                let (tier, theme) = (self.tier, painted.style.theme);
                 let colour = |c: Option<cells::Rgb>| match (c, tier) {
                     (None, _) => Color::Reset,
-                    (Some(rgb), Tier::Ansi16) => match cells::ansi16(rgb) {
+                    (Some(rgb), Tier::Ansi16) => match cells::ansi16(rgb, theme) {
                         Some(i) => Color::Indexed(i),
                         None => Color::Rgb(rgb[0], rgb[1], rgb[2]),
                     },
@@ -2045,7 +2080,7 @@ mod tests {
             u32::from(rows) * 4,
         );
         let t0 = Instant::now();
-        let (source, _) = canvas.source(&view, (cols, rows), Encoding::Octant);
+        let (source, _) = canvas.source(&view, (cols, rows), Encoding::Octant, MapStyle::PC);
         let drawn = t0.elapsed();
         let octants = cells::octants();
         let n = if measure_on() { 5 } else { 1 };
@@ -2332,6 +2367,7 @@ mod tests {
                     view,
                     cells: (cols, rows),
                     epoch: 0,
+                    style: MapStyle::M9,
                 };
                 // Painted whole for the render's share: the picture is
                 // encoded again below, both ways.
@@ -2395,6 +2431,7 @@ mod tests {
                 view,
                 cells: (cols, rows),
                 epoch: 0,
+                style: MapStyle::M9,
             }
         };
         for per_s in [25u32, 50] {
@@ -2491,6 +2528,7 @@ mod tests {
             view,
             cells: (30, 8),
             epoch: 0,
+            style: MapStyle::M9,
         }
     }
 
@@ -2499,6 +2537,7 @@ mod tests {
         Painted {
             view: ask.view,
             cells: ask.cells,
+            style: ask.style,
             epoch: ask.epoch,
             fb: Vec::new(),
             attribution: String::new(),
@@ -2528,6 +2567,7 @@ mod tests {
             view: done.view,
             cells: done.cells,
             epoch: done.epoch,
+            style: done.style,
         };
         assert!(!keep(&of, &c, fresh), "A is dropped");
         assert_eq!(slot.start(), Some(c), "B is never painted");
@@ -2538,6 +2578,7 @@ mod tests {
             view: done.view,
             cells: done.cells,
             epoch: done.epoch,
+            style: done.style,
         };
         assert!(keep(&of, &c, fresh), "C is the view wanted");
         // Keys faster than paints: after CATCH_UP_MS the paint behind is

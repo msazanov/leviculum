@@ -24,8 +24,8 @@
 //! to a box a few pixels outside the view before it reaches the filler, so
 //! every coordinate stays inside the filler's limit at any zoom, and the
 //! edges the clip adds lie outside the view, where a stroked coast does not
-//! show them. The borders go over either, one pixel wide, in [`BORDER`]
-//! under [`Ink::Colour`] and in the ink under [`Ink::Lines`], clipped
+//! show them. The borders go over either, one pixel wide, in the table's
+//! border colour under [`Ink::Colour`] and in the ink under [`Ink::Lines`], clipped
 //! segment by segment; only down to [`MAX_ZOOM`], below which 1:50m lines
 //! would be off by more than a pixel beside a region's own data.
 
@@ -36,7 +36,7 @@ use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::*;
 use leviculum_mapfill::fill::{Edge, FillRule, FillStats, Filler, Scratch};
 use leviculum_mapfill::stroke::stroke;
-use leviculum_mapfill::style::{area_color, Class, BACKGROUND, BORDER};
+use leviculum_mapfill::style::{Class, MapTheme};
 use leviculum_mapfill::SUBPIXEL;
 
 use crate::draw::Ink;
@@ -209,9 +209,9 @@ fn entries<'a>(table: &'a [u8], magic: &[u8; 4]) -> impl Iterator<Item = Ring<'a
     })
 }
 
-/// The outline's water colour, the region's water.
-pub fn water() -> Rgb565 {
-    area_color(Class::Water)
+/// The outline's water colour in `theme`, the region's water.
+pub fn water(theme: MapTheme) -> Rgb565 {
+    theme.palette().area(Class::Water)
 }
 
 /// What one outline view drew.
@@ -328,22 +328,25 @@ fn clip_segment(
 
 /// Draw the outline of `table` (normally [`WORLD_50M`]) and the borders of
 /// `borders` (normally [`BORDERS_50M`], or empty for none) for `view` into
-/// `target`, which is cleared first: to water under [`Ink::Colour`], to the
-/// background under [`Ink::Lines`].
+/// `target` in `theme`'s colours, which is cleared first: to water under
+/// [`Ink::Colour`], to the background under [`Ink::Lines`].
 pub fn draw<D>(
     table: &[u8],
     borders: &[u8],
     view: &Viewport,
     ink: Ink,
+    theme: MapTheme,
     target: &mut D,
 ) -> Result<OutlineStats, D::Error>
 where
     D: DrawTarget<Color = Rgb565>,
 {
     let mut st = OutlineStats::default();
+    let palette = theme.palette();
+    let land = palette.background;
     target.clear(match ink {
-        Ink::Colour => water(),
-        Ink::Lines(_) => BACKGROUND,
+        Ink::Colour => water(theme),
+        Ink::Lines(_) => land,
     })?;
     let (w, h) = view.size();
     let (left, top) = view.top_left_sub();
@@ -391,7 +394,7 @@ where
         for r in rings(table) {
             // A new polygon: fill the one before, whose holes are in.
             if !r.hole && ink == Ink::Colour && !filler.is_empty() {
-                st.fill += filler.fill(target, BACKGROUND, FillRule::EvenOdd)?;
+                st.fill += filler.fill(target, land, FillRule::EvenOdd)?;
             }
             let [x0, y0, x1, y1] = r.bbox;
             if scale(x1) + dx < -GUARD
@@ -426,14 +429,14 @@ where
             }
         }
         if ink == Ink::Colour && !filler.is_empty() {
-            st.fill += filler.fill(target, BACKGROUND, FillRule::EvenOdd)?;
+            st.fill += filler.fill(target, land, FillRule::EvenOdd)?;
         }
     }
     if view.zoom() > MAX_ZOOM || self::bits(borders) != Some(bits) {
         return Ok(st);
     }
     let colour = match ink {
-        Ink::Colour => BORDER,
+        Ink::Colour => palette.border,
         Ink::Lines(colour) => colour,
     };
     for k in left.div_euclid(world)..=(left + vw - 1).div_euclid(world) {

@@ -9,9 +9,16 @@
 //! header   "LMF1"  u16 view_w  u16 view_h  i8 shift  u8 tiles  u16 0
 //! tiles    tiles x (i32 off_x, i32 off_y)
 //! count    u32 features
-//! feature  u8 kind (1 area, 2 line)  u8 class  u8 tile  u8 0  u16 rings
+//! feature  u8 kind (1 area, 2 line)  u8 class  u8 tile  u8 flags  u16 rings
 //!          rings x (u16 n, n x (i16 x, i16 y))
 //! ```
+//!
+//! The flags byte was a zero until 1099, and a reader of that age never
+//! looks at it, so every bit is one such a reader may ignore: [`BRIDGE`]
+//! and [`TUNNEL`] on a line (drawn as on the ground), and [`VARIANT`], the
+//! class's newer half (forest on a park, a secondary road on a major road,
+//! drawn as the park and the major road). Bits a reader does not know are
+//! ignored as well, so a later one can be added the same way.
 //!
 //! A tile's offset is its origin minus the view's origin, in tile units.
 //! A vertex `v` of a feature in tile `t` lands at sub-pixel
@@ -27,6 +34,13 @@ const MAGIC: &[u8; 4] = b"LMF1";
 const HEADER: usize = 12;
 const TILE: usize = 8;
 const FEATURE: usize = 6;
+
+/// Flag: the line runs on a bridge.
+pub const BRIDGE: u8 = 1;
+/// Flag: the line runs in a tunnel.
+pub const TUNNEL: u8 = 2;
+/// Flag: the class byte's newer class ([`Class::wire`]).
+pub const VARIANT: u8 = 4;
 
 /// Why bytes are not a fixture.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -94,7 +108,7 @@ impl<'a> Fixture<'a> {
         for _ in 0..count {
             let base = tiles_end + 4 + at;
             let h = body.get(at..at + FEATURE).ok_or(t(base))?;
-            let class = Class::from_u8(h[1]).ok_or(FixtureError::Class(base))?;
+            let class = Class::from_wire(h[1], h[3]).ok_or(FixtureError::Class(base))?;
             let kind_ok = match h[0] {
                 1 => class.is_area(),
                 2 => !class.is_area(),
@@ -173,17 +187,20 @@ impl<'a> Fixture<'a> {
 }
 
 /// Iterator over a fixture's features.
+#[derive(Clone, Debug)]
 pub struct Features<'a> {
     fx: Fixture<'a>,
     at: usize,
     left: u32,
 }
 
-/// One feature: its kind, class, tile offset and rings.
+/// One feature: its kind, class, flags, tile offset and rings.
 #[derive(Clone, Copy, Debug)]
 pub struct Feature<'a> {
     pub kind: Kind,
     pub class: Class,
+    /// [`BRIDGE`], [`TUNNEL`] and [`VARIANT`] as written.
+    pub flags: u8,
     /// The feature's tile origin minus the view origin, in tile units.
     pub offset: Point,
     rings: u16,
@@ -209,7 +226,8 @@ impl<'a> Iterator for Features<'a> {
         self.left -= 1;
         Some(Feature {
             kind: if h[0] == 1 { Kind::Area } else { Kind::Line },
-            class: Class::from_u8(h[1])?,
+            class: Class::from_wire(h[1], h[3])?,
+            flags: h[3],
             offset: self.fx.tile_offset(h[2]),
             rings,
             body: b.get(start..end)?,
@@ -218,6 +236,16 @@ impl<'a> Iterator for Features<'a> {
 }
 
 impl<'a> Feature<'a> {
+    /// Whether the line runs on a bridge.
+    pub fn bridge(&self) -> bool {
+        self.flags & BRIDGE != 0
+    }
+
+    /// Whether the line runs in a tunnel.
+    pub fn tunnel(&self) -> bool {
+        self.flags & TUNNEL != 0
+    }
+
     /// Number of rings (areas) or line strings (lines).
     pub fn ring_count(&self) -> usize {
         usize::from(self.rings)
@@ -289,10 +317,13 @@ pub mod write {
     use super::{Kind, FEATURE, MAGIC};
     use crate::style::Class;
 
-    /// One feature to write: kind, class, tile index and rings.
+    /// One feature to write: kind, class, [`BRIDGE`](super::BRIDGE) and
+    /// [`TUNNEL`](super::TUNNEL), tile index and rings. The class's
+    /// [`VARIANT`](super::VARIANT) bit is the writer's to add.
     pub struct Feature {
         pub kind: Kind,
         pub class: Class,
+        pub flags: u8,
         pub tile: u8,
         pub rings: Vec<Vec<(i16, i16)>>,
     }
@@ -324,9 +355,10 @@ pub mod write {
                 Kind::Area => 1,
                 Kind::Line => 2,
             });
-            b.push(f.class as u8);
+            let (class, variant) = f.class.wire();
+            b.push(class);
             b.push(f.tile);
-            b.push(0);
+            b.push(f.flags | variant);
             b.extend_from_slice(&(f.rings.len() as u16).to_le_bytes());
             debug_assert_eq!(b.len() - start, FEATURE);
             for r in &f.rings {

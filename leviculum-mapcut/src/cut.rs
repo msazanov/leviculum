@@ -255,6 +255,7 @@ pub fn cut_tile(raw: &[u8], layers: ZoomLayers) -> Res<(Option<Vec<u8>>, ZoomSta
             feats.push(write::Feature {
                 kind: f.kind,
                 class: f.class,
+                flags: f.flags,
                 tile: 0,
                 rings: out,
             });

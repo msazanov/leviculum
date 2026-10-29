@@ -246,7 +246,7 @@ fn the_cut_applies_profile_one_and_reads_back() {
             Class::Waterway,
             Class::Path,
             Class::Path,
-            Class::MajorRoad
+            Class::SecondaryRoad
         ]
     );
     assert_eq!(z15[1].1, 8, "outer ring and hole");
@@ -281,6 +281,101 @@ fn the_cut_applies_profile_one_and_reads_back() {
     assert_eq!(z12.shift(), 3);
     let parks = z12.features().filter(|f| f.class == Class::Park).count();
     assert_eq!(parks, 1);
+}
+
+/// Forest apart from parks, the three road steps, the railways 4.x
+/// carries among the roads, and bridges and tunnels in both schemas the
+/// tree meets: `is_bridge` and `is_tunnel`
+/// (4.x) and `pmap:level` (3.x). The class byte alone, all a reader before
+/// 1099 reads, still says park and major road.
+#[test]
+fn the_cut_keeps_forest_road_steps_bridges_and_tunnels() {
+    let text = |s: &str| Value {
+        string_value: Some(s.to_owned()),
+        ..Value::default()
+    };
+    let yes = Value {
+        bool_value: Some(true),
+        ..Value::default()
+    };
+    let roads = Layer {
+        version: 2,
+        name: "roads".to_owned(),
+        features: [
+            (vec![0, 0, 1, 3], [100, 100]),
+            (vec![0, 1, 2, 4], [100, 200]),
+            (vec![0, 2], [100, 300]),
+            (vec![0, 0, 3, 5], [100, 400]),
+            (vec![0, 6], [100, 500]),
+        ]
+        .into_iter()
+        .map(|(tags, [x, y])| Feature {
+            id: None,
+            tags,
+            r#type: Some(LINESTRING),
+            geometry: line(&[[x, y], [x + 1000, y]]),
+        })
+        .collect(),
+        keys: ["kind", "is_bridge", "is_tunnel", "pmap:level"]
+            .map(str::to_owned)
+            .to_vec(),
+        values: vec![
+            text("highway"),
+            text("medium_road"),
+            text("minor_road"),
+            yes.clone(),
+            yes,
+            Value {
+                sint_value: Some(-1),
+                ..Value::default()
+            },
+            text("rail"),
+        ],
+        extent: Some(4096),
+    };
+    let tile = Tile {
+        layers: vec![
+            layer(
+                "landuse",
+                vec![
+                    (POLYGON, "park", polygon(&[square(0, 0, 1000)])),
+                    (POLYGON, "wood", polygon(&[square(2000, 0, 1000)])),
+                    (POLYGON, "meadow", polygon(&[square(0, 2000, 1000)])),
+                ],
+            ),
+            roads,
+        ],
+    }
+    .encode_to_vec();
+    let layers = leviculum_map::profile::layers(1, 15).expect("profile");
+    let (blob, _) = cut_tile(&tile, layers).expect("cut");
+    let blob = blob.expect("a blob");
+    let fx = leviculum_mapfill::fixture::Fixture::parse(&blob).expect("parse");
+    let got: Vec<_> = fx
+        .features()
+        .map(|f| (f.class, f.bridge(), f.tunnel()))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (Class::Forest, false, false),
+            (Class::Park, false, false),
+            (Class::Park, false, false),
+            (Class::MinorRoad, false, false),
+            (Class::SecondaryRoad, false, true),
+            (Class::MajorRoad, true, false),
+            (Class::MajorRoad, false, true),
+            (Class::Rail, false, false),
+        ]
+    );
+    // An old reader's view: the class bytes alone, in order.
+    let mut bytes = Vec::new();
+    let mut at = 12 + 8 + 4;
+    for f in fx.features() {
+        bytes.push(blob[at + 1]);
+        at += 6 + f.rings().map(|r| 2 + 4 * r.len()).sum::<usize>();
+    }
+    assert_eq!(bytes, [2, 2, 2, 18, 19, 19, 19, 20]);
 }
 
 #[test]

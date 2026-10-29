@@ -17,6 +17,7 @@ use leviculum_map::draw::Ink;
 use leviculum_map::pins::{self, Mark, Metrics, Pin};
 use leviculum_map::viewport::Viewport;
 use leviculum_mapfill::frame::rgb888;
+use leviculum_mapfill::style::Style;
 use leviculum_ui::Rect;
 
 use loquax::picture::Painter;
@@ -59,6 +60,8 @@ pub struct Picture {
     pub attribution: String,
     /// The maps directory's epoch the regions were read at.
     pub epoch: u64,
+    /// The style it was drawn in.
+    pub style: Style,
 }
 
 impl std::fmt::Debug for Picture {
@@ -73,11 +76,12 @@ impl std::fmt::Debug for Picture {
     }
 }
 
-/// `view` drawn in colour with lines as wide as `scale` asks (2.0 on a
-/// screen of twice the density draws them twice as wide), as RGBA.
-pub fn paint(painter: &mut Painter, view: &Viewport, scale: f32) -> Picture {
+/// `view` drawn in colour and `style` with lines as wide as `scale` asks
+/// (2.0 on a screen of twice the density draws them twice as wide), as
+/// RGBA.
+pub fn paint(painter: &mut Painter, view: &Viewport, style: Style, scale: f32) -> Picture {
     let percent = (scale * 100.0).round().max(1.0) as u32;
-    let drawn = painter.draw(view, Ink::Colour, percent);
+    let drawn = painter.draw(view, Ink::Colour, style, percent);
     let mut rgba = Vec::with_capacity(drawn.fb.len() * 4);
     for &px in &drawn.fb {
         let [r, g, b] = rgb888(Rgb565::from(RawU16::new(u16::from_be(px))));
@@ -88,6 +92,7 @@ pub fn paint(painter: &mut Painter, view: &Viewport, scale: f32) -> Picture {
         rgba,
         attribution: drawn.attribution,
         epoch: painter.epoch(),
+        style,
     }
 }
 
@@ -279,7 +284,7 @@ mod tests {
                 selected: Some([2; 16]),
             };
             let view = viewport(&state, area(size), &setup);
-            let picture = paint(&mut painter, &view, scale);
+            let picture = paint(&mut painter, &view, Style::PC, scale);
             assert_eq!(picture.view.size(), size);
             assert_eq!(picture.rgba.len(), (size.0 * size.1 * 4) as usize);
             assert_eq!(picture.attribution, credit, "zoom {zoom}");
@@ -319,7 +324,7 @@ mod tests {
         assert_eq!(a.len(), 1);
         assert_eq!(b.len(), 1);
         assert!((b[0].x - 2.0 * a[0].x).abs() <= 2.0, "{a:?} {b:?}");
-        let picture = paint(&mut painter, &two, 2.0);
+        let picture = paint(&mut painter, &two, Style::PC, 2.0);
         assert_eq!(picture.rgba.len(), 800 * 600 * 4);
         assert_eq!(metrics(2.0).marker, 2 * metrics(1.0).marker);
     }

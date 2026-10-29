@@ -12,7 +12,7 @@ use leviculum_map::viewport::Viewport;
 use leviculum_mapfill::fill::{Edge, Scratch};
 use leviculum_mapfill::frame::Frame;
 use leviculum_mapfill::render::{NoClock, RenderStats, Work};
-use leviculum_mapfill::style::{Profile, BACKGROUND};
+use leviculum_mapfill::style::{Profile, Style, BACKGROUND};
 
 const FLORENCE: &[u8] = include_bytes!("../fixtures/firenze.lmr");
 
@@ -110,7 +110,9 @@ fn the_fixture_opens_and_verifies() {
 /// culled, (1220, 3200, 151_645) filled, (2353, 7415, 14_735) stroked and
 /// 63_842 painted; z13 from 126, (1260, 2266, 78_167), (10_651, 15_332,
 /// 33_138) and 36_072; z11 from 79, (1832, 2809, 59_154), (2952, 3632,
-/// 9574) and 20_279, the box being about 28 x 12 pixels there.
+/// 9574) and 20_279, the box being about 28 x 12 pixels there. The
+/// secondary roads apart from the major ones (1099) stroke a step thinner
+/// below z15: z13 from (1375, 1654, 3313), z11 from (21, 20, 40).
 #[test]
 fn florence_region_draws_three_zooms() {
     let r = Region::from_bytes(FLORENCE).expect("open");
@@ -150,10 +152,10 @@ fn florence_region_draws_three_zooms() {
                 458,
                 10_301,
                 (282, 375, 11_509),
-                (1375, 1654, 3313),
+                (1375, 1646, 3245),
                 5198
             ),
-            (11, 1, 325, 310, 5365, (8, 26, 627), (21, 20, 40), 308),
+            (11, 1, 325, 310, 5365, (8, 26, 627), (21, 17, 25), 308),
         ]
     );
 }
@@ -380,7 +382,21 @@ fn lines(region: &Region<&[u8]>, view: &Viewport, percent: Option<u32>) -> Vec<u
     let (s, w2, wk) = (&mut scratch, &mut work, &mut NoClock);
     let Ok(_) = match percent {
         None => draw_in(&tiles, area, Profile::Full, ink, &mut frame, s, w2, wk),
-        Some(p) => draw_in_scaled(&tiles, area, Profile::Full, ink, p, &mut frame, s, w2, wk),
+        Some(p) => {
+            let m9 = Style::M9;
+            draw_in_scaled(
+                &tiles,
+                area,
+                Profile::Full,
+                ink,
+                m9,
+                p,
+                &mut frame,
+                s,
+                w2,
+                wk,
+            )
+        }
     };
     fb
 }

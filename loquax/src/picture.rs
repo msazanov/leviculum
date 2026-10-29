@@ -40,7 +40,8 @@ use leviculum_map::viewport::{ViewTile, Viewport};
 use leviculum_mapfill::fill::{Edge, Scratch};
 use leviculum_mapfill::frame::Frame;
 use leviculum_mapfill::render::{NoClock, Work};
-use leviculum_mapfill::style::Profile;
+use leviculum_mapfill::style::{MapTheme, Profile, Style};
+use leviculum_ui::theme::{Theme, ThemeFlag};
 
 use crate::identity::HOME_ENV;
 
@@ -54,6 +55,16 @@ pub fn maps_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
         .or_else(|| set("HOME").map(|home| PathBuf::from(home).join(".local/share")))?;
     Some(data.join("loquax").join("maps"))
+}
+
+/// The map's colour table for the config's `map_theme` (`flag`) and the
+/// theme the screen is drawn in, `None` for a frontend that has none:
+/// unset is light, and `auto` follows the screen, light without one.
+pub fn map_theme(flag: Option<ThemeFlag>, screen: Option<Theme>) -> MapTheme {
+    match (flag, screen) {
+        (Some(ThemeFlag::Dark), _) | (Some(ThemeFlag::Auto), Some(Theme::Dark)) => MapTheme::Dark,
+        _ => MapTheme::Light,
+    }
 }
 
 /// The file name prefix of a region the autoload wrote: those are a cache,
@@ -219,13 +230,13 @@ impl Painter {
         (*zooms.start(), *zooms.end())
     }
 
-    /// Draw `view` in `ink` with lines `percent` per cent as wide as the
-    /// zoom's ([`leviculum_mapfill::render::Look::scaled`]): the world
+    /// Draw `view` in `ink` and `style` with lines `percent` per cent as
+    /// wide as the zoom's ([`leviculum_mapfill::render::Look::scaled`]): the world
     /// outline under what no region covers, then every region that reaches
     /// into the view ([`drawn`]), each inside its own box, the deepest last.
     /// A region whose tile does not read is left out. The directory is read
     /// again first when it changed.
-    pub fn draw(&mut self, view: &Viewport, ink: Ink, percent: u32) -> Drawn {
+    pub fn draw(&mut self, view: &Viewport, ink: Ink, style: Style, percent: u32) -> Drawn {
         self.refresh();
         let (w, h) = view.size();
         let mut fb = vec![0u16; (w as usize) * (h as usize)];
@@ -249,6 +260,7 @@ impl Painter {
                     outline::BORDERS_50M,
                     view,
                     ink,
+                    style.theme,
                     &mut frame,
                 );
             }
@@ -260,6 +272,7 @@ impl Painter {
                     view,
                     area,
                     ink,
+                    style,
                     percent,
                     &mut self.read,
                     &mut frame,
@@ -304,11 +317,13 @@ impl Painter {
 
 /// Draw `region`'s tiles of `view` into `area` of `frame`; `false` when a
 /// tile could not be read, and the region is left out.
+#[allow(clippy::too_many_arguments)]
 fn region_into(
     region: &Region<File>,
     view: &Viewport,
     area: Rectangle,
     ink: Ink,
+    style: Style,
     percent: u32,
     read: &mut Vec<(ViewTile, Vec<u8>)>,
     frame: &mut Frame<'_>,
@@ -339,6 +354,7 @@ fn region_into(
         area,
         Profile::Full,
         ink,
+        style,
         percent,
         frame,
         &mut scratch,
@@ -351,6 +367,21 @@ fn region_into(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_map_theme_is_light_unless_asked_and_auto_follows_the_screen() {
+        use ThemeFlag::{Auto, Dark, Light};
+        for (flag, screen, want) in [
+            (None, Some(Theme::Dark), MapTheme::Light),
+            (Some(Light), Some(Theme::Dark), MapTheme::Light),
+            (Some(Dark), None, MapTheme::Dark),
+            (Some(Auto), Some(Theme::Dark), MapTheme::Dark),
+            (Some(Auto), Some(Theme::Light), MapTheme::Light),
+            (Some(Auto), None, MapTheme::Light),
+        ] {
+            assert_eq!(map_theme(flag, screen), want, "{flag:?} {screen:?}");
+        }
+    }
 
     #[test]
     fn the_maps_directory_follows_the_home_rule() {
@@ -425,7 +456,7 @@ mod tests {
         );
         let paint = |dir: &Path| {
             Painter::new(Maps::new(Some(dir.to_path_buf())))
-                .draw(&view, Ink::Colour, 100)
+                .draw(&view, Ink::Colour, Style::M9, 100)
                 .fb
         };
         let (w, b, e) = (paint(&west), paint(&both), paint(&east));
