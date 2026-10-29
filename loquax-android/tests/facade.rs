@@ -211,6 +211,12 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
         assert_eq!(list.conversations[0].last, "hallo vom Telefon");
         assert!(list.conversations[0].ours);
         assert_eq!(list.conversations[0].initials, peer[..2].to_uppercase());
+        // The row's mark (1130): ours is last, so a delivery word, a text.
+        assert_eq!(list.conversations[0].kind, "text");
+        assert!(!list.conversations[0].state.is_empty());
+        assert_eq!(list.conversations[0].reaction, None);
+        assert_eq!(list.initials.chars().count(), 2);
+        assert_eq!(list.address.len(), 32);
 
         // Negative: an address that is none, and a message id that is none.
         assert!(session

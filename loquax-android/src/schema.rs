@@ -34,7 +34,9 @@
 //! added is no such change: Java reads keys by name and skips an event it
 //! does not know, so `link` (event and field) came within version 1, and a
 //! code with the address behind it in [`Start::code`] is still a string,
-//! and the avatar's `initials`, `icon_fg` and `icon_bg` (1129) are fields.
+//! and the avatar's `initials`, `icon_fg` and `icon_bg` (1129) are fields,
+//! as are the list row's `kind`, `reaction` and `state` and the list's
+//! own `address` and `initials` (1130).
 //! A request added is none either: an older app never sends `front`, and
 //! the session then counts itself in the back, pulling on wakes and its
 //! schedule as before. The map's margins and `moving` (1131) are such
@@ -176,12 +178,30 @@ pub struct ConversationRow {
     pub icon_fg: Option<String>,
     #[serde(default)]
     pub icon_bg: Option<String>,
+    /// What the last message is (1130): `text`, `position` for a report
+    /// without text, `reaction`; the app words the last two in the phone's
+    /// language, `last` stays the English line for an app that does not.
+    #[serde(default)]
+    pub kind: String,
+    /// The reaction's content when `kind` is `reaction`.
+    #[serde(default)]
+    pub reaction: Option<String>,
+    /// Ours only: the last message's delivery, as [`MessageRow::state`];
+    /// the list draws its mark where an unread count would be.
+    #[serde(default)]
+    pub state: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Conversations {
     pub v: u32,
     pub conversations: Vec<ConversationRow>,
+    /// Our own address, the home node's, and its avatar's letters, for
+    /// the list's bar (1130).
+    #[serde(default)]
+    pub address: String,
+    #[serde(default)]
+    pub initials: String,
 }
 
 /// A reaction under a message: its content, how many sent it, and whether

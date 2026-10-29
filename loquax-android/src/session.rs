@@ -746,12 +746,26 @@ impl Inner {
                     initials: self.initials(&conversation.peer),
                     icon_fg: icon.as_ref().map(|(fg, _)| fg.clone()),
                     icon_bg: icon.map(|(_, bg)| bg),
+                    kind: last.map_or("", kind).to_string(),
+                    reaction: last
+                        .filter(|m| m.is_reaction())
+                        .and_then(|m| m.reaction())
+                        .map(|(_, content)| content),
+                    state: match last {
+                        Some(m) if m.outbound => state_word(m.delivery).to_string(),
+                        _ => String::new(),
+                    },
                 }
             })
             .collect();
+        let (address, initials) = self.model.address.map_or_else(Default::default, |own| {
+            (loquax::address::to_hex(&own), self.initials(&own))
+        });
         schema::Conversations {
             v: VERSION,
             conversations: rows,
+            address,
+            initials,
         }
     }
 
@@ -888,6 +902,18 @@ pub fn state_word(state: Option<DeliveryState>) -> &'static str {
     }
 }
 
+/// What a conversation's last message is, for the list's words: `text`,
+/// `position` or `reaction` (1130), the same split as the English line.
+pub fn kind(message: &Message) -> &'static str {
+    if message.is_reaction() {
+        "reaction"
+    } else if message.is_report() {
+        "position"
+    } else {
+        "text"
+    }
+}
+
 /// The list's line for a conversation's last message.
 fn preview(message: &Message) -> String {
     if let Some(text) = reactions::preview(message) {
@@ -950,4 +976,48 @@ pub fn parse_peer(text: &str) -> Result<[u8; 16], String> {
 pub fn parse_id(text: &str) -> Result<[u8; 32], String> {
     let text = text.trim();
     loquax::address::parse_id(text).ok_or_else(|| format!("'{text}' is not a message id"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use leviculum_lxmf::constants::{FIELD_REACTION, FIELD_TELEMETRY};
+    use leviculum_lxmf::reaction::Reaction;
+    use loquax::ui::Signature;
+
+    fn message(outbound: bool, body: &str, fields: Vec<Field>) -> Message {
+        Message {
+            outbound,
+            body: body.to_string(),
+            id: None,
+            delivery: outbound.then_some(DeliveryState::Delivered),
+            signature: Signature::Verified,
+            leg: None,
+            unproven: false,
+            at: None,
+            size: body.len(),
+            ledger: Vec::new(),
+            last_leg: None,
+            activity: 0,
+            fields,
+        }
+    }
+
+    #[test]
+    fn the_list_tells_a_text_a_position_and_a_reaction_apart() {
+        assert_eq!(kind(&message(false, "hallo", Vec::new())), "text");
+        let report = message(false, "", vec![(FIELD_TELEMETRY, vec![0xc0])]);
+        assert_eq!(kind(&report), "position");
+        // Text with telemetry is a text: the line shows what was written.
+        let with_fix = message(false, "bin da", vec![(FIELD_TELEMETRY, vec![0xc0])]);
+        assert_eq!(kind(&with_fix), "text");
+        let thumbs = Reaction {
+            to: [7; 32],
+            content: "👍".to_string(),
+        }
+        .encode_field_value();
+        let reaction = message(true, "", vec![(FIELD_REACTION, thumbs)]);
+        assert_eq!(kind(&reaction), "reaction");
+        assert_eq!(preview(&reaction), "you reacted 👍");
+    }
 }
