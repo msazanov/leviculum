@@ -23,7 +23,6 @@
 //! regions again and paints the view anew.
 
 pub mod map;
-pub mod names;
 
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex, PoisonError};

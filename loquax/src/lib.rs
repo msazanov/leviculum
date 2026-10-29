@@ -86,10 +86,14 @@ pub mod mailbox;
 pub mod mailbox_state;
 #[cfg(feature = "mapload")]
 pub mod mapload;
+#[cfg(feature = "screenmap")]
+pub mod mapnames;
 pub mod names;
 pub mod outbox;
 #[cfg(feature = "picture")]
 pub mod picture;
+#[cfg(feature = "screenmap")]
+pub mod screenmap;
 pub mod seen;
 pub mod send;
 #[cfg(feature = "history")]

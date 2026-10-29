@@ -1,91 +1,21 @@
 //! The window's map (`docs/src/concepts/loquax-map.md`, slice (d)): the
 //! picture of a view as RGBA for an iced image, and the pins over it with
-//! their labels set as text.
-//!
-//! The terminal's map counts in cells; this one counts in the screen's own
-//! pixels, so the model's map functions ([`loquax::ui::map`]: the view,
-//! fitting, zooming about the pointer, dragging) run here with one pixel to
-//! a "cell" ([`setup`]). The picture is [`loquax::picture`]'s, the label
-//! rule [`leviculum_map::pins::labels`] in pixels with the window's font
-//! measuring each label ([`measure`]). Everything here is a pure function
-//! of its inputs, so the window and the test below draw through the same
-//! code and the test needs no display.
+//! their labels set as text. The picture, the pins' places and the names
+//! are [`loquax::screenmap`]'s, which the Android app draws through too;
+//! what is the window's own is its font measuring a label ([`measure`]),
+//! as iced sets the label on the canvas, and its one typesetter.
 
-use embedded_graphics::pixelcolor::raw::RawU16;
-use embedded_graphics::pixelcolor::Rgb565;
 use std::sync::{Mutex, OnceLock, PoisonError};
 
-use leviculum_map::draw::Ink;
 use leviculum_map::labels::Rect as Box2;
-use leviculum_map::pins::{self, Mark, Metrics, Pin};
 use leviculum_map::viewport::Viewport;
-use leviculum_mapfill::frame::rgb888;
 use leviculum_mapfill::style::Style;
-use leviculum_ui::Rect;
 
+use loquax::mapnames::Typesetter;
 use loquax::picture::Painter;
-use loquax::ui::map::{MapPin, MapSetup};
-
-use super::names::{self, Typesetter};
-
-/// A marker's diameter in logical pixels; times the scale on screen.
-pub const MARKER: f32 = 10.0;
-/// A label's text size in logical pixels.
-pub const LABEL: f32 = 14.0;
-/// The space between a marker and the label beside it.
-pub const GAP: f32 = 4.0;
-/// A label's line, as a multiple of its text size: iced's default.
-pub const LINE: f32 = 1.3;
-/// How far, in logical pixels either way, the pointer goes from where the
-/// left button went down before the press is a drag and no longer a click.
-pub const DRAG: f32 = 4.0;
-
-/// What the model's map functions are told: one pixel a cell, and the
-/// zooms and headers of the installed regions.
-pub fn setup(painter: &Painter) -> MapSetup {
-    MapSetup {
-        cell_px: (1, 1),
-        zooms: painter.zooms(),
-        regions: painter.headers(),
-        ..MapSetup::default()
-    }
-}
-
-/// The picture's area in screen pixels, as the model's map functions take
-/// it.
-pub fn area(size: (u32, u32)) -> Rect {
-    let clamp = |v: u32| u16::try_from(v).unwrap_or(u16::MAX);
-    Rect::new(0, 0, clamp(size.0), clamp(size.1))
-}
-
-/// One view's picture: RGBA rows, and the credit it carries.
-pub struct Picture {
-    pub view: Viewport,
-    pub rgba: Vec<u8>,
-    pub attribution: String,
-    /// The maps directory's epoch the regions were read at.
-    pub epoch: u64,
-    /// The style it was drawn in.
-    pub style: Style,
-    /// What its names were placed after, the pins' boxes; `None` for a
-    /// picture drawn without names, while the view moves.
-    pub names_after: Option<Vec<Box2>>,
-    /// The names set into it.
-    pub names: Vec<String>,
-}
-
-impl std::fmt::Debug for Picture {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let (w, h) = self.view.size();
-        write!(
-            f,
-            "Picture({w}x{h} z{} {} names={})",
-            self.view.zoom(),
-            self.attribution,
-            self.names.len()
-        )
-    }
-}
+pub use loquax::screenmap::{
+    area, hit, place, setup, taken, Picture, Placed, DRAG, LABEL, LINE, MARKER,
+};
 
 /// The window's one typesetter, shared by its paints.
 fn typesetter() -> &'static Mutex<Typesetter> {
@@ -93,10 +23,7 @@ fn typesetter() -> &'static Mutex<Typesetter> {
     TYPE.get_or_init(|| Mutex::new(Typesetter::new()))
 }
 
-/// `view` drawn in colour and `style` with lines as wide as `scale` asks
-/// (2.0 on a screen of twice the density draws them twice as wide), as
-/// RGBA; with `names_after` (the pins' boxes, [`taken`]) the map's names
-/// set into it after them ([`names::set`]), streets along their lines.
+/// [`loquax::screenmap::paint`] with the window's typesetter.
 pub fn paint(
     painter: &mut Painter,
     view: &Viewport,
@@ -104,168 +31,8 @@ pub fn paint(
     scale: f32,
     names_after: Option<Vec<Box2>>,
 ) -> Picture {
-    let percent = (scale * 100.0).round().max(1.0) as u32;
-    let drawn = painter.draw(view, Ink::Colour, style, percent);
-    let mut rgba = Vec::with_capacity(drawn.fb.len() * 4);
-    for &px in &drawn.fb {
-        let [r, g, b] = rgb888(Rgb565::from(RawU16::new(u16::from_be(px))));
-        rgba.extend_from_slice(&[r, g, b, 0xff]);
-    }
-    let mut set = Vec::new();
-    if let Some(taken) = &names_after {
-        let labels = painter.labels(view, true);
-        let (w, h) = view.size();
-        let mut type_ = typesetter().lock().unwrap_or_else(PoisonError::into_inner);
-        set = names::set(
-            &mut rgba,
-            w,
-            h,
-            &labels,
-            taken,
-            scale,
-            style.theme,
-            &mut type_,
-        );
-    }
-    Picture {
-        view: *view,
-        rgba,
-        attribution: drawn.attribution,
-        epoch: painter.epoch(),
-        style,
-        names_after,
-        names: set,
-    }
-}
-
-/// The boxes the pins of `placed` cover, their markers and their names,
-/// in screen pixels: what the map's names are placed after.
-pub fn taken(placed: &[Placed], scale: f32) -> Vec<Box2> {
-    let r = MARKER * scale / 2.0;
-    let line = LABEL * LINE * scale;
-    let mut out = Vec::new();
-    for p in placed {
-        out.push(Box2 {
-            x0: (p.x - r).floor() as i32,
-            y0: (p.y - r).floor() as i32,
-            x1: (p.x + r).ceil() as i32,
-            y1: (p.y + r).ceil() as i32,
-        });
-        if let Some((x, y, _)) = &p.label {
-            out.push(Box2 {
-                x0: x.floor() as i32,
-                y0: y.floor() as i32,
-                x1: (x + p.width).ceil() as i32,
-                y1: (y + line).ceil() as i32,
-            });
-        }
-    }
-    out
-}
-
-/// A pin as the window draws it, in screen pixels.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Placed {
-    pub peer: [u8; 16],
-    /// The marker's centre.
-    pub x: f32,
-    pub y: f32,
-    /// The label's text and its top left corner, where it has room.
-    pub label: Option<(f32, f32, String)>,
-    /// The label's width, for a click on it.
-    pub width: f32,
-    pub stale: bool,
-    pub selected: bool,
-}
-
-/// The sizes the label rule counts with at `scale`.
-pub fn metrics(scale: f32) -> Metrics {
-    let px = |v: f32| (v * scale).round().max(1.0) as u32;
-    Metrics {
-        marker: px(MARKER),
-        gap: px(GAP),
-        line: px(LABEL * LINE),
-    }
-}
-
-/// The pins of `pins` that land in `view`, the label of each set by the
-/// core's rule where it has room and `selected`'s always; `measure(text,
-/// size)` is the width of a label in pixels at that text size. The
-/// selected pin comes last, so it is drawn on top.
-pub fn place(
-    pins: &[MapPin],
-    view: &Viewport,
-    selected: Option<[u8; 16]>,
-    scale: f32,
-    measure: impl Fn(&str, f32) -> u32,
-) -> Vec<Placed> {
-    let as_pins: Vec<Pin<'_>> = pins
-        .iter()
-        .map(|p| Pin {
-            at: p.at,
-            label: &p.label,
-            stale: p.stale,
-        })
-        .collect();
-    let m = metrics(scale);
-    let landed: Vec<(&MapPin, u32, u32, String, u32)> = pins::place(view, &as_pins)
-        .into_iter()
-        .filter_map(|placed| {
-            let pin = pins.get(placed.index)?;
-            let words = pin.words();
-            let width = measure(&words, LABEL * scale);
-            Some((pin, placed.x, placed.y, words, width))
-        })
-        .collect();
-    // The rule takes a marker's top left corner; the core places its centre.
-    let marks: Vec<Mark> = landed
-        .iter()
-        .map(|(_, x, y, _, _)| Mark {
-            x: x.saturating_sub(m.marker / 2),
-            y: y.saturating_sub(m.line / 2),
-        })
-        .collect();
-    let chosen = selected.and_then(|peer| landed.iter().position(|(p, ..)| p.peer == peer));
-    let labels = pins::labels(
-        &marks,
-        |i| landed.get(i).map_or(0, |(.., width)| *width),
-        chosen,
-        view.size(),
-        m,
-    );
-    let mut out: Vec<Placed> = landed
-        .into_iter()
-        .zip(labels)
-        .map(|((pin, x, y, words, width), label)| Placed {
-            peer: pin.peer,
-            x: x as f32,
-            y: y as f32,
-            label: label.map(|l| (l.x as f32, l.y as f32, words)),
-            width: width as f32,
-            stale: pin.stale,
-            selected: Some(pin.peer) == selected,
-        })
-        .collect();
-    out.sort_by_key(|p| p.selected);
-    out
-}
-
-/// The pin under the screen pixel `(x, y)`, its marker or its label, the
-/// topmost where they overlap.
-pub fn hit(placed: &[Placed], x: f32, y: f32, scale: f32) -> Option<[u8; 16]> {
-    let radius = MARKER * scale / 2.0 + 2.0 * scale;
-    let line = LABEL * LINE * scale;
-    placed
-        .iter()
-        .rev()
-        .find(|p| {
-            let on_marker = (p.x - x).abs() <= radius && (p.y - y).abs() <= radius;
-            let on_label = p.label.as_ref().is_some_and(|(lx, ly, _)| {
-                (*lx..*lx + p.width).contains(&x) && (*ly..*ly + line).contains(&y)
-            });
-            on_marker || on_label
-        })
-        .map(|p| p.peer)
+    let mut type_ = typesetter().lock().unwrap_or_else(PoisonError::into_inner);
+    loquax::screenmap::paint(painter, view, style, scale, names_after, &mut type_)
 }
 
 /// The width of `text` at `size` pixels as the window sets it: iced's own
@@ -293,7 +60,8 @@ mod tests {
     use super::*;
     use leviculum_map::mercator::{project, LatLon};
     use loquax::picture::Maps;
-    use loquax::ui::map::{fit, viewport, MapState};
+    use loquax::screenmap::metrics;
+    use loquax::ui::map::{fit, viewport, MapPin, MapState};
     use std::path::PathBuf;
 
     /// A painter over the committed Florence region alone.

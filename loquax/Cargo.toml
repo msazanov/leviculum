@@ -87,6 +87,11 @@ picture = [
 # archive read by HTTP range requests, through the cut the map tool runs.
 # Both frontends carry it; the CLI and the core do not.
 mapload = ["picture", "dep:leviculum-mapcut"]
+# The map on a pixel screen (`loquax::screenmap`, 1128): the picture with
+# the map's names set in Fira Sans by cosmic-text and swash
+# (`loquax::mapnames`, 1100) and the pins drawn in. The window and the
+# Android app draw through it; the terminal and the CLI do not carry it.
+screenmap = ["picture", "dep:cosmic-text"]
 tui = [
     "std",
     "history",
@@ -115,6 +120,7 @@ gui = [
     "history",
     "picture",
     "mapload",
+    "screenmap",
     "leviculum-ui/std",
     "dep:tui-input",
     "dep:futures",
@@ -145,6 +151,11 @@ leviculum-map = { path = "../leviculum-map" }
 # its colours, the crates leviculum-map draws through.
 leviculum-mapfill = { path = "../leviculum-mapfill", optional = true }
 embedded-graphics = { version = "0.8", optional = true }
+# The names on a pixel screen (`screenmap`): the shaper and rasteriser iced
+# sets its text with, at iced's version, so the window's graph holds one
+# copy. Without its default `fontconfig`: the one face is embedded, no
+# host font is looked for.
+cosmic-text = { version = "0.15", default-features = false, features = ["std", "swash"], optional = true }
 # The autoload (`mapload`): the PMTiles reader, the MVT decoder and the cut,
 # shared with leviculum-map-tool, and its HTTP range reader (ureq on rustls).
 leviculum-mapcut = { path = "../leviculum-mapcut", features = ["http"], optional = true }

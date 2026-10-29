@@ -1,8 +1,10 @@
-//! The map's names in the window (`docs/drafts/map-renderer-roadmap-2026-10.md`,
+//! The map's names on a pixel screen (`docs/drafts/map-renderer-roadmap-2026-10.md`,
 //! section 1, "Placement" and "Fonts"): set into the picture's raster once,
 //! when the view is at rest, so they ride along with it and cost nothing a
 //! frame. Placed by the map core's one rule ([`leviculum_map::labels::place`])
 //! in screen pixels, after the pins and their names, which nothing covers.
+//! The window (1100) and the Android app (1128) set them through this one
+//! module.
 //!
 //! Places, waters and parks are set centred on their anchor; a street's
 //! or a river's name on the middle of the longest run of its line (its
@@ -11,20 +13,25 @@
 //! the run's angle and turned to read left to right, with
 //! squares along its baseline as its boxes (the study's first step;
 //! bending text along curves is later). Rivers are blue and slanted, the
-//! font's own glyphs sheared, since iced embeds no italic. Every name
+//! font's own glyphs sheared, since the font has no italic here. Every name
 //! carries a halo of the map's ground colour, its glyphs' coverage widened
 //! by [`HALO`] pixels and drawn first.
 //!
-//! The text is shaped by cosmic-text and rasterised by swash, through
-//! iced's own copy of both, in Fira Sans, the font iced embeds: one font on
-//! every host, so a picture and its golden agree.
+//! The text is shaped by cosmic-text and rasterised by swash in Fira Sans,
+//! the face iced embeds, carried here as `fonts/FiraSans-Regular.ttf` (the
+//! same file, under the SIL Open Font License, `fonts/OFL.txt`): one font
+//! on every host and on the phone, so a picture and its golden agree.
 
-use iced::advanced::graphics::text::cosmic_text::{
-    self as ct, fontdb, Attrs, Buffer, Family, FontSystem, Shaping, SwashCache,
-};
-use iced::advanced::graphics::text::FIRA_SANS_REGULAR;
+use std::string::{String, ToString};
+use std::vec::Vec;
+
+use cosmic_text::{self as ct, fontdb, Attrs, Buffer, Family, FontSystem, Shaping, SwashCache};
 use leviculum_map::labels::{self, Candidate, LabelKind, Rect, Rule, ViewLabel, SUBPIXEL};
 use leviculum_mapfill::style::MapTheme;
+
+/// Fira Sans Regular 4.203, the file iced 0.14 embeds with its `fira-sans`
+/// feature, byte for byte.
+pub const FIRA_SANS_REGULAR: &[u8] = include_bytes!("../fonts/FiraSans-Regular.ttf");
 
 /// The most a street's straight run may turn at a vertex, in degrees.
 pub const STRAIGHT_DEG: f64 = 12.0;
@@ -144,9 +151,17 @@ impl Typesetter {
         }
     }
 
-    /// `text`'s coverage at `size` pixels, with `pad` pixels around;
-    /// slanted with `italic`.
-    pub fn mask(&mut self, text: &str, size: f32, pad: usize, italic: bool) -> Mask {
+    /// `text`'s width at `size` pixels, shaped and not drawn: what a
+    /// screen without iced measures a pin's label with.
+    pub fn width(&mut self, text: &str, size: f32) -> u32 {
+        let buffer = self.shaped(text, size, false);
+        let width = buffer
+            .layout_runs()
+            .fold(0f32, |width, run| width.max(run.line_w));
+        width.ceil() as u32
+    }
+
+    fn shaped(&mut self, text: &str, size: f32, italic: bool) -> Buffer {
         let metrics = ct::Metrics::new(size, (size * 1.25).ceil());
         let mut buffer = Buffer::new(&mut self.fonts, metrics);
         buffer.set_size(&mut self.fonts, None, None);
@@ -156,6 +171,13 @@ impl Typesetter {
         }
         buffer.set_text(&mut self.fonts, text, &attrs, Shaping::Advanced, None);
         buffer.shape_until_scroll(&mut self.fonts, false);
+        buffer
+    }
+
+    /// `text`'s coverage at `size` pixels, with `pad` pixels around;
+    /// slanted with `italic`.
+    pub fn mask(&mut self, text: &str, size: f32, pad: usize, italic: bool) -> Mask {
+        let buffer = self.shaped(text, size, italic);
         let (mut width, mut height) = (0f32, 0f32);
         for run in buffer.layout_runs() {
             width = width.max(run.line_w);
@@ -392,6 +414,21 @@ fn paint(
     angle: f64,
     colour: [u8; 3],
 ) {
+    paint_faded(rgba, w, h, mask, centre, angle, colour, 1.0);
+}
+
+/// [`paint`] at `opacity`: a pin's dimmed label.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn paint_faded(
+    rgba: &mut [u8],
+    w: u32,
+    h: u32,
+    mask: &Mask,
+    centre: (f64, f64),
+    angle: f64,
+    colour: [u8; 3],
+    opacity: f64,
+) {
     let (mw, mh) = (mask.w as f64, mask.h as f64);
     let (c, s) = (angle.cos(), angle.sin());
     let reach = (mw.hypot(mh) / 2.0).ceil();
@@ -416,7 +453,8 @@ fn paint(
             let a = match angle == 0.0 {
                 true => f64::from(mask.at(mx.round() as i64, my.round() as i64)),
                 false => mask.sample(mx, my),
-            } / 255.0;
+            } / 255.0
+                * opacity;
             if a > 0.0 {
                 let i = ((y as usize) * (w as usize) + x as usize) * 4;
                 if let Some(px) = rgba.get_mut(i..i + 3) {
