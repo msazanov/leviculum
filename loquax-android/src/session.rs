@@ -32,6 +32,7 @@ use loquax::ui::map::MapPin;
 use loquax::ui::{reactions, update, Message, UiEffect, UiEvent, UiModel};
 use loquax::when::WallTime;
 
+use crate::avatar;
 use crate::schema::{self, Event, VERSION};
 
 /// The file under the app's directory that keeps the home node's address.
@@ -734,6 +735,7 @@ impl Inner {
             .map(|index| {
                 let conversation = &self.model.conversations[index];
                 let last = conversation.messages.last();
+                let icon = avatar::latest_appearance(&conversation.messages);
                 schema::ConversationRow {
                     peer: loquax::address::to_hex(&conversation.peer),
                     name: self.model.names.label(&conversation.peer),
@@ -741,6 +743,9 @@ impl Inner {
                     ours: last.is_some_and(|m| m.outbound),
                     at: last.and_then(|m| m.at).map_or(0, |at| at.unix_secs),
                     unread: u32::try_from(conversation.unread).unwrap_or(u32::MAX),
+                    initials: self.initials(&conversation.peer),
+                    icon_fg: icon.as_ref().map(|(fg, _)| fg.clone()),
+                    icon_bg: icon.map(|(_, bg)| bg),
                 }
             })
             .collect();
@@ -752,6 +757,8 @@ impl Inner {
 
     fn messages(&self, peer: [u8; 16]) -> schema::Messages {
         let index = self.model.conversations.iter().position(|c| c.peer == peer);
+        let icon =
+            index.and_then(|c| avatar::latest_appearance(&self.model.conversations[c].messages));
         let rows = index.map_or_else(Vec::new, |c| {
             let conversation = &self.model.conversations[c];
             let chips = reactions::gather(conversation);
@@ -768,7 +775,14 @@ impl Inner {
             peer: loquax::address::to_hex(&peer),
             name: self.model.names.label(&peer),
             messages: rows,
+            initials: self.initials(&peer),
+            icon_fg: icon.as_ref().map(|(fg, _)| fg.clone()),
+            icon_bg: icon.map(|(_, bg)| bg),
         }
+    }
+
+    fn initials(&self, peer: &[u8; 16]) -> String {
+        avatar::initials(self.model.names.shown(peer), peer)
     }
 }
 

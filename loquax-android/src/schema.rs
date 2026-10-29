@@ -33,7 +33,8 @@
 //! carries it, and Java refuses one it does not know. A field or an event
 //! added is no such change: Java reads keys by name and skips an event it
 //! does not know, so `link` (event and field) came within version 1, and a
-//! code with the address behind it in [`Start::code`] is still a string.
+//! code with the address behind it in [`Start::code`] is still a string,
+//! and the avatar's `initials`, `icon_fg` and `icon_bg` (1129) are fields.
 //! A request added is none either: an older app never sends `front`, and
 //! the session then counts itself in the back, pulling on wakes and its
 //! schedule as before.
@@ -163,6 +164,17 @@ pub struct ConversationRow {
     /// When it was written or came, seconds since 1970 UTC; 0 for none.
     pub at: i64,
     pub unread: u32,
+    /// The avatar's letters (1129): from the name, or the address's first
+    /// two hex digits for a peer without one.
+    #[serde(default)]
+    pub initials: String,
+    /// The peer's own avatar colours, `rrggbb`, from the icon appearance of
+    /// its latest message that carried one; absent, the app picks a colour
+    /// from the address.
+    #[serde(default)]
+    pub icon_fg: Option<String>,
+    #[serde(default)]
+    pub icon_bg: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -205,6 +217,13 @@ pub struct Messages {
     pub peer: String,
     pub name: String,
     pub messages: Vec<MessageRow>,
+    /// The header's avatar, as in [`ConversationRow`].
+    #[serde(default)]
+    pub initials: String,
+    #[serde(default)]
+    pub icon_fg: Option<String>,
+    #[serde(default)]
+    pub icon_bg: Option<String>,
 }
 
 /// What happened, for the screen.

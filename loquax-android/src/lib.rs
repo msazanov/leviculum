@@ -22,6 +22,7 @@
 
 #![deny(unsafe_code)]
 
+pub mod avatar;
 pub mod map;
 pub mod schema;
 pub mod session;

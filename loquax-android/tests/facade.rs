@@ -182,6 +182,13 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
         assert!(bubble.ours);
         assert_eq!(bubble.body, "hallo vom Telefon");
         assert_ne!(bubble.state, "failed", "{bubble:?}");
+        // A peer without a name: the avatar shows its address's first byte,
+        // in the app's colour since it sent no icon appearance (1129).
+        assert_eq!(messages.initials, peer[..2].to_uppercase());
+        assert_eq!(
+            (messages.icon_fg.as_deref(), messages.icon_bg.as_deref()),
+            (None, None)
+        );
 
         session.request(Request::Pull).expect("pull");
         let deadline = std::time::Instant::now() + Duration::from_secs(60);
@@ -203,6 +210,7 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
         assert_eq!(list.conversations[0].peer, peer);
         assert_eq!(list.conversations[0].last, "hallo vom Telefon");
         assert!(list.conversations[0].ours);
+        assert_eq!(list.conversations[0].initials, peer[..2].to_uppercase());
 
         // Negative: an address that is none, and a message id that is none.
         assert!(session
