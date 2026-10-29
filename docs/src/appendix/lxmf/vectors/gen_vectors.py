@@ -380,6 +380,20 @@ def gen_message_vectors():
         "Reacted to your message with \U0001F44D.".encode("utf-8"),
     )
 
+    # VEC-MSG-REPLY: a reply to VEC-MSG-1 as Columba, MeshChatX and Ratspeak
+    # write one, FIELD_REPLY_TO with the target's full LXMessage.hash and
+    # FIELD_REPLY_QUOTE with the quoted content (LXMF.py:23-24); the reply
+    # itself is the content. VEC-MSG-COMMENT is the same reply as
+    # FIELD_COMMENT's dict (LXMF.py:26, :112-118), which the reference
+    # defines and no deployed client writes.
+    gen_reply_vector("VEC-MSG-REPLY", m.hash, {
+        LXMF.FIELD_REPLY_TO: m.hash,
+        LXMF.FIELD_REPLY_QUOTE: "Hello".encode("utf-8"),
+    })
+    gen_reply_vector("VEC-MSG-COMMENT", m.hash, {
+        LXMF.FIELD_COMMENT: {LXMF.COMMENT_FOR: m.hash},
+    })
+
     gen_foreign_writer_vectors(src, dst)
 
 
@@ -411,6 +425,34 @@ def gen_reaction_vector(vector_id, target_hash, content):
         "recovered_reaction_content_hex": read[LXMF.REACTION_CONTENT].hex(),
         "signature_validated": bool(unpacked.signature_validated),
     })
+
+
+def gen_reply_vector(vector_id, target_hash, fields):
+    content = "Agreed".encode("utf-8")
+    m, _src, _dst = build_message(b"", content, fields, LXMessage.OPPORTUNISTIC)
+    unpacked = LXMessage.unpack_from_bytes(m.packed)
+    record = {
+        "id": vector_id,
+        "title": "Reply message (FIELD_REPLY_TO and FIELD_REPLY_QUOTE, or FIELD_COMMENT)",
+        "kind": "frozen",
+        "citation": "LXMF.py:23-26,112-118; LXMessage.py:747-822",
+        "src_identity_prv_hex": SRC_PRV.hex(),
+        "timestamp": FIXED_TIMESTAMP,
+        "content_hex": content.hex(),
+        "target_hex": target_hash.hex(),
+        "packed_hex": m.packed.hex(),
+        "message_id_hex": m.hash.hex(),
+        "signature_validated": bool(unpacked.signature_validated),
+    }
+    for key in sorted(fields):
+        record["field_%02x_msgpack_hex" % key] = msgpack.packb(fields[key]).hex()
+    if LXMF.FIELD_REPLY_TO in fields:
+        record["recovered_reply_to_hex"] = unpacked.fields[LXMF.FIELD_REPLY_TO].hex()
+        record["recovered_quote_hex"] = unpacked.fields[LXMF.FIELD_REPLY_QUOTE].hex()
+    else:
+        record["recovered_reply_to_hex"] = (
+            unpacked.fields[LXMF.FIELD_COMMENT][LXMF.COMMENT_FOR].hex())
+    add(record)
 
 
 # --------------------------------------------------------------------------

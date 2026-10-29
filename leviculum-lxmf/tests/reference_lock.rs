@@ -13,13 +13,14 @@ use std::{
 
 const LXMF_VERSION: &str = "1.1.0";
 const LXMF_HEAD: &str = "795fdaa2b0777c13033787d933d1afc94a2377cb";
-// Updated 2026-10-29 for VEC-MSG-REACTION and VEC-MSG-REACTION-TEXT
+// Updated 2026-10-29 for VEC-MSG-REPLY and VEC-MSG-COMMENT (replies, 1137):
+// 32 added lines, none removed. Before that 2026-10-29 for VEC-MSG-REACTION and VEC-MSG-REACTION-TEXT
 // (FIELD_REACTION, 1104): the regeneration added two vectors and left every
 // existing record byte-identical (the diff is 34 added lines, none removed).
 // Before that 2026-09-12 for VEC-PN-CONTROL (leviculum#384 part 4), the same
 // way.
 const VECTOR_FIXTURE_SHA256: &str =
-    "91a5839f0d31cbd8588ec7c10b4cf91b00a587f779cc7c6472b457911873d009";
+    "0c09fa89bf06095405fada95960c89aa750271a4aa9da240940b6a0ac32c9ca9";
 
 const REFERENCE_FILES: &[(&str, &str)] = &[
     (
