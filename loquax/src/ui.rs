@@ -115,6 +115,7 @@ use leviculum_ui::input::{
 };
 use leviculum_ui::keymap::{scrolled, Ctx, ScrollCmd};
 use leviculum_ui::link::{classify_link, LinkKind};
+use leviculum_ui::theme::ThemeFlag;
 use leviculum_ui::toast::{Toast, ToastKind};
 use leviculum_ui::tokens::{tokens, Tokens};
 use leviculum_ui::{RLine, RStyle, Rect, StyledChar, Theme, Tier};
@@ -610,6 +611,9 @@ pub struct UiModel<B> {
     /// Whether going to a place loads its region by itself (`map_autoload`,
     /// on in the shell's config by default; off here until the shell says).
     pub map_autoload: bool,
+    /// The config's `map_theme`, which each frontend resolves against the
+    /// theme it draws in (`picture::map_theme`); `None` for unset.
+    pub map_theme: Option<ThemeFlag>,
     /// The word the map's title carries while a region loads.
     pub map_loading: Option<String>,
     /// The glyph test pattern is over the map (`g`, 1093).
@@ -691,6 +695,7 @@ impl<B: InputBuffer + Default> UiModel<B> {
             map_setup: map::MapSetup::default(),
             map_press: None,
             map_autoload: false,
+            map_theme: None,
             map_loading: None,
             map_glyph_test: false,
             map_named_until: None,
@@ -3016,6 +3021,8 @@ pub struct View {
     /// The colour tier and the theme the screen is drawn in.
     pub tier: Tier,
     pub theme: Theme,
+    /// The config's `map_theme` ([`UiModel::map_theme`]).
+    pub map_theme: Option<ThemeFlag>,
     /// The map, when open, drawn in the conversation pane's place.
     pub map: Option<map::MapView>,
     /// The glyph test pattern over the open map.
@@ -3420,6 +3427,7 @@ pub fn view<B: InputBuffer>(model: &UiModel<B>) -> View {
         detail_scroll: model.detail_scroll,
         tier: model.tier,
         theme: model.theme,
+        map_theme: model.map_theme,
         map_glyph_test: map.is_some() && model.map_glyph_test,
         map,
     }

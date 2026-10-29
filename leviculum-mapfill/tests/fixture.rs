@@ -3,7 +3,7 @@
 
 use embedded_graphics::prelude::*;
 use leviculum_mapfill::fill::{Edge, Scratch};
-use leviculum_mapfill::fixture::{write, Fixture, FixtureError, Kind};
+use leviculum_mapfill::fixture::{write, Fixture, FixtureError, Kind, BRIDGE, TUNNEL, VARIANT};
 use leviculum_mapfill::frame::Frame;
 use leviculum_mapfill::render::{render, NoClock, RenderStats, Work};
 use leviculum_mapfill::style::{Class, Profile, BACKGROUND};
@@ -47,12 +47,14 @@ fn writer_and_reader_agree() {
         write::Feature {
             kind: Kind::Area,
             class: Class::Water,
+            flags: 0,
             tile: 1,
             rings: vec![vec![(0, 0), (64, 0), (64, 64)], vec![(8, 8)]],
         },
         write::Feature {
             kind: Kind::Line,
             class: Class::Path,
+            flags: 0,
             tile: 0,
             rings: vec![vec![(-5, 7), (300, -2)]],
         },
@@ -102,6 +104,54 @@ fn writer_and_reader_agree() {
     let mut tile = b.clone();
     tile[first + 2] = 2;
     assert_eq!(Fixture::parse(&tile).err(), Some(FixtureError::Tile(first)));
+}
+
+/// The classes and flags of 1099 in the byte a reader before them never
+/// looked at: forest and the secondary road come back as written, and the
+/// class byte alone, all such a reader reads, is the park's and the major
+/// road's it drew them as before.
+#[test]
+fn the_flags_byte_carries_the_new_classes_past_an_old_reader() {
+    let feats = [
+        (Kind::Area, Class::Forest, 0),
+        (Kind::Area, Class::Park, 0),
+        (Kind::Line, Class::SecondaryRoad, BRIDGE),
+        (Kind::Line, Class::MajorRoad, TUNNEL),
+    ]
+    .map(|(kind, class, flags)| write::Feature {
+        kind,
+        class,
+        flags,
+        tile: 0,
+        rings: vec![vec![(0, 0), (64, 0), (64, 64)]],
+    });
+    let b = write::fixture(256, 256, 0, &[(0, 0)], &feats);
+    let fx = Fixture::parse(&b).expect("parse");
+    let got: Vec<_> = fx
+        .features()
+        .map(|f| (f.class, f.bridge(), f.tunnel()))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (Class::Forest, false, false),
+            (Class::Park, false, false),
+            (Class::SecondaryRoad, true, false),
+            (Class::MajorRoad, false, true),
+        ]
+    );
+    // Each feature is 6 header bytes and one ring of three vertices.
+    let first = 12 + 8 + 4;
+    let header = |i: usize| &b[first + i * (6 + 2 + 12)..][..4];
+    assert_eq!(header(0), [1, 2, 0, VARIANT]);
+    assert_eq!(header(1), [1, 2, 0, 0]);
+    assert_eq!(header(2), [2, 19, 0, VARIANT | BRIDGE]);
+    assert_eq!(header(3), [2, 19, 0, TUNNEL]);
+    // A bit no reader knows yet is ignored, as these were.
+    let mut later = b.clone();
+    later[first + 3] |= 0x80;
+    let fx = Fixture::parse(&later).expect("parse");
+    assert_eq!(fx.features().next().map(|f| f.class), Some(Class::Forest));
 }
 
 /// The numbers the draft's "Device measurement" section quotes for the

@@ -10,10 +10,8 @@ use embedded_graphics::prelude::*;
 
 use crate::fill::{FillRule, FillStats, Filler, Scratch};
 use crate::fixture::{Feature, Fixture, Kind};
-use crate::stroke::stroke;
-use crate::style::{
-    area_color, line_style, line_width, LineWidths, Profile, BACKGROUND, LINE_WIDTHS,
-};
+use crate::stroke::{stroke_pen, Pen};
+use crate::style::{line_width, Class, LineWidths, MapTheme, Profile, Style, CASING, LINE_WIDTHS};
 
 /// A free-running tick counter; differences are taken wrapping.
 pub trait Clock {
@@ -62,6 +60,8 @@ pub struct RenderStats {
     pub fill: FillStats,
     /// Line strokes.
     pub stroke: FillStats,
+    /// Casings, stroked under the lines ([`Look::casing`]).
+    pub casing: FillStats,
     /// Features skipped because the work or edge storage was too small.
     pub overflows: u32,
     /// Most vertices one feature held.
@@ -128,8 +128,8 @@ fn project_feature(
     Some((nr, (x0, y0, x1, y1), n))
 }
 
-/// How a pass inks what it draws: the line widths per class, and whether
-/// areas are filled.
+/// How a pass inks what it draws: the line widths per class, whether
+/// areas are filled, the colour table, the casings and the joints.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Look {
     /// Each line class's width; 0 leaves the class out.
@@ -137,17 +137,42 @@ pub struct Look {
     /// `Some`: lines only, all in this colour, and no area filled: the
     /// terminal's braille backend, which has one colour a cell and no fill.
     pub mono: Option<Rgb565>,
+    /// The colour table.
+    pub theme: MapTheme,
+    /// How much wider than its line a casing is, both sides together, in
+    /// sub-pixels; 0 draws none.
+    pub casing: i32,
+    /// Round joins and caps rather than square caps.
+    pub round: bool,
+    /// Paths dashed. Off on the M9: a dashed path is twice the stroke
+    /// edges of a solid one (the Florence fixture's 5,919 became 11,147).
+    pub dashed: bool,
 }
 
 impl Look {
-    /// The colour tables at the fixtures' widths.
+    /// The light table at the fixtures' widths, square caps, no casings:
+    /// the M9's look.
     pub const DEFAULT: Self = Self {
         widths: LINE_WIDTHS,
         mono: None,
+        theme: MapTheme::Light,
+        casing: 0,
+        round: false,
+        dashed: false,
     };
-}
 
-impl Look {
+    /// The look of `style` at `widths`.
+    pub fn of(style: Style, widths: LineWidths) -> Self {
+        Self {
+            widths,
+            mono: None,
+            theme: style.theme,
+            casing: if style.cased { CASING } else { 0 },
+            round: style.cased,
+            dashed: style.cased,
+        }
+    }
+
     /// The same look with every line `percent` per cent as wide: 200 on a
     /// screen of twice the ordinary density, where a picture drawn at the
     /// screen's own pixels would otherwise show every road half as thick
@@ -159,7 +184,21 @@ impl Look {
         };
         Self {
             widths: self.widths.map(scale),
+            casing: scale(self.casing),
             ..self
+        }
+    }
+
+    /// The pen of a line of class `c`, `width` wide: paths dashed three
+    /// widths on, two off, in colour where the look dashes; everything
+    /// else solid.
+    fn pen(&self, c: Class, width: i32) -> Pen {
+        let dash = (c == Class::Path && self.dashed && self.mono.is_none())
+            .then_some((3 * width, 2 * width));
+        Pen {
+            width,
+            round: self.round,
+            dash,
         }
     }
 }
@@ -186,12 +225,14 @@ pub struct Pass<'s, 'a> {
 }
 
 impl<'s, 'a> Pass<'s, 'a> {
-    /// Clear `target` to the background and open a pass clipped to it.
+    /// Clear `target` to `look`'s background and open a pass clipped to
+    /// it, inked by `look`.
     ///
     /// `scratch.heads` must hold at least the target's height in rows.
     pub fn begin<D, C>(
         target: &mut D,
         scratch: &'s mut Scratch<'a>,
+        look: Look,
         clock: &mut C,
     ) -> Result<Self, D::Error>
     where
@@ -201,7 +242,7 @@ impl<'s, 'a> Pass<'s, 'a> {
         let mut stats = RenderStats::default();
         let clip = target.bounding_box();
         let t = clock.now();
-        target.clear(BACKGROUND)?;
+        target.clear(look.theme.palette().background)?;
         let prev = clock.now();
         stats.phases.clear += u64::from(prev.wrapping_sub(t));
         let sub = crate::fill::SUBPIXEL;
@@ -214,19 +255,61 @@ impl<'s, 'a> Pass<'s, 'a> {
             filler: Filler::new(scratch, clip),
             view: (vl, vt, vr, vb),
             prev,
-            look: Look::DEFAULT,
+            look,
             stats,
         })
     }
 
-    /// The same pass inked by `look` instead of [`Look::DEFAULT`].
-    pub fn with_look(mut self, look: Look) -> Self {
-        self.look = look;
-        self
+    /// The look this pass inks by.
+    pub fn look(&self) -> Look {
+        self.look
+    }
+
+    /// Project `f` and test it against the view, counting it when
+    /// `count`: the rings, or `None` when it is skipped.
+    fn prepare<C: Clock>(
+        &mut self,
+        f: &Feature<'_>,
+        at: Placement,
+        pad: i32,
+        work: &mut Work<'_>,
+        clock: &mut C,
+        count: bool,
+    ) -> Option<usize> {
+        let st = &mut self.stats;
+        let (vl, vt, vr, vb) = self.view;
+        if count {
+            st.features += 1;
+        }
+        let projected = project_feature(f, at, work);
+        let visible = projected.map(|(_, (x0, y0, x1, y1), n)| {
+            n > 0 && x1 + pad >= vl && x0 - pad < vr && y1 + pad >= vt && y0 - pad < vb
+        });
+        let now = clock.now();
+        st.phases.project_clip += u64::from(now.wrapping_sub(self.prev));
+        self.prev = now;
+        let Some((nr, _, n)) = projected else {
+            if count {
+                st.overflows += 1;
+            }
+            return None;
+        };
+        if count {
+            st.vertices += n as u32;
+            st.max_feature_vertices = st.max_feature_vertices.max(n as u32);
+        }
+        if visible != Some(true) {
+            if count {
+                st.culled += 1;
+            }
+            return None;
+        }
+        Some(nr)
     }
 
     /// Draw one feature placed at `at`, if `profile` includes its class
-    /// and any of it is in view.
+    /// and any of it is in view. A line in a tunnel is drawn halfway to
+    /// the background.
     pub fn feature<D, C>(
         &mut self,
         f: &Feature<'_>,
@@ -250,27 +333,11 @@ impl<'s, 'a> Pass<'s, 'a> {
         if !profile.includes(f.class) || (f.kind == Kind::Line && width == 0) {
             return Ok(());
         }
-        let st = &mut self.stats;
-        let (vl, vt, vr, vb) = self.view;
-        st.features += 1;
-        let projected = project_feature(f, at, work);
-        let pad = width;
-        let visible = projected.map(|(_, (x0, y0, x1, y1), n)| {
-            n > 0 && x1 + pad >= vl && x0 - pad < vr && y1 + pad >= vt && y0 - pad < vb
-        });
-        let now = clock.now();
-        st.phases.project_clip += u64::from(now.wrapping_sub(self.prev));
-        self.prev = now;
-        let Some((nr, _, n)) = projected else {
-            st.overflows += 1;
+        let Some(nr) = self.prepare(f, at, width, work, clock, true) else {
             return Ok(());
         };
-        st.vertices += n as u32;
-        st.max_feature_vertices = st.max_feature_vertices.max(n as u32);
-        if visible != Some(true) {
-            st.culled += 1;
-            return Ok(());
-        }
+        let palette = self.look.theme.palette();
+        let st = &mut self.stats;
         let filler = &mut self.filler;
         let mut start = 0usize;
         match f.kind {
@@ -285,7 +352,7 @@ impl<'s, 'a> Pass<'s, 'a> {
                     start = end;
                 }
                 if ok {
-                    st.fill += filler.fill(target, area_color(f.class), FillRule::NonZero)?;
+                    st.fill += filler.fill(target, palette.area(f.class), FillRule::NonZero)?;
                 } else {
                     filler.clear();
                     st.overflows += 1;
@@ -295,10 +362,15 @@ impl<'s, 'a> Pass<'s, 'a> {
                 self.prev = now;
             }
             Kind::Line => {
-                let color = self.look.mono.unwrap_or(line_style(f.class).0);
+                let color = match (self.look.mono, f.tunnel()) {
+                    (Some(c), _) => c,
+                    (None, true) => palette.tunnel(f.class),
+                    (None, false) => palette.line(f.class),
+                };
+                let pen = self.look.pen(f.class, width);
                 for &end in &work.ring_ends[..nr] {
                     let end = usize::from(end);
-                    st.stroke += stroke(filler, &work.points[start..end], width, target, color)?;
+                    st.stroke += stroke_pen(filler, &work.points[start..end], pen, target, color)?;
                     start = end;
                 }
                 let now = clock.now();
@@ -306,6 +378,61 @@ impl<'s, 'a> Pass<'s, 'a> {
                 self.prev = now;
             }
         }
+        Ok(())
+    }
+
+    /// Draw the casing of the line `f` placed at `at`, where the look has
+    /// casings and the line gets one: a major or secondary road, or any
+    /// line on a bridge. A caller strokes every casing of a layer before
+    /// the layer's lines, so the casings join under the fills.
+    pub fn casing<D, C>(
+        &mut self,
+        f: &Feature<'_>,
+        at: Placement,
+        profile: Profile,
+        target: &mut D,
+        work: &mut Work<'_>,
+        clock: &mut C,
+    ) -> Result<(), D::Error>
+    where
+        D: DrawTarget<Color = Rgb565>,
+        C: Clock,
+    {
+        let line = line_width(&self.look.widths, f.class);
+        if f.kind != Kind::Line
+            || self.look.mono.is_some()
+            || self.look.casing == 0
+            || line == 0
+            || !(f.class.is_cased() || f.bridge())
+            || !profile.includes(f.class)
+        {
+            return Ok(());
+        }
+        let width = line + self.look.casing;
+        let Some(nr) = self.prepare(f, at, width, work, clock, false) else {
+            return Ok(());
+        };
+        let color = self.look.theme.palette().casing_of(f.class);
+        let pen = Pen {
+            width,
+            round: self.look.round,
+            dash: None,
+        };
+        let mut start = 0usize;
+        for &end in &work.ring_ends[..nr] {
+            let end = usize::from(end);
+            self.stats.casing += stroke_pen(
+                &mut self.filler,
+                &work.points[start..end],
+                pen,
+                target,
+                color,
+            )?;
+            start = end;
+        }
+        let now = clock.now();
+        self.stats.phases.stroke += u64::from(now.wrapping_sub(self.prev));
+        self.prev = now;
         Ok(())
     }
 }
@@ -326,7 +453,7 @@ where
     D: DrawTarget<Color = Rgb565>,
     C: Clock,
 {
-    let mut pass = Pass::begin(target, scratch, clock)?;
+    let mut pass = Pass::begin(target, scratch, Look::DEFAULT, clock)?;
     let at = Placement {
         shift: fx.shift(),
         origin: Point::zero(),

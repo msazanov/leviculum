@@ -965,6 +965,7 @@ pub(crate) async fn start(
         tracing::warn!("{problem}");
     }
     model.map_autoload = config.map_autoload.unwrap_or(true);
+    model.map_theme = config.map_theme;
     let source = Source::of(config.map_source.as_deref());
     tracing::info!(
         "MAPLOAD autoload={} source={}",

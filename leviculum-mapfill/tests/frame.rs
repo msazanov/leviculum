@@ -38,9 +38,9 @@ fn rgb888_keeps_full_intensity_and_row_order() {
     use leviculum_mapfill::style::BACKGROUND;
     assert_eq!(rgb888(Rgb565::WHITE), [255, 255, 255]);
     assert_eq!(rgb888(Rgb565::BLACK), [0, 0, 0]);
-    // 242, 239, 233 lose their low bits in Rgb565 and get them back from
+    // 245, 241, 233 lose their low bits in Rgb565 and get them back from
     // the top ones.
-    assert_eq!(rgb888(BACKGROUND), [247, 239, 239]);
+    assert_eq!(rgb888(BACKGROUND), [247, 243, 239]);
     let mut px = [0u16; 2];
     let mut frame = Frame::new(&mut px, 2, 1).expect("frame");
     let Ok(()) = Pixel(Point::new(1, 0), Rgb565::RED).draw(&mut frame);
@@ -49,13 +49,15 @@ fn rgb888_keeps_full_intensity_and_row_order() {
     assert_eq!(out, [0, 0, 0, 255, 0, 0]);
 }
 
-/// The width table the map core picks per zoom starts from the one
-/// `line_style` carries.
+/// Every line class has a width at the deep zooms and no area has one,
+/// and the three road steps widen from minor to major.
 #[test]
-fn the_default_widths_are_line_styles() {
-    use leviculum_mapfill::style::{line_style, line_width, Class, LINE_WIDTHS};
+fn the_default_widths_cover_the_lines() {
+    use leviculum_mapfill::style::{line_width, Class, LINE_WIDTHS};
     for c in Class::ALL {
-        let want = if c.is_area() { 0 } else { line_style(c).1 };
-        assert_eq!(line_width(&LINE_WIDTHS, c), want, "{c:?}");
+        assert_eq!(line_width(&LINE_WIDTHS, c) > 0, !c.is_area(), "{c:?}");
     }
+    let w = |c| line_width(&LINE_WIDTHS, c);
+    assert!(w(Class::MinorRoad) < w(Class::SecondaryRoad));
+    assert!(w(Class::SecondaryRoad) < w(Class::MajorRoad));
 }

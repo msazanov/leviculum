@@ -13,7 +13,10 @@
 //! place loads its region by itself; `map_source`, the URL of the PMTiles
 //! archive regions are cut from (unset: the newest Protomaps daily build);
 //! and `map_cache_mb`, how many megabytes the autoloaded regions may take
-//! (500 by default). And one key a terminal context for the map's
+//! (500 by default). `map_theme`, `light` (the default), `dark` or `auto`
+//! (1099): the map's colour table, `auto` following the theme the screen
+//! is drawn in where the frontend has one (the terminal) and light where
+//! it has none (the window). And one key a terminal context for the map's
 //! drawing (1093), `map_drawing.<context> = <drawing>`, which the terminal
 //! writes itself when the reader leaves the map or quits: the way of
 //! drawing the map the reader stayed on in that context, a `--graphics`
@@ -33,6 +36,8 @@
 //! # the club's own copy of the map, and no more than 200 MB of it here
 //! map_source = https://maps.example.org/planet.pmtiles
 //! map_cache_mb = 200
+//! # the map in its dark colours whenever the terminal is dark
+//! map_theme = auto
 //! # written by the terminal: octants in foot, braille over mosh
 //! map_drawing.local:foot = octant
 //! map_drawing.mosh:xterm-256color = braille-thin
@@ -105,6 +110,8 @@ pub struct Config {
     pub map_source: Option<String>,
     /// `map_cache_mb`, when the file sets it.
     pub map_cache_mb: Option<u64>,
+    /// `map_theme`, when the file sets it; unset is light.
+    pub map_theme: Option<ThemeFlag>,
     /// `map_drawing.<context>` lines: each context and the drawing
     /// remembered for it, in file order, a later line for a context
     /// replacing an earlier one.
@@ -177,19 +184,24 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
                 }
             });
         }
-        if key.trim() == "theme" {
-            config.theme = Some(match value.trim().trim_matches('"') {
-                "auto" => ThemeFlag::Auto,
-                "dark" => ThemeFlag::Dark,
-                "light" => ThemeFlag::Light,
-                other => {
-                    return Err(ConfigError::BadValue {
-                        line: index + 1,
-                        key: "theme",
-                        detail: alloc::format!("{other:?} is not auto, dark or light"),
-                    });
-                }
-            });
+        for (name, slot) in [
+            ("theme", &mut config.theme),
+            ("map_theme", &mut config.map_theme),
+        ] {
+            if key.trim() == name {
+                *slot = Some(match value.trim().trim_matches('"') {
+                    "auto" => ThemeFlag::Auto,
+                    "dark" => ThemeFlag::Dark,
+                    "light" => ThemeFlag::Light,
+                    other => {
+                        return Err(ConfigError::BadValue {
+                            line: index + 1,
+                            key: name,
+                            detail: alloc::format!("{other:?} is not auto, dark or light"),
+                        });
+                    }
+                });
+            }
         }
         if key.trim() == "sync_interval" {
             match crate::sync::parse_interval(value.trim().trim_matches('"')) {
@@ -451,7 +463,17 @@ mod tests {
             Some("https://maps.example.org/p.pmtiles")
         );
         assert_eq!(set.map_cache_mb, Some(200));
+        assert_eq!(empty.map_theme, None);
+        assert_eq!(
+            parse_str("map_theme = auto\n").expect("auto").map_theme,
+            Some(ThemeFlag::Auto)
+        );
+        assert_eq!(
+            parse_str("map_theme = \"dark\"\n").expect("dark").map_theme,
+            Some(ThemeFlag::Dark)
+        );
         for (text, key) in [
+            ("map_theme = sepia\n", "map_theme"),
             ("map_autoload = sometimes\n", "map_autoload"),
             ("map_source = ftp://x/p.pmtiles\n", "map_source"),
             ("map_cache_mb = lots\n", "map_cache_mb"),

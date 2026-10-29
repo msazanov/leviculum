@@ -27,7 +27,7 @@ use alloc::vec::Vec;
 
 use embedded_graphics::pixelcolor::Rgb565;
 
-use crate::style::{line_style, Class};
+use crate::style::{Class, MapTheme};
 
 /// Source pixels across one cell.
 pub const SX: usize = 4;
@@ -66,6 +66,8 @@ pub struct Source {
     pub line: Vec<bool>,
     /// Which pixels the lines cover at half that width: one braille dot.
     pub thin: Vec<bool>,
+    /// The colour table `rgb` was drawn in.
+    pub theme: MapTheme,
 }
 
 impl Source {
@@ -812,16 +814,10 @@ pub fn rgb_of(c: Rgb565) -> Rgb {
     leviculum_mapfill::frame::rgb888(c)
 }
 
-/// The line colours of the style, which no area colour shares.
-pub fn line_colours() -> [Rgb; 5] {
-    [
-        Class::Waterway,
-        Class::Path,
-        Class::MinorRoad,
-        Class::MajorRoad,
-        Class::Rail,
-    ]
-    .map(|c| rgb_of(line_style(c).0))
+/// Every colour a line pixel of `theme`'s table can be (its inks, its
+/// tunnels' and its casings), which no area colour shares.
+pub fn line_colours(theme: MapTheme) -> [Rgb; 14] {
+    theme.palette().inks().map(rgb_of)
 }
 
 /// What a line pixel that is no line class (a coast, an outline) is inked.
@@ -830,20 +826,23 @@ pub const COAST: Rgb = [70, 110, 160];
 /// The minor roads' colour as braille dots.
 pub const MINOR_DOT: Rgb = [128, 128, 132];
 
-/// A line's colour as braille dots: a dot is a few pixels of a glyph, so
-/// the white of the minor roads vanishes on the light ground; grey keeps it.
-pub fn braille_ink(c: Rgb) -> Rgb {
-    match c == rgb_of(line_style(Class::MinorRoad).0) {
+/// A line's colour in `theme` as braille dots: a dot is a few pixels of a
+/// glyph, so the white of the minor roads vanishes on the light ground;
+/// grey keeps it. The dark table's minor roads stand out as they are.
+pub fn braille_ink(c: Rgb, theme: MapTheme) -> Rgb {
+    let minor = rgb_of(theme.palette().line(Class::MinorRoad));
+    match theme == MapTheme::Light && c == minor {
         true => MINOR_DOT,
         false => c,
     }
 }
 
-/// The index among the sixteen ANSI colours `c` is drawn in at 16
-/// colours, chosen per class ([`crate::style::ansi16`]); the dot colours of
-/// the braille techniques included. `None` for a colour that is no class's,
-/// a mean of a two-colour fit, which takes the nearest.
-pub fn ansi16(c: Rgb) -> Option<u8> {
+/// The index among the sixteen ANSI colours `c` of `theme`'s table is
+/// drawn in at 16 colours, chosen per class
+/// ([`crate::style::Palette::ansi16`]); the dot colours of the braille
+/// techniques included. `None` for a colour that is no class's, a mean of
+/// a two-colour fit, which takes the nearest.
+pub fn ansi16(c: Rgb, theme: MapTheme) -> Option<u8> {
     match c {
         COAST => Some(4),
         MINOR_DOT => Some(8),
@@ -851,7 +850,7 @@ pub fn ansi16(c: Rgb) -> Option<u8> {
             // Back to the table's Rgb565, kept only where it comes back
             // exactly: the expansion is one to one.
             let back = Rgb565::new(c[0] >> 3, c[1] >> 2, c[2] >> 3);
-            crate::style::ansi16(back).filter(|_| rgb_of(back) == c)
+            theme.palette().ansi16(back).filter(|_| rgb_of(back) == c)
         }
     }
 }
@@ -859,13 +858,13 @@ pub fn ansi16(c: Rgb) -> Option<u8> {
 /// Cell `(col, row)` of `src` in `encoding`.
 pub fn encode_cell(src: &Source, col: usize, row: usize, encoding: Encoding, sets: &Sets) -> Cell {
     let block = src.block(col, row);
-    let lines = line_colours();
+    let lines = line_colours(src.theme);
     let line = |x: usize, y: usize| Source::at(&src.line, src.px(col, row, x, y));
     let thin = |x: usize, y: usize| Source::at(&src.thin, src.px(col, row, x, y));
     let ink_of = |on: &dyn Fn(usize, usize) -> bool| {
         mode((0..CELL_PX).filter(|&i| on(i % SX, i / SX)).map(
             |i| match lines.contains(&block[i]) {
-                true => braille_ink(block[i]),
+                true => braille_ink(block[i], src.theme),
                 false => COAST,
             },
         ))
@@ -955,7 +954,7 @@ pub fn glyph_test() -> [(&'static str, Vec<char>, &'static str); 7] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::style::{area_color, BACKGROUND};
+    use crate::style::{BACKGROUND, LIGHT};
 
     /// A small deterministic generator, so the cells are the same on every
     /// run.
@@ -976,10 +975,10 @@ mod tests {
     fn cells() -> Vec<[Rgb; CELL_PX]> {
         let palette = [
             rgb_of(BACKGROUND),
-            rgb_of(area_color(Class::Park)),
-            rgb_of(area_color(Class::Water)),
-            rgb_of(line_style(Class::MajorRoad).0),
-            rgb_of(line_style(Class::MinorRoad).0),
+            rgb_of(LIGHT.area(Class::Park)),
+            rgb_of(LIGHT.area(Class::Water)),
+            rgb_of(LIGHT.line(Class::MajorRoad)),
+            rgb_of(LIGHT.line(Class::MinorRoad)),
         ];
         let mut lcg = Lcg(7);
         let mut out = Vec::new();
@@ -1065,14 +1064,14 @@ mod tests {
         let mut lcg = Lcg(3);
         let n = src.cols * src.rows * CELL_PX;
         let roads = [
-            rgb_of(line_style(Class::MinorRoad).0),
-            rgb_of(line_style(Class::MajorRoad).0),
+            rgb_of(LIGHT.line(Class::MinorRoad)),
+            rgb_of(LIGHT.line(Class::MajorRoad)),
         ];
         for _ in 0..n {
             let line = lcg.next().is_multiple_of(5);
             src.rgb.push(match line {
                 true => roads[usize::from(lcg.next()) % 2],
-                false => rgb_of(area_color(Class::Park)),
+                false => rgb_of(LIGHT.area(Class::Park)),
             });
             src.line.push(line);
             src.thin.push(line && lcg.next().is_multiple_of(2));
@@ -1104,7 +1103,7 @@ mod tests {
                 // background the park.
                 for c in cells.iter().filter(|c| c.ch != '\u{2800}') {
                     assert!(c.fg == Some(MINOR_DOT) || c.fg == Some(roads[1]), "{c:?}");
-                    assert_eq!(c.bg, Some(rgb_of(area_color(Class::Park))));
+                    assert_eq!(c.bg, Some(rgb_of(LIGHT.area(Class::Park))));
                 }
             }
         }
@@ -1118,20 +1117,28 @@ mod tests {
         assert_eq!(braille(|dx, dy| dx == 1 && dy == 3), '⢀');
     }
 
-    /// At 16 colours a class keeps its own colour: park green, water bright
-    /// blue, the minor roads' dots grey; a mean of two classes takes the
+    /// At 16 colours a class keeps its own colour: forest green, parks
+    /// bright green, water bright blue, the minor roads' dots grey, in the
+    /// dark table water blue on black; a mean of two classes takes the
     /// nearest instead.
     #[test]
     fn each_class_has_its_own_of_the_sixteen() {
-        assert_eq!(ansi16(rgb_of(area_color(Class::Park))), Some(2));
-        assert_eq!(ansi16(rgb_of(area_color(Class::Water))), Some(12));
-        assert_eq!(ansi16(rgb_of(line_style(Class::MajorRoad).0)), Some(3));
-        assert_eq!(ansi16(MINOR_DOT), Some(8));
-        assert_eq!(ansi16(COAST), Some(4));
-        assert_eq!(ansi16([123, 45, 67]), None);
+        let light = MapTheme::Light;
+        let at = |c: Class| rgb_of(LIGHT.area(c));
+        assert_eq!(ansi16(at(Class::Forest), light), Some(2));
+        assert_eq!(ansi16(at(Class::Park), light), Some(10));
+        assert_eq!(ansi16(at(Class::Water), light), Some(12));
+        assert_eq!(ansi16(rgb_of(LIGHT.line(Class::MajorRoad)), light), Some(3));
+        assert_eq!(ansi16(MINOR_DOT, light), Some(8));
+        assert_eq!(ansi16(COAST, light), Some(4));
+        assert_eq!(ansi16([123, 45, 67], light), None);
         // Next to a table colour, not on it.
-        let [r, g, b] = rgb_of(area_color(Class::Park));
-        assert_eq!(ansi16([r, g, b ^ 1]), None);
+        let [r, g, b] = at(Class::Park);
+        assert_eq!(ansi16([r, g, b ^ 1], light), None);
+        let dark = MapTheme::Dark;
+        let water = rgb_of(dark.palette().area(Class::Water));
+        assert_eq!(ansi16(water, dark), Some(4));
+        assert_eq!(ansi16(rgb_of(dark.palette().background), dark), Some(0));
     }
 
     #[test]

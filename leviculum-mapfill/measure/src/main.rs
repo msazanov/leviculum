@@ -95,6 +95,7 @@ fn extract(tiles: &Path, out: &Path) -> Res<()> {
             feats.push(write::Feature {
                 kind: f.kind,
                 class: f.class,
+                flags: f.flags,
                 tile: u8::try_from(ti)?,
                 rings: rs,
             });

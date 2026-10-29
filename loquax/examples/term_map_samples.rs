@@ -28,7 +28,7 @@ use leviculum_map::mercator::{project, LatLon};
 use leviculum_map::pins::{labels, Mark, Metrics};
 use leviculum_map::viewport::Viewport;
 use leviculum_mapfill::frame::Frame;
-use leviculum_mapfill::style::{area_color, line_style, Class, BACKGROUND};
+use leviculum_mapfill::style::{Class, MapTheme, Style, BACKGROUND, LIGHT};
 use leviculum_ui::color::{rgb_to_ansi16, rgb_to_ansi256};
 use loquax::picture::{Maps, Painter};
 
@@ -153,8 +153,8 @@ fn box_char(edges: usize, heavy: bool) -> char {
 /// cell's edges, braille where a line does not reach an edge, areas as the
 /// background.
 fn box_hybrid(src: &cells::Source, col: usize, row: usize) -> Cell {
-    let lines = line_colours();
-    let major = cells::rgb_of(line_style(Class::MajorRoad).0);
+    let lines = line_colours(MapTheme::Light);
+    let major = cells::rgb_of(LIGHT.line(Class::MajorRoad));
     let block = src.block(col, row);
     let line = |x: usize, y: usize| src.line[src.px(col, row, x, y)];
     let any = |pts: &[(usize, usize)]| pts.iter().any(|&(x, y)| line(x, y));
@@ -165,7 +165,7 @@ fn box_hybrid(src: &cells::Source, col: usize, row: usize) -> Cell {
     let fg =
         mode((0..SX * SY).filter(|&i| line(i % SX, i / SX)).map(
             |i| match lines.contains(&block[i]) {
-                true => braille_ink(block[i]),
+                true => braille_ink(block[i], MapTheme::Light),
                 false => COAST,
             },
         ));
@@ -313,18 +313,18 @@ fn ansi(grid: &Grid, tier: Tier, out: &mut String) {
 fn darken(c: Rgb) -> Rgb {
     let table: [(Rgb565, Rgb); 13] = [
         (BACKGROUND, [28, 30, 34]),
-        (area_color(Class::Earth), [28, 30, 34]),
-        (area_color(Class::Urban), [44, 46, 52]),
-        (area_color(Class::Park), [36, 66, 42]),
-        (area_color(Class::Pedestrian), [52, 52, 62]),
-        (area_color(Class::Sand), [78, 72, 48]),
-        (area_color(Class::Water), [26, 52, 92]),
-        (area_color(Class::Building), [66, 62, 60]),
-        (line_style(Class::Waterway).0, [70, 120, 190]),
-        (line_style(Class::Path).0, [110, 104, 98]),
-        (line_style(Class::MinorRoad).0, [150, 150, 158]),
-        (line_style(Class::MajorRoad).0, [222, 164, 64]),
-        (line_style(Class::Rail).0, [170, 170, 170]),
+        (LIGHT.area(Class::Earth), [28, 30, 34]),
+        (LIGHT.area(Class::Urban), [44, 46, 52]),
+        (LIGHT.area(Class::Park), [36, 66, 42]),
+        (LIGHT.area(Class::Pedestrian), [52, 52, 62]),
+        (LIGHT.area(Class::Sand), [78, 72, 48]),
+        (LIGHT.area(Class::Water), [26, 52, 92]),
+        (LIGHT.area(Class::Building), [66, 62, 60]),
+        (LIGHT.line(Class::Waterway), [70, 120, 190]),
+        (LIGHT.line(Class::Path), [110, 104, 98]),
+        (LIGHT.line(Class::MinorRoad), [150, 150, 158]),
+        (LIGHT.line(Class::MajorRoad), [222, 164, 64]),
+        (LIGHT.line(Class::Rail), [170, 170, 170]),
     ];
     table
         .iter()
@@ -337,7 +337,7 @@ fn darken(c: Rgb) -> Rgb {
 /// rather than taking the nearest one, which turns parks and the river into
 /// grey.
 fn tokens16(c: Rgb) -> Rgb {
-    ansi16(c).map_or(c, |i| {
+    ansi16(c, MapTheme::Light).map_or(c, |i| {
         let (r, g, b) = leviculum_ui::color::XTERM_16[usize::from(i)];
         [r, g, b]
     })
@@ -345,7 +345,7 @@ fn tokens16(c: Rgb) -> Rgb {
 
 fn draw(painter: &mut Painter, view: &Viewport, ink: Ink, percent: u32) -> (Vec<Rgb>, String) {
     let (w, h) = view.size();
-    let mut drawn = painter.draw(view, ink, percent);
+    let mut drawn = painter.draw(view, ink, Style::M9, percent);
     let mut flat = Vec::with_capacity(drawn.fb.len() * 3);
     if let Some(f) = Frame::new(&mut drawn.fb, w, h) {
         f.rgb888_into(&mut flat);
@@ -368,6 +368,7 @@ fn source(painter: &mut Painter, centre: LatLon, zoom: u8, cols: usize, rows: us
             rgb,
             line: lines.iter().map(|&c| c != bg).collect(),
             thin: thin.iter().map(|&c| c != bg).collect(),
+            theme: MapTheme::Light,
         },
         attribution,
     }

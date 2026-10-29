@@ -38,12 +38,16 @@ pub struct ZoomLayers {
     pub thin_px2: u16,
 }
 
+/// The bit of `c`'s class byte: a profile keeps class bytes, so forest
+/// goes with parks and secondary roads with major roads, as an older
+/// reader draws them.
 const fn bit(c: Class) -> u32 {
-    1 << (c as u8)
+    1 << c.wire().0
 }
 
 const ALL_BUT_BUILDINGS: u32 = bit(Class::Earth)
     | bit(Class::Urban)
+    | bit(Class::Forest)
     | bit(Class::Park)
     | bit(Class::Pedestrian)
     | bit(Class::Sand)
@@ -51,6 +55,7 @@ const ALL_BUT_BUILDINGS: u32 = bit(Class::Earth)
     | bit(Class::Waterway)
     | bit(Class::Path)
     | bit(Class::MinorRoad)
+    | bit(Class::SecondaryRoad)
     | bit(Class::MajorRoad)
     | bit(Class::Rail);
 
@@ -66,7 +71,7 @@ impl ZoomLayers {
         self.thin_px2 > 0
             && matches!(
                 c,
-                Class::Urban | Class::Park | Class::Pedestrian | Class::Sand
+                Class::Urban | Class::Forest | Class::Park | Class::Pedestrian | Class::Sand
             )
     }
 
@@ -101,23 +106,23 @@ const PX: i32 = leviculum_mapfill::SUBPIXEL;
 /// The line widths a view at zoom `z` draws with, waterway to rail
 /// (`leviculum_mapfill::style::LineWidths`); 0 leaves the class out.
 ///
-/// | view zoom | waterway | path | minor road | major road | rail |
-/// |---|---|---|---|---|---|
-/// | up to 8 | 1 | - | - | 1 | - |
-/// | 9, 10 | 1 | - | - | 1.5 | 1 |
-/// | 11, 12 | 1 | - | 1 | 2 | 1 |
-/// | 13, 14 | 1.5 | 1 | 2 | 3 | 1 |
-/// | 15 and deeper | 1.5 | 1 | 2.5 | 4 | 1 |
+/// | view zoom | waterway | path | minor road | secondary road | major road | rail |
+/// |---|---|---|---|---|---|---|
+/// | up to 8 | 1 | - | - | 1 | 1 | - |
+/// | 9, 10 | 1 | - | - | 1 | 1.5 | 1 |
+/// | 11, 12 | 1 | - | 1 | 1.5 | 2 | 1 |
+/// | 13, 14 | 1.5 | 1 | 2 | 2.5 | 3 | 1 |
+/// | 15 and deeper | 1.5 | 1 | 2.5 | 3.5 | 4 | 1 |
 ///
 /// In pixels. Paths and minor roads go at the region zooms, where they
 /// were a white mesh over the whole Florence view at z11 and z12; nothing
 /// is thinner than one pixel, which the stroker would draw broken.
 pub fn line_widths(z: u8) -> LineWidths {
     match z {
-        0..=8 => [PX, 0, 0, PX, 0],
-        9..=10 => [PX, 0, 0, 3 * PX / 2, PX],
-        11..=12 => [PX, 0, PX, 2 * PX, PX],
-        13..=14 => [3 * PX / 2, PX, 2 * PX, 3 * PX, PX],
+        0..=8 => [PX, 0, 0, PX, PX, 0],
+        9..=10 => [PX, 0, 0, PX, 3 * PX / 2, PX],
+        11..=12 => [PX, 0, PX, 3 * PX / 2, 2 * PX, PX],
+        13..=14 => [3 * PX / 2, PX, 2 * PX, 5 * PX / 2, 3 * PX, PX],
         _ => LINE_WIDTHS,
     }
 }

@@ -15,7 +15,7 @@ use leviculum_map::viewport::Viewport;
 use leviculum_mapfill::fill::{Edge, Scratch};
 use leviculum_mapfill::frame::Frame;
 use leviculum_mapfill::render::{NoClock, RenderStats, Work};
-use leviculum_mapfill::style::{Profile, BACKGROUND, BORDER};
+use leviculum_mapfill::style::{MapTheme, Profile, BACKGROUND, BORDER};
 
 const FLORENCE: &[u8] = include_bytes!("../fixtures/firenze.lmr");
 
@@ -70,7 +70,8 @@ fn count(fb: &mut [u16], w: u32, h: u32, colour: Rgb565) -> u32 {
 
 /// The region zooms draw thinner lines and no paths or minor roads where
 /// the fixtures' widths drew a white mesh. Before 1065 the z12 view drew
-/// 543 features and 35,640 stroke pixels, the z11 view 325 and 21,777.
+/// 543 features and 35,640 stroke pixels, the z11 view 325 and 21,777;
+/// before the secondary roads went a step thinner (1099), 12,885 and 9,574.
 #[test]
 fn region_zooms_draw_thinner_lines() {
     let mut fb = vec![0u16; 240 * 320];
@@ -80,10 +81,12 @@ fn region_zooms_draw_thinner_lines() {
         assert_eq!(st.overflows, 0);
         rows.push((zoom, st.features, st.stroke.pixels));
     }
-    assert_eq!(rows, [(12, 537, 12_885), (11, 325, 9_574)]);
+    assert_eq!(rows, [(12, 537, 11_415), (11, 325, 7_380)]);
 }
 
-/// Lines alone: no area filled, every inked pixel the one colour.
+/// Lines alone: no area filled, every inked pixel the one colour. Before
+/// the secondary roads went a step thinner (1099): 33,138 stroked, 17,994
+/// inked.
 #[test]
 fn the_lines_ink_fills_nothing() {
     let ink = Rgb565::new(0, 0, 0);
@@ -97,7 +100,7 @@ fn the_lines_ink_fills_nothing() {
     assert_eq!(inked + bg, 240 * 320, "only the ink and the background");
     assert_eq!(
         (st.features, st.stroke.pixels, inked),
-        (283, 33_138, 17_994)
+        (283, 31_840, 17_631)
     );
 }
 
@@ -154,14 +157,21 @@ fn the_border_table_is_natural_earth_50m() {
 fn outline_view(view: &Viewport, ink: Ink, fb: &mut [u16]) -> OutlineStats {
     let (w, h) = view.size();
     let mut frame = Frame::new(fb, w, h).expect("frame");
-    let Ok(st) = outline::draw(WORLD_50M, BORDERS_50M, view, ink, &mut frame);
+    let Ok(st) = outline::draw(
+        WORLD_50M,
+        BORDERS_50M,
+        view,
+        ink,
+        MapTheme::Light,
+        &mut frame,
+    );
     st
 }
 
 fn land_view(view: &Viewport, ink: Ink, fb: &mut [u16]) -> OutlineStats {
     let (w, h) = view.size();
     let mut frame = Frame::new(fb, w, h).expect("frame");
-    let Ok(st) = outline::draw(WORLD_50M, &[], view, ink, &mut frame);
+    let Ok(st) = outline::draw(WORLD_50M, &[], view, ink, MapTheme::Light, &mut frame);
     st
 }
 
@@ -174,7 +184,7 @@ fn the_outline_draws_the_world_at_z2() {
     let st = land_view(&view, Ink::Colour, &mut fb);
     assert_eq!(st.overflows, 0);
     let land = count(&mut fb, 240, 160, BACKGROUND);
-    let water = count(&mut fb, 240, 160, outline::water());
+    let water = count(&mut fb, 240, 160, outline::water(MapTheme::Light));
     assert_eq!(land + water, 240 * 160);
     assert_eq!(
         (st.rings, st.culled, st.vertices, st.fill.pixels, land),
@@ -183,7 +193,7 @@ fn the_outline_draws_the_world_at_z2() {
     assert_eq!((st.borders, st.border.pixels), (0, 0));
     let st = outline_view(&view, Ink::Colour, &mut fb);
     let land = count(&mut fb, 240, 160, BACKGROUND);
-    let water = count(&mut fb, 240, 160, outline::water());
+    let water = count(&mut fb, 240, 160, outline::water(MapTheme::Light));
     let border = count(&mut fb, 240, 160, BORDER);
     assert_eq!(land + water + border, 240 * 160);
     assert_eq!(
@@ -223,7 +233,7 @@ fn the_outline_draws_borders_at_z5() {
     let st = outline_view(&view, Ink::Colour, &mut fb);
     assert_eq!(st.overflows, 0);
     let land = count(&mut fb, 240, 160, BACKGROUND);
-    let water = count(&mut fb, 240, 160, outline::water());
+    let water = count(&mut fb, 240, 160, outline::water(MapTheme::Light));
     let border = count(&mut fb, 240, 160, BORDER);
     assert_eq!(land + water + border, 240 * 160);
     assert_eq!(bare, land + border, "the borders lie on the land");
