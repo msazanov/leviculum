@@ -3,6 +3,7 @@ package network.leviculum.loquax;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.DialogInterface;
+import android.content.Intent;
 import android.os.Bundle;
 import android.view.Gravity;
 import android.view.View;
@@ -51,6 +52,12 @@ public class ChatActivity extends Activity implements Events.Listener {
         ListView list = (ListView) findViewById(R.id.list);
         adapter = new Adapter();
         list.setAdapter(adapter);
+        list.setOnItemClickListener(new AdapterView.OnItemClickListener() {
+            @Override
+            public void onItemClick(AdapterView<?> parent, View view, int position, long id) {
+                showFix(rows.get(position));
+            }
+        });
         list.setOnItemLongClickListener(new AdapterView.OnItemLongClickListener() {
             @Override
             public boolean onItemLongClick(AdapterView<?> parent, View view, int position, long id) {
@@ -124,6 +131,16 @@ public class ChatActivity extends Activity implements Events.Listener {
         }
         compose.setText("");
         refresh();
+    }
+
+    /** A position report opens the map centred on its fix, as Enter does in the terminal. */
+    private void showFix(Map<String, Object> row) {
+        if (row.get("lat_e6") == null || row.get("lon_e6") == null) {
+            return;
+        }
+        startActivity(new Intent(this, MapActivity.class)
+                .putExtra(MapActivity.LAT_E6, Core.num(row, "lat_e6"))
+                .putExtra(MapActivity.LON_E6, Core.num(row, "lon_e6")));
     }
 
     /** A message's reactions: one of loquax's quick six. */

@@ -36,6 +36,16 @@ What it does today:
 - **Asked once.** On the first conversation list: notifications (Android
   13 and later), and on a later look the battery optimisation exemption,
   with a plain reason. Neither is forced, neither is asked again.
+- **Map.** The contacts' latest positions as pins over loquax's own map
+  (the button on the list), drawn by the library with the window's
+  renderer: the regions in the app's `maps/`, the world outline, the
+  names, the pins, stale ones dimmed, in the map's dark colours when the
+  phone is dark. One finger pans, a pinch or a double tap zooms, a tap on
+  a pin names it; "All" fits every pin, "Load area" loads the region of
+  the view. A tap on a position report in a chat opens the map on its
+  fix. Regions load by themselves around the pins and a report's place,
+  as in the terminal (`map_autoload`, `map_source`, `map_cache_mb` in the
+  app's `config`).
 - **Light or dark** by the phone's setting: the theme and every colour are
   resources with a `-night` set (`android/res/values-night/`), no AndroidX.
   Switching while a screen is open recreates it, as a rotation does; the
@@ -50,7 +60,7 @@ model; Java only draws. The library's node is a leaf: transport off, one
 TCP client interface to the home node, no lnsd and no shared instance on
 the phone (`loquax::engine::attach_leaf`). Its session
 (`src/session.rs`) runs the model's effects through the client runners the
-terminal's shell runs too (`loquax::home::runner`). Java calls five functions with msgpack
+terminal's shell runs too (`loquax::home::runner`). Java calls six functions with msgpack
 bytes in the versioned schema of `src/schema.rs`:
 
 | Call | What |
@@ -60,6 +70,7 @@ bytes in the versioned schema of `src/schema.rs`:
 | `query` | `conversations`, `messages` of one peer |
 | `nextEvent` | blocks on a Java thread: `changed`, `notice`, `sync`, `link`, `stopped` |
 | `stop` | end the session |
+| `renderMap` | one map frame (`src/map.rs`): the view and the gestures since the last in, the view and its RGBA pixels out; needs no session |
 
 ## Build
 
@@ -99,9 +110,10 @@ keytool -genkeypair -keystore android/loquax.keystore \
 |---|---|
 | `Cargo.toml`, `src/lib.rs` | the JNI library, a workspace member; `cargo test -p loquax-android` runs its tests on the host, `tests/facade.rs` against an in-process home node |
 | `src/schema.rs`, `src/session.rs` | the payloads, and the session behind them |
+| `src/map.rs`, `tests/map.rs` | the map screen's frames, and their test against the shared renderer and its golden (`tests/golden/`) |
 | `Makefile` | the template's, with the `native` step and the Android settings below |
 | `android/AndroidManifest.xml` | with the template's build-time tokens |
-| `android/src/network/leviculum/loquax/` | the three screens (`MainActivity` joins, `ConversationsActivity`, `ChatActivity`), `LoquaxService`, which holds the session, and `ServiceLink`, the screens' binding to it, `Asks`, the two questions asked once, `Native`, the Java face of the library, `Core` and `MsgPack`, which read it, and `Events` |
+| `android/src/network/leviculum/loquax/` | the four screens (`MainActivity` joins, `ConversationsActivity`, `ChatActivity`, `MapActivity` with its `MapView`), `LoquaxService`, which holds the session, and `ServiceLink`, the screens' binding to it, `Asks`, the two questions asked once, `Native`, the Java face of the library, `Core` and `MsgPack`, which read it, and `Events` |
 | `android/res/` | layouts, the bubbles' shapes, strings, the theme and its colours, light in `values/` and dark in `values-night/` |
 | `install-toolchain.sh` | the SDK and NDK pieces, checked by SHA-1 |
 
@@ -117,6 +129,8 @@ keytool -genkeypair -keystore android/loquax.keystore \
 - The library is linked with 16 KiB page alignment and with the checkout
   and cargo home paths remapped, so neither path ends up in the library,
   and without its symbol table (the dynamic one JNI needs stays).
+- `pack` adds `assets/FiraSans-OFL.txt`, the licence of the font the
+  map's names are set in.
 - SQLite inside the store is C, compiled by the NDK's clang, which the
   Makefile names for the cc crate.
 - The Java has no lambdas: javac compiles them against

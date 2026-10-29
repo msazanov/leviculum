@@ -28,6 +28,7 @@ use loquax::home::runner::{self, HomeClient};
 use loquax::home::watch::{self, Fallback, WatchEvent};
 use loquax::outbox::{Command, Outbox, OutboxEvent};
 use loquax::store::Store;
+use loquax::ui::map::MapPin;
 use loquax::ui::{reactions, update, Message, UiEffect, UiEvent, UiModel};
 use loquax::when::WallTime;
 
@@ -373,6 +374,11 @@ impl Session {
         })
     }
 
+    /// The map's pins as the session's model knows them now.
+    pub fn map_pins(&self) -> Vec<MapPin> {
+        self.lock().model.map_pins()
+    }
+
     /// The next event, waiting at most `wait`.
     pub fn next_event(&self, wait: Duration) -> Option<Event> {
         let events = self
@@ -431,14 +437,9 @@ impl Inner {
     ) -> Result<Self, String> {
         let store = Store::open_in(home, address).map_err(|error| error.to_string())?;
         let config = loquax::config::load(home).map_err(|error| error.to_string())?;
-        let contacts = loquax::names::load_contacts(home).map_err(|error| error.to_string())?;
-        let mut model = UiModel::<Line>::new(&[]);
+        let mut model = known(home, &store)?;
         model.home_client = true;
         model.list_apart = true;
-        model.names = loquax::names::Names::new(contacts);
-        for (peer, name) in store.names().map_err(|error| error.to_string())? {
-            model.names.remember(peer, &name);
-        }
         for (message_id, source, packed) in store.unverified().map_err(|e| e.to_string())? {
             let verify = Command::Verify {
                 message_id,
@@ -750,14 +751,16 @@ impl Inner {
     }
 
     fn messages(&self, peer: [u8; 16]) -> schema::Messages {
-        let conversation = self.model.conversations.iter().find(|c| c.peer == peer);
-        let rows = conversation.map_or_else(Vec::new, |conversation| {
+        let index = self.model.conversations.iter().position(|c| c.peer == peer);
+        let rows = index.map_or_else(Vec::new, |c| {
+            let conversation = &self.model.conversations[c];
             let chips = reactions::gather(conversation);
             conversation
                 .messages
                 .iter()
-                .filter(|message| !message.is_reaction())
-                .map(|message| row(message, &chips))
+                .enumerate()
+                .filter(|(_, message)| !message.is_reaction())
+                .map(|(m, message)| row(message, &chips, self.model.report_fix(c, m)))
                 .collect()
         });
         schema::Messages {
@@ -769,10 +772,41 @@ impl Inner {
     }
 }
 
-/// One bubble as the app draws it.
+/// A model that knows what the store and the contacts file know of the
+/// peers: their names and their latest positions. The session's starts so,
+/// and the map draws its pins from one when no session runs.
+pub fn known(home: &Path, store: &Store) -> Result<UiModel<Line>, String> {
+    let contacts = loquax::names::load_contacts(home).map_err(|error| error.to_string())?;
+    let mut model = UiModel::<Line>::new(&[]);
+    model.names = loquax::names::Names::new(contacts);
+    for (peer, name) in store.names().map_err(|error| error.to_string())? {
+        model.names.remember(peer, &name);
+    }
+    model.restore_positions(store.positions().map_err(|error| error.to_string())?);
+    Ok(model)
+}
+
+/// The map's pins as a model `known` from `home`'s store names them, at
+/// the wall clock `now`; none when the phone is no client yet.
+pub fn pins_in(home: &Path, now: WallTime) -> Result<Vec<MapPin>, String> {
+    let Some(key) = loquax::home::client::load_client(home)? else {
+        return Ok(Vec::new());
+    };
+    let address = loquax::home::lxmf_address(&key)?;
+    let path = home.join(loquax::store::STORE_FILE);
+    let Some(store) = Store::open_read_only(&path, address).map_err(|e| e.to_string())? else {
+        return Ok(Vec::new());
+    };
+    let mut model = known(home, &store)?;
+    update(&mut model, UiEvent::Clock(now));
+    Ok(model.map_pins())
+}
+
+/// One bubble as the app draws it; `fix` is a report's.
 fn row(
     message: &Message,
     chips: &std::collections::BTreeMap<[u8; 32], Vec<reactions::Chip>>,
+    fix: Option<loquax::telemetry::Fix>,
 ) -> schema::MessageRow {
     let chips = message
         .id
@@ -804,6 +838,8 @@ fn row(
         },
         at: message.at.map_or(0, |at| at.unix_secs),
         chips,
+        lat_e6: fix.as_ref().map(|f| f.location.latitude_e6),
+        lon_e6: fix.as_ref().map(|f| f.location.longitude_e6),
     }
 }
 

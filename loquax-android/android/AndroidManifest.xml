@@ -43,6 +43,8 @@
               a:exported='false'
               a:windowSoftInputMode='adjustResize'/>
 
+    <activity a:name='network.leviculum.loquax.MapActivity' a:exported='false'/>
+
     <service a:name='network.leviculum.loquax.LoquaxService'
              a:exported='false'
              a:foregroundServiceType='remoteMessaging'/>

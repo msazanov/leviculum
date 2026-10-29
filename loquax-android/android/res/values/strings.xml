@@ -37,4 +37,9 @@
     <string name="battery_text">loquax keeps a connection to your home node so new messages arrive while the app is closed. Android\'s battery optimisation may cut that connection when the phone lies still. You can leave loquax out of it; you can change this later in the system settings.</string>
     <string name="battery_yes">Leave it out</string>
     <string name="battery_no">Not now</string>
+    <string name="map">Map</string>
+    <string name="map_fit">All</string>
+    <string name="map_load">Load area</string>
+    <string name="map_loading">Loading the map of this area…</string>
+    <string name="map_no_pins">No positions yet. A contact\'s position report puts them on the map.</string>
 </resources>

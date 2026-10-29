@@ -12,7 +12,9 @@
 //! calls on the shell's Outbox seam, each bytes in and bytes out in the
 //! msgpack schema of [`schema`]: [`start`], [`command`], [`query`],
 //! [`next_event`] (blocking, on a Java thread of its own) and [`stop`].
-//! One [`session::Session`] per process, which is what an app is.
+//! One [`session::Session`] per process, which is what an app is. Beside
+//! them the map screen's [`render_map`] (1128), which needs no session:
+//! Rust draws the map, Java hosts the bitmap ([`map`]).
 //!
 //! `unsafe_code` is denied and allowed once per exported symbol: an
 //! exported, unmangled name is what the lint counts, and it is what JNI
@@ -20,6 +22,7 @@
 
 #![deny(unsafe_code)]
 
+pub mod map;
 pub mod schema;
 pub mod session;
 
@@ -136,6 +139,23 @@ pub fn next_event(wait: Duration) -> Option<Vec<u8>> {
         },
     };
     Some(schema::encode(&event))
+}
+
+/// One frame of the map screen for a [`schema::MapRequest`], laid out as
+/// [`schema::frame`] says. The pins are the running session's, or the
+/// store's in the request's directory without one.
+pub fn render_map(request: &[u8]) -> Vec<u8> {
+    match schema::decode::<schema::MapRequest>(request) {
+        Err(error) => schema::frame(&map::failed(error), &[]),
+        Ok(request) => {
+            let pins = current().map(|session| session.map_pins());
+            let now = loquax::when::WallTime {
+                unix_secs: leviculum_std::local_time::unix_now_secs(),
+                offset_secs: 0,
+            };
+            map::render(&request, pins, now)
+        }
+    }
 }
 
 /// Clear the slot if it still holds `session`, and stop it: its runtime
@@ -264,6 +284,23 @@ pub extern "system" fn Java_network_leviculum_loquax_Native_query<'caller>(
         .with_env(|env| -> Result<_, jni::errors::Error> {
             let request = bytes_of(env, &request)?;
             env.byte_array_from_slice(&query(&request))
+        })
+        .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
+}
+
+/// `static native byte[] renderMap(byte[] request)` of `Native`:
+/// [`render_map`]. Called off the UI thread.
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_network_leviculum_loquax_Native_renderMap<'caller>(
+    mut unowned: EnvUnowned<'caller>,
+    _class: JClass<'caller>,
+    request: JByteArray<'caller>,
+) -> JByteArray<'caller> {
+    unowned
+        .with_env(|env| -> Result<_, jni::errors::Error> {
+            let request = bytes_of(env, &request)?;
+            env.byte_array_from_slice(&render_map(&request))
         })
         .resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }

@@ -43,6 +43,12 @@ public class ConversationsActivity extends Activity implements Events.Listener {
                 say(Core.pull());
             }
         });
+        ((Button) findViewById(R.id.map)).setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                startActivity(new Intent(ConversationsActivity.this, MapActivity.class));
+            }
+        });
         final EditText address = (EditText) findViewById(R.id.address);
         ((Button) findViewById(R.id.open)).setOnClickListener(new View.OnClickListener() {
             @Override

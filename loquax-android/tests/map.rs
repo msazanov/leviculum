@@ -1,0 +1,355 @@
+//! The map screen's call through the facade (1128): the frame Java gets
+//! is loquax's own map on a pixel screen, the same pixels the window's
+//! renderer draws for the view, the pins drawn in, the dark table when the
+//! phone is dark, and a position in the store is a pin. A test binary of
+//! its own: the map takes a running session's pins over the store's, and
+//! the facade tests run sessions in their process.
+
+use std::path::{Path, PathBuf};
+
+use leviculum_core::Identity;
+use leviculum_lxmf::telemetry::Location;
+use leviculum_map::draw::Ink;
+use leviculum_map::mercator::{project, LatLon};
+use leviculum_map::viewport::Viewport;
+use leviculum_mapfill::frame::rgb888;
+use leviculum_mapfill::style::{MapTheme, Style};
+use loquax::mapnames::Typesetter;
+use loquax::picture::{Maps, Painter};
+use loquax::store::Store;
+use loquax::telemetry::Fix;
+use loquax::ui::history::StoreWrite;
+use loquax::ui::map::MapPin;
+use loquax::when::WallTime;
+use loquax_android::schema::{self, MapRequest, MapShown};
+
+/// The Florence view of the window's golden of the names: z16, 480 x 320.
+const LAT: f64 = 43.7752;
+const LON: f64 = 11.2660;
+const W: u32 = 480;
+const H: u32 = 320;
+const NOW: i64 = 1_790_000_000;
+
+/// A home with the committed Florence region in its maps, the autoload
+/// off: no test reaches for the internet.
+fn home() -> tempfile::TempDir {
+    let home = tempfile::tempdir().expect("home");
+    let maps = home.path().join("maps");
+    std::fs::create_dir_all(&maps).expect("maps");
+    let fixture =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../leviculum-map/fixtures/firenze.lmr");
+    std::fs::copy(fixture, maps.join("firenze.lmr")).expect("the region");
+    std::fs::write(
+        home.path().join(loquax::config::CONFIG_FILE),
+        "map_autoload = off\n",
+    )
+    .expect("config");
+    home
+}
+
+/// The request for the Florence view.
+fn request(home: &Path, dark: bool) -> MapRequest {
+    let at = project(LatLon::from_degrees(LAT, LON));
+    MapRequest {
+        dir: home.display().to_string(),
+        w: W,
+        h: H,
+        density_milli: 1000,
+        dark,
+        x: Some(at.x),
+        y: Some(at.y),
+        zoom: Some(16),
+        ..MapRequest::default()
+    }
+}
+
+fn frame(bytes: &[u8]) -> (MapShown, Vec<u8>) {
+    let (shown, rgba) = schema::unframe(bytes).expect("a frame");
+    assert!(shown.ok, "{:?}", shown.error);
+    assert_eq!(rgba.len(), (shown.w * shown.h * 4) as usize);
+    (shown, rgba.to_vec())
+}
+
+fn pin(peer: u8, label: &str, lat: f64, lon: f64) -> MapPin {
+    MapPin {
+        peer: [peer; 16],
+        at: project(LatLon::from_degrees(lat, lon)),
+        label: label.to_string(),
+        age: Some("5m".to_string()),
+        stale: false,
+    }
+}
+
+fn now() -> WallTime {
+    WallTime {
+        unix_secs: NOW,
+        offset_secs: 0,
+    }
+}
+
+/// The view's picture as loquax's painter draws it, no names, no pins,
+/// as RGBA.
+fn picture(home: &Path, theme: MapTheme) -> Vec<u8> {
+    let mut painter = Painter::new(Maps::new(Some(home.join("maps"))));
+    let view = Viewport::new(project(LatLon::from_degrees(LAT, LON)), 16, W, H);
+    let drawn = painter.draw(&view, Ink::Colour, Style::PC.in_theme(theme), 100);
+    drawn
+        .fb
+        .iter()
+        .flat_map(|&px| {
+            use embedded_graphics::pixelcolor::raw::RawU16;
+            use embedded_graphics::pixelcolor::Rgb565;
+            let [r, g, b] = rgb888(Rgb565::from(RawU16::new(u16::from_be(px))));
+            [r, g, b, 0xff]
+        })
+        .collect()
+}
+
+/// How many of the pixels of `a` and `b` are the same, per cent.
+fn same_share(a: &[u8], b: &[u8]) -> usize {
+    let same = a.chunks(4).zip(b.chunks(4)).filter(|(x, y)| x == y).count();
+    same * 100 / (a.len() / 4)
+}
+
+/// The frame through the facade with one pin: the window's renderer's
+/// pixels for the view, its names and its pin, exactly
+/// (`loquax::screenmap::render` called here as the window's code calls
+/// it); the map under them `loquax::picture`'s; the pin's marker at its
+/// place; pixel for pixel the golden.
+#[test]
+fn the_frame_is_the_shared_renderers_with_names_and_a_pin() {
+    let home = home();
+    let pins = vec![pin(1, "alice", 43.7752, 11.2640)];
+    let bytes =
+        loquax_android::map::render(&request(home.path(), false), Some(pins.clone()), now());
+    let (shown, rgba) = frame(&bytes);
+    assert_eq!((shown.w, shown.h, shown.zoom), (W, H, 16));
+    assert_eq!(shown.pins, 1);
+    assert_eq!(shown.attribution, "© OpenStreetMap contributors");
+
+    let mut painter = Painter::new(Maps::new(Some(home.path().join("maps"))));
+    let mut type_ = Typesetter::new();
+    let view = Viewport::new(project(LatLon::from_degrees(LAT, LON)), 16, W, H);
+    let direct = loquax::screenmap::render(
+        &mut painter,
+        &mut type_,
+        &view,
+        Style::PC,
+        1.0,
+        &pins,
+        None,
+        true,
+    );
+    assert_eq!(rgba, direct.picture.rgba, "the shared renderer's pixels");
+    assert!(
+        direct.picture.names.iter().any(|n| n.starts_with("Via ")),
+        "{:?}",
+        direct.picture.names
+    );
+
+    let plain = picture(home.path(), MapTheme::Light);
+    let share = same_share(&rgba, &plain);
+    assert!(
+        (90..100).contains(&share),
+        "the map under the names and the pin is the picture's: {share} %"
+    );
+
+    let placed = &direct.placed[0];
+    let (x, y) = (placed.x as usize, placed.y as usize);
+    let at = (y * W as usize + x) * 4;
+    assert_eq!(&rgba[at..at + 3], &[0x20, 0x50, 0xc0], "the marker's blue");
+
+    same_as("map-florence-z16.png", &rgba, W, H);
+}
+
+/// The phone in its dark setting draws the map's dark table: the frame
+/// is the dark picture under its names, and not the light one.
+#[test]
+fn a_dark_phone_draws_the_dark_table() {
+    let home = home();
+    let (_, light) = frame(&loquax_android::map::render(
+        &request(home.path(), false),
+        Some(Vec::new()),
+        now(),
+    ));
+    let (_, dark) = frame(&loquax_android::map::render(
+        &request(home.path(), true),
+        Some(Vec::new()),
+        now(),
+    ));
+    let dark_picture = picture(home.path(), MapTheme::Dark);
+    let share = same_share(&dark, &dark_picture);
+    assert!(share >= 90, "dark under its names: {share} %");
+    let share = same_share(&dark, &light);
+    assert!(share < 50, "not the light table: {share} %");
+}
+
+/// A tap on a pin's marker selects it and names it; the selected pin is
+/// drawn red. A pan moves the centre by the pixels at the zoom.
+#[test]
+fn a_tap_names_the_pin_and_a_pan_moves_the_view() {
+    let home = home();
+    let pins = vec![pin(7, "bob", 43.7752, 11.2640)];
+    let first = request(home.path(), false);
+    let (shown, _) = frame(&loquax_android::map::render(
+        &first,
+        Some(pins.clone()),
+        now(),
+    ));
+    assert_eq!(shown.tapped, None);
+    let mut view = Viewport::new(project(LatLon::from_degrees(LAT, LON)), 16, W, H);
+    let marker = leviculum_map::pins::place(
+        &view,
+        &[leviculum_map::pins::Pin {
+            at: pins[0].at,
+            label: "bob",
+            stale: false,
+        }],
+    )[0];
+    let tap = MapRequest {
+        tap_x: Some(marker.x as i32),
+        tap_y: Some(marker.y as i32),
+        ..first.clone()
+    };
+    let (shown, rgba) = frame(&loquax_android::map::render(
+        &tap,
+        Some(pins.clone()),
+        now(),
+    ));
+    assert_eq!(shown.tapped.as_deref(), Some("07".repeat(16).as_str()));
+    assert_eq!(shown.tapped_name.as_deref(), Some("bob · 5m"));
+    assert_eq!(shown.selected, shown.tapped);
+    let at = (marker.y as usize * W as usize + marker.x as usize) * 4;
+    assert_eq!(&rgba[at..at + 3], &[0xd0, 0x30, 0x30], "the selected red");
+
+    let pan = MapRequest {
+        pan_x: 40,
+        pan_y: -20,
+        ..first
+    };
+    let (shown, _) = frame(&loquax_android::map::render(&pan, Some(pins), now()));
+    view.pan(40, -20);
+    assert_eq!((shown.x, shown.y), (view.centre.x, view.centre.y));
+}
+
+/// A position in the store is a pin on the map, with no session running:
+/// the first frame fits it and selects it, named by the display rule.
+#[test]
+fn a_position_in_the_store_makes_a_pin() {
+    let home = home();
+    let identity = Identity::generate(&mut rand_core::OsRng);
+    let key: [u8; 64] = identity.public_key_bytes();
+    loquax::home::client::save_client(home.path(), &key).expect("client");
+    let address = loquax::home::lxmf_address(&key).expect("address");
+    let peer = [0x42; 16];
+    {
+        let mut store = Store::open_in(home.path(), address).expect("store");
+        let fix = Fix {
+            peer,
+            via: peer,
+            message: None,
+            received_at: Some(NOW - 60),
+            location: Location {
+                latitude_e6: 43_775_200,
+                longitude_e6: 11_264_000,
+                altitude_e2: 0,
+                speed_e2: 0,
+                bearing_e2: 0,
+                accuracy_e2: 500,
+                last_update: NOW - 90,
+            },
+            telemetry: Vec::new(),
+        };
+        store
+            .write(&[StoreWrite::Position(fix)])
+            .expect("the position");
+    }
+    let first = MapRequest {
+        x: None,
+        y: None,
+        zoom: None,
+        ..request(home.path(), false)
+    };
+    let bytes = loquax_android::render_map(&schema::encode(&first));
+    let (shown, _) = frame(&bytes);
+    assert_eq!(shown.pins, 1, "{shown:?}");
+    assert_eq!(shown.selected.as_deref(), Some("42".repeat(16).as_str()));
+    assert!(shown.zoom > 11, "one pin fits deep: {}", shown.zoom);
+}
+
+/// How long a phone's whole screen takes on this host, for the report:
+/// 1080 x 2400 at 2.75, the Florence view, one pin.
+#[test]
+fn a_phone_screen_frame_takes() {
+    let home = home();
+    let at = project(LatLon::from_degrees(LAT, LON));
+    let phone = MapRequest {
+        w: 1080,
+        h: 2400,
+        density_milli: 2750,
+        x: Some(at.x),
+        y: Some(at.y),
+        zoom: Some(17),
+        ..request(home.path(), false)
+    };
+    let pins = vec![pin(1, "alice", 43.7752, 11.2640)];
+    for round in 0..3 {
+        let started = std::time::Instant::now();
+        let (shown, _) = frame(&loquax_android::map::render(
+            &phone,
+            Some(pins.clone()),
+            now(),
+        ));
+        eprintln!(
+            "MAPFRAME 1080x2400 round={round} ms={} total_ms={}",
+            shown.ms,
+            started.elapsed().as_millis()
+        );
+    }
+}
+
+/// Hold `rgba` to the PNG golden `name` under `tests/golden`, pixel for
+/// pixel; a picture that moved is left in the temp dir.
+fn same_as(name: &str, rgba: &[u8], w: u32, h: u32) {
+    let rgb: Vec<u8> = rgba.chunks(4).flat_map(|p| [p[0], p[1], p[2]]).collect();
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/golden")
+        .join(name);
+    let encode = || {
+        let mut out = Vec::new();
+        let mut e = png::Encoder::new(&mut out, w, h);
+        e.set_color(png::ColorType::Rgb);
+        e.set_depth(png::BitDepth::Eight);
+        let mut writer = e.write_header().expect("header");
+        writer.write_image_data(&rgb).expect("data");
+        writer.finish().expect("finish");
+        out
+    };
+    let keep = || {
+        let dir = std::env::temp_dir().join("loquax-android-golden");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let kept = dir.join(name);
+        std::fs::write(&kept, encode()).expect("write");
+        kept
+    };
+    let Ok(bytes) = std::fs::read(&path) else {
+        panic!("no golden {name}; this run's is {}", keep().display());
+    };
+    let mut reader = png::Decoder::new(std::io::Cursor::new(bytes))
+        .read_info()
+        .expect("png");
+    let mut want = vec![0; reader.output_buffer_size().expect("size")];
+    let info = reader.next_frame(&mut want).expect("frame");
+    want.truncate(info.buffer_size());
+    if (info.width, info.height) != (w, h) || want != rgb {
+        let differ = want
+            .chunks(3)
+            .zip(rgb.chunks(3))
+            .filter(|(a, b)| a != b)
+            .count();
+        panic!(
+            "{name} moved: {differ} pixels differ; this run's is {}",
+            keep().display()
+        );
+    }
+}

@@ -13,6 +13,7 @@
 //! | `start` | [`Start`] |
 //! | `command` | [`Request`], tagged by `t`: `open`, `close`, `send`, `react`, `pull`, `front` |
 //! | `query` | [`Query`], tagged by `t`: `conversations`, `messages` |
+//! | `renderMap` | [`MapRequest`] |
 //!
 //! Rust to Java:
 //!
@@ -22,7 +23,12 @@
 //! | `command` | [`Done`] |
 //! | `query` | [`Conversations`] or [`Messages`], or [`Done`] with the error |
 //! | `nextEvent` | [`Event`], tagged by `t`: `changed`, `notice`, `sync`, `link`, `stopped`; none when the wait ran out |
+//! | `renderMap` | a frame: four bytes big endian, the length of a [`MapShown`], the [`MapShown`], and its `w` times `h` RGBA pixels |
 //!
+//! The map's pixels go raw behind the map, not as msgpack, so ten megabytes
+//! of a phone's screen are one copy into a Java `byte[]` and one into its
+//! bitmap. The map call needs no session: it draws the regions in the
+//! app's maps directory and the pins the store knows, with or without one.
 //! A change that Java cannot read is a new [`VERSION`]: every answer
 //! carries it, and Java refuses one it does not know. A field or an event
 //! added is no such change: Java reads keys by name and skips an event it
@@ -185,6 +191,12 @@ pub struct MessageRow {
     pub state: String,
     pub at: i64,
     pub chips: Vec<Chip>,
+    /// A position report's fix, degrees times a million, which a tap opens
+    /// the map on; absent for any other message.
+    #[serde(default)]
+    pub lat_e6: Option<i32>,
+    #[serde(default)]
+    pub lon_e6: Option<i32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -217,6 +229,124 @@ pub enum Event {
     /// that ended by itself is gone from the library then: the next
     /// `start` makes a fresh one.
     Stopped { v: u32, detail: String },
+}
+
+/// One frame of the map screen, and what the user did to the last one
+/// (1128). Java keeps only the view it got back ([`MapShown`]'s centre,
+/// zoom and selection) and hands it in again with the gestures since; the
+/// rules of the view are loquax's (`loquax::ui::map`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MapRequest {
+    /// The app's files directory: the maps under `maps/`, the store and
+    /// the config beside them.
+    pub dir: String,
+    /// The view's size in the screen's pixels.
+    pub w: u32,
+    pub h: u32,
+    /// The screen's density times a thousand: 2750 on a phone of 2.75.
+    pub density_milli: u32,
+    /// Whether the phone is in its dark setting.
+    #[serde(default)]
+    pub dark: bool,
+    /// The last frame's centre in world units and its zoom; absent on the
+    /// first frame, which fits the pins.
+    #[serde(default)]
+    pub x: Option<u32>,
+    #[serde(default)]
+    pub y: Option<u32>,
+    #[serde(default)]
+    pub zoom: Option<u8>,
+    /// The selected pin's peer, hex.
+    #[serde(default)]
+    pub selected: Option<String>,
+    /// Moves the view by this many pixels, after the centre above: what a
+    /// finger dragged the content by is the negative of it.
+    #[serde(default)]
+    pub pan_x: i32,
+    #[serde(default)]
+    pub pan_y: i32,
+    /// Zooms by this many steps about the pixel `(about_x, about_y)` of the
+    /// view, after the pan.
+    #[serde(default)]
+    pub zoom_by: i32,
+    #[serde(default)]
+    pub about_x: i32,
+    #[serde(default)]
+    pub about_y: i32,
+    /// A tap at this pixel of the last frame: the pin there is selected
+    /// and named.
+    #[serde(default)]
+    pub tap_x: Option<i32>,
+    #[serde(default)]
+    pub tap_y: Option<i32>,
+    /// Fit every pin, as `0` does in the terminal.
+    #[serde(default)]
+    pub fit: bool,
+    /// Centre on this place, degrees times a million, as a report's fix
+    /// opens the map in the terminal (1076); its region is loaded when no
+    /// region holds it.
+    #[serde(default)]
+    pub at_lat_e6: Option<i32>,
+    #[serde(default)]
+    pub at_lon_e6: Option<i32>,
+    /// Load the region of the view: "load this area", `d` in the terminal.
+    #[serde(default)]
+    pub load: bool,
+}
+
+/// The map frame's description; its pixels follow it (see the table
+/// above).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MapShown {
+    pub v: u32,
+    pub ok: bool,
+    pub error: Option<String>,
+    pub w: u32,
+    pub h: u32,
+    /// The view drawn, for the next request.
+    pub x: u32,
+    pub y: u32,
+    pub zoom: u8,
+    /// The shallowest and the deepest zoom the regions allow.
+    pub min_zoom: u8,
+    pub max_zoom: u8,
+    pub selected: Option<String>,
+    /// The credit the frame carries.
+    pub attribution: String,
+    /// The pins drawn, and the one a tap found, with its name.
+    pub pins: u32,
+    pub tapped: Option<String>,
+    pub tapped_name: Option<String>,
+    /// A region is loading: ask for the frame again in a while.
+    pub loading: bool,
+    /// A line for the user: a load that failed, a view loaded already.
+    pub notice: Option<String>,
+    /// How long the frame took to draw, milliseconds.
+    pub ms: u32,
+}
+
+/// A map frame for Java: the description's length, the description, the
+/// pixels.
+pub fn frame(shown: &MapShown, rgba: &[u8]) -> Vec<u8> {
+    let head = encode(shown);
+    let mut out = Vec::with_capacity(4 + head.len() + rgba.len());
+    out.extend_from_slice(&u32::try_from(head.len()).unwrap_or(0).to_be_bytes());
+    out.extend_from_slice(&head);
+    out.extend_from_slice(rgba);
+    out
+}
+
+/// Split a frame into its description and its pixels.
+pub fn unframe(frame: &[u8]) -> Result<(MapShown, &[u8]), String> {
+    let (len, rest) = frame
+        .split_first_chunk::<4>()
+        .ok_or_else(|| "a frame without its length".to_string())?;
+    let len = u32::from_be_bytes(*len) as usize;
+    if rest.len() < len {
+        return Err("a frame cut short".to_string());
+    }
+    let (head, pixels) = rest.split_at(len);
+    Ok((decode(head)?, pixels))
 }
 
 /// Encode an answer.
@@ -269,6 +399,26 @@ mod tests {
         let start: Start = decode(&bytes).expect("a bare start");
         assert_eq!(start.dir, "/data");
         assert_eq!((start.server, start.code, start.offset), (None, None, 0));
+    }
+
+    #[test]
+    fn a_map_frame_is_its_length_its_description_and_its_pixels() {
+        let shown = MapShown {
+            v: VERSION,
+            ok: true,
+            w: 2,
+            h: 1,
+            attribution: "© OpenStreetMap contributors".to_string(),
+            ..MapShown::default()
+        };
+        let pixels = [1u8, 2, 3, 255, 4, 5, 6, 255];
+        let bytes = frame(&shown, &pixels);
+        let head = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+        assert_eq!(bytes.len(), 4 + head + pixels.len());
+        assert_eq!(&bytes[4 + head..], &pixels);
+        assert_eq!(unframe(&bytes), Ok((shown, &pixels[..])));
+        assert!(unframe(&bytes[..3]).is_err());
+        assert!(unframe(&bytes[..4 + head - 1]).is_err());
     }
 
     #[test]

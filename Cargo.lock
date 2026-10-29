@@ -3273,12 +3273,16 @@ dependencies = [
 name = "loquax-android"
 version = "0.1.0"
 dependencies = [
+ "embedded-graphics",
  "jni",
  "leviculum-core",
  "leviculum-lxmf",
+ "leviculum-map",
+ "leviculum-mapfill",
  "leviculum-std",
  "leviculum-ui",
  "loquax",
+ "png",
  "rand_core 0.6.4",
  "rmp-serde",
  "serde",

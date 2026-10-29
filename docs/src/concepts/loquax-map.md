@@ -212,6 +212,15 @@ The frontends:
 - **The iced GUI.** The same frame, at the window's size, as an iced
   image widget; pins and labels as iced text over it. Panning by drag and
   zoom by wheel are input mapped to the same core events.
+- **Android** (1128). The same frame as the window's, drawn by the same
+  functions (`loquax::screenmap`): the picture, the map's names set in
+  Fira Sans by cosmic-text and swash (`loquax::mapnames`, carried in
+  `loquax/fonts/`), and here the pins and their labels too, all into one
+  RGBA buffer that Java blits into a bitmap in a plain View. Java does
+  the gestures (a finger pans and shifts the last bitmap, a pinch or a
+  double tap zooms and scales it, a tap names a pin) and hands them back
+  with the last view; the view's rules stay the model's, one pixel a
+  cell as in the window. No second map in Java.
 - **The M9.** The same pipeline straight into the panel's
   `embedded-graphics` target, as the measurement firmware does
   (`leviculum-mapfill/m9/`), with mousefood's cells for the labels.
