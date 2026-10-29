@@ -43,7 +43,10 @@ public class LoquaxService extends Service implements Events.Listener {
     private final Binder binder = new Local();
     /** Each conversation's unread count as last seen; null before the first look. */
     private Map<String, Long> unread;
+    private long total;
     private String server = "";
+    /** Whether the TCP interface to the home node is up, as the library last said. */
+    private boolean linkUp;
     private String line;
     private int screens;
     private boolean running;
@@ -121,6 +124,7 @@ public class LoquaxService extends Service implements Events.Listener {
         if (Core.bool(answer, "ok")) {
             running = true;
             server = Core.str(answer, "server");
+            linkUp = Core.bool(answer, "link");
             Events.start();
             look(false);
             return;
@@ -132,6 +136,11 @@ public class LoquaxService extends Service implements Events.Listener {
         }
         line = getString(R.string.not_connected, Core.str(answer, "error"));
         show();
+        retryLater();
+    }
+
+    /** Start again in a while: after a failed start, and after the session died. */
+    private void retryLater() {
         main.postDelayed(new Runnable() {
             @Override
             public void run() {
@@ -182,11 +191,21 @@ public class LoquaxService extends Service implements Events.Listener {
         String kind = Core.str(event, "t");
         if ("changed".equals(kind)) {
             look(true);
+        } else if ("link".equals(kind)) {
+            linkUp = Core.bool(event, "up");
+            describe();
         } else if ("stopped".equals(kind) && running) {
+            // Ended by itself (the stop button sets stopping first): the
+            // library has dropped the dead session, so the next start
+            // builds a fresh one.
             running = false;
             String detail = Core.str(event, "detail");
-            line = detail.isEmpty() ? getString(R.string.stopped) : detail;
+            line = getString(R.string.not_connected,
+                    detail.isEmpty() ? getString(R.string.stopped) : detail);
             show();
+            if (!stopping) {
+                retryLater();
+            }
         }
     }
 
@@ -218,9 +237,22 @@ public class LoquaxService extends Service implements Events.Listener {
             }
         }
         unread = now;
-        line = total == 0
-                ? getString(R.string.connected, server)
-                : getString(R.string.connected_unread, server, total);
+        this.total = total;
+        describe();
+    }
+
+    /** The persistent notification's line: the link, then the unread count. */
+    private void describe() {
+        if (!running) {
+            return;
+        }
+        if (!linkUp) {
+            line = getString(R.string.connecting, server);
+        } else if (total == 0) {
+            line = getString(R.string.connected, server);
+        } else {
+            line = getString(R.string.connected_unread, server, total);
+        }
         show();
     }
 

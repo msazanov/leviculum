@@ -46,7 +46,8 @@ fn current() -> Option<Arc<Session>> {
 
 /// Start the session from a [`schema::Start`]; a [`schema::Started`] back.
 /// A session already running answers for itself: the Activity starts again
-/// on every rotation, the session does not.
+/// on every rotation, the session does not. One that ended by itself (its
+/// engine died) is stopped and replaced, never handed out again.
 pub fn start(request: &[u8]) -> Vec<u8> {
     let started = match schema::decode::<schema::Start>(request) {
         Err(error) => Started {
@@ -58,6 +59,9 @@ pub fn start(request: &[u8]) -> Vec<u8> {
             let mut slot = SESSION
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(dead) = slot.take_if(|session| session.is_over()) {
+                dead.stop();
+            }
             let running = match slot.as_ref() {
                 Some(session) => Ok(Arc::clone(session)),
                 None => Session::start(&start).map(Arc::new),
@@ -72,6 +76,7 @@ pub fn start(request: &[u8]) -> Vec<u8> {
                         need: None,
                         address: Some(loquax::address::to_hex(&session.address())),
                         server: Some(session.server().to_string()),
+                        link: session.link(),
                     }
                 }
                 Err(error) => Started {
@@ -81,6 +86,7 @@ pub fn start(request: &[u8]) -> Vec<u8> {
                     need: error.need.map(str::to_string),
                     address: None,
                     server: None,
+                    link: false,
                 },
             }
         }
@@ -112,16 +118,50 @@ pub fn query(request: &[u8]) -> Vec<u8> {
 }
 
 /// The next [`schema::Event`], waiting at most `wait`; `None` when none
-/// came. Without a session, `stopped` at once.
+/// came. Without a session, `stopped` at once. The `stopped` of a session
+/// that ended by itself also clears the slot, so every call after it says
+/// "not started" and the service's next `start` builds a fresh session.
 pub fn next_event(wait: Duration) -> Option<Vec<u8>> {
     let event = match current() {
-        Some(session) => session.next_event(wait)?,
+        Some(session) => {
+            let event = session.next_event(wait)?;
+            if matches!(event, Event::Stopped { .. }) && session.is_over() {
+                forget(&session);
+            }
+            event
+        }
         None => Event::Stopped {
             v: VERSION,
             detail: "not started".to_string(),
         },
     };
     Some(schema::encode(&event))
+}
+
+/// Clear the slot if it still holds `session`, and stop it: its runtime
+/// and node go, its files stay for the next start.
+fn forget(session: &Arc<Session>) {
+    let gone = SESSION
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take_if(|held| Arc::ptr_eq(held, session));
+    if let Some(gone) = gone {
+        gone.stop();
+    }
+}
+
+/// Cut the running session off its engine, as the engine's death does;
+/// `false` without one. For the facade test, which has no other way to
+/// kill an engine.
+#[doc(hidden)]
+pub fn simulate_engine_death() -> bool {
+    match current() {
+        Some(session) => {
+            session.simulate_engine_death();
+            true
+        }
+        None => false,
+    }
 }
 
 /// Stop the session, if one runs.

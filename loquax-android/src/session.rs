@@ -41,6 +41,8 @@ pub const BUDGET: Duration = Duration::from_secs(60);
 const PUMP: Duration = Duration::from_millis(100);
 /// How long a send runner waits for its bubble to be named.
 const SETTLE: Duration = Duration::from_secs(5);
+/// How many pumps between two looks at the TCP interface: a second.
+const LINK_EVERY: u32 = 10;
 
 /// Why the session did not start, and what the join screen has to ask for.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,6 +114,10 @@ struct Inner {
     /// Something the screen shows changed since the last `changed`.
     dirty: bool,
     gone: bool,
+    /// Whether the TCP interface to the home node was up at the last look,
+    /// none before the first, and the pumps since that look.
+    link: Option<bool>,
+    link_age: u32,
 }
 
 /// A running session.
@@ -126,16 +132,22 @@ pub struct Session {
 impl Session {
     /// Start: on a phone that is no client yet, join with the code first.
     /// Blocks for as long as the join takes, up to [`BUDGET`].
+    /// A code with the address behind it (`lqxh1...@host:port`) brings the
+    /// server along; a server given beside it wins.
     pub fn start(start: &schema::Start) -> Result<Self, StartError> {
         let home = PathBuf::from(&start.dir);
         let client = loquax::home::client::load_client(&home).map_err(StartError::other)?;
+        let mut carried = None;
         let code = match (&client, start.code.as_deref().map(str::trim)) {
-            (_, Some(code)) if !code.is_empty() => Some(
-                loquax::home::code::HomeCode::parse(code).map_err(|error| StartError {
-                    need: Some("code"),
-                    text: format!("That is not a home code: {error}"),
-                })?,
-            ),
+            (_, Some(code)) if !code.is_empty() => {
+                let (code, server) = loquax::home::code::HomeCode::parse_with_server(code)
+                    .map_err(|error| StartError {
+                        need: Some("code"),
+                        text: format!("That is not a home code: {error}"),
+                    })?;
+                carried = server;
+                Some(code)
+            }
             (Some(_), _) => None,
             (None, _) => {
                 return Err(StartError {
@@ -156,7 +168,7 @@ impl Session {
         }
         let server = match start.server.as_deref().map(str::trim) {
             Some(server) if !server.is_empty() => server.to_string(),
-            _ => load_server(&home).ok_or(StartError {
+            _ => carried.or_else(|| load_server(&home)).ok_or(StartError {
                 need: Some("server"),
                 text: "Type the home node's address, host:port of its lnsd TCP server.".to_string(),
             })?,
@@ -272,6 +284,24 @@ impl Session {
     /// The server the session talks to.
     pub fn server(&self) -> &str {
         &self.server
+    }
+
+    /// Whether the TCP interface to the home node is up now.
+    pub fn link(&self) -> bool {
+        link_up(&self.lock().client.node)
+    }
+
+    /// Whether the session ended by itself: the engine is gone, and only a
+    /// fresh start helps.
+    pub fn is_over(&self) -> bool {
+        self.lock().gone
+    }
+
+    /// Cut the session off its engine, as the engine's death does; the
+    /// next pump finds it gone. For the facade test.
+    #[doc(hidden)]
+    pub fn simulate_engine_death(&self) {
+        self.lock().attached.outbox.sever();
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
@@ -431,6 +461,9 @@ impl Inner {
             origin: std::time::Instant::now(),
             dirty: true,
             gone: false,
+            link: None,
+            // The first pump looks, and says what it saw.
+            link_age: LINK_EVERY,
         })
     }
 
@@ -483,6 +516,7 @@ impl Inner {
                 Finished::Pull { result, cursor } => self.pulled(result, cursor),
             }
         }
+        self.look_at_link();
         let elapsed = u64::try_from(self.origin.elapsed().as_millis()).unwrap_or(u64::MAX);
         self.quiet(UiEvent::Clock(wall_now(self.offset)));
         self.quiet(UiEvent::Tick);
@@ -491,6 +525,43 @@ impl Inner {
             let _ = self.events.send(Event::Changed { v: VERSION });
         }
         true
+    }
+
+    /// Once a second: whether the TCP interface is up, told when it
+    /// changed and on the first look.
+    fn look_at_link(&mut self) {
+        self.link_age += 1;
+        if self.link_age < LINK_EVERY {
+            return;
+        }
+        self.link_age = 0;
+        let up = link_up(&self.client.node);
+        if up && self.link == Some(false) {
+            self.ask_for_home_path();
+        }
+        if self.link != Some(up) {
+            self.link = Some(up);
+            let _ = self.events.send(Event::Link { v: VERSION, up });
+        }
+    }
+
+    /// The interface came back: ask for the home destination's path. The
+    /// home node never announces that destination, so a transport node that
+    /// restarted (the box rebooted) knows no path to it until someone asks,
+    /// while this leaf still holds the path from before and would send its
+    /// link requests into the void until they time out. The path request
+    /// makes the transport ask the home node, which answers it.
+    fn ask_for_home_path(&self) {
+        let Ok(hash) = loquax::home::destination_hash(&self.client.public_key) else {
+            return;
+        };
+        let node = std::sync::Arc::clone(&self.client.node);
+        self.runtime.spawn(async move {
+            let destination = leviculum_core::DestinationHash::new(hash);
+            if let Err(error) = node.request_path(&destination).await {
+                tracing::info!("no path request to the home node: {error}");
+            }
+        });
     }
 
     /// Fold an event that changes nothing the screen shows by itself.
@@ -718,6 +789,15 @@ fn join_words(error: &loquax::home::client::HomeError, server: &str) -> String {
         HomeError::Timeout => "The home node did not answer in time. Try again.".to_string(),
         other => format!("Joining failed: {other}."),
     }
+}
+
+/// Whether the leaf's interface to the home node is up: its only one, the
+/// TCP client, which is down from the moment the server goes until it
+/// redials.
+fn link_up(node: &leviculum_std::driver::ReticulumNode) -> bool {
+    node.interface_stats()
+        .iter()
+        .any(|interface| !interface.is_local_client && interface.online)
 }
 
 fn wall_now(offset: i32) -> WallTime {

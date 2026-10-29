@@ -54,7 +54,7 @@ bytes in the versioned schema of `src/schema.rs`:
 | `start` | start, joining with the code on the first run |
 | `command` | `open`, `close`, `send`, `react`, `pull` |
 | `query` | `conversations`, `messages` of one peer |
-| `nextEvent` | blocks on a Java thread: `changed`, `notice`, `sync`, `stopped` |
+| `nextEvent` | blocks on a Java thread: `changed`, `notice`, `sync`, `link`, `stopped` |
 | `stop` | end the session |
 
 ## Build

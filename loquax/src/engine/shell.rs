@@ -154,6 +154,17 @@ pub struct InProcessOutbox {
     events: Receiver<OutboxEvent>,
 }
 
+impl InProcessOutbox {
+    /// Cut this end off the engine, as the engine's death does: every call
+    /// after this answers [`OutboxGone`]. For the tests of what a frontend
+    /// does then, which cannot otherwise kill an engine on purpose.
+    #[doc(hidden)]
+    pub fn sever(&mut self) {
+        self.commands = std::sync::mpsc::channel().0;
+        self.events = std::sync::mpsc::channel().1;
+    }
+}
+
 impl Outbox for InProcessOutbox {
     fn submit(&self, command: Command) -> Result<(), OutboxGone> {
         self.commands.send(command).map_err(|_| OutboxGone)
