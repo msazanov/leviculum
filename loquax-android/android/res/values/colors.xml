@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The app's colours in the light theme; values-night/colors.xml holds the
+     same names for the dark one. Every pair of text and its ground keeps a
+     contrast of 4.5:1 or more (WCAG AA), the numbers beside each. -->
+<resources>
+    <color name="background">#fafafa</color>
+    <!-- 15.6:1 and 6.1:1 on the background. -->
+    <color name="text">#202020</color>
+    <color name="text_secondary">#5f5f5f</color>
+    <!-- Buttons, fields and the cursor; 4.8:1 on the background. -->
+    <color name="accent">#3a7d44</color>
+    <!-- Our bubble: body 13.0:1, time and state 5.6:1. -->
+    <color name="bubble_ours">#d4ecd0</color>
+    <color name="bubble_ours_text">#202020</color>
+    <color name="bubble_ours_meta">#4a5e47</color>
+    <!-- Theirs: body 13.8:1, time 5.4:1. -->
+    <color name="bubble_theirs">#ececec</color>
+    <color name="bubble_theirs_text">#202020</color>
+    <color name="bubble_theirs_meta">#5f5f5f</color>
+    <!-- The unread count: 5.0:1. -->
+    <color name="badge">#3a7d44</color>
+    <color name="badge_text">#ffffff</color>
+</resources>

@@ -36,6 +36,10 @@ What it does today:
 - **Asked once.** On the first conversation list: notifications (Android
   13 and later), and on a later look the battery optimisation exemption,
   with a plain reason. Neither is forced, neither is asked again.
+- **Light or dark** by the phone's setting: the theme and every colour are
+  resources with a `-night` set (`android/res/values-night/`), no AndroidX.
+  Switching while a screen is open recreates it, as a rotation does; the
+  session in the service goes on untouched.
 
 Not yet: the battery measurement (study, section 3), UnifiedPush.
 
@@ -98,7 +102,7 @@ keytool -genkeypair -keystore android/loquax.keystore \
 | `Makefile` | the template's, with the `native` step and the Android settings below |
 | `android/AndroidManifest.xml` | with the template's build-time tokens |
 | `android/src/network/leviculum/loquax/` | the three screens (`MainActivity` joins, `ConversationsActivity`, `ChatActivity`), `LoquaxService`, which holds the session, and `ServiceLink`, the screens' binding to it, `Asks`, the two questions asked once, `Native`, the Java face of the library, `Core` and `MsgPack`, which read it, and `Events` |
-| `android/res/` | layouts, the bubbles' shapes, strings |
+| `android/res/` | layouts, the bubbles' shapes, strings, the theme and its colours, light in `values/` and dark in `values-night/` |
 | `install-toolchain.sh` | the SDK and NDK pieces, checked by SHA-1 |
 
 ## Where it differs from the template

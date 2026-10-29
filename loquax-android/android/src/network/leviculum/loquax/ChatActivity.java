@@ -210,13 +210,19 @@ public class ChatActivity extends Activity implements Events.Listener {
             ((LinearLayout) view).setGravity(ours ? Gravity.END : Gravity.START);
             View bubble = view.findViewById(R.id.bubble);
             bubble.setBackgroundResource(ours ? R.drawable.bubble_ours : R.drawable.bubble_theirs);
-            ((TextView) view.findViewById(R.id.body)).setText(Core.str(row, "body"));
+            TextView body = (TextView) view.findViewById(R.id.body);
+            body.setText(Core.str(row, "body"));
+            body.setTextColor(getColor(
+                    ours ? R.color.bubble_ours_text : R.color.bubble_theirs_text));
             String meta = Ui.when(Core.num(row, "at"));
             if (ours) {
                 meta = meta.isEmpty() ? state(Core.str(row, "state"))
                         : meta + "  " + state(Core.str(row, "state"));
             }
-            ((TextView) view.findViewById(R.id.meta)).setText(meta);
+            TextView metaView = (TextView) view.findViewById(R.id.meta);
+            metaView.setText(meta);
+            metaView.setTextColor(getColor(
+                    ours ? R.color.bubble_ours_meta : R.color.bubble_theirs_meta));
             StringBuilder chips = new StringBuilder();
             for (Map<String, Object> chip : Core.list(row, "chips")) {
                 if (chips.length() > 0) {

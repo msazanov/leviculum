@@ -25,6 +25,7 @@
             android:id="@+id/last"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:textColor="@color/text_secondary"
             android:ellipsize="end"
             android:maxLines="1" />
     </LinearLayout>
@@ -40,6 +41,7 @@
             android:id="@+id/at"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
+            android:textColor="@color/text_secondary"
             android:textSize="12sp" />
 
         <TextView
@@ -49,7 +51,7 @@
             android:background="@drawable/badge"
             android:paddingStart="6dp"
             android:paddingEnd="6dp"
-            android:textColor="#ffffff"
+            android:textColor="@color/badge_text"
             android:textSize="12sp" />
     </LinearLayout>
 </LinearLayout>

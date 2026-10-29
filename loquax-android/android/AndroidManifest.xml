@@ -17,7 +17,12 @@
   <uses-permission a:name='android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS'/>
 
   <application a:label='@string/app_name'
-               a:icon='@android:drawable/sym_def_app_icon'>
+               a:icon='@android:drawable/sym_def_app_icon'
+               a:theme='@style/Loquax'>
+    <!-- Light or dark by the phone's setting (res/values-night). A change
+         while a screen is open recreates it, as a rotation does; the
+         session lives in LoquaxService and the library, not in a screen,
+         so no configChanges='uiMode' is declared. -->
 
     <activity a:name='network.leviculum.loquax.MainActivity' a:exported='true'>
       <intent-filter>

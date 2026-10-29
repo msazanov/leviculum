@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The dark theme's colours, picked when the phone's dark setting is on;
+     the names and the contrast rule of values/colors.xml. -->
+<resources>
+    <color name="background">#121212</color>
+    <!-- 15.0:1 and 7.9:1 on the background. -->
+    <color name="text">#e6e6e6</color>
+    <color name="text_secondary">#a8a8a8</color>
+    <!-- 9.3:1 on the background. -->
+    <color name="accent">#81c784</color>
+    <!-- Our bubble: body 8.0:1, time and state 5.4:1. -->
+    <color name="bubble_ours">#25502c</color>
+    <color name="bubble_ours_text">#e6f2e3</color>
+    <color name="bubble_ours_meta">#b4ccb0</color>
+    <!-- Theirs: body 11.2:1, time 5.9:1. -->
+    <color name="bubble_theirs">#2c2c2c</color>
+    <color name="bubble_theirs_text">#e6e6e6</color>
+    <color name="bubble_theirs_meta">#a8a8a8</color>
+    <!-- The unread count: 5.0:1, as by day. -->
+    <color name="badge">#3a7d44</color>
+    <color name="badge_text">#ffffff</color>
+</resources>
