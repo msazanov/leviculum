@@ -1020,7 +1020,12 @@ impl LxmfNode {
                     && !self.pending_links.contains_key(&destination)
                     && node.has_path(&destination)
                 {
-                    let (_, follow_up) = self.start_direct_link(node, destination)?;
+                    let (_link_id, follow_up) = self.start_direct_link(node, destination)?;
+                    crate::tracing::debug!(
+                        "LXMF_DIRECT_LINK_ON_PATH dst={} link={} trigger=announce",
+                        destination,
+                        crate::tracing::Short(_link_id.as_bytes()),
+                    );
                     output.merge(follow_up);
                 }
             }
@@ -1029,7 +1034,12 @@ impl LxmfNode {
             } if self.wanted_links.contains(destination_hash)
                 && !self.pending_links.contains_key(destination_hash) =>
             {
-                let (_, follow_up) = self.start_direct_link(node, *destination_hash)?;
+                let (_link_id, follow_up) = self.start_direct_link(node, *destination_hash)?;
+                crate::tracing::debug!(
+                    "LXMF_DIRECT_LINK_ON_PATH dst={} link={} trigger=path",
+                    destination_hash,
+                    crate::tracing::Short(_link_id.as_bytes()),
+                );
                 output.merge(follow_up);
             }
             NodeEvent::LinkEstablished {

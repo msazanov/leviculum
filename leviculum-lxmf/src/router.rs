@@ -1711,6 +1711,13 @@ impl LxmfRouter {
             }
 
             if entry.attempts >= MAX_DELIVERY_ATTEMPTS {
+                crate::tracing::debug!(
+                    "LXMF_OUTBOUND_FAILED message={} dst={} method={:?} attempts={}",
+                    crate::tracing::Short(&id),
+                    crate::tracing::Short(&entry.message().destination_hash),
+                    entry.message().method,
+                    entry.attempts,
+                );
                 self.preemptive_path_requests.remove(&id);
                 self.builds_outstanding.remove(&id);
                 entry.set_state(MessageState::Failed, &mut self.build_epochs);
@@ -1865,17 +1872,36 @@ impl LxmfRouter {
                         Ok((state, link)) => {
                             output.core.merge(link.core);
                             match state {
-                                DirectLinkState::Started(_) => {
+                                DirectLinkState::Started(_link_id) => {
                                     entry.attempts = entry.attempts.saturating_add(1);
                                     entry.next_attempt_ms =
                                         now_ms.saturating_add(DELIVERY_RETRY_WAIT_MS);
+                                    crate::tracing::debug!(
+                                        "LXMF_DIRECT_LINK message={} dst={} link={} attempt={}",
+                                        crate::tracing::Short(&id),
+                                        destination,
+                                        crate::tracing::Short(_link_id.as_bytes()),
+                                        entry.attempts,
+                                    );
                                 }
                                 DirectLinkState::PathRequested => {
                                     entry.attempts = entry.attempts.saturating_add(1);
                                     entry.next_attempt_ms =
                                         now_ms.saturating_add(PATH_REQUEST_WAIT_MS);
+                                    crate::tracing::debug!(
+                                        "LXMF_DIRECT_PATH_REQUEST message={} dst={} attempt={}",
+                                        crate::tracing::Short(&id),
+                                        destination,
+                                        entry.attempts,
+                                    );
                                 }
                                 DirectLinkState::Connecting(_) | DirectLinkState::Ready(_) => {
+                                    crate::tracing::debug!(
+                                        "LXMF_DIRECT_WAIT message={} dst={} attempt={}",
+                                        crate::tracing::Short(&id),
+                                        destination,
+                                        entry.attempts,
+                                    );
                                     // Python only waits while an existing link is
                                     // pending; observing it does not consume a
                                     // new delivery attempt.
@@ -1884,14 +1910,28 @@ impl LxmfRouter {
                                 }
                             }
                         }
-                        Err(_) => {
+                        Err(_error) => {
                             entry.attempts = entry.attempts.saturating_add(1);
                             entry.next_attempt_ms = now_ms.saturating_add(DELIVERY_RETRY_WAIT_MS);
+                            crate::tracing::debug!(
+                                "LXMF_DIRECT_LINK_REFUSED message={} dst={} attempt={} error={:?}",
+                                crate::tracing::Short(&id),
+                                destination,
+                                entry.attempts,
+                                _error,
+                            );
                         }
                     }
                     self.outbound.insert(id, entry);
                 }
-                Err(_) => {
+                Err(_error) => {
+                    crate::tracing::debug!(
+                        "LXMF_SEND_REFUSED message={} dst={} attempt={} error={:?}",
+                        crate::tracing::Short(&id),
+                        crate::tracing::Short(&entry.message().destination_hash),
+                        entry.attempts.saturating_add(1),
+                        _error,
+                    );
                     entry.attempts = entry.attempts.saturating_add(1);
                     entry.next_attempt_ms = now_ms.saturating_add(DELIVERY_RETRY_WAIT_MS);
                     self.outbound.insert(id, entry);

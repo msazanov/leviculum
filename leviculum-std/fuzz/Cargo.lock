@@ -842,6 +842,7 @@ dependencies = [
  "rand_core",
  "rmp",
  "sha2",
+ "tracing",
 ]
 
 [[package]]
