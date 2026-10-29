@@ -69,6 +69,7 @@ pub mod events;
 #[cfg(feature = "std")]
 pub mod fanout;
 pub mod fetch;
+pub mod home;
 #[cfg(feature = "std")]
 pub mod identity;
 pub mod keys;

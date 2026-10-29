@@ -83,6 +83,14 @@ const DEFAULT_FETCH_TIMEOUT_SECS: u64 = 60;
 // send` is an argument error, not a send with a stray flag.
 #[command(args_conflicts_with_subcommands = true)]
 struct Args {
+    /// Run as the home node, headless, until SIGINT or SIGTERM: receive for
+    /// this identity, archive every message, answer the admitted devices,
+    /// collect from the propagation node. Takes the messenger's --instance,
+    /// --config, --pn, --sync-interval and --timeout.
+    #[cfg(feature = "tui")]
+    #[arg(long)]
+    daemon: bool,
+
     #[cfg(feature = "tui")]
     #[command(flatten)]
     tui: TuiArgs,
@@ -107,6 +115,50 @@ enum SubCommand {
     /// first view is the map of every peer with a position.
     #[cfg(feature = "gui")]
     Gui(GuiArgs),
+    /// The home node and its devices: admit, join, devices, revoke.
+    #[cfg(feature = "tui")]
+    #[command(subcommand)]
+    Home(HomeCommand),
+}
+
+/// `loquax home ...`.
+#[cfg(feature = "tui")]
+#[derive(Subcommand, Debug)]
+enum HomeCommand {
+    /// On the home node: open a single-use admission for one device and
+    /// print its code.
+    Admit {
+        /// The name the device is listed and revoked under.
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// On the new device: redeem a code from `home admit` and become a
+    /// client of that home node.
+    Join(JoinArgs),
+    /// On the home node: list the admitted devices.
+    Devices,
+    /// On the home node: remove a device, by its name or its hash (four hex
+    /// characters of it are enough when they are unique).
+    Revoke { device: String },
+}
+
+#[cfg(feature = "tui")]
+#[derive(clap::Args, Debug)]
+struct JoinArgs {
+    /// The code `loquax home admit` printed on the home node.
+    code: String,
+
+    /// Shared-instance name to connect to (overrides the config file's).
+    #[arg(long)]
+    instance: Option<String>,
+
+    /// Reticulum config directory (default: the platform default).
+    #[arg(long)]
+    config: Option<PathBuf>,
+
+    /// Seconds for the path, the link and the answer.
+    #[arg(long, default_value_t = DEFAULT_FETCH_TIMEOUT_SECS)]
+    timeout: u64,
 }
 
 #[cfg(feature = "gui")]
@@ -480,6 +532,10 @@ async fn main() -> ExitCode {
     // so an `info`-level line on stderr would be the only thing a cron job
     // ever saw from a send that worked. Whoever wants the detail asks for the
     // event log, which is where the message id lives.
+    #[cfg(feature = "tui")]
+    if args.daemon {
+        return run_daemon(args.tui).await;
+    }
     let command = match args.command {
         #[cfg(feature = "gui")]
         Some(SubCommand::Gui(gui)) => return run_gui(gui).await,
@@ -503,6 +559,8 @@ async fn main() -> ExitCode {
         SubCommand::Send(send) => run(send).await,
         SubCommand::Fetch(fetch) => run_fetch_command(fetch).await,
         SubCommand::Address => run_address(),
+        #[cfg(feature = "tui")]
+        SubCommand::Home(home) => run_home(home).await,
         // Dispatched above, before the subscriber writes to stderr.
         #[cfg(feature = "tui")]
         SubCommand::Tui(_) => ExitCode::SUCCESS,
@@ -594,6 +652,20 @@ fn run_address() -> ExitCode {
         Ok(home) => home,
         Err(error) => return failure(error, "no-home"),
     };
+    // A client's address is its home node's.
+    match loquax::home::client::load_client(&home) {
+        Ok(Some(public_key)) => {
+            return match loquax::home::lxmf_address(&public_key) {
+                Ok(address) => {
+                    println!("{}", address::to_hex(&address));
+                    ExitCode::SUCCESS
+                }
+                Err(error) => failure(error, "no-identity"),
+            };
+        }
+        Ok(None) => {}
+        Err(error) => return failure(error, "no-home"),
+    }
     let identity = match identity::load_or_create(&home.join("identity")) {
         Ok(identity) => identity,
         Err(error) => return failure(error, "no-identity"),
@@ -630,6 +702,9 @@ async fn run(args: SendArgs) -> ExitCode {
         Ok(home) => home,
         Err(error) => return failure(error, "no-home"),
     };
+    if let Some(refused) = refuse_on_client(&home) {
+        return refused;
+    }
     // Resolved before attaching for the same reason the display name is:
     // a bad --pn or a corrupt config line is an argument-shaped problem and
     // should not cost a daemon connection first.
@@ -762,6 +837,9 @@ async fn run_fetch_command(args: FetchArgs) -> ExitCode {
         Ok(home) => home,
         Err(error) => return failure(error, "no-home"),
     };
+    if let Some(refused) = refuse_on_client(&home) {
+        return refused;
+    }
     let (preferred_pn, pn_source) = match resolve_pn(args.pn.as_deref(), &home) {
         Ok(resolved) => resolved,
         Err(error) => return usage(error),
@@ -842,4 +920,287 @@ async fn run_fetch_command(args: FetchArgs) -> ExitCode {
     };
     attached.stop().await;
     code
+}
+
+/// A client of a home node sends and fetches nothing of its own: it holds no
+/// LXMF identity, and one minted here would be a second address beside the
+/// home node's, the very split the home node exists to end.
+fn refuse_on_client(home: &Path) -> Option<ExitCode> {
+    match loquax::home::client::load_client(home) {
+        Ok(None) => None,
+        Ok(Some(_)) => Some(failure(
+            format!(
+                "{}; open the messenger to read what the home node holds",
+                loquax::engine::CLIENT_SENDS
+            ),
+            "client",
+        )),
+        Err(error) => Some(failure(error, "no-home")),
+    }
+}
+
+/// `loquax --daemon`: the home node.
+#[cfg(feature = "tui")]
+async fn run_daemon(args: TuiArgs) -> ExitCode {
+    // The journal under systemd: loquax's own lines (archived, admitted,
+    // refused) and every warning. `RUST_LOG` replaces the filter.
+    leviculum_std::event_log::install_global_subscriber("warn,loquax=info");
+    let home = match identity::home_dir() {
+        Ok(home) => home,
+        Err(error) => return failure(error, "no-home"),
+    };
+    match loquax::home::client::load_client(&home) {
+        Ok(None) => {}
+        Ok(Some(_)) => {
+            return failure(
+                "this device is a client of a home node, so it cannot be one; \
+                 the home node runs where the identity is",
+                "client",
+            )
+        }
+        Err(error) => return failure(error, "no-home"),
+    }
+    let (preferred_pn, pn_source) = match resolve_pn(args.pn.as_deref(), &home) {
+        Ok(resolved) => resolved,
+        Err(error) => return usage(error),
+    };
+    let config = match loquax::config::load(&home) {
+        Ok(config) => config,
+        Err(error) => return usage(error.to_string()),
+    };
+    let sync_bound_ms = match args
+        .sync_interval
+        .as_deref()
+        .map(loquax::sync::parse_interval)
+    {
+        None => config
+            .sync_interval
+            .unwrap_or(Some(loquax::sync::DEFAULT_BOUND_MS)),
+        Some(Ok(bound)) => bound,
+        Some(Err(error)) => return usage(format!("--sync-interval {error}")),
+    };
+    let identity = match identity::load_or_create(&home.join("identity")) {
+        Ok(identity) => identity,
+        Err(error) => return failure(error, "no-identity"),
+    };
+    let display_name = match display_name::from_process(None) {
+        Ok(resolved) => resolved,
+        Err(error) => return usage(error),
+    };
+    let config_dir = args.config.unwrap_or_else(Config::default_config_dir);
+    let instance = args.instance.unwrap_or_else(|| instance_name(&config_dir));
+    let storage_dir = match storage_dir(&home) {
+        Ok(dir) => dir,
+        Err(error) => return failure(error, "no-daemon"),
+    };
+    let archive_cap_mb = config
+        .archive_cap_mb
+        .unwrap_or(loquax::home::DEFAULT_ARCHIVE_CAP_MB);
+    let mailbox: loquax::home::daemon::MailboxSource = {
+        let (home, config_dir, instance) = (home.clone(), config_dir.clone(), instance.clone());
+        Box::new(move || {
+            let (home, config_dir, instance) = (home.clone(), config_dir.clone(), instance.clone());
+            Box::pin(async move {
+                mailbox_run(&home, &config_dir, &instance, preferred_pn, Vec::new()).await
+            })
+        })
+    };
+    let outcome = loquax::home::daemon::run(loquax::home::daemon::DaemonOptions {
+        home,
+        instance,
+        storage_dir,
+        identity,
+        display_name: display_name.name.into_bytes(),
+        archive_cap_bytes: archive_cap_mb.saturating_mul(1 << 20),
+        preferred_pn,
+        pn_source,
+        sync_bound_ms,
+        fetch_budget: Duration::from_secs(args.timeout.saturating_mul(2)),
+        mailbox,
+    })
+    .await;
+    match outcome {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => failure(error, "failed"),
+    }
+}
+
+/// `loquax home ...`.
+#[cfg(feature = "tui")]
+async fn run_home(command: HomeCommand) -> ExitCode {
+    let home = match identity::home_dir() {
+        Ok(home) => home,
+        Err(error) => return failure(error, "no-home"),
+    };
+    let client = match loquax::home::client::load_client(&home) {
+        Ok(client) => client,
+        Err(error) => return failure(error, "no-home"),
+    };
+    let on_home_node = |store: &dyn Fn(&mut loquax::store::Store) -> ExitCode| {
+        if client.is_some() {
+            return failure(
+                "this device is a client of a home node; run this on the home node",
+                "client",
+            );
+        }
+        let identity = match identity::load_or_create(&home.join("identity")) {
+            Ok(identity) => identity,
+            Err(error) => return failure(error, "no-identity"),
+        };
+        let address = match loquax::engine::delivery_address(&identity) {
+            Ok(address) => address,
+            Err(error) => return failure(error, "no-identity"),
+        };
+        match loquax::store::Store::open_in(&home, address) {
+            Ok(mut opened) => store(&mut opened),
+            Err(error) => failure(error, "no-store"),
+        }
+    };
+    let now = leviculum_std::local_time::unix_now_secs();
+    match command {
+        HomeCommand::Admit { name } => on_home_node(&|store| {
+            let name = match &name {
+                Some(name) => name.trim().to_string(),
+                None => match store.devices() {
+                    Ok(devices) => format!("device-{}", devices.len() + 1),
+                    Err(error) => return failure(error, "no-store"),
+                },
+            };
+            if name.is_empty() {
+                return usage("--name may not be empty");
+            }
+            let mut token = [0u8; 16];
+            rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut token);
+            if let Err(error) = store.issue_token(&token, &name, now) {
+                return failure(error, "no-store");
+            }
+            let public_key = match identity::load_or_create(&home.join("identity")) {
+                Ok(identity) => identity.public_key_bytes(),
+                Err(error) => return failure(error, "no-identity"),
+            };
+            let code = loquax::home::code::HomeCode { public_key, token }.encode();
+            println!("Admission code for {name:?}, good for one device, once:\n\n{code}\n");
+            println!("On that device: loquax home join {code}");
+            ExitCode::SUCCESS
+        }),
+        HomeCommand::Devices => on_home_node(&|store| match store.devices() {
+            Ok(devices) => {
+                for device in devices {
+                    let at = loquax::when::WallTime {
+                        unix_secs: device.admitted_at,
+                        offset_secs: leviculum_std::local_time::utc_offset_secs(device.admitted_at),
+                    }
+                    .civil();
+                    println!(
+                        "{}  {}  admitted {:04}-{:02}-{:02} {:02}:{:02}",
+                        address::to_hex(&device.device),
+                        device.name,
+                        at.year,
+                        at.month,
+                        at.day,
+                        at.hour,
+                        at.minute
+                    );
+                }
+                ExitCode::SUCCESS
+            }
+            Err(error) => failure(error, "no-store"),
+        }),
+        HomeCommand::Revoke { device } => on_home_node(&|store| match store.revoke(&device) {
+            Ok(loquax::store::Revoked::One(gone)) => {
+                println!("revoked {}  {}", address::to_hex(&gone.device), gone.name);
+                ExitCode::SUCCESS
+            }
+            Ok(loquax::store::Revoked::None) => {
+                failure(format!("no admitted device is called {device:?}"), "failed")
+            }
+            Ok(loquax::store::Revoked::Ambiguous(matched)) => {
+                let names: Vec<String> = matched
+                    .iter()
+                    .map(|d| format!("{} {}", address::to_hex(&d.device), d.name))
+                    .collect();
+                usage(format!(
+                    "{device:?} names {} devices ({}); give the hash",
+                    matched.len(),
+                    names.join(", ")
+                ))
+            }
+            Err(error) => failure(error, "no-store"),
+        }),
+        HomeCommand::Join(args) => run_join(home, client, args).await,
+    }
+}
+
+/// `loquax home join <code>`.
+#[cfg(feature = "tui")]
+async fn run_join(home: PathBuf, client: Option<[u8; 64]>, args: JoinArgs) -> ExitCode {
+    let code = match loquax::home::code::HomeCode::parse(&args.code) {
+        Ok(code) => code,
+        Err(error) => return usage(error),
+    };
+    if client.is_some_and(|key| key != code.public_key) {
+        return failure(
+            "this device is already the client of another home node",
+            "client",
+        );
+    }
+    let address = match loquax::home::lxmf_address(&code.public_key) {
+        Ok(address) => address,
+        Err(error) => return usage(error),
+    };
+    let device =
+        match identity::load_or_create(&home.join(loquax::home::client::DEVICE_IDENTITY_FILE)) {
+            Ok(identity) => identity,
+            Err(error) => return failure(error, "no-identity"),
+        };
+    let display_name = match display_name::from_process(None) {
+        Ok(resolved) => resolved,
+        Err(error) => return usage(error),
+    };
+    let config_dir = args.config.unwrap_or_else(Config::default_config_dir);
+    let instance = args.instance.unwrap_or_else(|| instance_name(&config_dir));
+    let storage_dir = match storage_dir(&home) {
+        Ok(dir) => dir,
+        Err(error) => return failure(error, "no-daemon"),
+    };
+    let attached = match loquax::engine::attach_as(
+        AttachConfig {
+            instance,
+            storage_dir,
+            identity: device.clone(),
+            display_name: Vec::new(),
+            notices: Terminal::new(home.clone()),
+        },
+        loquax::engine::Role::Client { address },
+    )
+    .await
+    {
+        Ok(attached) => attached,
+        Err(error) => return failure(error, "no-daemon"),
+    };
+    let node = attached.node();
+    let joined = loquax::home::client::join(
+        &node,
+        &code.public_key,
+        &device,
+        &code.token,
+        &display_name.name,
+        Duration::from_secs(args.timeout),
+    )
+    .await;
+    drop(node);
+    attached.stop().await;
+    match joined {
+        Ok(()) => match loquax::home::client::save_client(&home, &code.public_key) {
+            Ok(()) => {
+                println!(
+                    "joined: this device reads the mail of {}",
+                    address::to_hex(&address)
+                );
+                ExitCode::SUCCESS
+            }
+            Err(error) => failure(error, "no-home"),
+        },
+        Err(error) => failure(error, "failed"),
+    }
 }

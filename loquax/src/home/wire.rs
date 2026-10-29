@@ -1,0 +1,253 @@
+//! The two requests a client sends the home node, and their answers, as
+//! msgpack values on an RNS link (`docs/src/concepts/loquax-home-node.md`,
+//! "The client protocol").
+//!
+//! ```text
+//! /join  [token: bin16, name: str]           -> [status]
+//! /sync  [cursor: uint]                       -> [status, first: uint, more: bool,
+//!                                                 [[seq: uint, kind: uint, at: int, packed: bin], ...]]
+//! ```
+//!
+//! The status is the first element of every answer, so a refusal decodes
+//! the same way whatever was asked. `first` is the oldest sequence the
+//! archive still holds: a client whose cursor is older than `first - 1`
+//! lost entries to the cap and can say so.
+
+use alloc::vec::Vec;
+
+use leviculum_lxmf::msgpack;
+
+/// One archive entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Entry {
+    /// Its sequence: every entry after another has a larger one.
+    pub seq: u64,
+    /// What it records ([`super::KIND_RECEIVED`]).
+    pub kind: u8,
+    /// When the home node recorded it, unix seconds.
+    pub at: i64,
+    /// The LXMF message as it came, signature and all.
+    pub packed: Vec<u8>,
+}
+
+/// One `/sync` answer's worth of the archive.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Page {
+    pub entries: Vec<Entry>,
+    /// Whether entries after the last one here wait for the next request.
+    pub more: bool,
+    /// The oldest sequence the archive holds; 0 when it is empty.
+    pub first: u64,
+}
+
+/// How a request went.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Status {
+    Ok,
+    /// The link was not identified, so there is no device to check.
+    NotIdentified,
+    /// The device is not admitted, or no longer.
+    NotAdmitted,
+    /// The admission token is unknown or used.
+    BadToken,
+    /// The request did not decode.
+    Malformed,
+    /// The home node could not answer (its store failed).
+    Failed,
+}
+
+impl Status {
+    fn code(self) -> u64 {
+        match self {
+            Self::Ok => 0,
+            Self::NotIdentified => 1,
+            Self::NotAdmitted => 2,
+            Self::BadToken => 3,
+            Self::Malformed => 4,
+            Self::Failed => 5,
+        }
+    }
+
+    fn from_code(code: u64) -> Option<Self> {
+        Some(match code {
+            0 => Self::Ok,
+            1 => Self::NotIdentified,
+            2 => Self::NotAdmitted,
+            3 => Self::BadToken,
+            4 => Self::Malformed,
+            5 => Self::Failed,
+            _ => return None,
+        })
+    }
+}
+
+impl core::fmt::Display for Status {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::Ok => "ok",
+            Self::NotIdentified => "the home node did not learn who this device is",
+            Self::NotAdmitted => "this device is not admitted to the home node (or was revoked)",
+            Self::BadToken => "the home node does not know this admission code, or it was used",
+            Self::Malformed => "the home node could not read the request",
+            Self::Failed => "the home node could not answer",
+        })
+    }
+}
+
+/// Why an answer did not decode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Malformed;
+
+impl From<msgpack::Error> for Malformed {
+    fn from(_: msgpack::Error) -> Self {
+        Self
+    }
+}
+
+pub fn join_request(token: &[u8; 16], name: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    msgpack::array(&mut out, 2);
+    msgpack::bin(&mut out, token);
+    msgpack::string(&mut out, name);
+    out
+}
+
+pub fn read_join_request(data: &[u8]) -> Result<([u8; 16], alloc::string::String), Malformed> {
+    let mut p = 0;
+    if msgpack::array_len(data, &mut p)? != 2 {
+        return Err(Malformed);
+    }
+    let token = <[u8; 16]>::try_from(msgpack::read_bin(data, &mut p)?).map_err(|_| Malformed)?;
+    let name = msgpack::read_str(data, &mut p)?.into();
+    Ok((token, name))
+}
+
+pub fn status_answer(status: Status) -> Vec<u8> {
+    let mut out = Vec::new();
+    msgpack::array(&mut out, 1);
+    msgpack::uint(&mut out, status.code());
+    out
+}
+
+pub fn read_status(data: &[u8]) -> Result<Status, Malformed> {
+    let mut p = 0;
+    if msgpack::array_len(data, &mut p)? < 1 {
+        return Err(Malformed);
+    }
+    Status::from_code(msgpack::read_uint(data, &mut p)?).ok_or(Malformed)
+}
+
+pub fn sync_request(cursor: u64) -> Vec<u8> {
+    let mut out = Vec::new();
+    msgpack::array(&mut out, 1);
+    msgpack::uint(&mut out, cursor);
+    out
+}
+
+pub fn read_sync_request(data: &[u8]) -> Result<u64, Malformed> {
+    let mut p = 0;
+    if msgpack::array_len(data, &mut p)? < 1 {
+        return Err(Malformed);
+    }
+    Ok(msgpack::read_uint(data, &mut p)?)
+}
+
+pub fn sync_answer(page: &Page) -> Vec<u8> {
+    let mut out = Vec::new();
+    msgpack::array(&mut out, 4);
+    msgpack::uint(&mut out, Status::Ok.code());
+    msgpack::uint(&mut out, page.first);
+    msgpack::bool(&mut out, page.more);
+    msgpack::array(&mut out, page.entries.len());
+    for entry in &page.entries {
+        msgpack::array(&mut out, 4);
+        msgpack::uint(&mut out, entry.seq);
+        msgpack::uint(&mut out, u64::from(entry.kind));
+        msgpack::int(&mut out, entry.at);
+        msgpack::bin(&mut out, &entry.packed);
+    }
+    out
+}
+
+/// A `/sync` answer: the page, or the status that refused it.
+pub fn read_sync_answer(data: &[u8]) -> Result<Result<Page, Status>, Malformed> {
+    let status = read_status(data)?;
+    if status != Status::Ok {
+        return Ok(Err(status));
+    }
+    let mut p = 0;
+    if msgpack::array_len(data, &mut p)? != 4 {
+        return Err(Malformed);
+    }
+    msgpack::read_uint(data, &mut p)?;
+    let first = msgpack::read_uint(data, &mut p)?;
+    let more = msgpack::read_bool(data, &mut p)?;
+    let count = msgpack::array_len(data, &mut p)?;
+    let mut entries = Vec::new();
+    for _ in 0..count {
+        if msgpack::array_len(data, &mut p)? != 4 {
+            return Err(Malformed);
+        }
+        let seq = msgpack::read_uint(data, &mut p)?;
+        let kind = u8::try_from(msgpack::read_uint(data, &mut p)?).map_err(|_| Malformed)?;
+        let at = msgpack::read_int(data, &mut p)?;
+        let packed = msgpack::read_bin(data, &mut p)?.to_vec();
+        entries.push(Entry {
+            seq,
+            kind,
+            at,
+            packed,
+        });
+    }
+    Ok(Ok(Page {
+        entries,
+        more,
+        first,
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_join_request_round_trips() {
+        let data = join_request(&[7; 16], "laptop");
+        assert_eq!(read_join_request(&data), Ok(([7; 16], "laptop".into())));
+    }
+
+    #[test]
+    fn a_page_round_trips() {
+        let page = Page {
+            entries: alloc::vec![
+                Entry {
+                    seq: 3,
+                    kind: 0,
+                    at: 1_800_000_000,
+                    packed: alloc::vec![1, 2, 3],
+                },
+                Entry {
+                    seq: 70_000,
+                    kind: 0,
+                    at: -1,
+                    packed: alloc::vec![0; 300],
+                },
+            ],
+            more: true,
+            first: 2,
+        };
+        assert_eq!(read_sync_answer(&sync_answer(&page)), Ok(Ok(page)));
+    }
+
+    #[test]
+    fn a_refusal_decodes_as_its_status() {
+        let data = status_answer(Status::NotAdmitted);
+        assert_eq!(read_sync_answer(&data), Ok(Err(Status::NotAdmitted)));
+        assert_eq!(read_status(&data), Ok(Status::NotAdmitted));
+    }
+
+    #[test]
+    fn a_cursor_round_trips() {
+        assert_eq!(read_sync_request(&sync_request(u64::MAX)), Ok(u64::MAX));
+    }
+}

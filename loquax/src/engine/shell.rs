@@ -13,11 +13,15 @@ use alloc::vec::Vec;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 
+use std::sync::Arc;
+
 use leviculum_core::identity::Identity;
 use leviculum_core::node::NodeEvent;
 use leviculum_core::transport::TickOutput;
+use leviculum_core::{DestinationHash, LinkId, RequestPolicy};
 use leviculum_std::driver::{CoreProcessor, ReticulumNodeBuilder, StdNodeCore};
 use leviculum_std::ReticulumNode;
+use tokio::sync::mpsc::UnboundedSender;
 
 use super::{Engine, StampAnswer, StampJob};
 use crate::clock;
@@ -32,6 +36,70 @@ struct Processor {
     events: Sender<OutboxEvent>,
     stamps: Sender<StampJob>,
     stamp_answers: Receiver<StampAnswer>,
+    /// On a home node: its home destination, and where requests to it go.
+    home: Option<(DestinationHash, UnboundedSender<HomeRequest>)>,
+}
+
+/// One request a client sent the home destination, with the identity the
+/// link was identified with when it was. Taken off the processor tap, which
+/// never drops an event, and answered by the home node's loop
+/// (`crate::home::daemon`), off the core lock.
+#[derive(Debug, Clone)]
+pub struct HomeRequest {
+    pub link_id: LinkId,
+    pub request_id: [u8; 16],
+    pub path: String,
+    pub data: Vec<u8>,
+    pub remote: Option<[u8; 16]>,
+}
+
+/// What the attached engine is.
+pub enum Role {
+    /// The messenger: our identity's delivery destination, the router.
+    Messenger,
+    /// A client of the home node whose LXMF address this is
+    /// ([`Engine::client`]): no delivery destination at all.
+    Client { address: [u8; 16] },
+    /// The home node: the messenger's engine, handing every received message
+    /// out packed for the archive, plus the home destination `loquax.home`
+    /// with its two request handlers, whose requests go to `requests`.
+    Home {
+        requests: UnboundedSender<HomeRequest>,
+    },
+}
+
+impl Processor {
+    /// A request to the home destination goes to the home node's loop. The
+    /// remote identity is read here, under the lock the event came with.
+    fn forward_home_request(&self, core: &StdNodeCore, event: &NodeEvent) {
+        let Some((home, requests)) = &self.home else {
+            return;
+        };
+        let NodeEvent::RequestReceived {
+            link_id,
+            destination_hash,
+            request_id,
+            path,
+            data,
+            ..
+        } = event
+        else {
+            return;
+        };
+        if destination_hash != home {
+            return;
+        }
+        let remote = core
+            .get_remote_identity(link_id)
+            .map(|identity| *identity.hash());
+        let _ = requests.send(HomeRequest {
+            link_id: *link_id,
+            request_id: *request_id,
+            path: path.clone(),
+            data: data.clone(),
+            remote,
+        });
+    }
 }
 
 impl Processor {
@@ -66,6 +134,7 @@ impl Processor {
 
 impl CoreProcessor for Processor {
     fn on_event(&mut self, core: &mut StdNodeCore, event: &NodeEvent) -> TickOutput {
+        self.forward_home_request(core, event);
         let out = self.engine.on_event(core, event);
         self.flush();
         out
@@ -157,16 +226,25 @@ impl core::error::Error for AttachError {}
 
 /// A running client node and the outbox that talks to its engine.
 pub struct Attached {
-    node: ReticulumNode,
+    node: Arc<ReticulumNode>,
     /// The frontend's end of the seam.
     pub outbox: InProcessOutbox,
 }
 
 impl Attached {
+    /// The node, for what talks to the network beside the engine: the home
+    /// node's answers and a client's pulls (`crate::home`).
+    pub fn node(&self) -> Arc<ReticulumNode> {
+        Arc::clone(&self.node)
+    }
+
     /// Stop the node. Best effort: the send outcome is already decided by the
-    /// time anything calls this.
-    pub async fn stop(mut self) {
-        let _ = self.node.stop().await;
+    /// time anything calls this. A task still holding the node (a pull cut
+    /// off at exit) leaves it to be torn down with the process.
+    pub async fn stop(self) {
+        if let Ok(mut node) = Arc::try_unwrap(self.node) {
+            let _ = node.stop().await;
+        }
     }
 }
 
@@ -174,6 +252,37 @@ impl Attached {
 pub async fn attach<N: Effects + Send + 'static>(
     config: AttachConfig<N>,
 ) -> Result<Attached, AttachError> {
+    attach_as(config, Role::Messenger).await
+}
+
+/// [`attach`] in a given [`Role`].
+pub async fn attach_as<N: Effects + Send + 'static>(
+    config: AttachConfig<N>,
+    role: Role,
+) -> Result<Attached, AttachError> {
+    // The home destination is the identity's too, so it is minted before
+    // the engine takes the identity.
+    let home = match &role {
+        Role::Home { requests } => {
+            let copy = config
+                .identity
+                .private_key_bytes()
+                .ok()
+                .and_then(|bytes| Identity::from_private_key_bytes(&bytes).ok())
+                .ok_or_else(|| AttachError::NoDaemon {
+                    instance: config.instance.clone(),
+                    detail: "the home identity has no private key".to_string(),
+                })?;
+            let mut destination =
+                crate::home::destination(copy).map_err(|detail| AttachError::NoDaemon {
+                    instance: config.instance.clone(),
+                    detail,
+                })?;
+            destination.set_accepts_links(true);
+            Some((destination, requests.clone()))
+        }
+        _ => None,
+    };
     let (commands_tx, commands_rx) = std::sync::mpsc::channel::<Command>();
     let (events_tx, events_rx) = std::sync::mpsc::channel::<OutboxEvent>();
     let (stamps_tx, stamps_rx) = std::sync::mpsc::channel::<StampJob>();
@@ -188,12 +297,20 @@ pub async fn attach<N: Effects + Send + 'static>(
     let notices = config.notices;
     std::thread::spawn(move || run_stamp_worker(&stamps_rx, &answers_tx, notices));
 
+    let engine = match role {
+        Role::Messenger => Engine::new(config.identity, config.display_name),
+        Role::Client { address } => Engine::client(address),
+        Role::Home { .. } => Engine::new(config.identity, config.display_name).handing_out_packed(),
+    };
     let processor = Processor {
-        engine: Engine::new(config.identity, config.display_name),
+        engine,
         commands: commands_rx,
         events: events_tx,
         stamps: stamps_tx,
         stamp_answers: answers_rx,
+        home: home
+            .as_ref()
+            .map(|(destination, requests)| (*destination.hash(), requests.clone())),
     };
 
     let mut node = ReticulumNodeBuilder::new()
@@ -216,8 +333,19 @@ pub async fn attach<N: Effects + Send + 'static>(
         detail: e.to_string(),
     })?;
 
+    // Registered after the start, as a page server registers its own
+    // (`lblogd/src/node.rs`): the handlers admit every link, and the home
+    // node's loop checks the identity on each request itself.
+    if let Some((destination, _)) = home {
+        let hash = *destination.hash();
+        node.register_destination(destination);
+        for path in [crate::home::JOIN_PATH, crate::home::SYNC_PATH] {
+            node.register_request_handler(hash, path, RequestPolicy::AllowAll);
+        }
+    }
+
     Ok(Attached {
-        node,
+        node: Arc::new(node),
         outbox: InProcessOutbox {
             commands: commands_tx,
             events: events_rx,
