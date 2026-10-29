@@ -543,3 +543,45 @@ fn a_group_readable_identity_is_narrowed_at_load() {
     assert_eq!(std::fs::read(&path).expect("read"), key, "the same key");
     assert_eq!(first.stdout, second.stdout, "the same address");
 }
+
+/// 1119: `--config` goes before the subcommand as well as after it, for every
+/// subcommand. `loquax --config X home join CODE` was refused ("cannot be used
+/// with '--config'") while `loquax home join CODE --config X` worked. The
+/// directory names an instance no daemon serves, so a run that read it fails
+/// naming that instance: the value arrived, not just the parse.
+#[cfg(feature = "tui")]
+#[test]
+fn config_is_taken_before_and_after_the_subcommand() {
+    let config = tempfile::tempdir().expect("config dir");
+    let instance = format!("loquax-config-probe-{}", std::process::id());
+    std::fs::write(
+        config.path().join("config"),
+        format!("[reticulum]\n  instance_name = {instance}\n"),
+    )
+    .expect("config");
+    let dir = config.path().to_str().expect("utf-8 path");
+    let code = "lqxh1notacode";
+    let runs: [&[&str]; 6] = [
+        &["--config", dir, "send", NOWHERE, "hi"],
+        &["send", "--config", dir, NOWHERE, "hi"],
+        &["--config", dir, "fetch", "--timeout", "1"],
+        &["fetch", "--timeout", "1", "--config", dir],
+        &["--config", dir, "home", "join", code],
+        &["home", "join", code, "--config", dir],
+    ];
+    for args in runs {
+        let run = run(args, b"");
+        assert!(
+            !run.stderr.contains("cannot be used with"),
+            "{args:?}: {}",
+            run.stderr
+        );
+        if args.contains(&"join") {
+            // The code is refused before the config is read; the parse is
+            // what this run is for.
+            assert!(run.stderr.contains("home code"), "{args:?}: {}", run.stderr);
+        } else {
+            assert!(run.stderr.contains(&instance), "{args:?}: {}", run.stderr);
+        }
+    }
+}
