@@ -343,7 +343,7 @@ impl Engine {
     /// An engine for a client of the home node whose LXMF address is
     /// `address`. It registers nothing, by construction: the state it starts
     /// in has no identity to register, and no path leads from it to
-    /// [`register`]. The guard test is
+    /// `register`. The guard test is
     /// `a_client_engine_registers_no_delivery_destination`.
     pub fn client(address: [u8; 16]) -> Self {
         Self::starting_in(
