@@ -23,6 +23,7 @@
 //! regions again and paints the view anew.
 
 pub mod map;
+pub mod names;
 
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -383,8 +384,27 @@ impl App {
             return Task::none();
         };
         let view = viewport(&self.state, map::area(size), &self.setup);
+        // The names are laid out at rest only: while a drag moves the view
+        // the picture is drawn without them, and once it rests, again with
+        // them, placed after the pins as they then stand.
+        let names_after = match self.press.as_ref().is_some_and(|p| p.dragging) {
+            true => None,
+            false => {
+                let placed = map::place(
+                    &self.seen.pins,
+                    &view,
+                    self.state.selected,
+                    self.scale,
+                    map::measure,
+                );
+                Some(map::taken(&placed, self.scale))
+            }
+        };
         let current = self.picture.as_ref().is_some_and(|(p, _)| {
-            p.view == view && p.epoch == self.seen.maps && p.style == self.seen.style
+            p.view == view
+                && p.epoch == self.seen.maps
+                && p.style == self.seen.style
+                && p.names_after == names_after
         });
         if current || self.painting {
             return Task::none();
@@ -394,7 +414,7 @@ impl App {
         Task::perform(
             async move {
                 let mut painter = painter.lock().unwrap_or_else(PoisonError::into_inner);
-                Arc::new(map::paint(&mut painter, &view, style, scale))
+                Arc::new(map::paint(&mut painter, &view, style, scale, names_after))
             },
             Message::Painted,
         )

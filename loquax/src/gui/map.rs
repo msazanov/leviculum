@@ -13,7 +13,10 @@
 
 use embedded_graphics::pixelcolor::raw::RawU16;
 use embedded_graphics::pixelcolor::Rgb565;
+use std::sync::{Mutex, OnceLock, PoisonError};
+
 use leviculum_map::draw::Ink;
+use leviculum_map::labels::Rect as Box2;
 use leviculum_map::pins::{self, Mark, Metrics, Pin};
 use leviculum_map::viewport::Viewport;
 use leviculum_mapfill::frame::rgb888;
@@ -22,6 +25,8 @@ use leviculum_ui::Rect;
 
 use loquax::picture::Painter;
 use loquax::ui::map::{MapPin, MapSetup};
+
+use super::names::{self, Typesetter};
 
 /// A marker's diameter in logical pixels; times the scale on screen.
 pub const MARKER: f32 = 10.0;
@@ -62,6 +67,11 @@ pub struct Picture {
     pub epoch: u64,
     /// The style it was drawn in.
     pub style: Style,
+    /// What its names were placed after, the pins' boxes; `None` for a
+    /// picture drawn without names, while the view moves.
+    pub names_after: Option<Vec<Box2>>,
+    /// The names set into it.
+    pub names: Vec<String>,
 }
 
 impl std::fmt::Debug for Picture {
@@ -69,17 +79,31 @@ impl std::fmt::Debug for Picture {
         let (w, h) = self.view.size();
         write!(
             f,
-            "Picture({w}x{h} z{} {})",
+            "Picture({w}x{h} z{} {} names={})",
             self.view.zoom(),
-            self.attribution
+            self.attribution,
+            self.names.len()
         )
     }
 }
 
+/// The window's one typesetter, shared by its paints.
+fn typesetter() -> &'static Mutex<Typesetter> {
+    static TYPE: OnceLock<Mutex<Typesetter>> = OnceLock::new();
+    TYPE.get_or_init(|| Mutex::new(Typesetter::new()))
+}
+
 /// `view` drawn in colour and `style` with lines as wide as `scale` asks
 /// (2.0 on a screen of twice the density draws them twice as wide), as
-/// RGBA.
-pub fn paint(painter: &mut Painter, view: &Viewport, style: Style, scale: f32) -> Picture {
+/// RGBA; with `names_after` (the pins' boxes, [`taken`]) the map's names
+/// set into it after them ([`names::set`]), streets along their lines.
+pub fn paint(
+    painter: &mut Painter,
+    view: &Viewport,
+    style: Style,
+    scale: f32,
+    names_after: Option<Vec<Box2>>,
+) -> Picture {
     let percent = (scale * 100.0).round().max(1.0) as u32;
     let drawn = painter.draw(view, Ink::Colour, style, percent);
     let mut rgba = Vec::with_capacity(drawn.fb.len() * 4);
@@ -87,13 +111,56 @@ pub fn paint(painter: &mut Painter, view: &Viewport, style: Style, scale: f32) -
         let [r, g, b] = rgb888(Rgb565::from(RawU16::new(u16::from_be(px))));
         rgba.extend_from_slice(&[r, g, b, 0xff]);
     }
+    let mut set = Vec::new();
+    if let Some(taken) = &names_after {
+        let labels = painter.labels(view, true);
+        let (w, h) = view.size();
+        let mut type_ = typesetter().lock().unwrap_or_else(PoisonError::into_inner);
+        set = names::set(
+            &mut rgba,
+            w,
+            h,
+            &labels,
+            taken,
+            scale,
+            style.theme,
+            &mut type_,
+        );
+    }
     Picture {
         view: *view,
         rgba,
         attribution: drawn.attribution,
         epoch: painter.epoch(),
         style,
+        names_after,
+        names: set,
     }
+}
+
+/// The boxes the pins of `placed` cover, their markers and their names,
+/// in screen pixels: what the map's names are placed after.
+pub fn taken(placed: &[Placed], scale: f32) -> Vec<Box2> {
+    let r = MARKER * scale / 2.0;
+    let line = LABEL * LINE * scale;
+    let mut out = Vec::new();
+    for p in placed {
+        out.push(Box2 {
+            x0: (p.x - r).floor() as i32,
+            y0: (p.y - r).floor() as i32,
+            x1: (p.x + r).ceil() as i32,
+            y1: (p.y + r).ceil() as i32,
+        });
+        if let Some((x, y, _)) = &p.label {
+            out.push(Box2 {
+                x0: x.floor() as i32,
+                y0: y.floor() as i32,
+                x1: (x + p.width).ceil() as i32,
+                y1: (y + line).ceil() as i32,
+            });
+        }
+    }
+    out
 }
 
 /// A pin as the window draws it, in screen pixels.
@@ -284,7 +351,7 @@ mod tests {
                 selected: Some([2; 16]),
             };
             let view = viewport(&state, area(size), &setup);
-            let picture = paint(&mut painter, &view, Style::PC, scale);
+            let picture = paint(&mut painter, &view, Style::PC, scale, None);
             assert_eq!(picture.view.size(), size);
             assert_eq!(picture.rgba.len(), (size.0 * size.1 * 4) as usize);
             assert_eq!(picture.attribution, credit, "zoom {zoom}");
@@ -324,9 +391,92 @@ mod tests {
         assert_eq!(a.len(), 1);
         assert_eq!(b.len(), 1);
         assert!((b[0].x - 2.0 * a[0].x).abs() <= 2.0, "{a:?} {b:?}");
-        let picture = paint(&mut painter, &two, Style::PC, 2.0);
+        let picture = paint(&mut painter, &two, Style::PC, 2.0, None);
         assert_eq!(picture.rgba.len(), 800 * 600 * 4);
         assert_eq!(metrics(2.0).marker, 2 * metrics(1.0).marker);
+    }
+
+    /// The map's names set into the window's picture (1100): the Florence
+    /// fixture at z16 with one pin, the parks and the streets the zoom
+    /// shows, each name with its halo, none under the pin's name; the
+    /// picture the same on a second paint and pixel for pixel the golden.
+    /// A picture drawn while the view moves carries none.
+    #[test]
+    fn the_map_names_are_set_into_the_picture() {
+        let mut painter = florence();
+        let at = project(LatLon::from_degrees(43.7752, 11.2660));
+        let view = Viewport::new(at, 16, 480, 320);
+        let pins = [pin(1, "alice", 43.7752, 11.2640)];
+        let placed = place(&pins, &view, None, 1.0, measure);
+        let boxes = taken(&placed, 1.0);
+        let named = paint(&mut painter, &view, Style::PC, 1.0, Some(boxes.clone()));
+        let plain = paint(&mut painter, &view, Style::PC, 1.0, None);
+        assert!(plain.names.is_empty());
+        assert_ne!(named.rgba, plain.rgba, "the names changed the picture");
+        assert!(
+            named.names.iter().any(|n| n == "Piazza D'Azeglio"),
+            "{:?}",
+            named.names
+        );
+        assert!(
+            named.names.iter().filter(|n| n.starts_with("Via ")).count() >= 2,
+            "{:?}",
+            named.names
+        );
+        let again = paint(&mut painter, &view, Style::PC, 1.0, Some(boxes));
+        assert_eq!(again.rgba, named.rgba, "a second paint is the same");
+        assert_eq!(again.names, named.names);
+        let rgb: Vec<u8> = named
+            .rgba
+            .chunks(4)
+            .flat_map(|p| [p[0], p[1], p[2]])
+            .collect();
+        same_as("gui-names-florence-z16.png", &rgb, 480, 320);
+    }
+
+    /// Hold `rgb` to the PNG golden `name` under `loquax/tests/golden`,
+    /// pixel for pixel; a picture that moved is left in the temp dir.
+    fn same_as(name: &str, rgb: &[u8], w: u32, h: u32) {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/golden")
+            .join(name);
+        let encode = || {
+            let mut out = Vec::new();
+            let mut e = png::Encoder::new(&mut out, w, h);
+            e.set_color(png::ColorType::Rgb);
+            e.set_depth(png::BitDepth::Eight);
+            let mut writer = e.write_header().expect("header");
+            writer.write_image_data(rgb).expect("data");
+            writer.finish().expect("finish");
+            out
+        };
+        let keep = || {
+            let dir = std::env::temp_dir().join("loquax-golden");
+            std::fs::create_dir_all(&dir).expect("temp dir");
+            let kept = dir.join(name);
+            std::fs::write(&kept, encode()).expect("write");
+            kept
+        };
+        let Ok(bytes) = std::fs::read(&path) else {
+            panic!("no golden {name}; this run's is {}", keep().display());
+        };
+        let mut reader = png::Decoder::new(std::io::Cursor::new(bytes))
+            .read_info()
+            .expect("png");
+        let mut want = vec![0; reader.output_buffer_size().expect("size")];
+        let info = reader.next_frame(&mut want).expect("frame");
+        want.truncate(info.buffer_size());
+        if (info.width, info.height) != (w, h) || want != rgb {
+            let differ = want
+                .chunks(3)
+                .zip(rgb.chunks(3))
+                .filter(|(a, b)| a != b)
+                .count();
+            panic!(
+                "{name} moved: {differ} pixels differ; this run's is {}",
+                keep().display()
+            );
+        }
     }
 
     /// The label width comes from the font: a longer name is wider.

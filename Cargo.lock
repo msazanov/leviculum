@@ -3255,6 +3255,7 @@ dependencies = [
  "leviculum-ui-ratatui",
  "lnpnd",
  "open",
+ "png",
  "rand_core 0.6.4",
  "ratatui",
  "rusqlite",
