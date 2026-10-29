@@ -197,8 +197,7 @@ public class ChatActivity extends Activity implements Events.Listener {
 
     /** The line under the bar, shown only while it has something to say. */
     private void line(String text) {
-        status.setText(text);
-        status.setVisibility(text.isEmpty() ? View.GONE : View.VISIBLE);
+        Ui.showLine(status, text, true);
     }
 
     /** The send button is bright with text to send and dimmed without. */
@@ -366,7 +365,7 @@ public class ChatActivity extends Activity implements Events.Listener {
         }
         String words = Ui.eventLine(this, event);
         if (words != null) {
-            line(words);
+            Ui.showLine(status, words, Ui.stays(event));
         }
     }
 

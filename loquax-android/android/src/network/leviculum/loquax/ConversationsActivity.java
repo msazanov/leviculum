@@ -210,8 +210,7 @@ public class ConversationsActivity extends Activity implements Events.Listener {
 
     /** The line under the bar, shown only while it has something to say. */
     private void line(String text) {
-        status.setText(text);
-        status.setVisibility(text.isEmpty() ? View.GONE : View.VISIBLE);
+        Ui.showLine(status, text, true);
     }
 
     private void refresh() {
@@ -253,7 +252,7 @@ public class ConversationsActivity extends Activity implements Events.Listener {
         } else {
             String line = Ui.eventLine(this, event);
             if (line != null) {
-                line(line);
+                Ui.showLine(status, line, Ui.stays(event));
             }
         }
     }

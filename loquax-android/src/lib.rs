@@ -24,6 +24,7 @@
 
 pub mod avatar;
 pub mod map;
+pub mod pull_line;
 pub mod schema;
 pub mod session;
 

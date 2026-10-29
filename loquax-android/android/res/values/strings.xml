@@ -17,7 +17,8 @@
     <string name="react">React</string>
     <string name="no_reaction_yet">This message has no id yet; react once the home node took it.</string>
     <string name="pulling">Pulling from the home node…</string>
-    <string name="pulled">Pulled, %1$s new entries.</string>
+    <string name="pulled">%1$s new message(s).</string>
+    <string name="pulled_nothing">No new messages.</string>
     <string name="pull_failed">Pull failed: %1$s</string>
     <string name="stopped">Stopped.</string>
     <string name="state_queued">queued</string>

@@ -33,6 +33,7 @@ use loquax::ui::{reactions, update, Message, UiEffect, UiEvent, UiModel};
 use loquax::when::WallTime;
 
 use crate::avatar;
+use crate::pull_line::{PullLine, Say};
 use crate::schema::{self, Event, VERSION};
 
 /// The file under the app's directory that keeps the home node's address.
@@ -109,6 +110,10 @@ struct Inner {
     sending: bool,
     pull_owed: bool,
     pulling: bool,
+    /// Whether the user asked for the pull owed (Refresh), and what the
+    /// status line is told of the running one (1136).
+    pull_asked: bool,
+    pull_line: PullLine,
     finished_tx: Sender<Finished>,
     finished_rx: Receiver<Finished>,
     events: Sender<Event>,
@@ -356,7 +361,12 @@ impl Session {
                 content,
             },
             schema::Request::Close => UiEvent::Close,
-            schema::Request::Pull => UiEvent::Run(PaletteCommand::Fetch),
+            schema::Request::Pull => {
+                let mut inner = self.lock();
+                inner.asked_to_pull();
+                inner.apply(UiEvent::Run(PaletteCommand::Fetch));
+                return Ok(());
+            }
             schema::Request::Front { front } => {
                 self.lock().front = front;
                 return Ok(());
@@ -480,6 +490,8 @@ impl Inner {
             sending: false,
             pull_owed: false,
             pulling: false,
+            pull_asked: false,
+            pull_line: PullLine::default(),
             finished_tx,
             finished_rx,
             events,
@@ -547,7 +559,10 @@ impl Inner {
             }
         }
         self.look_at_link();
-        let elapsed = u64::try_from(self.origin.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let elapsed = self.elapsed_ms();
+        if let Some(say) = self.pull_line.tick(elapsed) {
+            self.say(say);
+        }
         self.watched(elapsed);
         self.quiet(UiEvent::Clock(wall_now(self.offset)));
         self.quiet(UiEvent::Tick);
@@ -623,8 +638,46 @@ impl Inner {
         let _ = update(&mut self.model, event);
     }
 
+    fn elapsed_ms(&self) -> u64 {
+        u64::try_from(self.origin.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+
+    /// The user asked for a pull (Refresh): the next one is theirs, or the
+    /// running one when one runs.
+    fn asked_to_pull(&mut self) {
+        match self.pulling {
+            true => {
+                if let Some(say) = self.pull_line.asked() {
+                    self.say(say);
+                }
+            }
+            false => self.pull_asked = true,
+        }
+    }
+
+    /// Tell the status line about a pull.
+    fn say(&self, say: Say) {
+        let (state, detail) = match say {
+            Say::Running => ("running", String::new()),
+            Say::Done(new) => ("done", new.to_string()),
+            Say::Failed(error) => ("failed", error),
+        };
+        let _ = self.events.send(Event::Sync {
+            v: VERSION,
+            state: state.to_string(),
+            detail,
+        });
+    }
+
     /// Fold one event, keep what it changed, run what it asks for.
     fn apply(&mut self, event: UiEvent) {
+        // What a fetch starts and ends with goes to the line as a `sync`
+        // event ([`PullLine`]), so the terminal's toasts for it ("fetching
+        // the mailbox", "no new messages") would only say it twice.
+        let pull_words = matches!(
+            event,
+            UiEvent::FetchDone(_) | UiEvent::Run(PaletteCommand::Fetch)
+        );
         let shown = matches!(
             event,
             UiEvent::Engine(_)
@@ -638,7 +691,13 @@ impl Inner {
         );
         let toasts = self.model.toasts.len();
         let effects = update(&mut self.model, event);
-        for toast in self.model.toasts.iter().skip(toasts) {
+        for toast in self
+            .model
+            .toasts
+            .iter()
+            .skip(toasts)
+            .filter(|_| !pull_words)
+        {
             let _ = self.events.send(Event::Notice {
                 v: VERSION,
                 text: toast.text.clone(),
@@ -694,11 +753,10 @@ impl Inner {
         }
         if !self.pulling && std::mem::take(&mut self.pull_owed) {
             self.pulling = true;
-            let _ = self.events.send(Event::Sync {
-                v: VERSION,
-                state: "running".to_string(),
-                detail: String::new(),
-            });
+            let asked = std::mem::take(&mut self.pull_asked);
+            if let Some(say) = self.pull_line.began(self.elapsed_ms(), asked) {
+                self.say(say);
+            }
             let mut tap = self.fanout.tap();
             let client = self.client.clone();
             let home = self.home.clone();
@@ -712,18 +770,13 @@ impl Inner {
 
     /// A pull ended: what it brought is in the store by now (the pump
     /// folded it before the runner saw its fence), so the cursor may pass it.
+    /// `result` counts the new messages it brought, never entries.
     fn pulled(&mut self, result: Result<usize, String>, cursor: Option<u64>) {
         self.pulling = false;
         runner::settle_pull(&self.home, cursor);
-        let (state, detail) = match &result {
-            Ok(entries) => ("done", entries.to_string()),
-            Err(error) => ("failed", error.clone()),
-        };
-        let _ = self.events.send(Event::Sync {
-            v: VERSION,
-            state: state.to_string(),
-            detail,
-        });
+        if let Some(say) = self.pull_line.ended(&result) {
+            self.say(say);
+        }
         self.apply(UiEvent::FetchDone(result));
     }
 

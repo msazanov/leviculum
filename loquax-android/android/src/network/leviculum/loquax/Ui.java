@@ -1,6 +1,8 @@
 package network.leviculum.loquax;
 
 import android.content.Context;
+import android.view.View;
+import android.widget.TextView;
 import java.text.DateFormat;
 import java.text.SimpleDateFormat;
 import java.util.Calendar;
@@ -150,6 +152,40 @@ final class Ui {
         return System.currentTimeMillis() / 1000;
     }
 
+    /** How long a line about something that happened stays before it hides. */
+    static final long LINE_MS = 4000;
+
+    /**
+     * Whether the line `event` gives stays until the next one: only
+     * "pulling", which its result follows. Any other hides after
+     * {@link #LINE_MS}, so the line never says an old result.
+     */
+    static boolean stays(Map<String, Object> event) {
+        return "sync".equals(Core.str(event, "t")) && "running".equals(Core.str(event, "state"));
+    }
+
+    /**
+     * Show `text` on `status`, hidden again after {@link #LINE_MS} unless it
+     * `stays`. A later line cancels the hiding of an earlier one.
+     */
+    static void showLine(final TextView status, String text, boolean stays) {
+        status.setText(text);
+        status.setVisibility(text.isEmpty() ? View.GONE : View.VISIBLE);
+        final Object shown = new Object();
+        status.setTag(shown);
+        if (stays || text.isEmpty()) {
+            return;
+        }
+        status.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                if (status.getTag() == shown) {
+                    status.setVisibility(View.GONE);
+                }
+            }
+        }, LINE_MS);
+    }
+
     /** The status line for an event other than `changed`, or null. */
     static String eventLine(Context context, Map<String, Object> event) {
         if (event.containsKey("error")) {
@@ -165,7 +201,10 @@ final class Ui {
                 return context.getString(R.string.pulling);
             }
             if ("done".equals(state)) {
-                return context.getString(R.string.pulled, Core.str(event, "detail"));
+                String detail = Core.str(event, "detail");
+                return "0".equals(detail)
+                        ? context.getString(R.string.pulled_nothing)
+                        : context.getString(R.string.pulled, detail);
             }
             return context.getString(R.string.pull_failed, Core.str(event, "detail"));
         }

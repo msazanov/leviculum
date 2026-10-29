@@ -270,8 +270,10 @@ pub enum Event {
     Changed { v: u32 },
     /// A line for the user: what the terminal shows as a toast.
     Notice { v: u32, text: String },
-    /// A pull began (`running`), ended (`done`, with how many entries
-    /// came), or failed (`failed`, with why).
+    /// A pull began (`running`), ended (`done`, with how many new
+    /// messages came), or failed (`failed`, with why). A pull the user did
+    /// not ask for says it runs only once it is slow, and ends only when
+    /// it said so or brought a message (`crate::pull_line`).
     Sync {
         v: u32,
         state: String,

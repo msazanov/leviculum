@@ -279,6 +279,9 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
 /// then a loquax messenger on the home node's instance sends to the home
 /// address. The session pulls on the home node's wake, with no `pull`
 /// asked, says `changed`, and the conversation list shows the message.
+/// Then the sender renames itself (1136): the status line hears nothing,
+/// neither a wake's pull nor a count, and opening the conversation pulls
+/// quietly and brings the new name.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_new_message_shows_on_the_phone_without_a_pull() {
     let instance = instance();
@@ -299,7 +302,9 @@ async fn a_new_message_shows_on_the_phone_without_a_pull() {
     };
     let session = tokio::task::spawn_blocking(move || {
         let session = Session::start(&first).unwrap_or_else(|error| panic!("{error:?}"));
-        // The pull on open, and the watching link's first word, settle.
+        // The pull on open is quiet; a Refresh says its end, and the
+        // watching link's first word settles.
+        session.request(Request::Pull).expect("pull");
         let deadline = std::time::Instant::now() + Duration::from_secs(60);
         loop {
             match session.next_event(Duration::from_millis(500)) {
@@ -321,11 +326,15 @@ async fn a_new_message_shows_on_the_phone_without_a_pull() {
     let sender = tempfile::tempdir().expect("sender dir");
     let storage = sender.path().join("storage");
     std::fs::create_dir_all(&storage).expect("sender storage");
+    let sender_identity = leviculum_core::Identity::generate(&mut rand_core::OsRng);
+    let sender_address = loquax::address::to_hex(
+        &loquax::engine::delivery_address(&sender_identity).expect("address"),
+    );
     let mut attached = loquax::engine::attach(loquax::engine::AttachConfig {
         instance: instance.clone(),
         config_dir: Some(rns.path().to_path_buf()),
-        storage_dir: storage,
-        identity: leviculum_core::Identity::generate(&mut rand_core::OsRng),
+        storage_dir: storage.clone(),
+        identity: sender_identity.clone(),
         display_name: b"sender".to_vec(),
         notices: loquax::effects::Terminal::new(sender.path().to_path_buf()),
     })
@@ -348,8 +357,18 @@ async fn a_new_message_shows_on_the_phone_without_a_pull() {
     .expect("the sender hands it on");
     let sent_at = std::time::Instant::now();
 
-    tokio::task::spawn_blocking(move || {
+    let session = tokio::task::spawn_blocking(move || {
         let mut changed = false;
+        // The wake's pull is quiet but for its result: one new message.
+        let mut said_one = false;
+        let mut look = |event: Option<Event>, changed: &mut bool| match event {
+            Some(Event::Changed { .. }) => *changed = true,
+            Some(Event::Sync { state, detail, .. }) => {
+                assert_eq!((state.as_str(), detail.as_str()), ("done", "1"));
+                said_one = true;
+            }
+            _ => {}
+        };
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
         loop {
             let list: schema::Conversations = rmp_serde::from_slice(
@@ -369,15 +388,84 @@ async fn a_new_message_shows_on_the_phone_without_a_pull() {
                 std::time::Instant::now() < deadline,
                 "the message never showed without a pull: {list:?}"
             );
-            if let Some(Event::Changed { .. }) = session.next_event(Duration::from_millis(100)) {
-                changed = true;
-            }
+            look(session.next_event(Duration::from_millis(100)), &mut changed);
         }
-        session.stop();
+        // The pull's end comes in the pump that showed the message, or the
+        // next; nothing of this pull is left for the rename below.
+        let settled = std::time::Instant::now() + Duration::from_secs(3);
+        while std::time::Instant::now() < settled {
+            look(session.next_event(Duration::from_millis(100)), &mut changed);
+        }
+        assert!(said_one, "the wake's pull said its one new message");
+        session
     })
     .await
     .expect("the wait for the wake");
     attached.stop().await;
+
+    // The sender comes back under another name and announces it.
+    let renamed = loquax::engine::attach(loquax::engine::AttachConfig {
+        instance: instance.clone(),
+        config_dir: Some(rns.path().to_path_buf()),
+        storage_dir: storage,
+        identity: sender_identity,
+        display_name: b"renamed".to_vec(),
+        notices: loquax::effects::Terminal::new(sender.path().to_path_buf()),
+    })
+    .await
+    .expect("the sender attaches again");
+    loquax::outbox::Outbox::submit(&renamed.outbox, loquax::outbox::Command::Announce)
+        .expect("announce");
+    tokio::task::spawn_blocking(move || {
+        // Whatever pulls run meanwhile: a name says nothing on the line.
+        let silent = |event: Option<Event>| {
+            assert!(
+                !matches!(event, Some(Event::Sync { .. } | Event::Notice { .. })),
+                "a name made the status line speak: {event:?}"
+            );
+        };
+        let quiet_until = std::time::Instant::now() + Duration::from_secs(4);
+        while std::time::Instant::now() < quiet_until {
+            silent(session.next_event(Duration::from_millis(100)));
+        }
+        // Opening the conversation pulls, quietly, and the name comes. It
+        // is opened again every two seconds, in case its pull found one
+        // running that began before the name was archived.
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        let mut opened = std::time::Instant::now() - Duration::from_secs(2);
+        loop {
+            if opened.elapsed() >= Duration::from_secs(2) {
+                session
+                    .request(Request::Open {
+                        peer: sender_address.clone(),
+                    })
+                    .expect("open");
+                opened = std::time::Instant::now();
+            }
+            let messages: schema::Messages = rmp_serde::from_slice(
+                &session
+                    .query(schema::Query::Messages {
+                        peer: sender_address.clone(),
+                    })
+                    .expect("a query"),
+            )
+            .expect("decode");
+            // The label is the name with the screen's short-hash mark.
+            if messages.name.starts_with("renamed") {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the new name never came: {:?}",
+                messages.name
+            );
+            silent(session.next_event(Duration::from_millis(100)));
+        }
+        session.stop();
+    })
+    .await
+    .expect("the rename");
+    renamed.stop().await;
     node.kill().await;
 }
 
