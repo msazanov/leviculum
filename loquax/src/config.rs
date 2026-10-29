@@ -43,6 +43,10 @@
 //! map_drawing.mosh:xterm-256color = braille-thin
 //! ```
 //!
+//! On a home node (`docs/src/concepts/loquax-home-node.md`) one key more,
+//! `archive_cap_mb`: how many megabytes of messages the archive keeps before
+//! the oldest go (1024 by default, `crate::home::DEFAULT_ARCHIVE_CAP_MB`).
+//!
 //! A drawing's name is not checked here: the set is the frontend's, and a
 //! name an older loquax does not know falls back to its own choice, said
 //! once, rather than stop it from starting.
@@ -112,6 +116,8 @@ pub struct Config {
     pub map_cache_mb: Option<u64>,
     /// `map_theme`, when the file sets it; unset is light.
     pub map_theme: Option<ThemeFlag>,
+    /// `archive_cap_mb`, when the file sets it: the home node's archive cap.
+    pub archive_cap_mb: Option<u64>,
     /// `map_drawing.<context>` lines: each context and the drawing
     /// remembered for it, in file order, a later line for a context
     /// replacing an earlier one.
@@ -248,6 +254,19 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
                         line: index + 1,
                         key: "map_cache_mb",
                         detail: alloc::format!("{text:?} is not a number of megabytes"),
+                    });
+                }
+            }
+        }
+        if key.trim() == "archive_cap_mb" {
+            let text = value.trim().trim_matches('"');
+            match text.parse::<u64>() {
+                Ok(mb) if mb > 0 => config.archive_cap_mb = Some(mb),
+                _ => {
+                    return Err(ConfigError::BadValue {
+                        line: index + 1,
+                        key: "archive_cap_mb",
+                        detail: alloc::format!("{text:?} is not a number of megabytes above 0"),
                     });
                 }
             }
@@ -444,6 +463,26 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn the_archive_cap_parses_and_zero_is_an_error() {
+        assert_eq!(parse_str("").expect("empty").archive_cap_mb, None);
+        assert_eq!(
+            parse_str("archive_cap_mb = 300\n")
+                .expect("set")
+                .archive_cap_mb,
+            Some(300)
+        );
+        for text in ["archive_cap_mb = 0\n", "archive_cap_mb = lots\n"] {
+            assert!(matches!(
+                parse_str(text),
+                Err(ConfigError::BadValue {
+                    key: "archive_cap_mb",
+                    ..
+                })
+            ));
+        }
     }
 
     #[test]

@@ -28,7 +28,7 @@ use tui_input::Input;
 
 use loquax::clock::Tokio;
 use loquax::effects::{Effects, Terminal as Files};
-use loquax::engine::{attach, AttachConfig, Attached};
+use loquax::engine::{attach_as, AttachConfig, Attached, Role};
 use loquax::fanout::{Fanout, Tap};
 use loquax::fetch::{run_fetch, FetchError, FetchOptions};
 use loquax::mailbox::{Unanswered, UNANSWERED_EXCLUSION_MS, UNANSWERED_LIMIT};
@@ -160,6 +160,18 @@ pub(crate) struct RunContext {
     /// The nodes that stopped answering when the job started, for its
     /// mailbox selection.
     excluded: Vec<[u8; 16]>,
+    /// Set when this device is a client of a home node: a fetch pulls from
+    /// the home node, and a send is refused until sending through it exists.
+    client: Option<HomeClient>,
+}
+
+/// What a client's pull needs: the home identity's key, the device's own
+/// identity, and the node to open the link on.
+#[derive(Clone)]
+pub(crate) struct HomeClient {
+    public_key: [u8; 64],
+    device: leviculum_core::Identity,
+    node: std::sync::Arc<leviculum_std::ReticulumNode>,
 }
 
 /// A runner that ended, as its task hands it to the shell.
@@ -740,6 +752,9 @@ pub(crate) fn local_now() -> WallTime {
 
 /// One compose-line send, exactly as `loquax send --via auto` runs it.
 async fn send(mut tap: Tap, context: RunContext, to: [u8; 16], body: String) -> UiEvent {
+    if context.client.is_some() {
+        return UiEvent::SendDone(Err(loquax::engine::CLIENT_SENDS.to_string()));
+    }
     let mut options = SendOptions::new(context.instance.clone(), context.timeout);
     let mut effects = context.effects.clone();
     let (home, config_dir, instance, pn, excluded) = (
@@ -792,6 +807,19 @@ async fn fetch(tap: Tap, context: RunContext) -> FetchEnd {
 }
 
 async fn drain(outbox: &mut Watched, context: RunContext) -> Result<usize, FetchError> {
+    if let Some(client) = &context.client {
+        // A drain gets twice a send's budget, as on the command line.
+        return loquax::home::client::pull_into(
+            outbox,
+            &client.node,
+            &context.home,
+            &client.public_key,
+            &client.device,
+            context.timeout * 2,
+        )
+        .await
+        .map_err(|error| FetchError::SyncFailed(error.to_string()));
+    }
     let mut seen = SeenStore::load(&context.home)
         .map_err(|e| FetchError::SyncFailed(format!("seen store: {e}")))?;
     // A drain gets twice a send's budget, as on the command line.
@@ -838,12 +866,29 @@ pub(crate) async fn start(
     );
     let (preferred_pn, pn_source) =
         crate::resolve_pn(options.pn.as_deref(), &home).map_err(crate::usage)?;
-    let identity = identity::load_or_create(&home.join("identity"))
-        .map_err(|error| crate::failure(error, "no-identity"))?;
-    // The history, before the daemon: a damaged store stops the start with
-    // the file named, and nothing is written over it.
-    let address = loquax::engine::delivery_address(&identity)
-        .map_err(|error| crate::failure(error, "no-identity"))?;
+    // A client of a home node runs on its own device identity and shows
+    // the home node's address as its own; its history is that address's.
+    let client = loquax::home::client::load_client(&home)
+        .map_err(|error| crate::failure(error, "no-home"))?;
+    let (identity, address) = match client {
+        Some(public_key) => {
+            let device =
+                identity::load_or_create(&home.join(loquax::home::client::DEVICE_IDENTITY_FILE))
+                    .map_err(|error| crate::failure(error, "no-identity"))?;
+            let address = loquax::home::lxmf_address(&public_key)
+                .map_err(|error| crate::failure(error, "no-identity"))?;
+            (device, address)
+        }
+        None => {
+            let identity = identity::load_or_create(&home.join("identity"))
+                .map_err(|error| crate::failure(error, "no-identity"))?;
+            // The history, before the daemon: a damaged store stops the
+            // start with the file named, and nothing is written over it.
+            let address = loquax::engine::delivery_address(&identity)
+                .map_err(|error| crate::failure(error, "no-identity"))?;
+            (identity, address)
+        }
+    };
     let store =
         Store::open_in(&home, address).map_err(|error| crate::failure(error, "no-store"))?;
     let history = store
@@ -879,15 +924,28 @@ pub(crate) async fn start(
         mailbox: mailbox_tx,
         files: home.clone(),
     };
-    let attached = attach(AttachConfig {
-        instance: instance.clone(),
-        storage_dir,
-        identity,
-        display_name: display_name.name.into_bytes(),
-        notices: effects.clone(),
-    })
+    let device = identity.clone();
+    let role = match client {
+        Some(_) => Role::Client { address },
+        None => Role::Messenger,
+    };
+    let attached = attach_as(
+        AttachConfig {
+            instance: instance.clone(),
+            storage_dir,
+            identity,
+            display_name: display_name.name.into_bytes(),
+            notices: effects.clone(),
+        },
+        role,
+    )
     .await
     .map_err(|error| crate::failure(error, "no-daemon"))?;
+    let client = client.map(|public_key| HomeClient {
+        public_key,
+        device,
+        node: attached.node(),
+    });
 
     let config = loquax::config::load(&home).map_err(|error| crate::usage(error.to_string()))?;
     let contacts =
@@ -993,6 +1051,7 @@ pub(crate) async fn start(
             timeout: Duration::from_secs(options.timeout),
             effects,
             excluded: Vec::new(),
+            client,
         },
         sends: VecDeque::new(),
         fetch_owed: None,

@@ -20,6 +20,14 @@ Toolchain: Rust 1.97.1
 
 ### Added
 
+- loquax home node, slice one (#232, 1101): `loquax --daemon` holds the LXMF
+  identity on an always-on host, takes DIRECT delivery, keeps every message
+  in an archive with a sequence under a disk cap (`archive_cap_mb`, 1 GiB by
+  default) and collects from its propagation node. `loquax home admit`,
+  `join`, `devices` and `revoke` admit other devices with a single-use code;
+  each has its own RNS identity, registers no delivery destination, and
+  pulls the archive by cursor in the messenger and with `loquax fetch`.
+  Pulling deletes nothing. See `docs/src/concepts/loquax-home-node.md`.
 - Every program ships as a nightly `.deb` (1000). New are `lnmsg`, built with
   its `tui`, for amd64 and arm64, and `lnflash`, for amd64: the flasher in
   `/usr/bin` and the firmware bundle under `/usr/share/lnflash`, where it

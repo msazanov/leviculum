@@ -199,6 +199,45 @@ fn render_message(
     Ok(rendered)
 }
 
+/// One received message as a fetch takes it: recorded as seen, and printed
+/// the first time it is seen. Whether it was new.
+pub fn take_received<E: Effects>(
+    seen: &mut SeenStore,
+    effects: &mut E,
+    message_id: &[u8; 32],
+    source: &[u8; 16],
+    title: &[u8],
+    body: &[u8],
+    verified: bool,
+) -> Result<bool, FetchError> {
+    // An unwritable seen record must not cost mail: the worst a failed
+    // write can do is a duplicate print next run, and that beats a message
+    // nobody saw.
+    let first_sight = match seen.record(*message_id) {
+        Some(write) => {
+            if let Err(error) = effects.write_seen(&write) {
+                effects.notice(&format!(
+                    "could not record {} as seen: {error}",
+                    crate::address::to_hex(message_id)
+                ));
+            }
+            true
+        }
+        None => false,
+    };
+    events::fetched(message_id, source, body.len(), !first_sight);
+    if first_sight {
+        // Rendered into one buffer and printed in one call: the binary's
+        // stdout is unlocked and shared with the tracing subscriber's own
+        // lines, and a message split across many small writes could have a
+        // log line land in the middle of its body.
+        let rendered = render_message(message_id, source, title, body, verified)
+            .map_err(|error| FetchError::SyncFailed(error.to_string()))?;
+        effects.print(&rendered).map_err(FetchError::SyncFailed)?;
+    }
+    Ok(first_sight)
+}
+
 /// Run one `loquax fetch`.
 ///
 /// `preferred_pn` and `pn_source` are as in
@@ -267,33 +306,9 @@ pub async fn run_fetch<O: Outbox, E: Effects>(
                     verified,
                     ..
                 } => {
-                    // An unwritable seen record must not cost mail: the worst
-                    // a failed write can do is a duplicate print next run,
-                    // and that beats a message nobody saw.
-                    let first_sight = match seen.record(message_id) {
-                        Some(write) => {
-                            if let Err(error) = effects.write_seen(&write) {
-                                effects.notice(&format!(
-                                    "could not record {} as seen: {error}",
-                                    crate::address::to_hex(&message_id)
-                                ));
-                            }
-                            true
-                        }
-                        None => false,
-                    };
-                    events::fetched(&message_id, &source, body.len(), !first_sight);
-                    if first_sight {
+                    if take_received(seen, effects, &message_id, &source, &title, &body, verified)?
+                    {
                         new += 1;
-                        // Rendered into one buffer and printed in one call:
-                        // the binary's stdout is unlocked and shared with
-                        // the tracing subscriber's own lines, and a message
-                        // split across many small writes could have a log
-                        // line land in the middle of its body.
-                        let rendered =
-                            render_message(&message_id, &source, &title, &body, verified)
-                                .map_err(|error| FetchError::SyncFailed(error.to_string()))?;
-                        effects.print(&rendered).map_err(FetchError::SyncFailed)?;
                     }
                 }
                 OutboxEvent::SyncDone {

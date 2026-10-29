@@ -42,11 +42,18 @@
 //!   invalid. A message stored unverified before schema 3 has no bytes kept
 //!   and stays unverified: the signature was never stored.
 //!
+//! - **The home node's archive is a table** (`archive`, schema 4): on a
+//!   home node (`docs/src/concepts/loquax-home-node.md`) every received
+//!   message is appended as it came, packed, under a sequence that only
+//!   grows (`AUTOINCREMENT`, so a sequence is never handed out twice, even
+//!   after the newest entry was evicted). Its clients pull it by cursor. The
+//!   admitted devices and the open admission tokens are two more tables.
+//!
 //! # Versions
 //!
-//! Schema 1 is the store of slice 6; schema 2 adds `positions` and schema 3
-//! `unverified`, nothing else, so an older file is migrated in place at
-//! open, in one transaction. A file newer than this program is refused
+//! Schema 1 is the store of slice 6; schema 2 adds `positions`, schema 3
+//! `unverified` and schema 4 the home node's three tables, nothing else, so
+//! an older file is migrated in place at open, in one transaction. A file newer than this program is refused
 //! ([`StoreError::Newer`]): a loquax that knows only schema 1 refuses a
 //! schema 2 file, and leaves it as it is.
 //!
@@ -84,7 +91,7 @@ use leviculum_lxmf::telemetry::Location;
 pub const STORE_FILE: &str = "history.sqlite3";
 
 /// The schema this program writes, in SQLite's `user_version`.
-pub const SCHEMA_VERSION: i32 = 3;
+pub const SCHEMA_VERSION: i32 = 4;
 
 /// How long a write waits for another loquax holding the file.
 const BUSY_MS: u64 = 5_000;
@@ -173,6 +180,31 @@ CREATE TABLE unverified(
     PRIMARY KEY (identity, id));
 ";
 
+/// What schema 4 adds to schema 3: the home node's archive, its admitted
+/// devices and its open admission tokens.
+const SCHEMA_V4: &str = "
+CREATE TABLE archive(
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    identity BLOB NOT NULL,
+    kind INTEGER NOT NULL,
+    id BLOB NOT NULL,
+    at INTEGER NOT NULL,
+    packed BLOB NOT NULL);
+CREATE UNIQUE INDEX archive_by_id ON archive(identity, kind, id);
+CREATE TABLE home_devices(
+    identity BLOB NOT NULL,
+    device BLOB NOT NULL,
+    name TEXT NOT NULL,
+    admitted_at INTEGER NOT NULL,
+    PRIMARY KEY (identity, device));
+CREATE TABLE home_tokens(
+    identity BLOB NOT NULL,
+    token BLOB NOT NULL,
+    name TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (identity, token));
+";
+
 /// The tables a whole store of schema 1 has.
 const TABLES_V1: [&str; 5] = [
     "conversations",
@@ -187,6 +219,9 @@ const TABLES_V2: [&str; 1] = ["positions"];
 
 /// The tables schema 3 adds.
 const TABLES_V3: [&str; 1] = ["unverified"];
+
+/// The tables schema 4 adds.
+const TABLES_V4: [&str; 3] = ["archive", "home_devices", "home_tokens"];
 
 /// A received message kept for its signature check: its id, its sender and
 /// the bytes it came as.
@@ -278,8 +313,8 @@ impl Store {
 
     fn create(&self) -> Result<(), StoreError> {
         let batch = format!(
-            "BEGIN IMMEDIATE; {SCHEMA} {SCHEMA_V2} {SCHEMA_V3} PRAGMA user_version = {SCHEMA_VERSION}; \
-             COMMIT;"
+            "BEGIN IMMEDIATE; {SCHEMA} {SCHEMA_V2} {SCHEMA_V3} {SCHEMA_V4} \
+             PRAGMA user_version = {SCHEMA_VERSION}; COMMIT;"
         );
         self.conn
             .execute_batch(&batch)
@@ -340,6 +375,11 @@ impl Store {
                 return Err(corrupt(format!("table {missing} is missing")));
             }
         }
+        if version >= 4 {
+            if let Some(missing) = missing(&TABLES_V4) {
+                return Err(corrupt(format!("table {missing} is missing")));
+            }
+        }
         if version < SCHEMA_VERSION {
             return self.migrate();
         }
@@ -360,7 +400,10 @@ impl Store {
                 if version < 2 {
                     batch.push_str(SCHEMA_V2);
                 }
-                batch.push_str(SCHEMA_V3);
+                if version < 3 {
+                    batch.push_str(SCHEMA_V3);
+                }
+                batch.push_str(SCHEMA_V4);
                 batch.push_str(&format!("PRAGMA user_version = {SCHEMA_VERSION};"));
                 if let Err(error) = self.conn.execute_batch(&batch) {
                     let _ = self.conn.execute_batch("ROLLBACK");
@@ -793,6 +836,300 @@ impl Store {
 
     fn failed(&self, error: impl fmt::Display) -> StoreError {
         failed(&self.path, error)
+    }
+}
+
+/// A device the home node admitted: its RNS identity hash, the name it was
+/// admitted under, and when (unix seconds).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Device {
+    pub device: [u8; 16],
+    pub name: String,
+    pub admitted_at: i64,
+}
+
+/// What redeeming an admission token came to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Redeemed {
+    /// The token was open; the device is admitted under this name and the
+    /// token is gone.
+    Admitted { name: String },
+    /// No such token: never issued, or used already.
+    Unknown,
+}
+
+/// What `loquax home revoke <device>` matched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Revoked {
+    /// Nothing by that name or hash.
+    None,
+    /// This one device, now removed.
+    One(Device),
+    /// More than one device matched; none was removed.
+    Ambiguous(Vec<Device>),
+}
+
+/// The home node's half of the store
+/// (`docs/src/concepts/loquax-home-node.md`): the archive its clients pull,
+/// the admitted devices, the open admission tokens. Every row is scoped by
+/// our own address, as the rest of the store is.
+impl Store {
+    /// Append one archive entry and evict the oldest entries while the
+    /// archive holds more than `cap_bytes` of packed messages. The entry
+    /// just appended is never evicted by its own append, so one message
+    /// larger than the cap is still kept until the next one comes.
+    ///
+    /// The same `(kind, id)` twice is one entry: a message that came direct
+    /// and again out of the propagation node is archived once. `None` is
+    /// that second time.
+    pub fn archive_append(
+        &mut self,
+        kind: u8,
+        id: &[u8; 32],
+        packed: &[u8],
+        at: i64,
+        cap_bytes: u64,
+    ) -> Result<Option<u64>, StoreError> {
+        let identity = self.identity;
+        let path = self.path.clone();
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| failed(&path, e))?;
+        let added = tx
+            .execute(
+                "INSERT OR IGNORE INTO archive(identity, kind, id, at, packed) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![&identity[..], i64::from(kind), &id[..], at, packed],
+            )
+            .map_err(|e| failed(&path, e))?;
+        if added == 0 {
+            return Ok(None);
+        }
+        let seq = tx.last_insert_rowid();
+        let mut total: i64 = tx
+            .query_row(
+                "SELECT COALESCE(SUM(LENGTH(packed)), 0) FROM archive WHERE identity = ?1",
+                params![&identity[..]],
+                |row| row.get(0),
+            )
+            .map_err(|e| failed(&path, e))?;
+        let cap = i64::try_from(cap_bytes).unwrap_or(i64::MAX);
+        while total > cap {
+            let oldest: Option<(i64, i64)> = tx
+                .query_row(
+                    "SELECT seq, LENGTH(packed) FROM archive WHERE identity = ?1 AND seq < ?2 \
+                     ORDER BY seq LIMIT 1",
+                    params![&identity[..], seq],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(|e| failed(&path, e))?;
+            let Some((victim, size)) = oldest else {
+                break;
+            };
+            tx.execute("DELETE FROM archive WHERE seq = ?1", params![victim])
+                .map_err(|e| failed(&path, e))?;
+            total -= size;
+        }
+        tx.commit().map_err(|e| failed(&path, e))?;
+        Ok(Some(seq as u64))
+    }
+
+    /// The archive entries after `cursor`, oldest first, up to about
+    /// `max_bytes` of packed messages but always at least one when there is
+    /// one, and whether more follow. `first` is the oldest sequence still
+    /// held, so a client whose cursor fell behind an eviction can say so.
+    pub fn archive_since(
+        &self,
+        cursor: u64,
+        max_bytes: usize,
+    ) -> Result<crate::home::wire::Page, StoreError> {
+        let cursor = i64::try_from(cursor).unwrap_or(i64::MAX);
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT seq, kind, at, packed FROM archive WHERE identity = ?1 AND seq > ?2 \
+                 ORDER BY seq",
+            )
+            .map_err(|e| self.failed(e))?;
+        let mut rows = statement
+            .query(params![&self.identity[..], cursor])
+            .map_err(|e| self.failed(e))?;
+        let mut entries = Vec::new();
+        let mut bytes = 0usize;
+        let mut more = false;
+        while let Some(row) = rows.next().map_err(|e| self.failed(e))? {
+            let packed: Vec<u8> = row.get(3).map_err(|e| self.failed(e))?;
+            if !entries.is_empty() && bytes.saturating_add(packed.len()) > max_bytes {
+                more = true;
+                break;
+            }
+            bytes = bytes.saturating_add(packed.len());
+            let seq: i64 = row.get(0).map_err(|e| self.failed(e))?;
+            let kind: i64 = row.get(1).map_err(|e| self.failed(e))?;
+            entries.push(crate::home::wire::Entry {
+                seq: seq as u64,
+                kind: u8::try_from(kind).unwrap_or(u8::MAX),
+                at: row.get(2).map_err(|e| self.failed(e))?,
+                packed,
+            });
+        }
+        let first: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT MIN(seq) FROM archive WHERE identity = ?1",
+                params![&self.identity[..]],
+                |row| row.get(0),
+            )
+            .map_err(|e| self.failed(e))?;
+        Ok(crate::home::wire::Page {
+            entries,
+            more,
+            first: first.map_or(0, |seq| seq as u64),
+        })
+    }
+
+    /// How many bytes of packed messages the archive holds.
+    pub fn archive_bytes(&self) -> Result<u64, StoreError> {
+        let total: i64 = self
+            .conn
+            .query_row(
+                "SELECT COALESCE(SUM(LENGTH(packed)), 0) FROM archive WHERE identity = ?1",
+                params![&self.identity[..]],
+                |row| row.get(0),
+            )
+            .map_err(|e| self.failed(e))?;
+        Ok(total.max(0) as u64)
+    }
+
+    /// Open one single-use admission token for a device to be called `name`.
+    pub fn issue_token(&mut self, token: &[u8; 16], name: &str, at: i64) -> Result<(), StoreError> {
+        self.conn
+            .execute(
+                "INSERT INTO home_tokens(identity, token, name, created_at) VALUES (?1, ?2, ?3, ?4)",
+                params![&self.identity[..], &token[..], name, at],
+            )
+            .map(|_| ())
+            .map_err(|e| self.failed(e))
+    }
+
+    /// Redeem `token` for `device`, in one transaction: the token goes and
+    /// the device is admitted under the token's name, or nothing changes.
+    /// A device admitted again keeps one row, with the new name and time.
+    pub fn redeem_token(
+        &mut self,
+        token: &[u8; 16],
+        device: &[u8; 16],
+        at: i64,
+    ) -> Result<Redeemed, StoreError> {
+        let identity = self.identity;
+        let path = self.path.clone();
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| failed(&path, e))?;
+        let name: Option<String> = tx
+            .query_row(
+                "SELECT name FROM home_tokens WHERE identity = ?1 AND token = ?2",
+                params![&identity[..], &token[..]],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| failed(&path, e))?;
+        let Some(name) = name else {
+            return Ok(Redeemed::Unknown);
+        };
+        tx.execute(
+            "DELETE FROM home_tokens WHERE identity = ?1 AND token = ?2",
+            params![&identity[..], &token[..]],
+        )
+        .map_err(|e| failed(&path, e))?;
+        tx.execute(
+            "INSERT OR REPLACE INTO home_devices(identity, device, name, admitted_at) \
+             VALUES (?1, ?2, ?3, ?4)",
+            params![&identity[..], &device[..], &name, at],
+        )
+        .map_err(|e| failed(&path, e))?;
+        tx.commit().map_err(|e| failed(&path, e))?;
+        Ok(Redeemed::Admitted { name })
+    }
+
+    /// Whether `device` is admitted now. Every request asks again.
+    pub fn is_admitted(&self, device: &[u8; 16]) -> Result<bool, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT 1 FROM home_devices WHERE identity = ?1 AND device = ?2",
+                params![&self.identity[..], &device[..]],
+                |_| Ok(()),
+            )
+            .optional()
+            .map(|row| row.is_some())
+            .map_err(|e| self.failed(e))
+    }
+
+    /// Every admitted device, the earliest admitted first.
+    pub fn devices(&self) -> Result<Vec<Device>, StoreError> {
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT device, name, admitted_at FROM home_devices WHERE identity = ?1 \
+                 ORDER BY admitted_at, name",
+            )
+            .map_err(|e| self.failed(e))?;
+        let rows = statement
+            .query_map(params![&self.identity[..]], |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            .map_err(|e| self.failed(e))?;
+        rows.into_iter()
+            .map(|(device, name, admitted_at)| {
+                Ok(Device {
+                    device: self.address(&device)?,
+                    name,
+                    admitted_at,
+                })
+            })
+            .collect()
+    }
+
+    /// Remove the device `which` names: its name exactly, or its hash in
+    /// hex, whole or a prefix of at least four characters. More than one
+    /// match removes nothing.
+    pub fn revoke(&mut self, which: &str) -> Result<Revoked, StoreError> {
+        let which = which.trim();
+        let lower = which.to_ascii_lowercase();
+        let hex_prefix = lower.len() >= 4 && lower.chars().all(|c| c.is_ascii_hexdigit());
+        let matched: Vec<Device> = self
+            .devices()?
+            .into_iter()
+            .filter(|device| {
+                device.name == which
+                    || (hex_prefix && crate::address::to_hex(&device.device).starts_with(&lower))
+            })
+            .collect();
+        match matched.len() {
+            0 => Ok(Revoked::None),
+            1 => {
+                let device = matched
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| self.failed("a matched device vanished between two reads"))?;
+                self.conn
+                    .execute(
+                        "DELETE FROM home_devices WHERE identity = ?1 AND device = ?2",
+                        params![&self.identity[..], &device.device[..]],
+                    )
+                    .map_err(|e| self.failed(e))?;
+                Ok(Revoked::One(device))
+            }
+            _ => Ok(Revoked::Ambiguous(matched)),
+        }
     }
 }
 
@@ -1607,11 +1944,58 @@ mod tests {
         assert!(text.contains("table positions is missing"), "{text}");
     }
 
-    /// A schema 2 store, as the loquax before leviculum 1079 wrote it,
-    /// migrates to schema 3 in place: its unverified message keeps its row
-    /// and has no bytes to be checked with.
+    /// A schema 3 store, as the loquax before the home node wrote it,
+    /// migrates to schema 4 in place: its messages stay, and the archive
+    /// starts empty.
     #[test]
-    fn a_schema_2_store_migrates_to_3_and_its_old_unverified_messages_stay() {
+    fn a_schema_3_store_migrates_to_4_with_an_empty_archive() {
+        let home = tempfile::tempdir().expect("home");
+        let conn = Connection::open(home.path().join(STORE_FILE)).expect("create");
+        conn.execute_batch(&format!(
+            "BEGIN; {SCHEMA} {SCHEMA_V2} {SCHEMA_V3} PRAGMA user_version = 3; COMMIT;"
+        ))
+        .expect("schema 3");
+        drop(conn);
+        let mut store = Store::open_in(home.path(), US).expect("schema 3 opens");
+        put(&mut store, ALICE, message(1, false, "kept"));
+        drop(store);
+        let mut store = Store::open_in(home.path(), US).expect("reopen");
+        assert_eq!(
+            store
+                .conn
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i32>(0))
+                .expect("version"),
+            4
+        );
+        assert_eq!(store.restore().expect("restore")[0].messages.len(), 1);
+        assert_eq!(
+            store.archive_since(0, usize::MAX).expect("page").entries,
+            []
+        );
+        assert_eq!(
+            store
+                .archive_append(0, &[1; 32], b"m", 1, u64::MAX)
+                .expect("append"),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn a_schema_4_store_without_its_archive_is_refused() {
+        let home = tempfile::tempdir().expect("home");
+        drop(Store::open_in(home.path(), US).expect("fresh"));
+        let conn = Connection::open(home.path().join(STORE_FILE)).expect("open");
+        conn.execute_batch("DROP TABLE archive").expect("drop");
+        drop(conn);
+        let text = refused(home.path());
+        assert!(text.contains("table archive is missing"), "{text}");
+    }
+
+    /// A schema 2 store, as the loquax before leviculum 1079 wrote it,
+    /// migrates in place to this program's schema: its unverified message
+    /// keeps its row and has no bytes to be checked with.
+    #[test]
+    fn a_schema_2_store_migrates_and_its_old_unverified_messages_stay() {
         let home = tempfile::tempdir().expect("home");
         let conn = Connection::open(home.path().join(STORE_FILE)).expect("create");
         conn.execute_batch(&format!(
@@ -1630,7 +2014,7 @@ mod tests {
                 .conn
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i32>(0))
                 .expect("version"),
-            3
+            SCHEMA_VERSION
         );
         assert!(store.unverified().expect("unverified").is_empty());
         assert_eq!(

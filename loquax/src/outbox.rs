@@ -106,6 +106,14 @@ pub enum Command {
         source: [u8; 16],
         packed: Vec<u8>,
     },
+    /// Take in one message pulled from the home node, packed as it came
+    /// (`docs/src/concepts/loquax-home-node.md`): it is reported as
+    /// [`OutboxEvent::Received`], its signature checked against its
+    /// sender's key as a received message's is.
+    Ingest { packed: Vec<u8> },
+    /// Announce our delivery destination again, on the next tick. The home
+    /// node does it on a slow timer, as lxmd's `announce_interval` would.
+    Announce,
 }
 
 /// What the mailbox rule is fed from, read by the frontend before it selects:
@@ -221,6 +229,13 @@ pub enum OutboxEvent {
     SyncFailed {
         detail: String,
         path: Option<PropagationPathAttempts>,
+    },
+    /// The message just [`OutboxEvent::Received`], packed as it came, for a
+    /// home node's archive. Only an engine asked for it hands it out
+    /// ([`crate::engine::Engine::handing_out_packed`]).
+    Packed {
+        message_id: [u8; 32],
+        packed: Vec<u8>,
     },
 }
 

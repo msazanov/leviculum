@@ -2461,13 +2461,15 @@ loquax-core-no-std:
 # tests. This does: clippy over every loquax target with the feature, the
 # binary's renderer and script tests, and the scripted session against an
 # in-process daemon (`loquax/tests/tui_snapshot.rs`, 8 s, and 8 s again in
-# each of three runs under a 25 % CPU quota, 2026-10-25). In `standard`, not
-# `fast`: the session spawns loquax against a daemon over sockets. The screen
-# model's own tests are core and run in every lib run.
+# each of three runs under a 25 % CPU quota, 2026-10-25), and the home node
+# end to end against a stock Python LXMF sender (`loquax/tests/home_node.rs`,
+# 2.6 s, 2.9 s under a 25 % quota, 2026-10-29; `--daemon` and `home` are the
+# tui build's). In `standard`, not `fast`: both spawn loquax against a daemon
+# over sockets. The screen model's own tests are core and run in every lib run.
 [doc('Lint and test loquax with its tui feature (#232)')]
 loquax-tui:
     cargo clippy -p loquax --features tui --all-targets -- -D warnings
-    {{manifest}} loquax-tui -- cargo test -p loquax --features tui --bins --test tui_snapshot
+    {{manifest}} loquax-tui -- cargo test -p loquax --features tui --bins --test tui_snapshot --test home_node
 
 # 1084, #474: loquax's `gui` feature (the iced window) is off by default and
 # in no other feature, so neither the workspace runs nor `loquax-tui` compile

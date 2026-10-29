@@ -77,7 +77,9 @@ use crate::outbox::{Command, MailboxInput, OutboxEvent, SendRequest, Via};
 #[cfg(feature = "std")]
 mod shell;
 #[cfg(feature = "std")]
-pub use shell::{attach, AttachConfig, AttachError, Attached, InProcessOutbox};
+pub use shell::{
+    attach, attach_as, AttachConfig, AttachError, Attached, HomeRequest, InProcessOutbox, Role,
+};
 
 /// How soon the engine asks the driver to come back.
 ///
@@ -87,6 +89,11 @@ pub use shell::{attach, AttachConfig, AttachError, Attached, InProcessOutbox};
 /// uses for the same job, and it bounds command pickup latency at a fifth of
 /// the driver's 1 s idle cadence.
 const POLL_INTERVAL_MS: u64 = 200;
+
+/// Why a client of a home node does not send yet: sending through the home
+/// node is the next slice (`docs/src/concepts/loquax-home-node.md`).
+pub const CLIENT_SENDS: &str = "this device is a client of a home node, and sending through \
+                                the home node is not built yet";
 
 /// How many path-table entries a selection asks the daemon to replay.
 ///
@@ -251,6 +258,18 @@ enum State {
     Ready(Box<Ready>),
     /// Registration failed and was reported.
     Failed,
+    /// A client of a home node (`docs/src/concepts/loquax-home-node.md`):
+    /// no LXMF destination at all, so in particular none for the home
+    /// identity, whose private key this device never holds. Messages come
+    /// in as [`Command::Ingest`], pulled from the home node by the shell.
+    Client(Client),
+}
+
+/// What a client engine keeps: the home node's LXMF address, which the
+/// screen shows as ours, and whether `Ready` has been said.
+struct Client {
+    address: [u8; 16],
+    said_ready: bool,
 }
 
 /// The LXMF engine: the router glue, driven from the node core's two hooks.
@@ -291,26 +310,56 @@ pub struct Engine {
     /// Received messages waiting on their sender's key, by sender. See
     /// [`Unheard`].
     unheard: BTreeMap<[u8; 16], Unheard>,
+    /// Whether every received message is also handed out packed
+    /// ([`OutboxEvent::Packed`]): a home node archives it as it came.
+    hands_out_packed: bool,
 }
 
 impl Engine {
     /// An engine that registers `identity`'s delivery destination on its
     /// first hook and announces it under `display_name`.
     pub fn new(identity: Identity, display_name: Vec<u8>) -> Self {
+        Self::starting_in(State::Unregistered(Box::new(identity)), display_name)
+    }
+
+    fn starting_in(state: State, display_name: Vec<u8>) -> Self {
         Self {
             display_name,
             events: VecDeque::new(),
             commands: VecDeque::new(),
             stamps: VecDeque::new(),
             stamp_answers: VecDeque::new(),
-            state: State::Unregistered(Box::new(identity)),
+            state,
             resolves: Vec::new(),
             tracked: BTreeMap::new(),
             mining: BTreeMap::new(),
             announced: false,
             pending_selection: None,
             unheard: BTreeMap::new(),
+            hands_out_packed: false,
         }
+    }
+
+    /// An engine for a client of the home node whose LXMF address is
+    /// `address`. It registers nothing, by construction: the state it starts
+    /// in has no identity to register, and no path leads from it to
+    /// `register`. The guard test is
+    /// `a_client_engine_registers_no_delivery_destination`.
+    pub fn client(address: [u8; 16]) -> Self {
+        Self::starting_in(
+            State::Client(Client {
+                address,
+                said_ready: false,
+            }),
+            Vec::new(),
+        )
+    }
+
+    /// Hand every received message out packed as well
+    /// ([`OutboxEvent::Packed`]), for a home node's archive.
+    pub fn handing_out_packed(mut self) -> Self {
+        self.hands_out_packed = true;
+        self
     }
 
     /// Queue one frontend command for the next [`Engine::on_tick`].
@@ -456,6 +505,9 @@ impl Engine {
                 // that did not verify here had no key to be checked against.
                 let held =
                     (!verified).then(|| (message.message_id, message.source_hash, message.pack()));
+                let packed = self
+                    .hands_out_packed
+                    .then(|| (message.message_id, message.pack()));
                 self.emit(OutboxEvent::Received {
                     message_id: message.message_id,
                     source: message.source_hash,
@@ -471,6 +523,9 @@ impl Engine {
                         source,
                         packed,
                     });
+                }
+                if let Some((message_id, packed)) = packed {
+                    self.emit(OutboxEvent::Packed { message_id, packed });
                 }
             }
             RouterEvent::PeerAnnounced {
@@ -584,8 +639,125 @@ impl Engine {
                     source,
                     packed,
                 } => self.hold(message_id, source, packed),
+                Command::Ingest { packed } => self.ingest(core, ready.address, &packed),
+                Command::Announce => self.announced = false,
             }
         }
+    }
+
+    /// Take in one message pulled from a home node, as it came: check that
+    /// it is addressed to `address`, check its signature against the
+    /// sender's key when that is known, and report it as a message that
+    /// arrived. One whose sender is not known yet is held, as a received
+    /// one is; one whose signature does not hold is dropped, as the router
+    /// drops one (`leviculum-lxmf/src/router.rs`, `accept_inbound`).
+    fn ingest<R: CryptoRngCore, C: CoreClock, S: Storage>(
+        &mut self,
+        core: &mut NodeCore<R, C, S>,
+        address: [u8; 16],
+        packed: &[u8],
+    ) {
+        let message =
+            match leviculum_lxmf::Message::unpack(packed, None, None, DeliveryMethod::Direct) {
+                Ok(message) => message,
+                Err(error) => {
+                    tracing::warn!("HOME ingest: not an LXMF message: {error:?}");
+                    return;
+                }
+            };
+        if message.destination_hash != address {
+            tracing::warn!(
+                "HOME ingest: message {} is for {}, not for us",
+                crate::address::to_hex(&message.message_id),
+                crate::address::to_hex(&message.destination_hash)
+            );
+            return;
+        }
+        let verification = core
+            .storage()
+            .get_identity(&message.source_hash)
+            .map(|identity| reverify(packed, identity));
+        if verification == Some(Verification::Invalid) {
+            tracing::warn!(
+                "HOME ingest: message {} does not carry its sender's signature",
+                crate::address::to_hex(&message.message_id)
+            );
+            return;
+        }
+        let verified = verification == Some(Verification::Valid);
+        let (message_id, source) = (message.message_id, message.source_hash);
+        self.emit(OutboxEvent::Received {
+            message_id,
+            source,
+            verified,
+            title: message.title,
+            body: message.content,
+            fields: message.fields,
+        });
+        if !verified {
+            self.hold(message_id, source, packed.to_vec());
+            self.emit(OutboxEvent::Unverified {
+                message_id,
+                source,
+                packed: packed.to_vec(),
+            });
+        }
+    }
+
+    /// The client engine's tick: say `Ready` once, take the commands a
+    /// client has, and settle held messages as their senders' keys come.
+    fn client_tick<R: CryptoRngCore, C: CoreClock, S: Storage>(
+        &mut self,
+        core: &mut NodeCore<R, C, S>,
+        now_ms: u64,
+    ) -> TickOutput {
+        let mut out = TickOutput::empty();
+        let State::Client(client) = &mut self.state else {
+            return out;
+        };
+        let address = client.address;
+        let say_ready = !client.said_ready;
+        client.said_ready = true;
+        if say_ready {
+            self.emit(OutboxEvent::Ready { address });
+        }
+        while let Some(command) = self.commands.pop_front() {
+            match command {
+                Command::Ingest { packed } => self.ingest(core, address, &packed),
+                Command::Verify {
+                    message_id,
+                    source,
+                    packed,
+                } => self.hold(message_id, source, packed),
+                Command::Send(_) => self.emit(OutboxEvent::Refused {
+                    detail: CLIENT_SENDS.to_string(),
+                }),
+                Command::Fetch { .. } => self.emit(OutboxEvent::SyncFailed {
+                    detail: "a client of a home node pulls from the home node, not a \
+                             propagation node"
+                        .to_string(),
+                    path: None,
+                }),
+                Command::SelectPn { .. } => self.emit(OutboxEvent::PnUnavailable {
+                    detail: "a client of a home node has no propagation node of its own"
+                        .to_string(),
+                }),
+                Command::Resolve { .. } | Command::Cancel { .. } | Command::Announce => {}
+            }
+        }
+        for source in self.unheard_due(core, now_ms) {
+            // No router to feed: what the request produces besides packets
+            // is nothing a client reads.
+            let mut output = core.request_path(&DestinationHash::new(source));
+            output.events.clear();
+            out.merge(output);
+        }
+        let poll = now_ms.saturating_add(POLL_INTERVAL_MS);
+        out.next_deadline_ms = Some(match out.next_deadline_ms {
+            Some(existing) => existing.min(poll),
+            None => poll,
+        });
+        out
     }
 
     /// Pick the propagation node for this run's uploads and drains: the
@@ -1002,8 +1174,32 @@ impl Engine {
         now_ms: u64,
         out: &mut TickOutput,
     ) {
+        for source in self.unheard_due(core, now_ms) {
+            // Through `absorb`, for the reason `poll_resolves` gives.
+            let output = core.request_path(&DestinationHash::new(source));
+            self.absorb(
+                ready,
+                core,
+                RouterOutput {
+                    core: output,
+                    events: Vec::new(),
+                },
+                out,
+            );
+        }
+    }
+
+    /// The router-free half of [`Engine::poll_unheard`], which a client of
+    /// a home node runs too: settle every held message whose sender's key
+    /// has arrived, and name the senders whose path is due to be asked for.
+    fn unheard_due<R: CryptoRngCore, C: CoreClock, S: Storage>(
+        &mut self,
+        core: &mut NodeCore<R, C, S>,
+        now_ms: u64,
+    ) -> Vec<[u8; 16]> {
+        let mut due = Vec::new();
         if self.unheard.is_empty() {
-            return;
+            return due;
         }
         let sources: Vec<[u8; 16]> = self.unheard.keys().copied().collect();
         for source in sources {
@@ -1040,18 +1236,9 @@ impl Engine {
                 unheard.messages.len(),
                 unheard.path_requests,
             );
-            // Through `absorb`, for the reason `poll_resolves` gives.
-            let output = core.request_path(&DestinationHash::new(source));
-            self.absorb(
-                ready,
-                core,
-                RouterOutput {
-                    core: output,
-                    events: Vec::new(),
-                },
-                out,
-            );
+            due.push(source);
         }
+        due
     }
 
     /// Answer every resolve that can be answered now.
@@ -1264,6 +1451,9 @@ impl Engine {
         event: &NodeEvent,
     ) -> TickOutput {
         let mut out = TickOutput::empty();
+        if matches!(self.state, State::Client(_)) {
+            return out;
+        }
         let Some(mut ready) = self.take_ready(core) else {
             return out;
         };
@@ -1307,6 +1497,9 @@ impl Engine {
         core: &mut NodeCore<R, C, S>,
         now_ms: u64,
     ) -> TickOutput {
+        if matches!(self.state, State::Client(_)) {
+            return self.client_tick(core, now_ms);
+        }
         let mut out = TickOutput::empty();
         let Some(mut ready) = self.take_ready(core) else {
             return out;
@@ -1458,6 +1651,178 @@ mod tests {
             StdClock::new(),
             StdStorage::new(dir).expect("storage under a fresh temp dir"),
         )
+    }
+
+    /// A home node's identity, the engine's client of it, and a core.
+    fn client_setup(dir: &std::path::Path) -> (Identity, [u8; 16], Engine, StdNodeCore) {
+        let home = leviculum_std::generate_identity();
+        let address = delivery_address(&home).expect("address");
+        (home, address, Engine::client(address), core(dir))
+    }
+
+    /// Every command a client is sent, and an event, through the engine.
+    fn exercise_client(engine: &mut Engine, core: &mut StdNodeCore) -> Vec<TickOutput> {
+        let mut outs = Vec::new();
+        let now_ms = core.now_ms();
+        outs.push(engine.on_tick(core, now_ms));
+        for command in [
+            Command::Announce,
+            Command::Resolve {
+                destination: [9; 16],
+            },
+            Command::SelectPn {
+                preferred: Some([8; 16]),
+                mailbox: None,
+            },
+            Command::Fetch {
+                path_budget_ms: 1_000,
+            },
+            Command::Send(Box::new(SendRequest {
+                destination: [9; 16],
+                title: Vec::new(),
+                body: b"x".to_vec(),
+                fields: Vec::new(),
+                via: Via::Link,
+            })),
+        ] {
+            engine.submit(command);
+            let now_ms = core.now_ms();
+            outs.push(engine.on_tick(core, now_ms));
+        }
+        outs.push(engine.on_event(core, &NodeEvent::InterfaceDown(0)));
+        outs
+    }
+
+    /// The guard of the home node's one rule: a client never registers a
+    /// delivery destination for the home identity, nor any other, and never
+    /// announces. The positive control runs the same probe on a messenger
+    /// engine holding the home identity, which does register it, so a probe
+    /// that could not see a registration would fail there.
+    #[test]
+    fn a_client_engine_registers_no_delivery_destination() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (home, address, mut engine, mut client_core) = client_setup(dir.path());
+        let outs = exercise_client(&mut engine, &mut client_core);
+        assert!(
+            client_core
+                .destination(&DestinationHash::new(address))
+                .is_none(),
+            "a client registered the home identity's delivery destination"
+        );
+        assert!(
+            outs.iter().all(|out| out.actions.is_empty()),
+            "a client put something on the wire: {:?}",
+            outs.iter().map(|out| out.actions.len()).collect::<Vec<_>>()
+        );
+        let events = drain(&mut engine);
+        assert_eq!(events.first(), Some(&OutboxEvent::Ready { address }));
+        assert!(events.contains(&OutboxEvent::Refused {
+            detail: CLIENT_SENDS.to_string()
+        }));
+
+        // Positive control: the messenger engine with the same identity.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut messenger_core = core(dir.path());
+        let mut messenger = Engine::new(home, b"home".to_vec());
+        let now_ms = messenger_core.now_ms();
+        let out = messenger.on_tick(&mut messenger_core, now_ms);
+        assert!(messenger_core
+            .destination(&DestinationHash::new(address))
+            .is_some());
+        assert!(!out.actions.is_empty(), "the messenger announces");
+    }
+
+    fn signed(to: [u8; 16], sender: &Identity, body: &[u8]) -> leviculum_lxmf::Message {
+        leviculum_lxmf::Message::create(
+            to,
+            delivery_address(sender).expect("sender address"),
+            sender,
+            1_800_000_000.0,
+            Vec::new(),
+            body.to_vec(),
+            Vec::new(),
+            DeliveryMethod::Direct,
+        )
+        .expect("message")
+    }
+
+    #[test]
+    fn an_ingested_message_from_a_known_sender_arrives_verified() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (_home, address, mut engine, mut core) = client_setup(dir.path());
+        let sender = leviculum_std::generate_identity();
+        let source = delivery_address(&sender).expect("source");
+        core.remember_identity(DestinationHash::new(source), sender.clone());
+        let message = signed(address, &sender, b"hello");
+        engine.submit(Command::Ingest {
+            packed: message.pack(),
+        });
+        let now_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, now_ms);
+        let events = drain(&mut engine);
+        assert!(events.contains(&OutboxEvent::Received {
+            message_id: message.message_id,
+            source,
+            title: Vec::new(),
+            body: b"hello".to_vec(),
+            fields: Vec::new(),
+            verified: true,
+        }));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, OutboxEvent::Unverified { .. })));
+    }
+
+    #[test]
+    fn an_ingested_message_from_an_unknown_sender_is_held_unverified() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (_home, address, mut engine, mut core) = client_setup(dir.path());
+        let sender = leviculum_std::generate_identity();
+        let message = signed(address, &sender, b"who");
+        engine.submit(Command::Ingest {
+            packed: message.pack(),
+        });
+        let now_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, now_ms);
+        let events = drain(&mut engine);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            OutboxEvent::Received { verified: false, message_id, .. }
+                if *message_id == message.message_id
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            OutboxEvent::Unverified { message_id, .. } if *message_id == message.message_id
+        )));
+    }
+
+    #[test]
+    fn an_ingested_message_for_someone_else_or_forged_is_dropped() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (_home, address, mut engine, mut core) = client_setup(dir.path());
+        let sender = leviculum_std::generate_identity();
+        let source = delivery_address(&sender).expect("source");
+        core.remember_identity(DestinationHash::new(source), sender.clone());
+        let elsewhere = signed([0x77; 16], &sender, b"not ours");
+        let mut forged = signed(address, &sender, b"genuine").pack();
+        let last = forged.len() - 1;
+        forged[last] ^= 0x01;
+        let now_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, now_ms);
+        drain(&mut engine);
+        engine.submit(Command::Ingest {
+            packed: elsewhere.pack(),
+        });
+        engine.submit(Command::Ingest { packed: forged });
+        let now_ms = core.now_ms();
+        let _ = engine.on_tick(&mut core, now_ms);
+        let events = drain(&mut engine);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, OutboxEvent::Received { .. })),
+            "{events:?}"
+        );
     }
 
     /// The first tick registers the delivery destination against a real core

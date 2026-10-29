@@ -211,6 +211,11 @@ required-features = ["std"]
 name = "tui_snapshot"
 required-features = ["tui"]
 
+# The home node end to end: `--daemon` and `home` are the terminal build's.
+[[test]]
+name = "home_node"
+required-features = ["tui"]
+
 # A throwaway: the samples and cost table of
 # docs/drafts/terminal-map-rendering-2026-10.md (1090). Never in a package.
 [[example]]
