@@ -42,4 +42,11 @@
     <string name="map_load">Load area</string>
     <string name="map_loading">Loading the map of this area…</string>
     <string name="map_no_pins">No positions yet. A contact\'s position report puts them on the map.</string>
+    <string name="back">Back</string>
+    <string name="menu">More</string>
+    <string name="emoji">Emoji</string>
+    <string name="today">Today</string>
+    <string name="yesterday">Yesterday</string>
+    <string name="just_now">Now</string>
+    <string name="minutes_ago">%1$d min</string>
 </resources>

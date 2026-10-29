@@ -1,23 +1,33 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- The app's colours in the light theme; values-night/colors.xml holds the
      same names for the dark one. Every pair of text and its ground keeps a
-     contrast of 4.5:1 or more (WCAG AA), the numbers beside each. -->
+     contrast of 4.5:1 or more (WCAG AA), a mark or a control 3:1 against
+     what it sits on, the numbers beside each. The chat follows a modern
+     messenger's layout (1129); ours stays in loquax's green, the accent. -->
 <resources>
-    <color name="background">#fafafa</color>
-    <!-- 15.6:1 and 6.1:1 on the background. -->
-    <color name="text">#202020</color>
-    <color name="text_secondary">#5f5f5f</color>
-    <!-- Buttons, fields and the cursor; 4.8:1 on the background. -->
+    <color name="background">#ffffff</color>
+    <!-- 17.2:1 and 6.4:1 on the background. -->
+    <color name="text">#1b1b1d</color>
+    <color name="text_secondary">#5c5f66</color>
+    <!-- Buttons, fields, the cursor and an unread time; 5.0:1 on the background. -->
     <color name="accent">#3a7d44</color>
-    <!-- Our bubble: body 13.0:1, time and state 5.6:1. -->
-    <color name="bubble_ours">#d4ecd0</color>
-    <color name="bubble_ours_text">#202020</color>
-    <color name="bubble_ours_meta">#4a5e47</color>
-    <!-- Theirs: body 13.8:1, time 5.4:1. -->
-    <color name="bubble_theirs">#ececec</color>
-    <color name="bubble_theirs_text">#202020</color>
-    <color name="bubble_theirs_meta">#5f5f5f</color>
-    <!-- The unread count: 5.0:1. -->
-    <color name="badge">#3a7d44</color>
+    <!-- The chat's top bar and the compose field: text 15.4:1, hint 5.7:1. -->
+    <color name="bar">#f1f2f4</color>
+    <!-- Our bubble: body 6.4:1, time and the delivery mark 5.1:1. -->
+    <color name="bubble_ours">#2e6b38</color>
+    <color name="bubble_ours_text">#ffffff</color>
+    <color name="bubble_ours_meta">#d6eadb</color>
+    <!-- Theirs: body 14.3:1, time 5.9:1. -->
+    <color name="bubble_theirs">#e9eaed</color>
+    <color name="bubble_theirs_text">#1b1b1d</color>
+    <color name="bubble_theirs_meta">#55585e</color>
+    <!-- The failed mark: its circle 5.0:1 on our bubble, the sign 7.2:1 on it. -->
+    <color name="failed_ground">#ffdad6</color>
+    <color name="failed_mark">#93000a</color>
+    <!-- The send button: 6.4:1 on the background, its arrow 6.4:1 on it. -->
+    <color name="send">#2e6b38</color>
+    <color name="on_send">#ffffff</color>
+    <!-- The unread count: 6.4:1. -->
+    <color name="badge">#2e6b38</color>
     <color name="badge_text">#ffffff</color>
 </resources>

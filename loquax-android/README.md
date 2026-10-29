@@ -12,17 +12,29 @@ What it does today:
   `host:port` of its lnsd TCP server, and joins. Both are kept in the app's
   files directory; later starts need neither. What went wrong is said in
   plain words, and the field it concerns is focused.
-- **Conversations.** Names as every loquax screen gives them, the last
-  message, the unread count, most recent first. An address typed below the
-  list opens a new conversation.
-- **Chat.** Bubbles, ours right and theirs left; each of ours says
-  `queued`, `sending`, `sent`, `delivered` or `failed` from the home node's
-  archive. Reactions show as chips under their message; a long press reacts
-  with one of loquax's quick six. Send goes through the home node's
-  `/send`. Opening the chat reads it (a read mark for the home's other
-  devices) and pulls; the refresh button pulls; the sync schedule pulls
-  while the app runs. Leaving the chat closes it, so what arrives then
-  stays unread.
+- **Conversations.** An avatar circle (initials on a colour from the
+  address, or the peer's own colours when it sent an LXMF icon
+  appearance), names as every loquax screen gives them, the last message,
+  when (minutes ago, the time today, yesterday, the weekday, the date),
+  the unread count; most recent first. An address typed below the list
+  opens a new conversation.
+- **Chat.** After a modern messenger's layout: a bar with back, the
+  peer's avatar and name and a menu (pull now, the map). Rounded bubbles,
+  ours right in loquax's green and theirs left in a grey a step lighter
+  than the screen, at most 80 % of its width. Inside a bubble's bottom
+  right its time and for ours the mark from the home node's archive: a
+  clock queued or sending, a tick sent, two ticks in a filled circle
+  delivered, a red mark failed. One sender's messages within three
+  minutes group: close together, inner corners less round, only the last
+  with its time (the newest group's in minutes ago). A day separator
+  ("Today", "Yesterday", the weekday, the date; German on a German phone)
+  between days. Reactions are pills over a bubble's bottom edge, the emoji
+  and a count above one; a long press reacts with one of loquax's quick
+  six. The compose field is a pill with an emoji button, and a round send
+  button beside it. Send goes through the home node's `/send`. Opening the
+  chat reads it (a read mark for the home's other devices) and pulls; the
+  menu pulls; the sync schedule pulls while the app runs. Leaving the chat
+  closes it, so what arrives then stays unread.
 
 - **In the background.** After the start a foreground service
   (`LoquaxService`, type `remoteMessaging`) holds the session: the link to
@@ -109,12 +121,12 @@ keytool -genkeypair -keystore android/loquax.keystore \
 | Path | What |
 |---|---|
 | `Cargo.toml`, `src/lib.rs` | the JNI library, a workspace member; `cargo test -p loquax-android` runs its tests on the host, `tests/facade.rs` against an in-process home node |
-| `src/schema.rs`, `src/session.rs` | the payloads, and the session behind them |
+| `src/schema.rs`, `src/session.rs`, `src/avatar.rs` | the payloads, the session behind them, and a peer's avatar (initials, icon appearance) |
 | `src/map.rs`, `tests/map.rs` | the map screen's frames, and their test against the shared renderer and its golden (`tests/golden/`) |
 | `Makefile` | the template's, with the `native` step and the Android settings below |
 | `android/AndroidManifest.xml` | with the template's build-time tokens |
-| `android/src/network/leviculum/loquax/` | the four screens (`MainActivity` joins, `ConversationsActivity`, `ChatActivity`, `MapActivity` with its `MapView`), `LoquaxService`, which holds the session, and `ServiceLink`, the screens' binding to it, `Asks`, the two questions asked once, `Native`, the Java face of the library, `Core` and `MsgPack`, which read it, and `Events` |
-| `android/res/` | layouts, the bubbles' shapes, strings, the theme and its colours, light in `values/` and dark in `values-night/` |
+| `android/src/network/leviculum/loquax/` | the four screens (`MainActivity` joins, `ConversationsActivity`, `ChatActivity`, `MapActivity` with its `MapView`), `LoquaxService`, which holds the session, and `ServiceLink`, the screens' binding to it, `Asks`, the two questions asked once, `Native`, the Java face of the library, `Core` and `MsgPack`, which read it, `Events`, and the chat's drawing: `AvatarView`, `BubbleLayout` (body with time and mark inside) and `Glyph` (its icons as paths) |
+| `android/res/` | layouts, the compose field's and badge's shapes, strings (the chat's times also in `values-de/`), the theme and its colours, light in `values/` and dark in `values-night/` |
 | `install-toolchain.sh` | the SDK and NDK pieces, checked by SHA-1 |
 
 ## Where it differs from the template

@@ -1,0 +1,12 @@
+<?xml version='1.0' encoding='utf-8'?>
+<!-- The chat's times and its icons' names in German (1129); every other
+     string falls back to values/strings.xml. -->
+<resources>
+    <string name="back">Zurück</string>
+    <string name="menu">Mehr</string>
+    <string name="emoji">Emoji</string>
+    <string name="today">Heute</string>
+    <string name="yesterday">Gestern</string>
+    <string name="just_now">Jetzt</string>
+    <string name="minutes_ago">%1$d Min.</string>
+</resources>

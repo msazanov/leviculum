@@ -1,14 +1,25 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- One conversation: avatar, name, last line, when, unread (1129). -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
     android:gravity="center_vertical"
+    android:minHeight="72dp"
     android:orientation="horizontal"
-    android:padding="12dp">
+    android:paddingStart="16dp"
+    android:paddingTop="8dp"
+    android:paddingEnd="16dp"
+    android:paddingBottom="8dp">
+
+    <network.leviculum.loquax.AvatarView
+        android:id="@+id/avatar"
+        android:layout_width="48dp"
+        android:layout_height="48dp" />
 
     <LinearLayout
         android:layout_width="0dp"
         android:layout_height="wrap_content"
+        android:layout_marginStart="16dp"
         android:layout_weight="1"
         android:orientation="vertical">
 
@@ -18,16 +29,18 @@
             android:layout_height="wrap_content"
             android:ellipsize="end"
             android:maxLines="1"
-            android:textSize="16sp"
-            android:textStyle="bold" />
+            android:textColor="@color/text"
+            android:textSize="17sp" />
 
         <TextView
             android:id="@+id/last"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:textColor="@color/text_secondary"
+            android:layout_marginTop="2dp"
             android:ellipsize="end"
-            android:maxLines="1" />
+            android:maxLines="1"
+            android:textColor="@color/text_secondary"
+            android:textSize="15sp" />
     </LinearLayout>
 
     <LinearLayout
@@ -47,11 +60,15 @@
         <TextView
             android:id="@+id/unread"
             android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
+            android:layout_height="22dp"
+            android:layout_marginTop="4dp"
             android:background="@drawable/badge"
+            android:gravity="center"
+            android:minWidth="22dp"
             android:paddingStart="6dp"
             android:paddingEnd="6dp"
             android:textColor="@color/badge_text"
-            android:textSize="12sp" />
+            android:textSize="12sp"
+            android:textStyle="bold" />
     </LinearLayout>
 </LinearLayout>

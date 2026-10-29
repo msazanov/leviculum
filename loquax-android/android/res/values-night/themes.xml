@@ -8,4 +8,12 @@
         <item name="android:textColorSecondary">@color/text_secondary</item>
         <item name="android:colorAccent">@color/accent</item>
     </style>
+    <!-- The chat (1129): its own bar with avatar and menu instead of the
+         action bar, the status bar in the bar's colour. -->
+    <style name="Loquax.Chat">
+        <item name="android:windowActionBar">false</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:statusBarColor">@color/bar</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
 </resources>

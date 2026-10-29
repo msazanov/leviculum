@@ -15,7 +15,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
-/** The conversation list: names, last message, unread; most recent first. */
+/** The conversation list: avatar, name, last message, when, unread; most recent first. */
 public class ConversationsActivity extends Activity implements Events.Listener {
     private final List<Map<String, Object>> rows = new ArrayList<>();
     private TextView status;
@@ -174,8 +174,11 @@ public class ConversationsActivity extends Activity implements Events.Listener {
                 last = getString(R.string.you) + " " + last;
             }
             ((TextView) view.findViewById(R.id.last)).setText(last);
-            ((TextView) view.findViewById(R.id.at)).setText(Ui.when(Core.num(row, "at")));
             long unread = Core.num(row, "unread");
+            TextView at = (TextView) view.findViewById(R.id.at);
+            at.setText(Ui.listTime(ConversationsActivity.this, Core.num(row, "at"), Ui.nowSecs()));
+            at.setTextColor(getColor(unread > 0 ? R.color.accent : R.color.text_secondary));
+            ((AvatarView) view.findViewById(R.id.avatar)).show(Core.str(row, "peer"), row);
             TextView badge = (TextView) view.findViewById(R.id.unread);
             badge.setVisibility(unread > 0 ? View.VISIBLE : View.GONE);
             badge.setText(String.valueOf(unread));
