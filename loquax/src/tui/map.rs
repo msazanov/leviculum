@@ -4,22 +4,38 @@
 //!
 //! The model ([`loquax::ui::map`]) says which view to draw and where the
 //! pins go; this module draws the view's picture under them and the
-//! attribution line below it. The ladder, decided 2026-10-27: kitty or
-//! sixel where the terminal answers for one, else half-blocks in colour,
-//! else braille, which is also the backend under `--no-color` and behind
-//! mosh (1088). The `--graphics` flag forces a rung, and `tui.log` names
-//! the one taken and why (`GRAPHICS backend= reason=`), beside the `KEYS`
-//! line.
+//! attribution line below it.
+//!
+//! The ladder (1093, Lew 2026-10-28: the most beautiful drawing the
+//! terminal can show): kitty or sixel where the terminal answers for one
+//! and no mosh or tmux sits between; octants where the terminal draws them
+//! itself and the glyphs survive the way there; quadrants and eighth
+//! blocks (`blocks`) in a local terminal with 256 colours or more; braille
+//! with one-dot lines over cell colours (`braille-thin`) over mosh, in
+//! Termux and at 16 colours; plain braille without colour. Half-blocks and
+//! the one-colour-a-cell `mosaic` are no rung, only a choice
+//! (`docs/drafts/terminal-map-rendering-2026-10.md`). The `--graphics` flag
+//! forces a way, `tui.log` names the one taken and why (`GRAPHICS backend=
+//! reason=`), beside the `KEYS` line.
+//!
+//! `t` cycles through every way live, the ones the facts say will not work
+//! marked, and the one the reader stays on is remembered per context
+//! ([`Facts::context`], the config's `map_drawing.<context>`); a remembered
+//! way wins over the ladder at the next start unless it cannot work at all
+//! there.
 //!
 //! The region files, where they are read from, and the frame one view is
-//! drawn into are the library's ([`loquax::picture`]), shared with the GUI.
+//! drawn into are the library's ([`loquax::picture`]), shared with the GUI;
+//! the text techniques' encoders are the map core's
+//! ([`leviculum_map::cells`]).
 
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use embedded_graphics::pixelcolor::Rgb565;
+use leviculum_map::cells::{self, Encoding, Sets};
 use leviculum_map::draw::Ink;
-use leviculum_map::viewport::Viewport;
+use leviculum_map::viewport::{Viewport, MAX_VIEW_ZOOM};
 use leviculum_mapfill::frame::{rgb888, Frame};
 use leviculum_mapfill::style::BACKGROUND;
 use leviculum_ui::color::Tier;
@@ -33,19 +49,28 @@ use ratatui::Frame as TermFrame;
 use tokio::sync::Notify;
 
 use loquax::picture::{Drawn, Maps, Painter};
-use loquax::ui::map::{MapSetup, MapView};
+use loquax::ui::map::{Drawing, MapSetup, MapView};
 
 /// `--graphics`.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum GraphicsFlag {
-    /// Ask the terminal and climb the ladder.
+    /// Ask the terminal and climb the ladder, or take the way remembered
+    /// for this terminal.
     Auto,
     /// The kitty graphics protocol.
     Kitty,
     /// Sixel.
     Sixel,
+    /// Octants: 2 x 4 a cell in two colours, U+1CD00.
+    Octant,
+    /// Quadrants and eighth blocks, the best fit a cell.
+    Blocks,
     /// Two pixels a cell in colour.
     Halfblocks,
+    /// Braille with one-dot lines in colour over the areas' colours.
+    BrailleThin,
+    /// One colour a cell, no glyph.
+    Mosaic,
     /// Eight dots a cell, lines only, one colour.
     Braille,
 }
@@ -55,27 +80,63 @@ pub enum GraphicsFlag {
 pub enum Graphics {
     Kitty,
     Sixel,
+    Octant,
+    Blocks,
     Halfblocks,
+    BrailleThin,
+    Mosaic,
     Braille,
 }
 
 impl Graphics {
-    /// The name `tui.log` and `--graphics` use.
+    /// Every way, best first: the ladder's order and the order `t` cycles
+    /// through.
+    pub const ORDER: [Graphics; 8] = [
+        Self::Kitty,
+        Self::Sixel,
+        Self::Octant,
+        Self::Blocks,
+        Self::Halfblocks,
+        Self::BrailleThin,
+        Self::Mosaic,
+        Self::Braille,
+    ];
+
+    /// The name `tui.log`, `--graphics`, the map's title and the config use.
     pub fn name(self) -> &'static str {
         match self {
             Self::Kitty => "kitty",
             Self::Sixel => "sixel",
+            Self::Octant => "octant",
+            Self::Blocks => "blocks",
             Self::Halfblocks => "halfblocks",
+            Self::BrailleThin => "braille-thin",
+            Self::Mosaic => "mosaic",
             Self::Braille => "braille",
         }
     }
 
-    /// Image pixels across and down one cell.
+    /// The way `name` names.
+    pub fn named(name: &str) -> Option<Self> {
+        Self::ORDER.into_iter().find(|g| g.name() == name)
+    }
+
+    /// Its place in [`Graphics::ORDER`].
+    pub fn index(self) -> usize {
+        Self::ORDER.iter().position(|&g| g == self).unwrap_or(0)
+    }
+
+    /// Image pixels across and down one cell, as the model lays the view
+    /// out. The text techniques of the map core take braille's cell, so a
+    /// view keeps its ground when the drawing changes; they draw at twice
+    /// that ([`Canvas::source`]).
     pub fn cell_px(self, font: FontSize) -> (u16, u16) {
         match self {
             Self::Kitty | Self::Sixel => (font.width.max(1), font.height.max(1)),
             Self::Halfblocks => (1, 2),
-            Self::Braille => (2, 4),
+            Self::Octant | Self::Blocks | Self::BrailleThin | Self::Mosaic | Self::Braille => {
+                (2, 4)
+            }
         }
     }
 
@@ -86,17 +147,199 @@ impl Graphics {
             _ => None,
         }
     }
+
+    /// The map core's encoder of a text technique.
+    fn encoding(self) -> Option<Encoding> {
+        match self {
+            Self::Octant => Some(Encoding::Octant),
+            Self::Blocks => Some(Encoding::BlocksBest),
+            Self::BrailleThin => Some(Encoding::BrailleThin),
+            Self::Mosaic => Some(Encoding::Mosaic),
+            Self::Kitty | Self::Sixel | Self::Halfblocks | Self::Braille => None,
+        }
+    }
+
+    fn of(flag: GraphicsFlag) -> Option<Self> {
+        Some(match flag {
+            GraphicsFlag::Auto => return None,
+            GraphicsFlag::Kitty => Self::Kitty,
+            GraphicsFlag::Sixel => Self::Sixel,
+            GraphicsFlag::Octant => Self::Octant,
+            GraphicsFlag::Blocks => Self::Blocks,
+            GraphicsFlag::Halfblocks => Self::Halfblocks,
+            GraphicsFlag::BrailleThin => Self::BrailleThin,
+            GraphicsFlag::Mosaic => Self::Mosaic,
+            GraphicsFlag::Braille => Self::Braille,
+        })
+    }
 }
 
-/// The rung the ladder took, and the facts that kept it off the rungs
-/// above.
+/// The first glibc whose `wcwidth` knows the octants (Unicode 16), measured
+/// on Debian 13 (1090): a mosh-server on an older one drops them silently.
+const OCTANT_GLIBC: (u32, u32) = (2, 41);
+
+/// What the ladder decides on: what the terminal answered, its colour
+/// tier, what sits between, and the environment that names the terminal.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Facts {
+    /// The graphics protocol the terminal answered for, when asked.
+    pub detected: Option<ProtocolType>,
+    pub tier: Tier,
+    pub between: Between,
+    /// `TERM`.
+    pub term: String,
+    /// `TERM_PROGRAM`.
+    pub program: String,
+    /// Termux (`TERMUX_VERSION` set): its default font chain draws braille
+    /// and no block elements.
+    pub termux: bool,
+    /// This host's glibc, asked only behind mosh: the mosh-server's
+    /// `wcwidth` decides which glyphs reach the client.
+    pub glibc: Option<(u32, u32)>,
+}
+
+impl Facts {
+    /// The facts with nothing found: no answer, nothing between, no
+    /// terminal named. What a key script decides on, so a frame does not
+    /// depend on where the test runs.
+    pub fn none(tier: Tier) -> Self {
+        Self {
+            detected: None,
+            tier,
+            between: Between::default(),
+            term: String::new(),
+            program: String::new(),
+            termux: false,
+            glibc: None,
+        }
+    }
+
+    /// The facts of this process: the terminal's answer and tier as found,
+    /// the go-betweens, the environment, and behind mosh the glibc.
+    pub fn read(detected: Option<ProtocolType>, tier: Tier, between: Between) -> Self {
+        let var = |name: &str| std::env::var(name).unwrap_or_default();
+        Self {
+            detected,
+            tier,
+            between,
+            term: var("TERM"),
+            program: var("TERM_PROGRAM"),
+            termux: std::env::var_os("TERMUX_VERSION").is_some(),
+            glibc: match between.mosh {
+                true => glibc(),
+                false => None,
+            },
+        }
+    }
+
+    /// The context a choice is remembered under: what sits between, then
+    /// `TERM_PROGRAM`, or `TERM` where that is unset, so a desktop terminal
+    /// and a mosh session from the phone each keep their own. Under tmux
+    /// `TERM_PROGRAM` is `tmux` itself, so every terminal tmux runs in
+    /// shares one.
+    pub fn context(&self) -> String {
+        let between = match (self.between.mosh, self.between.tmux, self.between.screen) {
+            (true, _, _) => "mosh",
+            (false, true, _) => "tmux",
+            (false, false, true) => "screen",
+            _ => "local",
+        };
+        let term = match (self.program.is_empty(), self.term.is_empty()) {
+            (false, _) => self.program.as_str(),
+            (true, false) => self.term.as_str(),
+            (true, true) => "unknown",
+        };
+        format!("{between}:{term}")
+    }
+
+    /// Whether the terminal draws octants itself, whatever its font: kitty,
+    /// foot and WezTerm (their sources, 1090).
+    fn draws_octants(&self) -> bool {
+        self.term.starts_with("xterm-kitty")
+            || self.term.starts_with("foot")
+            || self.program == "WezTerm"
+    }
+
+    /// Whether an octant reaches the terminal: always without mosh; behind
+    /// it only from a glibc that knows them.
+    fn octants_arrive(&self) -> bool {
+        !self.between.mosh || self.glibc.is_some_and(|v| v >= OCTANT_GLIBC)
+    }
+
+    /// Whether a graphics protocol's picture is not taken by a go-between:
+    /// mosh drops it, tmux passes it only where configured to.
+    fn pictures_arrive(&self) -> bool {
+        !self.between.mosh && !self.between.tmux
+    }
+
+    /// Whether `graphics` is expected to show here. One that is not is
+    /// still offered, marked.
+    pub fn expected(&self, graphics: Graphics) -> bool {
+        let colour = self.tier != Tier::Mono;
+        // The block elements: no Termux default font has them, and over
+        // mosh the client's font is unknown (Lew's `▀` came out a box).
+        let blocks = colour && !self.termux && !self.between.mosh;
+        match graphics {
+            Graphics::Kitty => self.detected == Some(ProtocolType::Kitty) && self.pictures_arrive(),
+            Graphics::Sixel => self.detected == Some(ProtocolType::Sixel) && self.pictures_arrive(),
+            Graphics::Octant => colour && self.draws_octants() && self.octants_arrive(),
+            Graphics::Blocks | Graphics::Halfblocks => blocks,
+            Graphics::BrailleThin | Graphics::Mosaic => colour,
+            Graphics::Braille => true,
+        }
+    }
+
+    /// Whether `graphics` can work here at all: a picture behind mosh never
+    /// arrives, whatever the terminal at the other end can do.
+    pub fn possible(&self, graphics: Graphics) -> bool {
+        !(graphics.protocol().is_some() && self.between.mosh)
+    }
+
+    /// The ways the map is offered in, in [`Graphics::ORDER`], each marked
+    /// as expected or not.
+    pub fn offers(&self) -> Vec<Drawing> {
+        Graphics::ORDER
+            .iter()
+            .map(|&g| Drawing {
+                name: g.name().to_string(),
+                expected: self.expected(g),
+            })
+            .collect()
+    }
+}
+
+/// This host's glibc version, from `getconf GNU_LIBC_VERSION` ("glibc
+/// 2.41"); `None` where there is none (musl, another system) or it does not
+/// say.
+fn glibc() -> Option<(u32, u32)> {
+    let out = std::process::Command::new("getconf")
+        .arg("GNU_LIBC_VERSION")
+        .output()
+        .ok()?;
+    parse_glibc(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// `glibc 2.41` as `(2, 41)`.
+fn parse_glibc(text: &str) -> Option<(u32, u32)> {
+    let version = text.trim().strip_prefix("glibc ")?;
+    let mut parts = version.split('.');
+    let major = parts.next()?.trim().parse().ok()?;
+    let minor = parts.next()?.trim().parse().ok()?;
+    Some((major, minor))
+}
+
+/// The way taken, and the facts that kept it off the rungs above.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Chosen {
     pub graphics: Graphics,
-    /// `tui.log`'s `reason=`: `forced` for a `--graphics` rung; under
-    /// `auto` `no-color`, `no-graphics` (the terminal answered for no
-    /// kitty or sixel), `mosh`, `no-truecolor` (half-blocks in the 256
-    /// colour palette) and `16-colors`. Empty on the top rung.
+    /// `tui.log`'s `reason=`: `forced` for a `--graphics` way, `remembered`
+    /// for the config's. Under `auto` without one, each fact once in ladder
+    /// order: `no-color`; `no-graphics` (the terminal answered for no kitty
+    /// or sixel) or `mosh` or `tmux` (it did, behind one); `no-octants`
+    /// (the terminal is not known to draw them) or `old-glibc` (it is, and
+    /// a mosh-server would drop them); `termux` or `mosh` (no block
+    /// elements); `no-truecolor` (256 colours) or `16-colors`. Empty on the
+    /// top rung.
     pub reasons: Vec<&'static str>,
 }
 
@@ -110,62 +353,222 @@ impl Chosen {
     }
 }
 
-/// The ladder: a forced rung as it is; under `auto` kitty or sixel when
-/// the terminal answered for one, half-blocks with 256 colours or more,
-/// braille below that and without colour. A terminal that answered for
-/// iTerm2's protocol climbs on to half-blocks: the decision names kitty and
-/// sixel only.
+/// The ladder: a forced way as it is; under `auto` kitty or sixel when the
+/// terminal answered for one and nothing between takes it, then octants
+/// where the terminal draws them itself and they arrive, then `blocks` with
+/// 256 colours or more in a local terminal, then `braille-thin` in any
+/// colour, plain braille without colour. A terminal that answered for
+/// iTerm2's protocol climbs on: the decision names kitty and sixel only.
 ///
-/// Behind mosh it is braille (1088). mosh answers the protocol query
-/// itself and drops sixel and kitty pictures, so no protocol is taken
-/// there. Half-blocks are not either: mosh 1.4.0 was measured to pass
-/// their colours and glyph unchanged, yet Lew's map from Termux over mosh
-/// (2026-10-28) showed an empty box in every cell, so the reader there
-/// gets the rung that carries no colour and only one glyph family.
-/// `--graphics halfblocks` still forces them.
-pub fn choose_graphics(
-    flag: GraphicsFlag,
-    detected: Option<ProtocolType>,
-    tier: Tier,
-    between: Between,
-) -> Chosen {
-    let forced = |graphics| Chosen {
-        graphics,
-        reasons: vec!["forced"],
+/// Behind mosh no protocol is taken: mosh answers the protocol query itself
+/// and drops sixel and kitty pictures (1088). Behind tmux neither: it
+/// passes them only where its configuration allows. Nor are block elements
+/// taken behind mosh: Lew's map from Termux over mosh (2026-10-28) showed an
+/// empty box for every `▀`, and the font at the other end is unknown.
+pub fn choose_graphics(flag: GraphicsFlag, facts: &Facts) -> Chosen {
+    if let Some(graphics) = Graphics::of(flag) {
+        return Chosen {
+            graphics,
+            reasons: vec!["forced"],
+        };
+    }
+    let mut reasons: Vec<&'static str> = Vec::new();
+    let take = |reasons: &mut Vec<&'static str>, why: &'static str| {
+        if !reasons.contains(&why) {
+            reasons.push(why);
+        }
     };
-    match flag {
-        GraphicsFlag::Kitty => return forced(Graphics::Kitty),
-        GraphicsFlag::Sixel => return forced(Graphics::Sixel),
-        GraphicsFlag::Halfblocks => return forced(Graphics::Halfblocks),
-        GraphicsFlag::Braille => return forced(Graphics::Braille),
-        GraphicsFlag::Auto => {}
+    if facts.tier == Tier::Mono {
+        return Chosen {
+            graphics: Graphics::Braille,
+            reasons: vec!["no-color"],
+        };
     }
-    let take = |graphics, reasons| Chosen { graphics, reasons };
-    if tier == Tier::Mono {
-        return take(Graphics::Braille, vec!["no-color"]);
-    }
-    let mut reasons = Vec::new();
-    match (detected, between.mosh) {
-        (Some(ProtocolType::Kitty), false) => return take(Graphics::Kitty, reasons),
-        (Some(ProtocolType::Sixel), false) => return take(Graphics::Sixel, reasons),
-        (Some(ProtocolType::Kitty | ProtocolType::Sixel), true) => {}
-        _ => reasons.push("no-graphics"),
-    }
-    if between.mosh {
-        reasons.push("mosh");
-        return take(Graphics::Braille, reasons);
-    }
-    match tier {
-        Tier::Truecolor => take(Graphics::Halfblocks, reasons),
-        Tier::Ansi256 => {
-            reasons.push("no-truecolor");
-            take(Graphics::Halfblocks, reasons)
+    match facts.detected {
+        Some(ProtocolType::Kitty | ProtocolType::Sixel) if facts.pictures_arrive() => {
+            let graphics = match facts.detected {
+                Some(ProtocolType::Kitty) => Graphics::Kitty,
+                _ => Graphics::Sixel,
+            };
+            return Chosen { graphics, reasons };
         }
-        Tier::Ansi16 | Tier::Mono => {
-            reasons.push("16-colors");
-            take(Graphics::Braille, reasons)
+        Some(ProtocolType::Kitty | ProtocolType::Sixel) => {
+            if facts.between.mosh {
+                take(&mut reasons, "mosh");
+            }
+            if facts.between.tmux {
+                take(&mut reasons, "tmux");
+            }
+        }
+        _ => take(&mut reasons, "no-graphics"),
+    }
+    let tier = match facts.tier {
+        Tier::Ansi256 => Some("no-truecolor"),
+        Tier::Ansi16 => Some("16-colors"),
+        Tier::Truecolor | Tier::Mono => None,
+    };
+    let sixteen = facts.tier == Tier::Ansi16;
+    match (facts.draws_octants(), facts.octants_arrive()) {
+        (true, true) if !sixteen => {
+            reasons.extend(tier);
+            return Chosen {
+                graphics: Graphics::Octant,
+                reasons,
+            };
+        }
+        (true, false) => take(&mut reasons, "old-glibc"),
+        (false, _) => take(&mut reasons, "no-octants"),
+        (true, true) => {}
+    }
+    if facts.termux {
+        take(&mut reasons, "termux");
+    }
+    if facts.between.mosh {
+        take(&mut reasons, "mosh");
+    }
+    reasons.extend(tier);
+    let graphics = match facts.expected(Graphics::Blocks) && !sixteen {
+        true => Graphics::Blocks,
+        false => Graphics::BrailleThin,
+    };
+    Chosen { graphics, reasons }
+}
+
+/// The way the map starts in: a forced way as it is; under `auto` the way
+/// remembered for this context when it can work here, else the ladder.
+/// The line beside it says, once, why a remembered way was passed over.
+pub fn choose_start(
+    flag: GraphicsFlag,
+    remembered: Option<&str>,
+    facts: &Facts,
+) -> (Chosen, Option<String>) {
+    let ladder = choose_graphics(flag, facts);
+    let Some(name) = remembered.filter(|_| flag == GraphicsFlag::Auto) else {
+        return (ladder, None);
+    };
+    let context = facts.context();
+    match Graphics::named(name) {
+        Some(graphics) if facts.possible(graphics) => (
+            Chosen {
+                graphics,
+                reasons: vec!["remembered"],
+            },
+            None,
+        ),
+        Some(_) => {
+            let line = format!(
+                "map: {name} was remembered for {context}, but no picture arrives through \
+                 mosh; drawn as {} instead",
+                ladder.graphics.name()
+            );
+            (ladder, Some(line))
+        }
+        None => {
+            let line = format!(
+                "map: {name} was remembered for {context}, a drawing this loquax does not \
+                 know; drawn as {} instead",
+                ladder.graphics.name()
+            );
+            (ladder, Some(line))
         }
     }
+}
+
+/// What the model is told of `painter` under `facts`: its cell and zooms,
+/// and every way offered with the one drawing now.
+pub fn setup_of(painter: &MapPainter, facts: &Facts) -> MapSetup {
+    MapSetup {
+        drawings: facts.offers(),
+        drawing: painter.graphics().index(),
+        ..painter.setup()
+    }
+}
+
+/// The way of drawing the map the reader chose, and what the config holds
+/// for this context: what to write when the reader leaves the map or quits.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Memory {
+    /// [`Facts::context`].
+    pub context: String,
+    /// What the config held at start or was last written, as a name.
+    saved: Option<String>,
+    /// The way drawing now.
+    now: Graphics,
+    /// Whether the reader chose a way this session: the ladder's own
+    /// choice is never written.
+    chosen: bool,
+}
+
+impl Memory {
+    /// The memory of `context`, the config holding `remembered` for it, the
+    /// map drawing `now`.
+    pub fn new(context: String, remembered: Option<&str>, now: Graphics) -> Self {
+        Self {
+            context,
+            saved: remembered.map(str::to_string),
+            now,
+            chosen: false,
+        }
+    }
+
+    /// The reader chose `graphics`.
+    pub fn chose(&mut self, graphics: Graphics) {
+        self.now = graphics;
+        self.chosen = true;
+    }
+
+    /// The config key and value owed: the reader's choice, where it is not
+    /// what the config holds already.
+    pub fn owed(&self) -> Option<(String, &'static str)> {
+        let name = self.now.name();
+        (self.chosen && self.saved.as_deref() != Some(name)).then(|| {
+            (
+                format!("{}{}", loquax::config::MAP_DRAWING, self.context),
+                name,
+            )
+        })
+    }
+
+    /// What [`Memory::owed`] said was written.
+    pub fn written(&mut self) {
+        self.saved = Some(self.now.name().to_string());
+    }
+}
+
+/// The glyph test over the map's `area` (`g`, 1093): a line a glyph set,
+/// each as it should look, and the `--graphics` values that need it, so the
+/// reader sees which ways their font can draw.
+pub fn draw_glyph_test(frame: &mut TermFrame, area: Rect) {
+    use ratatui::text::Line;
+    use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+    let rows = cells::glyph_test();
+    let mut lines = vec![Line::from("a box, ? or a gap: the font lacks it")];
+    lines.extend(rows.iter().map(|(name, glyphs, rungs)| {
+        let glyphs: String = glyphs.iter().collect();
+        Line::from(match rungs.is_empty() {
+            true => format!("{name:<11} {glyphs}"),
+            false => format!("{name:<11} {glyphs}  {rungs}"),
+        })
+    }));
+    let width = lines
+        .iter()
+        .map(|l| l.width() as u16 + 2)
+        .max()
+        .unwrap_or(0)
+        .min(area.width);
+    let height = (lines.len() as u16 + 2).min(area.height);
+    let at = Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    )
+    .intersection(frame.area());
+    frame.render_widget(Clear, at);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" glyph test · g closes ");
+    frame.render_widget(Paragraph::new(lines).block(block), at);
 }
 
 /// A no-op the terminal carries out before a picture sent again only to
@@ -209,6 +612,8 @@ struct Painted {
     fb: Vec<u16>,
     attribution: String,
     picture: Option<Picture>,
+    /// A text technique's cells, row by row ([`Graphics::encoding`]).
+    glyphs: Vec<cells::Cell>,
 }
 
 /// One paint asked for: the view, the cells its picture covers, and the
@@ -228,6 +633,8 @@ struct Canvas {
     painter: Painter,
     graphics: Graphics,
     pictures: Pictures,
+    /// The glyph sets the text techniques fit, built once.
+    sets: Sets,
 }
 
 impl Canvas {
@@ -239,9 +646,22 @@ impl Canvas {
         }
     }
 
-    /// Draw `ask`'s view, and encode it under kitty or sixel.
+    /// Draw `ask`'s view, and encode it under kitty or sixel or as a text
+    /// technique's cells.
     fn paint(&mut self, ask: Ask) -> Painted {
         let view = &ask.view;
+        if let Some(encoding) = self.graphics.encoding() {
+            let (source, attribution) = self.source(view, ask.cells, encoding);
+            return Painted {
+                view: *view,
+                cells: ask.cells,
+                epoch: ask.epoch,
+                fb: Vec::new(),
+                attribution,
+                picture: None,
+                glyphs: cells::encode(&source, encoding, &self.sets),
+            };
+        }
         let (w, h) = view.size();
         let Drawn {
             mut fb,
@@ -249,7 +669,7 @@ impl Canvas {
         } = self.painter.draw(view, self.ink(), 100);
         let picture = match self.graphics {
             Graphics::Kitty | Graphics::Sixel => self.encode(&mut fb, w, h, ask.cells),
-            Graphics::Halfblocks | Graphics::Braille => None,
+            _ => None,
         };
         Painted {
             view: *view,
@@ -258,7 +678,64 @@ impl Canvas {
             fb,
             attribution,
             picture,
+            glyphs: Vec::new(),
         }
+    }
+
+    /// `view` drawn for a text technique over `cells`: at the map core's
+    /// source grain of 4 x 8 pixels a cell, twice the model's braille cell,
+    /// so one zoom deeper at twice the line width, which keeps the view's
+    /// ground and its lines' look (the draft's samples, 1090). At the
+    /// deepest zoom, where there is none deeper, the view is drawn at its
+    /// own and every pixel doubled. Braille-thin needs the lines alone as
+    /// well, at the colour drawing's width and at half of it.
+    fn source(
+        &mut self,
+        view: &Viewport,
+        (cols, rows): (u16, u16),
+        encoding: Encoding,
+    ) -> (cells::Source, String) {
+        let (cols, rows) = (usize::from(cols), usize::from(rows));
+        let (fw, fh) = ((cols * cells::SX) as u32, (rows * cells::SY) as u32);
+        let deeper = view.zoom() < MAX_VIEW_ZOOM;
+        let (fine, scale) = match deeper {
+            true => (Viewport::new(view.centre, view.zoom() + 1, fw, fh), 1usize),
+            false => (Viewport::new(view.centre, view.zoom(), fw / 2, fh / 2), 2),
+        };
+        let percent = |p: u32| p / scale as u32;
+        let mut draw = |ink: Ink, p: u32| -> (Vec<cells::Rgb>, String) {
+            let (w, h) = fine.size();
+            let mut drawn = self.painter.draw(&fine, ink, percent(p));
+            let mut flat = Vec::with_capacity(drawn.fb.len() * 3);
+            if let Some(f) = Frame::new(&mut drawn.fb, w, h) {
+                f.rgb888_into(&mut flat);
+            }
+            let rgb: Vec<cells::Rgb> = flat.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
+            (doubled(rgb, w as usize, scale), drawn.attribution)
+        };
+        let (rgb, attribution) = draw(Ink::Colour, 200);
+        let lines_of = |rgb: Vec<cells::Rgb>| -> Vec<bool> {
+            let ground = cells::rgb_of(BACKGROUND);
+            rgb.into_iter().map(|c| c != ground).collect()
+        };
+        let (line, thin) = match encoding {
+            Encoding::BrailleThin
+            | Encoding::BrailleBg
+            | Encoding::BrailleColour
+            | Encoding::BrailleMono => {
+                let ink = Ink::Lines(Rgb565::new(0, 0, 0));
+                (lines_of(draw(ink, 200).0), lines_of(draw(ink, 100).0))
+            }
+            _ => (Vec::new(), Vec::new()),
+        };
+        let source = cells::Source {
+            cols,
+            rows,
+            rgb,
+            line,
+            thin,
+        };
+        (source, attribution)
     }
 
     /// The picture of `fb` for `cells`. A sixel of at most 256 colours,
@@ -281,6 +758,25 @@ impl Canvas {
             .and_then(|image| self.pictures.encode(image, cells).ok())
             .map(Picture::Sliced)
     }
+}
+
+/// `rgb`, `w` pixels a row, with every pixel `scale` times across and
+/// down.
+fn doubled(rgb: Vec<cells::Rgb>, w: usize, scale: usize) -> Vec<cells::Rgb> {
+    if scale <= 1 || w == 0 {
+        return rgb;
+    }
+    let mut out = Vec::with_capacity(rgb.len() * scale * scale);
+    for row in rgb.chunks(w) {
+        let wide: Vec<cells::Rgb> = row
+            .iter()
+            .flat_map(|&c| std::iter::repeat_n(c, scale))
+            .collect();
+        for _ in 0..scale {
+            out.extend_from_slice(&wide);
+        }
+    }
+    out
 }
 
 /// `fb` as a palette of its colours in RGB888 and one index a pixel;
@@ -423,7 +919,7 @@ impl Drop for Worker {
 /// and a test whose frames must be the same on every run, or on the
 /// worker thread for the terminal.
 enum Engine {
-    Inline(Canvas),
+    Inline(Box<Canvas>),
     Worker(Worker),
 }
 
@@ -445,6 +941,9 @@ pub struct MapPainter {
     labels: Vec<Label>,
     labels_view: Option<Viewport>,
     nudge: bool,
+    /// The screen's colour tier: at 16 colours a text technique's class
+    /// colours are drawn in their own of the sixteen ([`cells::ansi16`]).
+    tier: Tier,
 }
 
 impl MapPainter {
@@ -477,23 +976,31 @@ impl MapPainter {
             cell_px: graphics.cell_px(font),
             zooms: painter.zooms(),
             regions: painter.headers(),
+            ..MapSetup::default()
         };
         Self {
             graphics,
             maps,
             setup,
-            engine: Engine::Inline(Canvas {
+            engine: Engine::Inline(Box::new(Canvas {
                 painter,
                 graphics,
                 pictures: Pictures::new(picker, backend),
-            }),
+                sets: Sets::default(),
+            })),
             painted: None,
             shown_at: None,
             paints: 0,
             labels: Vec::new(),
             labels_view: None,
             nudge: false,
+            tier: Tier::Truecolor,
         }
+    }
+
+    /// Draw for a screen in `tier` from the next frame on.
+    pub fn set_tier(&mut self, tier: Tier) {
+        self.tier = tier;
     }
 
     /// The same painter drawing on its own thread: a frame shows the
@@ -501,7 +1008,7 @@ impl MapPainter {
     /// [`MapPainter::ready`] wakes the loop when that is drawn.
     pub fn threaded(self) -> Self {
         let engine = match self.engine {
-            Engine::Inline(canvas) => Engine::Worker(Worker::spawn(canvas)),
+            Engine::Inline(canvas) => Engine::Worker(Worker::spawn(*canvas)),
             worker => worker,
         };
         Self { engine, ..self }
@@ -647,6 +1154,36 @@ impl MapPainter {
                 Some(Picture::Whole(picture)) => images::render_whole(frame, area, picture),
                 None => {}
             },
+            Graphics::Octant | Graphics::Blocks | Graphics::BrailleThin | Graphics::Mosaic => {
+                let tier = self.tier;
+                let colour = |c: Option<cells::Rgb>| match (c, tier) {
+                    (None, _) => Color::Reset,
+                    (Some(rgb), Tier::Ansi16) => match cells::ansi16(rgb) {
+                        Some(i) => Color::Indexed(i),
+                        None => Color::Rgb(rgb[0], rgb[1], rgb[2]),
+                    },
+                    (Some([r, g, b]), _) => Color::Rgb(r, g, b),
+                };
+                let cols = usize::from(painted.cells.0);
+                let buf = frame.buffer_mut();
+                for row in 0..area.height {
+                    for col in 0..area.width {
+                        let i = usize::from(row) * cols + usize::from(col);
+                        let Some(c) = painted.glyphs.get(i) else {
+                            continue;
+                        };
+                        // The blank braille pattern is a glyph a font may
+                        // lack; a space shows the same background.
+                        let ch = match c.ch {
+                            '\u{2800}' => ' ',
+                            ch => ch,
+                        };
+                        if let Some(cell) = buf.cell_mut((area.x + col, area.y + row)) {
+                            cell.set_char(ch).set_fg(colour(c.fg)).set_bg(colour(c.bg));
+                        }
+                    }
+                }
+            }
         }
         // The labels placed for a paint of another pane size belong to
         // that size's layout, not to this one: a shrink would put them
@@ -772,10 +1309,32 @@ mod tests {
     use ratatui::Terminal;
     use std::path::PathBuf;
 
-    /// Every combination of what the terminal answered, its colour tier
-    /// and mosh, under `auto`, against the rung and the reasons.
+    /// The facts of a terminal named by `TERM` and `TERM_PROGRAM`.
+    fn facts(
+        detected: Option<ProtocolType>,
+        tier: Tier,
+        between: Between,
+        (term, program): (&str, &str),
+        termux: bool,
+        glibc: Option<(u32, u32)>,
+    ) -> Facts {
+        Facts {
+            detected,
+            tier,
+            between,
+            term: term.to_string(),
+            program: program.to_string(),
+            termux,
+            glibc,
+        }
+    }
+
+    /// Every combination of what the terminal answered, its colour tier,
+    /// what sits between, the terminal's name, Termux and the glibc behind
+    /// mosh, under `auto`, against the way and the reasons the ladder of
+    /// 1093 names, written out here as the draft states it.
     #[test]
-    fn the_ladder_takes_kitty_or_sixel_then_halfblocks_then_braille() {
+    fn the_ladder_takes_pictures_then_octants_then_blocks_then_braille_thin() {
         use GraphicsFlag::Auto;
         use ProtocolType::{Halfblocks as None_, Iterm2, Kitty, Sixel};
         let direct = Between::default();
@@ -793,56 +1352,163 @@ mod tests {
         };
         let detections = [None, Some(None_), Some(Iterm2), Some(Kitty), Some(Sixel)];
         let tiers = [Tier::Mono, Tier::Ansi16, Tier::Ansi256, Tier::Truecolor];
+        let terms = [
+            ("xterm-256color", ""),
+            ("foot", ""),
+            ("xterm-kitty", ""),
+            ("xterm-256color", "WezTerm"),
+            ("", ""),
+        ];
+        let mut rows = 0;
         for between in [direct, mosh, tmux, screen] {
             for detected in detections {
                 for tier in tiers {
-                    let chosen = choose_graphics(Auto, detected, tier, between);
-                    let protocol = match detected {
-                        Some(Kitty) => Some(Graphics::Kitty),
-                        Some(Sixel) => Some(Graphics::Sixel),
-                        _ => None,
-                    };
-                    let want: (Graphics, &[&str]) = match (tier, protocol, between.mosh) {
-                        (Tier::Mono, _, _) => (Graphics::Braille, &["no-color"]),
-                        (_, Some(g), false) => (g, &[]),
-                        (_, Some(_), true) => (Graphics::Braille, &["mosh"]),
-                        (_, None, true) => (Graphics::Braille, &["no-graphics", "mosh"]),
-                        (Tier::Truecolor, None, false) => (Graphics::Halfblocks, &["no-graphics"]),
-                        (Tier::Ansi256, None, false) => {
-                            (Graphics::Halfblocks, &["no-graphics", "no-truecolor"])
+                    for term in terms {
+                        for termux in [false, true] {
+                            for glibc in [None, Some((2, 36)), Some((2, 41))] {
+                                let f = facts(detected, tier, between, term, termux, glibc);
+                                let chosen = choose_graphics(Auto, &f);
+                                let want = ladder_by_hand(&f);
+                                assert_eq!(
+                                    (chosen.graphics, chosen.reasons.clone()),
+                                    want,
+                                    "{f:?}"
+                                );
+                                rows += 1;
+                            }
                         }
-                        (Tier::Ansi16, None, false) => {
-                            (Graphics::Braille, &["no-graphics", "16-colors"])
-                        }
-                    };
-                    assert_eq!(
-                        (chosen.graphics, chosen.reasons.as_slice()),
-                        want,
-                        "{detected:?} {tier:?} {between:?}"
-                    );
+                    }
                 }
             }
         }
+        assert_eq!(rows, 4 * 5 * 4 * 5 * 2 * 3);
+        let named = |f: Facts| {
+            let c = choose_graphics(Auto, &f);
+            (c.graphics, c.reason())
+        };
         // Lew's line from Termux over mosh, 2026-10-28, and what it is now.
-        let chosen = choose_graphics(Auto, Some(None_), Tier::Ansi256, mosh);
-        assert_eq!(chosen.graphics, Graphics::Braille);
-        assert_eq!(chosen.reason(), "no-graphics,mosh");
-        // foot, on foot.
-        let chosen = choose_graphics(Auto, Some(Sixel), Tier::Ansi256, direct);
         assert_eq!(
-            (chosen.graphics, chosen.reason()),
-            (Graphics::Sixel, "best".to_string())
+            named(facts(
+                Some(None_),
+                Tier::Ansi256,
+                mosh,
+                ("xterm-256color", ""),
+                false,
+                Some((2, 41))
+            )),
+            (
+                Graphics::BrailleThin,
+                "no-graphics,no-octants,mosh,no-truecolor".into()
+            )
         );
-        // A forced rung is taken as it is, whatever was found.
-        for (flag, graphics) in [
-            (GraphicsFlag::Kitty, Graphics::Kitty),
-            (GraphicsFlag::Sixel, Graphics::Sixel),
-            (GraphicsFlag::Halfblocks, Graphics::Halfblocks),
-            (GraphicsFlag::Braille, Graphics::Braille),
-        ] {
+        // foot on foot: its sixel; behind tmux octants are unknown there.
+        let foot = ("foot", "");
+        assert_eq!(
+            named(facts(
+                Some(Sixel),
+                Tier::Truecolor,
+                direct,
+                foot,
+                false,
+                None
+            )),
+            (Graphics::Sixel, "best".into())
+        );
+        assert_eq!(
+            named(facts(
+                Some(Sixel),
+                Tier::Truecolor,
+                tmux,
+                ("tmux-256color", "tmux"),
+                false,
+                None
+            )),
+            (Graphics::Blocks, "tmux,no-octants".into())
+        );
+        // foot over mosh: octants from a server with glibc 2.41, not 2.36.
+        assert_eq!(
+            named(facts(
+                Some(None_),
+                Tier::Truecolor,
+                mosh,
+                foot,
+                false,
+                Some((2, 41))
+            )),
+            (Graphics::Octant, "no-graphics".into())
+        );
+        assert_eq!(
+            named(facts(
+                Some(None_),
+                Tier::Truecolor,
+                mosh,
+                foot,
+                false,
+                Some((2, 36))
+            )),
+            (Graphics::BrailleThin, "no-graphics,old-glibc,mosh".into())
+        );
+        // WezTerm without a picture protocol answered; a plain xterm.
+        assert_eq!(
+            named(facts(
+                None,
+                Tier::Truecolor,
+                direct,
+                ("xterm-256color", "WezTerm"),
+                false,
+                None
+            )),
+            (Graphics::Octant, "no-graphics".into())
+        );
+        assert_eq!(
+            named(facts(
+                Some(None_),
+                Tier::Ansi256,
+                direct,
+                ("xterm-256color", ""),
+                false,
+                None
+            )),
+            (
+                Graphics::Blocks,
+                "no-graphics,no-octants,no-truecolor".into()
+            )
+        );
+        // Termux itself, and 16 colours anywhere.
+        assert_eq!(
+            named(facts(
+                None,
+                Tier::Truecolor,
+                direct,
+                ("xterm-256color", ""),
+                true,
+                None
+            )),
+            (
+                Graphics::BrailleThin,
+                "no-graphics,no-octants,termux".into()
+            )
+        );
+        assert_eq!(
+            named(facts(None, Tier::Ansi16, direct, foot, false, None)),
+            (Graphics::BrailleThin, "no-graphics,16-colors".into())
+        );
+        // A forced way is taken as it is, whatever was found.
+        for graphics in Graphics::ORDER {
+            let flag = match graphics {
+                Graphics::Kitty => GraphicsFlag::Kitty,
+                Graphics::Sixel => GraphicsFlag::Sixel,
+                Graphics::Octant => GraphicsFlag::Octant,
+                Graphics::Blocks => GraphicsFlag::Blocks,
+                Graphics::Halfblocks => GraphicsFlag::Halfblocks,
+                Graphics::BrailleThin => GraphicsFlag::BrailleThin,
+                Graphics::Mosaic => GraphicsFlag::Mosaic,
+                Graphics::Braille => GraphicsFlag::Braille,
+            };
             for between in [direct, mosh] {
                 for tier in tiers {
-                    let chosen = choose_graphics(flag, Some(Kitty), tier, between);
+                    let f = facts(Some(Kitty), tier, between, foot, false, None);
+                    let chosen = choose_graphics(flag, &f);
                     assert_eq!(
                         (chosen.graphics, chosen.reason()),
                         (graphics, "forced".into())
@@ -850,6 +1516,215 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The ladder as the draft and 1093 state it, rung by rung.
+    fn ladder_by_hand(f: &Facts) -> (Graphics, Vec<&'static str>) {
+        if f.tier == Tier::Mono {
+            return (Graphics::Braille, vec!["no-color"]);
+        }
+        let (mosh, tmux) = (f.between.mosh, f.between.tmux);
+        let mut why: Vec<&'static str> = Vec::new();
+        let mut add = |w: &'static str| {
+            if !why.contains(&w) {
+                why.push(w);
+            }
+        };
+        match f.detected {
+            Some(ProtocolType::Kitty) if !mosh && !tmux => return (Graphics::Kitty, Vec::new()),
+            Some(ProtocolType::Sixel) if !mosh && !tmux => return (Graphics::Sixel, Vec::new()),
+            Some(ProtocolType::Kitty | ProtocolType::Sixel) => {
+                if mosh {
+                    add("mosh");
+                }
+                if tmux {
+                    add("tmux");
+                }
+            }
+            _ => add("no-graphics"),
+        }
+        let tier = match f.tier {
+            Tier::Ansi256 => Some("no-truecolor"),
+            Tier::Ansi16 => Some("16-colors"),
+            _ => None,
+        };
+        let draws = f.term == "foot" || f.term == "xterm-kitty" || f.program == "WezTerm";
+        let arrive = !mosh || f.glibc == Some((2, 41));
+        if draws && arrive && f.tier != Tier::Ansi16 {
+            why.extend(tier);
+            return (Graphics::Octant, why);
+        }
+        if draws && !arrive {
+            add("old-glibc");
+        }
+        if !draws {
+            add("no-octants");
+        }
+        if f.termux {
+            add("termux");
+        }
+        if mosh {
+            add("mosh");
+        }
+        why.extend(tier);
+        match !f.termux && !mosh && f.tier != Tier::Ansi16 {
+            true => (Graphics::Blocks, why),
+            false => (Graphics::BrailleThin, why),
+        }
+    }
+
+    /// A remembered way wins over the ladder; one that cannot work here (a
+    /// picture behind mosh) or that this loquax does not know falls back to
+    /// the ladder, with one line saying so; a forced way wins over both.
+    #[test]
+    fn a_remembered_way_wins_unless_it_cannot_work_here() {
+        let foot = ("foot", "");
+        let local = facts(None, Tier::Truecolor, Between::default(), foot, false, None);
+        let mosh = facts(
+            None,
+            Tier::Truecolor,
+            Between {
+                mosh: true,
+                ..Between::default()
+            },
+            ("xterm-256color", ""),
+            false,
+            None,
+        );
+        let (chosen, line) = choose_start(GraphicsFlag::Auto, Some("mosaic"), &local);
+        assert_eq!(
+            (chosen.graphics, chosen.reason(), line),
+            (Graphics::Mosaic, "remembered".into(), None)
+        );
+        let (chosen, line) = choose_start(GraphicsFlag::Auto, Some("braille-thin"), &mosh);
+        assert_eq!((chosen.graphics, line), (Graphics::BrailleThin, None));
+        let (chosen, line) = choose_start(GraphicsFlag::Auto, Some("sixel"), &mosh);
+        assert_eq!(chosen.graphics, Graphics::BrailleThin);
+        assert_eq!(chosen.reason(), "no-graphics,no-octants,mosh");
+        let line = line.expect("said once");
+        assert!(
+            line.contains("sixel was remembered for mosh:xterm-256color"),
+            "{line}"
+        );
+        assert!(line.contains("drawn as braille-thin"), "{line}");
+        let (chosen, line) = choose_start(GraphicsFlag::Auto, Some("hologram"), &local);
+        assert_eq!(chosen.graphics, Graphics::Octant);
+        assert!(line.is_some_and(|l| l.contains("does not know")));
+        let (chosen, line) = choose_start(GraphicsFlag::Braille, Some("octant"), &local);
+        assert_eq!(
+            (chosen.graphics, chosen.reason(), line),
+            (Graphics::Braille, "forced".into(), None)
+        );
+        let (chosen, line) = choose_start(GraphicsFlag::Auto, None, &local);
+        assert_eq!((chosen.graphics, line), (Graphics::Octant, None));
+    }
+
+    /// The context a choice is kept under: what sits between, then
+    /// `TERM_PROGRAM` or else `TERM`.
+    #[test]
+    fn the_context_names_the_go_between_and_the_terminal() {
+        let at = |between: Between, term: (&str, &str)| {
+            facts(None, Tier::Truecolor, between, term, false, None).context()
+        };
+        let direct = Between::default();
+        let mosh = Between {
+            mosh: true,
+            tmux: true,
+            ..direct
+        };
+        let tmux = Between {
+            tmux: true,
+            ..direct
+        };
+        assert_eq!(at(direct, ("foot", "")), "local:foot");
+        assert_eq!(at(direct, ("xterm-256color", "WezTerm")), "local:WezTerm");
+        assert_eq!(at(mosh, ("xterm-256color", "")), "mosh:xterm-256color");
+        assert_eq!(at(tmux, ("tmux-256color", "tmux")), "tmux:tmux");
+        assert_eq!(at(direct, ("", "")), "local:unknown");
+        assert_eq!(parse_glibc("glibc 2.41\n"), Some((2, 41)));
+        assert_eq!(parse_glibc("glibc 2.36"), Some((2, 36)));
+        assert_eq!(parse_glibc(""), None);
+        assert_eq!(parse_glibc("musl"), None);
+    }
+
+    /// What is written: nothing until the reader chooses, then the choice
+    /// once under the context's key, nothing while it is what the config
+    /// holds.
+    #[test]
+    fn the_memory_writes_the_readers_choice_once() {
+        let mut memory = Memory::new("local:foot".to_string(), None, Graphics::Octant);
+        assert_eq!(memory.owed(), None, "the ladder's choice is not written");
+        memory.chose(Graphics::Blocks);
+        assert_eq!(
+            memory.owed(),
+            Some(("map_drawing.local:foot".to_string(), "blocks"))
+        );
+        memory.written();
+        assert_eq!(memory.owed(), None);
+        memory.chose(Graphics::Blocks);
+        assert_eq!(memory.owed(), None, "the same again is not written");
+        let mut held = Memory::new("mosh:x".to_string(), Some("mosaic"), Graphics::Mosaic);
+        held.chose(Graphics::Mosaic);
+        assert_eq!(held.owed(), None, "already in the config");
+        held.chose(Graphics::Braille);
+        assert_eq!(
+            held.owed(),
+            Some(("map_drawing.mosh:x".to_string(), "braille"))
+        );
+        // Every name reads back as its way.
+        for g in Graphics::ORDER {
+            assert_eq!(Graphics::named(g.name()), Some(g));
+            assert_eq!(Graphics::ORDER[g.index()], g);
+        }
+    }
+
+    /// The ways offered: all of them, in the ladder's order, those the
+    /// facts do not expect to show marked.
+    #[test]
+    fn every_way_is_offered_the_unlikely_ones_marked() {
+        let mosh = Between {
+            mosh: true,
+            ..Between::default()
+        };
+        let f = facts(
+            Some(ProtocolType::Sixel),
+            Tier::Truecolor,
+            mosh,
+            ("foot", ""),
+            false,
+            Some((2, 36)),
+        );
+        let offers = f.offers();
+        let names: Vec<&str> = offers.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "kitty",
+                "sixel",
+                "octant",
+                "blocks",
+                "halfblocks",
+                "braille-thin",
+                "mosaic",
+                "braille"
+            ]
+        );
+        let expected: Vec<bool> = offers.iter().map(|d| d.expected).collect();
+        assert_eq!(
+            expected,
+            [false, false, false, false, false, true, true, true]
+        );
+        assert!(!f.possible(Graphics::Sixel) && f.possible(Graphics::Octant));
+        let local = facts(
+            Some(ProtocolType::Sixel),
+            Tier::Truecolor,
+            Between::default(),
+            ("foot", ""),
+            false,
+            None,
+        );
+        let expected: Vec<bool> = local.offers().iter().map(|d| d.expected).collect();
+        assert_eq!(expected, [false, true, true, true, true, true, true, true]);
     }
 
     /// Half-blocks at 256 colours reach the terminal as palette indexes
@@ -983,6 +1858,222 @@ mod tests {
         let (_, text) = drawn(Graphics::Braille, None);
         assert!(text.chars().any(|c| ('\u{2801}'..='\u{28ff}').contains(&c)));
         assert!(text.contains("● bob · 4 min"));
+    }
+
+    /// The text techniques of the map core keep to their glyphs: octants
+    /// to the octant table, `blocks` to quadrants and eighths, braille-thin
+    /// to braille, mosaic to blanks; each cell in two colours of RGB at
+    /// truecolor, and at 16 colours braille-thin and mosaic in the class's
+    /// own of the sixteen, never an RGB a 16-colour terminal cannot show.
+    #[test]
+    fn the_text_techniques_keep_to_their_glyphs_and_colour_tiers() {
+        let octants: Vec<char> = cells::OCTANTS.to_vec();
+        let blocks: Vec<char> = cells::blocks().iter().map(|g| g.ch).collect();
+        for graphics in [
+            Graphics::Octant,
+            Graphics::Blocks,
+            Graphics::BrailleThin,
+            Graphics::Mosaic,
+        ] {
+            for tier in [Tier::Truecolor, Tier::Ansi16] {
+                let mut painter = MapPainter::new(Maps::default(), graphics, None);
+                painter.set_tier(tier);
+                let shown = shown(painter.setup().cell_px);
+                let mut terminal = Terminal::new(TestBackend::new(32, 10)).expect("terminal");
+                terminal
+                    .draw(|f| painter.render(f, &shown, Style::default()))
+                    .expect("draw");
+                let buffer = terminal.backend().buffer().clone();
+                let mut picture = 0;
+                let mut inked = 0;
+                // The picture's cells: inside (1, 1) 30 x 8, off the pin's
+                // row, whose label covers part of it.
+                for y in 1..9 {
+                    for x in 1..31 {
+                        if y == 5 {
+                            continue;
+                        }
+                        let cell = buffer.cell((x, y)).expect("cell");
+                        let ch = cell.symbol().chars().next().unwrap_or(' ');
+                        let ok = match graphics {
+                            Graphics::Octant => octants.contains(&ch),
+                            Graphics::Blocks => blocks.contains(&ch),
+                            Graphics::BrailleThin => {
+                                ch == ' ' || ('\u{2801}'..='\u{28FF}').contains(&ch)
+                            }
+                            _ => ch == ' ',
+                        };
+                        assert!(ok, "{graphics:?}: {ch:?} at ({x}, {y})");
+                        picture += 1;
+                        if ch != ' ' {
+                            inked += 1;
+                        }
+                        match (tier, graphics) {
+                            (Tier::Truecolor, _) => {
+                                assert!(
+                                    matches!(cell.bg, Color::Rgb(..)),
+                                    "{graphics:?}: {cell:?}"
+                                );
+                            }
+                            (_, Graphics::BrailleThin | Graphics::Mosaic) => {
+                                assert!(
+                                    matches!(cell.bg, Color::Indexed(i) if i < 16),
+                                    "{graphics:?}: {cell:?}"
+                                );
+                                if ch != ' ' {
+                                    assert!(
+                                        matches!(cell.fg, Color::Indexed(i) if i < 16),
+                                        "{graphics:?}: {cell:?}"
+                                    );
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                assert_eq!(picture, 30 * 7);
+                // The coasts of Europe at z1 are drawn: some cell carries a
+                // glyph, except in the mosaic, which has none.
+                match graphics {
+                    Graphics::Mosaic => assert_eq!(inked, 0),
+                    _ => assert!(inked > 0, "{graphics:?}: nothing drawn"),
+                }
+                let text: String = buffer.content().iter().map(|c| c.symbol()).collect();
+                assert!(text.contains("● bob · 4 min"), "{graphics:?}");
+                assert!(text.contains("Natural Earth"), "{graphics:?}");
+            }
+        }
+    }
+
+    /// At 16 colours the class colours reach the terminal as `38;5;n` and
+    /// `48;5;n` with n under 16, at 256 as palette indexes: no 24-bit SGR.
+    #[test]
+    fn braille_thin_at_16_and_256_colours_emits_no_24_bit_sgr() {
+        use leviculum_ui::color::ColorDepth;
+        use leviculum_ui_ratatui::style::downgrade_buffer;
+        use ratatui::backend::CrosstermBackend;
+        #[derive(Clone, Default)]
+        struct Shared(std::rc::Rc<std::cell::RefCell<Vec<u8>>>);
+        impl std::io::Write for Shared {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.borrow_mut().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        for (tier, depth) in [
+            (Tier::Ansi16, ColorDepth::Ansi16),
+            (Tier::Ansi256, ColorDepth::Ansi256),
+        ] {
+            let mut painter = MapPainter::new(Maps::default(), Graphics::BrailleThin, None);
+            painter.set_tier(tier);
+            let shown = shown(painter.setup().cell_px);
+            let bytes = Shared::default();
+            let options = ratatui::TerminalOptions {
+                viewport: ratatui::Viewport::Fixed(Rect::new(0, 0, 32, 10)),
+            };
+            let mut terminal =
+                Terminal::with_options(CrosstermBackend::new(bytes.clone()), options)
+                    .expect("terminal");
+            terminal
+                .draw(|f| {
+                    painter.render(f, &shown, Style::default());
+                    downgrade_buffer(f, depth, false);
+                })
+                .expect("draw");
+            let out = String::from_utf8_lossy(&bytes.0.borrow()).into_owned();
+            let sgr: Vec<&str> = out
+                .split("\u{1b}[")
+                .skip(1)
+                .filter_map(|s| s.split_once('m').map(|(p, _)| p))
+                .filter(|p| p.chars().all(|c| c.is_ascii_digit() || c == ';'))
+                .collect();
+            assert!(sgr.iter().any(|p| p.contains("48;5;")), "{tier:?}: {out:?}");
+            for p in &sgr {
+                assert!(
+                    !p.contains("38;2") && !p.contains("48;2"),
+                    "{tier:?}: 24-bit SGR {p:?}"
+                );
+                if tier == Tier::Ansi16 {
+                    for (at, _) in p.match_indices("8;5;") {
+                        let n: u32 = p[at + 4..]
+                            .split(';')
+                            .next()
+                            .and_then(|n| n.parse().ok())
+                            .expect("an index");
+                        assert!(n < 16, "{p:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// The octant fit's cost over Lew's pane, 155 x 65 cells of the
+    /// Florence fixture at z15, against the brute force over the 256
+    /// patterns that the draft measured at 34 ms: the same cells, and the
+    /// time of each printed. In the suite on a small pane, where only the
+    /// equality is checked; `LOQUAX_FRAME_REGION` set (as for
+    /// [`frame_cost`]) measures the full pane:
+    /// `LOQUAX_FRAME_REGION=x cargo test --release -p loquax --features tui
+    /// --bins octant_cost -- --nocapture`.
+    #[test]
+    fn octant_cost() {
+        let region =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../leviculum-map/fixtures/firenze.lmr");
+        let dir = tempfile::tempdir().expect("maps dir");
+        std::os::unix::fs::symlink(
+            std::fs::canonicalize(&region).expect("region"),
+            dir.path().join("f.lmr"),
+        )
+        .expect("link");
+        let (cols, rows) = match measure_on() {
+            true => (155u16, 65u16),
+            false => (30, 10),
+        };
+        let mut canvas = Canvas {
+            painter: Painter::new(Maps::new(Some(dir.path().to_path_buf()))),
+            graphics: Graphics::Octant,
+            pictures: Pictures::new(None, Backend::Text),
+            sets: Sets::default(),
+        };
+        let view = Viewport::new(
+            project(LatLon::from_degrees(43.7731, 11.2560)),
+            14,
+            u32::from(cols) * 2,
+            u32::from(rows) * 4,
+        );
+        let t0 = Instant::now();
+        let (source, _) = canvas.source(&view, (cols, rows), Encoding::Octant);
+        let drawn = t0.elapsed();
+        let octants = cells::octants();
+        let n = if measure_on() { 5 } else { 1 };
+        let (mut fast, mut brute) = (Vec::new(), Vec::new());
+        let (mut by_fit, mut by_brute) = (Vec::new(), Vec::new());
+        for _ in 0..n {
+            let t = Instant::now();
+            by_fit = cells::encode(&source, Encoding::Octant, &canvas.sets);
+            fast.push(t.elapsed());
+            let t = Instant::now();
+            by_brute = (0..source.rows)
+                .flat_map(|row| (0..source.cols).map(move |col| (col, row)))
+                .map(|(col, row)| cells::fit(&source.block(col, row), &octants))
+                .collect();
+            brute.push(t.elapsed());
+        }
+        assert_eq!(by_fit, by_brute);
+        assert!(by_fit.iter().any(|c| c.fg != c.bg), "the streets are drawn");
+        let median = |mut v: Vec<Duration>| {
+            v.sort();
+            v[v.len() / 2].as_secs_f64() * 1e3
+        };
+        println!(
+            "OCTANT cells={cols}x{rows} source_ms={:.1} fit_ms={:.2} brute_force_ms={:.2}",
+            drawn.as_secs_f64() * 1e3,
+            median(fast),
+            median(brute)
+        );
     }
 
     /// What a terminal shows after the frames ratatui sent it: each
@@ -1218,6 +2309,7 @@ mod tests {
             painter: Painter::new(open()),
             graphics: Graphics::Sixel,
             pictures: Pictures::new(Some(picker()), Backend::Graphics(ProtocolType::Sixel)),
+            sets: Sets::default(),
         };
         let mut read = Vec::new();
         let area = Rect::new(0, 0, cols, rows);
@@ -1411,6 +2503,7 @@ mod tests {
             fb: Vec::new(),
             attribution: String::new(),
             picture: None,
+            glyphs: Vec::new(),
         }
     }
 
@@ -1485,13 +2578,14 @@ mod tests {
         }
     }
 
-    fn every_backend() -> [MapPainter; 4] {
-        [
-            MapPainter::new(Maps::default(), Graphics::Halfblocks, None),
-            MapPainter::new(Maps::default(), Graphics::Braille, None),
-            MapPainter::new(Maps::default(), Graphics::Sixel, Some(Picker::halfblocks())),
-            MapPainter::new(Maps::default(), Graphics::Kitty, None),
-        ]
+    fn every_backend() -> Vec<MapPainter> {
+        Graphics::ORDER
+            .iter()
+            .map(|&g| match g {
+                Graphics::Sixel => MapPainter::new(Maps::default(), g, Some(Picker::halfblocks())),
+                _ => MapPainter::new(Maps::default(), g, None),
+            })
+            .collect()
     }
 
     /// The terminal shrank (a phone's keyboard came up) and the frame is

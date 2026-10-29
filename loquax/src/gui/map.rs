@@ -41,6 +41,7 @@ pub fn setup(painter: &Painter) -> MapSetup {
         cell_px: (1, 1),
         zooms: painter.zooms(),
         regions: painter.headers(),
+        ..MapSetup::default()
     }
 }
 

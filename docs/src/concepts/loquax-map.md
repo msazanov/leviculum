@@ -32,7 +32,7 @@ fields beside id, source, title, body and the verification
 the two telemetry fields into positions (`telemetry::read`,
 `loquax/src/telemetry.rs:130`), the screen model keeps each peer's latest
 and hands every one to the store (`take_telemetry`,
-`loquax/src/ui.rs:2636`), and the store keeps the fields whole in its
+`loquax/src/ui.rs:2701`), and the store keeps the fields whole in its
 `fields` column (`loquax/src/store.rs:858`) and the positions in a table of
 their own (`SCHEMA_V2`, `loquax/src/store.rs:151`). The sender's timestamp
 is still not carried: `OutboxEvent`, the screen's `Message` and every type
@@ -597,6 +597,44 @@ screen are found too and named in `tui.log`, and change nothing: both
 pass 256 colours, and `ratatui-image` wraps sixel for tmux. Inside tmux
 a mosh session that holds the tmux client is not an ancestor and is not
 seen. `GRAPHICS` names the rung and why: `reason=no-graphics,mosh`.
+
+**The text techniques, and the ladder since 1093.** Lew, 2026-10-28:
+loquax draws the most beautiful map the terminal can show, real graphics
+where the terminal has them, then the best text techniques in order, and
+a key cycles through every way live, the one the reader stays on
+remembered. The techniques and the measurements behind their order are
+`docs/drafts/terminal-map-rendering-2026-10.md` (1090). Built in 1093:
+
+- The encoders are the map core's, `leviculum_map::cells`: one view
+  drawn at 4 x 8 pixels a cell (one zoom deeper at twice the line width,
+  so the view keeps braille's ground) and encoded into one glyph and two
+  colours a cell. `octant` (U+1CD00, 2 x 4), `blocks` (quadrants and
+  eighth blocks, the best fit a cell), `braille-thin` (one-dot lines in
+  their colour over the areas' colours) and `mosaic` (one colour a cell)
+  join half-blocks and plain braille. The octant fit runs on the eight
+  2 x 2 sums in Gray code order and chooses exactly what the brute force
+  over the 32 pixels chooses (a test holds it): 5.8 ms at 155 x 65 cells
+  against 31 ms, release build on the coder host.
+- The ladder: kitty or sixel where the terminal answers and neither mosh
+  nor tmux sits between; octants where `TERM` or `TERM_PROGRAM` names a
+  terminal that draws them itself (kitty, foot, WezTerm), and behind mosh
+  only from a host whose glibc is 2.41 or later (an older mosh-server
+  drops them); `blocks` at 256 colours or more without mosh and outside
+  Termux; `braille-thin` otherwise, at 16 colours with each class in its
+  own of the sixteen (`leviculum_mapfill::style::ansi16`); plain braille
+  without colour. Half-blocks and the mosaic are no rung, only a choice.
+  tmux now keeps the pictures off the top: it passes them only where its
+  configuration allows.
+- `t` and `T` (and `F2`) cycle every way in the ladder's order, the title
+  naming the new one a moment; the palette's `map drawing` lists them
+  with the current one marked. A way the facts say will not show is still
+  offered, marked: the reader's eyes beat the detection. `g` shows the
+  glyph test over the map, a line a glyph set and the ways that need it.
+- The way the reader stays on is written to the config when they leave
+  the map or quit, as `map_drawing.<context>`, the context
+  `<mosh|tmux|screen|local>:<TERM_PROGRAM, else TERM>`. A remembered way
+  wins over the ladder at the next start unless it cannot work there at
+  all (a picture behind mosh), which is said once.
 
 ## 7. Decided
 

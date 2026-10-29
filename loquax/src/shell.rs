@@ -260,9 +260,18 @@ pub(crate) enum Output {
     Open(String),
     /// Capture the mouse or let it go.
     Mouse(bool),
+    /// Draw the map the `n`th way the frontend offered (1093).
+    MapDrawing(usize),
 }
 
 impl Shell {
+    /// The loquax home: the identity, the store, the config. The terminal
+    /// writes its map drawing there.
+    #[cfg(feature = "tui")]
+    pub(crate) fn home(&self) -> &std::path::Path {
+        &self.context.home
+    }
+
     /// Fold one event, write what it changed to the store, and run what
     /// comes back.
     pub(crate) fn apply(&mut self, event: UiEvent) {
@@ -284,6 +293,7 @@ impl Shell {
                 UiEffect::Copy(text) => self.outputs.push(Output::Copy(text)),
                 UiEffect::Open(url) => self.outputs.push(Output::Open(url)),
                 UiEffect::Mouse(on) => self.outputs.push(Output::Mouse(on)),
+                UiEffect::MapDrawing(n) => self.outputs.push(Output::MapDrawing(n)),
                 // The screen already shows the change; a file that would not
                 // take it is said, because the next start would not show it.
                 UiEffect::Contact(contact) => {
@@ -549,9 +559,9 @@ impl Shell {
                     let regions = self.maps.headers();
                     let zooms = leviculum_map::choice::view_zooms(regions.iter());
                     let setup = MapSetup {
-                        cell_px: self.model.map_setup.cell_px,
                         zooms: (*zooms.start(), *zooms.end()),
                         regions,
+                        ..self.model.map_setup.clone()
                     };
                     self.apply(UiEvent::MapSetup(setup));
                     self.apply(UiEvent::MapLoad(MapLoad::Done(want)));

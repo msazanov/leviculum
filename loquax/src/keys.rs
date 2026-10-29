@@ -28,7 +28,9 @@
 //! arrows and vi's `h` `j` `k` `l` pan, `+` and `-` zoom, `0` fits every
 //! pin again, `Tab` steps the pins, `Enter` opens the selected peer's
 //! conversation and `Esc` or `Ctrl-g` closes it. `m` stays free for a new
-//! conversation (section 3).
+//! conversation (section 3). `t` and `T` (and `F2`) cycle the ways the map
+//! is drawn, which the palette's `map drawing` lists, and `g` puts the glyph
+//! test over it (1093).
 //!
 //! `Enter` on a message opens it (1076): a position report opens the map at
 //! its fix, any other message its detail view, which `v` opens for every
@@ -139,6 +141,10 @@ pub enum MapCmd {
     Open,
     /// The conversation comes back.
     Close,
+    /// The next way of drawing the map (`true`) or the previous one.
+    Drawing(bool),
+    /// The glyph test pattern over the map, or away again.
+    GlyphTest,
 }
 
 const fn key(code: KeyCode, mods: Mods, action: Action, panes: Panes) -> Chord<Action> {
@@ -553,6 +559,31 @@ pub const ROWS: &[Row<Action>] = {
             &[&[key(Char('d'), Mods::Plain, run(C::LoadMapArea), MAP)]],
         )
         .palette("load map area"),
+        // 1093: the drawing cycles live, every way the shell has, the one
+        // the reader stays on remembered; the glyph test says which glyph
+        // sets the font draws.
+        Row::new(
+            "next / previous way of drawing the map",
+            MAP_GROUP,
+            &[
+                &[
+                    key(Char('t'), Mods::Plain, Map(MapCmd::Drawing(true)), MAP),
+                    key(Char('T'), Mods::Plain, Map(MapCmd::Drawing(false)), MAP),
+                ],
+                &[key(F(2), Mods::Any, Map(MapCmd::Drawing(true)), MAP)],
+            ],
+        ),
+        Row::new(
+            "every way of drawing the map, the one now marked",
+            MAP_GROUP,
+            &[],
+        )
+        .palette("map drawing"),
+        Row::new(
+            "the glyph test: which glyph sets the font draws",
+            MAP_GROUP,
+            &[&[key(Char('g'), Mods::Plain, Map(MapCmd::GlyphTest), MAP)]],
+        ),
         Row::new(
             "every pin in view again",
             MAP_GROUP,

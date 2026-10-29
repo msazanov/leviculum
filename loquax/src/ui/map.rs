@@ -39,6 +39,21 @@ pub struct MapSetup {
     /// The installed regions' headers, which say how deep a fit goes
     /// ([`fit`]).
     pub regions: Vec<Header>,
+    /// The ways this shell can draw the map, in the order a key cycles
+    /// through them (1093); none where there is no choice.
+    pub drawings: Vec<Drawing>,
+    /// Which of [`MapSetup::drawings`] draws the map now.
+    pub drawing: usize,
+}
+
+/// One way the shell can draw the map, as a key and the palette offer it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Drawing {
+    /// Its name, as `--graphics` and the map's title spell it.
+    pub name: String,
+    /// Whether the shell expects it to work here. One it does not is still
+    /// offered, marked: the reader's eyes beat the detection.
+    pub expected: bool,
 }
 
 impl Default for MapSetup {
@@ -49,6 +64,8 @@ impl Default for MapSetup {
             cell_px: (2, 4),
             zooms: (0, leviculum_map::outline::MAX_ZOOM),
             regions: Vec::new(),
+            drawings: Vec::new(),
+            drawing: 0,
         }
     }
 }
@@ -590,6 +607,7 @@ mod tests {
             cell_px: (9, 19),
             zooms: (*zooms.start(), *zooms.end()),
             regions: vec![header],
+            ..MapSetup::default()
         };
         assert!(setup.zooms.1 > header.max_zoom, "overzoom is offered");
         let area = Rect::new(1, 1, 60, 20);

@@ -462,16 +462,30 @@ pub struct Palette<B> {
     /// What the palette asks for instead of a command, its text the answer
     /// (`rename`).
     pub ask: Option<contacts::Ask>,
+    /// The palette lists the ways of drawing the map instead of the
+    /// commands (`map drawing`, 1093), its query filtering them.
+    pub drawings: bool,
 }
 
 impl<B: InputBuffer> Palette<B> {
     /// The rows the query matches, in table order; none while the palette
     /// asks.
     pub fn matches(&self) -> Vec<&'static PaletteEntry> {
-        match self.ask {
-            Some(_) => Vec::new(),
-            None => commands::filter(self.query.value()),
+        match (self.ask, self.drawings) {
+            (None, false) => commands::filter(self.query.value()),
+            _ => Vec::new(),
         }
+    }
+
+    /// While the palette lists the map's drawings: the indexes in
+    /// `drawings` the query matches, in their order.
+    pub fn drawing_matches(&self, drawings: &[map::Drawing]) -> Vec<usize> {
+        drawings
+            .iter()
+            .enumerate()
+            .filter(|(_, d)| commands::fuzzy_match(self.query.value(), &d.name))
+            .map(|(i, _)| i)
+            .collect()
     }
 }
 
@@ -598,6 +612,11 @@ pub struct UiModel<B> {
     pub map_autoload: bool,
     /// The word the map's title carries while a region loads.
     pub map_loading: Option<String>,
+    /// The glyph test pattern is over the map (`g`, 1093).
+    pub map_glyph_test: bool,
+    /// The tick until which the map's title names the way it is drawn,
+    /// after the drawing changed.
+    pub map_named_until: Option<u64>,
     /// Regions to ask the shell for, handed out as [`UiEffect::LoadMap`]
     /// at the end of the fold.
     map_wants: Vec<map::MapWant>,
@@ -673,6 +692,8 @@ impl<B: InputBuffer + Default> UiModel<B> {
             map_press: None,
             map_autoload: false,
             map_loading: None,
+            map_glyph_test: false,
+            map_named_until: None,
             map_wants: Vec::new(),
         };
         for peer in peers {
@@ -994,6 +1015,9 @@ pub enum UiEffect {
     /// Load this region into the maps directory, reported with
     /// [`UiEvent::MapLoad`] (1089).
     LoadMap(map::MapWant),
+    /// Draw the map the `n`th way of [`map::MapSetup::drawings`]; the shell
+    /// answers with a new [`UiEvent::MapSetup`] (1093).
+    MapDrawing(usize),
 }
 
 /// Fold one event into the model.
@@ -1019,6 +1043,12 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
         UiEvent::MapSetup(setup) => {
             if let Some(state) = model.map.as_mut() {
                 state.zoom = state.zoom.clamp(setup.zooms.0, setup.zooms.1);
+            }
+            // The drawing changed under the reader: the title names it a
+            // moment. The first setup changes nothing the reader chose.
+            let old = &model.map_setup;
+            if !old.drawings.is_empty() && old.drawing != setup.drawing {
+                model.map_named_until = Some(model.tick + MAP_NAMED_TICKS);
             }
             model.map_setup = setup;
             Vec::new()
@@ -1248,6 +1278,14 @@ fn overlay_key<B: InputBuffer + Default>(model: &mut UiModel<B>, key: KeyEvent) 
                 model.palette = None;
                 return model.answer_ask(ask, typed);
             }
+            if palette.drawings {
+                let chosen = palette
+                    .drawing_matches(&model.map_setup.drawings)
+                    .get(palette.selected)
+                    .copied();
+                model.palette = None;
+                return chosen.map(UiEffect::MapDrawing).into_iter().collect();
+            }
             let chosen = palette.matches().get(palette.selected).map(|e| e.command);
             model.palette = None;
             if let Some(command) = chosen {
@@ -1255,8 +1293,11 @@ fn overlay_key<B: InputBuffer + Default>(model: &mut UiModel<B>, key: KeyEvent) 
             }
         }
         KeyCode::Down => {
-            let last = palette.matches().len().saturating_sub(1);
-            palette.selected = (palette.selected + 1).min(last);
+            let rows = match palette.drawings {
+                true => palette.drawing_matches(&model.map_setup.drawings).len(),
+                false => palette.matches().len(),
+            };
+            palette.selected = (palette.selected + 1).min(rows.saturating_sub(1));
         }
         KeyCode::Up => palette.selected = palette.selected.saturating_sub(1),
         _ => {
@@ -1532,8 +1573,20 @@ fn map_key<B: InputBuffer>(model: &mut UiModel<B>, cmd: keys::MapCmd) -> Vec<UiE
         MapCmd::Close => {
             model.map = None;
             model.map_press = None;
+            model.map_glyph_test = false;
             model.focus = Pane::Messages;
         }
+        MapCmd::Drawing(forward) => {
+            let n = setup.drawings.len();
+            if n > 0 {
+                let next = match forward {
+                    true => (setup.drawing + 1) % n,
+                    false => (setup.drawing + n - 1) % n,
+                };
+                return vec![UiEffect::MapDrawing(next)];
+            }
+        }
+        MapCmd::GlyphTest => model.map_glyph_test = !model.map_glyph_test,
     }
     Vec::new()
 }
@@ -2349,6 +2402,18 @@ fn run<B: InputBuffer + Default>(model: &mut UiModel<B>, command: PaletteCommand
             open_map(model);
             Vec::new()
         }
+        PaletteCommand::MapDrawing => {
+            if model.map_setup.drawings.is_empty() {
+                model.toast(ToastKind::Info, "the map is drawn one way here".to_string());
+            } else {
+                model.palette = Some(Palette {
+                    selected: model.map_setup.drawing,
+                    drawings: true,
+                    ..Palette::default()
+                });
+            }
+            Vec::new()
+        }
         PaletteCommand::Rename => {
             model.ask_rename();
             Vec::new()
@@ -2953,10 +3018,16 @@ pub struct View {
     pub theme: Theme,
     /// The map, when open, drawn in the conversation pane's place.
     pub map: Option<map::MapView>,
+    /// The glyph test pattern over the open map.
+    pub map_glyph_test: bool,
 }
 
 /// The map pane's title.
 pub const MAP_TITLE: &str = "map";
+
+/// How many ticks the map's title names a new way of drawing it: two
+/// seconds at the shell's quarter-second tick.
+pub const MAP_NAMED_TICKS: u64 = 8;
 
 /// The map title's word while a region loads.
 pub const MAP_LOADING: &str = "loading map";
@@ -3277,23 +3348,34 @@ pub fn view<B: InputBuffer>(model: &UiModel<B>) -> View {
     let palette = model.palette.as_ref().map(|p| PaletteView {
         query: p.query.value().to_string(),
         cursor: p.query.cursor(),
-        rows: match p.ask {
-            Some(ask) => model.ask_rows(ask).iter().map(|row| plain(row)).collect(),
-            None => palette_rows(p, ctx),
+        rows: match (p.ask, p.drawings) {
+            (Some(ask), _) => model.ask_rows(ask).iter().map(|row| plain(row)).collect(),
+            (None, true) => drawing_rows(p, &model.map_setup),
+            (None, false) => palette_rows(p, ctx),
         },
     });
     let searching = model.search.is_some();
     let map = model.map_view();
+    // The way the map is drawn, a moment after it changed.
+    let named = model
+        .map_named_until
+        .filter(|&until| model.tick < until)
+        .and_then(|_| model.map_setup.drawings.get(model.map_setup.drawing))
+        .map_or(String::new(), |d| format!("{} · ", d.name));
     let (messages_title, messages_title_right) = match &map {
         Some(shown) => (
             MAP_TITLE.to_string(),
             match &model.map_loading {
                 Some(word) => format!(
-                    "z{} · {} in view · {word}",
+                    "{named}z{} · {} in view · {word}",
                     shown.viewport.zoom(),
                     shown.pins.len()
                 ),
-                None => format!("z{} · {} in view", shown.viewport.zoom(), shown.pins.len()),
+                None => format!(
+                    "{named}z{} · {} in view",
+                    shown.viewport.zoom(),
+                    shown.pins.len()
+                ),
             },
         ),
         None => (messages_title, messages_title_right),
@@ -3338,6 +3420,7 @@ pub fn view<B: InputBuffer>(model: &UiModel<B>) -> View {
         detail_scroll: model.detail_scroll,
         tier: model.tier,
         theme: model.theme,
+        map_glyph_test: map.is_some() && model.map_glyph_test,
         map,
     }
 }
@@ -3355,6 +3438,33 @@ fn palette_rows<B: InputBuffer>(p: &Palette<B>, ctx: Ctx) -> Vec<RLine> {
             };
             let mut line = RLine::default();
             match i == p.selected {
+                true => push(&mut line, &format!("▸ {shown}"), bold()),
+                false => push(&mut line, &format!("  {shown}"), RStyle::default()),
+            }
+            line
+        })
+        .collect()
+}
+
+/// The palette's rows while it lists the map's drawings: each name, the
+/// one drawing now behind `●`, the highlighted one bold behind `▸`, and the
+/// ones the shell does not expect to work here marked so (1093).
+fn drawing_rows<B: InputBuffer>(p: &Palette<B>, setup: &map::MapSetup) -> Vec<RLine> {
+    p.drawing_matches(&setup.drawings)
+        .iter()
+        .enumerate()
+        .filter_map(|(row, &i)| setup.drawings.get(i).map(|d| (row, i, d)))
+        .map(|(row, i, d)| {
+            let now = match i == setup.drawing {
+                true => "● ",
+                false => "  ",
+            };
+            let shown = match d.expected {
+                true => format!("{now}{}", d.name),
+                false => format!("{now}{}  (may not show here)", d.name),
+            };
+            let mut line = RLine::default();
+            match row == p.selected {
                 true => push(&mut line, &format!("▸ {shown}"), bold()),
                 false => push(&mut line, &format!("  {shown}"), RStyle::default()),
             }
@@ -6560,6 +6670,7 @@ mod tests {
                 cell_px: (2, 4),
                 zooms: (0, 20),
                 regions: vec![florence()],
+                ..map::MapSetup::default()
             }),
         );
         model
@@ -6573,6 +6684,132 @@ mod tests {
             .expect("pin")
             .label
             .clone()
+    }
+
+    /// The shell's offer of three drawings, the `now`th drawing.
+    fn offered(model: &mut UiModel<Field>, now: usize) {
+        let drawings = ["octant", "blocks", "braille"]
+            .iter()
+            .enumerate()
+            .map(|(i, name)| map::Drawing {
+                name: name.to_string(),
+                expected: i != 1,
+            })
+            .collect();
+        let setup = map::MapSetup {
+            drawings,
+            drawing: now,
+            ..model.map_setup.clone()
+        };
+        update(model, UiEvent::MapSetup(setup));
+    }
+
+    /// `t` asks the shell for the next drawing, `T` and the wrap for the
+    /// one before; the shell's answer is the drawing, and the title names
+    /// it for [`MAP_NAMED_TICKS`] ticks. The first setup names nothing.
+    #[test]
+    fn t_cycles_the_drawings_with_a_wrap_and_the_title_names_the_new_one() {
+        let mut model = mapped();
+        update(&mut model, key(KeyCode::Char('t')));
+        assert!(model.map.is_none(), "t opens nothing outside the map");
+        offered(&mut model, 0);
+        update(&mut model, key(KeyCode::Char('M')));
+        assert!(
+            view(&model).messages_title_right.starts_with("z"),
+            "named at start"
+        );
+        assert_eq!(
+            update(&mut model, key(KeyCode::Char('t'))),
+            vec![UiEffect::MapDrawing(1)]
+        );
+        assert_eq!(
+            update(&mut model, key(KeyCode::Char('T'))),
+            vec![UiEffect::MapDrawing(2)],
+            "back from the first wraps to the last"
+        );
+        assert_eq!(
+            update(&mut model, key(KeyCode::F(2))),
+            vec![UiEffect::MapDrawing(1)]
+        );
+        offered(&mut model, 2);
+        assert_eq!(
+            update(&mut model, key(KeyCode::Char('t'))),
+            vec![UiEffect::MapDrawing(0)],
+            "on from the last wraps to the first"
+        );
+        let title = view(&model).messages_title_right;
+        assert!(title.starts_with("braille · z"), "{title}");
+        for _ in 0..MAP_NAMED_TICKS {
+            update(&mut model, UiEvent::Tick);
+        }
+        let title = view(&model).messages_title_right;
+        assert!(title.starts_with("z"), "{title}");
+        // A shell with one way has nothing to cycle.
+        let mut plain = mapped();
+        update(&mut plain, key(KeyCode::Char('M')));
+        assert!(update(&mut plain, key(KeyCode::Char('t'))).is_empty());
+    }
+
+    /// The palette's `map drawing` lists every drawing, the one now behind
+    /// `●`, the unexpected ones marked; `Enter` asks for the highlighted
+    /// one, the query filters.
+    #[test]
+    fn the_palette_lists_the_drawings_and_enter_takes_one() {
+        let mut model = mapped();
+        offered(&mut model, 0);
+        update(&mut model, key(KeyCode::Char('M')));
+        update(&mut model, UiEvent::Run(PaletteCommand::MapDrawing));
+        let rows: Vec<String> = view(&model)
+            .palette
+            .expect("open")
+            .rows
+            .iter()
+            .map(|r| r.cells.iter().map(|c| c.ch).collect::<String>())
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                "▸ ● octant",
+                "    blocks  (may not show here)",
+                "    braille"
+            ]
+        );
+        update(&mut model, key(KeyCode::Down));
+        update(&mut model, key(KeyCode::Down));
+        update(&mut model, key(KeyCode::Down));
+        assert_eq!(
+            update(&mut model, key(KeyCode::Enter)),
+            vec![UiEffect::MapDrawing(2)]
+        );
+        assert!(model.palette.is_none());
+        update(&mut model, UiEvent::Run(PaletteCommand::MapDrawing));
+        for c in "blo".chars() {
+            update(&mut model, key(KeyCode::Char(c)));
+        }
+        assert_eq!(
+            update(&mut model, key(KeyCode::Enter)),
+            vec![UiEffect::MapDrawing(1)]
+        );
+        // Without an offer there is nothing to choose.
+        let mut plain = mapped();
+        update(&mut plain, UiEvent::Run(PaletteCommand::MapDrawing));
+        assert!(plain.palette.is_none());
+    }
+
+    /// `g` puts the glyph test over the map and takes it away; closing the
+    /// map takes it too.
+    #[test]
+    fn g_shows_the_glyph_test_over_the_map() {
+        let mut model = mapped();
+        update(&mut model, key(KeyCode::Char('M')));
+        assert!(!view(&model).map_glyph_test);
+        update(&mut model, key(KeyCode::Char('g')));
+        assert!(view(&model).map_glyph_test);
+        update(&mut model, key(KeyCode::Char('g')));
+        assert!(!view(&model).map_glyph_test);
+        update(&mut model, key(KeyCode::Char('g')));
+        update(&mut model, key(KeyCode::Esc));
+        assert!(!view(&model).map_glyph_test && !model.map_glyph_test);
     }
 
     /// `M` puts the map in the conversation's place with every pin in view
@@ -6732,6 +6969,7 @@ mod tests {
                     cell_px,
                     zooms: (0, 20),
                     regions: vec![florence()],
+                    ..map::MapSetup::default()
                 }),
             );
             update(&mut model, key(KeyCode::Char('M')));
@@ -6936,6 +7174,7 @@ mod tests {
                 cell_px: (2, 4),
                 zooms: (0, 20),
                 regions: vec![florence()],
+                ..map::MapSetup::default()
             }),
         );
         arrive(&mut model, PEER, 1, "on my way", Vec::new());

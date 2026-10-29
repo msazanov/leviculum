@@ -4,8 +4,18 @@ Draft, 2026-10-28 (1090). Lew uses loquax's braille map over mosh from
 Termux and asks what text mode can do beyond it. This draft compares the
 cell techniques on the same views, says what cartography in cells needs,
 which glyphs fonts actually carry, what each technique costs, and
-recommends one default per situation. Concept and samples only: loquax's
-behaviour is unchanged.
+recommends one default per situation.
+
+**Status (1093, 2026-10-29): built** for slices 1 to 4 of section 5:
+`braille-thin`, the 16-colour class tokens, octants and `blocks` as rungs
+with the faster octant fit, and the glyph test behind `g`; plus a key that
+cycles every way live and a memory of the one the reader stays on, per
+terminal context (`loquax(1)`, MAP; `loquax-map.md`, section 6). The
+encoders moved out of the sample generator into the map core,
+`leviculum_map::cells`, which the generator now calls. Slices 5 (a dark
+style table) and 6 (labels) are not built. The two-colour fit compares
+its splits exactly now (a fraction, no integer division), so a sample
+generated again may differ from the committed ones in a near tie.
 
 Everything below was measured on the coder host (schneckenschreck, AMD
 Ryzen 9 7950X) unless it says otherwise. Nothing was checked on Lew's
@@ -306,7 +316,10 @@ Reading:
 - Every encoder but the brute-force octant fit is under 5 ms at 155 x 65.
   The octant fit tries 256 masks on 32 pixels a cell; on the eight
   octant means instead of 32 pixels it is a quarter, and a 2-means split
-  of eight values needs no enumeration at all. Not done here.
+  of eight values needs no enumeration at all. Built in 1093 on the
+  eight sums, half the patterns (a pattern and its complement fit alike)
+  in Gray code order: 5.8 ms against 31 ms at 155 x 65 over the Florence
+  fixture, the same cells as the brute force.
 - Bytes: a colour frame is about 60 KB at 80 x 24 in truecolor, 300 KB at
   155 x 65, because almost every cell carries two SGR sequences. 256
   colours cost 60 %, 16 colours a third.
@@ -318,18 +331,23 @@ Reading:
 
 ## 5. Slices
 
-1. **`braille-thin` replaces today's braille** under colour: areas as cell
+1. *(built, 1093, as the rung over mosh, in Termux and at 16 colours;
+   plain braille stays for no colour and as a choice)*
+   **`braille-thin` replaces today's braille** under colour: areas as cell
    background in the style's colours, lines at half width (one dot),
    minor roads grey as dots. Over mosh and at 16 colours (with the class
    tokens of slice 2). `--no-color` keeps braille in the terminal's
    colour. Snapshot-tested like today's braille.
-2. **16-colour class tokens** in the style table beside the RGB, and the
+2. *(built, 1093: `leviculum_mapfill::style::ansi16`)*
+   **16-colour class tokens** in the style table beside the RGB, and the
    256 tier left on nearest-index (measured to keep the classes apart).
-3. **Octants and blocks-best as rungs** between images and braille:
+3. *(built, 1093, the flag values `octant` and `blocks`)*
+   **Octants and blocks-best as rungs** between images and braille:
    `--graphics octants|blocks`, auto octants on kitty, foot and WezTerm by
    `TERM`/`TERM_PROGRAM`, else blocks-best replacing half-blocks. The
    faster octant fit (means of eight) lands with it.
-4. **The glyph test pattern** behind one key, naming the flag per line.
+4. *(built, 1093, `g` in the map)*
+   **The glyph test pattern** behind one key, naming the flag per line.
 5. **A dark style table** as data (`darken`'s table made real), chosen by
    the terminal background query (OSC 11) where it answers, else by
    config.

@@ -177,6 +177,7 @@ impl<B: InputBuffer + Default> UiModel<B> {
             query,
             selected: 0,
             ask: Some(Ask::Rename(peer)),
+            drawings: false,
         });
     }
 

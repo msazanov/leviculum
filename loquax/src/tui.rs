@@ -44,7 +44,7 @@ use leviculum_ui::tokens::Tokens;
 use leviculum_ui_ratatui::background::detect_background;
 use leviculum_ui_ratatui::event::{key_event, mouse_event, step_event, EventStep};
 use leviculum_ui_ratatui::geometry::to_ratatui;
-use leviculum_ui_ratatui::images::{Between, Picker, ProtocolType};
+use leviculum_ui_ratatui::images::{Between, Picker};
 use leviculum_ui_ratatui::style::downgrade_buffer;
 use leviculum_ui_ratatui::terminal::{install_panic_hook, set_mouse_capture, TerminalOps};
 use leviculum_ui_ratatui::{help, to_ratatui_text, toast, CrosstermTerminal, TerminalGuard};
@@ -123,7 +123,15 @@ pub async fn run(options: TuiOptions) -> ExitCode {
                 .unwrap_or_else(|| script.with_extension("frames"));
             run_script(&mut shell, script, &frames, &options).await
         }
-        None => run_terminal(&mut shell, theme_flag, options.graphics).await,
+        None => {
+            run_terminal(
+                &mut shell,
+                theme_flag,
+                options.graphics,
+                &config.map_drawing,
+            )
+            .await
+        }
     };
     shell::finish(shell, outcome).await
 }
@@ -171,13 +179,9 @@ fn log_keys(model: &Model) {
 
 /// The once-at-start `tui.log` line naming how the map is drawn and why,
 /// beside the `KEYS` line.
-fn log_graphics(
-    painter: &map::MapPainter,
-    chosen: &map::Chosen,
-    detected: Option<ProtocolType>,
-    between: Between,
-) {
+fn log_graphics(painter: &map::MapPainter, chosen: &map::Chosen, facts: &map::Facts) {
     let setup = painter.setup();
+    let between = facts.between;
     let names = [
         (between.mosh, "mosh"),
         (between.tmux, "tmux"),
@@ -185,10 +189,12 @@ fn log_graphics(
     ];
     let between: Vec<&str> = names.iter().filter(|(b, _)| *b).map(|(_, n)| *n).collect();
     tracing::info!(
-        "GRAPHICS backend={} reason={} detected={} between={} cell={}x{} zooms={}-{}",
+        "GRAPHICS backend={} reason={} detected={} between={} cell={}x{} zooms={}-{} context={}",
         painter.graphics().name(),
         chosen.reason(),
-        detected.map_or("none".to_string(), |p| format!("{p:?}").to_lowercase()),
+        facts
+            .detected
+            .map_or("none".to_string(), |p| format!("{p:?}").to_lowercase()),
         match between.is_empty() {
             true => "none".to_string(),
             false => between.join(","),
@@ -196,7 +202,8 @@ fn log_graphics(
         setup.cell_px.0,
         setup.cell_px.1,
         setup.zooms.0,
-        setup.zooms.1
+        setup.zooms.1,
+        facts.context()
     );
 }
 
@@ -205,6 +212,7 @@ async fn run_terminal(
     shell: &mut Shell,
     theme: ThemeFlag,
     graphics: map::GraphicsFlag,
+    remembered: &[(String, String)],
 ) -> Result<(), String> {
     install_panic_hook();
     // Before the alternate screen, as lnomad does: the background query reads
@@ -235,20 +243,40 @@ async fn run_terminal(
     let ask = match graphics {
         map::GraphicsFlag::Auto => shell.model.tier != Tier::Mono,
         map::GraphicsFlag::Kitty | map::GraphicsFlag::Sixel => true,
-        map::GraphicsFlag::Halfblocks | map::GraphicsFlag::Braille => false,
+        map::GraphicsFlag::Octant
+        | map::GraphicsFlag::Blocks
+        | map::GraphicsFlag::Halfblocks
+        | map::GraphicsFlag::BrailleThin
+        | map::GraphicsFlag::Mosaic
+        | map::GraphicsFlag::Braille => false,
     };
     let picker = match ask {
         true => Picker::from_query_stdio().ok(),
         false => None,
     };
     let detected = picker.as_ref().map(Picker::protocol_type);
-    let between = Between::detect();
-    let chosen = map::choose_graphics(graphics, detected, shell.model.tier, between);
+    let facts = map::Facts::read(detected, shell.model.tier, Between::detect());
+    // The way remembered for this terminal wins over the ladder, unless it
+    // cannot work here; then the ladder's, said once (1093).
+    let context = facts.context();
+    let held = remembered
+        .iter()
+        .rev()
+        .find(|(c, _)| *c == context)
+        .map(|(_, d)| d.as_str());
+    let (chosen, passed_over) = map::choose_start(graphics, held, &facts);
+    if let Some(line) = passed_over {
+        tracing::info!("GRAPHICS {line}");
+        shell.apply(UiEvent::Notice(line));
+    }
+    let mut memory = map::Memory::new(context, held, chosen.graphics);
     // The map is drawn on its own thread: a key is read while the last
     // one's view is painted and encoded (1075).
-    let mut painter = map::MapPainter::new(shell.maps.clone(), chosen.graphics, picker).threaded();
-    log_graphics(&painter, &chosen, detected, between);
-    shell.apply(UiEvent::MapSetup(painter.setup()));
+    let mut painter =
+        map::MapPainter::new(shell.maps.clone(), chosen.graphics, picker.clone()).threaded();
+    log_graphics(&painter, &chosen, &facts);
+    shell.apply(UiEvent::MapSetup(map::setup_of(&painter, &facts)));
+    let mut map_open = false;
     let mut events = EventStream::new();
     shell.apply(UiEvent::Clock(local_now()));
     let size = terminal.size().map_err(|e| e.to_string())?;
@@ -266,10 +294,27 @@ async fn run_terminal(
 
     let result = loop {
         for output in std::mem::take(&mut shell.outputs) {
+            if let Output::MapDrawing(n) = output {
+                // Another way of drawing the map, at once (1093).
+                if let Some(&next) = map::Graphics::ORDER.get(n) {
+                    painter =
+                        map::MapPainter::new(shell.maps.clone(), next, picker.clone()).threaded();
+                    memory.chose(next);
+                    tracing::info!("GRAPHICS backend={} reason=chosen", next.name());
+                    shell.apply(UiEvent::MapSetup(map::setup_of(&painter, &facts)));
+                }
+                continue;
+            }
             if let Err(error) = run_output(output) {
                 shell.apply(UiEvent::Notice(error));
             }
         }
+        // Leaving the map writes the way the reader stayed on.
+        let open = shell.model.map.is_some();
+        if map_open && !open {
+            remember(shell, &mut memory);
+        }
+        map_open = open;
         if shell.redraw {
             shell.redraw = false;
             if let Err(error) = terminal.clear() {
@@ -328,8 +373,31 @@ async fn run_terminal(
     // How many map pictures went up, beside the GRAPHICS line: a held key
     // that drew far fewer than it pressed was coalesced (1075).
     tracing::info!("GRAPHICS paints={}", painter.paints());
+    remember(shell, &mut memory);
     guard.restore_now().map_err(|e| e.to_string())?;
     result
+}
+
+/// Write the way of drawing the map the reader chose to the config, when
+/// it is not there already; a file that would not take it is said.
+fn remember(shell: &mut Shell, memory: &mut map::Memory) {
+    let Some((key, value)) = memory.owed() else {
+        return;
+    };
+    match loquax::config::save(shell.home(), &key, value) {
+        Ok(()) => {
+            memory.written();
+            tracing::info!("GRAPHICS remembered={value} context={}", memory.context);
+        }
+        Err(error) => {
+            let line = format!(
+                "{}: the map drawing not saved: {error}",
+                shell.home().join(loquax::config::CONFIG_FILE).display()
+            );
+            tracing::warn!("{line}");
+            shell.afterwards.push(line);
+        }
+    }
 }
 
 /// `f`'s result, or the message of the panic it raised.
@@ -374,6 +442,8 @@ fn run_output(output: Output) -> Result<(), String> {
         }
         Output::Open(url) => open::that(&url).map_err(|e| format!("could not open {url}: {e}")),
         Output::Mouse(on) => set_mouse_capture(on).map_err(|e| format!("mouse: {e}")),
+        // The loop switches the painter itself.
+        Output::MapDrawing(_) => Ok(()),
     }
 }
 
@@ -881,11 +951,13 @@ async fn run_script(
     // A script asks no terminal and looks for no go-between: `auto` climbs
     // the ladder on its tier alone, so a frame does not depend on where the
     // test runs.
-    let between = Between::default();
-    let chosen = map::choose_graphics(options.graphics, None, shell.model.tier, between);
+    // Nor does it read a remembered drawing or write one: its home is
+    // the test's, and its frames must not depend on a run before.
+    let facts = map::Facts::none(shell.model.tier);
+    let chosen = map::choose_graphics(options.graphics, &facts);
     let mut painter = map::MapPainter::new(shell.maps.clone(), chosen.graphics, None);
-    log_graphics(&painter, &chosen, None, between);
-    shell.apply(UiEvent::MapSetup(painter.setup()));
+    log_graphics(&painter, &chosen, &facts);
+    shell.apply(UiEvent::MapSetup(map::setup_of(&painter, &facts)));
     let mut out =
         std::fs::File::create(frames).map_err(|e| format!("{}: {e}", frames.display()))?;
     let styles_path = {
@@ -1008,6 +1080,13 @@ async fn run_script(
         }
         for output in std::mem::take(&mut shell.outputs) {
             let line = match output {
+                Output::MapDrawing(n) => {
+                    if let Some(&next) = map::Graphics::ORDER.get(n) {
+                        painter = map::MapPainter::new(shell.maps.clone(), next, None);
+                        shell.apply(UiEvent::MapSetup(map::setup_of(&painter, &facts)));
+                    }
+                    continue;
+                }
                 Output::Copy(text) => format!("osc52 {}", osc52(&text).replace('\x1b', "\\e")),
                 Output::Open(url) => format!("open {url}"),
                 Output::Mouse(on) => format!("mouse {}", if on { "on" } else { "off" }),
@@ -1102,7 +1181,11 @@ pub fn draw(frame: &mut Frame, view: &View, painter: Option<&mut map::MapPainter
         // The map in the conversation's place: the picture, the pins and
         // the attribution, all inside the pane.
         (Some(shown), Some(painter)) => {
+            painter.set_tier(tier);
             painter.render(frame, shown, Style::default().add_modifier(Modifier::DIM));
+            if view.map_glyph_test {
+                map::draw_glyph_test(frame, to_ratatui(shown.area));
+            }
         }
         (Some(shown), None) => {
             for pin in &shown.pins {

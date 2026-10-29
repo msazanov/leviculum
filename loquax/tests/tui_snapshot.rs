@@ -114,6 +114,7 @@ const EXPECTED_HISTORY: &str = include_str!("fixtures/tui_history.frames");
 const EXPECTED_TELEMETRY: &str = include_str!("fixtures/tui_telemetry.frames");
 const EXPECTED_MAP: &str = include_str!("fixtures/tui_map.frames");
 const EXPECTED_MAPLOAD: &str = include_str!("fixtures/tui_mapload.frames");
+const EXPECTED_MAP_CYCLE: &str = include_str!("fixtures/tui_map_cycle.frames");
 
 const SCRIPT: &str = "\
 until ready 20
@@ -1926,6 +1927,11 @@ fn located(minutes_ago: i64, lat_e6: i32, lon_e6: i32) -> leviculum_lxmf::teleme
 }
 
 async fn map_session(graphics: &str) -> (String, String) {
+    map_session_of("map", MAP_SCRIPT, graphics).await
+}
+
+/// The map session's peers and region, `script` played with `--graphics`.
+async fn map_session_of(name: &str, script: &str, graphics: &str) -> (String, String) {
     use leviculum_lxmf::msgpack::Number;
     use leviculum_lxmf::telemetry::{encode_stream_field_value, StreamEntry};
     let install = |home: &Path| {
@@ -1961,7 +1967,7 @@ async fn map_session(graphics: &str) -> (String, String) {
         vec![("", own)]
     };
     let flag = format!("--graphics={graphics}");
-    peer_session("map", "80x24", MAP_SCRIPT, &[&flag], install, messages).await
+    peer_session(name, "80x24", script, &[&flag], install, messages).await
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1976,7 +1982,8 @@ async fn the_map_shows_the_pins_on_the_region_and_the_outline_in_braille_and_hal
         assert_eq!(
             line,
             format!(
-                "GRAPHICS backend={graphics} reason=forced detected=none between=none cell={} zooms=0-20",
+                "GRAPHICS backend={graphics} reason=forced detected=none between=none cell={} zooms=0-20 \
+                 context=local:unknown",
                 match graphics {
                     "braille" => "2x4",
                     _ => "1x2",
@@ -2042,6 +2049,133 @@ async fn the_map_shows_the_pins_on_the_region_and_the_outline_in_braille_and_hal
         panic!(
             "the frames moved; this run's are in {}, the pinned ones in \
              loquax/tests/fixtures/tui_map.frames\n{all}",
+            kept.display()
+        );
+    }
+}
+
+/// The map's drawing cycled live (1093): opened in octants, `t` steps
+/// through the text techniques in the ladder's order, the title naming each,
+/// `T` steps back, and `g` puts the glyph test over the map. A script
+/// writes no config and reads none, so its frames do not depend on a run
+/// before.
+const MAP_CYCLE_SCRIPT: &str = "\
+clock 2026-10-26 14:00
+until ready 20
+frame attached
+until received 1 60
+tick 12
+key M
+frame octant
+key t
+frame blocks
+key t
+frame halfblocks
+key t
+frame braille-thin
+key t
+frame mosaic
+key t
+frame braille
+key T
+frame back to mosaic
+tick 8
+frame the name gone
+key g
+frame glyph test
+key g
+frame glyph test closed
+key q
+";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_map_drawing_cycles_through_the_text_techniques() {
+    let (frames, log) = map_session_of("mapcycle", MAP_CYCLE_SCRIPT, "octant").await;
+    assert!(
+        log.contains(
+            "GRAPHICS backend=octant reason=forced detected=none between=none cell=2x4 zooms=0-20 \
+             context=local:unknown"
+        ),
+        "{log}"
+    );
+    // The picture's rows: inside the map pane's border, above the credit.
+    let picture = |label: &str| -> String {
+        frame(&frames, label)
+            .lines()
+            .skip(1)
+            .take(18)
+            .map(|l| l.chars().skip(27).take(52).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let octants = |p: &str| {
+        p.chars()
+            .filter(|c| ('\u{1CD00}'..='\u{1CDE5}').contains(c))
+            .count()
+    };
+    let braille = |p: &str| {
+        p.chars()
+            .filter(|c| ('\u{2801}'..='\u{28FF}').contains(c))
+            .count()
+    };
+    let octant = picture("octant");
+    assert!(octants(&octant) > 50, "{octant}");
+    let blocks = picture("blocks");
+    assert_eq!(octants(&blocks), 0, "{blocks}");
+    assert!(
+        blocks
+            .chars()
+            .any(|c| "▘▝▀▖▌▞▛▗▚▐▜▄▙▟▁▂▃▅▆▇▔▎▊".contains(c)),
+        "{blocks}"
+    );
+    let half = picture("halfblocks");
+    assert!(half.chars().filter(|&c| c == '▀').count() > 400, "{half}");
+    let thin = picture("braille-thin");
+    assert!(braille(&thin) > 50 && octants(&thin) == 0, "{thin}");
+    let mosaic = picture("mosaic");
+    assert_eq!(braille(&mosaic) + octants(&mosaic), 0, "{mosaic}");
+    let plain = picture("braille");
+    assert!(braille(&plain) > 50, "{plain}");
+    // The title names each new drawing, until the ticks pass.
+    for (label, name) in [
+        ("blocks", "blocks"),
+        ("halfblocks", "halfblocks"),
+        ("braille-thin", "braille-thin"),
+        ("mosaic", "mosaic"),
+        ("braille", "braille"),
+        ("back to mosaic", "mosaic"),
+    ] {
+        let top = frame(&frames, label).lines().next().unwrap_or_default();
+        assert!(top.contains(&format!("{name} · z14")), "{label}: {top}");
+    }
+    let top = frame(&frames, "octant").lines().next().unwrap_or_default();
+    assert!(top.contains("─ z14 ·"), "named only after a change: {top}");
+    let top = frame(&frames, "the name gone")
+        .lines()
+        .next()
+        .unwrap_or_default();
+    assert!(top.contains("─ z14 ·"), "{top}");
+    // Every frame keeps the pins and the credit.
+    for label in ["octant", "blocks", "braille-thin", "mosaic", "braille"] {
+        let shown = frame(&frames, label);
+        assert!(shown.contains("● you · 1 min"), "{label}\n{shown}");
+        assert!(
+            shown.contains("© OpenStreetMap contributors"),
+            "{label}\n{shown}"
+        );
+    }
+    let test = frame(&frames, "glyph test");
+    assert!(
+        test.contains("glyph test · g closes") && test.contains("octant"),
+        "{test}"
+    );
+    assert!(!frame(&frames, "glyph test closed").contains("glyph test"));
+    if frames != EXPECTED_MAP_CYCLE {
+        let kept = std::env::temp_dir().join("loquax-tui-map-cycle.frames");
+        let _ = std::fs::write(&kept, &frames);
+        panic!(
+            "the frames moved; this run's are in {}, the pinned ones in \
+             loquax/tests/fixtures/tui_map_cycle.frames\n{frames}",
             kept.display()
         );
     }
