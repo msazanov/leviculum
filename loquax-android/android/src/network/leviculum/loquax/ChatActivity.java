@@ -93,12 +93,14 @@ public class ChatActivity extends Activity implements Events.Listener {
             finish();
             return;
         }
+        Core.front(true);
         say(error);
         refresh();
     }
 
     @Override
     protected void onPause() {
+        Core.front(false);
         Events.listen(null);
         Core.close();
         super.onPause();

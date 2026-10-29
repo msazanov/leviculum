@@ -95,11 +95,13 @@ public class ConversationsActivity extends Activity implements Events.Listener {
             finish();
             return;
         }
+        Core.front(true);
         refresh();
     }
 
     @Override
     protected void onPause() {
+        Core.front(false);
         Events.listen(null);
         super.onPause();
     }

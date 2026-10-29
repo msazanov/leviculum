@@ -11,7 +11,7 @@
 //! | call | payload |
 //! |---|---|
 //! | `start` | [`Start`] |
-//! | `command` | [`Request`], tagged by `t`: `open`, `close`, `send`, `react`, `pull` |
+//! | `command` | [`Request`], tagged by `t`: `open`, `close`, `send`, `react`, `pull`, `front` |
 //! | `query` | [`Query`], tagged by `t`: `conversations`, `messages` |
 //!
 //! Rust to Java:
@@ -28,6 +28,9 @@
 //! added is no such change: Java reads keys by name and skips an event it
 //! does not know, so `link` (event and field) came within version 1, and a
 //! code with the address behind it in [`Start::code`] is still a string.
+//! A request added is none either: an older app never sends `front`, and
+//! the session then counts itself in the back, pulling on wakes and its
+//! schedule as before.
 
 use serde::{Deserialize, Serialize};
 
@@ -98,6 +101,10 @@ pub enum Request {
     },
     /// Asked for a pull now: the refresh button.
     Pull,
+    /// A screen of the app came to the front (`true`) or left it: while in
+    /// front and with the watching link down, the session pulls every
+    /// minute.
+    Front { front: bool },
 }
 
 /// What the screen wants to show.
@@ -243,6 +250,10 @@ mod tests {
         assert_eq!(
             decode::<Request>(&encode(&Request::Pull)),
             Ok(Request::Pull)
+        );
+        assert_eq!(
+            decode::<Request>(&encode(&Request::Front { front: true })),
+            Ok(Request::Front { front: true })
         );
     }
 

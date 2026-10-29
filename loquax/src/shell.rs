@@ -33,6 +33,7 @@ use loquax::engine::{attach_as, AttachConfig, Attached, Role};
 use loquax::fanout::{Fanout, Tap};
 use loquax::fetch::{run_fetch, FetchError, FetchOptions};
 use loquax::home::runner::{self, HomeClient};
+use loquax::home::watch::{self, Fallback, WatchEvent};
 use loquax::mailbox::{Unanswered, UNANSWERED_EXCLUSION_MS, UNANSWERED_LIMIT};
 use loquax::mailbox_state::{self, short, Stored};
 use loquax::mapload::{Loader, Source, Step, CACHE_DEFAULT_MB};
@@ -239,6 +240,12 @@ pub(crate) struct Shell {
     loader: Loader,
     /// The origin of the monotonic clock the mailbox schedule runs on.
     origin: tokio::time::Instant,
+    /// On a client of a home node: the watching link's task, its word on
+    /// wakes and on itself, whether it is up, and the pull while it is
+    /// down. A script runs none, as it runs no schedule unless it says so.
+    watch: Option<(tokio::task::JoinHandle<()>, UnboundedReceiver<WatchEvent>)>,
+    watching: bool,
+    fallback: Fallback,
 }
 
 /// What the model asks of the terminal beyond drawing.
@@ -477,6 +484,7 @@ impl Shell {
         while let Ok(line) = self.notices_rx.try_recv() {
             self.apply(UiEvent::Notice(line));
         }
+        self.watched();
         while let Ok(stored) = self.mailbox_rx.try_recv() {
             self.replaced(&stored);
             self.apply(chosen(&stored));
@@ -608,6 +616,32 @@ impl Shell {
                     tracing::info!("MAPLOAD skipped box={} why={why}", box_words(&want));
                 }
             }
+        }
+    }
+
+    /// What the watching link said: a wake past the cursor pulls, and while
+    /// the link is down a pull runs every minute, the terminal being in
+    /// front whenever it runs.
+    fn watched(&mut self) {
+        let Some((_, events)) = &mut self.watch else {
+            return;
+        };
+        let mut wake = false;
+        while let Ok(event) = events.try_recv() {
+            match event {
+                WatchEvent::Watching(up) => self.watching = up,
+                WatchEvent::Wake(newest) => {
+                    let cursor = loquax::home::client::load_cursor(&self.context.home);
+                    wake |= watch::wants_pull(newest, cursor);
+                }
+            }
+        }
+        if self.fallback.due(self.elapsed_ms(), self.watching, true) {
+            tracing::info!("SYNC the watching link is down; pulling");
+            wake = true;
+        }
+        if wake {
+            self.apply(UiEvent::HomeWake);
         }
     }
 
@@ -1075,6 +1109,22 @@ pub(crate) async fn start(
     let cache_bytes = config.map_cache_mb.unwrap_or(CACHE_DEFAULT_MB) << 20;
     let loader = Loader::new(maps.clone(), source, cache_bytes);
     let (done_tx, done_rx) = unbounded_channel();
+    let watch = match (&client, options.scripted) {
+        (Some(client), false) => {
+            let (events_tx, events_rx) = unbounded_channel();
+            let task = tokio::spawn(watch::run(
+                watch::Watch {
+                    node: client.node.clone(),
+                    public_key: client.public_key,
+                    device: client.device.clone(),
+                    home: home.clone(),
+                },
+                events_tx,
+            ));
+            Some((task, events_rx))
+        }
+        _ => None,
+    };
     let shell = Shell {
         model,
         _delivery_lock: delivery_lock,
@@ -1113,6 +1163,9 @@ pub(crate) async fn start(
         maps,
         loader,
         origin: tokio::time::Instant::now(),
+        watch,
+        watching: false,
+        fallback: Fallback::default(),
     };
     Ok((shell, config))
 }
@@ -1124,8 +1177,12 @@ pub(crate) async fn finish(mut shell: Shell, outcome: Result<(), String>) -> Exi
     let Shell {
         attached,
         afterwards,
+        watch,
         ..
     } = shell;
+    if let Some((task, _)) = watch {
+        task.abort();
+    }
     attached.stop().await;
     for line in afterwards {
         eprintln!("loquax: {line}");

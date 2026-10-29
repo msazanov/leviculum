@@ -25,6 +25,7 @@ use leviculum_ui::input::{InputBuffer, KeyEvent};
 use loquax::engine::{attach_leaf, Attached, LeafConfig, Role};
 use loquax::fanout::Fanout;
 use loquax::home::runner::{self, HomeClient};
+use loquax::home::watch::{self, Fallback, WatchEvent};
 use loquax::outbox::{Command, Outbox, OutboxEvent};
 use loquax::store::Store;
 use loquax::ui::{reactions, update, Message, UiEffect, UiEvent, UiModel};
@@ -118,6 +119,13 @@ struct Inner {
     /// none before the first, and the pumps since that look.
     link: Option<bool>,
     link_age: u32,
+    /// The watching link's word (`loquax::home::watch`), whether it is up,
+    /// whether a screen of the app is in front, and the pull every minute
+    /// while it is and the link is down.
+    watch: tokio::sync::mpsc::UnboundedReceiver<WatchEvent>,
+    watching: bool,
+    front: bool,
+    fallback: Fallback,
 }
 
 /// A running session.
@@ -241,6 +249,13 @@ impl Session {
         save_server(&home, &server).map_err(StartError::other)?;
 
         let (events_tx, events_rx) = channel();
+        let (watch_tx, watch_rx) = tokio::sync::mpsc::unbounded_channel();
+        let watching = watch::Watch {
+            node: client.node.clone(),
+            public_key,
+            device: client.device.clone(),
+            home: home.clone(),
+        };
         let inner = Inner::new(
             &home,
             address,
@@ -249,8 +264,11 @@ impl Session {
             start.offset,
             events_tx,
             runtime.handle().clone(),
+            watch_rx,
         )
         .map_err(StartError::other)?;
+        // Ends with the runtime, or once the session's end of it is dropped.
+        runtime.spawn(watch::run(watching, watch_tx));
         let inner = Arc::new(Mutex::new(inner));
         let pumped = Arc::clone(&inner);
         runtime.spawn(async move {
@@ -337,6 +355,10 @@ impl Session {
             },
             schema::Request::Close => UiEvent::Close,
             schema::Request::Pull => UiEvent::Run(PaletteCommand::Fetch),
+            schema::Request::Front { front } => {
+                self.lock().front = front;
+                return Ok(());
+            }
         };
         self.lock().apply(event);
         Ok(())
@@ -396,6 +418,7 @@ impl Drop for Session {
 }
 
 impl Inner {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         home: &Path,
         address: [u8; 16],
@@ -404,6 +427,7 @@ impl Inner {
         offset: i32,
         events: Sender<Event>,
         runtime: tokio::runtime::Handle,
+        watch: tokio::sync::mpsc::UnboundedReceiver<WatchEvent>,
     ) -> Result<Self, String> {
         let store = Store::open_in(home, address).map_err(|error| error.to_string())?;
         let config = loquax::config::load(home).map_err(|error| error.to_string())?;
@@ -464,6 +488,10 @@ impl Inner {
             link: None,
             // The first pump looks, and says what it saw.
             link_age: LINK_EVERY,
+            watch,
+            watching: false,
+            front: false,
+            fallback: Fallback::default(),
         })
     }
 
@@ -518,6 +546,7 @@ impl Inner {
         }
         self.look_at_link();
         let elapsed = u64::try_from(self.origin.elapsed().as_millis()).unwrap_or(u64::MAX);
+        self.watched(elapsed);
         self.quiet(UiEvent::Clock(wall_now(self.offset)));
         self.quiet(UiEvent::Tick);
         self.apply(UiEvent::Elapsed(elapsed));
@@ -525,6 +554,29 @@ impl Inner {
             let _ = self.events.send(Event::Changed { v: VERSION });
         }
         true
+    }
+
+    /// What the watching link said: a wake past the cursor pulls, as does
+    /// a minute in front with the link down. The pull is the one a send
+    /// starts, behind a running one; its messages notify as any pull's do.
+    fn watched(&mut self, elapsed: u64) {
+        let mut wake = false;
+        while let Ok(event) = self.watch.try_recv() {
+            match event {
+                WatchEvent::Watching(up) => self.watching = up,
+                WatchEvent::Wake(newest) => {
+                    let cursor = loquax::home::client::load_cursor(&self.home);
+                    wake |= watch::wants_pull(newest, cursor);
+                }
+            }
+        }
+        if self.fallback.due(elapsed, self.watching, self.front) {
+            tracing::info!("SYNC the watching link is down; pulling");
+            wake = true;
+        }
+        if wake {
+            self.apply(UiEvent::HomeWake);
+        }
     }
 
     /// Once a second: whether the TCP interface is up, told when it

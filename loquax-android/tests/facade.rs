@@ -261,6 +261,112 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
     node.kill().await;
 }
 
+/// The wake on the phone (1123): a joined session, its open pull done,
+/// then a loquax messenger on the home node's instance sends to the home
+/// address. The session pulls on the home node's wake, with no `pull`
+/// asked, says `changed`, and the conversation list shows the message.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_message_shows_on_the_phone_without_a_pull() {
+    let instance = instance();
+    let rns = tempfile::tempdir().expect("transport config dir");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+    let port = listener.local_addr().expect("its address").port();
+    let home = tempfile::tempdir().expect("home node dir");
+    let code = admit(home.path());
+    let node = HomeNode::start(listener, &instance, rns.path(), home.path()).await;
+
+    let phone = tempfile::tempdir().expect("app dir");
+    let first = Start {
+        dir: phone.path().display().to_string(),
+        server: Some(format!("127.0.0.1:{port}")),
+        code: Some(code),
+        name: Some("Pixel".to_string()),
+        offset: 0,
+    };
+    let session = tokio::task::spawn_blocking(move || {
+        let session = Session::start(&first).unwrap_or_else(|error| panic!("{error:?}"));
+        // The pull on open, and the watching link's first word, settle.
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            match session.next_event(Duration::from_millis(500)) {
+                Some(Event::Sync { state, .. }) if state == "done" => break,
+                Some(Event::Sync { state, detail, .. }) if state == "failed" => {
+                    panic!("the pull on open failed: {detail}")
+                }
+                _ => assert!(std::time::Instant::now() < deadline, "no pull ended"),
+            }
+        }
+        std::thread::sleep(Duration::from_secs(3));
+        while session.next_event(Duration::ZERO).is_some() {}
+        session
+    })
+    .await
+    .expect("the session");
+    let address = session.address();
+
+    let sender = tempfile::tempdir().expect("sender dir");
+    let storage = sender.path().join("storage");
+    std::fs::create_dir_all(&storage).expect("sender storage");
+    let mut attached = loquax::engine::attach(loquax::engine::AttachConfig {
+        instance: instance.clone(),
+        config_dir: Some(rns.path().to_path_buf()),
+        storage_dir: storage,
+        identity: leviculum_core::Identity::generate(&mut rand_core::OsRng),
+        display_name: b"sender".to_vec(),
+        notices: loquax::effects::Terminal::new(sender.path().to_path_buf()),
+    })
+    .await
+    .expect("the sender attaches");
+    let body = "ohne Ziehen";
+    loquax::send::run_send(
+        &mut attached.outbox,
+        loquax::outbox::SendRequest {
+            destination: address,
+            title: Vec::new(),
+            body: body.as_bytes().to_vec(),
+            fields: Vec::new(),
+            via: loquax::outbox::Via::Direct,
+        },
+        &loquax::send::SendOptions::new(instance.clone(), Duration::from_secs(40)),
+        &loquax::clock::Tokio::new(),
+    )
+    .await
+    .expect("the sender hands it on");
+    let sent_at = std::time::Instant::now();
+
+    tokio::task::spawn_blocking(move || {
+        let mut changed = false;
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            let list: schema::Conversations = rmp_serde::from_slice(
+                &session
+                    .query(schema::Query::Conversations)
+                    .expect("a query"),
+            )
+            .expect("decode");
+            if changed && list.conversations.iter().any(|c| c.last == body) {
+                eprintln!(
+                    "WAKE phone shows it {} ms after the send returned",
+                    sent_at.elapsed().as_millis()
+                );
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the message never showed without a pull: {list:?}"
+            );
+            if let Some(Event::Changed { .. }) = session.next_event(Duration::from_millis(100)) {
+                changed = true;
+            }
+        }
+        session.stop();
+    })
+    .await
+    .expect("the wait for the wake");
+    attached.stop().await;
+    node.kill().await;
+}
+
 /// A shared-instance name of this test process's own.
 fn instance() -> String {
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
