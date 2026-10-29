@@ -188,7 +188,10 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
     let mut fanout = Fanout::default();
     let mut schedule = sync_bound_ms.map(|bound| Schedule::new(Some(bound)));
     let mut fetch: Option<tokio::task::JoinHandle<Option<usize>>> = None;
-    let mut selected_pn = preferred_pn;
+    // The node the engine's router has selected, as its PnSelected said:
+    // not `--pn` itself, which the router learns only from a SelectPn, and
+    // with collections off nothing else sends one.
+    let mut selected_pn = None;
     let origin = tokio::time::Instant::now();
     let now_ms = || u64::try_from(origin.elapsed().as_millis()).unwrap_or(u64::MAX);
     let mut pump = tokio::time::interval(PUMP);
@@ -234,6 +237,9 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                         }
                         OutboxEvent::PnSelected { destination, .. } => {
                             selected_pn = Some(destination);
+                        }
+                        OutboxEvent::PnUnavailable { detail } => {
+                            tracing::info!("HOME no propagation node: {detail}");
                         }
                         OutboxEvent::Announced { destination, .. } => {
                             let acts = outgoing.announced(destination, unix_now());
