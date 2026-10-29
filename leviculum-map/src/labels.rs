@@ -29,8 +29,12 @@
 //! else out of range is an error. Sorted strings make a name searchable by
 //! binary search ([`crate::Region::find_string`]).
 
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::cmp::{Ordering, Reverse};
+
+use crate::region::{check_tile, Region, RegionError, Storage};
+use crate::viewport::Viewport;
 
 /// Length of a section's head.
 pub const SECTION_HEAD: usize = 8;
@@ -42,6 +46,8 @@ pub const LINE_LEN: usize = 8;
 pub const ALT_LEN: usize = 8;
 /// The extent label anchors are given in, whatever the tile's geometry.
 pub const LABEL_EXTENT: i16 = 4096;
+/// Sub-pixels a pixel, the unit of [`ViewLabel`]'s positions.
+pub const SUBPIXEL: i64 = leviculum_mapfill::SUBPIXEL as i64;
 
 /// What a label names. The byte values are the format's; a reader skips a
 /// byte it does not know ([`LabelKind::from_wire`] is `None`).
@@ -430,10 +436,9 @@ impl Rect {
 pub struct Candidate {
     pub kind: LabelKind,
     pub rank: u8,
-    /// The string it shows: two candidates of one string are one name.
-    pub string: u32,
-    /// A tie breaker stable under a pan: the anchor's world position, or
-    /// the feature's.
+    /// The text it shows: two candidates of one text are one name.
+    pub text: String,
+    /// A tie breaker stable under a pan ([`ViewLabel::at`]).
     pub at: (u32, u32),
     pub boxes: Vec<Rect>,
 }
@@ -459,7 +464,7 @@ pub fn order(c: &[Candidate]) -> Vec<usize> {
     let mut out: Vec<usize> = (0..c.len()).collect();
     out.sort_by_key(|&i| {
         let c = &c[i];
-        (c.kind.priority(), Reverse(c.rank), c.string, c.at)
+        (c.kind.priority(), Reverse(c.rank), c.text.as_str(), c.at)
     });
     out
 }
@@ -484,7 +489,7 @@ pub fn place(candidates: &[Candidate], taken: &[Rect], rule: Rule) -> Vec<usize>
         let same = placed
             .iter()
             .map(|&p| &candidates[p])
-            .filter(|p| p.string == c.string);
+            .filter(|p| p.text == c.text);
         let repeated = match c.kind.is_road() {
             false => same.count() > 0,
             true => same
@@ -515,4 +520,156 @@ pub fn place(candidates: &[Candidate], taken: &[Rect], rule: Rule) -> Vec<usize>
         placed.push(i);
     }
     placed
+}
+
+/// A name that lands in a view, ready for a frontend to measure and place.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ViewLabel {
+    pub kind: LabelKind,
+    pub rank: u8,
+    /// What the map shows: the name in the locale the region was cut for
+    /// where the cut kept one, else the local name, never both.
+    pub text: String,
+    /// The local name.
+    pub local: String,
+    /// Stable under a pan and whatever order the tiles were read in: the
+    /// anchor (or the line's first vertex) at the tile zoom's 4096 units a
+    /// tile.
+    pub at: (u32, u32),
+    /// A point's anchor in sub-pixels from the view's top-left corner;
+    /// a line's first vertex.
+    pub anchor: (i64, i64),
+    /// A street's line, its pieces in sub-pixels; empty for a point.
+    pub line: Vec<Vec<(i64, i64)>>,
+}
+
+impl<S: Storage> Region<S> {
+    /// The names of `view` this region holds and the view's zoom shows:
+    /// the points whose anchor lands inside the region's area of the view,
+    /// and with `lines` the streets with a vertex there. Appended to `out`
+    /// in tile order; [`place`] orders them. A frontend that draws no
+    /// street names passes `lines = false` and reads no geometry.
+    pub fn view_labels(
+        &self,
+        view: &Viewport,
+        lines: bool,
+        out: &mut Vec<ViewLabel>,
+    ) -> Result<(), RegionError> {
+        let area = self.area(view);
+        let sub = SUBPIXEL;
+        let inside = |(x, y): (i64, i64)| {
+            let (px, py) = (x.div_euclid(sub), y.div_euclid(sub));
+            let (x0, y0) = (i64::from(area.top_left.x), i64::from(area.top_left.y));
+            (x0..x0 + i64::from(area.size.width)).contains(&px)
+                && (y0..y0 + i64::from(area.size.height)).contains(&py)
+        };
+        let (mut sec, mut blob) = (Vec::new(), Vec::new());
+        let strings = self.string_count();
+        for tile in view.tiles(self.zooms()) {
+            let Some(e) = self.find_labels(tile.id)? else {
+                continue;
+            };
+            self.read_tile(&e, &mut sec)?;
+            let s =
+                Section::parse(&sec, strings).map_err(|err| RegionError::Labels(tile.id, err))?;
+            let origin = (i64::from(tile.origin.x), i64::from(tile.origin.y));
+            let o = u32::from(tile.overzoom);
+            let world = |x: i64, y: i64| {
+                (
+                    ((u64::from(tile.id.x) << 12) as i64 + x).clamp(0, i64::from(u32::MAX)) as u32,
+                    ((u64::from(tile.id.y) << 12) as i64 + y).clamp(0, i64::from(u32::MAX)) as u32,
+                )
+            };
+            let text = |n: u16, string: u32| -> Result<(String, String), RegionError> {
+                let mut local = String::new();
+                self.read_string(string, &mut local)?;
+                let shown = match s.alternate(n) {
+                    Some(a) => {
+                        let mut alt = String::new();
+                        self.read_string(a, &mut alt)?;
+                        alt
+                    }
+                    None => local.clone(),
+                };
+                Ok((shown, local))
+            };
+            for (n, p) in s.points() {
+                if p.min_zoom > view.zoom() {
+                    continue;
+                }
+                let anchor = (
+                    origin.0 + (i64::from(p.x) << o),
+                    origin.1 + (i64::from(p.y) << o),
+                );
+                if !inside(anchor) {
+                    continue;
+                }
+                let (text, local) = text(n, p.string)?;
+                out.push(ViewLabel {
+                    kind: p.kind,
+                    rank: p.rank,
+                    text,
+                    local,
+                    at: world(i64::from(p.x), i64::from(p.y)),
+                    anchor,
+                    line: Vec::new(),
+                });
+            }
+            if !lines || s.lines().all(|(_, l)| l.min_zoom > view.zoom()) {
+                continue;
+            }
+            let Some(g) = self.find(tile.id)? else {
+                continue;
+            };
+            self.read_tile(&g, &mut blob)?;
+            let fx = check_tile(tile.id, &blob)?;
+            let features: Vec<_> = fx.features().collect();
+            let shift = o as i32 + i32::from(fx.shift());
+            let scale = |v: i16| -> i64 {
+                match shift >= 0 {
+                    true => i64::from(v) << shift,
+                    false => i64::from(v) >> -shift,
+                }
+            };
+            for (n, l) in s.lines() {
+                if l.min_zoom > view.zoom() {
+                    continue;
+                }
+                let Some(f) = features.get(usize::from(l.feature)) else {
+                    continue;
+                };
+                let line: Vec<Vec<(i64, i64)>> = f
+                    .rings()
+                    .map(|r| {
+                        r.points()
+                            .map(|(x, y)| (origin.0 + scale(x), origin.1 + scale(y)))
+                            .collect()
+                    })
+                    .collect();
+                let Some(&first) = line.iter().flatten().next() else {
+                    continue;
+                };
+                if !line.iter().flatten().any(|&p| inside(p)) {
+                    continue;
+                }
+                let (text, local) = text(n, l.string)?;
+                let (fx0, fy0) = f
+                    .rings()
+                    .next()
+                    .and_then(|r| r.points().next())
+                    .map_or((0, 0), |(x, y)| (i64::from(x), i64::from(y)));
+                let to4096 = |v: i64| v << i32::from(fx.shift().max(0));
+                out.push(ViewLabel {
+                    kind: l.kind,
+                    rank: 0,
+                    text,
+                    local,
+                    at: world(to4096(fx0), to4096(fy0)),
+                    anchor: first,
+                    line,
+                });
+            }
+        }
+        Ok(())
+    }
 }

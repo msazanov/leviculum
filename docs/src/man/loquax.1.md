@@ -180,6 +180,8 @@ Region files live in `$XDG_DATA_HOME/loquax/maps/` (default `~/.local/share/loqu
         --bbox 8.47,50.01,8.80,50.23
     mv city.lmr ~/.local/share/loquax/maps/
 
+The map names what a region names: cities, towns, districts, villages, suburbs and neighbourhoods as the zoom reaches them, larger places first, then waters and parks. **tui** sets at most one name in each block of 20 by 6 cells, with a free cell around it, in the cells' own background so it stands out from the map, and leaves a name out rather than cutting it; it never covers a pin or a pin's name. A region cut before names existed has none.
+
 Where no region covers the view, and with none installed, the map is the world outline, Natural Earth's land at 1:50m, as far in as zoom 10. The attribution line under the map names what is drawn, `© OpenStreetMap contributors` for a region and `Natural Earth` for the outline. A region file that does not open is named in `tui.log` and left out.
 
 The map is drawn the most beautiful way the terminal can show, and you can change it while you look. The ways, best first:

@@ -35,6 +35,7 @@ use std::time::{Duration, Instant};
 use embedded_graphics::pixelcolor::Rgb565;
 use leviculum_map::cells::{self, Encoding, Sets};
 use leviculum_map::draw::Ink;
+use leviculum_map::labels::{LabelKind, ViewLabel};
 use leviculum_map::viewport::{Viewport, MAX_VIEW_ZOOM};
 use leviculum_mapfill::frame::{rgb888, Frame};
 use leviculum_mapfill::style::{MapTheme, Style as MapStyle};
@@ -49,7 +50,7 @@ use ratatui::Frame as TermFrame;
 use tokio::sync::Notify;
 
 use loquax::picture::{Drawn, Maps, Painter};
-use loquax::ui::map::{Drawing, MapSetup, MapView};
+use loquax::ui::map::{place_names, Drawing, MapSetup, MapView};
 
 /// `--graphics`.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
@@ -583,6 +584,51 @@ struct Label {
     row: u16,
     text: String,
     style: Style,
+    /// A name of the map, not a pin's.
+    name: bool,
+}
+
+/// How a name of the map is set in cells: its own cells' background is its
+/// halo, dark text on white in the light table and light on near black in
+/// the dark, waters in blue and parks in green, places in bold. At sixteen
+/// colours the ANSI ones; without colour, plain and bold alone.
+fn name_style(tier: Tier, theme: MapTheme) -> impl Fn(LabelKind) -> Style {
+    move |kind| {
+        let dark = theme == MapTheme::Dark;
+        let fg = match (tier, kind, dark) {
+            (Tier::Mono, ..) => None,
+            (Tier::Ansi16, LabelKind::Water, false) => Some(Color::Indexed(4)),
+            (Tier::Ansi16, LabelKind::Water, true) => Some(Color::Indexed(12)),
+            (Tier::Ansi16, LabelKind::Park, false) => Some(Color::Indexed(2)),
+            (Tier::Ansi16, LabelKind::Park, true) => Some(Color::Indexed(10)),
+            (Tier::Ansi16, _, false) => Some(Color::Indexed(0)),
+            (Tier::Ansi16, _, true) => Some(Color::Indexed(15)),
+            (_, LabelKind::Water, false) => Some(Color::Rgb(0x1f, 0x4e, 0x8c)),
+            (_, LabelKind::Water, true) => Some(Color::Rgb(0x8c, 0xb4, 0xe6)),
+            (_, LabelKind::Park, false) => Some(Color::Rgb(0x2e, 0x6b, 0x2e)),
+            (_, LabelKind::Park, true) => Some(Color::Rgb(0x94, 0xc8, 0x8c)),
+            (_, _, false) => Some(Color::Rgb(0x20, 0x20, 0x20)),
+            (_, _, true) => Some(Color::Rgb(0xe8, 0xe8, 0xe8)),
+        };
+        let bg = match (tier, dark) {
+            (Tier::Mono, _) => None,
+            (Tier::Ansi16, false) => Some(Color::Indexed(15)),
+            (Tier::Ansi16, true) => Some(Color::Indexed(0)),
+            (_, false) => Some(Color::Rgb(0xff, 0xff, 0xff)),
+            (_, true) => Some(Color::Rgb(0x16, 0x16, 0x16)),
+        };
+        let mut style = Style::default();
+        if let Some(fg) = fg {
+            style = style.fg(fg);
+        }
+        if let Some(bg) = bg {
+            style = style.bg(bg);
+        }
+        if matches!(kind, LabelKind::City | LabelKind::Town) {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+        style
+    }
 }
 
 /// How long a picture behind the view is kept on screen while every
@@ -616,6 +662,8 @@ struct Painted {
     picture: Option<Picture>,
     /// A text technique's cells, row by row ([`Graphics::encoding`]).
     glyphs: Vec<cells::Cell>,
+    /// The names of the view, placed in cells at render time.
+    names: Vec<ViewLabel>,
 }
 
 /// One paint asked for: the view, the cells its picture covers, and the
@@ -654,6 +702,8 @@ impl Canvas {
     /// technique's cells.
     fn paint(&mut self, ask: Ask) -> Painted {
         let view = &ask.view;
+        // Places, waters and parks; cells cannot turn a street's name.
+        let names = self.painter.labels(view, false);
         if let Some(encoding) = self.graphics.encoding() {
             let (source, attribution) = self.source(view, ask.cells, encoding, ask.style);
             return Painted {
@@ -665,6 +715,7 @@ impl Canvas {
                 attribution,
                 picture: None,
                 glyphs: cells::encode(&source, encoding, &self.sets),
+                names,
             };
         }
         let (w, h) = view.size();
@@ -685,6 +736,7 @@ impl Canvas {
             attribution,
             picture,
             glyphs: Vec::new(),
+            names,
         }
     }
 
@@ -1224,10 +1276,39 @@ impl MapPainter {
         // that size's layout, not to this one: a shrink would put them
         // below the frame (1087).
         let behind = fits && painted.view != ask.view && self.labels_view == Some(painted.view);
-        let labels = match behind {
-            true => self.labels.clone(),
+        let pins = match behind {
+            true => self.labels.iter().filter(|l| !l.name).cloned().collect(),
             false => labels_of(shown, muted),
         };
+        // The map's names go where no pin and no pin's name is, placed for
+        // the picture's own view so they never stand off its streets.
+        let taken: Vec<(u16, u16, u16)> = pins
+            .iter()
+            .filter_map(|l| {
+                let col = l.col.checked_sub(area.x)?;
+                let row = l.row.checked_sub(area.y)?;
+                Some((col, row, l.text.chars().count() as u16))
+            })
+            .collect();
+        let names = match fits {
+            true => {
+                let at = leviculum_ui::Rect::new(area.x, area.y, area.width, area.height);
+                place_names(&painted.names, at, self.setup.cell_px, &taken)
+            }
+            false => Vec::new(),
+        };
+        let halo = name_style(self.tier, painted.style.theme);
+        let mut labels: Vec<Label> = names
+            .into_iter()
+            .map(|n| Label {
+                col: n.col,
+                row: n.row,
+                style: halo(n.kind),
+                text: n.text,
+                name: true,
+            })
+            .collect();
+        labels.extend(pins);
         let buf = frame.buffer_mut();
         if matches!(graphics, Graphics::Kitty | Graphics::Sixel) {
             // A graphics protocol marks the cells under its picture as
@@ -1306,6 +1387,7 @@ fn labels_of(shown: &MapView, muted: Style) -> Vec<Label> {
                     row,
                     text,
                     style,
+                    name: false,
                 }),
         );
     }
@@ -1894,6 +1976,69 @@ mod tests {
         assert!(text.chars().any(|c| ('\u{2801}'..='\u{28ff}').contains(&c)));
         assert!(text.contains("● bob · 4 min"));
     }
+
+    /// The names of the Florence fixture over its picture in braille, with
+    /// a pin: the park names the view's zoom shows set by the density
+    /// rule, each with its cells' background as its halo at truecolor, none
+    /// over the pin; the frame pinned as text.
+    #[test]
+    fn the_map_names_its_places_by_the_density_rule() {
+        let dir =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../leviculum-map/fixtures");
+        let mut painter = MapPainter::new(Maps::new(Some(dir)), Graphics::Braille, None);
+        painter.set_tier(Tier::Truecolor);
+        let cell_px = painter.setup().cell_px;
+        let (cols, rows) = (60u16, 20u16);
+        let area = leviculum_ui::Rect::new(0, 0, cols, rows);
+        let at = project(LatLon::from_degrees(43.7755, 11.2672));
+        let shown = MapView {
+            area,
+            viewport: Viewport::new(
+                at,
+                15,
+                u32::from(cols) * u32::from(cell_px.0),
+                u32::from(rows) * u32::from(cell_px.1),
+            ),
+            cell_px,
+            pins: vec![PinCell {
+                peer: [1; 16],
+                col: 2,
+                row: 1,
+                text: "● bob · 4 min".to_string(),
+                apart: None,
+                stale: false,
+                selected: false,
+            }],
+        };
+        let mut terminal = Terminal::new(TestBackend::new(cols, rows + 1)).expect("terminal");
+        let Ok(_) = terminal.draw(|f| painter.render(f, &shown, Style::default()));
+        let buffer = terminal.backend().buffer().clone();
+        let text: Vec<String> = (0..rows)
+            .map(|y| {
+                (0..cols)
+                    .map(|x| match buffer.cell((x, y)).map(|c| c.symbol()) {
+                        Some(s) if s.chars().all(|c| c.is_alphanumeric() || " '·●".contains(c)) => {
+                            s.to_string()
+                        }
+                        _ => " ".to_string(),
+                    })
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect();
+        let frame = text.join("\n");
+        assert!(frame.contains("● bob · 4 min"), "{frame}");
+        assert!(frame.contains("Piazza D'Azeglio"), "{frame}");
+        let row = text.iter().position(|l| l.contains("Piazza")).expect("row") as u16;
+        let col = text[usize::from(row)].find("Piazza").expect("col") as u16;
+        let cell = buffer.cell((col, row)).expect("cell");
+        assert_eq!(cell.bg, Color::Rgb(0xff, 0xff, 0xff), "the halo");
+        assert_eq!(cell.fg, Color::Rgb(0x2e, 0x6b, 0x2e), "a park's green");
+        assert_eq!(frame, PINNED_NAMES, "{frame}");
+    }
+
+    const PINNED_NAMES: &str = "\n  ● bob · 4 min  Giardino del Borgo\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n                           Piazza D'Azeglio\n";
 
     /// The text techniques of the map core keep to their glyphs: octants
     /// to the octant table, `blocks` to quadrants and eighths, braille-thin
@@ -2543,6 +2688,7 @@ mod tests {
             attribution: String::new(),
             picture: None,
             glyphs: Vec::new(),
+            names: Vec::new(),
         }
     }
 

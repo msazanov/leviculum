@@ -19,6 +19,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use leviculum_map::choice::fit_ceiling;
+use leviculum_map::labels::{self as names, Candidate, LabelKind, ViewLabel};
 use leviculum_map::mercator::{project, unproject, LatLon, World};
 use leviculum_map::pins::{self, Mark, Metrics, Pin, Side};
 use leviculum_map::region::{Bounds, Header};
@@ -239,6 +240,90 @@ pub struct LabelCell {
     pub col: u16,
     pub row: u16,
     pub text: String,
+}
+
+/// A name of the map set in cells: a place, a water, a park.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NameCell {
+    pub col: u16,
+    pub row: u16,
+    pub text: String,
+    pub kind: LabelKind,
+}
+
+/// The terminal's density rule (`docs/drafts/map-renderer-roadmap-2026-10.md`,
+/// section 1, "Placement"): at most one place a block of this many cells.
+pub const NAME_BLOCK: (u16, u16) = (20, 6);
+
+/// Where the names of `labels` go in `area`, `cell_px` image pixels a cell,
+/// by the map core's one rule ([`names::place`]) in cells: centred on
+/// their anchor, one place per [`NAME_BLOCK`], one free cell around each,
+/// never over `taken` (the pins' markers and names, placed first), never
+/// cut: a name that does not fit the area whole is left out. Streets are
+/// not named in cells, which cannot turn text. Each `taken` is (col, row,
+/// width) of a one-row run, relative to `area`; so is each name returned
+/// to the area's own origin added.
+pub fn place_names(
+    labels: &[ViewLabel],
+    area: Rect,
+    cell_px: (u16, u16),
+    taken: &[(u16, u16, u16)],
+) -> Vec<NameCell> {
+    let (cw, ch) = (i64::from(cell_px.0.max(1)), i64::from(cell_px.1.max(1)));
+    let sub = names::SUBPIXEL;
+    let (w, h) = (i32::from(area.width), i32::from(area.height));
+    let candidates: Vec<Candidate> = labels
+        .iter()
+        .filter(|l| !l.kind.is_road())
+        .filter_map(|l| {
+            let col = l.anchor.0.div_euclid(sub * cw);
+            let row = l.anchor.1.div_euclid(sub * ch);
+            let len = l.text.chars().count() as i64;
+            let x0 = i32::try_from(col - len / 2).ok()?;
+            let y0 = i32::try_from(row).ok()?;
+            let x1 = x0.checked_add(i32::try_from(len).ok()?)?;
+            let whole = x0 >= 0 && x1 <= w && (0..h).contains(&y0) && len > 0;
+            whole.then(|| Candidate {
+                kind: l.kind,
+                rank: l.rank,
+                text: l.text.clone(),
+                at: l.at,
+                boxes: alloc::vec![names::Rect {
+                    x0,
+                    y0,
+                    x1,
+                    y1: y0 + 1
+                }],
+            })
+        })
+        .collect();
+    let taken: Vec<names::Rect> = taken
+        .iter()
+        .map(|&(col, row, width)| names::Rect {
+            x0: i32::from(col),
+            y0: i32::from(row),
+            x1: i32::from(col) + i32::from(width),
+            y1: i32::from(row) + 1,
+        })
+        .collect();
+    let rule = names::Rule {
+        margin: 1,
+        block: (i32::from(NAME_BLOCK.0), i32::from(NAME_BLOCK.1)),
+        repeat: 0,
+    };
+    names::place(&candidates, &taken, rule)
+        .into_iter()
+        .filter_map(|i| {
+            let c = candidates.get(i)?;
+            let b = c.boxes.first()?;
+            Some(NameCell {
+                col: area.x + u16::try_from(b.x0).ok()?,
+                row: area.y + u16::try_from(b.y0).ok()?,
+                text: c.text.clone(),
+                kind: c.kind,
+            })
+        })
+        .collect()
 }
 
 /// The map as drawn.
@@ -557,6 +642,93 @@ pub fn pin_at(cells: &[PinCell], area: Rect, col: u16, row: u16) -> Option<[u8; 
 mod tests {
     use super::*;
     use alloc::vec;
+
+    fn name(kind: LabelKind, rank: u8, text: &str, col: i64, row: i64) -> ViewLabel {
+        // The anchor in the middle of its cell, braille's 2 x 4 pixels.
+        let sub = names::SUBPIXEL;
+        ViewLabel {
+            kind,
+            rank,
+            text: text.to_string(),
+            local: text.to_string(),
+            at: (col as u32, row as u32),
+            anchor: (col * 2 * sub + sub, row * 4 * sub + sub),
+            line: Vec::new(),
+        }
+    }
+
+    /// The density rule in cells: one place a 20 x 6 block, the larger
+    /// first, a free cell around each, never cut at the pane's edge, never
+    /// over a pin, never a street; and the frame it gives pinned as text.
+    #[test]
+    fn names_are_set_by_the_density_rule() {
+        let area = Rect::new(2, 1, 60, 18);
+        let labels = [
+            name(LabelKind::Village, 4, "Grassina", 12, 3),
+            name(LabelKind::City, 12, "Firenze", 10, 2),
+            name(LabelKind::Town, 6, "Fiesole", 30, 2),
+            // Would be cut at the right edge: left out.
+            name(LabelKind::Town, 6, "Bagno a Ripoli", 57, 9),
+            // On the pin's run.
+            name(LabelKind::Town, 6, "Prato", 45, 8),
+            name(LabelKind::Water, 0, "Arno", 22, 13),
+            name(LabelKind::Suburb, 1, "Gavinana", 50, 14),
+            name(LabelKind::MinorRoad, 0, "Via dei Servi", 5, 16),
+        ];
+        let pin = (43, 8, 9);
+        let got = place_names(&labels, area, (2, 4), &[pin]);
+        let mut frame = vec![vec![' '; 60]; 18];
+        for (x, ch) in (pin.0..pin.0 + pin.2).zip("● alice ".chars().cycle()) {
+            frame[usize::from(pin.1)][usize::from(x)] = ch;
+        }
+        for n in &got {
+            let (col, row) = (usize::from(n.col - area.x), usize::from(n.row - area.y));
+            for (i, ch) in n.text.chars().enumerate() {
+                frame[row][col + i] = ch;
+            }
+        }
+        let text: Vec<String> = frame
+            .iter()
+            .map(|r| r.iter().collect::<String>().trim_end().to_string())
+            .collect();
+        assert_eq!(
+            text,
+            [
+                "",
+                "",
+                "       Firenze             Fiesole",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "                                           ● alice ●",
+                "",
+                "",
+                "",
+                "",
+                "                    Arno",
+                "                                              Gavinana",
+                "",
+                "",
+                "",
+            ],
+            "{got:?}"
+        );
+        let mut blocks: Vec<(u16, u16)> = got
+            .iter()
+            .map(|n| {
+                (
+                    (n.col - area.x) / NAME_BLOCK.0,
+                    (n.row - area.y) / NAME_BLOCK.1,
+                )
+            })
+            .collect();
+        let all = blocks.len();
+        blocks.sort_unstable();
+        blocks.dedup();
+        assert_eq!(blocks.len(), all, "one name a block");
+    }
 
     /// The cells `place` draws for two pins on one spot: neither name
     /// covers the other, and the selected one is drawn last.

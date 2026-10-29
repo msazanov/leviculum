@@ -5,8 +5,8 @@
 //! this reader does not know is refused, never misread.
 
 use leviculum_map::labels::{
-    encode_section, encode_strings, LabelError, LabelKind, LineLabel, PointLabel, Section,
-    POINT_LEN, SECTION_HEAD,
+    encode_section, encode_strings, place, Candidate, LabelError, LabelKind, LineLabel, PointLabel,
+    Rect, Rule, Section, ViewLabel, POINT_LEN, SECTION_HEAD,
 };
 use leviculum_map::region::{
     check_strings, Entry, Header, Region, RegionError, TileId, ENTRY_LEN, HEADER_LEN,
@@ -248,4 +248,138 @@ fn a_version_this_reader_does_not_know_is_refused() {
         Region::from_bytes(&b).err(),
         Some(RegionError::Header("label index"))
     );
+}
+
+fn candidate(kind: LabelKind, rank: u8, text: &str, x: i32, y: i32, len: i32) -> Candidate {
+    Candidate {
+        kind,
+        rank,
+        text: text.to_owned(),
+        at: (x as u32, y as u32),
+        boxes: vec![Rect {
+            x0: x,
+            y0: y,
+            x1: x + len,
+            y1: y + 1,
+        }],
+    }
+}
+
+/// The one rule: pins first and never covered, then places by class and
+/// rank, waters and parks, streets; greedy and in an order that does not
+/// depend on the order the frontend handed the labels in.
+#[test]
+fn placement_is_deterministic_and_pins_come_first() {
+    let c = vec![
+        candidate(LabelKind::Village, 4, "Grassina", 10, 5, 8),
+        candidate(LabelKind::City, 12, "Florenz", 12, 5, 7),
+        candidate(LabelKind::Town, 6, "Fiesole", 40, 2, 7),
+        // Under the pin's label.
+        candidate(LabelKind::City, 12, "Prato", 60, 10, 5),
+        candidate(LabelKind::Water, 0, "Arno", 30, 12, 4),
+        candidate(LabelKind::Water, 0, "Arno", 50, 18, 4),
+        candidate(LabelKind::MinorRoad, 0, "Via dei Servi", 0, 20, 13),
+        candidate(LabelKind::MinorRoad, 0, "Via dei Servi", 4, 22, 13),
+        candidate(LabelKind::MinorRoad, 0, "Via dei Servi", 60, 22, 13),
+    ];
+    let pin = Rect {
+        x0: 58,
+        y0: 10,
+        x1: 70,
+        y1: 11,
+    };
+    let rule = Rule {
+        margin: 1,
+        block: (0, 0),
+        repeat: 30,
+    };
+    let names = |placed: &[usize], c: &[Candidate]| -> Vec<(String, i32)> {
+        placed
+            .iter()
+            .map(|&i| (c[i].text.clone(), c[i].boxes[0].x0))
+            .collect()
+    };
+    let placed = place(&c, &[pin], rule);
+    let want: Vec<(String, i32)> = [
+        ("Florenz", 12),
+        ("Fiesole", 40),
+        ("Arno", 30),
+        ("Via dei Servi", 0),
+        ("Via dei Servi", 60),
+    ]
+    .map(|(t, x)| (t.to_owned(), x))
+    .to_vec();
+    assert_eq!(names(&placed, &c), want);
+    // Handed over in reverse: the same labels, the same order.
+    let mut reversed = c.clone();
+    reversed.reverse();
+    assert_eq!(names(&place(&reversed, &[pin], rule), &reversed), want);
+
+    // The terminal's density rule: one place per 20 x 6 block, so the
+    // town in Florence's block is dropped even with room beside it.
+    let dense = vec![
+        candidate(LabelKind::City, 12, "Florenz", 1, 1, 7),
+        candidate(LabelKind::Town, 6, "Fiesole", 12, 3, 7),
+        candidate(LabelKind::Town, 6, "Prato", 21, 3, 5),
+    ];
+    let block = Rule {
+        block: (20, 6),
+        ..rule
+    };
+    let got = names(&place(&dense, &[], block), &dense);
+    assert_eq!(got, [("Florenz".to_owned(), 1), ("Prato".to_owned(), 21)]);
+    // One free cell around each: a label touching one placed does not
+    // stand, one a cell apart does.
+    let touching = vec![
+        candidate(LabelKind::City, 12, "Aa", 0, 0, 2),
+        candidate(LabelKind::City, 11, "Bb", 2, 0, 2),
+        candidate(LabelKind::City, 10, "Cc", 3, 0, 2),
+    ];
+    let got = names(&place(&touching, &[], rule), &touching);
+    assert_eq!(got, [("Aa".to_owned(), 0), ("Cc".to_owned(), 3)]);
+}
+
+/// The names a view of the Florence region shows, read through the
+/// storage the way a frontend reads them: the German name where the cut
+/// kept one, the local one beside it, the zoom's own classes only, and at
+/// z15 the streets with their lines in the view's sub-pixels.
+#[test]
+fn a_view_collects_the_names_its_zoom_shows() {
+    use leviculum_map::mercator::{project, LatLon};
+    use leviculum_map::viewport::Viewport;
+    let r = Region::from_bytes(FLORENCE).expect("open");
+    let at = project(LatLon::from_degrees(43.7750, 11.2610));
+    let mut out = Vec::new();
+    let view = Viewport::new(at, 11, 800, 600);
+    // The region's box is a few pixels at z11: only what lands inside it.
+    r.view_labels(&view, true, &mut out).expect("labels");
+    assert!(out.iter().all(|l| l.line.is_empty()));
+    out.clear();
+    let view = Viewport::new(at, 13, 1200, 800);
+    r.view_labels(&view, true, &mut out).expect("labels");
+    assert!(out
+        .iter()
+        .all(|l| l.kind.is_place() || !l.line.is_empty() || l.kind == LabelKind::Park));
+    out.clear();
+    let view = Viewport::new(at, 15, 1024, 768);
+    r.view_labels(&view, true, &mut out).expect("labels");
+    let streets: Vec<&ViewLabel> = out.iter().filter(|l| l.kind.is_road()).collect();
+    assert!(streets.len() > 20, "{} streets", streets.len());
+    let (w, h) = (1024 * 16, 768 * 16);
+    for s in &streets {
+        assert!(s
+            .line
+            .iter()
+            .flatten()
+            .any(|&(x, y)| (0..w).contains(&x) && (0..h).contains(&y)));
+        assert_eq!(s.text, s.local, "the streets have no German names");
+    }
+    // Read twice, the same names in the same order.
+    let mut again = Vec::new();
+    r.view_labels(&view, true, &mut again).expect("labels");
+    assert_eq!(out, again);
+    // Without lines no geometry is read and no street comes back.
+    let mut points = Vec::new();
+    r.view_labels(&view, false, &mut points).expect("labels");
+    assert!(points.iter().all(|l| !l.kind.is_road()));
 }
