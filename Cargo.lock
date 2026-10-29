@@ -3267,6 +3267,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "loquax-android"
+version = "0.1.0"
+dependencies = [
+ "jni",
+ "leviculum-core",
+ "loquax",
+ "rand_core 0.6.4",
+ "tempfile",
+]
+
+[[package]]
 name = "lru"
 version = "0.16.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"

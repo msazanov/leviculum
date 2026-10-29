@@ -19,6 +19,10 @@ members = [
     "leviculum-proxy",
     "lnflash",
     "loquax",
+    # The Android app's JNI library (`loquax-android/`), built for Android by
+    # the make flow there. Not a default member, like leviculum-ffi: a cdylib
+    # the musl default drops.
+    "loquax-android",
     "lnpnd",
     "lndecode",
     "vectors-verify",

@@ -58,6 +58,11 @@
 
 extern crate alloc;
 
+/// The version this build carries, with the commit it was built from:
+/// `0.1.0 (1a2b3c…)`, what `loquax --version` prints (`build.rs`). The
+/// Android app shows it on its first screen.
+pub const VERSION: &str = env!("LEVICULUM_VERSION");
+
 pub mod address;
 pub mod body;
 pub mod clock;
