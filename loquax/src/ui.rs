@@ -532,6 +532,9 @@ pub struct UiModel<B> {
     pub fetching: bool,
     /// What started the running fetch, or the last one.
     pub fetch_reason: Option<Reason>,
+    /// How many fetches ended, either way, for a key script's `until
+    /// synced`.
+    pub fetches_done: usize,
     /// The mailbox's own schedule (`crate::sync`): the terminal's. A model
     /// without one syncs only when asked, as a key script's does unless it
     /// names `--sync-interval`, so no frame shows a fetch the script did not
@@ -675,6 +678,7 @@ impl<B: InputBuffer + Default> UiModel<B> {
             sending: VecDeque::new(),
             fetching: false,
             fetch_reason: None,
+            fetches_done: 0,
             sync: None,
             elapsed_ms: 0,
             enhanced: false,
@@ -1187,6 +1191,7 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
 /// messages, and the first failure in a row, not every retry's.
 fn on_fetch_done<B>(model: &mut UiModel<B>, result: Result<usize, String>) -> Vec<UiEffect> {
     model.fetching = false;
+    model.fetches_done += 1;
     let now = model.elapsed_ms;
     let failures = model.sync.as_mut().map_or(1, |sync| {
         sync.on(
@@ -2746,6 +2751,10 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
                 }
                 return effects;
             }
+            if open && model.home_client {
+                // Read where it arrived, so read on the home's other devices.
+                model.mark_out(crate::home::wire::MarkFlag::Read, vec![message_id]);
+            }
             if !open {
                 model.changed_peers.insert(peer);
                 let conversation = &mut model.conversations[index];
@@ -4196,6 +4205,20 @@ mod tests {
                     [Mark {
                         flag: MarkFlag::Read,
                         ids: vec![ID2, ID],
+                    }]
+                ),
+                false => assert!(marks.is_empty()),
+            }
+            // One arriving in the open conversation is read where it lands.
+            engine(&mut model, received_from(OTHER, [0x33; 32], "three"));
+            assert_eq!(model.conversations[1].unread, 0);
+            let marks = model.take_marks();
+            match client {
+                true => assert_eq!(
+                    marks,
+                    [Mark {
+                        flag: MarkFlag::Read,
+                        ids: vec![[0x33; 32]],
                     }]
                 ),
                 false => assert!(marks.is_empty()),

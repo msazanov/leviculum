@@ -566,6 +566,8 @@ enum Until {
     Leg(Leg),
     /// No region load runs or waits (1089).
     MapIdle,
+    /// This many fetches (on a client, pulls from the home node) ended.
+    Synced(usize),
 }
 
 impl Until {
@@ -592,6 +594,7 @@ impl Until {
             }
             Self::Named(count) => model.names.heard_count() >= *count,
             Self::MapIdle => model.map_loading.is_none(),
+            Self::Synced(count) => model.fetches_done >= *count,
             Self::Verified(count) => {
                 model
                     .conversations
@@ -808,6 +811,7 @@ fn parse_state(name: &str) -> Result<DeliveryState, String> {
 /// until named <n> [secs]         n peers have announced a name
 /// until verified <n> [secs]      n received messages have a verified signature
 /// until map [secs]               no map region load runs or waits
+/// until synced <n> [secs]        n fetches (pulls on a client) have ended
 /// until leg <direct|propagated> [secs]
 ///                                the runner is on that leg for the newest
 ///                                sent message
@@ -910,6 +914,13 @@ fn parse_script(text: &str) -> Result<Vec<Step>, String> {
                             "propagated" => Leg::Propagated,
                             other => return Err(at(format!("unknown leg {other:?}"))),
                         }),
+                        secs(tail.first().copied()).map_err(at)?,
+                    ),
+                    ["synced", n, tail @ ..] => Step::Until(
+                        Until::Synced(
+                            n.parse()
+                                .map_err(|_| at(format!("bad fetch count {n:?}")))?,
+                        ),
                         secs(tail.first().copied()).map_err(at)?,
                     ),
                     ["received", n, tail @ ..] => Step::Until(
