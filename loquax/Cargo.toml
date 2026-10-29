@@ -219,6 +219,9 @@ leviculum-mapcut = { path = "../leviculum-mapcut" }
 # The window's golden picture of the map's names is a PNG (1100); in the
 # lock already, through leviculum-map's goldens.
 png = "0.18"
+# The emoji table's test counts graphemes (1137); in the lock already,
+# through ratatui.
+unicode-segmentation = "1"
 
 [lib]
 name = "loquax"

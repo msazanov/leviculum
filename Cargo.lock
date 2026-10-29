@@ -3267,6 +3267,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tui-input",
+ "unicode-segmentation",
 ]
 
 [[package]]

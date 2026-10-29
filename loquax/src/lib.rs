@@ -69,6 +69,7 @@ pub mod clock;
 pub mod config;
 pub mod display_name;
 pub mod effects;
+pub mod emoji;
 pub mod engine;
 pub mod events;
 #[cfg(feature = "history")]

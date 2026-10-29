@@ -52,6 +52,18 @@ pub const QUICK: [&str; 6] = [
     "\u{1F621}",
 ];
 
+/// The reaction row of the Android app's long press: Signal's default six
+/// (Lew's reference, 2026-10-29), the same strings, U+FE0F included, until
+/// the reader's own most used take their place.
+pub const SIGNAL_QUICK: [&str; 6] = [
+    "\u{2764}\u{FE0F}",
+    "\u{1F44D}",
+    "\u{1F44E}",
+    "\u{1F602}",
+    "\u{1F62E}",
+    "\u{1F622}",
+];
+
 /// The longest reaction drawn, in characters; Ratspeak and MeshChatX cut at
 /// the same 16.
 pub const MAX_CHARS: usize = 16;
