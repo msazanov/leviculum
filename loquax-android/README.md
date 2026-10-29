@@ -51,7 +51,7 @@ bytes in the versioned schema of `src/schema.rs`:
 
 | Call | What |
 |---|---|
-| `start` | start, joining with the code on the first run |
+| `start` | start, joining with the code (`lqxh1...`, or `lqxh1...@host:port` with the address) on the first run |
 | `command` | `open`, `close`, `send`, `react`, `pull` |
 | `query` | `conversations`, `messages` of one peer |
 | `nextEvent` | blocks on a Java thread: `changed`, `notice`, `sync`, `link`, `stopped` |

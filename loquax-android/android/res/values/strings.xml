@@ -3,7 +3,7 @@
     <string name="app_name">loquax</string>
     <string name="starting">Starting…</string>
     <string name="joining">Joining the home node…</string>
-    <string name="code_label">Home code, from `loquax home admit` on the home node</string>
+    <string name="code_label">Home code, from `loquax home admit` on the home node (with --server it brings the address along)</string>
     <string name="code_hint">lqxh1…</string>
     <string name="server_label">The home node\'s address: host:port of its lnsd TCP server</string>
     <string name="server_hint">192.168.1.20:4242</string>

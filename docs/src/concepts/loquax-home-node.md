@@ -60,9 +60,19 @@ On the home node, `loquax home admit --name laptop` opens one single-use
 token and prints a code. The code carries the home identity's public key
 and the token, with four bytes of SHA-256 over both so a mistyped code is
 refused before anything goes on the wire, in lower-case base32 behind the
-prefix `lqxh1` (140 characters; slice 5 adds a QR code for it). The home
-destination and the LXMF address both derive from the public key, so the
-code needs nothing else.
+prefix `lqxh1` (140 characters). The home destination and the LXMF
+address both derive from the public key, so the code needs nothing else.
+
+A phone has no shared instance to reach the home node through, so it needs
+the home node's TCP server too. `loquax home admit --server host:port`
+writes it behind the code, `lqxh1...@host:port` (an IPv6 address in
+brackets): the base32 alphabet has no `@`, so the split is unambiguous, a
+code without the address reads as before, and a desktop's `home join`
+drops the address. `admit` prints the code as a QR code beside the text,
+in Unicode half blocks, the base32 in upper case in the QR alphanumeric
+mode (version 6 for the code alone, at error correction level M). The
+Android join screen takes the combined form pasted or shared to it from a
+QR reader and fills the address from it.
 
 On the new device, `loquax home join <code>` creates the device identity,
 asks for the path to the home destination, opens a link to it, identifies
@@ -72,7 +82,9 @@ token, all in one transaction. A token used once is refused the second
 time, and so is one older than `home_token_hours` in the config (24 by
 default: time to carry the code to the other device, short enough that a
 code left in a chat log or a screenshot is dead by the next day). `loquax
-home tokens` lists the codes still open, with when each expires.
+home tokens` lists the codes still open, with when each expires, and
+`loquax home revoke-token <prefix>` withdraws one by the start of its hash
+as that list shows it (four hex characters are enough when unique).
 
 `loquax home devices` lists the admitted devices, `loquax home revoke
 <device>` removes one, by its name or by its hash (four hex characters are
@@ -350,8 +362,10 @@ and the answer as a sent bubble.
    wake push. After the battery measurement.
 4. Multi-client state: `/mark`, read and sent state on every client.
    Built, without a retry for a mark the home node did not take.
-5. Pairing UX: the QR code in the GUI, the text code in the TUI, hand-over
-   from a one-device setup.
+5. Pairing UX: the address in the code, the QR code in the terminal,
+   `revoke-token`, the combined code on the phone's join screen. Built;
+   the QR code in the GUI and the hand-over from a one-device setup are
+   open.
 
 The rest of the plan (the M9 as a client, board sleep, Android) is in the
 draft's section 5.

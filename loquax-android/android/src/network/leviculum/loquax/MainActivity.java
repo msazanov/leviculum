@@ -4,6 +4,8 @@ import android.app.Activity;
 import android.content.Intent;
 import android.os.Build;
 import android.os.Bundle;
+import android.text.Editable;
+import android.text.TextWatcher;
 import android.view.View;
 import android.widget.Button;
 import android.widget.EditText;
@@ -14,6 +16,11 @@ import java.util.Map;
  * The first screen: starts the session, and on a phone that is not joined
  * yet asks for the home code and the home node's address. Once started it
  * hands over to the conversation list.
+ *
+ * A code from {@code loquax home admit --server} carries the address
+ * ({@code lqxh1...@host:port}): pasted, it fills the address field too;
+ * shared from another app (a QR reader's share button), it fills both and
+ * joins at once.
  */
 public class MainActivity extends Activity {
     private TextView status;
@@ -43,7 +50,66 @@ public class MainActivity extends Activity {
                 start(true);
             }
         });
-        start(false);
+        code.addTextChangedListener(new TextWatcher() {
+            @Override
+            public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
+
+            @Override
+            public void onTextChanged(CharSequence s, int start, int before, int count) {}
+
+            @Override
+            public void afterTextChanged(Editable s) {
+                fillServer(s.toString());
+            }
+        });
+        start(shared(getIntent()));
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        if (shared(intent)) {
+            start(true);
+        }
+    }
+
+    /**
+     * A code shared to the app: into the form. True when it carries the
+     * address, so joining needs nothing else.
+     */
+    private boolean shared(Intent intent) {
+        if (intent == null || !Intent.ACTION_SEND.equals(intent.getAction())) {
+            return false;
+        }
+        CharSequence text = intent.getCharSequenceExtra(Intent.EXTRA_TEXT);
+        String found = text == null ? "" : homeCode(text.toString());
+        if (found.isEmpty()) {
+            return false;
+        }
+        code.setText(found);
+        return found.indexOf('@') > 0;
+    }
+
+    /** The first word that starts like a home code, in either case; empty for none. */
+    static String homeCode(String text) {
+        for (String word : text.split("\\s+")) {
+            if (word.regionMatches(true, 0, "lqxh1", 0, 5)) {
+                return word;
+            }
+        }
+        return "";
+    }
+
+    /** The address behind a combined code, into an empty address field. */
+    private void fillServer(String text) {
+        int at = text.indexOf('@');
+        if (at < 0 || !server.getText().toString().trim().isEmpty()) {
+            return;
+        }
+        String address = text.substring(at + 1).trim();
+        if (!address.isEmpty()) {
+            server.setText(address);
+        }
     }
 
     private String home() {

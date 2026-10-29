@@ -24,6 +24,12 @@
         <category a:name='android.intent.category.LAUNCHER'/>
         <action a:name='android.intent.action.MAIN'/>
       </intent-filter>
+      <!-- A home code shared from another app, a QR reader's for one. -->
+      <intent-filter>
+        <action a:name='android.intent.action.SEND'/>
+        <category a:name='android.intent.category.DEFAULT'/>
+        <data a:mimeType='text/plain'/>
+      </intent-filter>
     </activity>
 
     <activity a:name='network.leviculum.loquax.ConversationsActivity' a:exported='false'/>
