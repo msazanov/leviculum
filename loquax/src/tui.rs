@@ -277,6 +277,10 @@ async fn run_terminal(
     log_graphics(&painter, &chosen, &facts);
     shell.apply(UiEvent::MapSetup(map::setup_of(&painter, &facts)));
     let mut map_open = false;
+    let log_input = input_log_on(std::env::var_os(INPUT_LOG_VAR).as_deref());
+    if log_input {
+        tracing::info!("INPUT log=on");
+    }
     let mut events = EventStream::new();
     shell.apply(UiEvent::Clock(local_now()));
     let size = terminal.size().map_err(|e| e.to_string())?;
@@ -360,7 +364,8 @@ async fn run_terminal(
                 // A held key's repeats and a drag's motions that queued
                 // while the last frame was drawn are one frame at the
                 // newest view, not a frame each (1075).
-                let ended = apply_waiting(item, &mut events, |event| shell.apply(event));
+                let ended =
+                    apply_waiting(item, &mut events, log_input, |event| shell.apply(event));
                 if let Some(result) = ended {
                     break result;
                 }
@@ -412,10 +417,12 @@ fn unwound<R>(f: impl FnOnce() -> R) -> Result<R, String> {
 }
 
 /// `first` and every event already waiting behind it on `events`, applied
-/// in order without waiting for more; `Some` when the stream ended.
+/// in order without waiting for more; `Some` when the stream ended. With
+/// `log_input` each is an `INPUT` line in `tui.log` first, as it came.
 fn apply_waiting<S>(
     first: Option<std::io::Result<Event>>,
     events: &mut S,
+    log_input: bool,
     mut apply: impl FnMut(UiEvent),
 ) -> Option<Result<(), String>>
 where
@@ -423,12 +430,93 @@ where
 {
     let mut item = first;
     loop {
+        if let (true, Some(Ok(event))) = (log_input, &item) {
+            tracing::info!("{}", input_line(event));
+        }
         match step_event(item, map_event) {
             EventStep::Apply(event) => apply(event),
             EventStep::Ignore => {}
             EventStep::End(result) => return Some(result.map_err(|e| e.to_string())),
         }
         item = events.next().now_or_never()?;
+    }
+}
+
+/// The variable that turns the raw input log on: what the terminal sends,
+/// before any mapping, so a phone's swipe can be read off `tui.log` (1102).
+const INPUT_LOG_VAR: &str = "LOQUAX_INPUT_LOG";
+
+/// Whether the input log's variable turns it on: set, not empty, not `0`.
+fn input_log_on(value: Option<&std::ffi::OsStr>) -> bool {
+    value.is_some_and(|v| !v.is_empty() && v != "0")
+}
+
+/// One terminal event as an `INPUT` line, every field it carries but a
+/// paste's text, of which only the length in bytes is said.
+fn input_line(event: &Event) -> String {
+    use crossterm::event::{KeyEventKind, MouseButton as Button, MouseEventKind as Kind};
+    let button = |b: &Button| match b {
+        Button::Left => "left",
+        Button::Right => "right",
+        Button::Middle => "middle",
+        Button::Back => "back",
+        Button::Forward => "forward",
+    };
+    match event {
+        Event::Mouse(mouse) => {
+            let (kind, pressed) = match &mouse.kind {
+                Kind::Down(b) => ("down", Some(button(b))),
+                Kind::Up(b) => ("up", Some(button(b))),
+                Kind::Drag(b) => ("drag", Some(button(b))),
+                Kind::Moved => ("moved", None),
+                Kind::ScrollDown => ("scroll_down", None),
+                Kind::ScrollUp => ("scroll_up", None),
+                Kind::ScrollLeft => ("scroll_left", None),
+                Kind::ScrollRight => ("scroll_right", None),
+            };
+            format!(
+                "INPUT kind=mouse event={kind} button={} col={} row={} mods={}",
+                pressed.unwrap_or("none"),
+                mouse.column,
+                mouse.row,
+                modifiers(mouse.modifiers),
+            )
+        }
+        Event::Key(key) => {
+            let code = match key.code {
+                crossterm::event::KeyCode::Char(c) if c.is_ascii_graphic() => format!("char:{c}"),
+                crossterm::event::KeyCode::Char(c) => format!("char:U+{:04X}", u32::from(c)),
+                crossterm::event::KeyCode::F(n) => format!("f{n}"),
+                other => format!("{other:?}").to_lowercase().replace(' ', ""),
+            };
+            let state = match key.kind {
+                KeyEventKind::Press => "press",
+                KeyEventKind::Repeat => "repeat",
+                KeyEventKind::Release => "release",
+            };
+            format!(
+                "INPUT kind=key code={code} mods={} state={state}",
+                modifiers(key.modifiers)
+            )
+        }
+        Event::Resize(width, height) => {
+            format!("INPUT kind=resize width={width} height={height}")
+        }
+        Event::Paste(text) => format!("INPUT kind=paste len={}", text.len()),
+        Event::FocusGained => "INPUT kind=focus gained=true".to_string(),
+        Event::FocusLost => "INPUT kind=focus gained=false".to_string(),
+    }
+}
+
+/// `shift+ctrl`, or `none`.
+fn modifiers(mods: crossterm::event::KeyModifiers) -> String {
+    let names: Vec<String> = mods
+        .iter_names()
+        .map(|(name, _)| name.to_lowercase())
+        .collect();
+    match names.is_empty() {
+        true => "none".to_string(),
+        false => names.join("+"),
     }
 }
 
@@ -2387,7 +2475,7 @@ mod tests {
         let mut events =
             futures::stream::iter((0..9).map(|_| right())).chain(futures::stream::pending());
         let mut applied = 0;
-        let ended = apply_waiting(Some(right()), &mut events, |event| {
+        let ended = apply_waiting(Some(right()), &mut events, false, |event| {
             applied += 1;
             update(&mut model, event);
         });
@@ -2399,5 +2487,73 @@ mod tests {
         let Ok(_) = terminal.draw(|f| draw(f, &ui::view(&model), Some(&mut painter)));
         assert_eq!(painter.paints(), 1, "one frame for the ten");
         assert_eq!(painter.painted_view(), Some(want));
+    }
+
+    /// The raw input log: one line an event, every field but a paste's
+    /// text, and the variable read as on only when set to something but
+    /// `0` (1102).
+    #[test]
+    fn the_input_log_says_each_event_as_it_came() {
+        use crossterm::event::{
+            KeyCode as Code, KeyEvent as Key, KeyEventKind, KeyEventState, KeyModifiers as Mods,
+            MouseButton as Button, MouseEvent as Mouse, MouseEventKind as Kind,
+        };
+        let mouse = |kind, modifiers| {
+            Event::Mouse(Mouse {
+                kind,
+                column: 12,
+                row: 7,
+                modifiers,
+            })
+        };
+        assert_eq!(
+            input_line(&mouse(Kind::ScrollLeft, Mods::NONE)),
+            "INPUT kind=mouse event=scroll_left button=none col=12 row=7 mods=none"
+        );
+        assert_eq!(
+            input_line(&mouse(
+                Kind::Drag(Button::Left),
+                Mods::SHIFT | Mods::CONTROL
+            )),
+            "INPUT kind=mouse event=drag button=left col=12 row=7 mods=shift+control"
+        );
+        assert_eq!(
+            input_line(&Event::Key(Key::new(Code::Char('h'), Mods::ALT))),
+            "INPUT kind=key code=char:h mods=alt state=press"
+        );
+        assert_eq!(
+            input_line(&Event::Key(Key {
+                code: Code::Char(' '),
+                modifiers: Mods::NONE,
+                kind: KeyEventKind::Repeat,
+                state: KeyEventState::NONE,
+            })),
+            "INPUT kind=key code=char:U+0020 mods=none state=repeat"
+        );
+        assert_eq!(
+            input_line(&Event::Key(Key::new(Code::F(5), Mods::NONE))),
+            "INPUT kind=key code=f5 mods=none state=press"
+        );
+        assert_eq!(
+            input_line(&Event::Key(Key::new(Code::Left, Mods::NONE))),
+            "INPUT kind=key code=left mods=none state=press"
+        );
+        assert_eq!(
+            input_line(&Event::Resize(80, 24)),
+            "INPUT kind=resize width=80 height=24"
+        );
+        assert_eq!(
+            input_line(&Event::Paste("secret words".to_string())),
+            "INPUT kind=paste len=12"
+        );
+        assert_eq!(
+            input_line(&Event::FocusLost),
+            "INPUT kind=focus gained=false"
+        );
+        let on = |v: Option<&str>| input_log_on(v.map(std::ffi::OsStr::new));
+        assert!(on(Some("1")));
+        assert!(!on(Some("0")));
+        assert!(!on(Some("")));
+        assert!(!on(None));
     }
 }

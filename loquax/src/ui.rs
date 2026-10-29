@@ -50,7 +50,7 @@
 //! release copies it ([`UiEffect::Copy`], OSC 52 in the terminal). On the
 //! map a drag moves the view with the pointer and a click opens the pin it
 //! went down and came up on ([`map::MapPress`]); the wheel zooms about the
-//! pointer.
+//! pointer, and tilted sideways pans an eighth as `h` and `l` do.
 //!
 //! # History
 //!
@@ -1529,6 +1529,16 @@ fn load_map_area<B: InputBuffer>(model: &mut UiModel<B>) {
     }
 }
 
+/// Move the map's view by eighths of its width and height, east and south
+/// positive: the arrows, `h` `j` `k` `l` and the tilted wheel.
+fn pan_map(state: &mut map::MapState, area: Rect, setup: &map::MapSetup, dx: i8, dy: i8) {
+    let mut view = map::viewport(state, area, setup);
+    let (w, h) = view.size();
+    let step = |n: i8, of: u32| i32::from(n) * (of / 8).max(1) as i32;
+    view.pan(step(dx, w), step(dy, h));
+    state.centre = view.centre;
+}
+
 /// A key on the open map.
 fn map_key<B: InputBuffer>(model: &mut UiModel<B>, cmd: keys::MapCmd) -> Vec<UiEffect> {
     use keys::MapCmd;
@@ -1541,13 +1551,7 @@ fn map_key<B: InputBuffer>(model: &mut UiModel<B>, cmd: keys::MapCmd) -> Vec<UiE
     match cmd {
         MapCmd::ZoomIn => state.zoom = state.zoom.saturating_add(1).min(setup.zooms.1),
         MapCmd::ZoomOut => state.zoom = state.zoom.saturating_sub(1).max(setup.zooms.0),
-        MapCmd::Pan(dx, dy) => {
-            let mut view = map::viewport(state, area, &setup);
-            let (w, h) = view.size();
-            let step = |n: i8, of: u32| i32::from(n) * (of / 8).max(1) as i32;
-            view.pan(step(dx, w), step(dy, h));
-            state.centre = view.centre;
-        }
+        MapCmd::Pan(dx, dy) => pan_map(state, area, &setup, dx, dy),
         MapCmd::Fit => {
             let (centre, zoom) = map::fit(&pins, area, &setup);
             state.centre = centre;
@@ -1774,6 +1778,8 @@ fn on_mouse<B: InputBuffer + Default>(model: &mut UiModel<B>, mouse: MouseEvent)
         MouseEventKind::Up(MouseButton::Left) => release(model, col, row),
         MouseEventKind::ScrollDown => wheel(model, col, row, true),
         MouseEventKind::ScrollUp => wheel(model, col, row, false),
+        MouseEventKind::ScrollRight => tilt(model, col, row, true),
+        MouseEventKind::ScrollLeft => tilt(model, col, row, false),
         _ => Vec::new(),
     }
 }
@@ -2083,6 +2089,22 @@ fn wheel<B: InputBuffer>(model: &mut UiModel<B>, col: u16, row: u16, down: bool)
             }
         }
         None => {}
+    }
+    Vec::new()
+}
+
+/// The wheel tilted, or a touch screen's sideways swipe sent as one: over
+/// the map it pans an eighth of the view, as `h` and `l` do. Nothing else
+/// scrolls sideways, and an overlay takes it for nothing.
+fn tilt<B: InputBuffer>(model: &mut UiModel<B>, col: u16, row: u16, right: bool) -> Vec<UiEffect> {
+    if model.help || model.palette.is_some() || model.detail.is_some() {
+        return Vec::new();
+    }
+    if hit::pane_at(model, col, row) == Some(Pane::Map) {
+        let (setup, area) = (model.map_setup.clone(), model.map_area());
+        if let Some(state) = model.map.as_mut() {
+            pan_map(state, area, &setup, if right { 1 } else { -1 }, 0);
+        }
     }
     Vec::new()
 }
@@ -7140,6 +7162,37 @@ mod tests {
         );
         assert_eq!(model.map.expect("open").centre, centre);
         assert_eq!(model.map.expect("open").zoom, before.zoom);
+    }
+
+    /// The tilted wheel, which is what a sideways swipe on a touch terminal
+    /// may send (1102), pans the map an eighth as `l` and `h` do; off the
+    /// map and under an overlay it does nothing.
+    #[test]
+    fn the_tilted_wheel_pans_the_map_as_h_and_l() {
+        let mut model = mapped();
+        update(&mut model, key(KeyCode::Char('M')));
+        let area = model.map_area();
+        let at = (area.x + 3, area.y + 2);
+        let start = model.map.expect("open");
+        update(&mut model, mouse(MouseEventKind::ScrollRight, at.0, at.1));
+        let tilted = model.map.expect("open");
+        assert_ne!(tilted.centre, start.centre, "it moved");
+        update(&mut model, mouse(MouseEventKind::ScrollLeft, at.0, at.1));
+        assert_eq!(model.map.expect("open").centre, start.centre, "and back");
+        update(&mut model, key(KeyCode::Char('l')));
+        assert_eq!(model.map.expect("open").centre, tilted.centre, "as l");
+        update(&mut model, mouse(MouseEventKind::ScrollLeft, at.0, at.1));
+        assert_eq!(model.map.expect("open").centre, start.centre, "as h");
+        assert_eq!(model.map.expect("open").zoom, start.zoom, "no zoom");
+        // Over the list beside the map: nothing.
+        assert_eq!(hit::pane_at(&model, 1, 1), Some(Pane::Conversations));
+        update(&mut model, mouse(MouseEventKind::ScrollRight, 1, 1));
+        assert_eq!(model.map.expect("open").centre, start.centre);
+        // Under the help: nothing.
+        update(&mut model, key(KeyCode::Char('?')));
+        assert!(model.help);
+        update(&mut model, mouse(MouseEventKind::ScrollRight, at.0, at.1));
+        assert_eq!(model.map.expect("open").centre, start.centre);
     }
 
     /// The list stays beside the map: the focus goes there and back by

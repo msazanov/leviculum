@@ -241,11 +241,13 @@ test.
 whose module comment is the normative layout). All integers little-endian,
 offsets from the start of the file:
 
-- a 64-byte header: `LMR1`, version 1, header length, the bounds in
+- a header: `LMR1`, the version (1, or 2 since 1100 with names), the
+  header length (64, or 96 for version 2), the bounds in
   degrees x 10^7 (west, south, east, north; west greater than east means
   across the antimeridian), the zoom range (at most 16, so x and y fit a
   `u16`), the layer profile id, where the attribution and the notice lie,
-  the tile count, where the index lies and the file's length;
+  the tile count, where the index lies and the file's length; version 2
+  adds where the label index and the string table lie;
 - the two texts, UTF-8 and both required: the attribution, one line every
   map view shows ("© OpenStreetMap contributors"), and the notice, the
   ODbL text, the derived-database sentence and the source the region was
@@ -258,9 +260,32 @@ offsets from the start of the file:
   park's byte, a secondary road on a major road's. An older reader draws
   those as the park and the major road it drew before, so the version
   stays 1 (`leviculum-mapfill/src/fixture.rs`);
+- version 2 (LMR2, 1100): a label section per tile that has names, one
+  string table for the whole region (UTF-8, u32 offsets, sorted, so a name
+  is found by binary search), and a label index like the tile index right
+  before it. A section holds point labels (kind, population rank, min
+  zoom, flags, string, anchor: 12 bytes) and line labels that refer to a
+  line feature of the tile's own blob (8 bytes), so a street name reuses
+  the geometry the tile holds; and an alternate name per label where the
+  name in the locale the cut was asked for differs from the local one.
+  The layout is `leviculum-map/src/labels.rs`'s module comment. A version
+  1 reader refuses version 2 with `RegionError::Version`; this reader
+  reads both, and a frontend that draws no names never opens the label
+  index or the table;
 - the index last, 20 bytes per tile ascending by (z, x, y): z, x, y,
   offset, length. Last, so the cut can stream tiles and learn their count
   at the end.
+
+**Names** (1100). The cut keeps the names of places (city, town, district,
+village, suburb, neighbourhood; not localities, hamlets, isolated
+dwellings or farms, which are 1,774 of the 1,933 places of a Frankfurt z13
+tile), of water points and parks, each where its anchor lies in the tile
+and the tile's zoom reaches its `min_zoom` (the deepest zoom keeps all, for
+the views that overzoom it), and of named roads from z14, each a line
+feature of its own. Street names show from z14 for major and secondary
+roads, from z15 for the rest. Measured on the 4.x extracts with `--locale
+de`: Frankfurt 9,878,095 to 10,270,116 bytes (+4.0 %), Berlin 35,176,663 to
+36,309,038 (+3.2 %).
 
 A tile with nothing left under the profile has no entry; a reader draws
 the background there. Two entries may share a blob (the cut stores

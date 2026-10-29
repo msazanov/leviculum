@@ -7,11 +7,12 @@
 //! `physical_line`, `natural`) and 4.x (the daily builds, kind under
 //! `kind`, waterways as lines of `water`, `landcover`).
 
+use leviculum_map::labels::LabelKind;
 use leviculum_mapfill::fixture::{Kind, BRIDGE, TUNNEL};
 use leviculum_mapfill::style::Class;
 use prost::Message;
 use tinymvt::geometry::GeometryDecoder;
-use tinymvt::vector_tile::tile::{Feature, Layer};
+use tinymvt::vector_tile::tile::{Feature, Layer, Value};
 use tinymvt::vector_tile::Tile;
 
 use crate::Res;
@@ -21,6 +22,28 @@ pub const EXTENT: u32 = 4096;
 
 const POLYGON: i32 = 3;
 const LINESTRING: i32 = 2;
+const POINT: i32 = 1;
+
+/// A name as the cut keeps it: the local one, and the one in the locale
+/// the region is cut for where that differs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Name {
+    pub local: String,
+    pub alternate: Option<String>,
+}
+
+/// A named point the map labels: a place, a water, a park.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourcePoint {
+    pub kind: LabelKind,
+    /// `population_rank`, 0 where the source has none.
+    pub rank: u8,
+    /// The source's `min_zoom`, rounded down; 0 where it has none.
+    pub min_zoom: u8,
+    pub name: Name,
+    /// In tile units, possibly in the tile's buffer.
+    pub at: [i32; 2],
+}
 
 /// One feature: its kind, class and parts. An area's part is a polygon,
 /// outer ring first, then its holes; a line's part is one line string.
@@ -30,13 +53,97 @@ pub struct SourceFeature {
     /// [`BRIDGE`] or [`TUNNEL`] for a line that runs on one or in one.
     pub flags: u8,
     pub parts: Vec<Vec<Vec<[i32; 2]>>>,
+    /// A named road's kind and name, which the cut labels.
+    pub label: Option<(LabelKind, Name)>,
 }
 
 /// A decoded tile: features in tile order (layer by layer, feature by
-/// feature) and how many features had no class or the wrong geometry.
+/// feature), the named points the map labels, and how many features had no
+/// class or the wrong geometry.
 pub struct Decoded {
     pub features: Vec<SourceFeature>,
+    pub points: Vec<SourcePoint>,
     pub skipped: usize,
+}
+
+/// A feature's properties as text or number, looked up by key.
+struct Props<'a> {
+    layer: &'a Layer,
+    feature: &'a Feature,
+}
+
+impl<'a> Props<'a> {
+    fn value(&self, key: &str) -> Option<&'a Value> {
+        self.feature.tags.chunks_exact(2).find_map(|c| {
+            (self.layer.keys.get(c[0] as usize)? == key)
+                .then(|| self.layer.values.get(c[1] as usize))
+                .flatten()
+        })
+    }
+
+    /// The first of `keys` the feature carries as text.
+    fn text(&self, keys: &[&str]) -> Option<&'a str> {
+        keys.iter()
+            .find_map(|k| self.value(k)?.string_value.as_deref())
+    }
+
+    /// The first of `keys` the feature carries as a number.
+    fn number(&self, keys: &[&str]) -> Option<f64> {
+        keys.iter().find_map(|k| {
+            let v = self.value(k)?;
+            v.double_value
+                .or(v.float_value.map(f64::from))
+                .or(v.int_value.map(|i| i as f64))
+                .or(v.sint_value.map(|i| i as f64))
+                .or(v.uint_value.map(|i| i as f64))
+                .or(v.string_value.as_deref().and_then(|s| s.parse().ok()))
+        })
+    }
+
+    /// The name, and the one in `locale` where it differs; `None` without
+    /// a name or with an empty one.
+    fn name(&self, locale: Option<&str>) -> Option<Name> {
+        let local = self.text(&["name"]).filter(|n| !n.trim().is_empty())?;
+        let alternate = locale
+            .and_then(|l| self.text(&[&format!("name:{l}")]))
+            .filter(|a| *a != local && !a.trim().is_empty())
+            .map(str::to_owned);
+        Some(Name {
+            local: local.to_owned(),
+            alternate,
+        })
+    }
+}
+
+/// The label kind of a place of Protomaps `kind` and `kind_detail`: the
+/// classes the map names (`docs/drafts/map-renderer-roadmap-2026-10.md`,
+/// section 1, "Placement"). Localities, hamlets, isolated dwellings and
+/// farms are left out: in Frankfurt they are 1,774 of the 1,933 places of
+/// a z13 tile, field and area names that bury the towns.
+pub fn place_kind(kind: &str, detail: &str) -> Option<LabelKind> {
+    if kind == "macrohood" {
+        return Some(LabelKind::District);
+    }
+    Some(match detail {
+        "city" => LabelKind::City,
+        "town" => LabelKind::Town,
+        "quarter" => LabelKind::District,
+        "village" => LabelKind::Village,
+        "suburb" => LabelKind::Suburb,
+        "neighbourhood" => LabelKind::Neighbourhood,
+        _ => return None,
+    })
+}
+
+/// The label kind of a named road of Protomaps `kind`; paths, railways and
+/// the rest are not named.
+pub fn road_kind(kind: &str) -> Option<LabelKind> {
+    Some(match kind {
+        "highway" => LabelKind::MajorRoad,
+        "major_road" | "medium_road" => LabelKind::SecondaryRoad,
+        "minor_road" => LabelKind::MinorRoad,
+        _ => return None,
+    })
 }
 
 /// The class of a landuse, natural or landcover area of `kind`, `other`
@@ -106,11 +213,19 @@ fn line_flags(l: &Layer, f: &Feature) -> u8 {
     flags
 }
 
-/// Decode one uncompressed MVT tile.
+/// Decode one uncompressed MVT tile, names left out.
 pub fn decode(raw: &[u8]) -> Res<Decoded> {
+    decode_named(raw, None, false)
+}
+
+/// Decode one uncompressed MVT tile, and when `names` is set the names the
+/// map labels as well: the local name, with `locale`'s (`de`, `en`) where
+/// it differs.
+pub fn decode_named(raw: &[u8], locale: Option<&str>, names: bool) -> Res<Decoded> {
     let tile = Tile::decode(raw)?;
     let mut out = Decoded {
         features: Vec::new(),
+        points: Vec::new(),
         skipped: 0,
     };
     for l in &tile.layers {
@@ -136,6 +251,20 @@ pub fn decode(raw: &[u8]) -> Res<Decoded> {
                 }
             }
             let geometry = f.r#type.unwrap_or(0);
+            let props = Props {
+                layer: l,
+                feature: f,
+            };
+            if geometry == POINT {
+                if names {
+                    if let Some(p) = point(l.name.as_str(), kind, &props, f, locale)? {
+                        out.points.push(p);
+                        continue;
+                    }
+                }
+                out.skipped += 1;
+                continue;
+            }
             let Some((k, class)) = class_of(&l.name, kind, geometry) else {
                 out.skipped += 1;
                 continue;
@@ -157,13 +286,61 @@ pub fn decode(raw: &[u8]) -> Res<Decoded> {
                 Kind::Line => line_flags(l, f),
                 Kind::Area => 0,
             };
+            let label = match (names, k, l.name.as_str()) {
+                (true, Kind::Line, "roads") => road_kind(kind).zip(props.name(locale)),
+                _ => None,
+            };
             out.features.push(SourceFeature {
                 kind: k,
                 class,
                 flags,
                 parts,
+                label,
             });
         }
     }
     Ok(out)
+}
+
+/// The labelled point a feature of `layer` with `kind` is, if it is one: a
+/// place of the named classes, a named water point, a named park.
+fn point(
+    layer: &str,
+    kind: &str,
+    props: &Props<'_>,
+    f: &Feature,
+    locale: Option<&str>,
+) -> Res<Option<SourcePoint>> {
+    let label = match layer {
+        "places" => place_kind(
+            kind,
+            props
+                .text(&["kind_detail", "pmap:kind_detail"])
+                .unwrap_or(""),
+        ),
+        "water" => Some(LabelKind::Water),
+        "pois" if kind == "park" => Some(LabelKind::Park),
+        _ => None,
+    };
+    let Some(label) = label else {
+        return Ok(None);
+    };
+    let Some(name) = props.name(locale) else {
+        return Ok(None);
+    };
+    let Some(at) = GeometryDecoder::new(&f.geometry)
+        .decode_points()?
+        .first()
+        .copied()
+    else {
+        return Ok(None);
+    };
+    let small = |v: Option<f64>| v.map_or(0, |v| v.floor().clamp(0.0, 255.0) as u8);
+    Ok(Some(SourcePoint {
+        kind: label,
+        rank: small(props.number(&["population_rank", "pmap:population_rank"])),
+        min_zoom: small(props.number(&["min_zoom", "pmap:min_zoom"])),
+        name,
+        at,
+    }))
 }

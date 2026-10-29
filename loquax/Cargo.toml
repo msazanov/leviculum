@@ -168,6 +168,10 @@ iced = { version = "0.14", default-features = false, features = [
     "canvas",
     "image-without-codecs",
     "advanced",
+    # Fira Sans embedded: the map's names are set in it on every host, so a
+    # picture and its golden agree (1100). It is the window's default font
+    # with the feature, the same on every host for the same reason.
+    "fira-sans",
 ], optional = true }
 # A web or mail link in a message body, clicked, goes to the system's
 # handler as lnomad hands it one (`xdg-open` on Linux).
@@ -197,6 +201,9 @@ hex = "0.4"
 lnpnd = { path = "../lnpnd" }
 # The loopback map source of the autoload tests (1089).
 leviculum-mapcut = { path = "../leviculum-mapcut" }
+# The window's golden picture of the map's names is a PNG (1100); in the
+# lock already, through leviculum-map's goldens.
+png = "0.18"
 
 [lib]
 name = "loquax"

@@ -34,6 +34,7 @@ fn want(cap: u64) -> Want {
         floor: 14,
         cap,
         profile: leviculum_map::profile::CUT_1,
+        locale: Some("de".to_owned()),
     }
 }
 

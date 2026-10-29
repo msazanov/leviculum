@@ -34,6 +34,7 @@ use embedded_graphics::prelude::{Dimensions, Point};
 use embedded_graphics::primitives::Rectangle;
 use leviculum_map::choice::{drawn, view_zooms};
 use leviculum_map::draw::{draw_in_scaled, draw_tiles, Ink};
+use leviculum_map::labels::ViewLabel;
 use leviculum_map::outline;
 use leviculum_map::region::{Header, Region};
 use leviculum_map::viewport::{ViewTile, Viewport};
@@ -288,6 +289,33 @@ impl Painter {
         Drawn { fb, attribution }
     }
 
+    /// The names `view` shows from every region that reaches into it, in
+    /// the order [`Painter::draw`] draws them, streets too with `lines`; a
+    /// region whose names do not read is left out. A version 1 region has
+    /// none. Placed by the frontend, in its unit, by the core's rule
+    /// ([`leviculum_map::labels::place`]).
+    pub fn labels(&mut self, view: &Viewport, lines: bool) -> Vec<ViewLabel> {
+        self.refresh();
+        let order = drawn(
+            self.regions
+                .iter()
+                .map(|r| (r.name.as_str(), r.region.header())),
+            view,
+        );
+        let mut out = Vec::new();
+        for i in order {
+            let mut found = Vec::new();
+            if self.regions[i]
+                .region
+                .view_labels(view, lines, &mut found)
+                .is_ok()
+            {
+                out.extend(found);
+            }
+        }
+        out
+    }
+
     /// Mark the autoloaded region `i` viewed, at most every
     /// [`VIEWED_EVERY`]: its file's modification time is the order the
     /// cache is evicted in ([`crate::mapload`]).
@@ -434,6 +462,7 @@ mod tests {
                 attribution: "© OpenStreetMap contributors".to_string(),
                 notice: "test".to_string(),
                 threads: 1,
+                locale: None,
             };
             let out = File::create(maps.join(format!("{name}.lmr"))).expect("create");
             cut(&archive, &opts, std::io::BufWriter::new(out)).expect("cut");
