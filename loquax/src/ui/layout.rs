@@ -29,7 +29,7 @@ use leviculum_ui::text::{fit_width, truncate_to_cols};
 use leviculum_ui::tokens::{Paint, Tokens};
 use leviculum_ui::{RLine, RStyle};
 
-use super::{leg_label, plain, push, wrap, Conversation, Message, Signature, UiModel};
+use super::{leg_label, plain, push, reactions, wrap, Conversation, Message, Signature, UiModel};
 use crate::names::Names;
 use crate::telemetry;
 use crate::when::{date_label, list_time, WallTime};
@@ -158,8 +158,15 @@ pub fn conversation(conversation: &Conversation, width: usize, draw: &Draw<'_>) 
     }
     let mut last = Last::Separator;
     let mut day = None;
+    // The first of the reactions folded since the last block: a note or the
+    // `new` rule that stood before one goes before the next block instead.
+    let mut skipped: Option<usize> = None;
+    let reactions = reactions::gather(conversation);
     for (index, message) in conversation.messages.iter().enumerate() {
         let start = laid.rows.len();
+        if message.is_reaction() {
+            skipped.get_or_insert(index);
+        }
         if folded(conversation, index) {
             // Drawn as the report after it: no rows, so no click lands on
             // it and the cursor steps over it.
@@ -180,14 +187,16 @@ pub fn conversation(conversation: &Conversation, width: usize, draw: &Draw<'_>) 
                 last = Last::Separator;
             }
         }
-        for note in conversation.notes.iter().filter(|n| n.before == index) {
+        let from = skipped.take().unwrap_or(index);
+        let here = |at: usize| (from..=index).contains(&at);
+        for note in conversation.notes.iter().filter(|n| here(n.before)) {
             if last == Last::Block {
                 laid.push(RLine::default());
             }
             laid.push(note_line(&note.text, width, draw.tokens));
             last = Last::Separator;
         }
-        if let Some(rule) = conversation.new_rule.filter(|rule| rule.at == index) {
+        if let Some(rule) = conversation.new_rule.filter(|rule| here(rule.at)) {
             if last == Last::Block {
                 laid.push(RLine::default());
             }
@@ -209,6 +218,12 @@ pub fn conversation(conversation: &Conversation, width: usize, draw: &Draw<'_>) 
         );
         laid.rows.extend(drawn.rows);
         laid.texts.extend(drawn.texts);
+        let chips = message.id.and_then(|id| reactions.get(&id));
+        if let Some(row) =
+            chips.and_then(|chips| reactions::row(chips, message.outbound, width, draw.tokens))
+        {
+            laid.push(row);
+        }
         laid.spans.push(Span {
             start,
             end: laid.rows.len(),
@@ -216,7 +231,7 @@ pub fn conversation(conversation: &Conversation, width: usize, draw: &Draw<'_>) 
         });
         last = Last::Block;
     }
-    let after = conversation.messages.len();
+    let after = skipped.unwrap_or(conversation.messages.len());
     for note in conversation.notes.iter().filter(|n| n.before >= after) {
         if last == Last::Block {
             laid.push(RLine::default());
@@ -227,11 +242,19 @@ pub fn conversation(conversation: &Conversation, width: usize, draw: &Draw<'_>) 
     laid
 }
 
-/// Whether message `index` is a telemetry report the next one replaces on
-/// screen: one peer's consecutive reports fold into the latest
+/// Whether message `index` has no block of its own: a reaction, drawn
+/// under its target ([`reactions`]), or a telemetry report the next one
+/// replaces on screen: one peer's consecutive reports fold into the latest
 /// (`loquax-map.md`, "In the conversation"). Not across a day, a note or the
 /// `new` rule, which say something about where the run is.
 pub fn folded(conversation: &Conversation, index: usize) -> bool {
+    if conversation
+        .messages
+        .get(index)
+        .is_some_and(Message::is_reaction)
+    {
+        return true;
+    }
     let (Some(this), Some(next)) = (
         conversation.messages.get(index),
         conversation.messages.get(index + 1),
@@ -403,6 +426,11 @@ fn block(
         }
         (false, Some(query)) => super::search::mark_first(&message.body, query),
         (false, None) => message.body.clone(),
+    };
+    // A reaction drawn as a block, its signature broken: what it claims.
+    let body = match (body.trim().is_empty(), message.reaction()) {
+        (true, Some((_, content))) => format!("reacted {content}"),
+        _ => body,
     };
     for text in body.split('\n') {
         let mut line = plain(text);
@@ -619,6 +647,7 @@ fn entry(
         n => format!("[{n}]"),
     };
     let preview = match last {
+        Some(message) if message.is_reaction() => reactions::preview(message).unwrap_or_default(),
         Some(message) if message.is_report() => format!("{} position", telemetry::REPORT_MARK),
         Some(message) => {
             let first = message.body.split('\n').next().unwrap_or("");

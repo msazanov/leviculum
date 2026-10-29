@@ -137,6 +137,7 @@ pub mod history;
 pub mod hit;
 pub mod layout;
 pub mod map;
+pub mod reactions;
 pub mod search;
 
 /// How many ticks a toast stays up. The shell ticks every 250 ms, so three
@@ -989,8 +990,13 @@ pub enum MapLoad {
 pub enum UiEffect {
     /// Send `body` to `to` the way `loquax send --via auto` does. The shell
     /// runs sends one at a time in this order and reports each with
-    /// [`UiEvent::SendDone`].
-    Send { to: [u8; 16], body: String },
+    /// [`UiEvent::SendDone`]. `fields` go with it as they are: a reaction's
+    /// ([`reactions`]).
+    Send {
+        to: [u8; 16],
+        body: String,
+        fields: Vec<Field>,
+    },
     /// Drain the mailbox, as `loquax fetch` does; reported with
     /// [`UiEvent::FetchDone`].
     Fetch,
@@ -1036,6 +1042,8 @@ pub fn update<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) 
     // Whatever hid the open conversation, a block, the `blocked` view or a
     // restore, another the list shows takes its place.
     model.settle();
+    // A reaction has no block for the cursor to stand on.
+    model.off_reactions();
     // The map holds the conversation's place: the focus going to the
     // conversation or compose takes it away, and without it there is no
     // map to focus.
@@ -1309,6 +1317,17 @@ fn overlay_key<B: InputBuffer + Default>(model: &mut UiModel<B>, key: KeyEvent) 
             palette.selected = (palette.selected + 1).min(rows.saturating_sub(1));
         }
         KeyCode::Up => palette.selected = palette.selected.saturating_sub(1),
+        // The picker: a digit on an empty line is that quick reaction.
+        KeyCode::Char(digit @ '1'..='6')
+            if palette.query.value().is_empty()
+                && matches!(palette.ask, Some(contacts::Ask::React { .. })) =>
+        {
+            if let Some(contacts::Ask::React { peer, target }) = palette.ask {
+                model.palette = None;
+                let quick = reactions::QUICK[usize::from(digit as u8 - b'1')];
+                return model.react(peer, target, quick);
+            }
+        }
         _ => {
             if palette.query.edit(&key) {
                 palette.selected = 0;
@@ -2242,7 +2261,12 @@ fn scroll_messages<B: InputBuffer>(model: &mut UiModel<B>, cmd: ScrollCmd) {
         }
     }
     model.message_cursor = cursor;
-    model.scroll_top = match cursor == last && top >= bottom {
+    // The newest drawn message: reactions after it have no rows.
+    let newest = laid.spans[cursor.min(laid.spans.len())..]
+        .iter()
+        .skip(1)
+        .all(|span| span.start == span.end);
+    model.scroll_top = match (cursor == last || newest) && top >= bottom {
         true => None,
         false => Some(top),
     };
@@ -2449,6 +2473,10 @@ fn run<B: InputBuffer + Default>(model: &mut UiModel<B>, command: PaletteCommand
             model.ask_rename();
             Vec::new()
         }
+        PaletteCommand::React => {
+            model.ask_react();
+            Vec::new()
+        }
         PaletteCommand::Block => model.set_blocked(true),
         PaletteCommand::Unblock => model.set_blocked(false),
         PaletteCommand::Blocked => {
@@ -2508,7 +2536,11 @@ fn send<B: InputBuffer + Default>(model: &mut UiModel<B>) -> Vec<UiEffect> {
     if let Some(sync) = model.sync.as_mut() {
         sync.on(SyncEvent::Sent, now);
     }
-    vec![UiEffect::Send { to, body }]
+    vec![UiEffect::Send {
+        to,
+        body,
+        fields: Vec::new(),
+    }]
 }
 
 /// The glyph-table state a router state is shown as.
@@ -2648,8 +2680,22 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
                 fields,
             });
             let peer = conversation.peer;
+            let reaction = conversation
+                .messages
+                .last()
+                .filter(|m| m.is_reaction())
+                .and_then(Message::reaction);
             model.changed.insert((peer, activity));
             let effects = take_telemetry(model, index, message_id);
+            // A reaction: kept and stored, drawn under its target, and the
+            // reader told; it is no unread message and moves no cursor.
+            if let Some((_, content)) = reaction {
+                if !blocked {
+                    let from = model.names.label(&source);
+                    model.toast(ToastKind::Info, format!("{from} reacted {content}"));
+                }
+                return effects;
+            }
             // Blocked: kept and stored, and nothing more: no unread, no
             // `new` rule, no toast. Its position is kept too; the map leaves
             // it out.
@@ -3835,7 +3881,8 @@ mod tests {
             effects,
             [UiEffect::Send {
                 to: OTHER,
-                body: "hello".to_string()
+                body: "hello".to_string(),
+                fields: Vec::new(),
             }]
         );
         assert_eq!(model.compose.value(), "");
@@ -4180,7 +4227,8 @@ mod tests {
             effects,
             [UiEffect::Send {
                 to: PEER,
-                body: "one\ntwo".to_string()
+                body: "one\ntwo".to_string(),
+                fields: Vec::new(),
             }]
         );
         model.enhanced = true;
@@ -4216,7 +4264,8 @@ mod tests {
             effects,
             [UiEffect::Send {
                 to: PEER,
-                body: "a\nb\nc".to_string()
+                body: "a\nb\nc".to_string(),
+                fields: Vec::new(),
             }]
         );
         model.enhanced = false;
@@ -4400,6 +4449,7 @@ mod tests {
             [UiEffect::Send {
                 to: PEER,
                 body: "one\n\nthree".to_string(),
+                fields: Vec::new(),
             }]
         );
     }
@@ -7812,5 +7862,225 @@ mod tests {
         update(&mut model, key(KeyCode::Esc));
         assert!(model.palette.is_none());
         assert_eq!(model.names.petname(&PEER), None);
+    }
+
+    // Reactions (1104): FIELD_REACTION as Columba, Ratspeak and MeshChatX
+    // send it, drawn under the target and never as a message of its own.
+
+    const THUMBS: &str = "\u{1F44D}";
+    const HEART: &str = "\u{2764}\u{FE0F}";
+
+    /// The reaction field as `app` sends it, with the content beside it.
+    /// Columba (`NativeRnsBackendImpl.sendReaction`, torlando-tech/columba
+    /// `9222e38`, `rns-backend-kt/.../NativeRnsBackendImpl.kt:1498-1522`):
+    /// the field alone, empty content; MeshChatX the same
+    /// (`send_reaction`, Quad4-Software/MeshChatX `4378392`,
+    /// `meshchatx/meshchat.py:11214-11231`). Ratspeak 1.0.35
+    /// (`ratspeak_chat_custom_fields`, ratspeak/Ratspeak `7da1fe3`,
+    /// `crates/ratspeak-runtime/src/lxmf.rs:410-435`) adds its own envelope
+    /// in `FIELD_CUSTOM_TYPE`/`FIELD_CUSTOM_DATA`; 1.0.25 also put a text in
+    /// the content for clients without reactions (ratspeak/Ratspeak#42).
+    fn shaped(app: &str, target: [u8; 32], content: &str) -> (Vec<u8>, Vec<(i64, Vec<u8>)>) {
+        use leviculum_lxmf::constants::{FIELD_CUSTOM_DATA, FIELD_CUSTOM_TYPE, FIELD_REACTION};
+        use leviculum_lxmf::msgpack;
+        let field = leviculum_lxmf::reaction::Reaction {
+            to: target,
+            content: content.into(),
+        }
+        .encode_field_value();
+        let mut fields = vec![(FIELD_REACTION, field)];
+        let mut ratspeak = || {
+            let mut kind = Vec::new();
+            msgpack::bin(&mut kind, b"ratspeak.chat.v2");
+            let mut payload = Vec::new();
+            msgpack::map(&mut payload, 4);
+            for (k, v) in [("kind", "reaction"), ("emoji", content), ("action", "add")] {
+                msgpack::string(&mut payload, k);
+                msgpack::string(&mut payload, v);
+            }
+            msgpack::string(&mut payload, "target");
+            msgpack::bin(&mut payload, &target);
+            let mut data = Vec::new();
+            msgpack::bin(&mut data, &payload);
+            fields.push((FIELD_CUSTOM_TYPE, kind));
+            fields.push((FIELD_CUSTOM_DATA, data));
+        };
+        let body = match app {
+            "columba" | "meshchatx" => Vec::new(),
+            "ratspeak-1.0.35" => {
+                ratspeak();
+                Vec::new()
+            }
+            "ratspeak-1.0.25" => {
+                ratspeak();
+                format!("Reacted to your message with {content}.").into_bytes()
+            }
+            _ => panic!("no shape for {app}"),
+        };
+        (body, fields)
+    }
+
+    fn reacted(model: &mut UiModel<Field>, id: [u8; 32], app: &str, to: [u8; 32], what: &str) {
+        let (body, fields) = shaped(app, to, what);
+        engine(
+            model,
+            OutboxEvent::Received {
+                message_id: id,
+                source: PEER,
+                title: Vec::new(),
+                body,
+                fields,
+                verified: true,
+            },
+        );
+    }
+
+    fn received(model: &mut UiModel<Field>, id: [u8; 32], body: &str) {
+        engine(
+            model,
+            OutboxEvent::Received {
+                message_id: id,
+                source: PEER,
+                title: Vec::new(),
+                body: body.as_bytes().to_vec(),
+                fields: Vec::new(),
+                verified: true,
+            },
+        );
+    }
+
+    /// Every deployed shape is one reaction under its target and no
+    /// message: no block, no unread, no `new` rule, Ratspeak's fallback
+    /// text nowhere on screen; the same reaction twice counts once.
+    #[test]
+    fn each_clients_reaction_is_one_reaction_and_no_message() {
+        for app in ["columba", "meshchatx", "ratspeak-1.0.35", "ratspeak-1.0.25"] {
+            let mut model = UiModel::<Field>::new(&[PEER]);
+            received(&mut model, ID, "lunch at noon?");
+            let before = shown(&model);
+            model.toasts.clear();
+            reacted(&mut model, ID2, app, ID, THUMBS);
+            reacted(&mut model, ID2, app, ID, THUMBS);
+            reacted(&mut model, [0x33; 32], app, ID, THUMBS);
+            let rows = shown(&model);
+            assert_eq!(rows.len(), before.len() + 1, "{app}: {rows:?}");
+            assert_eq!(rows.last().map(String::as_str), Some(THUMBS), "{app}");
+            assert!(
+                !rows.iter().any(|r| r.contains("Reacted")),
+                "{app}: {rows:?}"
+            );
+            let conversation = &model.conversations[0];
+            assert_eq!(conversation.messages.len(), 3, "{app}: deduplicated by id");
+            assert_eq!(conversation.unread, 0, "{app}");
+            assert_eq!(conversation.new_rule, None, "{app}");
+            assert_eq!(
+                model.message_cursor, 0,
+                "{app}: the cursor stays on the text"
+            );
+            assert_eq!(
+                model.current_toast().map(|t| t.text.clone()),
+                Some(format!("<abababab…> reacted {THUMBS}")),
+                "{app}"
+            );
+            assert_eq!(
+                text(&view(&model).conversations[1]).trim(),
+                format!("▌reacted {THUMBS}"),
+                "{app}"
+            );
+        }
+    }
+
+    /// Ours and theirs on one message: each content once with its count,
+    /// ours in brackets.
+    #[test]
+    fn two_reactions_count_and_ours_is_marked() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        received(&mut model, ID, "lunch at noon?");
+        reacted(&mut model, ID2, "columba", ID, THUMBS);
+        reacted(&mut model, [0x33; 32], "columba", ID, HEART);
+        assert_eq!(shown(&model).last().unwrap(), &format!("{THUMBS}  {HEART}"));
+        let effects = model.react(PEER, ID, THUMBS);
+        assert_eq!(
+            shown(&model).last().unwrap(),
+            &format!("[{THUMBS} 2]  {HEART}")
+        );
+        let [UiEffect::Send { to, body, fields }] = effects.as_slice() else {
+            panic!("one send: {effects:?}");
+        };
+        assert_eq!((*to, body.as_str()), (PEER, ""));
+        let (key, value) = &fields[0];
+        assert_eq!(*key, leviculum_lxmf::constants::FIELD_REACTION);
+        assert_eq!(
+            leviculum_lxmf::reaction::Reaction::decode_field_value(value),
+            Some(leviculum_lxmf::reaction::Reaction {
+                to: ID,
+                content: THUMBS.into()
+            })
+        );
+        assert_eq!(model.sending.len(), 1, "delivered like any send");
+    }
+
+    /// A reaction whose target is not here yet is kept, drawn nowhere,
+    /// and attaches when the target arrives.
+    #[test]
+    fn a_reaction_before_its_target_attaches_when_the_target_arrives() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        reacted(&mut model, ID2, "columba", ID, THUMBS);
+        assert_eq!(shown(&model), [layout::EARLIEST]);
+        received(&mut model, ID, "lunch at noon?");
+        let rows = shown(&model);
+        assert_eq!(rows.last().unwrap(), THUMBS, "{rows:?}");
+        assert_eq!(model.message_cursor, 1, "on the text, past the reaction");
+    }
+
+    /// A blocked peer's reaction is kept and says nothing (1082).
+    #[test]
+    fn a_blocked_peers_reaction_is_kept_silently() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        received(&mut model, ID, "lunch at noon?");
+        let mut contact = model.names.contacts.of(&PEER);
+        contact.blocked = true;
+        model.names.contacts.set(&contact);
+        model.toasts.clear();
+        reacted(&mut model, ID2, "columba", ID, THUMBS);
+        assert_eq!(model.conversations[0].messages.len(), 2, "kept");
+        assert!(model.current_toast().is_none());
+    }
+
+    /// `e` opens the picker on the message under the cursor, a digit sends
+    /// that quick reaction, typed text and `Enter` any other.
+    #[test]
+    fn the_picker_sends_a_quick_or_a_typed_reaction() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        received(&mut model, ID, "lunch at noon?");
+        update(&mut model, key(KeyCode::Tab));
+        update(&mut model, key(KeyCode::Char('e')));
+        let palette = model.palette.as_ref().expect("the picker");
+        assert_eq!(
+            palette.ask,
+            Some(contacts::Ask::React {
+                peer: PEER,
+                target: ID
+            })
+        );
+        assert_eq!(
+            model.ask_rows(palette.ask.unwrap())[0],
+            "react to: lunch at noon?"
+        );
+        let effects = update(&mut model, key(KeyCode::Char('2')));
+        assert!(model.palette.is_none());
+        assert!(matches!(effects.as_slice(), [UiEffect::Send { .. }]));
+        assert_eq!(shown(&model).last().unwrap(), &format!("[{HEART}]"));
+        update(&mut model, UiEvent::Run(PaletteCommand::React));
+        typed(&mut model, "ok");
+        update(&mut model, key(KeyCode::Enter));
+        assert_eq!(shown(&model).last().unwrap(), &format!("[{HEART}]  [ok]"));
+        // A send not yet queued has no id to react to.
+        update(&mut model, key(KeyCode::Tab));
+        typed(&mut model, "see you");
+        update(&mut model, key(KeyCode::Enter));
+        update(&mut model, key(KeyCode::BackTab));
+        update(&mut model, UiEvent::Run(PaletteCommand::React));
+        assert!(model.palette.is_none());
     }
 }

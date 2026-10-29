@@ -29,6 +29,10 @@ pub enum Ask {
     /// The reader's name for this peer: `Enter` sets it, an empty line
     /// clears it.
     Rename([u8; 16]),
+    /// A reaction to the message with id `target` in `peer`'s
+    /// conversation: a digit picks a quick one, `Enter` sends what was
+    /// typed ([`super::reactions`]).
+    React { peer: [u8; 16], target: [u8; 32] },
 }
 
 impl<B> UiModel<B> {
@@ -71,12 +75,13 @@ impl<B> UiModel<B> {
     }
 
     /// The palette's rows while it asks: what for, and what `Enter` does.
-    pub fn ask_rows(&self, ask: Ask) -> [String; 2] {
+    pub fn ask_rows(&self, ask: Ask) -> Vec<String> {
         match ask {
-            Ask::Rename(peer) => [
+            Ask::Rename(peer) => vec![
                 format!("your name for {}", self.names.label(&peer)),
                 "Enter sets it, empty clears it".to_string(),
             ],
+            Ask::React { peer, target } => self.react_rows(peer, target),
         }
     }
 
@@ -185,6 +190,7 @@ impl<B: InputBuffer + Default> UiModel<B> {
     pub(super) fn answer_ask(&mut self, ask: Ask, typed: String) -> Vec<UiEffect> {
         match ask {
             Ask::Rename(peer) => self.rename(peer, &typed),
+            Ask::React { peer, target } => self.react(peer, target, &typed),
         }
     }
 }

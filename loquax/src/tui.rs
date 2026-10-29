@@ -2194,6 +2194,112 @@ mod tests {
         }
     }
 
+    /// Reactions (1104), drawn from the model at 80 x 24: a bubble of ours
+    /// with two reactions under it, one sent as Columba sends it and one as
+    /// Ratspeak 1.0.25 did, its fallback text drawn nowhere; then the
+    /// picker over the peer's message, and the reaction it sent marked as
+    /// ours. Pinned in `tests/fixtures/tui_reactions.frames`.
+    #[test]
+    fn reactions_draw_under_the_bubble_and_the_picker() {
+        use leviculum_lxmf::constants::FIELD_REACTION;
+        use leviculum_lxmf::reaction::Reaction;
+        let alice = [0x4f; 16];
+        let mut model = Model::new(&[alice]);
+        update(
+            &mut model,
+            UiEvent::Resize {
+                width: 80,
+                height: 24,
+            },
+        );
+        update(
+            &mut model,
+            UiEvent::Clock(WallTime::from_civil(2026, 10, 29, 12, 1, 3600)),
+        );
+        let recv = |m: &mut Model, id: u8, body: &str, fields: Vec<(i64, Vec<u8>)>| {
+            update(
+                m,
+                UiEvent::Engine(OutboxEvent::Received {
+                    message_id: [id; 32],
+                    source: alice,
+                    title: Vec::new(),
+                    body: body.as_bytes().to_vec(),
+                    fields,
+                    verified: true,
+                }),
+            );
+        };
+        let reaction = |to: u8, content: &str| {
+            let value = Reaction {
+                to: [to; 32],
+                content: content.into(),
+            }
+            .encode_field_value();
+            vec![(FIELD_REACTION, value)]
+        };
+        recv(&mut model, 1, "lunch at noon?", Vec::new());
+        model.focus = Pane::Compose;
+        for c in "yes, the usual place".chars() {
+            update(
+                &mut model,
+                UiEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)),
+            );
+        }
+        update(
+            &mut model,
+            UiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        );
+        update(
+            &mut model,
+            UiEvent::Engine(OutboxEvent::Queued {
+                message_id: [0xa1; 32],
+            }),
+        );
+        update(
+            &mut model,
+            UiEvent::Engine(OutboxEvent::State {
+                message_id: [0xa1; 32],
+                state: MessageState::Delivered,
+            }),
+        );
+        update(&mut model, UiEvent::SendDone(Ok(())));
+        recv(&mut model, 2, "", reaction(0xa1, "\u{1F44D}"));
+        recv(
+            &mut model,
+            3,
+            "Reacted to your message with \u{2764}\u{FE0F}.",
+            reaction(0xa1, "\u{2764}\u{FE0F}"),
+        );
+        model.toasts.clear();
+        let mut frames = String::new();
+        let two = screen(&model, 80, 24);
+        assert!(!two.contains("Reacted"), "{two}");
+        frames.push_str(&format!("--- two reactions ---\n{two}"));
+        model.focus = Pane::Messages;
+        update(&mut model, UiEvent::Key(parse_key("k").expect("key")));
+        update(&mut model, UiEvent::Key(parse_key("e").expect("key")));
+        let picker = screen(&model, 80, 24);
+        assert!(picker.contains("react to: lunch at noon?"), "{picker}");
+        frames.push_str(&format!("--- picker ---\n{picker}"));
+        let effects = update(&mut model, UiEvent::Key(parse_key("1").expect("key")));
+        assert!(
+            matches!(effects.as_slice(), [loquax::ui::UiEffect::Send { fields, .. }] if fields.len() == 1),
+            "{effects:?}"
+        );
+        model.toasts.clear();
+        frames.push_str(&format!("--- ours ---\n{}", screen(&model, 80, 24)));
+        let expected = include_str!("../tests/fixtures/tui_reactions.frames");
+        if frames != expected {
+            let kept = std::env::temp_dir().join("loquax-tui-reactions.frames");
+            let _ = std::fs::write(&kept, &frames);
+            panic!(
+                "the frames moved; this run's are in {}, the pinned ones in \
+                 loquax/tests/fixtures/tui_reactions.frames\n{frames}",
+                kept.display()
+            );
+        }
+    }
+
     /// The search of section 5's 120 x 40 mockup, drawn from the model at
     /// both sizes: the field and the messages group as `tripod` is typed,
     /// the third result opened with its match marked in place, both groups

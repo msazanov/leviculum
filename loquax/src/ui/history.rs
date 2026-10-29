@@ -174,6 +174,7 @@ impl<B> UiModel<B> {
         }
         // A `--to` peer the reader blocked is not the one to open.
         self.settle();
+        self.off_reactions();
     }
 
     /// Everything a fold changed that the store must learn, in the order to

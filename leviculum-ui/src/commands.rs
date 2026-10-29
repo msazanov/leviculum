@@ -69,6 +69,9 @@ pub enum Command {
     /// Give the open conversation's peer a name of the reader's own, or
     /// clear it: the palette takes the name as text.
     Rename,
+    /// React to the message under the cursor: a quick emoji or a short text
+    /// of the reader's own.
+    React,
     /// Block the open conversation's peer: what it sends is kept, not shown.
     Block,
     /// Lift the block on the open conversation's peer.
@@ -90,7 +93,7 @@ pub struct PaletteEntry {
 }
 
 /// The table, in the order the palette lists it unfiltered.
-pub const COMMANDS: [PaletteEntry; 28] = [
+pub const COMMANDS: [PaletteEntry; 29] = [
     entry("send", Command::Send),
     entry("fetch", Command::Fetch),
     entry("quit", Command::Quit),
@@ -115,6 +118,7 @@ pub const COMMANDS: [PaletteEntry; 28] = [
     entry("load map area", Command::LoadMapArea),
     entry("map drawing", Command::MapDrawing),
     entry("rename", Command::Rename),
+    entry("react", Command::React),
     entry("block", Command::Block),
     entry("unblock", Command::Unblock),
     entry("blocked", Command::Blocked),

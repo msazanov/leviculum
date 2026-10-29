@@ -23,6 +23,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
+use leviculum_lxmf::Field;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tui_input::Input;
 
@@ -230,7 +231,7 @@ pub(crate) struct Shell {
     context: RunContext,
     /// Sends not yet started, oldest first. They run one at a time: the
     /// model names a queued message after the oldest running send.
-    sends: VecDeque<([u8; 16], String)>,
+    sends: VecDeque<([u8; 16], String, Vec<Field>)>,
     /// A fetch asked for and not yet started, with its reason's word. The
     /// model asks for one at a time.
     fetch_owed: Option<&'static str>,
@@ -298,7 +299,7 @@ impl Shell {
         for effect in effects {
             match effect {
                 UiEffect::Store(read) => answers.extend(self.read(read)),
-                UiEffect::Send { to, body } => self.sends.push_back((to, body)),
+                UiEffect::Send { to, body, fields } => self.sends.push_back((to, body, fields)),
                 UiEffect::Fetch => {
                     let reason = self.model.fetch_reason.map_or("key", |r| r.word());
                     tracing::info!("SYNC reason={reason}");
@@ -554,12 +555,12 @@ impl Shell {
     /// queued message after the oldest running send.
     fn start_next(&mut self) {
         if self.send_task.is_none() {
-            if let Some((to, body)) = self.sends.pop_front() {
+            if let Some((to, body, fields)) = self.sends.pop_front() {
                 let tap = self.fanout.tap();
                 let context = self.job_context();
                 let done = self.done_tx.clone();
                 self.send_task = Some(tokio::spawn(async move {
-                    let event = send(tap, context, to, body).await;
+                    let event = send(tap, context, to, body, fields).await;
                     let _ = done.send(Finished::Send(event));
                 }));
             }
@@ -808,9 +809,15 @@ pub(crate) fn local_now() -> WallTime {
 }
 
 /// One compose-line send, exactly as `loquax send --via auto` runs it.
-async fn send(mut tap: Tap, context: RunContext, to: [u8; 16], body: String) -> UiEvent {
+async fn send(
+    mut tap: Tap,
+    context: RunContext,
+    to: [u8; 16],
+    body: String,
+    fields: Vec<Field>,
+) -> UiEvent {
     if let Some(client) = &context.client {
-        return send_home(tap, client, &context, to, body).await;
+        return send_home(tap, client, &context, to, body, fields).await;
     }
     let mut options = SendOptions::new(context.instance.clone(), context.timeout);
     let mut effects = context.effects.clone();
@@ -825,7 +832,7 @@ async fn send(mut tap: Tap, context: RunContext, to: [u8; 16], body: String) -> 
         destination: to,
         title: Vec::new(),
         body: body.into_bytes(),
-        fields: Vec::new(),
+        fields,
         via: Via::Link,
     };
     let outcome = run_send_auto(
@@ -860,13 +867,14 @@ async fn send_home(
     context: &RunContext,
     to: [u8; 16],
     body: String,
+    fields: Vec<Field>,
 ) -> UiEvent {
     let submission = loquax::home::wire::Submission {
         client_id: loquax::home::client::client_id(),
         destination: to,
         title: Vec::new(),
         content: body.into_bytes(),
-        fields: Vec::new(),
+        fields,
     };
     let accepted = loquax::home::client::send_retrying(
         &client.node,
