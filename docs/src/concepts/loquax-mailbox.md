@@ -11,9 +11,9 @@ This is where a naive design produces a client that silently loses mail,
 and the library has arranged things so that the naive design is the
 default: **nothing syncs unless the application asks**
 (`request_messages_from_propagation_node`,
-`leviculum-lxmf/src/router/propagation_runtime.rs:1484`, and
+`leviculum-lxmf/src/router/propagation_runtime.rs:1498`, and
 `next_deadline()` returns `None` outside `PathRequested`,
-`leviculum-lxmf/src/router/propagation_runtime.rs:1224-1235`).
+`leviculum-lxmf/src/router/propagation_runtime.rs:1238-1249`).
 
 ### When to sync
 
@@ -97,10 +97,10 @@ screen.
 
 The library hands over a fourteen-state machine
 (`PropagationClientState`,
-`leviculum-lxmf/src/router/propagation_runtime.rs:83-98`), progress as an
+`leviculum-lxmf/src/router/propagation_runtime.rs:87-102`), progress as an
 `f32`, transfer size, and a result of `{ received, duplicates }`
 (`PropagationSyncResult`,
-`leviculum-lxmf/src/router/propagation_runtime.rs:101-106`). That is more
+`leviculum-lxmf/src/router/propagation_runtime.rs:105-110`). That is more
 than enough to be honest.
 
 A permanent one-line status, taking NomadNet's best idea (its
@@ -123,11 +123,11 @@ different failures happened, because they need different fixes:
 | Library state | What the user must be told |
 |---|---|
 | no node selected | "no mailbox chosen"; offer the picker |
-| `NoPath` (`leviculum-lxmf/src/router/propagation_runtime.rs:92`) | "cannot find a route to the mailbox"; it may come back |
-| `LinkFailed` (`leviculum-lxmf/src/router/propagation_runtime.rs:93`) | "the mailbox did not answer" |
-| `NoAccess` (`leviculum-lxmf/src/router/propagation_runtime.rs:96`) | "the mailbox refused you"; this one will not fix itself |
-| `NoIdentity` (`leviculum-lxmf/src/router/propagation_runtime.rs:95`) | "the mailbox does not know your key" |
-| `TransferFailed` (`leviculum-lxmf/src/router/propagation_runtime.rs:94`) | "the transfer broke"; will retry |
+| `NoPath` (`leviculum-lxmf/src/router/propagation_runtime.rs:96`) | "cannot find a route to the mailbox"; it may come back |
+| `LinkFailed` (`leviculum-lxmf/src/router/propagation_runtime.rs:97`) | "the mailbox did not answer" |
+| `NoAccess` (`leviculum-lxmf/src/router/propagation_runtime.rs:100`) | "the mailbox refused you"; this one will not fix itself |
+| `NoIdentity` (`leviculum-lxmf/src/router/propagation_runtime.rs:99`) | "the mailbox does not know your key" |
+| `TransferFailed` (`leviculum-lxmf/src/router/propagation_runtime.rs:98`) | "the transfer broke"; will retry |
 
 A single "sync failed" for all six is the lie this section exists to
 prevent.
@@ -162,7 +162,7 @@ TRUSTED** (its `NomadNetworkApp.py`, lines 607-631). columba auto-selects
 the fewest-hops node, full stop. The library's own auto-selection ranks by
 route, hops, peering cost and stamp cost
 (`select_outbound_propagation_node`,
-`leviculum-lxmf/src/router/propagation_runtime.rs:1255-1297`) with no trust
+`leviculum-lxmf/src/router/propagation_runtime.rs:1269-1311`) with no trust
 input at all, because it has no notion of trust.
 
 Your mailbox sees the *envelope* of every message sent to you: who sent it
@@ -272,12 +272,33 @@ eligible as your mailbox. Do not inherit that.
 ### The purge default
 
 `retain_synced_on_node` defaults to `false`
-(`leviculum-lxmf/src/router/propagation_runtime.rs:73`), so by default the
+(`leviculum-lxmf/src/router/propagation_runtime.rs:77`), so by default the
 client tells the node to delete what it has collected. That is the right
 default for privacy and for the node operator's disk, and it is the wrong
 default for a user who runs two clients on the same identity, because the
 first one to sync takes the mail. This must be a visible setting with the
-consequence spelled out, not a config-file default nobody reads.
+consequence spelled out, not a config-file default nobody reads. Loquax
+does not expose it yet: it enables the client with
+`PropagationClientConfig::default()` (`loquax/src/engine.rs:1242`).
+
+Set to `true`, our client keeps every message on the node. That is a
+deviation from the reference client, whose flag only keeps messages it
+already holds out of the have-list
+(`reference/LXMF/LXMF/LXMRouter.py:1581-1583`) and which still
+acknowledges every download unconditionally (`LXMRouter.py:1623-1638`,
+"TODO: Add option to keep messages on node"); the node deletes on that
+acknowledgement (`LXMRouter.py:1508-1519`). So with the reference client
+the flag does not keep a fresh download on the node, and a second client
+would never see it. Ours withholds the acknowledgement as well
+(`leviculum-lxmf/src/router/propagation_runtime.rs:664`). Wire-neutral:
+the node holds an unacknowledged message until expiry, exactly as for a
+client that drops before acknowledging. The same client does not fetch it
+again, since the message is in its router's store and the next list's
+have-path filters it. The cost is the node's disk: retained mail stays
+until the thirty-day expiry or eviction, and a node that caps its list
+response (a board's serve limit) lists only the smallest messages, so a
+large backlog of retained mail can push a newer, larger message off the
+list until older ones expire.
 
 ### What the client must implement itself
 
@@ -286,7 +307,7 @@ consequence spelled out, not a config-file default nobody reads.
   neither is in the router snapshot (`snapshot`,
   `leviculum-lxmf/src/router.rs:2084-2101`); replay via
   `restore_known_propagation_node`
-  (`leviculum-lxmf/src/router/propagation_runtime.rs:1436`).
+  (`leviculum-lxmf/src/router/propagation_runtime.rs:1450`).
 - Re-selection after restart.
 - Proof-of-work for `PropagationStampPending`, off the core lock.
 - Calling `persist()` on `PersistenceRequested`.

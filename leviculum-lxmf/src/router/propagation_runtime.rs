@@ -54,7 +54,11 @@ pub const PROPAGATION_PATH_TIMEOUT_MS: u64 = 2 * super::PATH_REQUEST_WAIT_MS;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PropagationClientConfig {
-    /// Do not tell the node to purge messages already present locally.
+    /// Never tell the node to purge: neither messages already present
+    /// locally nor the ones a sync just downloaded. The reference client
+    /// still acknowledges its downloads with this set
+    /// (`reference/LXMF/LXMF/LXMRouter.py:1623-1638`); ours does not, so
+    /// several devices on one identity each receive the message.
     pub retain_synced_on_node: bool,
     /// Maximum `/get` response payload requested from the remote node, in
     /// kilobytes. Python sends its `delivery_per_transfer_limit` here
@@ -647,7 +651,17 @@ impl PropagationRuntime {
             }
         }
 
-        if !haves.is_empty() {
+        // The acknowledgement purges the downloads on the node
+        // (`reference/LXMF/LXMF/LXMRouter.py:1508-1519`). The reference
+        // client sends it unconditionally (`:1623-1638`, "TODO: Add option
+        // to keep messages on node"), so its `retain_synced_on_node` only
+        // shapes the have-list (`:1581-1583`). Ours also withholds it here,
+        // so a second device on the same identity still finds the message.
+        // Wire-neutral: the node keeps an unacknowledged message until
+        // expiry, as for a client that drops before acknowledging, and this
+        // device does not fetch it again, since it is now in the router's
+        // store and the have-path of the next list filters it.
+        if !haves.is_empty() && !self.config.retain_synced_on_node {
             if let Some(link_id) = self.active_link() {
                 let acknowledgement = MessageGetRequest::acknowledge(haves).encode()?;
                 output.core.merge(self.transport.submit_mailbox_request(

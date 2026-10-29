@@ -240,7 +240,7 @@ entirely the client's job**, from raw `NodeEvent::AnnounceReceived`.
 the composed send (`leviculum-lxmf/src/router.rs:1847-1852`), the
 built-transfer commit (`leviculum-lxmf/src/router.rs:1040-1045`) and the
 upload the transport reports through `UploadSubmitted`
-(`leviculum-lxmf/src/router/propagation_runtime.rs:402-414`) — and on the
+(`leviculum-lxmf/src/router/propagation_runtime.rs:406-418`) — and on the
 transition only: a submission onto an entry already in that state reports
 nothing. For a direct delivery it is the only thing between being accepted
 and being answered. For a propagated one it names the message on a link
@@ -273,7 +273,7 @@ Discriminants are the Python `LXMessage` constants. Four traps:
    Reticulum unproven, and the message is still queued and still retryable
    (`leviculum-lxmf/src/router.rs:1336-1350`). For propagated messages it
    means the propagation node accepted the upload, and the entry is
-   *deleted* (`leviculum-lxmf/src/router/propagation_runtime.rs:434-441`).
+   *deleted* (`leviculum-lxmf/src/router/propagation_runtime.rs:438-445`).
    Direct delivery goes `Outbound -> Sending -> Delivered | Rejected |
    Failed` and never passes through `Sent`, because the `Submitted` handler
    matches only `DeliveryMethod::Opportunistic`
@@ -290,7 +290,7 @@ Discriminants are the Python `LXMessage` constants. Four traps:
 4. **`Rejected` is ambiguous.** It means either "the receiver cancelled the
    Resource transfer" (`leviculum-lxmf/src/router.rs:1294-1307`) or "the
    propagation node refused the upload for an insufficient stamp"
-   (`leviculum-lxmf/src/router/propagation_runtime.rs:466-478`), and the
+   (`leviculum-lxmf/src/router/propagation_runtime.rs:470-482`), and the
    event alone cannot distinguish them.
 
 And one omission that shapes the whole UI: **there is no "propagated but
@@ -301,7 +301,7 @@ that vanished.
 Terminal states remove the entry from the outbound map
 (`remove_outbound`, `leviculum-lxmf/src/router.rs:880-883`; call sites at
 `:888`, `:1334`, `:1369` and five in the propagation runtime, among them
-`leviculum-lxmf/src/router/propagation_runtime.rs:973`). If the client does
+`leviculum-lxmf/src/router/propagation_runtime.rs:987`). If the client does
 not capture the `Message` at `enqueue` time it cannot render its own sent
 message afterwards, and it cannot offer a retry button.
 `MAX_DELIVERY_ATTEMPTS` is 5 (`leviculum-lxmf/src/router.rs:48`).
@@ -331,7 +331,7 @@ list request, want/have partitioning, download, acknowledge and purge
 (`begin_list_request`,
 `leviculum-lxmf/src/router/propagation_runtime.rs:459-551`). The observable
 state machine is `PropagationClientState`
-(`leviculum-lxmf/src/router/propagation_runtime.rs:83-98`),
+(`leviculum-lxmf/src/router/propagation_runtime.rs:87-102`),
 wire-compatible with Python's `PR_*` constants: `Idle`, `PathRequested`,
 `LinkEstablishing`, `LinkEstablished`, `RequestSent`, `Receiving`,
 `ResponseReceived`, `Complete`, `NoPath`, `LinkFailed`, `TransferFailed`,
@@ -339,35 +339,40 @@ wire-compatible with Python's `PR_*` constants: `Idle`, `PathRequested`,
 practice. There is automatic failover to another reachable node when the
 selected one loses its route, but not while a sync round is still running on
 it: that round ends first, as `LinkFailed` or `NoPath`
-(`leviculum-lxmf/src/router/propagation_runtime.rs:897-950`).
+(`leviculum-lxmf/src/router/propagation_runtime.rs:911-964`).
 
 What the router will not do:
 
 - **It never schedules a sync.** `request_messages_from_propagation_node`
-  (`leviculum-lxmf/src/router/propagation_runtime.rs:1484`) must be called
+  (`leviculum-lxmf/src/router/propagation_runtime.rs:1498`) must be called
   by the application every time. `PropagationClientConfig` has three fields
   and none of them is an interval
   (`leviculum-lxmf/src/router/propagation_runtime.rs:56-68`), and
   `next_deadline()` returns `None` in every state except `PathRequested`
-  (`leviculum-lxmf/src/router/propagation_runtime.rs:1224-1235`).
+  (`leviculum-lxmf/src/router/propagation_runtime.rs:1238-1249`).
 - **It does not persist known propagation nodes.** They live in an
   in-memory map (`known_nodes`,
   `leviculum-lxmf/src/propagation_client.rs:267`) and are absent from the
   router snapshot (`snapshot`, `leviculum-lxmf/src/router.rs:2084-2101`).
   The client must persist and replay them via
   `restore_known_propagation_node`
-  (`leviculum-lxmf/src/router/propagation_runtime.rs:1436`). The selected
+  (`leviculum-lxmf/src/router/propagation_runtime.rs:1450`). The selected
   node is not snapshotted either.
 - **It does not clamp the transfer limit against the node's advertised
   one.** The download request carries the local
   `delivery_transfer_limit_kb` (default 1000) regardless of what the node
-  announced (`leviculum-lxmf/src/router/propagation_runtime.rs:581-586`).
+  announced (`leviculum-lxmf/src/router/propagation_runtime.rs:585-590`).
 
 Default `retain_synced_on_node` is `false`
-(`leviculum-lxmf/src/router/propagation_runtime.rs:73`), meaning the client
+(`leviculum-lxmf/src/router/propagation_runtime.rs:77`), meaning the client
 tells the node to purge what it has collected. That is a user-visible
 policy decision disguised as a config default, and
-[the mailbox page](loquax-mailbox.md) argues it should be surfaced.
+[the mailbox page](loquax-mailbox.md) argues it should be surfaced. Set to
+`true`, our client also withholds the acknowledgement after a download
+(`leviculum-lxmf/src/router/propagation_runtime.rs:664`), which the
+reference client sends regardless of the flag
+(`reference/LXMF/LXMF/LXMRouter.py:1623-1638`); only then does a second
+client on the same identity still find the message.
 
 The reference holds messages for `MESSAGE_EXPIRY = 30*24*60*60`, i.e.
 thirty days (`reference/LXMF/LXMF/LXMRouter.py:38`).
@@ -931,7 +936,7 @@ not a list of open work.
    duplication.
 2. **No "propagated, awaiting collection" state.** A propagated message
    reaches `Sent` and its queue entry is deleted
-   (`leviculum-lxmf/src/router/propagation_runtime.rs:434-441`), so the
+   (`leviculum-lxmf/src/router/propagation_runtime.rs:438-445`), so the
    client cannot distinguish "in a mailbox" from "gone" without keeping its
    own shadow record. This is the single biggest obstacle to an honest
    delivery display.
