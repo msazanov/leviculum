@@ -2607,10 +2607,10 @@ mod tests {
     }
 
     /// A schema 4 store, as the home node of slice 1 wrote it, migrates to
-    /// schema 5 in place: its archive, devices and tokens stay, and the
-    /// outbox starts empty.
+    /// the current schema in place: its archive, devices and tokens stay, and
+    /// the outbox starts empty.
     #[test]
-    fn a_schema_4_store_migrates_to_5_with_an_empty_outbox() {
+    fn a_schema_4_store_migrates_with_an_empty_outbox() {
         let home = tempfile::tempdir().expect("home");
         let conn = Connection::open(home.path().join(STORE_FILE)).expect("create");
         conn.execute_batch(&format!(
@@ -2650,6 +2650,62 @@ mod tests {
         );
         assert_eq!(store.open_tokens(6, 100).expect("tokens").len(), 1);
         assert_eq!(store.outbox_open().expect("outbox"), []);
+    }
+
+    /// A schema 5 store, as the home node of slice 2 wrote it before the
+    /// import existed, migrates to the current schema in place: an outbox
+    /// row still retried stays, and its messages read as our own, with no
+    /// origin.
+    #[test]
+    fn a_schema_5_store_migrates_keeping_its_outbox() {
+        let home = tempfile::tempdir().expect("home");
+        let conn = Connection::open(home.path().join(STORE_FILE)).expect("create");
+        conn.execute_batch(&format!(
+            "BEGIN; {SCHEMA} {SCHEMA_V2} {SCHEMA_V3} {SCHEMA_V4} {SCHEMA_V5} \
+             PRAGMA user_version = 5; COMMIT;"
+        ))
+        .expect("schema 5");
+        conn.execute(
+            "INSERT INTO home_outbox(identity, client_id, id, destination, packed, \
+             created_at, state, propagated) VALUES (?1, ?2, ?3, ?4, ?5, 9, 0, 1)",
+            params![
+                &US[..],
+                &[1u8; 32][..],
+                &[2u8; 32][..],
+                &ALICE[..],
+                &b"packed"[..]
+            ],
+        )
+        .expect("outbox row");
+        drop(conn);
+        let store = Store::open_in(home.path(), US).expect("schema 5 opens");
+        assert_eq!(
+            store
+                .conn
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i32>(0))
+                .expect("version"),
+            SCHEMA_VERSION
+        );
+        assert_eq!(
+            store.outbox_open().expect("outbox"),
+            [Outgoing {
+                id: [2u8; 32],
+                destination: ALICE,
+                packed: b"packed".to_vec(),
+                created_at: 9,
+                propagated: true,
+            }]
+        );
+        let origins: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE origin IS NOT NULL \
+                 OR origin_verdict IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )
+            .expect("origin columns exist");
+        assert_eq!(origins, 0);
     }
 
     /// A schema 3 store, as the loquax before the home node wrote it,

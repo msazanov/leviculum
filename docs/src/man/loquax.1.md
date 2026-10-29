@@ -107,7 +107,7 @@ One always-on machine, the home node, holds the LXMF identity and keeps every me
 
 In **tui**, the focus follows the pane. `Tab` and `Shift-Tab` cycle the conversations, the messages and the compose line. `?` (or `F1` from any pane) shows every key; the help, the footer and the palette are built from the same table the keys are.
 
-In the messages, `y` or `Alt-w` copies what a drag selected (see MOUSE), or else the message under the cursor whole. `d` deletes the message under the cursor from this device after asking: `y` deletes it, any other key keeps it (see HISTORY).
+In the messages, `y` or `Alt-w` copies what a drag selected (see MOUSE), or else the message under the cursor whole. `d` deletes the message under the cursor from this device after asking: `y` deletes it, any other key keeps it (see HISTORY). `e` reacts to the message under the cursor (see REACTIONS).
 
 In the conversations and the messages: `j`/`k`, the arrows or `Ctrl-n`/`Ctrl-p` move, `Ctrl-f`/`Ctrl-b`, `Space` and `PageDown`/`PageUp` page, `Ctrl-d`/`Ctrl-u` move half a page, `g`/`G`, `Home`/`End`, `Alt-<`/`Alt->` or `Ctrl-↑`/`Ctrl-↓` jump to the top or bottom. `Enter` opens the selected conversation; on a message it opens the message: a position report the map at its fix (see TELEMETRY), any other message its detail view (see THE SCREEN), which `v` opens for every message. `i`, `a` or `r` start writing. `:` opens the command palette (`:q` and `Enter` quit), `Ctrl-r` fetches the mailbox outside a search, `q` quits. `/` searches (see SEARCH).
 
@@ -115,7 +115,7 @@ In the compose line, keys type. `Enter` sends to the open conversation (an empty
 
 **send_on_enter**: with `send_on_enter = false` in `$LNMSG_HOME/config`, or after the palette's `send on enter`, `Enter` breaks the line and `Alt-Enter` sends (`Ctrl-Enter` too, where the terminal can send it).
 
-Everywhere: `Alt-x` opens the command palette, which matches what you type against the actions' names (`send`, `fetch`, `quit`, `help`, `details`, `next conversation`, `send on enter`, `mouse`, `theme`, `search`, `delete message`, `delete conversation`, `pin`, `rename`, `block`, `unblock`, `blocked`, `map drawing`, ...); a name typed whole, or its start, is offered first. `Alt-↓`/`Alt-↑` select the next or previous conversation, `Alt-Shift-↓`/`Alt-Shift-↑` the next or previous one with unread messages. `Ctrl-s` opens the search, or goes back to its field. `F5` fetches the mailbox, `Ctrl-l` redraws the screen, `Ctrl-q` quits. `Ctrl-c` quits nowhere; outside compose it says that `Ctrl-q` does.
+Everywhere: `Alt-x` opens the command palette, which matches what you type against the actions' names (`send`, `fetch`, `quit`, `help`, `details`, `next conversation`, `send on enter`, `mouse`, `theme`, `search`, `delete message`, `delete conversation`, `pin`, `rename`, `react`, `block`, `unblock`, `blocked`, `map drawing`, ...); a name typed whole, or its start, is offered first. `Alt-↓`/`Alt-↑` select the next or previous conversation, `Alt-Shift-↓`/`Alt-Shift-↑` the next or previous one with unread messages. `Ctrl-s` opens the search, or goes back to its field. `F5` fetches the mailbox, `Ctrl-l` redraws the screen, `Ctrl-q` quits. `Ctrl-c` quits nowhere; outside compose it says that `Ctrl-q` does.
 
 ## MAILBOX
 
@@ -146,6 +146,12 @@ Two peers whose names look alike (the same letters ignoring case, full-width for
 The title's trust state is one of three words: `known`, a peer you named; `blocked`, one you blocked; else `unknown`. Beside a petname the title also says what the peer announces (`known · announces Alice`).
 
 The palette names and blocks the open conversation's peer, and writes `contacts` as it goes, changing only that peer's lines and keeping every comment and other line. `rename` turns the palette into a text field holding the peer's petname: `Enter` sets what it holds, an empty field clears the petname, `Esc` changes nothing. `block` blocks the peer and `unblock` lifts it. A blocked peer's messages are still received, proven and kept in the history, so the sender sees them delivered; they are only not shown: the conversation leaves the list and the search, counts nothing unread, raises no notice, and its positions are not pinned on the map. The palette's `blocked` turns the list into the blocked conversations, titled `Blocked`, where they open with their messages; `blocked` again, or `unblock`, which shows the conversation in the list with its history, goes back.
+
+## REACTIONS
+
+A reaction is an emoji, or a short text, attached to an earlier message: the LXMF reaction field, which Columba, Ratspeak and MeshChatX send and read. Under a message its reactions are drawn on one row, each once with how many sent it when more than one did, yours in brackets: `👍 2  [❤️]`. A reaction is never a message of its own on the screen: it counts nothing unread and moves no cursor, and a text an older client wrote beside it (`Reacted to your message with ...`) is not shown. One that arrives before the message it reacts to is kept and appears when that message does. A blocked peer's reactions are kept and not shown.
+
+`e` on a message, or the palette's `react`, opens the picker: `1` to `6` send 👍 ❤️ 😂 😮 😢 😡 at once, the six Columba offers; anything typed is sent with `Enter`, at most 16 characters, and `Esc` sends nothing. A reaction is sent as any message is, direct or through the mailbox, with no text of its own. It cannot be taken back or changed: the field has no way to say so.
 
 ## SEARCH
 

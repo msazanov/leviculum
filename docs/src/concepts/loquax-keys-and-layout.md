@@ -169,6 +169,7 @@ chord `loquax` adds to them.
 | copy the message's text | `y` | `Alt-w` | | drag selects, release copies (OSC 52) | M |
 | follow a link in the body | `f`, then its label | | | click the link, as in `lnomad` | M |
 | delete from this device | `d`, then confirm | | `d` (mutt; aerc asks first) | | M, from the history slice on |
+| react: a quick emoji by its digit, or typed text and `Enter` (1104) | `e` | | palette `react` (the long press in Signal and Columba) | | M |
 
 ### Compose
 
@@ -285,7 +286,7 @@ and the palette finds the action by the chat program's word too (`new
 chat`, `find`).
 
 **`:q` quits for free.** The palette's fuzzy match is a subsequence test
-(`fuzzy_match`, `leviculum-ui/src/commands.rs:138`), and `quit` is the only
+(`fuzzy_match`, `leviculum-ui/src/commands.rs:142`), and `quit` is the only
 palette name containing a `q`, so `:`, `q`, `Enter` quits as a vi user
 expects. That stays true only while it is tested, so the keymap slice
 pins it.
@@ -782,7 +783,7 @@ or fills a gap it leaves:
   blank row under the last of them when an unpinned one follows. No key and
   no mouse target, as the element text has it.
 - **The palette ranks** a name typed whole and then one it begins before
-  the scattered matches (`leviculum-ui/src/commands.rs:150`); without it
+  the scattered matches (`leviculum-ui/src/commands.rs:154`); without it
   `:pin` and `Enter` ran `previous conversation`, whose letters hold
   `p`, `i`, `n` in order.
 - **The unread count** and the `new` rule survive a restart: a conversation
@@ -918,7 +919,7 @@ first rung it is.
 - a palette action `theme` toggles for the session, the way `t` calls
   `toggle_theme` in lnomad (`lnomad/src/app/event.rs:697`); no key, the
   keymap is decided. Its toast names the theme it turned to
-  (`loquax/src/ui.rs:2550`).
+  (`loquax/src/ui.rs:2578`).
 
 #### 3. What colour carries and what it must not carry alone
 
@@ -1303,10 +1304,14 @@ sees. Where it differs from the table:
 - **Typing indicators.** No LXMF field carries one, and sending one would
   be a transmission per keystroke, which the quiet keyboard rules out on
   its own.
-- **Reactions.** No field the deployed clients agree on carries them;
-  a reaction would be a whole message that peers render as text. If
-  Sideband, columba or NomadNet settle on a field, it is a row in the
-  table then, not a guess now.
+- **Reactions beyond the field.** LXMF now specifies them
+  (`FIELD_REACTION`, `reference/LXMF/LXMF/LXMF.py:25`, `:104-110`), and
+  Columba, Ratspeak and MeshChatX send it, so loquax reacts too (1104):
+  `e` on a message, the reaction drawn under its target
+  (`loquax/src/ui/reactions.rs`). What it does not copy is what the field
+  cannot carry: no removal and no change of a reaction (Ratspeak removes
+  only through its own envelope), and no fallback text in the content,
+  which Columba draws as a second message.
 - **Online and last-seen presence.** What the mesh knows is the last
   announce and the path, and the header says exactly that ("heard 14:05",
   "direct, 2 hops"); "online" would round an announce up to a person.

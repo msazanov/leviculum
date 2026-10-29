@@ -55,6 +55,7 @@ pub mod propagation;
 pub mod propagation_client;
 pub mod propagation_node;
 pub mod propagation_store;
+pub mod reaction;
 pub mod router;
 pub mod stamp;
 pub mod storage;

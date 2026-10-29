@@ -20,6 +20,12 @@ Toolchain: Rust 1.97.1
 
 ### Added
 
+- loquax reactions (#232, 1104): the LXMF `FIELD_REACTION` as Columba,
+  Ratspeak and MeshChatX send it, drawn under the message it reacts to with
+  a count and yours marked, never as a message of its own; a reaction that
+  arrives before its target appears with it. `e` or the palette's `react`
+  opens a picker of Columba's six emoji or free text, sent like any message.
+  `leviculum-lxmf` gains the codec, pinned against the reference.
 - loquax import and export, slice one (#232, 1103): `loquax import` brings
   over a NomadNet tree (contacts, blocks, the propagation node, the history
   with signatures checked where the bytes are intact), raw identity files of

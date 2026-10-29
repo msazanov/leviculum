@@ -186,7 +186,7 @@ Note that `LxmfRouter`, `RouterEvent`, `RouterOutput`, `RouterConfig` and
 `MessageState` are *not* re-exported at the crate root — the crate root
 exports only `BuiltResource`, `DeliveryStampRequest`, `InboundStampRequest`,
 `PendingResourceBuild` and `PropagationStampRequest` from that module
-(`leviculum-lxmf/src/lib.rs:105-108`) — so they are reachable as
+(`leviculum-lxmf/src/lib.rs:106-109`) — so they are reachable as
 `leviculum_lxmf::router::*` only.
 
 ### Events are return values, not a channel
@@ -455,10 +455,12 @@ restarts, and must not pretend to.
 `leviculum-lxmf/src/constants.rs:60-86` declares the full LXMF field set
 including `FIELD_THREAD (0x08)`, `FIELD_RENDERER (0x0F)`,
 `FIELD_REPLY_TO (0x30)`, `FIELD_REPLY_QUOTE (0x31)`,
-`FIELD_REACTION (0x40)` and `FIELD_COMMENT (0x41)`, but only files, image
-and audio have typed codecs. Unknown fields round-trip byte-for-byte
+`FIELD_REACTION (0x40)` and `FIELD_COMMENT (0x41)`, but only files, image,
+audio, telemetry and, since 1104, reactions (`leviculum-lxmf/src/reaction.rs`,
+pinned against the reference by `VEC-MSG-REACTION`) have typed codecs.
+Unknown fields round-trip byte-for-byte
 (`leviculum-lxmf/src/message.rs:5-8`), so nothing is lost, but a client
-wanting replies, threads, reactions or renderer-aware display must
+wanting replies, threads or renderer-aware display must
 hand-roll the msgpack via the exported `msgpack` module.
 
 `RENDERER_MICRON = 0x01` (`reference/LXMF/LXMF/LXMF.py:100`) is interesting
@@ -967,8 +969,9 @@ not a list of open work.
    (`leviculum-lxmf/src/message.rs:40`) and `StorageError` have no
    `Display`. Every user-facing string is the client's to write, and two
    clients will word them differently.
-9. **No typed codecs for reply, thread, reaction or renderer fields**
-   (`leviculum-lxmf/src/constants.rs:68-86`), so each client hand-rolls
+9. **No typed codecs for reply, thread or renderer fields**
+   (`leviculum-lxmf/src/constants.rs:68-86`; reactions have one since
+   1104, `leviculum-lxmf/src/reaction.rs`), so each client hand-rolls
    msgpack for the same wire structures. This is a compatibility risk more
    than an ergonomics one.
 10. **Codeberg #203** (`StampExecutor::generate` returns a `!Send` future)

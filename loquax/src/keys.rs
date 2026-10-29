@@ -251,6 +251,13 @@ pub const ROWS: &[Row<Action>] = {
         )
         .palette("delete message")
         .note("on this device; y confirms"),
+        Row::new(
+            "react to the message",
+            MESSAGES_GROUP,
+            &[&[key(Char('e'), Mods::Plain, run(C::React), MESSAGES)]],
+        )
+        .palette("react")
+        .note("1-6 a quick emoji, or type one"),
         Row::new("delete the conversation", CONVERSATIONS, &[])
             .palette("delete conversation")
             .note("on this device; y confirms"),

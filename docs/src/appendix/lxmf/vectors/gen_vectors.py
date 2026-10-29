@@ -368,7 +368,49 @@ def gen_message_vectors():
         "matches_source": unpacked.hash == m.hash,
     })
 
+    # VEC-MSG-REACTION: a reaction to VEC-MSG-1, the FIELD_REACTION dict of
+    # LXMF.py:25 and :104-110 keyed by the target's full LXMessage.hash. The
+    # content is empty, as Columba and MeshChatX send it.
+    # VEC-MSG-REACTION-TEXT is the same reaction with the fallback text
+    # Ratspeak 1.0.25 put in the content: a reader shows one reaction and no
+    # message for it.
+    gen_reaction_vector("VEC-MSG-REACTION", m.hash, b"")
+    gen_reaction_vector(
+        "VEC-MSG-REACTION-TEXT", m.hash,
+        "Reacted to your message with \U0001F44D.".encode("utf-8"),
+    )
+
     gen_foreign_writer_vectors(src, dst)
+
+
+def gen_reaction_vector(vector_id, target_hash, content):
+    reaction = "\U0001F44D"
+    fields = {
+        LXMF.FIELD_REACTION: {
+            LXMF.REACTION_TO: target_hash,
+            LXMF.REACTION_CONTENT: reaction.encode("utf-8"),
+        }
+    }
+    m, _src, _dst = build_message(b"", content, fields, LXMessage.OPPORTUNISTIC)
+    unpacked = LXMessage.unpack_from_bytes(m.packed)
+    read = unpacked.fields[LXMF.FIELD_REACTION]
+    add({
+        "id": vector_id,
+        "title": "Reaction message (FIELD_REACTION) and the reference reading it",
+        "kind": "frozen",
+        "citation": "LXMF.py:25,104-110; LXMessage.py:747-822",
+        "src_identity_prv_hex": SRC_PRV.hex(),
+        "timestamp": FIXED_TIMESTAMP,
+        "content_hex": content.hex(),
+        "reaction_to_hex": target_hash.hex(),
+        "reaction_content_hex": reaction.encode("utf-8").hex(),
+        "field_msgpack_hex": msgpack.packb(fields[LXMF.FIELD_REACTION]).hex(),
+        "packed_hex": m.packed.hex(),
+        "message_id_hex": m.hash.hex(),
+        "recovered_reaction_to_hex": read[LXMF.REACTION_TO].hex(),
+        "recovered_reaction_content_hex": read[LXMF.REACTION_CONTENT].hex(),
+        "signature_validated": bool(unpacked.signature_validated),
+    })
 
 
 # --------------------------------------------------------------------------
