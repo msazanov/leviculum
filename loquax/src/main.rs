@@ -107,6 +107,20 @@ enum SubCommand {
     Fetch(FetchArgs),
     /// Print this machine's own LXMF address.
     Address,
+    /// Bring over the identity, contacts and history of another messenger:
+    /// NomadNet's tree, a raw identity file of any app, a pasted Base32 key,
+    /// or a loquax export. Without a path it looks in the apps' default
+    /// places. Asks before it writes; the identity only on a typed `yes`.
+    #[cfg(feature = "history")]
+    Import(ImportArgs),
+    /// Write this loquax's identity, contacts and history into a new
+    /// directory in NomadNet's shape, which NomadNet and `loquax import`
+    /// read. The directory holds the private key, with mode 0600.
+    #[cfg(feature = "history")]
+    Export {
+        /// The directory to write; it must not exist or be empty.
+        dir: PathBuf,
+    },
     /// The terminal messenger, as plain `loquax`: conversations, messages and
     /// a compose line.
     #[cfg(feature = "tui")]
@@ -321,6 +335,25 @@ struct SendArgs {
     /// this budget.
     #[arg(long, default_value_t = DEFAULT_TIMEOUT_SECS)]
     timeout: u64,
+}
+
+#[cfg(feature = "history")]
+#[derive(clap::Args, Debug)]
+struct ImportArgs {
+    /// List what would be imported, per conversation with counts of new,
+    /// already held and unreadable messages, and write nothing.
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Read a Base32 identity key, as Sideband, Columba, MeshChatX and
+    /// Ratspeak export it, from the first line of stdin; it is not taken on
+    /// the command line, where it would stay in the shell's history.
+    #[arg(long, conflicts_with = "path")]
+    key: bool,
+
+    /// A NomadNet directory, a loquax export, a raw identity file or a file
+    /// with a Base32 key. Without it, the apps' default places are scanned.
+    path: Option<PathBuf>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -562,6 +595,10 @@ async fn main() -> ExitCode {
         SubCommand::Send(send) => run(send).await,
         SubCommand::Fetch(fetch) => run_fetch_command(fetch).await,
         SubCommand::Address => run_address(),
+        #[cfg(feature = "history")]
+        SubCommand::Import(import) => run_import(import),
+        #[cfg(feature = "history")]
+        SubCommand::Export { dir } => run_export(&dir),
         #[cfg(feature = "tui")]
         SubCommand::Home(home) => run_home(home).await,
         // Dispatched above, before the subscriber writes to stderr.
@@ -617,6 +654,9 @@ async fn run_tui(args: TuiArgs) -> ExitCode {
     let Some(size) = size else {
         return usage(format!("--size {}: want WxH, at least 20x8", args.size));
     };
+    if args.script.is_none() {
+        first_start_import();
+    }
     let sync_interval = match args
         .sync_interval
         .as_deref()
@@ -644,6 +684,133 @@ async fn run_tui(args: TuiArgs) -> ExitCode {
         size,
     })
     .await
+}
+
+/// `loquax import`: find, list, ask, import.
+#[cfg(feature = "history")]
+fn run_import(args: ImportArgs) -> ExitCode {
+    use loquax::import;
+    let home = match identity::home_dir() {
+        Ok(home) => home,
+        Err(error) => return failure(error, "no-home"),
+    };
+    let stdin = std::io::stdin();
+    let mut input = stdin.lock();
+    let found = if args.key {
+        let mut line = String::new();
+        if let Err(error) = std::io::BufRead::read_line(&mut input, &mut line) {
+            return failure(format!("stdin: {error}"), "import-failed");
+        }
+        match import::key::from_base32(&line) {
+            Some(key) => vec![import::pasted("pasted", Path::new("(stdin)"), key)],
+            None => return usage("--key: the first line of stdin is not a Base32 identity key"),
+        }
+    } else if let Some(path) = &args.path {
+        match import::sniff(path) {
+            Ok(found) => vec![found],
+            Err(error) => return failure(error, "import-failed"),
+        }
+    } else {
+        let Some(user_home) = std::env::var_os("HOME").map(PathBuf::from) else {
+            return failure("HOME is not set, so there is nowhere to look", "no-home");
+        };
+        import::scan(&user_home, true)
+    };
+    if found.is_empty() {
+        println!("nothing to import found");
+        return ExitCode::SUCCESS;
+    }
+    for source in &found {
+        println!("{}", source.line());
+    }
+    if args.dry_run {
+        let mut failed = false;
+        for source in found.iter().filter(|f| f.importable()) {
+            let choices = import::Choices {
+                contacts: true,
+                history: true,
+                identity: false,
+            };
+            println!("\n{}", source.path.display());
+            match import::import(source, &home, choices, true) {
+                Ok(report) => report.lines(true).iter().for_each(|l| println!("{l}")),
+                Err(error) => {
+                    failed = true;
+                    eprintln!("loquax: {error}");
+                }
+            }
+            if source.address.is_some() && source.address != import::current_address(&home) {
+                println!("identity: offered, adopted only on a typed yes");
+            }
+        }
+        return match failed {
+            true => ExitCode::from(EXIT_FAILURE),
+            false => ExitCode::SUCCESS,
+        };
+    }
+    let mut output = std::io::stdout();
+    match import::ask_and_import(&found, &home, &mut input, &mut output) {
+        Ok(reports) if reports.iter().all(Result::is_ok) => ExitCode::SUCCESS,
+        Ok(_) => ExitCode::from(EXIT_FAILURE),
+        Err(error) => failure(error, "import-failed"),
+    }
+}
+
+/// `loquax export <dir>`.
+#[cfg(feature = "history")]
+fn run_export(dir: &Path) -> ExitCode {
+    let home = match identity::home_dir() {
+        Ok(home) => home,
+        Err(error) => return failure(error, "no-home"),
+    };
+    match loquax::export::export(&home, dir) {
+        Ok(done) => {
+            println!(
+                "exported <{}>: {} messages in {} conversations, {} contacts, and the identity \
+                 (private, mode 0600) to {}",
+                address::to_hex(&done.address),
+                done.messages,
+                done.conversations,
+                done.contacts,
+                dir.display()
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => failure(error, "export-failed"),
+    }
+}
+
+/// On the very first start, before an identity is minted: look in the
+/// apps' default places and, when something is there, ask on the terminal
+/// before the screen opens. Nothing found is no question at all.
+#[cfg(feature = "tui")]
+fn first_start_import() {
+    use std::io::IsTerminal;
+    let Ok(home) = identity::home_dir() else {
+        return;
+    };
+    if !loquax::import::first_start(&home) || !std::io::stdin().is_terminal() {
+        return;
+    }
+    let Some(user_home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return;
+    };
+    let found = loquax::import::scan(&user_home, true);
+    if !found.iter().any(|f| f.importable()) {
+        return;
+    }
+    println!("loquax starts for the first time here, and found another messenger's data:");
+    for source in &found {
+        println!("{}", source.line());
+    }
+    println!("(Enter takes the default; nothing is written without an answer.)");
+    let stdin = std::io::stdin();
+    let mut output = std::io::stdout();
+    if let Err(error) =
+        loquax::import::ask_and_import(&found, &home, &mut stdin.lock(), &mut output)
+    {
+        eprintln!("loquax: import: {error}");
+    }
 }
 
 /// `loquax address`: print our own LXMF address. No daemon involved — the

@@ -263,6 +263,9 @@ pub const ROWS: &[Row<Action>] = {
             .note("kept, not shown"),
         Row::new("unblock the peer", CONVERSATIONS, &[]).palette("unblock"),
         Row::new("list the blocked, or the rest", CONVERSATIONS, &[]).palette("blocked"),
+        Row::new("import from another messenger", CONVERSATIONS, &[])
+            .palette("import")
+            .note("contacts and history; the identity: loquax import"),
         Row::new(
             "previous conversation",
             CONVERSATIONS,

@@ -196,8 +196,8 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 │                                                kept, not shown               ║
 │  : unblock                                     unblock the peer              ║
 │  : blocked                                     list the blocked, or the rest ║
-│  Alt-↑   Ctrl-Shift-Tab                        previous conversation         ║
-│  Alt-↓   Ctrl-Tab                              next conversation             ║
+│  : import                                      import from another messenger ║
+│                                                contacts and history; the     ║
 └──────────────────────────────────────────────────────────────────────────────┘
 === wheel ===
 --- frame 1: list focused ---
