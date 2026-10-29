@@ -43,9 +43,13 @@
 //! map_drawing.mosh:xterm-256color = braille-thin
 //! ```
 //!
-//! On a home node (`docs/src/concepts/loquax-home-node.md`) one key more,
-//! `archive_cap_mb`: how many megabytes of messages the archive keeps before
-//! the oldest go (1024 by default, `crate::home::DEFAULT_ARCHIVE_CAP_MB`).
+//! On a home node (`docs/src/concepts/loquax-home-node.md`) four keys more:
+//! `archive_cap_mb`, how many megabytes of messages the archive keeps before
+//! the oldest go (1024 by default, `crate::home::DEFAULT_ARCHIVE_CAP_MB`);
+//! `home_token_hours`, how long an admission code stays good (24 by
+//! default); `outbox_retry_secs`, how often a message sent through the home
+//! node is tried direct again besides on every announce of its recipient
+//! (3600 by default); and `outbox_days`, for how many days (7 by default).
 //!
 //! A drawing's name is not checked here: the set is the frontend's, and a
 //! name an older loquax does not know falls back to its own choice, said
@@ -114,10 +118,17 @@ pub struct Config {
     pub map_source: Option<String>,
     /// `map_cache_mb`, when the file sets it.
     pub map_cache_mb: Option<u64>,
-    /// `map_theme`, when the file sets it; unset is light.
-    pub map_theme: Option<ThemeFlag>,
     /// `archive_cap_mb`, when the file sets it: the home node's archive cap.
     pub archive_cap_mb: Option<u64>,
+    /// `home_token_hours`, when the file sets it: an admission token's life.
+    pub home_token_hours: Option<u64>,
+    /// `outbox_retry_secs`, when the file sets it: the home node's slow
+    /// direct retry cadence.
+    pub outbox_retry_secs: Option<u64>,
+    /// `outbox_days`, when the file sets it: how long the home node retries.
+    pub outbox_days: Option<u64>,
+    /// `map_theme`, when the file sets it; unset is light.
+    pub map_theme: Option<ThemeFlag>,
     /// `map_drawing.<context>` lines: each context and the drawing
     /// remembered for it, in file order, a later line for a context
     /// replacing an earlier one.
@@ -268,6 +279,29 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
                         key: "archive_cap_mb",
                         detail: alloc::format!("{text:?} is not a number of megabytes above 0"),
                     });
+                }
+            }
+        }
+        for (name, slot, unit) in [
+            ("home_token_hours", &mut config.home_token_hours, "hours"),
+            (
+                "outbox_retry_secs",
+                &mut config.outbox_retry_secs,
+                "seconds",
+            ),
+            ("outbox_days", &mut config.outbox_days, "days"),
+        ] {
+            if key.trim() == name {
+                let text = value.trim().trim_matches('"');
+                match text.parse::<u64>() {
+                    Ok(n) if n > 0 => *slot = Some(n),
+                    _ => {
+                        return Err(ConfigError::BadValue {
+                            line: index + 1,
+                            key: name,
+                            detail: alloc::format!("{text:?} is not a number of {unit} above 0"),
+                        });
+                    }
                 }
             }
         }
@@ -468,6 +502,21 @@ mod tests {
     #[test]
     fn the_archive_cap_parses_and_zero_is_an_error() {
         assert_eq!(parse_str("").expect("empty").archive_cap_mb, None);
+        let home = parse_str("home_token_hours = 2\noutbox_retry_secs = 30\noutbox_days = 1\n")
+            .expect("home keys");
+        assert_eq!(home.home_token_hours, Some(2));
+        assert_eq!(home.outbox_retry_secs, Some(30));
+        assert_eq!(home.outbox_days, Some(1));
+        for (text, key) in [
+            ("home_token_hours = 0\n", "home_token_hours"),
+            ("outbox_retry_secs = soon\n", "outbox_retry_secs"),
+            ("outbox_days = -1\n", "outbox_days"),
+        ] {
+            assert!(
+                matches!(parse_str(text), Err(ConfigError::BadValue { key: k, .. }) if k == key),
+                "{text}"
+            );
+        }
         assert_eq!(
             parse_str("archive_cap_mb = 300\n")
                 .expect("set")

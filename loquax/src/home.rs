@@ -7,22 +7,29 @@
 //! to the home node's own destination, `loquax.home`. Fetching never deletes.
 //!
 //! - [`code`]: the admission code `loquax home admit` prints.
-//! - [`wire`]: the two requests, `/join` and `/sync`, and their answers.
+//! - [`wire`]: the three requests, `/join`, `/sync` and `/send`, and their
+//!   answers.
+//! - [`outgoing`]: the home node's outbox policy, direct at once, a
+//!   propagated copy on failure, direct retries for seven days.
 //! - `server`: how the home node answers them, from the store.
 //! - `client`: how a client asks, over the driver's link API.
 //! - `daemon`: `loquax --daemon`, the home node itself.
+//! - `lock`: one registrar of the delivery destination per home.
 
 use alloc::string::String;
 
 use leviculum_core::{Destination, DestinationType, Direction, Identity};
 
 pub mod code;
+pub mod outgoing;
 pub mod wire;
 
 #[cfg(feature = "std")]
 pub mod client;
 #[cfg(feature = "history")]
 pub mod daemon;
+#[cfg(feature = "std")]
+pub mod lock;
 #[cfg(feature = "history")]
 pub mod server;
 
@@ -37,10 +44,59 @@ pub const ASPECT: &str = "home";
 pub const JOIN_PATH: &str = "/join";
 /// The pull: the client's cursor in, the archive entries after it out.
 pub const SYNC_PATH: &str = "/sync";
+/// A message to send: the client's own id and the message in, the message
+/// id out. The home node signs it, keeps it in its outbox and delivers.
+pub const SEND_PATH: &str = "/send";
 
-/// The archive entry kind of a received message. Later kinds (sent,
-/// delivered, read) are the later slices' state changes.
+/// The archive entry kind of a received message, packed as it came.
 pub const KIND_RECEIVED: u8 = 0;
+/// A message a client handed in with `/send`, packed as the home node
+/// signed it.
+pub const KIND_SENT: u8 = 1;
+/// A propagation node took a copy of a sent message. This and the kinds
+/// below carry the message id as their bytes, nothing else.
+pub const KIND_PROPAGATED: u8 = 2;
+/// A direct delivery proof came for a sent message.
+pub const KIND_DELIVERED: u8 = 3;
+/// The retries of a sent message ended with no propagation node ever
+/// taking it and no proof: it never left the home node.
+pub const KIND_FAILED: u8 = 4;
+/// The direct retries of a propagated message ended without a proof; the
+/// copy on the propagation node may still reach the recipient.
+pub const KIND_RETRIES_ENDED: u8 = 5;
+
+/// What a client shows for a state entry of a message it sent through the
+/// home node: the router state its bubble takes, `None` for an entry that
+/// changes nothing on screen (the sent entry itself, and direct retries
+/// that ended while a propagated copy waits).
+pub fn shown_state(kind: u8) -> Option<leviculum_lxmf::router::MessageState> {
+    use leviculum_lxmf::router::MessageState;
+    match kind {
+        KIND_PROPAGATED => Some(MessageState::AwaitingCollection),
+        KIND_DELIVERED => Some(MessageState::Delivered),
+        KIND_FAILED => Some(MessageState::Failed),
+        _ => None,
+    }
+}
+
+/// The word `loquax fetch` prints for an archive entry of a message sent
+/// through the home node; `None` for a received message.
+pub fn sent_word(kind: u8) -> Option<&'static str> {
+    Some(match kind {
+        KIND_SENT => "accepted",
+        KIND_PROPAGATED => "propagated",
+        KIND_DELIVERED => "delivered",
+        KIND_FAILED => "failed",
+        KIND_RETRIES_ENDED => "retries-ended",
+        _ => return None,
+    })
+}
+
+/// How long an admission token stays good, by default: a day, time to
+/// carry the code to the other device, short enough that a code left in a
+/// chat log or a screenshot is dead by the next. `home_token_hours` in the
+/// config changes it.
+pub const DEFAULT_TOKEN_HOURS: u64 = 24;
 
 /// The archive's default cap, in megabytes: 1 GiB. Twice the 500 MB a stock
 /// lxmd propagation node keeps by default
@@ -56,6 +112,30 @@ pub const DEFAULT_ARCHIVE_CAP_MB: u64 = 1024;
 /// resource of a few hundred parts at the TCP MDU, quick on a LAN or the
 /// internet, which are the media a home node's clients use in this slice.
 pub const SYNC_PAGE_BYTES: usize = 64 * 1024;
+
+/// An admission token's life in seconds, as the config sets it.
+pub fn token_ttl_secs(config: &crate::config::Config) -> i64 {
+    let hours = config.home_token_hours.unwrap_or(DEFAULT_TOKEN_HOURS);
+    i64::try_from(hours.saturating_mul(3600)).unwrap_or(i64::MAX)
+}
+
+/// The outbox's timing, as the config sets it.
+pub fn policy(config: &crate::config::Config) -> outgoing::Policy {
+    let secs = |n: u64| i64::try_from(n).unwrap_or(i64::MAX);
+    outgoing::Policy {
+        retry_secs: secs(
+            config
+                .outbox_retry_secs
+                .unwrap_or(outgoing::DEFAULT_RETRY_SECS),
+        ),
+        horizon_secs: secs(
+            config
+                .outbox_days
+                .unwrap_or(outgoing::DEFAULT_DAYS)
+                .saturating_mul(24 * 3600),
+        ),
+    }
+}
 
 /// The home destination of `identity`: `loquax.home`, inbound when the
 /// identity holds its private key (the home node), outbound otherwise.

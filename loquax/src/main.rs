@@ -140,6 +140,9 @@ enum HomeCommand {
     /// On the home node: remove a device, by its name or its hash (four hex
     /// characters of it are enough when they are unique).
     Revoke { device: String },
+    /// On the home node: list the admission codes not yet used and not yet
+    /// expired (`home_token_hours` in the config, 24 by default).
+    Tokens,
 }
 
 #[cfg(feature = "tui")]
@@ -702,8 +705,18 @@ async fn run(args: SendArgs) -> ExitCode {
         Ok(home) => home,
         Err(error) => return failure(error, "no-home"),
     };
-    if let Some(refused) = refuse_on_client(&home) {
-        return refused;
+    match loquax::home::client::load_client(&home) {
+        Ok(None) => {}
+        Ok(Some(public_key)) => {
+            let message = ClientMessage {
+                destination,
+                title,
+                body,
+            };
+            let reach = (args.instance, args.config, args.timeout);
+            return run_client_send(home, public_key, message, reach).await;
+        }
+        Err(error) => return failure(error, "no-home"),
     }
     // Resolved before attaching for the same reason the display name is:
     // a bad --pn or a corrupt config line is an argument-shaped problem and
@@ -924,20 +937,84 @@ async fn run_fetch_command(args: FetchArgs) -> ExitCode {
     code
 }
 
-/// A client of a home node sends nothing of its own yet: it holds no LXMF
-/// identity, and one minted here would be a second address beside the home
-/// node's, the very split the home node exists to end.
-fn refuse_on_client(home: &Path) -> Option<ExitCode> {
-    match loquax::home::client::load_client(home) {
-        Ok(None) => None,
-        Ok(Some(_)) => Some(failure(
-            format!(
-                "{}; open the messenger to read what the home node holds",
-                loquax::engine::CLIENT_SENDS
-            ),
-            "client",
-        )),
-        Err(error) => Some(failure(error, "no-home")),
+/// One message as `loquax send` read it, for a client to hand its home node.
+struct ClientMessage {
+    destination: [u8; 16],
+    title: Vec<u8>,
+    body: Vec<u8>,
+}
+
+/// `loquax send` on a client of a home node: hand the message to the home
+/// node with `/send`, which signs it, keeps it in its outbox and delivers it
+/// (`docs/src/concepts/loquax-home-node.md`). Done once the home node
+/// answered; `--via` and `--pn` are the home node's business, not read
+/// here. Its states come with the next `loquax fetch`.
+async fn run_client_send(
+    home: PathBuf,
+    public_key: [u8; 64],
+    message: ClientMessage,
+    (instance, config, timeout): (Option<String>, Option<PathBuf>, u64),
+) -> ExitCode {
+    let address = match loquax::home::lxmf_address(&public_key) {
+        Ok(address) => address,
+        Err(error) => return failure(error, "no-identity"),
+    };
+    let device =
+        match identity::load_or_create(&home.join(loquax::home::client::DEVICE_IDENTITY_FILE)) {
+            Ok(identity) => identity,
+            Err(error) => return failure(error, "no-identity"),
+        };
+    let config_dir = config.unwrap_or_else(Config::default_config_dir);
+    let instance = instance.unwrap_or_else(|| instance_name(&config_dir));
+    let storage_dir = match storage_dir(&home) {
+        Ok(dir) => dir,
+        Err(error) => return failure(error, "no-daemon"),
+    };
+    let attached = match loquax::engine::attach_as(
+        AttachConfig {
+            instance,
+            storage_dir,
+            identity: device.clone(),
+            display_name: Vec::new(),
+            notices: Terminal::new(home.clone()),
+        },
+        loquax::engine::Role::Client { address },
+    )
+    .await
+    {
+        Ok(attached) => attached,
+        Err(error) => return failure(error, "no-daemon"),
+    };
+    let node = attached.node();
+    let bytes = message.body.len();
+    let submission = loquax::home::wire::Submission {
+        client_id: loquax::home::client::client_id(),
+        destination: message.destination,
+        title: message.title,
+        content: message.body,
+        fields: Vec::new(),
+    };
+    let accepted = loquax::home::client::send_retrying(
+        &node,
+        &public_key,
+        &device,
+        &submission,
+        Duration::from_secs(timeout),
+    )
+    .await;
+    drop(node);
+    attached.stop().await;
+    match accepted {
+        Ok(id) => {
+            events::enqueued(&id, &message.destination, bytes, "home");
+            events::done(Some(&id), "home", 0);
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("loquax: the home node did not take the message: {error}");
+            events::done(None, "failed", EXIT_FAILURE);
+            ExitCode::from(EXIT_FAILURE)
+        }
     }
 }
 
@@ -1014,6 +1091,8 @@ async fn run_daemon(args: TuiArgs) -> ExitCode {
         identity,
         display_name: display_name.name.into_bytes(),
         archive_cap_bytes: archive_cap_mb.saturating_mul(1 << 20),
+        token_ttl_secs: loquax::home::token_ttl_secs(&config),
+        policy: loquax::home::policy(&config),
         preferred_pn,
         pn_source,
         sync_bound_ms,
@@ -1129,6 +1208,36 @@ async fn run_home(command: HomeCommand) -> ExitCode {
             }
             Err(error) => failure(error, "no-store"),
         }),
+        HomeCommand::Tokens => {
+            let ttl = match loquax::config::load(&home) {
+                Ok(config) => loquax::home::token_ttl_secs(&config),
+                Err(error) => return usage(error),
+            };
+            on_home_node(&|store| match store.open_tokens(now, ttl) {
+                Ok(tokens) => {
+                    for token in tokens {
+                        let expires = token.created_at.saturating_add(ttl);
+                        let at = loquax::when::WallTime {
+                            unix_secs: expires,
+                            offset_secs: leviculum_std::local_time::utc_offset_secs(expires),
+                        }
+                        .civil();
+                        println!(
+                            "{}  {}  expires {:04}-{:02}-{:02} {:02}:{:02}",
+                            address::to_hex(&token.token[..4]),
+                            token.name,
+                            at.year,
+                            at.month,
+                            at.day,
+                            at.hour,
+                            at.minute
+                        );
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(error) => failure(error, "no-store"),
+            })
+        }
         HomeCommand::Join(args) => run_join(home, client, args).await,
     }
 }

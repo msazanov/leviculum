@@ -6,7 +6,12 @@
 //! /join  [token: bin16, name: str]           -> [status]
 //! /sync  [cursor: uint]                       -> [status, first: uint, more: bool,
 //!                                                 [[seq: uint, kind: uint, at: int, packed: bin], ...]]
+//! /send  [client_id: bin16, destination: bin16, title: bin, content: bin,
+//!         [[key: int, value: bin], ...]]      -> [status, id: bin32]
 //! ```
+//!
+//! A field's value is its raw msgpack, carried as bytes, so the home node
+//! signs exactly what the client composed.
 //!
 //! The status is the first element of every answer, so a refusal decodes
 //! the same way whatever was asked. `first` is the oldest sequence the
@@ -28,6 +33,18 @@ pub struct Entry {
     pub at: i64,
     /// The LXMF message as it came, signature and all.
     pub packed: Vec<u8>,
+}
+
+/// One message a client hands the home node to send.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Submission {
+    /// The client's own id for it: the same id handed in again is the same
+    /// message.
+    pub client_id: [u8; 16],
+    pub destination: [u8; 16],
+    pub title: Vec<u8>,
+    pub content: Vec<u8>,
+    pub fields: Vec<leviculum_lxmf::Field>,
 }
 
 /// One `/sync` answer's worth of the archive.
@@ -169,6 +186,75 @@ pub fn sync_answer(page: &Page) -> Vec<u8> {
     out
 }
 
+pub fn send_request(submission: &Submission) -> Vec<u8> {
+    let mut out = Vec::new();
+    msgpack::array(&mut out, 5);
+    msgpack::bin(&mut out, &submission.client_id);
+    msgpack::bin(&mut out, &submission.destination);
+    msgpack::bin(&mut out, &submission.title);
+    msgpack::bin(&mut out, &submission.content);
+    msgpack::array(&mut out, submission.fields.len());
+    for (key, value) in &submission.fields {
+        msgpack::array(&mut out, 2);
+        msgpack::int(&mut out, *key);
+        msgpack::bin(&mut out, value);
+    }
+    out
+}
+
+pub fn read_send_request(data: &[u8]) -> Result<Submission, Malformed> {
+    let mut p = 0;
+    if msgpack::array_len(data, &mut p)? != 5 {
+        return Err(Malformed);
+    }
+    let client_id =
+        <[u8; 16]>::try_from(msgpack::read_bin(data, &mut p)?).map_err(|_| Malformed)?;
+    let destination =
+        <[u8; 16]>::try_from(msgpack::read_bin(data, &mut p)?).map_err(|_| Malformed)?;
+    let title = msgpack::read_bin(data, &mut p)?.to_vec();
+    let content = msgpack::read_bin(data, &mut p)?.to_vec();
+    let count = msgpack::array_len(data, &mut p)?;
+    let mut fields = Vec::new();
+    for _ in 0..count {
+        if msgpack::array_len(data, &mut p)? != 2 {
+            return Err(Malformed);
+        }
+        let key = msgpack::read_int(data, &mut p)?;
+        let value = msgpack::read_bin(data, &mut p)?.to_vec();
+        fields.push((key, value));
+    }
+    Ok(Submission {
+        client_id,
+        destination,
+        title,
+        content,
+        fields,
+    })
+}
+
+pub fn send_answer(id: &[u8; 32]) -> Vec<u8> {
+    let mut out = Vec::new();
+    msgpack::array(&mut out, 2);
+    msgpack::uint(&mut out, Status::Ok.code());
+    msgpack::bin(&mut out, id);
+    out
+}
+
+/// A `/send` answer: the message id, or the status that refused it.
+pub fn read_send_answer(data: &[u8]) -> Result<Result<[u8; 32], Status>, Malformed> {
+    let status = read_status(data)?;
+    if status != Status::Ok {
+        return Ok(Err(status));
+    }
+    let mut p = 0;
+    if msgpack::array_len(data, &mut p)? != 2 {
+        return Err(Malformed);
+    }
+    msgpack::read_uint(data, &mut p)?;
+    let id = <[u8; 32]>::try_from(msgpack::read_bin(data, &mut p)?).map_err(|_| Malformed)?;
+    Ok(Ok(id))
+}
+
 /// A `/sync` answer: the page, or the status that refused it.
 pub fn read_sync_answer(data: &[u8]) -> Result<Result<Page, Status>, Malformed> {
     let status = read_status(data)?;
@@ -244,6 +330,26 @@ mod tests {
         let data = status_answer(Status::NotAdmitted);
         assert_eq!(read_sync_answer(&data), Ok(Err(Status::NotAdmitted)));
         assert_eq!(read_status(&data), Ok(Status::NotAdmitted));
+    }
+
+    #[test]
+    fn a_submission_and_its_answer_round_trip() {
+        let submission = Submission {
+            client_id: [3; 16],
+            destination: [4; 16],
+            title: b"t".to_vec(),
+            content: "grüß dich".as_bytes().to_vec(),
+            fields: alloc::vec![(2, alloc::vec![0xc3]), (-1, alloc::vec![0x01])],
+        };
+        assert_eq!(
+            read_send_request(&send_request(&submission)),
+            Ok(submission)
+        );
+        assert_eq!(read_send_answer(&send_answer(&[8; 32])), Ok(Ok([8; 32])));
+        assert_eq!(
+            read_send_answer(&status_answer(Status::NotAdmitted)),
+            Ok(Err(Status::NotAdmitted))
+        );
     }
 
     #[test]
