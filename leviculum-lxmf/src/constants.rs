@@ -85,6 +85,10 @@ pub const FIELD_REACTION: i64 = 0x40;
 pub const FIELD_COMMENT: i64 = 0x41;
 pub const FIELD_CONTINUATION: i64 = 0x42;
 
+/// `FIELD_REACTION` dict keys (`reference/LXMF/LXMF/LXMF.py:109-110`).
+pub const REACTION_TO: i64 = 0x00;
+pub const REACTION_CONTENT: i64 = 0x01;
+
 /// The single-packet size limits are written here as literals; Python
 /// computes them. This module proves the two agree.
 ///
