@@ -703,8 +703,9 @@ impl Canvas {
     /// technique's cells.
     fn paint(&mut self, ask: Ask) -> Painted {
         let view = &ask.view;
-        // Places, waters and parks; cells cannot turn a street's name.
-        let names = self.painter.labels(view, false);
+        // Places, waters and parks, and the streets and rivers, which the
+        // cells name where they run level.
+        let names = self.painter.labels(view, true);
         if let Some(encoding) = self.graphics.encoding() {
             let (source, attribution) = self.source(view, ask.cells, encoding, ask.style);
             return Painted {
@@ -2040,6 +2041,71 @@ mod tests {
     }
 
     const PINNED_NAMES: &str = "\n  ● bob · 4 min  Giardino del Borgo\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n                           Piazza D'Azeglio\n";
+
+    /// The streets of the Florence fixture named in cells (1126): at z16
+    /// by the Duomo over its picture in braille, each name on a level run of its street
+    /// two cells longer than the name, one name a 20 x 6 block, a free cell
+    /// around it, none over the pin; the frame pinned as text, and the
+    /// styles of a street's cells the places' halo without bold.
+    #[test]
+    fn the_map_names_its_streets_on_level_runs() {
+        let dir =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../leviculum-map/fixtures");
+        let mut painter = MapPainter::new(Maps::new(Some(dir)), Graphics::Braille, None);
+        painter.set_tier(Tier::Truecolor);
+        let cell_px = painter.setup().cell_px;
+        let (cols, rows) = (80u16, 24u16);
+        let area = leviculum_ui::Rect::new(0, 0, cols, rows);
+        let at = project(LatLon::from_degrees(43.7737, 11.2526));
+        let shown = MapView {
+            area,
+            viewport: Viewport::new(
+                at,
+                16,
+                u32::from(cols) * u32::from(cell_px.0),
+                u32::from(rows) * u32::from(cell_px.1),
+            ),
+            cell_px,
+            pins: vec![PinCell {
+                peer: [1; 16],
+                col: 2,
+                row: 1,
+                text: "● bob · 4 min".to_string(),
+                apart: None,
+                stale: false,
+                selected: false,
+            }],
+        };
+        let mut terminal = Terminal::new(TestBackend::new(cols, rows + 1)).expect("terminal");
+        let Ok(_) = terminal.draw(|f| painter.render(f, &shown, Style::default()));
+        let buffer = terminal.backend().buffer().clone();
+        let text: Vec<String> = (0..rows)
+            .map(|y| {
+                (0..cols)
+                    .map(|x| match buffer.cell((x, y)).map(|c| c.symbol()) {
+                        Some(s) if s.chars().all(|c| c.is_alphanumeric() || " '·●".contains(c)) => {
+                            s.to_string()
+                        }
+                        _ => " ".to_string(),
+                    })
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect();
+        let frame = text.join("\n");
+        let streets = frame.matches("Via ").count();
+        assert!(streets >= 2, "{frame}");
+        let row = text.iter().position(|l| l.contains("Via ")).expect("row") as u16;
+        let col = text[usize::from(row)].find("Via ").expect("col") as u16;
+        let cell = buffer.cell((col, row)).expect("cell");
+        assert_eq!(cell.bg, Color::Rgb(0xff, 0xff, 0xff), "the halo");
+        assert_eq!(cell.fg, Color::Rgb(0x20, 0x20, 0x20), "a street's ink");
+        assert!(!cell.modifier.contains(Modifier::BOLD));
+        assert_eq!(frame, PINNED_STREETS, "{frame}");
+    }
+
+    const PINNED_STREETS: &str = "\n  ● bob · 4 min\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n                Via dei Banchi            Via dei Cerretani\n\n\n\n\n\n\n";
 
     /// The text techniques of the map core keep to their glyphs: octants
     /// to the octant table, `blocks` to quadrants and eighths, braille-thin

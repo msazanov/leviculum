@@ -242,7 +242,8 @@ pub struct LabelCell {
     pub text: String,
 }
 
-/// A name of the map set in cells: a place, a water, a park.
+/// A name of the map set in cells: a place, a water, a park, a river, a
+/// street.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NameCell {
     pub col: u16,
@@ -252,17 +253,54 @@ pub struct NameCell {
 }
 
 /// The terminal's density rule (`docs/drafts/map-renderer-roadmap-2026-10.md`,
-/// section 1, "Placement"): at most one place a block of this many cells.
+/// section 1, "Placement"): at most one name a block of this many cells.
 pub const NAME_BLOCK: (u16, u16) = (20, 6);
 
+/// How far apart, in cells, two names of one street or river stand.
+pub const NAME_REPEAT: u16 = 60;
+
+/// The horizontal runs of `line` (sub-pixels) in cells of `cw` by `ch`
+/// sub-pixels, in the order the line passes them: (row, first col, last
+/// col) of each stretch the line stays in one row, walked at a quarter of
+/// a cell, so a street that climbs a row every few cells gives runs that
+/// short.
+pub fn cell_runs(line: &[(i64, i64)], cw: i64, ch: i64) -> Vec<(i64, i64, i64)> {
+    let mut runs: Vec<(i64, i64, i64)> = Vec::new();
+    let mut add = |col: i64, row: i64| match runs.last_mut() {
+        Some(r) if r.0 == row => {
+            r.1 = r.1.min(col);
+            r.2 = r.2.max(col);
+        }
+        _ => runs.push((row, col, col)),
+    };
+    let cell = |(x, y): (i64, i64)| (x.div_euclid(cw), y.div_euclid(ch));
+    if let Some(&p) = line.first() {
+        let (c, r) = cell(p);
+        add(c, r);
+    }
+    for w in line.windows(2) {
+        let ((x0, y0), (x1, y1)) = (w[0], w[1]);
+        let steps = ((x1 - x0).abs() * 4 / cw).max((y1 - y0).abs() * 4 / ch) + 1;
+        for i in 1..=steps {
+            let (c, r) = cell((x0 + (x1 - x0) * i / steps, y0 + (y1 - y0) * i / steps));
+            add(c, r);
+        }
+    }
+    runs
+}
+
 /// Where the names of `labels` go in `area`, `cell_px` image pixels a cell,
-/// by the map core's one rule ([`names::place`]) in cells: centred on
-/// their anchor, one place per [`NAME_BLOCK`], one free cell around each,
-/// never over `taken` (the pins' markers and names, placed first), never
-/// cut: a name that does not fit the area whole is left out. Streets are
-/// not named in cells, which cannot turn text. Each `taken` is (col, row,
-/// width) of a one-row run, relative to `area`; so is each name returned
-/// to the area's own origin added.
+/// by the map core's one rule ([`names::place`]) in cells: one name per
+/// [`NAME_BLOCK`], one free cell around each, never over `taken` (the
+/// pins' markers and names, placed first), never cut: a name that does not
+/// fit the area whole is left out. Places, waters and parks are centred on
+/// their anchor. A street's name is set on a horizontal run of its line at
+/// least two cells longer than the name ([`cell_runs`]), centred on it,
+/// and repeats [`NAME_REPEAT`] cells apart; cells cannot turn text, so a
+/// street that never runs level is not named. A river's name goes where
+/// its line crosses the middle row of a block row, or on a run as a
+/// street's. Each `taken` is (col, row, width) of a one-row run, relative
+/// to `area`; so is each name returned to the area's own origin added.
 pub fn place_names(
     labels: &[ViewLabel],
     area: Rect,
@@ -271,32 +309,66 @@ pub fn place_names(
 ) -> Vec<NameCell> {
     let (cw, ch) = (i64::from(cell_px.0.max(1)), i64::from(cell_px.1.max(1)));
     let sub = names::SUBPIXEL;
-    let (w, h) = (i32::from(area.width), i32::from(area.height));
-    let candidates: Vec<Candidate> = labels
-        .iter()
-        .filter(|l| !l.kind.is_road())
-        .filter_map(|l| {
-            let col = l.anchor.0.div_euclid(sub * cw);
-            let row = l.anchor.1.div_euclid(sub * ch);
-            let len = l.text.chars().count() as i64;
-            let x0 = i32::try_from(col - len / 2).ok()?;
-            let y0 = i32::try_from(row).ok()?;
-            let x1 = x0.checked_add(i32::try_from(len).ok()?)?;
-            let whole = x0 >= 0 && x1 <= w && (0..h).contains(&y0) && len > 0;
-            whole.then(|| Candidate {
-                kind: l.kind,
-                rank: l.rank,
-                text: l.text.clone(),
-                at: l.at,
-                boxes: alloc::vec![names::Rect {
-                    x0,
-                    y0,
-                    x1,
-                    y1: y0 + 1
-                }],
-            })
-        })
-        .collect();
+    let (w, h) = (i64::from(area.width), i64::from(area.height));
+    let band = i64::from(NAME_BLOCK.1);
+    let mut candidates: Vec<Candidate> = Vec::new();
+    for l in labels {
+        let len = l.text.chars().count() as i64;
+        if len == 0 {
+            continue;
+        }
+        // (col, row) of each place the name may start at, best first.
+        let mut starts: Vec<(i64, i64)> = Vec::new();
+        match l.kind.is_line() {
+            false => {
+                let col = l.anchor.0.div_euclid(sub * cw);
+                let row = l.anchor.1.div_euclid(sub * ch);
+                starts.push((col - len / 2, row));
+            }
+            true => {
+                let mut runs: Vec<(i64, i64, i64)> = l
+                    .line
+                    .iter()
+                    .flat_map(|piece| cell_runs(piece, sub * cw, sub * ch))
+                    .filter(|&(row, c0, c1)| {
+                        let level = c1 - c0 + 1 >= len + 2;
+                        let crossing =
+                            l.kind == LabelKind::River && row.rem_euclid(band) == band / 2;
+                        level || crossing
+                    })
+                    .collect();
+                // The longest first, so a street's own best run is tried
+                // before its others.
+                runs.sort_by_key(|&(row, c0, c1)| (core::cmp::Reverse(c1 - c0), row, c0));
+                starts.extend(
+                    runs.iter()
+                        .map(|&(row, c0, c1)| ((c0 + c1 + 1) / 2 - len / 2, row)),
+                );
+            }
+        }
+        for (x0, y0) in starts {
+            let whole = x0 >= 0 && x0 + len <= w && (0..h).contains(&y0);
+            let (Ok(x0), Ok(y0), Ok(n)) =
+                (i32::try_from(x0), i32::try_from(y0), i32::try_from(len))
+            else {
+                continue;
+            };
+            if whole {
+                candidates.push(Candidate {
+                    kind: l.kind,
+                    rank: l.rank,
+                    text: l.text.clone(),
+                    at: l.at,
+                    boxes: alloc::vec![names::Rect {
+                        x0,
+                        y0,
+                        x1: x0 + n,
+                        y1: y0 + 1
+                    }],
+                });
+            }
+        }
+    }
     let taken: Vec<names::Rect> = taken
         .iter()
         .map(|&(col, row, width)| names::Rect {
@@ -309,7 +381,7 @@ pub fn place_names(
     let rule = names::Rule {
         margin: 1,
         block: (i32::from(NAME_BLOCK.0), i32::from(NAME_BLOCK.1)),
-        repeat: 0,
+        repeat: i32::from(NAME_REPEAT),
     };
     names::place(&candidates, &taken, rule)
         .into_iter()
@@ -659,7 +731,8 @@ mod tests {
 
     /// The density rule in cells: one place a 20 x 6 block, the larger
     /// first, a free cell around each, never cut at the pane's edge, never
-    /// over a pin, never a street; and the frame it gives pinned as text.
+    /// over a pin, never a street without a line; and the frame it gives
+    /// pinned as text.
     #[test]
     fn names_are_set_by_the_density_rule() {
         let area = Rect::new(2, 1, 60, 18);
@@ -729,6 +802,107 @@ mod tests {
         blocks.dedup();
         assert_eq!(blocks.len(), all, "one name a block");
     }
+
+    /// A line label whose line runs through the middles of `cells`, as
+    /// braille's 2 x 4 pixels a cell.
+    fn along(kind: LabelKind, text: &str, at: u32, cells: &[(i64, i64)]) -> ViewLabel {
+        let sub = names::SUBPIXEL;
+        let line: Vec<(i64, i64)> = cells
+            .iter()
+            .map(|&(c, r)| (c * 2 * sub + sub, r * 4 * sub + 2 * sub))
+            .collect();
+        ViewLabel {
+            kind,
+            rank: 0,
+            text: text.to_string(),
+            local: text.to_string(),
+            at: (at, 0),
+            anchor: line[0],
+            line: vec![line],
+        }
+    }
+
+    /// Street and river names in cells (1126): a street on a level run at
+    /// least two cells longer than its name, centred on it, the major road
+    /// first; a street that climbs a row every few cells and one that runs
+    /// straight down are not named; a river where it crosses a block row's
+    /// middle, once in the repeat distance; never over a place's name or a
+    /// pin; and the frame pinned as text.
+    #[test]
+    fn streets_on_level_runs_and_rivers_where_they_cross_a_block_row() {
+        let area = Rect::new(0, 0, 60, 18);
+        // Climbs a row every three cells: no run is long enough.
+        let stairs: Vec<(i64, i64)> = (0..6).map(|i| (22 + 3 * i, 8 + i)).collect();
+        let labels = [
+            name(LabelKind::City, 12, "Firenze", 10, 1),
+            along(LabelKind::MinorRoad, "Via Rosa", 1, &[(2, 9), (19, 9)]),
+            // Its run is the name and one cell: too short.
+            along(LabelKind::MinorRoad, "Via Corta", 2, &[(2, 15), (11, 15)]),
+            along(
+                LabelKind::MajorRoad,
+                "Viale Lavagnini",
+                3,
+                &[(0, 14), (21, 14)],
+            ),
+            along(LabelKind::SecondaryRoad, "Via Scesa", 4, &stairs),
+            along(
+                LabelKind::SecondaryRoad,
+                "Via Dritta",
+                5,
+                &[(30, 0), (30, 17)],
+            ),
+            along(LabelKind::River, "Arno", 6, &[(50, 0), (48, 17)]),
+            // Centred on its run it would cover the pin: left out.
+            along(LabelKind::MinorRoad, "Via Nuova", 7, &[(20, 4), (58, 4)]),
+        ];
+        let pin = (28, 4, 9);
+        let got = place_names(&labels, area, (2, 4), &[pin]);
+        let mut frame = vec![vec![' '; 60]; 18];
+        for (x, ch) in (pin.0..pin.0 + pin.2).zip("● alice ".chars().cycle()) {
+            frame[usize::from(pin.1)][usize::from(x)] = ch;
+        }
+        for n in &got {
+            for (i, ch) in n.text.chars().enumerate() {
+                frame[usize::from(n.row)][usize::from(n.col) + i] = ch;
+            }
+        }
+        let text: Vec<String> = frame
+            .iter()
+            .map(|r| r.iter().collect::<String>().trim_end().to_string())
+            .collect();
+        assert_eq!(text, PINNED_STREETS, "{got:?}");
+        let kinds: Vec<LabelKind> = got.iter().map(|n| n.kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                LabelKind::City,
+                LabelKind::River,
+                LabelKind::MajorRoad,
+                LabelKind::MinorRoad,
+            ]
+        );
+    }
+
+    const PINNED_STREETS: [&str; 18] = [
+        "",
+        "       Firenze",
+        "",
+        "                                                Arno",
+        "                            ● alice ●",
+        "",
+        "",
+        "",
+        "",
+        "       Via Rosa",
+        "",
+        "",
+        "",
+        "",
+        "    Viale Lavagnini",
+        "",
+        "",
+        "",
+    ];
 
     /// The cells `place` draws for two pins on one spot: neither name
     /// covers the other, and the selected one is drawn last.
