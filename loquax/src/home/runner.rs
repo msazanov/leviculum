@@ -84,7 +84,10 @@ pub async fn send_home(
 }
 
 /// A client's fetch: one pull from its home node, with twice a send's
-/// `budget`, as on the command line. The cursor comes back for
+/// `budget`, as on the command line. It counts the received messages that
+/// came ([`super::client::Pull::messages`]), never entries: a pull that
+/// brought only names, marks, states or the user's own sent message
+/// brought nothing new (1136). The cursor comes back for
 /// [`settle_pull`]: the runner sees the fence on its tap in the same pump
 /// that hands the screen the pulled messages, and the frontend writes those
 /// to the store before it takes the runner's end.
@@ -104,7 +107,7 @@ pub async fn pull(
     )
     .await
     {
-        Ok(pull) => (Ok(pull.entries), pull.cursor),
+        Ok(pull) => (Ok(pull.messages()), pull.cursor),
         Err(error) => (Err(error.to_string()), None),
     }
 }

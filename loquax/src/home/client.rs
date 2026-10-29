@@ -368,10 +368,29 @@ pub struct Pull {
     /// Each entry of a message sent through the home node: its id and its
     /// archive kind.
     pub sent: Vec<([u8; 32], u8)>,
+    /// Each name the home node heard a peer announce, as archived.
+    pub names: Vec<([u8; 16], String)>,
     /// The cursor to save once what came is kept: `None` when nothing came,
     /// or when the engine did not get through it in time, so the next pull
     /// asks for the same entries again.
     pub cursor: Option<u64>,
+}
+
+impl Pull {
+    /// How many received messages came: what a status line calls new. An
+    /// entry of the user's own sent message, a state change, a mark and a
+    /// name are entries, not messages (1136).
+    pub fn messages(&self) -> usize {
+        self.received.len()
+    }
+
+    /// How many state changes of messages sent through the home node came.
+    pub fn states(&self) -> usize {
+        self.sent
+            .iter()
+            .filter(|(_, kind)| *kind != super::KIND_SENT)
+            .count()
+    }
 }
 
 /// How long a pull waits for the engine to take the entries it was handed:
@@ -442,9 +461,12 @@ async fn take_in(
         }
         if entry.kind == super::KIND_NAME {
             match wire::read_name_entry(&entry.packed) {
-                Ok((destination, name)) => outbox
-                    .submit(Command::HomeName { destination, name })
-                    .map_err(gone)?,
+                Ok((destination, name)) => {
+                    pull.names.push((destination, name.clone()));
+                    outbox
+                        .submit(Command::HomeName { destination, name })
+                        .map_err(gone)?
+                }
                 Err(_) => tracing::warn!("HOME pull: entry {} is no name", entry.seq),
             }
             continue;
@@ -509,8 +531,12 @@ async fn take_in(
         }
     }
     tracing::info!(
-        "HOME pull cursor={cursor} entries={} through={last} settled={}",
+        "HOME pull cursor={cursor} entries={} messages={} states={} names={} through={last} \
+         settled={}",
         pull.entries,
+        pull.messages(),
+        pull.states(),
+        pull.names.len(),
         pull.cursor.is_some()
     );
     Ok(pull)
@@ -612,6 +638,7 @@ mod tests {
         assert_eq!(pull.cursor, Some(6));
         assert_eq!(pull.entries, 3);
         assert_eq!(pull.received, [received]);
+        assert_eq!((pull.messages(), pull.states()), (1, 2));
         assert_eq!(
             pull.sent,
             [
@@ -677,6 +704,10 @@ mod tests {
         let pull = take_in(&mut outbox, 0, pulled).await.expect("pull");
         assert_eq!(pull.cursor, Some(5));
         assert_eq!(pull.sent, [(message.message_id, super::super::KIND_SENT)]);
+        // 1136: the user's own sent message, a mark and a name are entries,
+        // and none of them is a new message or a state change.
+        assert_eq!((pull.entries, pull.messages(), pull.states()), (5, 0, 0));
+        assert_eq!(pull.names, [([5; 16], "Reviewer Berlin".to_string())]);
         assert_eq!(
             *outbox.commands.borrow(),
             [

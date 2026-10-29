@@ -533,6 +533,8 @@ pub struct UiModel<B> {
     pub fetching: bool,
     /// What started the running fetch, or the last one.
     pub fetch_reason: Option<Reason>,
+    /// When the running fetch, or the last one, began, on `elapsed_ms`.
+    pub fetch_since_ms: u64,
     /// How many fetches ended, either way, for a key script's `until
     /// synced`.
     pub fetches_done: usize,
@@ -683,6 +685,7 @@ impl<B: InputBuffer + Default> UiModel<B> {
             sending: VecDeque::new(),
             fetching: false,
             fetch_reason: None,
+            fetch_since_ms: 0,
             fetches_done: 0,
             sync: None,
             elapsed_ms: 0,
@@ -1315,6 +1318,7 @@ fn start_pull<B>(model: &mut UiModel<B>, reason: Reason) -> Vec<UiEffect> {
     }
     model.fetching = true;
     model.fetch_reason = Some(reason);
+    model.fetch_since_ms = now;
     vec![UiEffect::Fetch]
 }
 
@@ -1345,6 +1349,7 @@ fn auto_sync<B>(model: &mut UiModel<B>) -> Vec<UiEffect> {
     sync.begin(now);
     model.fetching = true;
     model.fetch_reason = Some(reason);
+    model.fetch_since_ms = now;
     vec![UiEffect::Fetch]
 }
 
@@ -2532,6 +2537,7 @@ fn run<B: InputBuffer + Default>(model: &mut UiModel<B>, command: PaletteCommand
             }
             model.fetching = true;
             model.fetch_reason = Some(Reason::Key);
+            model.fetch_since_ms = now;
             model.toast(ToastKind::Info, "fetching the mailbox".to_string());
             vec![UiEffect::Fetch]
         }
@@ -3450,6 +3456,20 @@ fn bold() -> RStyle {
     }
 }
 
+/// How long a client's quiet pull runs before the header says so.
+pub const QUIET_PULL_MS: u64 = 1_000;
+
+/// Whether the header says a fetch runs: one the reader asked for or the
+/// schedule started, at once; a client's quiet pull, for a wake or after a
+/// send, only once it took longer than [`QUIET_PULL_MS`]. A wake comes for
+/// every message, state and mark, and a line that said each pull would
+/// flicker (1136).
+fn fetch_shown<B>(model: &UiModel<B>) -> bool {
+    let quiet = matches!(model.fetch_reason, Some(Reason::Wake | Reason::Sent));
+    model.fetching
+        && (!quiet || model.elapsed_ms.saturating_sub(model.fetch_since_ms) >= QUIET_PULL_MS)
+}
+
 /// The mailbox state in the header, longest first: the renderer takes the
 /// first that fits.
 fn mailbox_words<B>(model: &UiModel<B>) -> Vec<String> {
@@ -3462,7 +3482,7 @@ fn mailbox_words<B>(model: &UiModel<B>) -> Vec<String> {
     } else {
         "adopted"
     };
-    let sync = match (model.fetching, model.mailbox.synced, model.now) {
+    let sync = match (fetch_shown(model), model.mailbox.synced, model.now) {
         (true, _, _) => Some("fetching".to_string()),
         (false, Some(at), Some(now)) => Some(format!("synced {}", list_time(&at, &now))),
         (false, Some(at), None) => Some(format!("synced {}", at.hh_mm())),
@@ -4608,6 +4628,40 @@ mod tests {
         );
         assert_eq!(model.fetch_reason, Some(Reason::Wake));
         assert!(update(&mut model, UiEvent::FetchDone(Ok(0))).is_empty());
+    }
+
+    /// 1136: a wake's pull is quiet. The header says "fetching" for it
+    /// only past a second, a pull with nothing new raises no toast, and
+    /// one asked for says so at once.
+    #[test]
+    fn a_wake_pull_is_silent_unless_it_is_slow_or_brings_a_message() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        model.home_client = true;
+        update(
+            &mut model,
+            UiEvent::MailboxChosen {
+                node: [0x9c; 16],
+                by_user: false,
+            },
+        );
+        let toasts = model.toasts.len();
+        update(&mut model, UiEvent::Elapsed(10_000));
+        assert_eq!(update(&mut model, UiEvent::HomeWake), [UiEffect::Fetch]);
+        assert!(!view(&model).messages_title_right.contains("fetching"));
+        update(&mut model, UiEvent::Elapsed(10_000 + QUIET_PULL_MS - 1));
+        assert!(!view(&model).messages_title_right.contains("fetching"));
+        update(&mut model, UiEvent::Elapsed(10_000 + QUIET_PULL_MS));
+        assert!(view(&model).messages_title_right.contains("fetching"));
+        update(&mut model, UiEvent::FetchDone(Ok(0)));
+        assert_eq!(model.toasts.len(), toasts, "names only: nothing said");
+        update(&mut model, UiEvent::HomeWake);
+        update(&mut model, UiEvent::FetchDone(Ok(1)));
+        assert_eq!(
+            model.toasts.last().map(|t| t.text.as_str()),
+            Some("1 new message(s)")
+        );
+        update(&mut model, UiEvent::Run(PaletteCommand::Fetch));
+        assert!(view(&model).messages_title_right.contains("fetching"));
     }
 
     #[test]
