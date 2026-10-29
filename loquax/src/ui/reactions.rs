@@ -254,25 +254,7 @@ impl<B> UiModel<B> {
         }
         .encode_field_value();
         let fields = vec![(FIELD_REACTION, field)];
-        let mut message = Message::ours(String::new(), self.now);
-        message.fields = fields.clone();
-        let activity = self.bump();
-        message.activity = activity;
-        let conversation = &mut self.conversations[index];
-        conversation.messages.push(message);
-        conversation.activity = activity;
-        let at = conversation.messages.len() - 1;
-        self.touch(index, at);
-        self.sending.push_back((index, at));
-        let now = self.elapsed_ms;
-        if let Some(sync) = self.sync.as_mut() {
-            sync.on(crate::sync::SyncEvent::Sent, now);
-        }
-        vec![UiEffect::Send {
-            to: peer,
-            body: String::new(),
-            fields,
-        }]
+        self.send_fields(index, String::new(), fields)
     }
 
     /// Move the cursor off a reaction, which has no block to stand on: to

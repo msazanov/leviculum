@@ -138,6 +138,7 @@ pub mod hit;
 pub mod layout;
 pub mod map;
 pub mod reactions;
+pub mod replies;
 pub mod search;
 
 /// How many ticks a toast stays up. The shell ticks every 250 ms, so three
@@ -1052,6 +1053,23 @@ pub enum UiEvent {
         target: [u8; 32],
         content: String,
     },
+    /// Send `body` to `peer` as a reply to the message `target`
+    /// ([`replies`]).
+    Reply {
+        peer: [u8; 16],
+        target: [u8; 32],
+        body: String,
+    },
+    /// Send a copy of the message `key` (its [`Message::activity`]) of
+    /// `from`'s conversation to `to` ([`replies`]).
+    Forward {
+        from: [u8; 16],
+        key: u64,
+        to: [u8; 16],
+    },
+    /// Delete the messages `keys` of `peer`'s conversation without asking,
+    /// as `y` after `d` does for one: a frontend that asked already.
+    Delete { peer: [u8; 16], keys: Vec<u64> },
 }
 
 /// How a region load goes, as the shell reports it.
@@ -1250,6 +1268,12 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
             target,
             content,
         } => model.react(peer, target, &content),
+        UiEvent::Reply { peer, target, body } => model.reply_to(peer, target, body),
+        UiEvent::Forward { from, key, to } => model.forward(from, key, to),
+        UiEvent::Delete { peer, keys } => {
+            model.delete_messages(peer, &keys);
+            Vec::new()
+        }
     }
 }
 
@@ -3523,6 +3547,18 @@ fn next_sync<B>(model: &UiModel<B>) -> Option<WallTime> {
         unix_secs: at.saturating_add(59).div_euclid(60).saturating_mul(60),
         offset_secs: now.offset_secs,
     })
+}
+
+/// The detail view of the message `key` (its [`Message::activity`]) in
+/// `peer`'s conversation, what `v` opens in the terminal: for a frontend
+/// that shows it its own way.
+pub fn message_detail<B>(model: &UiModel<B>, peer: [u8; 16], key: u64) -> Option<DetailView> {
+    let c = model.conversations.iter().position(|c| c.peer == peer)?;
+    let m = model.conversations[c]
+        .messages
+        .iter()
+        .position(|m| m.activity == key)?;
+    detail_view(model, c, m)
 }
 
 /// The detail view of message `m` of conversation `c`.
@@ -8729,5 +8765,186 @@ mod tests {
         update(&mut model, key(KeyCode::BackTab));
         update(&mut model, UiEvent::Run(PaletteCommand::React));
         assert!(model.palette.is_none());
+    }
+
+    // Replies, forwards and a frontend's delete (1137).
+
+    /// A reply goes out with the target's id and its quote, the shape the
+    /// deployed clients read, the text as content; the bubble above it
+    /// shows the target's text, ours or theirs. One whose target this
+    /// device lacks shows the quote the sender put in.
+    #[test]
+    fn a_reply_carries_its_target_and_quote() {
+        use leviculum_lxmf::reply::Reply;
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        received(&mut model, ID, "lunch at noon?\nor later");
+        let effects = update(
+            &mut model,
+            UiEvent::Reply {
+                peer: PEER,
+                target: ID,
+                body: "noon".to_string(),
+            },
+        );
+        let [UiEffect::Send { to, body, fields }] = effects.as_slice() else {
+            panic!("{effects:?}");
+        };
+        assert_eq!((*to, body.as_str()), (PEER, "noon"));
+        assert_eq!(
+            Reply::from_fields(fields),
+            Some(Reply {
+                to: ID,
+                quote: Some("lunch at noon?".to_string())
+            })
+        );
+        let c = 0;
+        let m = model.conversations[c].messages.len() - 1;
+        let quoted = model.quoted(c, m).expect("quoted");
+        assert_eq!(
+            (quoted.text.as_str(), quoted.ours),
+            ("lunch at noon?", Some(false))
+        );
+        assert_eq!(model.message_cursor, m);
+
+        let elsewhere = Reply {
+            to: [0x77; 32],
+            quote: Some("an old one".to_string()),
+        };
+        engine(
+            &mut model,
+            OutboxEvent::Received {
+                message_id: ID2,
+                source: PEER,
+                title: Vec::new(),
+                body: b"yes".to_vec(),
+                fields: elsewhere.fields(),
+                verified: true,
+            },
+        );
+        let m = model.conversations[c].messages.len() - 1;
+        let quoted = model.quoted(c, m).expect("quoted");
+        assert_eq!((quoted.text.as_str(), quoted.ours), ("an old one", None));
+        assert!(update(
+            &mut model,
+            UiEvent::Reply {
+                peer: PEER,
+                target: ID,
+                body: " ".to_string()
+            }
+        )
+        .is_empty());
+    }
+
+    /// A forward is the text and the content fields again, in the other
+    /// conversation, made if new; not the first sender's telemetry.
+    #[test]
+    fn a_forward_copies_text_and_content_fields() {
+        use leviculum_lxmf::constants::{FIELD_IMAGE, FIELD_TELEMETRY};
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        engine(
+            &mut model,
+            OutboxEvent::Received {
+                message_id: ID,
+                source: PEER,
+                title: Vec::new(),
+                body: b"look".to_vec(),
+                fields: vec![(FIELD_TELEMETRY, vec![0xc0]), (FIELD_IMAGE, vec![0x01])],
+                verified: true,
+            },
+        );
+        let key = model.conversations[0].messages[0].activity;
+        let effects = update(
+            &mut model,
+            UiEvent::Forward {
+                from: PEER,
+                key,
+                to: OTHER,
+            },
+        );
+        assert_eq!(
+            effects,
+            [UiEffect::Send {
+                to: OTHER,
+                body: "look".to_string(),
+                fields: vec![(FIELD_IMAGE, vec![0x01])],
+            }]
+        );
+        let other = model.conversations.iter().position(|c| c.peer == OTHER);
+        let other = &model.conversations[other.expect("made")];
+        assert_eq!(other.messages.last().map(|m| m.body.as_str()), Some("look"));
+        assert!(other.messages.last().is_some_and(|m| m.outbound));
+        assert!(update(
+            &mut model,
+            UiEvent::Forward {
+                from: PEER,
+                key: 999,
+                to: OTHER
+            }
+        )
+        .is_empty());
+    }
+
+    /// A frontend's delete of several: each gone from the screen and the
+    /// store, one mark for the home's devices; one still sending is kept.
+    #[test]
+    fn a_frontend_deletes_several_and_keeps_a_send_in_flight() {
+        use crate::home::wire::{Mark, MarkFlag};
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        model.home_client = true;
+        received(&mut model, ID, "one");
+        received(&mut model, ID2, "two");
+        update(
+            &mut model,
+            UiEvent::Write {
+                peer: PEER,
+                body: "three".to_string(),
+            },
+        );
+        model.take_writes();
+        model.take_marks();
+        model.toasts.clear();
+        let keys: Vec<u64> = model.conversations[0]
+            .messages
+            .iter()
+            .map(|m| m.activity)
+            .collect();
+        update(&mut model, UiEvent::Delete { peer: PEER, keys });
+        let left: Vec<&str> = model.conversations[0]
+            .messages
+            .iter()
+            .map(|m| m.body.as_str())
+            .collect();
+        assert_eq!(left, ["three"]);
+        assert_eq!(
+            model.take_marks(),
+            [Mark {
+                flag: MarkFlag::Deleted,
+                ids: vec![ID, ID2],
+            }]
+        );
+        assert_eq!(model.take_writes().len(), 2);
+        assert_eq!(
+            model.current_toast().map(|t| t.text.clone()),
+            Some(
+                "2 messages deleted from every device of this home; 1 still being sent, kept"
+                    .to_string()
+            )
+        );
+    }
+
+    /// The detail a frontend shows is the terminal's `v` view.
+    #[test]
+    fn a_frontend_gets_the_detail_view_by_key() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        received(&mut model, ID, "one");
+        let key = model.conversations[0].messages[0].activity;
+        let detail = message_detail(&model, PEER, key).expect("detail");
+        assert!(
+            detail.rows.iter().any(|r| r.contains(&to_hex(&ID))),
+            "{:?}",
+            detail.rows
+        );
+        assert!(detail.rows.iter().any(|r| r == "signature verified"));
+        assert!(message_detail(&model, PEER, 999).is_none());
     }
 }
