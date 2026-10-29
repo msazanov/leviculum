@@ -78,7 +78,8 @@ use crate::outbox::{Command, MailboxInput, OutboxEvent, SendRequest, Via};
 mod shell;
 #[cfg(feature = "std")]
 pub use shell::{
-    attach, attach_as, AttachConfig, AttachError, Attached, HomeRequest, InProcessOutbox, Role,
+    attach, attach_as, attach_leaf, parse_server, AttachConfig, AttachError, Attached, HomeRequest,
+    InProcessOutbox, LeafConfig, Role,
 };
 
 /// How soon the engine asks the driver to come back.

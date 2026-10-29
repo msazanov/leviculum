@@ -194,6 +194,60 @@ pub struct AttachConfig<N = Terminal> {
     pub notices: N,
 }
 
+/// What attaching a leaf needs to know: [`AttachConfig`] without the
+/// shared instance, and with the one node the leaf talks to instead.
+pub struct LeafConfig<N = Terminal> {
+    /// The home node's TCP server, `host:port`: an lnsd `TCPServerInterface`
+    /// or an rnsd one. A name is looked up again on every reconnect.
+    pub server: String,
+    /// Where this leaf keeps its node state: as [`AttachConfig::storage_dir`],
+    /// and here also the node's transport identity, since no daemon holds one.
+    pub storage_dir: PathBuf,
+    /// The identity the engine runs on.
+    pub identity: Identity,
+    /// The name recipients see, as [`AttachConfig::display_name`].
+    pub display_name: Vec<u8>,
+    /// Where the stamp worker's progress lines go.
+    pub notices: N,
+}
+
+/// `host:port` as the leaf dials it: the host as written (a name, an IPv4
+/// address, or an IPv6 one in brackets, which come off) and the port. The
+/// error says what is wrong in words a user typed the address in.
+pub fn parse_server(text: &str) -> Result<(String, u16), String> {
+    let text = text.trim();
+    let Some((host, port)) = text.rsplit_once(':') else {
+        return Err(format!(
+            "'{text}' has no port: write the home node's address as host:port, e.g. \
+             192.168.1.20:4242"
+        ));
+    };
+    let host = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    if host.is_empty() {
+        return Err(format!("'{text}' has no host before the port"));
+    }
+    if host.contains(':') && !text.starts_with('[') {
+        return Err(format!(
+            "'{text}': an IPv6 address goes in brackets, as [{host}]:port"
+        ));
+    }
+    match port.parse::<u16>() {
+        Ok(port) if port > 0 => Ok((host.to_string(), port)),
+        _ => Err(format!("'{port}' is not a port: a number from 1 to 65535")),
+    }
+}
+
+/// Where the attached node's traffic goes.
+enum Upstream {
+    /// A running daemon's shared instance, by name.
+    Shared(String),
+    /// One TCP client interface to this host and port, the node's only one.
+    Tcp { host: String, port: u16 },
+}
+
 /// Why attaching failed.
 #[derive(Debug)]
 pub enum AttachError {
@@ -204,6 +258,8 @@ pub enum AttachError {
     /// and they are one error to a user: the IPC socket is the only thing
     /// either step reaches for. Which of the two noticed is in `detail`.
     NoDaemon { instance: String, detail: String },
+    /// A leaf's own node did not come up. `server` is what it was to dial.
+    NoServer { server: String, detail: String },
 }
 
 impl core::fmt::Display for AttachError {
@@ -216,6 +272,11 @@ impl core::fmt::Display for AttachError {
                  Reticulum stack of its own.\n  \
                  Start one with `lnsd` (or Python's `rnsd`), or name another instance \
                  with --instance / --config.\n  \
+                 The stack said: {detail}"
+            ),
+            Self::NoServer { server, detail } => write!(
+                f,
+                "could not start a node that talks to the home node at {server}.\n  \
                  The stack said: {detail}"
             ),
         }
@@ -260,6 +321,73 @@ pub async fn attach_as<N: Effects + Send + 'static>(
     config: AttachConfig<N>,
     role: Role,
 ) -> Result<Attached, AttachError> {
+    let AttachConfig {
+        instance,
+        storage_dir,
+        identity,
+        display_name,
+        notices,
+    } = config;
+    let joined = Joined {
+        storage_dir,
+        identity,
+        display_name,
+        notices,
+    };
+    attach_through(joined, role, Upstream::Shared(instance)).await
+}
+
+/// Attach as a leaf: an in-process node with transport off and one TCP
+/// client interface to `config.server`, no daemon and no shared instance.
+/// The phone's way to its home node (`docs/drafts/loquax-android-2026-10.md`,
+/// option A). The node is up once this returns; the TCP connection comes up
+/// on its own and reconnects when it drops, so an unreachable server is no
+/// error here but a home node request that finds no path.
+pub async fn attach_leaf<N: Effects + Send + 'static>(
+    config: LeafConfig<N>,
+    role: Role,
+) -> Result<Attached, AttachError> {
+    let LeafConfig {
+        server,
+        storage_dir,
+        identity,
+        display_name,
+        notices,
+    } = config;
+    let (host, port) =
+        parse_server(&server).map_err(|detail| AttachError::NoServer { server, detail })?;
+    let joined = Joined {
+        storage_dir,
+        identity,
+        display_name,
+        notices,
+    };
+    attach_through(joined, role, Upstream::Tcp { host, port }).await
+}
+
+/// What both attaches hand the engine and the node.
+struct Joined<N> {
+    storage_dir: PathBuf,
+    identity: Identity,
+    display_name: Vec<u8>,
+    notices: N,
+}
+
+async fn attach_through<N: Effects + Send + 'static>(
+    config: Joined<N>,
+    role: Role,
+    upstream: Upstream,
+) -> Result<Attached, AttachError> {
+    let fail = |detail: String| match &upstream {
+        Upstream::Shared(instance) => AttachError::NoDaemon {
+            instance: instance.clone(),
+            detail,
+        },
+        Upstream::Tcp { host, port } => AttachError::NoServer {
+            server: format!("{host}:{port}"),
+            detail,
+        },
+    };
     // The home destination is the identity's too, so it is minted before
     // the engine takes the identity.
     let home = match &role {
@@ -269,15 +397,8 @@ pub async fn attach_as<N: Effects + Send + 'static>(
                 .private_key_bytes()
                 .ok()
                 .and_then(|bytes| Identity::from_private_key_bytes(&bytes).ok())
-                .ok_or_else(|| AttachError::NoDaemon {
-                    instance: config.instance.clone(),
-                    detail: "the home identity has no private key".to_string(),
-                })?;
-            let mut destination =
-                crate::home::destination(copy).map_err(|detail| AttachError::NoDaemon {
-                    instance: config.instance.clone(),
-                    detail,
-                })?;
+                .ok_or_else(|| fail("the home identity has no private key".to_string()))?;
+            let mut destination = crate::home::destination(copy).map_err(fail)?;
             destination.set_accepts_links(true);
             Some((destination, requests.clone()))
         }
@@ -313,9 +434,34 @@ pub async fn attach_as<N: Effects + Send + 'static>(
             .map(|(destination, requests)| (*destination.hash(), requests.clone())),
     };
 
-    let mut node = ReticulumNodeBuilder::new()
-        .enable_transport(false)
-        .connect_to_shared_instance(&config.instance)
+    let builder = ReticulumNodeBuilder::new().enable_transport(false);
+    let builder = match &upstream {
+        Upstream::Shared(instance) => builder.connect_to_shared_instance(instance),
+        // The interface as a config section, not `add_tcp_client`: that
+        // takes a socket address, and a home node behind a dynamic DNS name
+        // has to be looked up again on each reconnect, which the TCP
+        // client does for a name in `target_host`. Nothing else in the
+        // config: no shared instance to serve, no discovery, no other
+        // interface. A leaf is never a transport node.
+        Upstream::Tcp { host, port } => {
+            let mut config = leviculum_std::Config::default();
+            config.interfaces.insert(
+                "Home Node".to_string(),
+                leviculum_std::config::InterfaceConfig {
+                    name: "Home Node".to_string(),
+                    interface_type: "TCPClientInterface".to_string(),
+                    target_host: Some(host.clone()),
+                    target_port: Some(*port),
+                    ..Default::default()
+                },
+            );
+            builder
+                .config(config)
+                .share_instance(false)
+                .discover_interfaces(false)
+        }
+    };
+    let mut node = builder
         .storage_path(config.storage_dir)
         .core_processor(processor)
         // The engine consumes events on the processor tap; nothing here ever
@@ -324,14 +470,8 @@ pub async fn attach_as<N: Effects + Send + 'static>(
         .without_events()
         .build()
         .await
-        .map_err(|e| AttachError::NoDaemon {
-            instance: config.instance.clone(),
-            detail: e.to_string(),
-        })?;
-    node.start().await.map_err(|e| AttachError::NoDaemon {
-        instance: config.instance.clone(),
-        detail: e.to_string(),
-    })?;
+        .map_err(|e| fail(e.to_string()))?;
+    node.start().await.map_err(|e| fail(e.to_string()))?;
 
     // Registered after the start, as a page server registers its own
     // (`lblogd/src/node.rs`): the handlers admit every link, and the home
@@ -378,5 +518,30 @@ fn run_stamp_worker(
         if answers.send(answer).is_err() {
             return;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_server_is_host_and_port() {
+        let ok = |text: &str, host: &str, port: u16| {
+            assert_eq!(parse_server(text), Ok((host.to_string(), port)), "{text}");
+        };
+        ok("192.168.1.20:4242", "192.168.1.20", 4242);
+        ok(" home.example.org:4965 ", "home.example.org", 4965);
+        ok("[fd00::1]:4242", "fd00::1", 4242);
+        let refused = |text: &str, words: &str| {
+            let error = parse_server(text).expect_err(text);
+            assert!(error.contains(words), "{text}: {error}");
+        };
+        refused("192.168.1.20", "has no port");
+        refused(":4242", "has no host");
+        refused("fd00::1:4242", "in brackets");
+        refused("home:0", "not a port");
+        refused("home:65536", "not a port");
+        refused("home:http", "not a port");
     }
 }

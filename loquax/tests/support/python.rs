@@ -173,6 +173,9 @@ pub struct Mesh {
     pub daemon: ReticulumNode,
     pub instance: String,
     pub home: tempfile::TempDir,
+    /// The port of the daemon's TCP server on 127.0.0.1, where a leaf
+    /// (the Android app's node) dials in: [`Mesh::start_serving`] only.
+    pub tcp_port: Option<u16>,
     _storage: tempfile::TempDir,
 }
 
@@ -184,6 +187,16 @@ impl Mesh {
     /// [`Mesh::start`] with a TCP link to each of several Python daemons,
     /// so they reach each other through the Rust transport.
     pub async fn start_many(python_rns_ports: &[u16]) -> Self {
+        Self::start_with(python_rns_ports, false).await
+    }
+
+    /// [`Mesh::start_many`] with a TCP server on a free loopback port too,
+    /// as a home node's lnsd has one for its phones.
+    pub async fn start_serving(python_rns_ports: &[u16]) -> Self {
+        Self::start_with(python_rns_ports, true).await
+    }
+
+    async fn start_with(python_rns_ports: &[u16], serve: bool) -> Self {
         // Unique per process AND per call: two tests in one binary run in
         // parallel threads and would otherwise fight over one abstract socket.
         static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -203,6 +216,14 @@ impl Mesh {
                 .expect("loopback address");
             builder = builder.add_tcp_client(python);
         }
+        let mut tcp_port = None;
+        if serve {
+            // Bound here, so the port is known before the daemon runs and
+            // no other test can take it in between.
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback TCP port");
+            tcp_port = Some(listener.local_addr().expect("its address").port());
+            builder = builder.add_tcp_server_listener(listener);
+        }
         let mut daemon = builder
             .storage_path(storage.path().to_path_buf())
             .build_sync()
@@ -216,6 +237,7 @@ impl Mesh {
             daemon,
             instance,
             home: tempfile::tempdir().expect("loquax state dir"),
+            tcp_port,
             _storage: storage,
         }
     }

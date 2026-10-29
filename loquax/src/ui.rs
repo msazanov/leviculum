@@ -1023,6 +1023,20 @@ pub enum UiEvent {
     MapSetup(map::MapSetup),
     /// A region load asked with [`UiEffect::LoadMap`] moved on.
     MapLoad(MapLoad),
+    /// Open `peer`'s conversation, listed if new, as a tap on it does in a
+    /// frontend without keys (the Android app): its unread are read, and on
+    /// a client of a home node marked read for the home's other devices.
+    Open { peer: [u8; 16] },
+    /// Send `body` to `peer` in their conversation, opened first, as the
+    /// compose pane's `Enter` does with its text.
+    Write { peer: [u8; 16], body: String },
+    /// React with `content` to the message `target` in `peer`'s
+    /// conversation, as the picker's choice does ([`reactions`]).
+    React {
+        peer: [u8; 16],
+        target: [u8; 32],
+        content: String,
+    },
 }
 
 /// How a region load goes, as the shell reports it.
@@ -1195,6 +1209,21 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
             Vec::new()
         }
         UiEvent::FetchDone(result) => on_fetch_done(model, result),
+        UiEvent::Open { peer } => {
+            let index = model.conversation(peer);
+            model.select(index);
+            Vec::new()
+        }
+        UiEvent::Write { peer, body } => {
+            let index = model.conversation(peer);
+            model.select(index);
+            send_body(model, body)
+        }
+        UiEvent::React {
+            peer,
+            target,
+            content,
+        } => model.react(peer, target, &content),
     }
 }
 
@@ -2596,14 +2625,26 @@ fn send<B: InputBuffer + Default>(model: &mut UiModel<B>) -> Vec<UiEffect> {
     if model.compose.value().trim().is_empty() {
         return Vec::new();
     }
-    let Some(conversation) = model.conversations.get_mut(model.selected) else {
+    if model.conversations.get(model.selected).is_none() {
         model.toast(
             ToastKind::Error,
             "no conversation to send to: start loquax tui --to <address>".to_string(),
         );
         return Vec::new();
-    };
+    }
     let body = model.compose.take();
+    send_body(model, body)
+}
+
+/// Send `body` in the open conversation: the compose pane's text, or a
+/// frontend's ([`UiEvent::Write`]). Blank text sends nothing.
+fn send_body<B>(model: &mut UiModel<B>, body: String) -> Vec<UiEffect> {
+    if body.trim().is_empty() {
+        return Vec::new();
+    }
+    let Some(conversation) = model.conversations.get_mut(model.selected) else {
+        return Vec::new();
+    };
     conversation
         .messages
         .push(Message::ours(body.clone(), model.now));
@@ -4282,6 +4323,85 @@ mod tests {
                 false => assert!(marks.is_empty()),
             }
         }
+    }
+
+    /// A frontend without keys opens a conversation by its peer: the same
+    /// read and the same marks as the list's key, and a peer not listed yet
+    /// gets a conversation.
+    #[test]
+    fn a_tap_opens_a_conversation_as_the_key_does() {
+        use crate::home::wire::{Mark, MarkFlag};
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        model.home_client = true;
+        engine(&mut model, received_from(OTHER, ID, "one"));
+        assert_eq!(model.conversations[1].unread, 1);
+        assert!(update(&mut model, UiEvent::Open { peer: OTHER }).is_empty());
+        assert_eq!(model.selected, 1);
+        assert_eq!(model.conversations[1].unread, 0);
+        assert_eq!(
+            model.take_marks(),
+            [Mark {
+                flag: MarkFlag::Read,
+                ids: vec![ID],
+            }]
+        );
+        let new = [0x5a; 16];
+        update(&mut model, UiEvent::Open { peer: new });
+        assert_eq!(model.conversations[model.selected].peer, new);
+    }
+
+    /// A frontend's text goes out as compose's does: a bubble of ours,
+    /// queued, in the peer's conversation, opened; blank text sends
+    /// nothing; and a reaction by peer and target is the picker's.
+    #[test]
+    fn a_frontend_writes_and_reacts_without_the_compose_pane() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        assert!(update(
+            &mut model,
+            UiEvent::Write {
+                peer: OTHER,
+                body: "  ".to_string()
+            }
+        )
+        .is_empty());
+        let effects = update(
+            &mut model,
+            UiEvent::Write {
+                peer: OTHER,
+                body: "hallo".to_string(),
+            },
+        );
+        assert_eq!(
+            effects,
+            [UiEffect::Send {
+                to: OTHER,
+                body: "hallo".to_string(),
+                fields: Vec::new(),
+            }]
+        );
+        let conversation = &model.conversations[model.selected];
+        assert_eq!(conversation.peer, OTHER);
+        let ours = conversation.messages.last().expect("the bubble");
+        assert!(ours.outbound);
+        assert_eq!(ours.delivery, Some(DeliveryState::Queued));
+        assert_eq!(model.sending.len(), 1);
+        assert_eq!(model.compose.value(), "", "compose is not touched");
+
+        engine(&mut model, received_from(OTHER, ID, "lunch?"));
+        let effects = update(
+            &mut model,
+            UiEvent::React {
+                peer: OTHER,
+                target: ID,
+                content: "ok".to_string(),
+            },
+        );
+        let [UiEffect::Send { to, body, fields }] = effects.as_slice() else {
+            panic!("one send: {effects:?}");
+        };
+        assert_eq!((*to, body.as_str()), (OTHER, ""));
+        assert_eq!(fields.len(), 1);
+        assert_eq!(model.sending.len(), 2);
     }
 
     /// Another device read a message: every received message up to it is
