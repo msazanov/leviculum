@@ -696,3 +696,64 @@ fn a_region_carries_its_names_and_one_string_table() {
         assert!(r.string(i - 1).expect("s") < r.string(i).expect("s"));
     }
 }
+
+/// The label language's chain (1126): `name:<locale>`; else `name:en`
+/// where `name` is in a script the locale does not read; else `name`.
+#[test]
+fn a_name_falls_back_to_english_where_the_locale_cannot_read_it() {
+    let layers = leviculum_map::profile::layers(1, 13).expect("profile");
+    fn city<'a>(x: i32, tags: &[(&'a str, &str)]) -> Tagged<'a> {
+        let mut props = vec![("kind", text("locality")), ("kind_detail", text("city"))];
+        props.extend(tags.iter().map(|(k, v)| (*k, text(v))));
+        (POINT, at(x, 100), props)
+    }
+    let tile = Tile {
+        layers: vec![
+            layer("earth", vec![(POLYGON, "", polygon(&[square(0, 0, 4096)]))]),
+            tagged(
+                "places",
+                vec![
+                    city(100, &[("name", "Αθήνα"), ("name:en", "Athens")]),
+                    city(
+                        200,
+                        &[
+                            ("name", "Москва"),
+                            ("name:de", "Moskau"),
+                            ("name:en", "Moscow"),
+                        ],
+                    ),
+                    city(300, &[("name", "東京")]),
+                    city(400, &[("name", "München"), ("name:en", "Munich")]),
+                    city(500, &[("name", "Αθήνα"), ("name:en", "Αθήνα")]),
+                ],
+            ),
+        ],
+    }
+    .encode_to_vec();
+    let shown = |locale: Option<&str>| -> Vec<String> {
+        let names = Names {
+            locale,
+            z: 13,
+            deepest: false,
+        };
+        let (_, labels, _) = cut_tile_named(&tile, layers, Some(names)).expect("cut");
+        labels
+            .points
+            .iter()
+            .map(|p| p.3.alternate.clone().unwrap_or_else(|| p.3.local.clone()))
+            .collect()
+    };
+    assert_eq!(
+        shown(Some("de")),
+        ["Athens", "Moskau", "東京", "München", "Αθήνα"]
+    );
+    assert_eq!(
+        shown(Some("ru")),
+        ["Athens", "Москва", "東京", "München", "Αθήνα"]
+    );
+    assert_eq!(
+        shown(Some("el")),
+        ["Αθήνα", "Moscow", "東京", "München", "Αθήνα"]
+    );
+    assert_eq!(shown(None), ["Αθήνα", "Москва", "東京", "München", "Αθήνα"]);
+}

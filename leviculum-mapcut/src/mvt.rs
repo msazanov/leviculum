@@ -24,8 +24,9 @@ const POLYGON: i32 = 3;
 const LINESTRING: i32 = 2;
 const POINT: i32 = 1;
 
-/// A name as the cut keeps it: the local one, and the one in the locale
-/// the region is cut for where that differs.
+/// A name as the cut keeps it: the local one, and the one shown in the
+/// locale the region is cut for where that differs: `name:<locale>`, else
+/// `name:en` where the locale cannot read `name` ([`readable`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Name {
     pub local: String,
@@ -100,19 +101,84 @@ impl<'a> Props<'a> {
         })
     }
 
-    /// The name, and the one in `locale` where it differs; `None` without
-    /// a name or with an empty one.
+    /// The name, and the one `locale` shows where it differs; `None`
+    /// without a name or with an empty one. The chain: `name:<locale>`;
+    /// else `name:en` where `name` is in a script the locale does not read
+    /// and `name:en` is in one it does ([`readable`]: a German map of
+    /// Athens shows "Athens", not "Αθήνα"); else `name` alone.
     fn name(&self, locale: Option<&str>) -> Option<Name> {
         let local = self.text(&["name"]).filter(|n| !n.trim().is_empty())?;
+        let given = |key: &str| self.text(&[key]).filter(|a| !a.trim().is_empty());
         let alternate = locale
-            .and_then(|l| self.text(&[&format!("name:{l}")]))
-            .filter(|a| *a != local && !a.trim().is_empty())
+            .and_then(|l| {
+                given(&format!("name:{l}")).or_else(|| {
+                    let script = locale_script(l);
+                    given("name:en").filter(|en| !readable(local, script) && readable(en, script))
+                })
+            })
+            .filter(|a| *a != local)
             .map(str::to_owned);
         Some(Name {
             local: local.to_owned(),
             alternate,
         })
     }
+}
+
+/// The scripts the label language tells apart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Script {
+    Latin,
+    Greek,
+    Cyrillic,
+    /// Han, kana and Hangul.
+    Cjk,
+    /// Every other script: Arabic, Hebrew, the Indic ones, Thai, ...
+    Other,
+}
+
+/// The script of a letter; `None` for what is no letter (digits, spaces,
+/// punctuation, combining marks), which every reader reads.
+pub fn script_of(c: char) -> Option<Script> {
+    if !c.is_alphabetic() {
+        return None;
+    }
+    let u = u32::from(c);
+    Some(match u {
+        0x41..=0x5a | 0x61..=0x7a | 0xaa | 0xba | 0xc0..=0x24f | 0x250..=0x2af => Script::Latin,
+        0x1e00..=0x1eff | 0x2c60..=0x2c7f | 0xa720..=0xa7ff | 0xff21..=0xff5a => Script::Latin,
+        0x370..=0x3ff | 0x1f00..=0x1fff => Script::Greek,
+        0x400..=0x52f | 0x1c80..=0x1c8f | 0x2de0..=0x2dff | 0xa640..=0xa69f => Script::Cyrillic,
+        0x1100..=0x11ff | 0x3040..=0x30ff | 0x3130..=0x318f | 0x31f0..=0x31ff => Script::Cjk,
+        0x3400..=0x4dbf | 0x4e00..=0x9fff | 0xac00..=0xd7af | 0xf900..=0xfaff => Script::Cjk,
+        0x20000..=0x3ffff => Script::Cjk,
+        _ => Script::Other,
+    })
+}
+
+/// The script a locale's language (`de`, `ru`) is written in: Latin for
+/// every language not named here.
+pub fn locale_script(locale: &str) -> Script {
+    let lang = locale.split(['_', '-', '.']).next().unwrap_or("");
+    match lang {
+        "el" => Script::Greek,
+        "ru" | "uk" | "be" | "bg" | "mk" | "sr" | "kk" | "ky" | "mn" | "tg" | "tt" | "ba"
+        | "cv" => Script::Cyrillic,
+        "zh" | "ja" | "ko" => Script::Cjk,
+        "ar" | "fa" | "ur" | "he" | "yi" | "hi" | "mr" | "ne" | "bn" | "th" | "ka" | "hy"
+        | "am" | "ta" | "te" | "kn" | "ml" | "gu" | "pa" | "si" | "km" | "lo" | "my" => {
+            Script::Other
+        }
+        _ => Script::Latin,
+    }
+}
+
+/// Whether a reader of `script` reads `text`: every letter in Latin, which
+/// every map reader is taken to read, or in `script`.
+pub fn readable(text: &str, script: Script) -> bool {
+    text.chars()
+        .filter_map(script_of)
+        .all(|s| s == Script::Latin || s == script)
 }
 
 /// The label kind of a place of Protomaps `kind` and `kind_detail`: the
