@@ -718,6 +718,12 @@ async fn run(args: SendArgs) -> ExitCode {
         }
         Err(error) => return failure(error, "no-home"),
     }
+    // The send registers the delivery destination for its run: never
+    // beside the home node that answers for the same identity.
+    let _lock = match loquax::home::lock::DeliveryLock::share(&home) {
+        Ok(lock) => lock,
+        Err(error) => return failure(error, "locked"),
+    };
     // Resolved before attaching for the same reason the display name is:
     // a bad --pn or a corrupt config line is an argument-shaped problem and
     // should not cost a daemon connection first.
@@ -855,6 +861,11 @@ async fn run_fetch_command(args: FetchArgs) -> ExitCode {
         Ok(Some(public_key)) => return run_client_fetch(home, public_key, args).await,
         Err(error) => return failure(error, "no-home"),
     }
+    // As `loquax send`: the home node collects for its own identity.
+    let _lock = match loquax::home::lock::DeliveryLock::share(&home) {
+        Ok(lock) => lock,
+        Err(error) => return failure(error, "locked"),
+    };
     let (preferred_pn, pn_source) = match resolve_pn(args.pn.as_deref(), &home) {
         Ok(resolved) => resolved,
         Err(error) => return usage(error),
