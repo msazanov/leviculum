@@ -60,9 +60,19 @@ On the home node, `loquax home admit --name laptop` opens one single-use
 token and prints a code. The code carries the home identity's public key
 and the token, with four bytes of SHA-256 over both so a mistyped code is
 refused before anything goes on the wire, in lower-case base32 behind the
-prefix `lqxh1` (140 characters; slice 5 adds a QR code for it). The home
-destination and the LXMF address both derive from the public key, so the
-code needs nothing else.
+prefix `lqxh1` (140 characters). The home destination and the LXMF
+address both derive from the public key, so the code needs nothing else.
+
+A phone has no shared instance to reach the home node through, so it needs
+the home node's TCP server too. `loquax home admit --server host:port`
+writes it behind the code, `lqxh1...@host:port` (an IPv6 address in
+brackets): the base32 alphabet has no `@`, so the split is unambiguous, a
+code without the address reads as before, and a desktop's `home join`
+drops the address. `admit` prints the code as a QR code beside the text,
+in Unicode half blocks, the base32 in upper case in the QR alphanumeric
+mode (version 6 for the code alone, at error correction level M). The
+Android join screen takes the combined form pasted or shared to it from a
+QR reader and fills the address from it.
 
 On the new device, `loquax home join <code>` creates the device identity,
 asks for the path to the home destination, opens a link to it, identifies
@@ -72,7 +82,9 @@ token, all in one transaction. A token used once is refused the second
 time, and so is one older than `home_token_hours` in the config (24 by
 default: time to carry the code to the other device, short enough that a
 code left in a chat log or a screenshot is dead by the next day). `loquax
-home tokens` lists the codes still open, with when each expires.
+home tokens` lists the codes still open, with when each expires, and
+`loquax home revoke-token <prefix>` withdraws one by the start of its hash
+as that list shows it (four hex characters are enough when unique).
 
 `loquax home devices` lists the admitted devices, `loquax home revoke
 <device>` removes one, by its name or by its hash (four hex characters are
@@ -90,7 +102,7 @@ registered locally, as the reference answers for any local destination
 (`reference/Reticulum/RNS/Transport.py:2936-2941`). Peers other than the
 user's own devices never see it.
 
-Its three request handlers admit every link at the RNS level; the home node
+Its five request handlers admit every link at the RNS level; the home node
 reads the identity the link was identified with and decides itself. A
 request on a link that was not identified is answered with a refusal.
 
@@ -105,6 +117,7 @@ Link requests on `loquax.home`, msgpack on the wire:
 /send  [client_id: bin16, destination: bin16, title: bin, content: bin,
         [[key: int, value: bin], ...]] -> [status, id: bin32]
 /mark  [flag: uint, [id: bin32, ...]] -> [status]
+/watch [cursor: uint]              -> [status, newest: uint]
 ```
 
 The status comes first in every answer: 0 ok, 1 not identified, 2 not
@@ -136,7 +149,51 @@ so a client whose cursor fell behind an eviction says so in its log.
   (leviculum 1079). A message addressed to anyone but the home identity, or
   whose signature does not hold, is dropped.
 
-A later slice adds `/register` for wake paths (slice 3).
+## The wake
+
+Slice 3's first rung, the quiet link (leviculum 1123). Without it a client
+learns of new mail only on its next pull: on open, on Refresh, or on the
+schedule, fifteen minutes by default.
+
+- **The client keeps one link** to `loquax.home` while it runs (the
+  phone's session, the terminal), identified as the device, and asks
+  `/watch` on it with its cursor. The answer is the archive's newest
+  sequence, 0 for an empty archive, so a client whose cursor is behind
+  pulls at once. The link stays up with the link's own keepalive; tuning
+  that and the TCP keepalives for the battery is a later, measured step.
+  A link that drops, or never comes up, is opened again after 2 s,
+  doubling to five minutes, and after 2 s again once one stood
+  (`loquax::home::watch::Backoff`).
+- **The home node wakes every watching link** when the archive grows: a
+  received message, a state change of a sent one, a mark. The wake is a
+  channel message on that link, no content, only the newest sequence:
+
+  ```text
+  ["pull", newest: uint]
+  ```
+
+  A burst is coalesced: the first append after a quiet spell wakes at
+  once, the rest of the burst is one more wake 500 ms after it, per link
+  (`loquax::home::wake`). A link whose device was revoked since is closed
+  instead; one that is gone is forgotten.
+- **The client pulls on a wake past its cursor**, with the `/sync` above
+  on a link of its own; the phone notifies as for any pull. A wake older
+  than the cursor pulls nothing.
+- **The fallback stays**: pulls on open, on Refresh and on the schedule.
+  While a screen of the app is in front (the `front` request of the
+  phone's facade; the terminal is in front whenever it runs) and the
+  watching link is down, a pull runs every minute.
+- **Compatible both ways.** A client from before never opens the link
+  and pulls as it did. A home node from before answers no `/watch`: the
+  request runs out of time, the backoff grows to five minutes, and the
+  client pulls on its schedule and every minute in front. `home_wake = off`
+  in the home node's config answers `/watch` and sends no wake.
+
+On loopback a wake reaches the client in the same 10 ms poll in which
+the home node's archive line appears (`loquax/tests/home_node.rs`, with
+`home_wake = off` as the positive control). The phone's session shows the
+message 0.3 s after the sender's `run_send` returns, with no pull asked
+(`loquax-android/tests/facade.rs`).
 
 ## Sending through the home node
 
@@ -347,11 +404,15 @@ and the answer as a sent bubble.
    limits slice 1 left: the delivery lock, the cursor after the store, and
    token expiry.
 3. Quiet link: TCP liveness in lnsd, the per-link keepalive, AP mode, a
-   wake push. After the battery measurement.
+   wake push. The wake over the kept link is built ("The wake"); the
+   keepalive tuning, the TCP liveness and AP mode wait for the battery
+   measurement.
 4. Multi-client state: `/mark`, read and sent state on every client.
    Built, without a retry for a mark the home node did not take.
-5. Pairing UX: the QR code in the GUI, the text code in the TUI, hand-over
-   from a one-device setup.
+5. Pairing UX: the address in the code, the QR code in the terminal,
+   `revoke-token`, the combined code on the phone's join screen. Built;
+   the QR code in the GUI and the hand-over from a one-device setup are
+   open.
 
 The rest of the plan (the M9 as a client, board sleep, Android) is in the
 draft's section 5.

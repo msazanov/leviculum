@@ -9,7 +9,18 @@
 //! /send  [client_id: bin16, destination: bin16, title: bin, content: bin,
 //!         [[key: int, value: bin], ...]]      -> [status, id: bin32]
 //! /mark  [flag: uint, [id: bin32, ...]]       -> [status]
+//! /watch [cursor: uint]                       -> [status, newest: uint]
+//!
+//! wake   ["pull", newest: uint]               home node to client, on the
+//!                                             link that asked /watch
 //! ```
+//!
+//! `/watch` keeps the link it came on: the home node sends a wake over it,
+//! as a channel message, whenever the archive grew, at most one per
+//! [`super::wake::COALESCE_MS`] per link. A wake carries no content, only
+//! the newest sequence, and the client pulls with `/sync` when that is past
+//! its cursor ([`super::watch`]). `newest` in the answer is the same number
+//! at the time of the request, 0 for an empty archive.
 //!
 //! A mark's flag is 0 for read and 1 for deleted ([`MarkFlag`]). The home
 //! node keeps the request's bytes as the archive entry, so every client
@@ -215,6 +226,57 @@ pub fn sync_request(cursor: u64) -> Vec<u8> {
 pub fn read_sync_request(data: &[u8]) -> Result<u64, Malformed> {
     let mut p = 0;
     if msgpack::array_len(data, &mut p)? < 1 {
+        return Err(Malformed);
+    }
+    Ok(msgpack::read_uint(data, &mut p)?)
+}
+
+pub fn watch_request(cursor: u64) -> Vec<u8> {
+    sync_request(cursor)
+}
+
+pub fn read_watch_request(data: &[u8]) -> Result<u64, Malformed> {
+    read_sync_request(data)
+}
+
+pub fn watch_answer(newest: u64) -> Vec<u8> {
+    let mut out = Vec::new();
+    msgpack::array(&mut out, 2);
+    msgpack::uint(&mut out, Status::Ok.code());
+    msgpack::uint(&mut out, newest);
+    out
+}
+
+/// A `/watch` answer: the newest sequence, or the status that refused it.
+pub fn read_watch_answer(data: &[u8]) -> Result<Result<u64, Status>, Malformed> {
+    let status = read_status(data)?;
+    if status != Status::Ok {
+        return Ok(Err(status));
+    }
+    let mut p = 0;
+    if msgpack::array_len(data, &mut p)? != 2 {
+        return Err(Malformed);
+    }
+    msgpack::read_uint(data, &mut p)?;
+    Ok(Ok(msgpack::read_uint(data, &mut p)?))
+}
+
+/// The word a wake starts with.
+const WAKE_WORD: &str = "pull";
+
+/// A wake: pull, the archive's newest sequence is `newest`.
+pub fn wake(newest: u64) -> Vec<u8> {
+    let mut out = Vec::new();
+    msgpack::array(&mut out, 2);
+    msgpack::string(&mut out, WAKE_WORD);
+    msgpack::uint(&mut out, newest);
+    out
+}
+
+/// A wake's newest sequence. Anything else on the link is malformed.
+pub fn read_wake(data: &[u8]) -> Result<u64, Malformed> {
+    let mut p = 0;
+    if msgpack::array_len(data, &mut p)? != 2 || msgpack::read_str(data, &mut p)? != WAKE_WORD {
         return Err(Malformed);
     }
     Ok(msgpack::read_uint(data, &mut p)?)
@@ -452,6 +514,26 @@ mod tests {
         msgpack::array(&mut unknown, 1);
         msgpack::bin(&mut unknown, &[1; 32]);
         assert_eq!(read_mark(&unknown), Err(Malformed));
+    }
+
+    #[test]
+    fn a_watch_and_a_wake_round_trip_and_a_stranger_is_no_wake() {
+        assert_eq!(read_watch_request(&watch_request(9)), Ok(9));
+        assert_eq!(read_watch_answer(&watch_answer(41)), Ok(Ok(41)));
+        assert_eq!(
+            read_watch_answer(&status_answer(Status::NotAdmitted)),
+            Ok(Err(Status::NotAdmitted))
+        );
+        let data = wake(u64::MAX);
+        assert_eq!(read_wake(&data), Ok(u64::MAX));
+        // A handful of bytes: one link packet on any medium.
+        assert!(data.len() <= 16, "{}", data.len());
+        let mut other = Vec::new();
+        msgpack::array(&mut other, 2);
+        msgpack::string(&mut other, "push");
+        msgpack::uint(&mut other, 1);
+        assert_eq!(read_wake(&other), Err(Malformed));
+        assert_eq!(read_wake(&sync_request(1)), Err(Malformed));
     }
 
     #[test]

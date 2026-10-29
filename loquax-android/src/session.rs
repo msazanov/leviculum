@@ -2,9 +2,10 @@
 //! (`loquax::engine::attach_leaf`), the client engine behind the Outbox
 //! seam, the store, and loquax's screen model, which decides what a
 //! message, a send, a mark and a pull do to the conversations exactly as it
-//! does in the terminal. What the terminal's shell does with the model's
-//! effects for a client of a home node is done here, on a tokio runtime the
-//! session owns: sends through `/send` one at a time, pulls, marks.
+//! does in the terminal. The model's effects run here on a tokio runtime the
+//! session owns, through the client runners the terminal's shell runs too
+//! (`loquax::home::runner`): sends through `/send` one at a time, pulls,
+//! marks.
 //!
 //! Java never touches the engine. It calls [`Session::request`] and
 //! [`Session::query`] from any thread, which take the session's lock
@@ -17,14 +18,14 @@ use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use leviculum_core::Identity;
 use leviculum_lxmf::Field;
-use leviculum_std::ReticulumNode;
 use leviculum_ui::commands::Command as PaletteCommand;
 use leviculum_ui::delivery::DeliveryState;
 use leviculum_ui::input::{InputBuffer, KeyEvent};
 use loquax::engine::{attach_leaf, Attached, LeafConfig, Role};
-use loquax::fanout::{Fanout, Tap};
+use loquax::fanout::Fanout;
+use loquax::home::runner::{self, HomeClient};
+use loquax::home::watch::{self, Fallback, WatchEvent};
 use loquax::outbox::{Command, Outbox, OutboxEvent};
 use loquax::store::Store;
 use loquax::ui::{reactions, update, Message, UiEffect, UiEvent, UiModel};
@@ -41,6 +42,8 @@ pub const BUDGET: Duration = Duration::from_secs(60);
 const PUMP: Duration = Duration::from_millis(100);
 /// How long a send runner waits for its bubble to be named.
 const SETTLE: Duration = Duration::from_secs(5);
+/// How many pumps between two looks at the TCP interface: a second.
+const LINK_EVERY: u32 = 10;
 
 /// Why the session did not start, and what the join screen has to ask for.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,14 +85,6 @@ impl InputBuffer for Line {
     fn set_cursor(&mut self, _at: usize) {}
 }
 
-/// What talks to the home node beside the engine.
-#[derive(Clone)]
-struct Client {
-    node: Arc<ReticulumNode>,
-    public_key: [u8; 64],
-    device: Identity,
-}
-
 /// A runner's end, folded by the pump.
 enum Finished {
     Send(UiEvent),
@@ -105,7 +100,7 @@ struct Inner {
     store: Store,
     attached: Attached,
     fanout: Fanout,
-    client: Client,
+    client: HomeClient,
     home: PathBuf,
     offset: i32,
     sends: VecDeque<([u8; 16], String, Vec<Field>)>,
@@ -120,6 +115,17 @@ struct Inner {
     /// Something the screen shows changed since the last `changed`.
     dirty: bool,
     gone: bool,
+    /// Whether the TCP interface to the home node was up at the last look,
+    /// none before the first, and the pumps since that look.
+    link: Option<bool>,
+    link_age: u32,
+    /// The watching link's word (`loquax::home::watch`), whether it is up,
+    /// whether a screen of the app is in front, and the pull every minute
+    /// while it is and the link is down.
+    watch: tokio::sync::mpsc::UnboundedReceiver<WatchEvent>,
+    watching: bool,
+    front: bool,
+    fallback: Fallback,
 }
 
 /// A running session.
@@ -134,16 +140,22 @@ pub struct Session {
 impl Session {
     /// Start: on a phone that is no client yet, join with the code first.
     /// Blocks for as long as the join takes, up to [`BUDGET`].
+    /// A code with the address behind it (`lqxh1...@host:port`) brings the
+    /// server along; a server given beside it wins.
     pub fn start(start: &schema::Start) -> Result<Self, StartError> {
         let home = PathBuf::from(&start.dir);
         let client = loquax::home::client::load_client(&home).map_err(StartError::other)?;
+        let mut carried = None;
         let code = match (&client, start.code.as_deref().map(str::trim)) {
-            (_, Some(code)) if !code.is_empty() => Some(
-                loquax::home::code::HomeCode::parse(code).map_err(|error| StartError {
-                    need: Some("code"),
-                    text: format!("That is not a home code: {error}"),
-                })?,
-            ),
+            (_, Some(code)) if !code.is_empty() => {
+                let (code, server) = loquax::home::code::HomeCode::parse_with_server(code)
+                    .map_err(|error| StartError {
+                        need: Some("code"),
+                        text: format!("That is not a home code: {error}"),
+                    })?;
+                carried = server;
+                Some(code)
+            }
             (Some(_), _) => None,
             (None, _) => {
                 return Err(StartError {
@@ -164,7 +176,7 @@ impl Session {
         }
         let server = match start.server.as_deref().map(str::trim) {
             Some(server) if !server.is_empty() => server.to_string(),
-            _ => load_server(&home).ok_or(StartError {
+            _ => carried.or_else(|| load_server(&home)).ok_or(StartError {
                 need: Some("server"),
                 text: "Type the home node's address, host:port of its lnsd TCP server.".to_string(),
             })?,
@@ -203,7 +215,7 @@ impl Session {
             Role::Client { address },
         ));
         let attached = attached.map_err(|error| StartError::other(error.to_string()))?;
-        let client = Client {
+        let client = HomeClient {
             node: attached.node(),
             public_key,
             device,
@@ -237,6 +249,13 @@ impl Session {
         save_server(&home, &server).map_err(StartError::other)?;
 
         let (events_tx, events_rx) = channel();
+        let (watch_tx, watch_rx) = tokio::sync::mpsc::unbounded_channel();
+        let watching = watch::Watch {
+            node: client.node.clone(),
+            public_key,
+            device: client.device.clone(),
+            home: home.clone(),
+        };
         let inner = Inner::new(
             &home,
             address,
@@ -245,8 +264,11 @@ impl Session {
             start.offset,
             events_tx,
             runtime.handle().clone(),
+            watch_rx,
         )
         .map_err(StartError::other)?;
+        // Ends with the runtime, or once the session's end of it is dropped.
+        runtime.spawn(watch::run(watching, watch_tx));
         let inner = Arc::new(Mutex::new(inner));
         let pumped = Arc::clone(&inner);
         runtime.spawn(async move {
@@ -282,6 +304,24 @@ impl Session {
         &self.server
     }
 
+    /// Whether the TCP interface to the home node is up now.
+    pub fn link(&self) -> bool {
+        link_up(&self.lock().client.node)
+    }
+
+    /// Whether the session ended by itself: the engine is gone, and only a
+    /// fresh start helps.
+    pub fn is_over(&self) -> bool {
+        self.lock().gone
+    }
+
+    /// Cut the session off its engine, as the engine's death does; the
+    /// next pump finds it gone. For the facade test.
+    #[doc(hidden)]
+    pub fn simulate_engine_death(&self) {
+        self.lock().attached.outbox.sever();
+    }
+
     fn lock(&self) -> MutexGuard<'_, Inner> {
         // A panic under the lock is caught at the JNI edge; what it left
         // is still the best state there is.
@@ -315,6 +355,10 @@ impl Session {
             },
             schema::Request::Close => UiEvent::Close,
             schema::Request::Pull => UiEvent::Run(PaletteCommand::Fetch),
+            schema::Request::Front { front } => {
+                self.lock().front = front;
+                return Ok(());
+            }
         };
         self.lock().apply(event);
         Ok(())
@@ -374,14 +418,16 @@ impl Drop for Session {
 }
 
 impl Inner {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         home: &Path,
         address: [u8; 16],
         attached: Attached,
-        client: Client,
+        client: HomeClient,
         offset: i32,
         events: Sender<Event>,
         runtime: tokio::runtime::Handle,
+        watch: tokio::sync::mpsc::UnboundedReceiver<WatchEvent>,
     ) -> Result<Self, String> {
         let store = Store::open_in(home, address).map_err(|error| error.to_string())?;
         let config = loquax::config::load(home).map_err(|error| error.to_string())?;
@@ -439,6 +485,13 @@ impl Inner {
             origin: std::time::Instant::now(),
             dirty: true,
             gone: false,
+            link: None,
+            // The first pump looks, and says what it saw.
+            link_age: LINK_EVERY,
+            watch,
+            watching: false,
+            front: false,
+            fallback: Fallback::default(),
         })
     }
 
@@ -451,10 +504,10 @@ impl Inner {
         match self.fanout.pump(&mut self.attached.outbox) {
             Ok(events) => {
                 for event in events {
-                    if self.already_held(&event) {
+                    if runner::already_held(&self.store, &event) {
                         continue;
                     }
-                    self.keep_signature(&event);
+                    runner::keep_signature(&mut self.store, &event);
                     let named = match &event {
                         OutboxEvent::Announced {
                             destination,
@@ -464,7 +517,12 @@ impl Inner {
                     };
                     self.apply(UiEvent::Engine(event));
                     if let Some(peer) = named {
-                        self.keep_name(peer);
+                        runner::keep_name(
+                            &mut self.store,
+                            &self.model.names,
+                            self.model.address,
+                            peer,
+                        );
                     }
                 }
             }
@@ -486,7 +544,9 @@ impl Inner {
                 Finished::Pull { result, cursor } => self.pulled(result, cursor),
             }
         }
+        self.look_at_link();
         let elapsed = u64::try_from(self.origin.elapsed().as_millis()).unwrap_or(u64::MAX);
+        self.watched(elapsed);
         self.quiet(UiEvent::Clock(wall_now(self.offset)));
         self.quiet(UiEvent::Tick);
         self.apply(UiEvent::Elapsed(elapsed));
@@ -494,6 +554,66 @@ impl Inner {
             let _ = self.events.send(Event::Changed { v: VERSION });
         }
         true
+    }
+
+    /// What the watching link said: a wake past the cursor pulls, as does
+    /// a minute in front with the link down. The pull is the one a send
+    /// starts, behind a running one; its messages notify as any pull's do.
+    fn watched(&mut self, elapsed: u64) {
+        let mut wake = false;
+        while let Ok(event) = self.watch.try_recv() {
+            match event {
+                WatchEvent::Watching(up) => self.watching = up,
+                WatchEvent::Wake(newest) => {
+                    let cursor = loquax::home::client::load_cursor(&self.home);
+                    wake |= watch::wants_pull(newest, cursor);
+                }
+            }
+        }
+        if self.fallback.due(elapsed, self.watching, self.front) {
+            tracing::info!("SYNC the watching link is down; pulling");
+            wake = true;
+        }
+        if wake {
+            self.apply(UiEvent::HomeWake);
+        }
+    }
+
+    /// Once a second: whether the TCP interface is up, told when it
+    /// changed and on the first look.
+    fn look_at_link(&mut self) {
+        self.link_age += 1;
+        if self.link_age < LINK_EVERY {
+            return;
+        }
+        self.link_age = 0;
+        let up = link_up(&self.client.node);
+        if up && self.link == Some(false) {
+            self.ask_for_home_path();
+        }
+        if self.link != Some(up) {
+            self.link = Some(up);
+            let _ = self.events.send(Event::Link { v: VERSION, up });
+        }
+    }
+
+    /// The interface came back: ask for the home destination's path. The
+    /// home node never announces that destination, so a transport node that
+    /// restarted (the box rebooted) knows no path to it until someone asks,
+    /// while this leaf still holds the path from before and would send its
+    /// link requests into the void until they time out. The path request
+    /// makes the transport ask the home node, which answers it.
+    fn ask_for_home_path(&self) {
+        let Ok(hash) = loquax::home::destination_hash(&self.client.public_key) else {
+            return;
+        };
+        let node = std::sync::Arc::clone(&self.client.node);
+        self.runtime.spawn(async move {
+            let destination = leviculum_core::DestinationHash::new(hash);
+            if let Err(error) = node.request_path(&destination).await {
+                tracing::info!("no path request to the home node: {error}");
+            }
+        });
     }
 
     /// Fold an event that changes nothing the screen shows by itself.
@@ -550,22 +670,8 @@ impl Inner {
         if marks.is_empty() {
             return;
         }
-        let client = self.client.clone();
-        self.runtime.spawn(async move {
-            for mark in marks {
-                let outcome = loquax::home::client::mark(
-                    &client.node,
-                    &client.public_key,
-                    &client.device,
-                    &mark,
-                    BUDGET,
-                )
-                .await;
-                if let Err(error) = outcome {
-                    tracing::warn!("HOME mark {} not taken: {error}", mark.flag.word());
-                }
-            }
-        });
+        self.runtime
+            .spawn(runner::hand_marks(self.client.clone(), marks, BUDGET));
     }
 
     /// The oldest send, if none runs; the owed pull, if none runs.
@@ -573,11 +679,13 @@ impl Inner {
         if !self.sending {
             if let Some((to, body, fields)) = self.sends.pop_front() {
                 self.sending = true;
-                let tap = self.fanout.tap();
+                let mut tap = self.fanout.tap();
                 let client = self.client.clone();
                 let done = self.finished_tx.clone();
                 self.runtime.spawn(async move {
-                    let event = send(tap, &client, to, body, fields).await;
+                    let event =
+                        runner::send_home(&mut tap, &client, to, body, fields, BUDGET, SETTLE)
+                            .await;
                     let _ = done.send(Finished::Send(event));
                 });
             }
@@ -594,19 +702,7 @@ impl Inner {
             let home = self.home.clone();
             let done = self.finished_tx.clone();
             self.runtime.spawn(async move {
-                let pulled = loquax::home::client::pull_into(
-                    &mut tap,
-                    &client.node,
-                    &home,
-                    &client.public_key,
-                    &client.device,
-                    BUDGET * 2,
-                )
-                .await;
-                let (result, cursor) = match pulled {
-                    Ok(pull) => (Ok(pull.entries), pull.cursor),
-                    Err(error) => (Err(error.to_string()), None),
-                };
+                let (result, cursor) = runner::pull(&mut tap, &client, &home, BUDGET).await;
                 let _ = done.send(Finished::Pull { result, cursor });
             });
         }
@@ -616,11 +712,7 @@ impl Inner {
     /// folded it before the runner saw its fence), so the cursor may pass it.
     fn pulled(&mut self, result: Result<usize, String>, cursor: Option<u64>) {
         self.pulling = false;
-        if let Some(cursor) = cursor {
-            if let Err(error) = loquax::home::client::save_cursor(&self.home, cursor) {
-                tracing::warn!("HOME cursor: {error}");
-            }
-        }
+        runner::settle_pull(&self.home, cursor);
         let (state, detail) = match &result {
             Ok(entries) => ("done", entries.to_string()),
             Err(error) => ("failed", error.clone()),
@@ -631,44 +723,6 @@ impl Inner {
             detail,
         });
         self.apply(UiEvent::FetchDone(result));
-    }
-
-    /// A received message the store holds already: a pull's copy of one an
-    /// earlier pull brought.
-    fn already_held(&self, event: &OutboxEvent) -> bool {
-        let OutboxEvent::Received { message_id, .. } = event else {
-            return false;
-        };
-        self.store.holds_received(message_id).unwrap_or(false)
-    }
-
-    /// A signature that waits on its sender's key, kept in the store until
-    /// the verdict, as the terminal keeps it.
-    fn keep_signature(&mut self, event: &OutboxEvent) {
-        let kept = match event {
-            OutboxEvent::Unverified {
-                message_id,
-                source,
-                packed,
-            } => self.store.keep_unverified(message_id, source, packed),
-            OutboxEvent::Verified {
-                message_id, valid, ..
-            } => self.store.settle_verdict(message_id, *valid),
-            _ => return,
-        };
-        if let Err(error) = kept {
-            tracing::warn!("{error}");
-        }
-    }
-
-    /// A name an announce carried, kept for the next run.
-    fn keep_name(&mut self, peer: [u8; 16]) {
-        let Some(name) = self.model.names.announced(&peer).map(str::to_string) else {
-            return;
-        };
-        if let Err(error) = self.store.save_name(peer, &name) {
-            tracing::warn!("{error}");
-        }
     }
 
     fn conversations(&self) -> schema::Conversations {
@@ -775,49 +829,6 @@ fn preview(message: &Message) -> String {
     message.body.lines().next().unwrap_or_default().to_string()
 }
 
-/// One compose send on a client, as the terminal's shell runs it: handed
-/// to the home node with `/send`, the bubble named after the id it gave.
-async fn send(
-    mut tap: Tap,
-    client: &Client,
-    to: [u8; 16],
-    body: String,
-    fields: Vec<Field>,
-) -> UiEvent {
-    let submission = loquax::home::wire::Submission {
-        client_id: loquax::home::client::client_id(),
-        destination: to,
-        title: Vec::new(),
-        content: body.into_bytes(),
-        fields,
-    };
-    let accepted = loquax::home::client::send_retrying(
-        &client.node,
-        &client.public_key,
-        &client.device,
-        &submission,
-        BUDGET,
-    )
-    .await;
-    let message_id = match accepted {
-        Ok(id) => id,
-        Err(error) => return UiEvent::SendDone(Err(format!("home node: {error}"))),
-    };
-    if tap.submit(Command::HomeAccepted { message_id }).is_err() {
-        return UiEvent::SendDone(Err("the message engine stopped".to_string()));
-    }
-    let deadline = tokio::time::Instant::now() + SETTLE;
-    while tokio::time::Instant::now() < deadline {
-        match tap.try_next_event() {
-            Ok(Some(OutboxEvent::Queued { message_id: id })) if id == message_id => break,
-            Ok(Some(_)) => {}
-            Ok(None) => tokio::time::sleep(PUMP).await,
-            Err(gone) => return UiEvent::SendDone(Err(gone.to_string())),
-        }
-    }
-    UiEvent::SendDone(Ok(()))
-}
-
 /// A join that failed, in words for the join screen.
 fn join_words(error: &loquax::home::client::HomeError, server: &str) -> String {
     use loquax::home::client::HomeError;
@@ -830,6 +841,15 @@ fn join_words(error: &loquax::home::client::HomeError, server: &str) -> String {
         HomeError::Timeout => "The home node did not answer in time. Try again.".to_string(),
         other => format!("Joining failed: {other}."),
     }
+}
+
+/// Whether the leaf's interface to the home node is up: its only one, the
+/// TCP client, which is down from the moment the server goes until it
+/// redials.
+fn link_up(node: &leviculum_std::driver::ReticulumNode) -> bool {
+    node.interface_stats()
+        .iter()
+        .any(|interface| !interface.is_local_client && interface.online)
 }
 
 fn wall_now(offset: i32) -> WallTime {
@@ -847,11 +867,7 @@ fn load_server(home: &Path) -> Option<String> {
 }
 
 fn save_server(home: &Path, server: &str) -> Result<(), String> {
-    let path = home.join(SERVER_FILE);
-    let temporary = path.with_extension("new");
-    std::fs::write(&temporary, format!("{server}\n"))
-        .and_then(|()| std::fs::rename(&temporary, &path))
-        .map_err(|error| format!("{}: {error}", path.display()))
+    loquax::home::client::write_atomically(&home.join(SERVER_FILE), &format!("{server}\n"))
 }
 
 /// A peer's address as the app hands it back.
@@ -863,16 +879,5 @@ pub fn parse_peer(text: &str) -> Result<[u8; 16], String> {
 /// A message id in hex.
 pub fn parse_id(text: &str) -> Result<[u8; 32], String> {
     let text = text.trim();
-    let mut id = [0u8; 32];
-    let parsed = text.len() == 64
-        && text.is_ascii()
-        && id.iter_mut().enumerate().all(|(i, byte)| {
-            u8::from_str_radix(&text[2 * i..2 * i + 2], 16)
-                .map(|value| *byte = value)
-                .is_ok()
-        });
-    match parsed {
-        true => Ok(id),
-        false => Err(format!("'{text}' is not a message id")),
-    }
+    loquax::address::parse_id(text).ok_or_else(|| format!("'{text}' is not a message id"))
 }

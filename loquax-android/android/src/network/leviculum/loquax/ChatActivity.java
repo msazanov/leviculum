@@ -38,6 +38,7 @@ public class ChatActivity extends Activity implements Events.Listener {
     private TextView status;
     private EditText compose;
     private Adapter adapter;
+    private final ServiceLink link = new ServiceLink(this);
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -72,15 +73,34 @@ public class ChatActivity extends Activity implements Events.Listener {
     }
 
     @Override
+    protected void onStart() {
+        super.onStart();
+        link.bind();
+    }
+
+    @Override
+    protected void onStop() {
+        link.unbind();
+        super.onStop();
+    }
+
+    @Override
     protected void onResume() {
         super.onResume();
         Events.listen(this);
-        say(Core.open(peer));
+        String error = Core.open(peer);
+        if (Ui.NOT_STARTED.equals(error)) {
+            finish();
+            return;
+        }
+        Core.front(true);
+        say(error);
         refresh();
     }
 
     @Override
     protected void onPause() {
+        Core.front(false);
         Events.listen(null);
         Core.close();
         super.onPause();
@@ -140,6 +160,10 @@ public class ChatActivity extends Activity implements Events.Listener {
     public void onEvent(Map<String, Object> event) {
         if ("changed".equals(Core.str(event, "t"))) {
             refresh();
+            return;
+        }
+        if ("stopped".equals(Core.str(event, "t"))) {
+            finish();
             return;
         }
         String line = Ui.eventLine(this, event);

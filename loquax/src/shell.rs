@@ -32,6 +32,8 @@ use loquax::effects::{Effects, Terminal as Files};
 use loquax::engine::{attach_as, AttachConfig, Attached, Role};
 use loquax::fanout::{Fanout, Tap};
 use loquax::fetch::{run_fetch, FetchError, FetchOptions};
+use loquax::home::runner::{self, HomeClient};
+use loquax::home::watch::{self, Fallback, WatchEvent};
 use loquax::mailbox::{Unanswered, UNANSWERED_EXCLUSION_MS, UNANSWERED_LIMIT};
 use loquax::mailbox_state::{self, short, Stored};
 use loquax::mapload::{Loader, Source, Step, CACHE_DEFAULT_MB};
@@ -84,28 +86,6 @@ pub(crate) struct ShellOptions {
     pub scripted: bool,
     /// The file beside the identity the log goes to: `tui.log`, `gui.log`.
     pub log_file: &'static str,
-}
-
-/// A received message the store already holds, which the screen drops
-/// before it folds: the mailbox copy of one that came directly, perhaps
-/// before a restart and below the window the screen loaded. A store that
-/// cannot answer lets the message through; a duplicate beats a lost one.
-pub(crate) fn already_held(store: &Store, event: &OutboxEvent) -> bool {
-    let OutboxEvent::Received { message_id, .. } = event else {
-        return false;
-    };
-    match store.holds_received(message_id) {
-        Ok(held) => {
-            if held {
-                tracing::info!("HELD message={}", loquax::address::to_hex(message_id));
-            }
-            held
-        }
-        Err(error) => {
-            tracing::warn!("{error}");
-            false
-        }
-    }
 }
 
 /// Effects for the runners and the stamp worker: their lines become toasts,
@@ -164,15 +144,6 @@ pub(crate) struct RunContext {
     /// Set when this device is a client of a home node: a fetch pulls from
     /// the home node, and a send is refused until sending through it exists.
     client: Option<HomeClient>,
-}
-
-/// What a client's pull needs: the home identity's key, the device's own
-/// identity, and the node to open the link on.
-#[derive(Clone)]
-pub(crate) struct HomeClient {
-    public_key: [u8; 64],
-    device: leviculum_core::Identity,
-    node: std::sync::Arc<leviculum_std::ReticulumNode>,
 }
 
 /// A runner that ended, as its task hands it to the shell.
@@ -269,6 +240,12 @@ pub(crate) struct Shell {
     loader: Loader,
     /// The origin of the monotonic clock the mailbox schedule runs on.
     origin: tokio::time::Instant,
+    /// On a client of a home node: the watching link's task, its word on
+    /// wakes and on itself, whether it is up, and the pull while it is
+    /// down. A script runs none, as it runs no schedule unless it says so.
+    watch: Option<(tokio::task::JoinHandle<()>, UnboundedReceiver<WatchEvent>)>,
+    watching: bool,
+    fallback: Fallback,
 }
 
 /// What the model asks of the terminal beyond drawing.
@@ -417,28 +394,8 @@ impl Shell {
         }
         self.mark_tasks.retain(|task| !task.is_finished());
         let budget = self.context.timeout;
-        self.mark_tasks.push(tokio::spawn(async move {
-            for mark in marks {
-                let outcome = loquax::home::client::mark(
-                    &client.node,
-                    &client.public_key,
-                    &client.device,
-                    &mark,
-                    budget,
-                )
-                .await;
-                match outcome {
-                    Ok(()) => {
-                        tracing::info!("HOME mark {} messages={}", mark.flag.word(), mark.ids.len())
-                    }
-                    Err(error) => tracing::warn!(
-                        "HOME mark {} messages={} not taken: {error}",
-                        mark.flag.word(),
-                        mark.ids.len()
-                    ),
-                }
-            }
-        }));
+        self.mark_tasks
+            .push(tokio::spawn(runner::hand_marks(client, marks, budget)));
     }
 
     /// What the screen asked the store, answered as the event the model
@@ -472,40 +429,6 @@ impl Shell {
         }
     }
 
-    /// A name an announce carried, kept for the next run.
-    fn keep_name(&mut self, destination: [u8; 16]) {
-        if self.model.address == Some(destination) {
-            return;
-        }
-        let Some(name) = self.model.names.announced(&destination).map(str::to_string) else {
-            return;
-        };
-        if let Err(error) = self.store.save_name(destination, &name) {
-            loquax::events::store_failed(&error.to_string());
-        }
-    }
-
-    /// The store's side of a signature that waits on its sender's key: the
-    /// message's bytes while it waits, the verdict once it is in. The
-    /// verdict goes to the store here because the screen holds only a
-    /// window of each conversation (leviculum 1079).
-    fn keep_signature(&mut self, event: &OutboxEvent) {
-        let kept = match event {
-            OutboxEvent::Unverified {
-                message_id,
-                source,
-                packed,
-            } => self.store.keep_unverified(message_id, source, packed),
-            OutboxEvent::Verified {
-                message_id, valid, ..
-            } => self.store.settle_verdict(message_id, *valid),
-            _ => return,
-        };
-        if let Err(error) = kept {
-            loquax::events::store_failed(&error.to_string());
-        }
-    }
-
     /// Everything that arrived since the last call, without waiting.
     pub(crate) fn poll(&mut self) {
         match self.fanout.pump(&mut self.attached.outbox) {
@@ -518,13 +441,18 @@ impl Shell {
                         } => Some(*destination),
                         _ => None,
                     };
-                    if already_held(&self.store, &event) {
+                    if runner::already_held(&self.store, &event) {
                         continue;
                     }
-                    self.keep_signature(&event);
+                    runner::keep_signature(&mut self.store, &event);
                     self.apply(UiEvent::Engine(event));
                     if let Some(destination) = named {
-                        self.keep_name(destination);
+                        runner::keep_name(
+                            &mut self.store,
+                            &self.model.names,
+                            self.model.address,
+                            destination,
+                        );
                     }
                 }
             }
@@ -556,6 +484,7 @@ impl Shell {
         while let Ok(line) = self.notices_rx.try_recv() {
             self.apply(UiEvent::Notice(line));
         }
+        self.watched();
         while let Ok(stored) = self.mailbox_rx.try_recv() {
             self.replaced(&stored);
             self.apply(chosen(&stored));
@@ -690,6 +619,32 @@ impl Shell {
         }
     }
 
+    /// What the watching link said: a wake past the cursor pulls, and while
+    /// the link is down a pull runs every minute, the terminal being in
+    /// front whenever it runs.
+    fn watched(&mut self) {
+        let Some((_, events)) = &mut self.watch else {
+            return;
+        };
+        let mut wake = false;
+        while let Ok(event) = events.try_recv() {
+            match event {
+                WatchEvent::Watching(up) => self.watching = up,
+                WatchEvent::Wake(newest) => {
+                    let cursor = loquax::home::client::load_cursor(&self.context.home);
+                    wake |= watch::wants_pull(newest, cursor);
+                }
+            }
+        }
+        if self.fallback.due(self.elapsed_ms(), self.watching, true) {
+            tracing::info!("SYNC the watching link is down; pulling");
+            wake = true;
+        }
+        if wake {
+            self.apply(UiEvent::HomeWake);
+        }
+    }
+
     /// What a job starting now runs with: the nodes excluded at this moment.
     fn job_context(&self) -> RunContext {
         let mut context = self.context.clone();
@@ -704,11 +659,7 @@ impl Shell {
         // What the pull brought was written as the screen folded it, in the
         // poll that handed the runner its fence; only now may the cursor
         // pass it.
-        if let Some(cursor) = end.cursor {
-            if let Err(error) = loquax::home::client::save_cursor(&self.context.home, cursor) {
-                tracing::warn!("HOME cursor: {error}");
-            }
-        }
+        runner::settle_pull(&self.context.home, end.cursor);
         match &end.result {
             Ok(new) => tracing::info!(
                 "SYNC done reason={reason} result=ok new={new} elapsed_ms={}",
@@ -867,7 +818,9 @@ async fn send(
     fields: Vec<Field>,
 ) -> UiEvent {
     if let Some(client) = &context.client {
-        return send_home(tap, client, &context, to, body, fields).await;
+        let settle = Duration::from_millis(SETTLE_MS);
+        return runner::send_home(&mut tap, client, to, body, fields, context.timeout, settle)
+            .await;
     }
     let mut options = SendOptions::new(context.instance.clone(), context.timeout);
     let mut effects = context.effects.clone();
@@ -908,63 +861,16 @@ async fn send(
     }
 }
 
-/// One compose-line send on a client: handed to the home node with `/send`,
-/// which delivers it. The bubble is named after the id the home node gave
-/// it, and takes its later states from the archive's entries on each pull.
-async fn send_home(
-    mut tap: Tap,
-    client: &HomeClient,
-    context: &RunContext,
-    to: [u8; 16],
-    body: String,
-    fields: Vec<Field>,
-) -> UiEvent {
-    let submission = loquax::home::wire::Submission {
-        client_id: loquax::home::client::client_id(),
-        destination: to,
-        title: Vec::new(),
-        content: body.into_bytes(),
-        fields,
-    };
-    let accepted = loquax::home::client::send_retrying(
-        &client.node,
-        &client.public_key,
-        &client.device,
-        &submission,
-        context.timeout,
-    )
-    .await;
-    let message_id = match accepted {
-        Ok(id) => id,
-        Err(error) => return UiEvent::SendDone(Err(format!("home node: {error}"))),
-    };
-    tracing::info!(
-        "HOME send accepted message={}",
-        loquax::address::to_hex(&message_id)
-    );
-    // The bubble's name has to reach the screen before this runner's end
-    // does: the screen names the oldest running send.
-    if tap.submit(Command::HomeAccepted { message_id }).is_err() {
-        return UiEvent::SendDone(Err(OutboxGone.to_string()));
-    }
-    let deadline = tokio::time::Instant::now() + Duration::from_millis(SETTLE_MS);
-    while tokio::time::Instant::now() < deadline {
-        match tap.try_next_event() {
-            Ok(Some(OutboxEvent::Queued { message_id: id })) if id == message_id => break,
-            Ok(Some(_)) => {}
-            Ok(None) => tokio::time::sleep(Duration::from_millis(PUMP_MS)).await,
-            Err(gone) => return UiEvent::SendDone(Err(gone.to_string())),
-        }
-    }
-    UiEvent::SendDone(Ok(()))
-}
-
 /// One mailbox drain, exactly as `loquax fetch` runs it.
 async fn fetch(tap: Tap, context: RunContext) -> FetchEnd {
     let started = tokio::time::Instant::now();
     let mut watched = Watched { tap, node: None };
     let (result, cursor) = match &context.client {
-        Some(client) => pull(&mut watched, client, &context).await,
+        Some(client) => {
+            let (result, cursor) =
+                runner::pull(&mut watched, client, &context.home, context.timeout).await;
+            (result.map_err(FetchError::SyncFailed), cursor)
+        }
         None => (drain(&mut watched, context).await, None),
     };
     FetchEnd {
@@ -972,31 +878,6 @@ async fn fetch(tap: Tap, context: RunContext) -> FetchEnd {
         node: watched.node,
         elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
         cursor,
-    }
-}
-
-/// A client's fetch: one pull from its home node. The cursor comes back for
-/// [`Shell::fetch_done`] to save: the runner sees the fence on its tap in
-/// the same pump that hands the screen the pulled messages, and the shell
-/// writes those to the store before it takes the runner's end.
-async fn pull(
-    outbox: &mut Watched,
-    client: &HomeClient,
-    context: &RunContext,
-) -> (Result<usize, FetchError>, Option<u64>) {
-    // A drain gets twice a send's budget, as on the command line.
-    match loquax::home::client::pull_into(
-        outbox,
-        &client.node,
-        &context.home,
-        &client.public_key,
-        &client.device,
-        context.timeout * 2,
-    )
-    .await
-    {
-        Ok(pull) => (Ok(pull.entries), pull.cursor),
-        Err(error) => (Err(FetchError::SyncFailed(error.to_string())), None),
     }
 }
 
@@ -1228,6 +1109,22 @@ pub(crate) async fn start(
     let cache_bytes = config.map_cache_mb.unwrap_or(CACHE_DEFAULT_MB) << 20;
     let loader = Loader::new(maps.clone(), source, cache_bytes);
     let (done_tx, done_rx) = unbounded_channel();
+    let watch = match (&client, options.scripted) {
+        (Some(client), false) => {
+            let (events_tx, events_rx) = unbounded_channel();
+            let task = tokio::spawn(watch::run(
+                watch::Watch {
+                    node: client.node.clone(),
+                    public_key: client.public_key,
+                    device: client.device.clone(),
+                    home: home.clone(),
+                },
+                events_tx,
+            ));
+            Some((task, events_rx))
+        }
+        _ => None,
+    };
     let shell = Shell {
         model,
         _delivery_lock: delivery_lock,
@@ -1266,6 +1163,9 @@ pub(crate) async fn start(
         maps,
         loader,
         origin: tokio::time::Instant::now(),
+        watch,
+        watching: false,
+        fallback: Fallback::default(),
     };
     Ok((shell, config))
 }
@@ -1277,8 +1177,12 @@ pub(crate) async fn finish(mut shell: Shell, outcome: Result<(), String>) -> Exi
     let Shell {
         attached,
         afterwards,
+        watch,
         ..
     } = shell;
+    if let Some((task, _)) = watch {
+        task.abort();
+    }
     attached.stop().await;
     for line in afterwards {
         eprintln!("loquax: {line}");

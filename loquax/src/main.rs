@@ -141,11 +141,16 @@ enum SubCommand {
 #[derive(Subcommand, Debug)]
 enum HomeCommand {
     /// On the home node: open a single-use admission for one device and
-    /// print its code.
+    /// print its code, as text and as a QR code.
     Admit {
         /// The name the device is listed and revoked under.
         #[arg(long)]
         name: Option<String>,
+        /// The home node's TCP server as a phone reaches it, `host:port`:
+        /// written into the code (`lqxh1...@host:port`), so the phone needs
+        /// one scan or one paste.
+        #[arg(long)]
+        server: Option<String>,
     },
     /// On the new device: redeem a code from `home admit` and become a
     /// client of that home node.
@@ -158,6 +163,10 @@ enum HomeCommand {
     /// On the home node: list the admission codes not yet used and not yet
     /// expired (`home_token_hours` in the config, 24 by default).
     Tokens,
+    /// On the home node: withdraw an admission code not yet used, by the
+    /// start of its hash as `home tokens` lists it (four hex characters
+    /// are enough when they are unique).
+    RevokeToken { prefix: String },
 }
 
 #[cfg(feature = "tui")]
@@ -1338,6 +1347,7 @@ async fn run_daemon(args: TuiArgs) -> ExitCode {
         sync_bound_ms,
         fetch_budget: Duration::from_secs(args.timeout.saturating_mul(2)),
         mailbox,
+        wake: config.home_wake.unwrap_or(true),
     })
     .await;
     match outcome {
@@ -1379,7 +1389,7 @@ async fn run_home(command: HomeCommand) -> ExitCode {
     };
     let now = leviculum_std::local_time::unix_now_secs();
     match command {
-        HomeCommand::Admit { name } => on_home_node(&|store| {
+        HomeCommand::Admit { name, server } => on_home_node(&|store| {
             let name = match &name {
                 Some(name) => name.trim().to_string(),
                 None => match store.devices() {
@@ -1390,6 +1400,12 @@ async fn run_home(command: HomeCommand) -> ExitCode {
             if name.is_empty() {
                 return usage("--name may not be empty");
             }
+            let server = server.as_deref().map(str::trim);
+            if let Some(server) = server {
+                if let Err(error) = loquax::engine::parse_server(server) {
+                    return usage(format!("--server: {error}"));
+                }
+            }
             let mut token = [0u8; 16];
             rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut token);
             if let Err(error) = store.issue_token(&token, &name, now) {
@@ -1399,9 +1415,27 @@ async fn run_home(command: HomeCommand) -> ExitCode {
                 Ok(identity) => identity.public_key_bytes(),
                 Err(error) => return failure(error, "no-identity"),
             };
-            let code = loquax::home::code::HomeCode { public_key, token }.encode();
-            println!("Admission code for {name:?}, good for one device, once:\n\n{code}\n");
-            println!("On that device: loquax home join {code}");
+            let code = loquax::home::code::HomeCode { public_key, token };
+            let text = match server {
+                Some(server) => code.encode_with_server(server),
+                None => code.encode(),
+            };
+            println!("Admission code for {name:?}, good for one device, once:\n\n{text}\n");
+            match loquax::home::qr::lines(&text) {
+                Ok(lines) => println!("{}\n", lines.join("\n")),
+                Err(error) => eprintln!("loquax: no QR code: {error}"),
+            }
+            match server {
+                Some(_) => println!(
+                    "On a phone: scan it with a QR reader and share it to loquax, or paste it \
+                     into loquax's join screen."
+                ),
+                None => println!(
+                    "On a phone: paste it, with this node's address; --server puts that in the \
+                     code."
+                ),
+            }
+            println!("On a desktop: loquax home join {}", code.encode());
             ExitCode::SUCCESS
         }),
         HomeCommand::Devices => on_home_node(&|store| match store.devices() {
@@ -1474,6 +1508,37 @@ async fn run_home(command: HomeCommand) -> ExitCode {
                         );
                     }
                     ExitCode::SUCCESS
+                }
+                Err(error) => failure(error, "no-store"),
+            })
+        }
+        HomeCommand::RevokeToken { prefix } => {
+            on_home_node(&|store| match store.revoke_token(&prefix) {
+                Ok(loquax::store::TokenRevoked::One(gone)) => {
+                    println!(
+                        "withdrew {}  {}",
+                        address::to_hex(&gone.token[..4]),
+                        gone.name
+                    );
+                    ExitCode::SUCCESS
+                }
+                Ok(loquax::store::TokenRevoked::None) => failure(
+                    format!("no open admission code starts with {prefix:?}"),
+                    "failed",
+                ),
+                Ok(loquax::store::TokenRevoked::Ambiguous(matched)) => {
+                    let names: Vec<String> = matched
+                        .iter()
+                        .map(|t| format!("{} {}", address::to_hex(&t.token[..4]), t.name))
+                        .collect();
+                    usage(format!(
+                        "{prefix:?} starts {} codes ({}); give more of it",
+                        matched.len(),
+                        names.join(", ")
+                    ))
+                }
+                Ok(loquax::store::TokenRevoked::TooShort) => {
+                    usage(format!("{prefix:?}: give at least four hex characters"))
                 }
                 Err(error) => failure(error, "no-store"),
             })

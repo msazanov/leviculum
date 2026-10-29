@@ -1,0 +1,273 @@
+//! A client's watching link (`docs/src/concepts/loquax-home-node.md`, "The
+//! wake"): one link to `loquax.home`, kept while the client runs, that
+//! asked `/watch` and hears a wake whenever the home node's archive grew.
+//! The frontend pulls on a wake past its cursor ([`wants_pull`]); the pull
+//! itself is the `/sync` it always was, on a link of its own.
+//!
+//! The link is opened again with [`Backoff`] when it drops or never came
+//! up. While it is down the frontend falls back to pulling ([`Fallback`]),
+//! besides its open, its Refresh and its schedule. A home node from before
+//! `/watch` answers nothing: the request runs out of time, the backoff
+//! grows to [`Backoff::MAX`], and the client pulls as it always did.
+
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+
+use leviculum_core::node::NodeEvent;
+use leviculum_core::{Identity, LinkId};
+use leviculum_std::driver::TapEvent;
+use leviculum_std::ReticulumNode;
+use tokio::sync::mpsc::UnboundedSender;
+
+use super::client::{self, HomeError};
+use super::wire;
+
+/// What the watching link tells its frontend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WatchEvent {
+    /// The link is up and watching, or it dropped.
+    Watching(bool),
+    /// The archive's newest sequence is this: pull when it is past the
+    /// cursor. Said once on every `/watch` answer too, so entries that came
+    /// while the link was down are pulled at once. `u64::MAX` when wakes
+    /// may have been missed (the node's event tap fell behind).
+    Wake(u64),
+}
+
+/// Whether a wake with `newest` calls for a pull from `cursor`.
+pub fn wants_pull(newest: u64, cursor: u64) -> bool {
+    newest > cursor
+}
+
+/// How long one attempt to open the link and ask `/watch` may take.
+const ATTEMPT: Duration = Duration::from_secs(30);
+/// How often the link is looked at besides its events: a closed link whose
+/// event the tap lost is found within this.
+const LOOK: Duration = Duration::from_secs(5);
+
+/// The wait before the next attempt to open the watching link: doubled on
+/// each attempt that did not come up, back to the first once a link stood.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Backoff {
+    next: Duration,
+}
+
+impl Default for Backoff {
+    fn default() -> Self {
+        Self { next: Self::FIRST }
+    }
+}
+
+impl Backoff {
+    /// The first wait: a dropped link is back within seconds.
+    pub const FIRST: Duration = Duration::from_secs(2);
+    /// The longest: five minutes, so a home node that does not know
+    /// `/watch`, or is away for the night, costs one link attempt per five
+    /// minutes and no more.
+    pub const MAX: Duration = Duration::from_secs(300);
+
+    /// An attempt failed: the wait before the next, and the one after it
+    /// doubled.
+    pub fn failed(&mut self) -> Duration {
+        let wait = self.next;
+        self.next = (self.next * 2).min(Self::MAX);
+        wait
+    }
+
+    /// A link stood and dropped: the next attempt comes after the first
+    /// wait again.
+    pub fn held(&mut self) -> Duration {
+        self.next = Self::FIRST;
+        self.failed()
+    }
+}
+
+/// The pull every [`Fallback::EVERY`] while the app is in front and the
+/// watching link is down: the user looks at the screen and has no wake to
+/// rely on.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Fallback {
+    /// Since when the link was down with the app in front, or the last
+    /// fallback pull.
+    since: Option<u64>,
+}
+
+impl Fallback {
+    pub const EVERY: Duration = Duration::from_secs(60);
+
+    /// Whether a fallback pull is due at `now_ms`.
+    pub fn due(&mut self, now_ms: u64, watching: bool, front: bool) -> bool {
+        if watching || !front {
+            self.since = None;
+            return false;
+        }
+        let since = *self.since.get_or_insert(now_ms);
+        let every = u64::try_from(Self::EVERY.as_millis()).unwrap_or(u64::MAX);
+        if now_ms.saturating_sub(since) < every {
+            return false;
+        }
+        self.since = Some(now_ms);
+        true
+    }
+}
+
+/// What the watching link needs: the node, the home identity's key, the
+/// device's own identity, and the home directory its cursor is kept in.
+#[derive(Clone)]
+pub struct Watch {
+    pub node: Arc<ReticulumNode>,
+    pub public_key: [u8; 64],
+    pub device: Identity,
+    pub home: PathBuf,
+}
+
+/// Keep the watching link until `events` is dropped: open it, ask
+/// `/watch`, hand on every wake, and open it again after the backoff when
+/// it drops.
+pub async fn run(watch: Watch, events: UnboundedSender<WatchEvent>) {
+    let mut backoff = Backoff::default();
+    loop {
+        let wait = match keep(&watch, &events).await {
+            Ok(()) => backoff.held(),
+            Err(error) => {
+                tracing::info!("HOME watch: {error}");
+                backoff.failed()
+            }
+        };
+        if events.is_closed() {
+            return;
+        }
+        tracing::info!("HOME watch again in {}s", wait.as_secs());
+        tokio::time::sleep(wait).await;
+    }
+}
+
+/// One watching link, from its opening to its end: `Ok` once it stood and
+/// dropped, the error when it never came up.
+async fn keep(watch: &Watch, events: &UnboundedSender<WatchEvent>) -> Result<(), HomeError> {
+    // Subscribed before the request, so a wake right behind the answer is
+    // heard.
+    let mut tap = watch.node.subscribe_events();
+    let deadline = tokio::time::Instant::now() + ATTEMPT;
+    let link = client::open(&watch.node, &watch.public_key, &watch.device, deadline).await?;
+    let cursor = client::load_cursor(&watch.home);
+    let answer = client::request(
+        &watch.node,
+        &link,
+        super::WATCH_PATH,
+        &wire::watch_request(cursor),
+        deadline,
+    )
+    .await
+    .and_then(|bytes| {
+        wire::read_watch_answer(&bytes)
+            .map_err(|_| HomeError::Malformed)?
+            .map_err(HomeError::Refused)
+    });
+    let newest = match answer {
+        Ok(newest) => newest,
+        Err(error) => {
+            let _ = watch.node.close_link(&link).await;
+            return Err(error);
+        }
+    };
+    tracing::info!("HOME watching cursor={cursor} newest={newest}");
+    let _ = events.send(WatchEvent::Watching(true));
+    let _ = events.send(WatchEvent::Wake(newest));
+    listen(watch, &link, &mut tap, events).await;
+    let _ = events.send(WatchEvent::Watching(false));
+    tracing::info!("HOME watch link dropped");
+    Ok(())
+}
+
+/// Hand on the wakes on `link` until it closes or nobody listens.
+async fn listen(
+    watch: &Watch,
+    link: &LinkId,
+    tap: &mut leviculum_std::driver::EventTap,
+    events: &UnboundedSender<WatchEvent>,
+) {
+    let mut look = tokio::time::interval(LOOK);
+    loop {
+        tokio::select! {
+            event = tap.recv() => match event {
+                Some(TapEvent::Event(NodeEvent::MessageReceived { link_id, data, .. }))
+                    if link_id == *link =>
+                {
+                    match wire::read_wake(&data) {
+                        Ok(newest) => {
+                            tracing::info!("HOME wake newest={newest}");
+                            let _ = events.send(WatchEvent::Wake(newest));
+                        }
+                        Err(_) => tracing::info!("HOME watch: {} bytes that are no wake", data.len()),
+                    }
+                }
+                Some(TapEvent::Event(NodeEvent::LinkClosed { link_id, .. })) if link_id == *link => {
+                    return;
+                }
+                Some(TapEvent::Lagged(lost)) => {
+                    tracing::info!("HOME watch lost {lost} node events; pulling");
+                    let _ = events.send(WatchEvent::Wake(u64::MAX));
+                }
+                Some(_) => {}
+                None => return,
+            },
+            _ = look.tick() => {
+                if events.is_closed() {
+                    let _ = watch.node.close_link(link).await;
+                    return;
+                }
+                if !watch.node.link_is_established(link) {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_wake_pulls_only_past_the_cursor() {
+        assert!(!wants_pull(0, 0));
+        assert!(!wants_pull(7, 7));
+        assert!(!wants_pull(6, 7), "an older home answer pulls nothing");
+        assert!(wants_pull(8, 7));
+        assert!(wants_pull(u64::MAX, 7), "a lost wake pulls");
+    }
+
+    /// The link is opened again after 2, 4, 8 ... seconds up to five
+    /// minutes while it does not come up, and after 2 s again once one
+    /// stood and dropped.
+    #[test]
+    fn the_link_is_opened_again_with_a_doubling_wait_that_a_standing_link_resets() {
+        let mut backoff = Backoff::default();
+        let waits: Vec<u64> = (0..10).map(|_| backoff.failed().as_secs()).collect();
+        assert_eq!(waits, [2, 4, 8, 16, 32, 64, 128, 256, 300, 300]);
+        assert_eq!(backoff.held(), Backoff::FIRST);
+        assert_eq!(backoff.failed().as_secs(), 4);
+    }
+
+    #[test]
+    fn the_fallback_pulls_every_minute_only_in_front_with_the_link_down() {
+        let mut fallback = Fallback::default();
+        // Watching, or in the back: never.
+        assert!(!fallback.due(0, true, true));
+        assert!(!fallback.due(120_000, false, false));
+        // In front, the link down: a minute after it went down, then every
+        // minute.
+        assert!(!fallback.due(200_000, false, true));
+        assert!(!fallback.due(259_999, false, true));
+        assert!(fallback.due(260_000, false, true));
+        assert!(!fallback.due(300_000, false, true));
+        assert!(fallback.due(320_000, false, true));
+        // The link back: the count starts over the next time it drops.
+        assert!(!fallback.due(330_000, true, true));
+        assert!(!fallback.due(340_000, false, true));
+        assert!(!fallback.due(399_999, false, true));
+        assert!(fallback.due(400_000, false, true));
+    }
+}

@@ -84,6 +84,25 @@ pub fn parse(text: &str) -> Result<[u8; ADDRESS_BYTES], AddressError> {
     Ok(out)
 }
 
+/// A message id from its 64 hex digits, as [`to_hex`] writes it; `None`
+/// for anything else. The seen store's lines and the Android app's
+/// requests both carry ids this way.
+pub fn parse_id(text: &str) -> Option<[u8; 32]> {
+    if text.len() != 64 || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut id = [0u8; 32];
+    for (byte, pair) in id.iter_mut().zip(text.as_bytes().chunks_exact(2)) {
+        let digit = |c: u8| match c {
+            b'0'..=b'9' => c - b'0',
+            b'a'..=b'f' => c - b'a' + 10,
+            _ => c.to_ascii_lowercase() - b'a' + 10,
+        };
+        *byte = (digit(pair[0]) << 4) | digit(pair[1]);
+    }
+    Some(id)
+}
+
 /// Lowercase hex, the form every other tool in the tree prints a hash in.
 pub fn to_hex(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -97,6 +116,18 @@ pub fn to_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_message_id_is_64_hex_digits_and_nothing_else() {
+        assert_eq!(parse_id(&"ab".repeat(32)), Some([0xab; 32]));
+        assert_eq!(parse_id(&"AB".repeat(32)), Some([0xab; 32]));
+        assert_eq!(parse_id(&to_hex(&[7; 32])), Some([7; 32]));
+        assert_eq!(parse_id(&"ab".repeat(31)), None);
+        assert_eq!(parse_id(&"zz".repeat(32)), None);
+        // `from_str_radix` would take a sign; an id never has one.
+        assert_eq!(parse_id(&format!("+a{}", "ab".repeat(31))), None);
+        assert_eq!(parse_id(".index"), None);
+    }
 
     #[test]
     fn a_plain_32_character_hash_parses() {

@@ -62,7 +62,7 @@ pub enum Role {
     Client { address: [u8; 16] },
     /// The home node: the messenger's engine, handing every received message
     /// out packed for the archive, plus the home destination `loquax.home`
-    /// with its four request handlers, whose requests go to `requests`.
+    /// with its five request handlers, whose requests go to `requests`.
     Home {
         requests: UnboundedSender<HomeRequest>,
     },
@@ -152,6 +152,17 @@ impl CoreProcessor for Processor {
 pub struct InProcessOutbox {
     commands: Sender<Command>,
     events: Receiver<OutboxEvent>,
+}
+
+impl InProcessOutbox {
+    /// Cut this end off the engine, as the engine's death does: every call
+    /// after this answers [`OutboxGone`]. For the tests of what a frontend
+    /// does then, which cannot otherwise kill an engine on purpose.
+    #[doc(hidden)]
+    pub fn sever(&mut self) {
+        self.commands = std::sync::mpsc::channel().0;
+        self.events = std::sync::mpsc::channel().1;
+    }
 }
 
 impl Outbox for InProcessOutbox {
@@ -511,6 +522,7 @@ async fn attach_through<N: Effects + Send + 'static>(
             crate::home::SYNC_PATH,
             crate::home::SEND_PATH,
             crate::home::MARK_PATH,
+            crate::home::WATCH_PATH,
         ] {
             node.register_request_handler(hash, path, RequestPolicy::AllowAll);
         }

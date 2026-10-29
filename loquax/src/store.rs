@@ -1009,6 +1009,19 @@ pub enum Revoked {
     Ambiguous(Vec<Device>),
 }
 
+/// What `loquax home revoke-token <prefix>` matched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TokenRevoked {
+    /// Fewer than four hex characters, or a character that is none.
+    TooShort,
+    /// No token starts so.
+    None,
+    /// This one token, now withdrawn.
+    One(OpenToken),
+    /// More than one token starts so; none was withdrawn.
+    Ambiguous(Vec<OpenToken>),
+}
+
 /// The home node's half of the store
 /// (`docs/src/concepts/loquax-home-node.md`): the archive its clients pull,
 /// the admitted devices, the open admission tokens. Every row is scoped by
@@ -1094,6 +1107,20 @@ impl Store {
             more,
             first: first.map_or(0, |seq| seq as u64),
         })
+    }
+
+    /// The archive's newest sequence, 0 when it is empty: what a wake
+    /// tells a watching client.
+    pub fn archive_newest(&self) -> Result<u64, StoreError> {
+        let newest: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT MAX(seq) FROM archive WHERE identity = ?1",
+                params![&self.identity[..]],
+                |row| row.get(0),
+            )
+            .map_err(|e| self.failed(e))?;
+        Ok(newest.map_or(0, |seq| seq as u64))
     }
 
     /// How many bytes of packed messages the archive holds.
@@ -1220,6 +1247,11 @@ impl Store {
                 params![&self.identity[..], now, ttl_secs],
             )
             .map_err(|e| self.failed(e))?;
+        self.tokens()
+    }
+
+    /// Every token issued and not redeemed, expired or not.
+    fn tokens(&self) -> Result<Vec<OpenToken>, StoreError> {
         let mut statement = self
             .conn
             .prepare(
@@ -1246,6 +1278,35 @@ impl Store {
                 })
             })
             .collect()
+    }
+
+    /// Withdraw the token whose hex starts with `prefix` (`loquax home
+    /// revoke-token`): at least four hex characters, as `home revoke` takes
+    /// a device's hash, and only when one token matches.
+    pub fn revoke_token(&mut self, prefix: &str) -> Result<TokenRevoked, StoreError> {
+        let lower = prefix.trim().to_ascii_lowercase();
+        if lower.len() < 4 || !lower.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Ok(TokenRevoked::TooShort);
+        }
+        let mut matched: Vec<OpenToken> = self
+            .tokens()?
+            .into_iter()
+            .filter(|token| crate::address::to_hex(&token.token).starts_with(&lower))
+            .collect();
+        match matched.len() {
+            0 => Ok(TokenRevoked::None),
+            1 => {
+                let token = matched.remove(0);
+                self.conn
+                    .execute(
+                        "DELETE FROM home_tokens WHERE identity = ?1 AND token = ?2",
+                        params![&self.identity[..], &token.token[..]],
+                    )
+                    .map_err(|e| self.failed(e))?;
+                Ok(TokenRevoked::One(token))
+            }
+            _ => Ok(TokenRevoked::Ambiguous(matched)),
+        }
     }
 
     /// The message an earlier `/send` with `client_id` made, if one did.

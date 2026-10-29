@@ -609,10 +609,10 @@ pub struct UiModel<B> {
     /// Marks for the home node, in the order they were made
     /// ([`UiModel::take_marks`]).
     marks: Vec<crate::home::wire::Mark>,
-    /// A pull a send asked for while one was running: started when that
-    /// one ends, since it may have begun before the home node had the
-    /// message.
-    pull_owed: bool,
+    /// A pull a send or a wake asked for while one was running, with its
+    /// reason: started when that one ends, since it may have begun before
+    /// the home node had the message.
+    pull_owed: Option<Reason>,
     /// A delete waiting for its `y`, and the question on screen.
     pub confirm: Option<(Confirm, Toast)>,
     /// A stored search result to open once its page has loaded.
@@ -710,7 +710,7 @@ impl<B: InputBuffer + Default> UiModel<B> {
             home_client: false,
             list_apart: false,
             marks: Vec::new(),
-            pull_owed: false,
+            pull_owed: None,
             confirm: None,
             reveal_pending: None,
             positions: BTreeMap::new(),
@@ -991,6 +991,10 @@ pub enum UiEvent {
     Elapsed(u64),
     /// The machine woke from suspend (`crate::sync::resumed`).
     Resumed,
+    /// On a client of a home node: the home node said its archive grew
+    /// past this device's cursor ([`crate::home::watch`]), so a pull starts,
+    /// or follows the one running.
+    HomeWake,
     /// The screen's size in cells.
     Resize { width: u16, height: u16 },
     /// A click, a wheel turn, a drag or a move, at a screen cell.
@@ -1171,6 +1175,7 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
             auto_sync(model)
         }
         UiEvent::Resumed => schedule(model, SyncEvent::Resume),
+        UiEvent::HomeWake => pull_for(model, Reason::Wake),
         UiEvent::Resize { width, height } => {
             model.screen = (width, height);
             model.selection = None;
@@ -1277,8 +1282,8 @@ fn on_fetch_done<B>(model: &mut UiModel<B>, result: Result<usize, String>) -> Ve
         }
         Err(_) => {}
     }
-    if core::mem::take(&mut model.pull_owed) {
-        effects.extend(start_pull(model));
+    if let Some(reason) = model.pull_owed.take() {
+        effects.extend(start_pull(model, reason));
     }
     effects
 }
@@ -1288,23 +1293,28 @@ fn on_fetch_done<B>(model: &mut UiModel<B>, result: Result<usize, String>) -> Ve
 /// waiting for the schedule. A pull already running may have asked before
 /// the home node had the message, so another follows it.
 fn pull_after_send<B>(model: &mut UiModel<B>) -> Vec<UiEffect> {
+    pull_for(model, Reason::Sent)
+}
+
+/// A pull on a client, for `reason`: now, or behind the one running.
+fn pull_for<B>(model: &mut UiModel<B>, reason: Reason) -> Vec<UiEffect> {
     if !model.home_client {
         return Vec::new();
     }
     if model.fetching {
-        model.pull_owed = true;
+        model.pull_owed = Some(model.pull_owed.unwrap_or(reason));
         return Vec::new();
     }
-    start_pull(model)
+    start_pull(model, reason)
 }
 
-fn start_pull<B>(model: &mut UiModel<B>) -> Vec<UiEffect> {
+fn start_pull<B>(model: &mut UiModel<B>, reason: Reason) -> Vec<UiEffect> {
     let now = model.elapsed_ms;
     if let Some(sync) = model.sync.as_mut() {
         sync.begin(now);
     }
     model.fetching = true;
-    model.fetch_reason = Some(Reason::Sent);
+    model.fetch_reason = Some(reason);
     vec![UiEffect::Fetch]
 }
 
@@ -4564,6 +4574,26 @@ mod tests {
             update(&mut model, UiEvent::FetchDone(Ok(0))),
             [UiEffect::Fetch]
         );
+        assert!(update(&mut model, UiEvent::FetchDone(Ok(0))).is_empty());
+    }
+
+    /// A wake pulls at once on a client, follows a running pull once however
+    /// many wakes come meanwhile, and does nothing on a messenger.
+    #[test]
+    fn a_wake_on_a_client_pulls_and_a_burst_behind_a_pull_is_one_more() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        assert!(update(&mut model, UiEvent::HomeWake).is_empty());
+        model.home_client = true;
+        assert_eq!(update(&mut model, UiEvent::HomeWake), [UiEffect::Fetch]);
+        assert_eq!(model.fetch_reason, Some(Reason::Wake));
+        for _ in 0..3 {
+            assert!(update(&mut model, UiEvent::HomeWake).is_empty());
+        }
+        assert_eq!(
+            update(&mut model, UiEvent::FetchDone(Ok(1))),
+            [UiEffect::Fetch]
+        );
+        assert_eq!(model.fetch_reason, Some(Reason::Wake));
         assert!(update(&mut model, UiEvent::FetchDone(Ok(0))).is_empty());
     }
 

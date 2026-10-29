@@ -23,7 +23,7 @@ use leviculum_ui::delivery::DeliveryState;
 
 use super::mpack::{self, Map};
 use super::{key, ImportError};
-use crate::address::to_hex;
+use crate::address::{parse_id, to_hex};
 use crate::names::{sanitise, Contact};
 use crate::store::ImportRow;
 use crate::ui::Signature;
@@ -312,18 +312,6 @@ fn read_index(path: &Path) -> Vec<([u8; 32], IndexEntry)> {
             ))
         })
         .collect()
-}
-
-/// A message file's name: the 64 hex characters of its LXMF id.
-fn parse_id(name: &str) -> Option<[u8; 32]> {
-    if name.len() != 64 {
-        return None;
-    }
-    let mut id = [0u8; 32];
-    for (i, byte) in id.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(name.get(2 * i..2 * i + 2)?, 16).ok()?;
-    }
-    Some(id)
 }
 
 /// One message file as an import row; the reason when it is not one.

@@ -231,7 +231,7 @@ async fn pages(
 }
 
 /// A link to the home destination of `public_key`, identified as `device`.
-async fn open(
+pub(crate) async fn open(
     node: &ReticulumNode,
     public_key: &[u8; 64],
     device: &Identity,
@@ -276,7 +276,7 @@ async fn open(
 }
 
 /// One request on `link` and its answer's bytes.
-async fn request(
+pub(crate) async fn request(
     node: &ReticulumNode,
     link: &LinkId,
     path: &str,
@@ -349,7 +349,9 @@ pub fn save_cursor(home: &std::path::Path, cursor: u64) -> Result<(), String> {
     write_atomically(&home.join(CURSOR_FILE), &format!("{cursor}\n"))
 }
 
-fn write_atomically(path: &std::path::Path, text: &str) -> Result<(), String> {
+/// Write `text` to `path` through a temporary file beside it, so a reader
+/// sees the old content or the new, never half of it.
+pub fn write_atomically(path: &std::path::Path, text: &str) -> Result<(), String> {
     let temporary = path.with_extension("new");
     std::fs::write(&temporary, text)
         .and_then(|()| std::fs::rename(&temporary, path))

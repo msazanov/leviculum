@@ -78,6 +78,8 @@ pub enum Reason {
     Timer,
     /// A client of a home node sent a message, and pulls its state.
     Sent,
+    /// The home node woke its client: its archive grew.
+    Wake,
 }
 
 impl Reason {
@@ -89,6 +91,7 @@ impl Reason {
             Self::Announce => "announce",
             Self::Timer => "timer",
             Self::Sent => "send",
+            Self::Wake => "wake",
         }
     }
 }

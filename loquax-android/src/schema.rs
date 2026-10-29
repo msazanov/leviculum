@@ -11,7 +11,7 @@
 //! | call | payload |
 //! |---|---|
 //! | `start` | [`Start`] |
-//! | `command` | [`Request`], tagged by `t`: `open`, `close`, `send`, `react`, `pull` |
+//! | `command` | [`Request`], tagged by `t`: `open`, `close`, `send`, `react`, `pull`, `front` |
 //! | `query` | [`Query`], tagged by `t`: `conversations`, `messages` |
 //!
 //! Rust to Java:
@@ -21,10 +21,16 @@
 //! | `start` | [`Started`] |
 //! | `command` | [`Done`] |
 //! | `query` | [`Conversations`] or [`Messages`], or [`Done`] with the error |
-//! | `nextEvent` | [`Event`], tagged by `t`: `changed`, `notice`, `sync`, `stopped`; none when the wait ran out |
+//! | `nextEvent` | [`Event`], tagged by `t`: `changed`, `notice`, `sync`, `link`, `stopped`; none when the wait ran out |
 //!
 //! A change that Java cannot read is a new [`VERSION`]: every answer
-//! carries it, and Java refuses one it does not know.
+//! carries it, and Java refuses one it does not know. A field or an event
+//! added is no such change: Java reads keys by name and skips an event it
+//! does not know, so `link` (event and field) came within version 1, and a
+//! code with the address behind it in [`Start::code`] is still a string.
+//! A request added is none either: an older app never sends `front`, and
+//! the session then counts itself in the back, pulling on wakes and its
+//! schedule as before.
 
 use serde::{Deserialize, Serialize};
 
@@ -40,8 +46,10 @@ pub struct Start {
     /// The home node's TCP server, `host:port`; the saved one when absent.
     #[serde(default)]
     pub server: Option<String>,
-    /// The admission code from `loquax home admit` (`lqxh1...`); needed
-    /// only while the phone is no client yet.
+    /// The admission code from `loquax home admit` (`lqxh1...`, or
+    /// `lqxh1...@host:port` with the server behind it, which stands in for
+    /// [`Start::server`] when that is absent); needed only while the phone
+    /// is no client yet.
     #[serde(default)]
     pub code: Option<String>,
     /// The name the home node lists this phone under.
@@ -67,6 +75,10 @@ pub struct Started {
     pub address: Option<String>,
     /// The server the session talks to.
     pub server: Option<String>,
+    /// Whether its TCP interface to the home node is up right now; the
+    /// `link` event tells each change after.
+    #[serde(default)]
+    pub link: bool,
 }
 
 /// What the user did.
@@ -89,6 +101,10 @@ pub enum Request {
     },
     /// Asked for a pull now: the refresh button.
     Pull,
+    /// A screen of the app came to the front (`true`) or left it: while in
+    /// front and with the watching link down, the session pulls every
+    /// minute.
+    Front { front: bool },
 }
 
 /// What the screen wants to show.
@@ -194,7 +210,12 @@ pub enum Event {
         state: String,
         detail: String,
     },
-    /// The session ended; `detail` says why when it was not asked to.
+    /// The TCP interface to the home node came up or went down. Once
+    /// soon after the start, then on each change.
+    Link { v: u32, up: bool },
+    /// The session ended; `detail` says why when it was not asked to. One
+    /// that ended by itself is gone from the library then: the next
+    /// `start` makes a fresh one.
     Stopped { v: u32, detail: String },
 }
 
@@ -229,6 +250,10 @@ mod tests {
         assert_eq!(
             decode::<Request>(&encode(&Request::Pull)),
             Ok(Request::Pull)
+        );
+        assert_eq!(
+            decode::<Request>(&encode(&Request::Front { front: true })),
+            Ok(Request::Front { front: true })
         );
     }
 

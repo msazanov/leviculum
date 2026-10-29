@@ -8,6 +8,9 @@ import java.util.Map;
 
 /** What the screens share: times and the status line's words. */
 final class Ui {
+    /** The library's answer to a call without a session (src/lib.rs). */
+    static final String NOT_STARTED = "not started";
+
     private Ui() {}
 
     /** A time of day for today, a date and time before; empty for none. */

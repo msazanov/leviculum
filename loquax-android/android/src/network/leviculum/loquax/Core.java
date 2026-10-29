@@ -109,6 +109,11 @@ final class Core {
         return command(map("t", "pull"));
     }
 
+    /** A screen came to the front or left it: in front, a down watching link pulls every minute. */
+    static String front(boolean front) {
+        return command(map("t", "front", "front", front));
+    }
+
     static Map<String, Object> conversations() {
         return answer(Native.query(MsgPack.pack(map("t", "conversations"))));
     }

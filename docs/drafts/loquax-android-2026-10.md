@@ -282,6 +282,34 @@ then the service and the battery measurement.
 - **Next**: the foreground service (`remoteMessaging`) holding the quiet
   link, the battery exemption intent, then the measurement of section 3.
 
+After order 1116: the client runners (send, pull, marks, the store's side
+of an engine event) are one copy in `loquax::home::runner`, which the
+terminal's shell and the app's session both call. The foreground service
+(`LoquaxService`, `remoteMessaging`) holds the session after the first
+start, with the persistent notification (home node, unread, a stop
+button) and a notification per conversation with new messages; the
+battery exemption is asked once (`Asks`). The APK with both ABIs is
+8 664 203 B, again the same twice, the second from a fresh target
+directory with sccache off. Next: the measurement of section 3 on the
+phone.
+
+After order 1121: pairing is one scan or one paste. `loquax home admit
+--server host:port` puts the address into the code (`lqxh1...@host:port`)
+and prints it as a QR code too; the join screen fills the address from a
+pasted code, and a code shared to the app (a QR reader's share button,
+an `ACTION_SEND` of `text/plain`) fills both and joins at once. No camera
+in the app: that would take AndroidX or Google's scanner. A session whose
+engine died says `stopped` with why, and the library drops it, so the
+service's retry every 30 s builds a fresh one instead of reusing the dead
+one. The `link` event (and the field in `Started`) says whether the TCP
+interface is up; the notification says "Connected to" or "Connecting to"
+by it. When the link comes back the session asks for the home
+destination's path: the home node never announces that destination, so a
+transport node that restarted knew no path to it, and the leaf's link
+requests over its old path timed out (41 s in the facade test before
+this) until a path request went out. The APK is 8 688 779 B, the same
+twice.
+
 ## 7. Open questions for Lew (answered 2026-10-29, see section 6)
 
 1. **Package name.** `network.leviculum.loquax` assumes the domain
