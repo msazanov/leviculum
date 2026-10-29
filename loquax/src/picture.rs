@@ -434,6 +434,7 @@ mod tests {
                 attribution: "© OpenStreetMap contributors".to_string(),
                 notice: "test".to_string(),
                 threads: 1,
+                locale: None,
             };
             let out = File::create(maps.join(format!("{name}.lmr"))).expect("create");
             cut(&archive, &opts, std::io::BufWriter::new(out)).expect("cut");

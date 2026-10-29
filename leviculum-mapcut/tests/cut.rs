@@ -5,8 +5,11 @@
 use std::collections::BTreeMap;
 use std::io::Cursor;
 
+use leviculum_map::labels::LabelKind;
 use leviculum_map::region::{Bounds, Region, TileId};
-use leviculum_mapcut::cut::{cut, cut_tile, in_bounds, CutOptions, DEVICE_POINTS};
+use leviculum_mapcut::cut::{
+    cut, cut_tile, cut_tile_named, in_bounds, CutOptions, Names, DEVICE_POINTS,
+};
 use leviculum_mapcut::{Res, TileSource};
 use leviculum_mapfill::fixture::Kind;
 use leviculum_mapfill::style::Class;
@@ -149,6 +152,178 @@ impl TileSource for Synthetic {
     }
 }
 
+/// A feature with properties: geometry type, its commands, key-value pairs.
+type Tagged<'a> = (i32, Vec<u32>, Vec<(&'a str, Value)>);
+
+/// A layer whose features carry properties.
+fn tagged(name: &str, features: Vec<Tagged<'_>>) -> Layer {
+    let mut keys: Vec<String> = Vec::new();
+    let mut values: Vec<Value> = Vec::new();
+    let mut fs = Vec::new();
+    for (t, geometry, props) in features {
+        let mut tags = Vec::new();
+        for (k, v) in props {
+            let ki = keys.iter().position(|x| x == k).unwrap_or_else(|| {
+                keys.push(k.to_owned());
+                keys.len() - 1
+            });
+            values.push(v);
+            tags.extend([ki as u32, values.len() as u32 - 1]);
+        }
+        fs.push(Feature {
+            id: None,
+            tags,
+            r#type: Some(t),
+            geometry,
+        });
+    }
+    Layer {
+        version: 2,
+        name: name.to_owned(),
+        features: fs,
+        keys,
+        values,
+        extent: Some(4096),
+    }
+}
+
+fn text(s: &str) -> Value {
+    Value {
+        string_value: Some(s.to_owned()),
+        ..Value::default()
+    }
+}
+
+fn number(v: i64) -> Value {
+    Value {
+        int_value: Some(v),
+        ..Value::default()
+    }
+}
+
+fn at(x: i32, y: i32) -> Vec<u32> {
+    let mut e = GeometryEncoder::new();
+    e.add_points([[x, y]]);
+    e.into_vec()
+}
+
+/// A Protomaps 4.x tile with one place of every class the source has, a
+/// water and a park point, a cafe, and named roads of every kind.
+fn named_tile() -> Vec<u8> {
+    let place = |kind: &str, detail: &str, name: &str, x: i32, min_zoom: i64| {
+        (
+            POINT,
+            at(x, 100),
+            vec![
+                ("kind", text(kind)),
+                ("kind_detail", text(detail)),
+                ("name", text(name)),
+                ("min_zoom", number(min_zoom)),
+                ("population_rank", number(x as i64 / 100)),
+            ],
+        )
+    };
+    let road = |kind: &str, name: &str, y: i32| {
+        (
+            LINESTRING,
+            line(&[[0, y], [4000, y]]),
+            vec![("kind", text(kind)), ("name", text(name))],
+        )
+    };
+    Tile {
+        layers: vec![
+            layer("earth", vec![(POLYGON, "", polygon(&[square(0, 0, 4096)]))]),
+            tagged(
+                "places",
+                vec![
+                    {
+                        let mut p = place("locality", "city", "Frankfurt am Main", 1200, 4);
+                        p.2.push(("name:de", text("Frankfurt am Main")));
+                        p.2.push(("name:en", text("Frankfurt")));
+                        p
+                    },
+                    place("locality", "town", "Offenbach am Main", 1100, 8),
+                    place("macrohood", "quarter", "Innenstadt I", 1000, 11),
+                    place("locality", "village", "Altenhain", 900, 11),
+                    place("neighbourhood", "suburb", "Sachsenhausen", 800, 13),
+                    place("neighbourhood", "neighbourhood", "Westend", 700, 13),
+                    // Left out: field names, hamlets, single houses, farms.
+                    place("locality", "locality", "Am Kirchberg", 600, 13),
+                    place("locality", "hamlet", "Hof Hausen", 500, 12),
+                    place("locality", "isolated_dwelling", "Forsthaus", 400, 13),
+                    place("locality", "farm", "Gut Neuhof", 300, 13),
+                    // A suburb a z14 view shows, not this z13 tile.
+                    place("neighbourhood", "suburb", "Gallus", 200, 14),
+                    // In the buffer: its neighbour's.
+                    (
+                        POINT,
+                        at(-20, 100),
+                        vec![
+                            ("kind", text("locality")),
+                            ("kind_detail", text("city")),
+                            ("name", text("Mainz")),
+                        ],
+                    ),
+                    // Not a name: an empty one.
+                    place("locality", "town", " ", 150, 8),
+                ],
+            ),
+            tagged(
+                "water",
+                vec![
+                    (
+                        POINT,
+                        at(2000, 2000),
+                        vec![("kind", text("water")), ("name", text("Main"))],
+                    ),
+                    (POINT, at(2100, 2000), vec![("kind", text("water"))]),
+                    (
+                        POLYGON,
+                        polygon(&[square(1000, 1000, 500)]),
+                        vec![("kind", text("water")), ("name", text("Teich"))],
+                    ),
+                ],
+            ),
+            tagged(
+                "pois",
+                vec![
+                    (
+                        POINT,
+                        at(3000, 3000),
+                        vec![
+                            ("kind", text("park")),
+                            ("name", text("Grüneburgpark")),
+                            ("name:de", text("Grüneburgpark")),
+                        ],
+                    ),
+                    (
+                        POINT,
+                        at(3100, 3000),
+                        vec![("kind", text("cafe")), ("name", text("Café Laumer"))],
+                    ),
+                ],
+            ),
+            tagged(
+                "roads",
+                vec![
+                    road("highway", "A 66", 500),
+                    road("major_road", "Mainzer Landstraße", 600),
+                    road("medium_road", "Eschersheimer Landstraße", 700),
+                    road("minor_road", "Wolfsgangstraße", 800),
+                    road("path", "Mainuferweg", 900),
+                    road("rail", "Main-Weser-Bahn", 1000),
+                    (
+                        LINESTRING,
+                        line(&[[0, 1100], [4000, 1100]]),
+                        vec![("kind", text("minor_road"))],
+                    ),
+                ],
+            ),
+        ],
+    }
+    .encode_to_vec()
+}
+
 /// Around Santa Maria del Fiore: the z15 tiles 17408..=17409 x 11943.
 const BOX: Bounds = Bounds {
     west: 112_505_000,
@@ -165,6 +340,7 @@ fn source(reversed: bool) -> Synthetic {
     tiles.insert(t(15, 17409, 11943), sea_tile());
     tiles.insert(t(14, 8704, 5971), sea_tile());
     tiles.insert(t(12, 2176, 1492), busy_tile());
+    tiles.insert(t(13, 4352, 2985), named_tile());
     // Outside the box, and outside the zoom range.
     tiles.insert(t(15, 17500, 11943), busy_tile());
     tiles.insert(t(9, 272, 186), busy_tile());
@@ -179,6 +355,7 @@ fn options(threads: usize) -> CutOptions {
         attribution: "© OpenStreetMap contributors".to_owned(),
         notice: "test notice, ODbL".to_owned(),
         threads,
+        locale: Some("de".to_owned()),
     }
 }
 
@@ -209,6 +386,7 @@ fn the_cut_applies_profile_one_and_reads_back() {
         ids,
         [
             (12, 2176, 1492),
+            (13, 4352, 2985),
             (14, 8704, 5971),
             (15, 17408, 11943),
             (15, 17409, 11943)
@@ -217,8 +395,8 @@ fn the_cut_applies_profile_one_and_reads_back() {
     );
     assert_eq!(r.attribution(), "© OpenStreetMap contributors");
     // The two sea tiles share one blob.
-    let sea14 = r.entry(1).expect("entry");
-    let sea15 = r.entry(3).expect("entry");
+    let sea14 = r.entry(2).expect("entry");
+    let sea15 = r.entry(4).expect("entry");
     assert_eq!((sea14.offset, sea14.len), (sea15.offset, sea15.len));
 
     let classes = |id: TileId| -> Vec<(Class, usize)> {
@@ -410,4 +588,111 @@ fn a_tile_with_nothing_left_is_not_written() {
     let (blob, st) = cut_tile(&only_buildings, layers).expect("cut");
     assert!(blob.is_none());
     assert_eq!((st.empty, st.features_in, st.features_out), (1, 1, 0));
+}
+
+#[test]
+fn the_cut_names_exactly_the_classes_the_map_labels() {
+    let layers = leviculum_map::profile::layers(1, 13).expect("profile");
+    let names = |z: u8, deepest: bool| Names {
+        locale: Some("en"),
+        z,
+        deepest,
+    };
+    let (blob, labels, st) =
+        cut_tile_named(&named_tile(), layers, Some(names(13, false))).expect("cut");
+    let blob = blob.expect("a blob");
+    let points: Vec<(LabelKind, u8, &str, Option<&str>)> = labels
+        .points
+        .iter()
+        .map(|(k, rank, _, n, _)| (*k, *rank, n.local.as_str(), n.alternate.as_deref()))
+        .collect();
+    assert_eq!(
+        points,
+        [
+            (LabelKind::City, 12, "Frankfurt am Main", Some("Frankfurt")),
+            (LabelKind::Town, 11, "Offenbach am Main", None),
+            (LabelKind::District, 10, "Innenstadt I", None),
+            (LabelKind::Village, 9, "Altenhain", None),
+            (LabelKind::Suburb, 8, "Sachsenhausen", None),
+            (LabelKind::Neighbourhood, 7, "Westend", None),
+            (LabelKind::Water, 0, "Main", None),
+            (LabelKind::Park, 0, "Grüneburgpark", None),
+        ]
+    );
+    // No street names in a z13 tile that is not the region's deepest.
+    assert!(labels.lines.is_empty());
+    assert_eq!((st.point_labels, st.line_labels), (8, 0));
+
+    // At z14, and in the deepest zoom of a region whatever it is: the
+    // suburb a z14 view shows, and the named roads, paths and railways
+    // not among them, each pointing at its own line feature.
+    for (z, deepest) in [(14, false), (13, true)] {
+        let (blob, labels, _) =
+            cut_tile_named(&named_tile(), layers, Some(names(z, deepest))).expect("cut");
+        let blob = blob.expect("a blob");
+        assert!(labels.points.iter().any(|p| p.3.local == "Gallus"), "z{z}");
+        let fx = leviculum_mapfill::fixture::Fixture::parse(&blob).expect("parse");
+        let features: Vec<_> = fx.features().collect();
+        let lines: Vec<(LabelKind, u8, &str, Class)> = labels
+            .lines
+            .iter()
+            .map(|(f, k, mz, n)| {
+                let f = &features[usize::from(*f)];
+                assert_eq!(f.kind, Kind::Line);
+                (*k, *mz, n.local.as_str(), f.class)
+            })
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                (
+                    LabelKind::MinorRoad,
+                    15,
+                    "Wolfsgangstraße",
+                    Class::MinorRoad
+                ),
+                (
+                    LabelKind::SecondaryRoad,
+                    14,
+                    "Mainzer Landstraße",
+                    Class::SecondaryRoad
+                ),
+                (
+                    LabelKind::SecondaryRoad,
+                    14,
+                    "Eschersheimer Landstraße",
+                    Class::SecondaryRoad
+                ),
+                (LabelKind::MajorRoad, 14, "A 66", Class::MajorRoad),
+            ],
+            "z{z}"
+        );
+    }
+    // The geometry is the same with names as without.
+    let (plain, _) = cut_tile(&named_tile(), layers).expect("cut");
+    assert_eq!(plain.as_deref(), Some(blob.as_slice()));
+}
+
+#[test]
+fn a_region_carries_its_names_and_one_string_table() {
+    let bytes = run(&source(false), 2);
+    let r = Region::from_bytes(&bytes).expect("open");
+    r.verify().expect("verify");
+    let l = r.header().labels.expect("version 2");
+    assert_eq!(l.sections, 1, "only the named tile has a section");
+    let id = TileId {
+        z: 13,
+        x: 4352,
+        y: 2985,
+    };
+    let s = r.labels(id).expect("labels").expect("a section");
+    let first = s.points().next().expect("a point").1;
+    assert_eq!(r.string(first.string), Ok("Frankfurt am Main"));
+    // `de` is the cut's locale here, and the German name is the local one.
+    assert_eq!(s.alternate(0), None);
+    assert!(r.find_string("Grüneburgpark").expect("search").is_some());
+    assert!(r.find_string("Am Kirchberg").expect("search").is_none());
+    for i in 1..r.string_count() {
+        assert!(r.string(i - 1).expect("s") < r.string(i).expect("s"));
+    }
 }

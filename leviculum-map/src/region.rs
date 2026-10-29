@@ -1,13 +1,14 @@
 //! The region file: one tile pyramid of `leviculum-mapfill`'s flat
 //! geometry, read in place (`docs/src/concepts/loquax-map.md`, section 4,
-//! "Region file").
+//! "Region file"), and from version 2 (LMR2) the names on it: one string
+//! table and a label section per tile ([`crate::labels`]).
 //!
 //! All integers little-endian. Offsets are from the start of the file.
 //!
 //! ```text
-//! header  64 bytes
+//! header  64 bytes (version 1), 96 (version 2)
 //!   0  "LMR1"
-//!   4  u16 version (1)          6  u16 header length (64)
+//!   4  u16 version (1 or 2)     6  u16 header length (64 or 96)
 //!   8  i32 west, south, east, north, degrees x 10^7 (west > east: the
 //!      region crosses the antimeridian)
 //!  24  u8 min zoom  25 u8 max zoom (<= 16)  26 u8 layer profile  27 u8 0
@@ -15,10 +16,18 @@
 //!  36  u32 notice offset        40 u32 notice length
 //!  44  u32 tile count           48 u64 index offset
 //!  56  u64 file length
+//!   version 2 only:
+//!  64  u64 label index offset   72 u32 label section count
+//!  76  u32 string count         80 u64 string table offset
+//!  88  u64 string table length
 //! text    the attribution (one line, shown on the map) and the notice
 //!         (the licence and the source), UTF-8, both required
 //! tiles   one `LMF1` fixture per tile: view 256x256, one tile at offset
 //!         (0, 0), its shift taking the tile's extent to 4096 sub-pixels
+//! labels  version 2: one label section per tile that has names
+//! strings version 2: the string table, after every blob
+//! label index  version 2: label section count x 20 bytes, the entries'
+//!         layout, ending where the index starts
 //! index   tile count x 20 bytes, ascending by (z, x, y), last in the file:
 //!         u8 z  u8 0  u16 x  u16 y  u16 0  u64 offset  u32 length
 //! ```
@@ -29,19 +38,31 @@
 //! can stream tiles and learn their count at the end, and it is searched
 //! in place, 20 bytes per probe: a whole country's index is megabytes,
 //! which the M9 does not load.
+//!
+//! A reader of version 1 refuses a version 2 file with
+//! [`RegionError::Version`], never misreads it; this reader reads both. A
+//! frontend that draws no names never touches the label index or the
+//! string table, so they cost it nothing.
 
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use leviculum_mapfill::fixture::{Fixture, FixtureError};
+use leviculum_mapfill::fixture::{Fixture, FixtureError, Kind};
+
+use crate::labels::{LabelError, Section};
 
 /// The file's first four bytes.
 pub const MAGIC: [u8; 4] = *b"LMR1";
-/// The format version this reader reads.
-pub const VERSION: u16 = 1;
-/// Header length in bytes.
+/// The format version the writer writes, the newest this reader reads.
+pub const VERSION: u16 = 2;
+/// The first version, without names, which this reader reads too.
+pub const VERSION_1: u16 = 1;
+/// Header length in bytes of a version 1 file, the part every version
+/// starts with.
 pub const HEADER_LEN: usize = 64;
+/// Header length in bytes of a version 2 file.
+pub const HEADER_LEN_2: usize = 96;
 /// Index entry length in bytes.
 pub const ENTRY_LEN: usize = 20;
 /// The highest zoom a region may hold: x and y are `u16`.
@@ -70,6 +91,11 @@ pub enum RegionError {
     Io,
     /// A tile blob is not a fixture, or not a one-tile one.
     Tile(TileId, FixtureError),
+    /// The string table is not one, or string `n` is not there.
+    Strings(u32),
+    /// A tile's label section is not one, or names a feature its tile
+    /// does not hold as a line.
+    Labels(TileId, LabelError),
 }
 
 /// A tile address.
@@ -110,6 +136,21 @@ pub struct Header {
     pub tiles: u32,
     pub index: u64,
     pub len: u64,
+    /// The names: `None` in a version 1 file, which has none.
+    pub labels: Option<LabelTables>,
+}
+
+/// Where a version 2 file keeps its names.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LabelTables {
+    /// The label index: entries like the tile index's, pointing at label
+    /// sections.
+    pub index: u64,
+    pub sections: u32,
+    pub strings: u32,
+    /// Offset and length of the string table.
+    pub table: u64,
+    pub table_len: u64,
 }
 
 fn u16_at(b: &[u8], at: usize) -> u16 {
@@ -127,17 +168,50 @@ fn u64_at(b: &[u8], at: usize) -> u64 {
 }
 
 impl Header {
-    /// Decode and check the fields that need nothing but the header. The
-    /// checks against the file's length are [`Region::open`]'s.
-    pub fn parse(b: &[u8; HEADER_LEN]) -> Result<Self, RegionError> {
+    /// The header's length in a file of `version`, `None` for a version
+    /// this reader does not know.
+    pub fn len_of(version: u16) -> Option<usize> {
+        match version {
+            VERSION_1 => Some(HEADER_LEN),
+            VERSION => Some(HEADER_LEN_2),
+            _ => None,
+        }
+    }
+
+    /// This header's length: 96 bytes with names, 64 without.
+    pub fn header_len(&self) -> usize {
+        match self.labels {
+            Some(_) => HEADER_LEN_2,
+            None => HEADER_LEN,
+        }
+    }
+
+    /// The version a file starting with these bytes says it is, after the
+    /// magic is checked; [`RegionError::Version`] for one this reader does
+    /// not know, before anything else of the header is read.
+    pub fn version(b: &[u8; HEADER_LEN]) -> Result<u16, RegionError> {
         if b[..4] != MAGIC {
             return Err(RegionError::Magic);
         }
         let version = u16_at(b, 4);
-        if version != VERSION {
-            return Err(RegionError::Version(version));
+        Self::len_of(version).ok_or(RegionError::Version(version))?;
+        Ok(version)
+    }
+
+    /// Decode and check the fields that need nothing but the header: the
+    /// first 64 bytes, and for version 2 the 32 after them. The checks
+    /// against the file's length are [`Region::open`]'s.
+    pub fn parse(b: &[u8]) -> Result<Self, RegionError> {
+        let head: &[u8; HEADER_LEN] = b
+            .get(..HEADER_LEN)
+            .and_then(|h| h.try_into().ok())
+            .ok_or(RegionError::Truncated)?;
+        let version = Self::version(head)?;
+        let len = Self::len_of(version).ok_or(RegionError::Version(version))?;
+        if b.len() < len {
+            return Err(RegionError::Truncated);
         }
-        if usize::from(u16_at(b, 6)) != HEADER_LEN {
+        if usize::from(u16_at(b, 6)) != len {
             return Err(RegionError::Header("header length"));
         }
         let i = |at| u32_at(b, at) as i32;
@@ -175,15 +249,27 @@ impl Header {
             tiles: u32_at(b, 44),
             index: u64_at(b, 48),
             len: u64_at(b, 56),
+            labels: (version == VERSION).then(|| LabelTables {
+                index: u64_at(b, 64),
+                sections: u32_at(b, 72),
+                strings: u32_at(b, 76),
+                table: u64_at(b, 80),
+                table_len: u64_at(b, 88),
+            }),
         })
     }
 
-    /// The 64 header bytes; the writer's half, kept beside the reader.
-    pub fn encode(&self) -> [u8; HEADER_LEN] {
-        let mut b = [0u8; HEADER_LEN];
+    /// The header bytes, version 2 with names and version 1 without; the
+    /// writer's half, kept beside the reader.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut b = vec![0u8; self.header_len()];
+        let version = match self.labels {
+            Some(_) => VERSION,
+            None => VERSION_1,
+        };
         b[..4].copy_from_slice(&MAGIC);
-        b[4..6].copy_from_slice(&VERSION.to_le_bytes());
-        b[6..8].copy_from_slice(&(HEADER_LEN as u16).to_le_bytes());
+        b[4..6].copy_from_slice(&version.to_le_bytes());
+        b[6..8].copy_from_slice(&(self.header_len() as u16).to_le_bytes());
         let bd = self.bounds;
         for (at, v) in [(8, bd.west), (12, bd.south), (16, bd.east), (20, bd.north)] {
             b[at..at + 4].copy_from_slice(&v.to_le_bytes());
@@ -202,6 +288,13 @@ impl Header {
         }
         b[48..56].copy_from_slice(&self.index.to_le_bytes());
         b[56..64].copy_from_slice(&self.len.to_le_bytes());
+        if let Some(l) = self.labels {
+            b[64..72].copy_from_slice(&l.index.to_le_bytes());
+            b[72..76].copy_from_slice(&l.sections.to_le_bytes());
+            b[76..80].copy_from_slice(&l.strings.to_le_bytes());
+            b[80..88].copy_from_slice(&l.table.to_le_bytes());
+            b[88..96].copy_from_slice(&l.table_len.to_le_bytes());
+        }
         b
     }
 }
@@ -292,7 +385,7 @@ pub struct Region<S> {
 impl<S: Storage> Region<S> {
     /// Check the header against the storage and read the two texts.
     pub fn open(storage: S) -> Result<Self, RegionError> {
-        let mut hb = [0u8; HEADER_LEN];
+        let mut hb = [0u8; HEADER_LEN_2];
         if storage.size() < HEADER_LEN as u64 {
             // Too short for a header: say Magic when even that is wrong.
             let n = storage.size() as usize;
@@ -305,23 +398,52 @@ impl<S: Storage> Region<S> {
             }
             return Err(RegionError::Truncated);
         }
-        storage.read_at(0, &mut hb)?;
-        let header = Header::parse(&hb)?;
+        storage.read_at(0, &mut hb[..HEADER_LEN])?;
+        let mut head = [0u8; HEADER_LEN];
+        head.copy_from_slice(&hb[..HEADER_LEN]);
+        let version = Header::version(&head)?;
+        let header_len = Header::len_of(version).ok_or(RegionError::Version(version))?;
+        if storage.size() < header_len as u64 {
+            return Err(RegionError::Truncated);
+        }
+        storage.read_at(0, &mut hb[..header_len])?;
+        let header = Header::parse(&hb[..header_len])?;
         if header.len != storage.size() {
             return Err(RegionError::Truncated);
         }
+        let first = header_len as u64;
         let index_len = u64::from(header.tiles) * ENTRY_LEN as u64;
-        if header.index < HEADER_LEN as u64
-            || header.index.checked_add(index_len) != Some(header.len)
-        {
+        if header.index < first || header.index.checked_add(index_len) != Some(header.len) {
             return Err(RegionError::Header("index"));
+        }
+        // Blobs lie after the header and before the string table, which
+        // lies before the label index, which ends where the index starts.
+        let mut data_end = header.index;
+        if let Some(l) = header.labels {
+            let label_index_len = u64::from(l.sections) * ENTRY_LEN as u64;
+            if l.index.checked_add(label_index_len) != Some(header.index) || l.index < first {
+                return Err(RegionError::Header("label index"));
+            }
+            let offsets = (u64::from(l.strings) + 1) * 4;
+            if l.table < first
+                || l.table.checked_add(l.table_len) != Some(l.index)
+                || l.table_len < offsets
+            {
+                return Err(RegionError::Header("strings"));
+            }
+            let mut last = [0u8; 4];
+            storage.read_at(l.table + offsets - 4, &mut last)?;
+            if u64::from(u32::from_le_bytes(last)) != l.table_len - offsets {
+                return Err(RegionError::Strings(l.strings));
+            }
+            data_end = l.table;
         }
         let text = |(off, len): (u32, u32)| -> Result<String, RegionError> {
             if len == 0 || len > MAX_TEXT {
                 return Err(RegionError::Text);
             }
             let end = u64::from(off) + u64::from(len);
-            if u64::from(off) < HEADER_LEN as u64 || end > header.index {
+            if u64::from(off) < first || end > data_end {
                 return Err(RegionError::Header("text"));
             }
             let mut b = vec![0u8; len as usize];
@@ -331,7 +453,7 @@ impl<S: Storage> Region<S> {
         let attribution = text(header.attribution)?;
         let notice = text(header.notice)?;
         Ok(Self {
-            data_end: header.index,
+            data_end,
             storage,
             header,
             attribution,
@@ -361,14 +483,19 @@ impl<S: Storage> Region<S> {
     /// Index entry `n`, checked: a valid tile in the region's zooms and a
     /// blob inside the data area.
     pub fn entry(&self, n: u32) -> Result<Entry, RegionError> {
-        if n >= self.header.tiles {
+        self.entry_in(self.header.index, self.header.tiles, n)
+    }
+
+    /// Entry `n` of the index at `index` holding `count` entries.
+    fn entry_in(&self, index: u64, count: u32, n: u32) -> Result<Entry, RegionError> {
+        if n >= count {
             return Err(RegionError::Entry(n));
         }
         let mut b = [0u8; ENTRY_LEN];
         self.storage
-            .read_at(self.header.index + u64::from(n) * ENTRY_LEN as u64, &mut b)?;
+            .read_at(index + u64::from(n) * ENTRY_LEN as u64, &mut b)?;
         let e = Entry::parse(&b).ok_or(RegionError::Entry(n))?;
-        let in_data = e.offset >= HEADER_LEN as u64
+        let in_data = e.offset >= self.header.header_len() as u64
             && e.len > 0
             && e.offset
                 .checked_add(u64::from(e.len))
@@ -382,12 +509,80 @@ impl<S: Storage> Region<S> {
     /// The entry of `id`, by binary search over the index in place;
     /// `None` when the region has nothing there.
     pub fn find(&self, id: TileId) -> Result<Option<Entry>, RegionError> {
-        let (mut lo, mut hi) = (0u32, self.header.tiles);
+        self.find_in(self.header.index, self.header.tiles, id)
+    }
+
+    fn find_in(&self, index: u64, count: u32, id: TileId) -> Result<Option<Entry>, RegionError> {
+        let (mut lo, mut hi) = (0u32, count);
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
-            let e = self.entry(mid)?;
+            let e = self.entry_in(index, count, mid)?;
             match e.id.cmp(&id) {
                 core::cmp::Ordering::Equal => return Ok(Some(e)),
+                core::cmp::Ordering::Less => lo = mid + 1,
+                core::cmp::Ordering::Greater => hi = mid,
+            }
+        }
+        Ok(None)
+    }
+
+    /// How many strings the region's table holds, 0 in a version 1 file.
+    pub fn string_count(&self) -> u32 {
+        self.header.labels.map_or(0, |l| l.strings)
+    }
+
+    /// Label index entry `n`, checked as [`Region::entry`] checks a tile's.
+    pub fn label_entry(&self, n: u32) -> Result<Entry, RegionError> {
+        let l = self.header.labels.ok_or(RegionError::Entry(n))?;
+        self.entry_in(l.index, l.sections, n)
+    }
+
+    /// The label section entry of `id`; `None` when the tile has no names
+    /// or the file is version 1. Only a frontend that draws names asks.
+    pub fn find_labels(&self, id: TileId) -> Result<Option<Entry>, RegionError> {
+        match self.header.labels {
+            Some(l) => self.find_in(l.index, l.sections, id),
+            None => Ok(None),
+        }
+    }
+
+    /// Byte range of string `n` in the storage.
+    fn string_range(&self, n: u32) -> Result<(u64, u32), RegionError> {
+        let l = self.header.labels.ok_or(RegionError::Strings(n))?;
+        if n >= l.strings {
+            return Err(RegionError::Strings(n));
+        }
+        let mut b = [0u8; 8];
+        self.storage.read_at(l.table + u64::from(n) * 4, &mut b)?;
+        let (from, to) = (u32_at(&b, 0), u32_at(&b, 4));
+        let bytes = l.table_len - (u64::from(l.strings) + 1) * 4;
+        if from > to || u64::from(to) > bytes {
+            return Err(RegionError::Strings(n));
+        }
+        let start = l.table + (u64::from(l.strings) + 1) * 4 + u64::from(from);
+        Ok((start, to - from))
+    }
+
+    /// String `n` of the table into `out`, replacing its contents.
+    pub fn read_string(&self, n: u32, out: &mut String) -> Result<(), RegionError> {
+        let (at, len) = self.string_range(n)?;
+        let mut b = vec![0u8; len as usize];
+        self.storage.read_at(at, &mut b)?;
+        out.clear();
+        out.push_str(core::str::from_utf8(&b).map_err(|_| RegionError::Strings(n))?);
+        Ok(())
+    }
+
+    /// The index of `name` in the string table, by binary search: the
+    /// table is sorted, so a search by place name needs no index of its own.
+    pub fn find_string(&self, name: &str) -> Result<Option<u32>, RegionError> {
+        let (mut lo, mut hi) = (0u32, self.string_count());
+        let mut s = String::new();
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            self.read_string(mid, &mut s)?;
+            match s.as_bytes().cmp(name.as_bytes()) {
+                core::cmp::Ordering::Equal => return Ok(Some(mid)),
                 core::cmp::Ordering::Less => lo = mid + 1,
                 core::cmp::Ordering::Greater => hi = mid,
             }
@@ -403,7 +598,8 @@ impl<S: Storage> Region<S> {
     }
 
     /// Walk the whole index: every entry in range, strictly ascending, and
-    /// every blob a one-tile fixture. What the cut runs on its own output
+    /// every blob a one-tile fixture; in a version 2 file the string table
+    /// and every label section too. What the cut runs on its own output
     /// and a frontend may run once on a file it did not make.
     pub fn verify(&self) -> Result<(), RegionError> {
         let mut prev: Option<TileId> = None;
@@ -417,8 +613,77 @@ impl<S: Storage> Region<S> {
             self.read_tile(&e, &mut buf)?;
             check_tile(e.id, &buf)?;
         }
+        let Some(l) = self.header.labels else {
+            return Ok(());
+        };
+        // The string table: offsets ascending, every string UTF-8, sorted
+        // and unique.
+        let mut table = vec![0u8; l.table_len as usize];
+        self.storage.read_at(l.table, &mut table)?;
+        check_strings(&table, l.strings)?;
+        let mut prev: Option<TileId> = None;
+        let mut sec = Vec::new();
+        for n in 0..l.sections {
+            let e = self.label_entry(n)?;
+            if prev.is_some_and(|p| p >= e.id) {
+                return Err(RegionError::Entry(n));
+            }
+            prev = Some(e.id);
+            self.read_tile(&e, &mut sec)?;
+            let tile = self
+                .find(e.id)?
+                .ok_or(RegionError::Labels(e.id, LabelError::Length))?;
+            self.read_tile(&tile, &mut buf)?;
+            check_labels(e.id, &sec, l.strings, &check_tile(e.id, &buf)?)?;
+        }
         Ok(())
     }
+}
+
+/// Check a string table of `count` strings whole: offsets ascending to
+/// its end, each string UTF-8, the strings sorted and each once.
+pub fn check_strings(table: &[u8], count: u32) -> Result<(), RegionError> {
+    let offsets = (count as usize + 1) * 4;
+    let bad = RegionError::Strings(count);
+    if table.len() < offsets {
+        return Err(bad);
+    }
+    let (heads, bytes) = table.split_at(offsets);
+    let mut prev: Option<&[u8]> = None;
+    for n in 0..count as usize {
+        let (from, to) = (
+            u32_at(heads, n * 4) as usize,
+            u32_at(heads, n * 4 + 4) as usize,
+        );
+        let s = bytes.get(from..to).ok_or(RegionError::Strings(n as u32))?;
+        core::str::from_utf8(s).map_err(|_| RegionError::Strings(n as u32))?;
+        if prev.is_some_and(|p| p >= s) {
+            return Err(RegionError::Strings(n as u32));
+        }
+        prev = Some(s);
+    }
+    if u32_at(heads, 0) != 0 || u32_at(heads, count as usize * 4) as usize != bytes.len() {
+        return Err(bad);
+    }
+    Ok(())
+}
+
+/// Parse tile `id`'s label section against a table of `strings` strings
+/// and the tile's geometry: every line label names a line feature of it.
+pub fn check_labels<'a>(
+    id: TileId,
+    section: &'a [u8],
+    strings: u32,
+    tile: &Fixture<'_>,
+) -> Result<Section<'a>, RegionError> {
+    let s = Section::parse(section, strings).map_err(|e| RegionError::Labels(id, e))?;
+    let lines: Vec<bool> = tile.features().map(|f| f.kind == Kind::Line).collect();
+    for (n, l) in s.lines() {
+        if !lines.get(usize::from(l.feature)).copied().unwrap_or(false) {
+            return Err(RegionError::Labels(id, LabelError::Feature(n)));
+        }
+    }
+    Ok(s)
 }
 
 /// Tile shifts a region blob may carry: extents 4096 (0) down to 256 (4).
@@ -474,5 +739,33 @@ impl<'a> Region<&'a [u8]> {
             .get(start..start + e.len as usize)
             .ok_or(RegionError::Truncated)?;
         check_tile(id, blob).map(Some)
+    }
+
+    /// Tile `id`'s label section, borrowed from the region; `None` when it
+    /// has no names. Checked against the string table, not against the
+    /// tile's geometry: [`Region::verify`] does that once for a file.
+    pub fn labels(&self, id: TileId) -> Result<Option<Section<'a>>, RegionError> {
+        let Some(e) = self.find_labels(id)? else {
+            return Ok(None);
+        };
+        let start = e.offset as usize;
+        let blob = self
+            .storage
+            .get(start..start + e.len as usize)
+            .ok_or(RegionError::Truncated)?;
+        Section::parse(blob, self.string_count())
+            .map(Some)
+            .map_err(|err| RegionError::Labels(id, err))
+    }
+
+    /// String `n` of the table, borrowed from the region.
+    pub fn string(&self, n: u32) -> Result<&'a str, RegionError> {
+        let (at, len) = self.string_range(n)?;
+        let start = at as usize;
+        let b = self
+            .storage
+            .get(start..start + len as usize)
+            .ok_or(RegionError::Truncated)?;
+        core::str::from_utf8(b).map_err(|_| RegionError::Strings(n))
     }
 }

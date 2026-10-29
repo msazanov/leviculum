@@ -9,6 +9,8 @@
 //! - [`profile`]: which classes each zoom of a region keeps, and how its
 //!   geometry was simplified.
 //! - [`pins`]: pins and their labels placed in a view, as data.
+//! - [`labels`]: the names a region carries (LMR2) and the one rule every
+//!   frontend places them by.
 //! - [`draw`]: the tiles of one view drawn into any `DrawTarget`, class by
 //!   class across the tiles, through `leviculum-mapfill`, in colour or as
 //!   lines alone, at the line widths of the view's zoom.
@@ -32,6 +34,7 @@ extern crate std;
 pub mod cells;
 pub mod choice;
 pub mod draw;
+pub mod labels;
 pub mod mercator;
 pub mod outline;
 pub mod pins;

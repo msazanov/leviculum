@@ -52,6 +52,29 @@ const PROFILE: u8 = leviculum_map::profile::CUT_1;
 /// What the region's notice names as the program that cut it.
 const BY: &str = "loquax";
 
+/// The language of a locale setting (`de_DE.UTF-8` is `de`), `None` for
+/// the C and POSIX locales and an empty one.
+pub fn language_of(setting: &str) -> Option<String> {
+    let lang: String = setting
+        .split(['_', '.', '@', '-'])
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let letters = (2..=3).contains(&lang.len()) && lang.bytes().all(|b| b.is_ascii_lowercase());
+    (letters && lang != "c").then_some(lang)
+}
+
+/// The user's language, which the autoload cuts names in beside the local
+/// ones: the first of `LC_ALL`, `LC_MESSAGES` and `LANG` that is set, as
+/// the C library chooses the language of its messages.
+pub fn user_language() -> Option<String> {
+    ["LC_ALL", "LC_MESSAGES", "LANG"]
+        .into_iter()
+        .filter_map(|k| std::env::var(k).ok())
+        .find(|v| !v.is_empty())
+        .and_then(|v| language_of(&v))
+}
+
 /// Where the archive is.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Source {
@@ -343,6 +366,7 @@ impl Job {
             floor: self.want.floor,
             cap: LOAD_CAP,
             profile: PROFILE,
+            locale: user_language(),
         };
         // Not `*.lmr`, so no painter reads it half written.
         let part = self.dir.join(format!(
@@ -448,6 +472,25 @@ mod tests {
             floor: 14,
             reason: LoadReason::View,
             centre: World { x: 0, y: 0 },
+        }
+    }
+
+    /// The language a region is cut in comes from the locale settings:
+    /// the language part, lower case, and none for C or POSIX.
+    #[test]
+    fn the_cut_language_is_the_locales() {
+        for (setting, want) in [
+            ("de_DE.UTF-8", Some("de")),
+            ("en_GB", Some("en")),
+            ("pt-BR", Some("pt")),
+            ("fil_PH.UTF-8", Some("fil")),
+            ("sr_RS@latin", Some("sr")),
+            ("C", None),
+            ("C.UTF-8", None),
+            ("POSIX", None),
+            ("", None),
+        ] {
+            assert_eq!(language_of(setting).as_deref(), want, "{setting:?}");
         }
     }
 

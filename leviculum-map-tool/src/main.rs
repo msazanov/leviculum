@@ -53,6 +53,10 @@ enum Cmd {
         /// Worker threads; the output does not depend on it.
         #[arg(long)]
         threads: Option<usize>,
+        /// Keep names in this language (`de`, `en`) beside the local ones
+        /// where they differ; without it the local names alone.
+        #[arg(long)]
+        locale: Option<String>,
     },
     /// Copy the tiles of a box of a PMTiles archive into a smaller one, as
     /// they are: the test fixture of the autoload (leviculum-mapcut/fixtures).
@@ -70,6 +74,12 @@ enum Cmd {
     },
     /// Print a region's header and per-zoom sizes, after checking it whole.
     Info { region: PathBuf },
+    /// Print the names a region holds at one zoom, a line each.
+    Labels {
+        region: PathBuf,
+        #[arg(long)]
+        zoom: u8,
+    },
     /// Draw one view of a region into a binary PPM.
     Render {
         region: PathBuf,
@@ -106,9 +116,10 @@ fn parse_bbox(s: &str) -> Res<Bounds> {
 
 fn print_zoom(label: &str, s: &ZoomStats) {
     println!(
-        "MAPTOOL zoom={label} tiles={} entries={} empty={} shared={} bytes={} features_in={} features_out={} vertices_in={} vertices_out={} over_device={} clamped={} resimplified={}",
+        "MAPTOOL zoom={label} tiles={} entries={} empty={} shared={} bytes={} features_in={} features_out={} vertices_in={} vertices_out={} over_device={} clamped={} resimplified={} point_labels={} line_labels={} label_bytes={}",
         s.tiles, s.entries, s.empty, s.shared, s.bytes, s.features_in, s.features_out,
-        s.vertices_in, s.vertices_out, s.over_device, s.clamped, s.resimplified
+        s.vertices_in, s.vertices_out, s.over_device, s.clamped, s.resimplified,
+        s.point_labels, s.line_labels, s.label_bytes
     );
 }
 
@@ -119,6 +130,7 @@ fn cmd_cut(
     zooms: (u8, u8),
     profile: u8,
     threads: Option<usize>,
+    locale: Option<String>,
 ) -> Res<()> {
     let t = Instant::now();
     let bounds = parse_bbox(bbox)?;
@@ -139,6 +151,7 @@ fn cmd_cut(
         threads: threads
             .or_else(|| std::thread::available_parallelism().ok().map(|n| n.get()))
             .unwrap_or(1),
+        locale,
     };
     let file = BufWriter::new(File::create(output)?);
     // A remote archive's tiles of the box are fetched first, in few
@@ -170,10 +183,12 @@ fn cmd_cut(
         .verify()
         .map_err(|e| format!("written region does not verify: {e:?}"))?;
     println!(
-        "MAPTOOL cut inputs={} input_bytes={input_bytes} region_bytes={} entries={} threads={} seconds={cut_s:.2}",
+        "MAPTOOL cut inputs={} input_bytes={input_bytes} region_bytes={} entries={} strings={} string_bytes={} threads={} seconds={cut_s:.2}",
         inputs.len(),
         stats.bytes,
         region.header().tiles,
+        stats.strings,
+        stats.string_bytes,
         opts.threads
     );
     Ok(())
@@ -291,8 +306,68 @@ fn cmd_info(path: &Path) -> Res<()> {
             z.1 += u64::from(e.len);
         }
     }
+    let mut labels = std::collections::BTreeMap::<u8, (u64, u64)>::new();
+    if let Some(l) = h.labels {
+        for n in 0..l.sections {
+            let e = region.label_entry(n).map_err(|e| format!("{e:?}"))?;
+            let z = labels.entry(e.id.z).or_default();
+            z.0 += 1;
+            z.1 += u64::from(e.len);
+        }
+        println!(
+            "MAPTOOL info version=2 strings={} string_bytes={} label_sections={}",
+            l.strings, l.table_len, l.sections
+        );
+    }
     for (z, (n, bytes)) in per {
-        println!("MAPTOOL info zoom={z} entries={n} blob_bytes={bytes}");
+        let (sections, label_bytes) = labels.get(&z).copied().unwrap_or_default();
+        println!(
+            "MAPTOOL info zoom={z} entries={n} blob_bytes={bytes} label_sections={sections} label_bytes={label_bytes}"
+        );
+    }
+    Ok(())
+}
+
+fn cmd_labels(path: &Path, zoom: u8) -> Res<()> {
+    let bytes = std::fs::read(path)?;
+    let region = Region::from_bytes(&bytes).map_err(|e| format!("{e:?}"))?;
+    let err = |e: leviculum_map::RegionError| format!("{e:?}");
+    let sections = region.header().labels.map_or(0, |l| l.sections);
+    for n in 0..sections {
+        let e = region.label_entry(n).map_err(err)?;
+        if e.id.z != zoom {
+            continue;
+        }
+        let Some(s) = region.labels(e.id).map_err(err)? else {
+            continue;
+        };
+        let alt = |n: u16| -> Res<String> {
+            Ok(match s.alternate(n) {
+                Some(a) => format!(" alt={:?}", region.string(a).map_err(err)?),
+                None => String::new(),
+            })
+        };
+        let t = e.id;
+        for (n, p) in s.points() {
+            println!(
+                "MAPTOOL label tile={}/{}/{} point kind={:?} rank={} min_zoom={} at={},{} name={:?}{}",
+                t.z, t.x, t.y, p.kind, p.rank, p.min_zoom, p.x, p.y,
+                region.string(p.string).map_err(err)?, alt(n)?
+            );
+        }
+        for (n, l) in s.lines() {
+            println!(
+                "MAPTOOL label tile={}/{}/{} line kind={:?} min_zoom={} feature={} name={:?}{}",
+                t.z,
+                t.x,
+                t.y,
+                l.kind,
+                l.min_zoom,
+                l.feature,
+                region.string(l.string).map_err(err)?,
+                alt(n)?
+            );
+        }
     }
     Ok(())
 }
@@ -357,6 +432,7 @@ fn main() -> Res<()> {
             max_zoom,
             profile,
             threads,
+            locale,
         } => cmd_cut(
             &inputs,
             &output,
@@ -364,6 +440,7 @@ fn main() -> Res<()> {
             (min_zoom, max_zoom),
             profile,
             threads,
+            locale,
         ),
         Cmd::Extract {
             output,
@@ -373,6 +450,7 @@ fn main() -> Res<()> {
             max_zoom,
         } => cmd_extract(&input, &output, &bbox, min_zoom..=max_zoom),
         Cmd::Info { region } => cmd_info(&region),
+        Cmd::Labels { region, zoom } => cmd_labels(&region, zoom),
         Cmd::Render {
             region,
             output,

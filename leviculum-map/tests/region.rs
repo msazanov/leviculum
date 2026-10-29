@@ -7,7 +7,7 @@ use embedded_graphics::prelude::*;
 use embedded_graphics::primitives::Rectangle;
 use leviculum_map::draw::{draw, draw_in, draw_tiles, Ink};
 use leviculum_map::mercator::{project, x_of_lon, y_of_lat, LatLon};
-use leviculum_map::region::{Entry, Region, RegionError, TileId, ENTRY_LEN, HEADER_LEN};
+use leviculum_map::region::{Entry, Region, RegionError, TileId, ENTRY_LEN, HEADER_LEN_2};
 use leviculum_map::viewport::Viewport;
 use leviculum_mapfill::fill::{Edge, Scratch};
 use leviculum_mapfill::frame::Frame;
@@ -259,6 +259,19 @@ fn every_truncation_is_an_error() {
 fn survives(bytes: &[u8]) -> Result<(), RegionError> {
     let r = Region::from_bytes(bytes)?;
     let verified = r.verify();
+    // The names, as a frontend reads them: every section, every string.
+    for n in 0..r.header().labels.map_or(0, |l| l.sections) {
+        if let Ok(e) = r.label_entry(n) {
+            if let Ok(Some(s)) = r.labels(e.id) {
+                for (_, p) in s.points() {
+                    let _ = r.string(p.string);
+                }
+                for (_, l) in s.lines() {
+                    let _ = r.string(l.string);
+                }
+            }
+        }
+    }
     let mut fb = vec![0u16; 240 * 320];
     for zoom in [11, 15, 16] {
         let view = Viewport::new(project(CENTRE), zoom, 240, 320);
@@ -302,8 +315,8 @@ fn corrupted_bytes_are_an_error_not_a_panic() {
     b[0] = b'X';
     assert_eq!(survives(&b).err(), Some(RegionError::Magic));
     let mut b = FLORENCE.to_vec();
-    b[4] = 2;
-    assert_eq!(survives(&b).err(), Some(RegionError::Version(2)));
+    b[4] = 3;
+    assert_eq!(survives(&b).err(), Some(RegionError::Version(3)));
     let mut b = FLORENCE.to_vec();
     b[25] = 17;
     assert_eq!(survives(&b).err(), Some(RegionError::Header("zoom")));
@@ -333,10 +346,14 @@ fn corrupted_bytes_are_an_error_not_a_panic() {
         assert_eq!(survives(&b).err(), Some(RegionError::Entry(0)));
     }
 
-    // Every single byte flipped, header, text, tiles and index: never a
-    // panic. Most flips inside a tile's geometry are still a valid picture,
-    // so only the outcome being reached is asserted.
-    for at in (0..FLORENCE.len()).step_by(1009).chain(0..HEADER_LEN) {
+    // Bytes flipped across header, text, tiles, the string table and both
+    // indexes: never a panic. Most flips inside a tile's geometry are still
+    // a valid picture, so only the outcome being reached is asserted.
+    for at in (0..FLORENCE.len())
+        .step_by(1009)
+        .chain(0..HEADER_LEN_2)
+        .chain((h.header().labels.map_or(index, |l| l.table as usize)..index).step_by(31))
+    {
         let mut b = FLORENCE.to_vec();
         b[at] ^= 0xA5;
         let _ = survives(&b);

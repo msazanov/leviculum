@@ -4,10 +4,13 @@ The map core every frontend draws through (#474,
 `docs/src/concepts/loquax-map.md`, sections 3 and 4). `no_std` with
 `alloc`; the feature `std` adds only a `Storage` for a file.
 
-- `region`: the region file (`LMR1`), a tile pyramid of
+- `region`: the region file (`LMR1`, versions 1 and 2), a tile pyramid of
   `leviculum-mapfill`'s flat geometry behind an index, opened through a
-  `Storage` and searched in place. Truncated or corrupt bytes are an
-  error, never a panic.
+  `Storage` and searched in place; version 2 adds one string table and a
+  label section per tile. Truncated or corrupt bytes are an error, never a
+  panic.
+- `labels`: the label sections and the string table, and the one rule
+  every frontend places names by (`place`).
 - `mercator`: Web Mercator between degrees x 10^7 and a `u32` world
   coordinate (2^32 units around the world, 9.3 mm at the equator).
 - `viewport`: centre, zoom, size; pan, fit to points, the screen position

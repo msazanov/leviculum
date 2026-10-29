@@ -24,6 +24,9 @@ pub struct Want {
     /// The most archive bytes the tiles may come to.
     pub cap: u64,
     pub profile: u8,
+    /// The language names are kept in beside the local ones
+    /// ([`CutOptions::locale`]).
+    pub locale: Option<String>,
 }
 
 /// What a load fetched and wrote.
@@ -126,6 +129,7 @@ pub fn load<R: RangeRead, W: Write + Seek>(
         attribution: ATTRIBUTION.to_owned(),
         notice: notice(by, want.profile, &source_line(archive)),
         threads,
+        locale: want.locale.clone(),
     };
     let stats = cut(&fetched, &opts, out)?;
     Ok(Loaded {

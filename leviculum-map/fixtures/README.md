@@ -1,12 +1,15 @@
 # Fixtures
 
-`firenze.lmr`: a region file (`LMR1`, layer profile 1) of central
-Florence, zooms 11 to 15, six tiles (z15/17408/11943 and z15/17409/11943,
-and the one tile above them at each of z14 to z11), 187,654 bytes. Cut with
+`firenze.lmr`: a region file (`LMR1` version 2, layer profile 1) of
+central Florence, zooms 11 to 15, six tiles (z15/17408/11943 and
+z15/17409/11943, and the one tile above them at each of z14 to z11), with
+the names of its places, parks and streets and the German name where it
+differs (Firenze, Florenz), 197,972 bytes. Cut with
 
 ```sh
 leviculum-map-tool cut -o firenze.lmr firenze.pmtiles \
-    --bbox 11.2505,43.7728,11.2700,43.7785 --min-zoom 11 --max-zoom 15
+    --bbox 11.2505,43.7728,11.2700,43.7785 --min-zoom 11 --max-zoom 15 \
+    --locale de
 ```
 
 from the Protomaps sample archive
