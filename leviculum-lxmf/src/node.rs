@@ -375,6 +375,10 @@ pub struct IncomingResourceTransfer {
 pub struct LxmfNode {
     delivery_destination: DestinationHash,
     config: LxmfNodeConfig,
+    /// Destinations whose link waits for a path. A want is spent by the link
+    /// it starts: the router counts one delivery attempt per want, so a want
+    /// that outlived its link would let every later announce or path answer
+    /// start an uncounted link (leviculum 1110).
     wanted_links: BTreeSet<DestinationHash>,
     pending_links: BTreeMap<DestinationHash, LinkId>,
     link_destinations: BTreeMap<LinkId, DestinationHash>,
@@ -722,6 +726,7 @@ impl LxmfNode {
         let (link_id, _routed, core) = node
             .connect(destination, &signing_key)
             .map_err(|_| LxmfNodeError::DirectLinkUnavailable)?;
+        self.wanted_links.remove(&destination);
         self.pending_links.insert(destination, link_id);
         self.link_destinations.insert(link_id, destination);
         let output = LxmfNodeOutput {

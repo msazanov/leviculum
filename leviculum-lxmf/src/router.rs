@@ -32,6 +32,8 @@ use crate::{
     ticket::{Ticket, TicketStore},
 };
 
+#[cfg(test)]
+mod direct_retry_tests;
 mod outbound;
 mod paper_runtime;
 mod propagation_runtime;
