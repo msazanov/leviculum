@@ -293,3 +293,49 @@ pub async fn pull_into(
     );
     Ok(pulled.entries.len())
 }
+
+/// How long a client's fetch waits for the engine to report the messages it
+/// was handed, after the pull: the engine takes commands every 200 ms.
+const SETTLE: Duration = Duration::from_secs(5);
+
+/// `loquax fetch` on a client: pull from the home node, then print what is
+/// new as a fetch from a propagation node prints it. How many were new.
+#[allow(clippy::too_many_arguments)]
+pub async fn fetch<E: crate::effects::Effects>(
+    outbox: &mut impl crate::outbox::Outbox,
+    node: &ReticulumNode,
+    home: &std::path::Path,
+    public_key: &[u8; 64],
+    device: &Identity,
+    budget: Duration,
+    effects: &mut E,
+    seen: &mut crate::seen::SeenStore,
+) -> Result<usize, crate::fetch::FetchError> {
+    use crate::fetch::{take_received, FetchError};
+    use crate::outbox::OutboxEvent;
+    let pulled = pull_into(outbox, node, home, public_key, device, budget)
+        .await
+        .map_err(|error| FetchError::SyncFailed(error.to_string()))?;
+    let deadline = tokio::time::Instant::now() + SETTLE;
+    let (mut taken, mut new) = (0, 0);
+    while taken < pulled && tokio::time::Instant::now() < deadline {
+        match outbox.try_next_event()? {
+            Some(OutboxEvent::Received {
+                message_id,
+                source,
+                title,
+                body,
+                verified,
+                ..
+            }) => {
+                taken += 1;
+                if take_received(seen, effects, &message_id, &source, &title, &body, verified)? {
+                    new += 1;
+                }
+            }
+            Some(_) => {}
+            None => tokio::time::sleep(Duration::from_millis(20)).await,
+        }
+    }
+    Ok(new)
+}

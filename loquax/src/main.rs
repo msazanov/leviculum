@@ -837,8 +837,10 @@ async fn run_fetch_command(args: FetchArgs) -> ExitCode {
         Ok(home) => home,
         Err(error) => return failure(error, "no-home"),
     };
-    if let Some(refused) = refuse_on_client(&home) {
-        return refused;
+    match loquax::home::client::load_client(&home) {
+        Ok(None) => {}
+        Ok(Some(public_key)) => return run_client_fetch(home, public_key, args).await,
+        Err(error) => return failure(error, "no-home"),
     }
     let (preferred_pn, pn_source) = match resolve_pn(args.pn.as_deref(), &home) {
         Ok(resolved) => resolved,
@@ -922,9 +924,9 @@ async fn run_fetch_command(args: FetchArgs) -> ExitCode {
     code
 }
 
-/// A client of a home node sends and fetches nothing of its own: it holds no
-/// LXMF identity, and one minted here would be a second address beside the
-/// home node's, the very split the home node exists to end.
+/// A client of a home node sends nothing of its own yet: it holds no LXMF
+/// identity, and one minted here would be a second address beside the home
+/// node's, the very split the home node exists to end.
 fn refuse_on_client(home: &Path) -> Option<ExitCode> {
     match loquax::home::client::load_client(home) {
         Ok(None) => None,
@@ -1201,6 +1203,67 @@ async fn run_join(home: PathBuf, client: Option<[u8; 64]>, args: JoinArgs) -> Ex
             }
             Err(error) => failure(error, "no-home"),
         },
+        Err(error) => failure(error, "failed"),
+    }
+}
+
+/// `loquax fetch` on a client of a home node: pull what the home node holds
+/// after this device's cursor and print what is new.
+async fn run_client_fetch(home: PathBuf, public_key: [u8; 64], args: FetchArgs) -> ExitCode {
+    let address = match loquax::home::lxmf_address(&public_key) {
+        Ok(address) => address,
+        Err(error) => return failure(error, "no-identity"),
+    };
+    let device =
+        match identity::load_or_create(&home.join(loquax::home::client::DEVICE_IDENTITY_FILE)) {
+            Ok(identity) => identity,
+            Err(error) => return failure(error, "no-identity"),
+        };
+    let mut seen = match SeenStore::load(&home) {
+        Ok(seen) => seen,
+        Err(error) => return failure(format!("seen store: {error}"), "no-home"),
+    };
+    let config_dir = args.config.unwrap_or_else(Config::default_config_dir);
+    let instance = args.instance.unwrap_or_else(|| instance_name(&config_dir));
+    let storage_dir = match storage_dir(&home) {
+        Ok(dir) => dir,
+        Err(error) => return failure(error, "no-daemon"),
+    };
+    let mut attached = match loquax::engine::attach_as(
+        AttachConfig {
+            instance,
+            storage_dir,
+            identity: device.clone(),
+            display_name: Vec::new(),
+            notices: Terminal::new(home.clone()),
+        },
+        loquax::engine::Role::Client { address },
+    )
+    .await
+    {
+        Ok(attached) => attached,
+        Err(error) => return failure(error, "no-daemon"),
+    };
+    let node = attached.node();
+    let mut effects = Terminal::new(home.clone());
+    let outcome = loquax::home::client::fetch(
+        &mut attached.outbox,
+        &node,
+        &home,
+        &public_key,
+        &device,
+        Duration::from_secs(args.timeout),
+        &mut effects,
+        &mut seen,
+    )
+    .await;
+    drop(node);
+    attached.stop().await;
+    match outcome {
+        Ok(new) => {
+            events::done(None, if new > 0 { "fetched" } else { "empty" }, 0);
+            ExitCode::SUCCESS
+        }
         Err(error) => failure(error, "failed"),
     }
 }
