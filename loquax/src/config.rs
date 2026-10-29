@@ -13,7 +13,13 @@
 //! place loads its region by itself; `map_source`, the URL of the PMTiles
 //! archive regions are cut from (unset: the newest Protomaps daily build);
 //! and `map_cache_mb`, how many megabytes the autoloaded regions may take
-//! (500 by default):
+//! (500 by default). And one key a terminal context for the map's
+//! drawing (1093), `map_drawing.<context> = <drawing>`, which the terminal
+//! writes itself when the reader leaves the map or quits: the way of
+//! drawing the map the reader stayed on in that context, a `--graphics`
+//! value (`docs/src/man/loquax.1.md`, MAP). The context is
+//! `<mosh|tmux|screen|local>:<TERM_PROGRAM, else TERM>`, so a desktop
+//! terminal and a mosh session from the phone each keep their own:
 //!
 //! ```text
 //! # the mailbox this machine uses when a direct delivery fails
@@ -27,7 +33,14 @@
 //! # the club's own copy of the map, and no more than 200 MB of it here
 //! map_source = https://maps.example.org/planet.pmtiles
 //! map_cache_mb = 200
+//! # written by the terminal: octants in foot, braille over mosh
+//! map_drawing.local:foot = octant
+//! map_drawing.mosh:xterm-256color = braille-thin
 //! ```
+//!
+//! A drawing's name is not checked here: the set is the frontend's, and a
+//! name an older loquax does not know falls back to its own choice, said
+//! once, rather than stop it from starting.
 //!
 //! Deliberately not the Reticulum config file: that one belongs to the
 //! daemon and is shared with Python's `rnsd`, and a foreign key in it would
@@ -41,6 +54,7 @@
 //! trace.
 
 use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 
 use leviculum_ui::theme::ThemeFlag;
 
@@ -91,6 +105,50 @@ pub struct Config {
     pub map_source: Option<String>,
     /// `map_cache_mb`, when the file sets it.
     pub map_cache_mb: Option<u64>,
+    /// `map_drawing.<context>` lines: each context and the drawing
+    /// remembered for it, in file order, a later line for a context
+    /// replacing an earlier one.
+    pub map_drawing: Vec<(String, String)>,
+}
+
+/// The prefix of a remembered map drawing's key; the context follows it.
+pub const MAP_DRAWING: &str = "map_drawing.";
+
+impl Config {
+    /// The drawing remembered for `context`.
+    pub fn map_drawing(&self, context: &str) -> Option<&str> {
+        self.map_drawing
+            .iter()
+            .find(|(c, _)| c == context)
+            .map(|(_, d)| d.as_str())
+    }
+}
+
+/// `text` with `key` set to `value`: the first line that sets `key`
+/// rewritten, any later one dropped, or the line appended; every other line,
+/// comments and unknown keys included, kept as it was.
+pub fn set(text: &str, key: &str, value: &str) -> String {
+    let mut out = String::with_capacity(text.len() + key.len() + value.len() + 4);
+    let mut done = false;
+    for raw in text.lines() {
+        let code = raw.split('#').next().unwrap_or("");
+        let sets = code.split_once('=').is_some_and(|(k, _)| k.trim() == key);
+        match (sets, done) {
+            (true, false) => {
+                out.push_str(&alloc::format!("{key} = {value}\n"));
+                done = true;
+            }
+            (true, true) => {}
+            (false, _) => {
+                out.push_str(raw);
+                out.push('\n');
+            }
+        }
+    }
+    if !done {
+        out.push_str(&alloc::format!("{key} = {value}\n"));
+    }
+    out
 }
 
 /// Read the config file's text.
@@ -182,6 +240,13 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
                 }
             }
         }
+        if let Some(context) = key.trim().strip_prefix(MAP_DRAWING) {
+            let drawing = value.trim().trim_matches('"').to_string();
+            match config.map_drawing.iter_mut().find(|(c, _)| c == context) {
+                Some((_, held)) => *held = drawing,
+                None => config.map_drawing.push((context.to_string(), drawing)),
+            }
+        }
         if key.trim() == "propagation_node" {
             let value = value.trim().trim_matches('"');
             match address::parse(value) {
@@ -221,6 +286,23 @@ impl core::fmt::Display for LoadError {
 
 #[cfg(feature = "std")]
 impl core::error::Error for LoadError {}
+
+/// Set `key` to `value` in `home/config` ([`set`]), the file written whole
+/// under another name and moved over the old one, so a crash leaves the old
+/// file or the new, never half of one. A missing file is created.
+#[cfg(feature = "std")]
+pub fn save(home: &std::path::Path, key: &str, value: &str) -> std::io::Result<()> {
+    let path = home.join(CONFIG_FILE);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error),
+    };
+    std::fs::create_dir_all(home)?;
+    let next = home.join(alloc::format!(".{CONFIG_FILE}.new"));
+    std::fs::write(&next, set(&text, key, value))?;
+    std::fs::rename(&next, &path)
+}
 
 /// Load `home/config`. A missing file is an empty config, not an error.
 #[cfg(feature = "std")]
@@ -381,6 +463,61 @@ mod tests {
                 other => panic!("{text}: {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn a_remembered_drawing_is_read_per_context_the_last_line_winning() {
+        let config = parse_str(
+            "map_drawing.local:foot = octant\n\
+             map_drawing.mosh:xterm-256color = braille-thin # the phone\n\
+             map_drawing.local:foot = blocks\n\
+             map_drawing.local:WezTerm = \"no-such-drawing\"\n",
+        )
+        .expect("parses");
+        assert_eq!(config.map_drawing("local:foot"), Some("blocks"));
+        assert_eq!(
+            config.map_drawing("mosh:xterm-256color"),
+            Some("braille-thin")
+        );
+        // Not checked here: the frontend knows its drawings.
+        assert_eq!(config.map_drawing("local:WezTerm"), Some("no-such-drawing"));
+        assert_eq!(config.map_drawing("tmux:tmux"), None);
+        assert_eq!(config.map_drawing.len(), 3);
+    }
+
+    /// Setting a key rewrites its line in place, drops a second one, and
+    /// keeps every other line, comment and unknown key as it was; a key not
+    /// there is appended.
+    #[test]
+    fn setting_a_key_keeps_the_rest_of_the_file() {
+        let text = "# mine\ntheme = light\nmap_drawing.local:foot = octant # chosen\n\
+                    future_key = 1\nmap_drawing.local:foot = blocks\n";
+        let set_once = set(text, "map_drawing.local:foot", "braille");
+        assert_eq!(
+            set_once,
+            "# mine\ntheme = light\nmap_drawing.local:foot = braille\nfuture_key = 1\n"
+        );
+        let appended = set(&set_once, "map_drawing.mosh:foot", "braille-thin");
+        assert!(appended.ends_with("future_key = 1\nmap_drawing.mosh:foot = braille-thin\n"));
+        let config = parse_str(&appended).expect("parses");
+        assert_eq!(config.theme, Some(ThemeFlag::Light));
+        assert_eq!(config.map_drawing("local:foot"), Some("braille"));
+        assert_eq!(config.map_drawing("mosh:foot"), Some("braille-thin"));
+        assert_eq!(set("", "k", "v"), "k = v\n");
+        // A comment that names the key sets nothing.
+        assert_eq!(set("# k = old\n", "k", "v"), "# k = old\nk = v\n");
+    }
+
+    #[test]
+    fn saving_a_key_writes_the_file_and_load_reads_it_back() {
+        let dir = tempfile::tempdir().expect("tmp");
+        save(dir.path(), "map_drawing.local:foot", "octant").expect("save");
+        save(dir.path(), "map_drawing.local:foot", "blocks").expect("save again");
+        let config = load(dir.path()).expect("load");
+        assert_eq!(config.map_drawing("local:foot"), Some("blocks"));
+        let text = std::fs::read_to_string(dir.path().join(CONFIG_FILE)).expect("read");
+        assert_eq!(text, "map_drawing.local:foot = blocks\n");
+        assert!(!dir.path().join(".config.new").exists());
     }
 
     #[test]
