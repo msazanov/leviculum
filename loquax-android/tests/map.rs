@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 use leviculum_core::Identity;
 use leviculum_lxmf::telemetry::Location;
 use leviculum_map::draw::Ink;
-use leviculum_map::mercator::{project, LatLon};
-use leviculum_map::viewport::Viewport;
+use leviculum_map::mercator::{project, LatLon, World};
+use leviculum_map::viewport::{ExactView, Viewport};
 use leviculum_mapfill::frame::rgb888;
 use leviculum_mapfill::style::{MapTheme, Style};
 use leviculum_ui::theme::ThemeFlag;
@@ -113,7 +113,8 @@ fn same_share(a: &[u8], b: &[u8]) -> usize {
 }
 
 /// The frame through the facade with one pin: the window's renderer's
-/// pixels for the view, its names and its pin, exactly
+/// pixels for the view, its names and its pin, but for a tenth of a per
+/// cent at the tile seams
 /// (`loquax::screenmap::render` called here as the window's code calls
 /// it); the map under them `loquax::picture`'s; the pin's marker at its
 /// place; pixel for pixel the golden.
@@ -130,7 +131,19 @@ fn the_frame_is_the_shared_renderers_with_names_and_a_pin() {
 
     let mut painter = Painter::new(Maps::new(Some(home.path().join("maps"))));
     let mut type_ = Typesetter::new();
-    let view = Viewport::new(project(LatLon::from_degrees(LAT, LON)), 16, W, H);
+    // The frame sits on a whole pixel of its step (1134): drawn whole
+    // there, the view is the frame's.
+    let at = ExactView::new(
+        World {
+            x: shown.x,
+            y: shown.y,
+        },
+        16_000,
+        W,
+        H,
+    )
+    .on_whole_pixel();
+    let view = Viewport::new(at.centre, 16, W, H);
     let direct = loquax::screenmap::render(
         &mut painter,
         &mut type_,
@@ -141,7 +154,18 @@ fn the_frame_is_the_shared_renderers_with_names_and_a_pin() {
         None,
         true,
     );
-    assert_eq!(rgba, direct.picture.rgba, "the shared renderer's pixels");
+    // Composed from tiles, the frame is the view drawn whole but where a
+    // dashed path crosses a seam: its dashes start again at each tile's
+    // edge, as they do at a view's.
+    let differ = rgba
+        .chunks(4)
+        .zip(direct.picture.rgba.chunks(4))
+        .filter(|(a, b)| a != b)
+        .count();
+    assert!(
+        differ * 1000 < (W * H) as usize,
+        "the shared renderer's pixels: {differ} differ"
+    );
     assert!(
         direct.picture.names.iter().any(|n| n.starts_with("Via ")),
         "{:?}",
@@ -689,4 +713,212 @@ fn a_tap_on_a_text_with_a_position_opens_the_map_at_it() {
         "the sender's pin selected"
     );
     assert_eq!(shown.pins, 1, "{shown:?}");
+}
+
+/// The zoom a pinch leaves is the zoom the view keeps (Lew's device test
+/// of dd23d987, 1134): a pinch from 14.3 that ends at 15.37 is drawn at
+/// 15.37 while the fingers are down, at rest, and in every frame after,
+/// from the z15 tiles scaled; a double tap goes one step on exactly.
+#[test]
+fn a_pinch_ending_between_steps_stays_there() {
+    let home = home();
+    let start = MapRequest {
+        zoom: None,
+        zoom_milli: Some(14_300),
+        ..request(home.path(), false)
+    };
+    let (shown, _) = frame(&loquax_android::map::render(
+        &start,
+        Some(Vec::new()),
+        now(),
+    ));
+    assert_eq!(shown.zoom_milli, 14_300);
+    let pinch = MapRequest {
+        zoom_by_milli: 1_070,
+        about_x: (W / 2) as i32,
+        about_y: (H / 2) as i32,
+        moving: true,
+        ..start.clone()
+    };
+    let (moving, _) = frame(&loquax_android::map::render(
+        &pinch,
+        Some(Vec::new()),
+        now(),
+    ));
+    assert_eq!(moving.zoom_milli, 15_370, "while the fingers are down");
+    let rest = MapRequest {
+        x: Some(moving.x),
+        y: Some(moving.y),
+        zoom_milli: Some(moving.zoom_milli),
+        ..start.clone()
+    };
+    let (at_rest, _) = frame(&loquax_android::map::render(&rest, Some(Vec::new()), now()));
+    assert_eq!(at_rest.zoom_milli, 15_370, "no snap at rest");
+    assert_eq!((at_rest.zoom, at_rest.tile_zoom), (15, 15));
+    assert_eq!((at_rest.x, at_rest.y), (moving.x, moving.y));
+    let (again, _) = frame(&loquax_android::map::render(&rest, Some(Vec::new()), now()));
+    assert_eq!(again.zoom_milli, 15_370, "nor in a frame after");
+    let double_tap = MapRequest {
+        zoom_by_milli: 1_000,
+        about_x: (W / 2) as i32,
+        about_y: (H / 2) as i32,
+        ..rest
+    };
+    let (tapped, _) = frame(&loquax_android::map::render(
+        &double_tap,
+        Some(Vec::new()),
+        now(),
+    ));
+    assert_eq!(tapped.zoom_milli, 16_370, "a double tap is one step");
+}
+
+/// While the fingers pinch, a frame keeps the step it was composed from
+/// as long as the pinch is within a step of it; past that it takes the
+/// nearest step's tiles.
+#[test]
+fn a_pinch_keeps_its_tiles_within_a_step() {
+    let home = home();
+    let mut ask = MapRequest {
+        zoom: None,
+        zoom_milli: Some(14_300),
+        ..request(home.path(), false)
+    };
+    let (shown, _) = frame(&loquax_android::map::render(&ask, Some(Vec::new()), now()));
+    assert_eq!(shown.tile_zoom, 14);
+    ask.moving = true;
+    let mut steps = Vec::new();
+    for z in [14_600, 14_900, 15_000, 15_300, 15_700] {
+        ask.zoom_milli = Some(z);
+        let (shown, _) = frame(&loquax_android::map::render(&ask, Some(Vec::new()), now()));
+        steps.push((shown.zoom_milli, shown.tile_zoom));
+    }
+    assert_eq!(
+        steps,
+        [
+            (14_600, 14),
+            (14_900, 14),
+            (15_000, 14),
+            (15_300, 15),
+            (15_700, 15)
+        ]
+    );
+    ask.moving = false;
+    let (rest, _) = frame(&loquax_android::map::render(&ask, Some(Vec::new()), now()));
+    assert_eq!(
+        (rest.tile_zoom, rest.pending),
+        (16, false),
+        "the nearest step at rest"
+    );
+}
+
+/// The view's picture with no names and no pins, drawn whole about
+/// `centre` at z16, as RGBA.
+fn bare(home: &Path, centre: World) -> Vec<u8> {
+    let mut painter = Painter::new(Maps::new(Some(home.join("maps"))));
+    let view = Viewport::new(centre, 16, W, H);
+    let drawn = painter.draw(&view, Ink::Colour, Style::PC, 100);
+    drawn
+        .fb
+        .iter()
+        .flat_map(|&px| {
+            use embedded_graphics::pixelcolor::raw::RawU16;
+            use embedded_graphics::pixelcolor::Rgb565;
+            let [r, g, b] = rgb888(Rgb565::from(RawU16::new(u16::from_be(px))));
+            [r, g, b, 0xff]
+        })
+        .collect()
+}
+
+/// Names stay while the finger moves (Lew's device test of dd23d987,
+/// 1134): every pixel the rest frame's names and pin cover, where they
+/// differ from the bare map, is the same pixel in a frame panned while
+/// the finger is down, moved by the pan, in each direction.
+#[test]
+fn a_moving_frame_keeps_the_names_of_the_rest_frame() {
+    let home = home();
+    let pins = vec![pin(1, "alice", 43.7752, 11.2640)];
+    let first = request(home.path(), false);
+    let (rest, still) = frame(&loquax_android::map::render(
+        &first,
+        Some(pins.clone()),
+        now(),
+    ));
+    let centre = ExactView::new(
+        World {
+            x: rest.x,
+            y: rest.y,
+        },
+        16_000,
+        W,
+        H,
+    )
+    .on_whole_pixel()
+    .centre;
+    let plain = bare(home.path(), centre);
+    let names: Vec<usize> = (0..(W * H) as usize)
+        .filter(|&i| still[i * 4..i * 4 + 3] != plain[i * 4..i * 4 + 3])
+        .collect();
+    assert!(
+        names.len() > 2_000,
+        "the names cover {} pixels",
+        names.len()
+    );
+    for (dx, dy) in [(40, -20), (-60, 0), (0, 35), (-25, -25)] {
+        let panned = MapRequest {
+            x: Some(rest.x),
+            y: Some(rest.y),
+            pan_x: dx,
+            pan_y: dy,
+            moving: true,
+            ..first.clone()
+        };
+        let (_, moved) = frame(&loquax_android::map::render(
+            &panned,
+            Some(pins.clone()),
+            now(),
+        ));
+        let (mut kept, mut seen) = (0, 0);
+        for &i in &names {
+            let (x, y) = ((i % W as usize) as i32, (i / W as usize) as i32);
+            let (mx, my) = (x - dx, y - dy);
+            if !(0..W as i32).contains(&mx) || !(0..H as i32).contains(&my) {
+                continue;
+            }
+            seen += 1;
+            let j = (my as usize * W as usize + mx as usize) * 4;
+            if moved[j..j + 4] == still[i * 4..i * 4 + 4] {
+                kept += 1;
+            }
+        }
+        assert!(seen > 1_000, "pan {dx},{dy}: {seen}");
+        assert!(
+            kept * 1000 >= seen * 998,
+            "pan {dx},{dy}: {kept} of {seen} name pixels where they were"
+        );
+    }
+}
+
+/// The pins are drawn over the tiles: a frame with other pins, or with
+/// none, over the same view draws no tile, and the tiles a pan uncovers
+/// are the only ones a moving frame draws.
+#[test]
+fn a_pin_costs_no_tile() {
+    let home = home();
+    let ask = request(home.path(), false);
+    let _ = frame(&loquax_android::map::render(&ask, Some(Vec::new()), now()));
+    let before = loquax_android::map::tile_stats(home.path()).expect("a renderer");
+    assert!(before.rendered > 0);
+    for pins in [
+        vec![pin(1, "alice", 43.7752, 11.2640)],
+        vec![
+            pin(2, "bob", 43.7760, 11.2650),
+            pin(3, "carol", 43.7745, 11.2670),
+        ],
+        Vec::new(),
+    ] {
+        let _ = frame(&loquax_android::map::render(&ask, Some(pins), now()));
+    }
+    let after = loquax_android::map::tile_stats(home.path()).expect("a renderer");
+    assert_eq!(after.rendered, before.rendered, "no tile drawn for pins");
+    assert_eq!(after.hits, before.hits + 3 * before.misses);
 }

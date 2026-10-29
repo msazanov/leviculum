@@ -311,6 +311,10 @@ pub struct MapRequest {
     pub y: Option<u32>,
     #[serde(default)]
     pub zoom: Option<u8>,
+    /// The last frame's exact zoom in thousandths of a step (1134): where
+    /// a pinch left it. Wins over `zoom` when given.
+    #[serde(default)]
+    pub zoom_milli: Option<u32>,
     /// The selected pin's peer, hex.
     #[serde(default)]
     pub selected: Option<String>,
@@ -324,6 +328,11 @@ pub struct MapRequest {
     /// view, after the pan.
     #[serde(default)]
     pub zoom_by: i32,
+    /// Zooms by this many thousandths of a step about the same pixel,
+    /// after `zoom_by`: a pinch's live scale, `1000 * log2(scale)`, which
+    /// the view keeps exactly (1134).
+    #[serde(default)]
+    pub zoom_by_milli: i32,
     #[serde(default)]
     pub about_x: i32,
     #[serde(default)]
@@ -356,8 +365,10 @@ pub struct MapRequest {
     pub margin_x: u32,
     #[serde(default)]
     pub margin_y: u32,
-    /// A finger is on the map: the frame goes without the map's names,
-    /// which take a while to set, and the next frame at rest has them.
+    /// A finger is on the map: the frame shows the names its last frame at
+    /// rest placed, where the view moved them, and places none anew; it
+    /// keeps the zoom step it was composed from within a step of the
+    /// pinch, scaled, and draws only a few missing tiles (1134).
     #[serde(default)]
     pub moving: bool,
     /// Switch the map, and only the map, to the other table than the one
@@ -390,7 +401,18 @@ pub struct MapShown {
     /// The view drawn, for the next request.
     pub x: u32,
     pub y: u32,
+    /// The zoom step nearest the view's exact zoom.
     pub zoom: u8,
+    /// The view's exact zoom in thousandths of a step (1134).
+    #[serde(default)]
+    pub zoom_milli: u32,
+    /// The zoom step whose tiles the frame is composed from.
+    #[serde(default)]
+    pub tile_zoom: u8,
+    /// The frame still owes tiles it showed another step's tiles for:
+    /// ask again.
+    #[serde(default)]
+    pub pending: bool,
     /// The shallowest and the deepest zoom the regions allow.
     pub min_zoom: u8,
     pub max_zoom: u8,

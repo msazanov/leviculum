@@ -22,12 +22,13 @@ import java.util.Map;
  * asked for as soon as the frame thread is free, so frames come at the
  * rate the renderer goes while the finger moves (1131): each is drawn a
  * quarter screen past every edge, so a pan first reveals drawn map, at the
- * zoom step nearest the pinch's live scale, and without the map's names
- * until the finger lets go. A frame that lands is placed by where the
- * view it shows lies in the view the finger made, so the map stays under
- * the finger; at rest the next frame snaps to its zoom step. The request
- * is built when the thread is free, from the gestures up to then, so a
- * newer view supersedes the ones it passed and nothing is lost.
+ * pinch's exact zoom (1134), composed from the library's tile cache, with
+ * the names its last frame at rest placed. A frame that lands is placed by
+ * where the view it shows lies in the view the finger made, so the map
+ * stays under the finger; the zoom the fingers leave is the zoom the map
+ * keeps, nothing snaps. The request is built when the thread is free, from
+ * the gestures up to then, so a newer view supersedes the ones it passed
+ * and nothing is lost.
  */
 final class MapView extends View {
     /** What a frame said, on the UI thread. */
@@ -58,12 +59,12 @@ final class MapView extends View {
     /** The frame's margins: the view's top left corner is this pixel of it. */
     private int marginX;
     private int marginY;
-    /** The frame was drawn while the finger moved: it has no names. */
+    /** The frame was drawn while the finger moved: its names were not placed anew. */
     private boolean bare;
-    /** The last frame's view: absent before the first. */
+    /** The last frame's view, its zoom in thousandths: absent before the first. */
     private Long x;
     private Long y;
-    private Long zoom;
+    private Long zoomMilli;
     private String selected;
     /**
      * Where the frame is on screen: a pixel p of its view is at
@@ -212,7 +213,7 @@ final class MapView extends View {
             boolean again;
             synchronized (this) {
                 touching = false;
-                // The names come back, and the zoom snaps to its step.
+                // The names are placed anew over the view at rest.
                 again = bare || scale != 1f || offX != 0 || offY != 0;
             }
             if (again) {
@@ -298,12 +299,12 @@ final class MapView extends View {
                 w = getWidth();
                 h = getHeight();
                 // The frame's pixel under the screen's centre becomes the
-                // new frame's centre, at the zoom step nearest the scale.
+                // new frame's centre, at the scale's exact zoom.
                 float cx = w / 2f;
                 float cy = h / 2f;
                 int panX = Math.round((cx - offX) / scale - cx);
                 int panY = Math.round((cy - offY) / scale - cy);
-                int steps = Math.round((float) (Math.log(scale) / Math.log(2)));
+                long byMilli = Math.round(1000 * Math.log(scale) / Math.log(2));
                 request = Core.map("dir", dir,
                         "w", (long) w, "h", (long) h,
                         "margin_x", (long) Math.round(w * OVERSCAN),
@@ -312,14 +313,14 @@ final class MapView extends View {
                         "density_milli", (long) Math.round(getResources().getDisplayMetrics().density * 1000),
                         "dark", dark(),
                         "pan_x", (long) panX, "pan_y", (long) panY,
-                        "zoom_by", (long) steps,
+                        "zoom_by_milli", byMilli,
                         "about_x", (long) (w / 2), "about_y", (long) (h / 2),
                         "fit", fit, "load", load,
                         "toggle_theme", toggleTheme, "follow_phone", followPhone);
                 if (x != null) {
                     request.put("x", x);
                     request.put("y", y);
-                    request.put("zoom", zoom);
+                    request.put("zoom_milli", zoomMilli);
                 }
                 if (selected != null) request.put("selected", selected);
                 if (tapX != null) {
@@ -355,7 +356,7 @@ final class MapView extends View {
                     marginY = (int) Core.num(frame.shown, "margin_y");
                     x = Core.num(frame.shown, "x");
                     y = Core.num(frame.shown, "y");
-                    zoom = Core.num(frame.shown, "zoom");
+                    zoomMilli = Core.num(frame.shown, "zoom_milli");
                     Object chosen = frame.shown.get("selected");
                     selected = chosen == null ? null : String.valueOf(chosen);
                 }
@@ -367,6 +368,10 @@ final class MapView extends View {
                     listener.onShown(frame.shown);
                 }
             });
+            if (Core.bool(frame.shown, "pending")) {
+                // Tiles the frame showed from another step: draw them now.
+                ask();
+            }
             if (Core.bool(frame.shown, "loading")) {
                 postDelayed(new Runnable() {
                     @Override
@@ -382,13 +387,14 @@ final class MapView extends View {
      * Place the frame that landed, `shown`, asked for a `w` x `h` screen:
      * where its view lies in the last frame's, carried through what the
      * fingers did since, so the map stays under them. A frame asked at
-     * rest, with no finger down and nothing asked since, snaps: it is
-     * shown as drawn, its zoom step and its centre. Called holding `this`,
-     * before the last frame's view is replaced.
+     * rest, with no finger down and nothing asked since, is shown as
+     * drawn: its zoom is the one the fingers left, to a thousandth of a
+     * step, its centre to half a pixel. Called holding `this`, before the
+     * last frame's view is replaced.
      */
     private void place(Map<String, Object> shown, int w, int h, boolean moving) {
-        long z1 = Core.num(shown, "zoom");
-        boolean first = x == null || zoom == null || y == null;
+        long z1 = Core.num(shown, "zoom_milli");
+        boolean first = x == null || zoomMilli == null || y == null;
         if (first || (!moving && !touching && !owed)) {
             scale = 1f;
             offX = 0;
@@ -398,8 +404,8 @@ final class MapView extends View {
         // A pixel q of the new view is the pixel p = a q + b of the last
         // one: a the ratio of their scales, b from their centres' distance
         // in the last view's pixels, x across the antimeridian the short way.
-        double a = Math.pow(2, zoom - z1);
-        double unit = Math.pow(2, 24 - zoom);
+        double a = Math.pow(2, (zoomMilli - z1) / 1000.0);
+        double unit = Math.pow(2, 24 - zoomMilli / 1000.0);
         long dx = Core.num(shown, "x") - x;
         dx = ((dx + (1L << 31)) & 0xffffffffL) - (1L << 31);
         long dy = Core.num(shown, "y") - y;

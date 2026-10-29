@@ -60,8 +60,9 @@ What it does today:
   names, the pins, stale ones dimmed, in the map's dark colours when the
   phone is dark. One finger pans, a pinch or a double tap zooms, and the
   map is drawn anew while the finger moves: each frame a quarter screen
-  past every edge, at the zoom step nearest the pinch, its names set once
-  the finger lets go. Never more than one world shows. A tap on a pin
+  past every edge, at the exact zoom of the pinch, which the map keeps
+  when the fingers let go, composed from a tile cache, with the names the
+  last frame at rest placed. Never more than one world shows. A tap on a pin
   names it; "All" fits every pin, "Load area" loads the region of
   the view. A tap on a position report in a chat opens the map on its
   fix. Regions load by themselves around the pins and a report's place,

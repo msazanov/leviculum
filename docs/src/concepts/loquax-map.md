@@ -234,7 +234,20 @@ The frontends:
   the gestures (a finger pans and shifts the last bitmap, a pinch or a
   double tap zooms and scales it, a tap names a pin) and hands them back
   with the last view; the view's rules stay the model's, one pixel a
-  cell as in the window. No second map in Java.
+  cell as in the window. No second map in Java. The phone's view keeps
+  the zoom a pinch leaves, a real number to a thousandth of a step
+  (`leviculum_map::viewport::ExactView`, 1134), and its frame is composed
+  from loquax's tile cache (`loquax::tiles`): the map without names and
+  pins, in tiles of 256 pixels of the nearest whole step, kept by last
+  use up to 96 MB, missing ones drawn on up to eight threads, scaled to
+  the exact zoom (one to one at a whole step). The names are placed at
+  rest over the frame at the exact scale and kept; a frame while the
+  finger moves draws those names where the view moved them and places
+  none, so no name leaves the picture during a pan or a pinch. The pins
+  are drawn over the tiles every frame, so a pin costs no tile. A pinch
+  keeps the step it is composed from while it stays within a step of it,
+  and a frame shows the last step's cached tiles where the new step's are
+  still owed. The terminal and the window keep whole steps.
 - **The M9.** The same pipeline straight into the panel's
   `embedded-graphics` target, as the measurement firmware does
   (`leviculum-mapfill/m9/`), with mousefood's cells for the labels.
