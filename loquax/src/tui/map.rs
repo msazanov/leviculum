@@ -2857,4 +2857,94 @@ mod tests {
         assert_eq!(painter.painted_view(), Some(b.view));
         assert_eq!(painter.paints(), 2);
     }
+
+    /// The Florence fixture as a maps directory.
+    fn florence() -> Maps {
+        Maps::new(Some(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../leviculum-map/fixtures"),
+        ))
+    }
+
+    /// A sixel map of Florence at z15, 60 x 20 cells, no pin.
+    fn florence_sixel(painter: &MapPainter, centre: World) -> MapView {
+        let cell_px = painter.setup().cell_px;
+        let (cols, rows) = (60u16, 20u16);
+        MapView {
+            area: leviculum_ui::Rect::new(0, 0, cols, rows),
+            viewport: Viewport::new(
+                centre,
+                15,
+                u32::from(cols) * u32::from(cell_px.0),
+                u32::from(rows) * u32::from(cell_px.1),
+            ),
+            cell_px,
+            pins: Vec::new(),
+        }
+    }
+
+    /// A mouse drag over a sixel map with names, then the pointer at rest
+    /// (1118): each frame sends at most one picture, every picture sent is
+    /// a new view's, never the last one again for the names that moved, and
+    /// a frame at rest sends none. The names are there to be counted.
+    #[test]
+    fn a_drag_over_names_sends_each_picture_once() {
+        let mut painter = MapPainter::new(florence(), Graphics::Sixel, Some(Picker::halfblocks()));
+        let (cw, ch) = painter.setup().cell_px;
+        let mut shown = florence_sixel(&painter, project(LatLon::from_degrees(43.7755, 11.2672)));
+        let mut terminal = Terminal::new(TestBackend::new(60, 21)).expect("terminal");
+        let mut last = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 60, 21));
+        let mut sent: Option<String> = None;
+        let mut names = 0;
+        for step in 0..16 {
+            if (1..12).contains(&step) {
+                shown.viewport.pan(2 * i32::from(cw), i32::from(ch));
+            }
+            let next = terminal
+                .draw(|f| painter.render(f, &shown, Style::default()))
+                .expect("draw")
+                .buffer
+                .clone();
+            let pictures: Vec<String> = last
+                .diff(&next)
+                .into_iter()
+                .map(|(_, _, cell)| cell.symbol())
+                .filter(|s| s.contains("\u{1b}P"))
+                .map(|s| s.trim_start_matches(NUDGE).to_string())
+                .collect();
+            assert!(
+                pictures.len() <= 1,
+                "step {step}: {} pictures",
+                pictures.len()
+            );
+            if let Some(picture) = pictures.into_iter().next() {
+                assert!(step < 12, "step {step}: a picture sent at rest");
+                assert_ne!(sent.as_ref(), Some(&picture), "step {step}: sent again");
+                sent = Some(picture);
+            } else {
+                assert!(step >= 12, "step {step}: the new view not sent");
+            }
+            names += painter.labels.iter().filter(|l| l.name).count();
+            last = next;
+        }
+        assert!(names > 0, "no names over the drag");
+    }
+
+    /// A sixel map of Florence at rest with its names, pinned as the
+    /// terminal shows it: the picture's cells `▒`, the names set over it.
+    #[test]
+    fn a_sixel_map_at_rest_shows_its_names() {
+        let mut painter = MapPainter::new(florence(), Graphics::Sixel, Some(Picker::halfblocks()));
+        let shown = florence_sixel(&painter, project(LatLon::from_degrees(43.7755, 11.2672)));
+        let mut terminal = Terminal::new(TestBackend::new(60, 21)).expect("terminal");
+        let mut screen = Screen::new(Rect::new(0, 0, 60, 21));
+        screen.frame(&mut terminal, &mut painter, &shown);
+        let frame: Vec<String> = (0..20)
+            .map(|y| screen.row(y).replace('▒', " ").trim_end().to_string())
+            .collect();
+        let frame = frame.join("\n");
+        assert_eq!(frame, PINNED_SIXEL_NAMES, "{frame:?}");
+    }
+
+    const PINNED_SIXEL_NAMES: &str =
+        "\n\n\n\n\n\n\n\n                    Giardino del Borgo\n\n\n\n\n\n\n\n\n\n\n";
 }

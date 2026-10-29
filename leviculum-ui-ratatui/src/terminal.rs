@@ -8,8 +8,12 @@ use crossterm::cursor::MoveTo;
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::execute;
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen,
+    disable_raw_mode, enable_raw_mode, BeginSynchronizedUpdate, Clear, ClearType,
+    EndSynchronizedUpdate, EnterAlternateScreen, LeaveAlternateScreen,
 };
+use crossterm::QueueableCommand;
+use ratatui::backend::CrosstermBackend;
+use ratatui::{Frame, Terminal};
 
 /// The terminal side-effects the IO shell needs, abstracted so a test can
 /// substitute a mock and assert that `restore` runs, with no real terminal.
@@ -135,10 +139,38 @@ pub fn install_panic_hook() {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let mut out = io::stdout();
-        let _ = execute!(out, LeaveAlternateScreen, DisableMouseCapture);
+        let _ = execute!(
+            out,
+            EndSynchronizedUpdate,
+            LeaveAlternateScreen,
+            DisableMouseCapture
+        );
         let _ = disable_raw_mode();
         previous(info);
     }));
+}
+
+/// Draw one frame between a begin and an end of synchronized update (mode
+/// 2026): the terminal shows the screen as it was until the frame is whole,
+/// never a state inside it. A picture is written as an erase of its cells
+/// and then the sixel; foot fed frames back to back showed the erased pane
+/// in 128 of 206 grabs of a map drag with names, and none with the frame
+/// bracketed (1118). A terminal without the mode ignores both. The end is
+/// written when `render` panics as well, so a frame that panics never holds
+/// the screen.
+pub fn draw_synced<W: Write>(
+    terminal: &mut Terminal<CrosstermBackend<W>>,
+    render: impl FnOnce(&mut Frame),
+) -> io::Result<()> {
+    terminal.backend_mut().queue(BeginSynchronizedUpdate)?;
+    let drawn = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        terminal.draw(render).map(|_| ())
+    }));
+    let ended = execute!(terminal.backend_mut(), EndSynchronizedUpdate);
+    match drawn {
+        Ok(drawn) => drawn.and(ended),
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
 }
 
 #[cfg(test)]
@@ -234,5 +266,60 @@ mod tests {
         restored.set(false);
         guard.restore_now().expect("restore idempotent");
         assert!(!restored.get(), "restore ran twice");
+    }
+
+    /// A writer whose bytes the test keeps after the terminal has them.
+    #[derive(Clone, Default)]
+    struct Sink(Rc<std::cell::RefCell<Vec<u8>>>);
+
+    impl Write for Sink {
+        fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+            self.0.borrow_mut().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn sink_terminal(sink: &Sink) -> Terminal<CrosstermBackend<Sink>> {
+        let area = ratatui::layout::Rect::new(0, 0, 10, 2);
+        let options = ratatui::TerminalOptions {
+            viewport: ratatui::Viewport::Fixed(area),
+        };
+        Terminal::with_options(CrosstermBackend::new(sink.clone()), options).expect("terminal")
+    }
+
+    /// The frame's bytes stand between the begin and the end of a
+    /// synchronized update, the begin first and the end last (1118).
+    #[test]
+    fn a_synced_frame_is_bracketed_by_mode_2026() {
+        let sink = Sink::default();
+        let mut terminal = sink_terminal(&sink);
+        draw_synced(&mut terminal, |f| {
+            f.render_widget(ratatui::widgets::Paragraph::new("map"), f.area())
+        })
+        .expect("draw");
+        let text = String::from_utf8(sink.0.borrow().clone()).expect("utf8");
+        let (begin, end) = ("\x1b[?2026h", "\x1b[?2026l");
+        assert!(text.starts_with(begin), "{text:?}");
+        assert!(text.ends_with(end), "{text:?}");
+        let map = text.find("map").expect("the frame");
+        assert!(begin.len() <= map && map < text.len() - end.len());
+    }
+
+    /// A frame that panics still ends the update, so the terminal does not
+    /// keep the screen held; the panic goes on to the caller.
+    #[test]
+    fn a_frame_that_panics_still_ends_the_update() {
+        let sink = Sink::default();
+        let mut terminal = sink_terminal(&sink);
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            draw_synced(&mut terminal, |_| panic!("a frame that panics"))
+        }));
+        assert!(panicked.is_err(), "the panic reaches the caller");
+        let text = String::from_utf8(sink.0.borrow().clone()).expect("utf8");
+        assert!(text.starts_with("\x1b[?2026h"), "{text:?}");
+        assert!(text.ends_with("\x1b[?2026l"), "{text:?}");
     }
 }
