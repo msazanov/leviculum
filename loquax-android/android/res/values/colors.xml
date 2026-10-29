@@ -30,4 +30,8 @@
     <!-- The unread count: 6.4:1. -->
     <color name="badge">#2e6b38</color>
     <color name="badge_text">#ffffff</color>
+    <!-- The list's failed mark (1130): its circle 9.4:1 on the background,
+         the sign 9.4:1 on it. -->
+    <color name="list_failed_ground">#93000a</color>
+    <color name="list_failed_mark">#ffffff</color>
 </resources>

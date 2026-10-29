@@ -9,11 +9,12 @@ import android.graphics.Rect;
 import android.graphics.drawable.Drawable;
 
 /**
- * The few icons the chat draws, as paths on a 24 by 24 grid scaled to the
- * bounds: no icon font, no AndroidX, no image assets (1129).
+ * The few icons the chat and the list draw, as paths on a 24 by 24 grid
+ * scaled to the bounds: no icon font, no AndroidX, no image assets (1129,
+ * the list's search, close and pencil 1130).
  */
 final class Glyph extends Drawable {
-    enum Kind { BACK, MENU, EMOJI, SEND, SENT, DELIVERED, QUEUED, FAILED }
+    enum Kind { BACK, MENU, EMOJI, SEND, SENT, DELIVERED, QUEUED, FAILED, SEARCH, CLOSE, PENCIL }
 
     private final Kind kind;
     private final int color;
@@ -25,6 +26,16 @@ final class Glyph extends Drawable {
     private final Paint stroke = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
     private int alpha = 255;
+
+    /** The mark of one of ours, by the facade's delivery word. */
+    static Kind mark(String state) {
+        switch (state) {
+            case "sent": return Kind.SENT;
+            case "delivered": return Kind.DELIVERED;
+            case "failed": return Kind.FAILED;
+            default: return Kind.QUEUED;
+        }
+    }
 
     Glyph(Kind kind, int color) {
         this(kind, color, 0, 0, 0);
@@ -102,6 +113,20 @@ final class Glyph extends Drawable {
                 canvas.drawLine(12, 6.5f, 12, 13, stroke);
                 fill.setColor(failedMark);
                 canvas.drawCircle(12, 17, 1.4f, fill);
+                break;
+            case SEARCH:
+                canvas.drawCircle(10.5f, 10.5f, 6, stroke);
+                canvas.drawLine(15, 15, 20, 20, stroke);
+                break;
+            case CLOSE:
+                canvas.drawLine(6, 6, 18, 18, stroke);
+                canvas.drawLine(18, 6, 6, 18, stroke);
+                break;
+            case PENCIL:
+                Path pencil = path(4, 20, 5, 15.5f, 15.5f, 5, 19, 8.5f, 8.5f, 19);
+                pencil.close();
+                canvas.drawPath(pencil, stroke);
+                canvas.drawLine(13, 7.5f, 16.5f, 11, stroke);
                 break;
             default:
                 break;

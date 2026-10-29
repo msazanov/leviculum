@@ -12,12 +12,18 @@ What it does today:
   `host:port` of its lnsd TCP server, and joins. Both are kept in the app's
   files directory; later starts need neither. What went wrong is said in
   plain words, and the field it concerns is focused.
-- **Conversations.** An avatar circle (initials on a colour from the
-  address, or the peer's own colours when it sent an LXMF icon
-  appearance), names as every loquax screen gives them, the last message,
-  when (minutes ago, the time today, yesterday, the weekday, the date),
-  the unread count; most recent first. An address typed below the list
-  opens a new conversation.
+- **Conversations.** After a modern messenger's overview: a bar with our
+  own avatar, "loquax", a search (by name and last line) and a menu
+  (pull now, the map, stop the service). Each row a large avatar circle
+  (initials on a colour from the address, or the peer's own colours when
+  it sent an LXMF icon appearance), the name as every loquax screen gives
+  it, up to two lines of the last message ("Position" for a report,
+  "reacted 👍" for a reaction), the time ("Now", minutes, hours under a
+  day, the weekday within the week, then the date; German on a German
+  phone), and under it the unread count or, when ours is the last, its
+  delivery mark. Newest activity first, again whenever a message arrives
+  or goes. The round pencil button opens a screen to paste the address
+  of a new conversation.
 - **Chat.** After a modern messenger's layout: a bar with back, the
   peer's avatar and name and a menu (pull now, the map). Rounded bubbles,
   ours right in loquax's green and theirs left in a grey a step lighter
@@ -49,7 +55,7 @@ What it does today:
   13 and later), and on a later look the battery optimisation exemption,
   with a plain reason. Neither is forced, neither is asked again.
 - **Map.** The contacts' latest positions as pins over loquax's own map
-  (the button on the list), drawn by the library with the window's
+  (the list's menu), drawn by the library with the window's
   renderer: the regions in the app's `maps/`, the world outline, the
   names, the pins, stale ones dimmed, in the map's dark colours when the
   phone is dark. One finger pans, a pinch or a double tap zooms, and the

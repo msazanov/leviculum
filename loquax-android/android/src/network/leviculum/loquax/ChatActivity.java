@@ -370,16 +370,6 @@ public class ChatActivity extends Activity implements Events.Listener {
         }
     }
 
-    /** The mark of one of ours, by its state. */
-    private static Glyph.Kind mark(String state) {
-        switch (state) {
-            case "sent": return Glyph.Kind.SENT;
-            case "delivered": return Glyph.Kind.DELIVERED;
-            case "failed": return Glyph.Kind.FAILED;
-            default: return Glyph.Kind.QUEUED;
-        }
-    }
-
     /** Whether row `i` continues the group of row `i - 1`: one sender, one day, a few minutes. */
     private boolean joinsPrevious(int i) {
         if (i <= 0 || i >= rows.size()) {
@@ -416,18 +406,6 @@ public class ChatActivity extends Activity implements Events.Listener {
             }
         }
         return true;
-    }
-
-    /** The state of one of ours, in words. */
-    private String state(String state) {
-        switch (state) {
-            case "queued": return getString(R.string.state_queued);
-            case "sending": return getString(R.string.state_sending);
-            case "sent": return getString(R.string.state_sent);
-            case "delivered": return getString(R.string.state_delivered);
-            case "failed": return getString(R.string.state_failed);
-            default: return state;
-        }
     }
 
     private final class Adapter extends BaseAdapter {
@@ -506,9 +484,9 @@ public class ChatActivity extends Activity implements Events.Listener {
             ImageView mark = (ImageView) view.findViewById(R.id.mark);
             mark.setVisibility(ours ? View.VISIBLE : View.GONE);
             if (ours) {
-                mark.setImageDrawable(new Glyph(mark(state), metaColor, getColor(R.color.bubble_ours),
+                mark.setImageDrawable(new Glyph(Glyph.mark(state), metaColor, getColor(R.color.bubble_ours),
                         getColor(R.color.failed_ground), getColor(R.color.failed_mark)));
-                mark.setContentDescription(state(state));
+                mark.setContentDescription(Ui.state(ChatActivity.this, state));
             }
 
             LinearLayout chips = (LinearLayout) view.findViewById(R.id.chips);

@@ -27,4 +27,8 @@
     <!-- The unread count: 6.2:1. -->
     <color name="badge">#3b6b45</color>
     <color name="badge_text">#ffffff</color>
+    <!-- The list's failed mark (1130): its circle 13.7:1 on the background,
+         the sign 7.2:1 on it. -->
+    <color name="list_failed_ground">#ffdad6</color>
+    <color name="list_failed_mark">#93000a</color>
 </resources>

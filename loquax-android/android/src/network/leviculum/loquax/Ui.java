@@ -82,27 +82,68 @@ final class Ui {
         return context.getString(R.string.days_ago, (int) (secs / 86_400));
     }
 
-    /** The conversation list's time: ago, today's clock, yesterday, the weekday, the date. */
+    /**
+     * The conversation list's time (1130): now under a minute, minutes
+     * under an hour, hours under a day, then the weekday within the week,
+     * then the date, the year only when it is not this one. A time ahead of
+     * the phone's clock is now.
+     */
     static String listTime(Context context, long unixSecs, long nowSecs) {
         if (unixSecs <= 0) {
             return "";
         }
-        String ago = ago(context, unixSecs, nowSecs);
-        if (ago != null) {
-            return ago;
+        long secs = nowSecs - unixSecs;
+        if (secs < 60) {
+            return context.getString(R.string.just_now);
         }
-        int days = daysBetween(unixSecs, nowSecs);
-        if (days == 0) {
-            return clock(unixSecs);
+        if (secs < 3600) {
+            return context.getString(R.string.minutes_ago, (int) (secs / 60));
         }
-        if (days == 1) {
-            return context.getString(R.string.yesterday);
+        if (secs < 86_400) {
+            return context.getString(R.string.list_hours, (int) (secs / 3600));
         }
         Date at = new Date(unixSecs * 1000);
-        if (days < 7) {
+        if (daysBetween(unixSecs, nowSecs) < 7) {
             return new SimpleDateFormat("EEE", Locale.getDefault()).format(at);
         }
+        Calendar then = Calendar.getInstance();
+        then.setTime(at);
+        Calendar now = Calendar.getInstance();
+        now.setTimeInMillis(nowSecs * 1000);
+        if (then.get(Calendar.YEAR) == now.get(Calendar.YEAR)) {
+            String pattern = android.text.format.DateFormat.getBestDateTimePattern(Locale.getDefault(), "dMMM");
+            return new SimpleDateFormat(pattern, Locale.getDefault()).format(at);
+        }
         return DateFormat.getDateInstance(DateFormat.SHORT).format(at);
+    }
+
+    /**
+     * The list's line under a name (1130): a position report and a
+     * reaction in the phone's language, a text as it came. An older
+     * library without `kind` gives its English line.
+     */
+    static String preview(Context context, Map<String, Object> row) {
+        String kind = Core.str(row, "kind");
+        if ("position".equals(kind)) {
+            return context.getString(R.string.position);
+        }
+        String reaction = Core.str(row, "reaction");
+        if ("reaction".equals(kind) && !reaction.isEmpty()) {
+            return context.getString(Core.bool(row, "ours") ? R.string.you_reacted : R.string.reacted, reaction);
+        }
+        return Core.str(row, "last");
+    }
+
+    /** The delivery of one of ours, in words. */
+    static String state(Context context, String state) {
+        switch (state) {
+            case "queued": return context.getString(R.string.state_queued);
+            case "sending": return context.getString(R.string.state_sending);
+            case "sent": return context.getString(R.string.state_sent);
+            case "delivered": return context.getString(R.string.state_delivered);
+            case "failed": return context.getString(R.string.state_failed);
+            default: return state;
+        }
     }
 
     static long nowSecs() {

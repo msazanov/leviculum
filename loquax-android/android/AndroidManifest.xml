@@ -37,7 +37,14 @@
       </intent-filter>
     </activity>
 
-    <activity a:name='network.leviculum.loquax.ConversationsActivity' a:exported='false'/>
+    <activity a:name='network.leviculum.loquax.ConversationsActivity'
+              a:theme='@style/Loquax.List'
+              a:exported='false'/>
+
+    <activity a:name='network.leviculum.loquax.NewConversationActivity'
+              a:theme='@style/Loquax.List'
+              a:exported='false'
+              a:windowSoftInputMode='stateVisible'/>
 
     <activity a:name='network.leviculum.loquax.ChatActivity'
               a:theme='@style/Loquax.Chat'

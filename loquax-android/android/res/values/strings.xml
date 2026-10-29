@@ -11,9 +11,8 @@
     <string name="refresh">Refresh</string>
     <string name="open">Open</string>
     <string name="send">Send</string>
-    <string name="you">You:</string>
     <string name="address_hint">Address of a new conversation</string>
-    <string name="no_conversations">No conversations yet. Refresh pulls from the home node; an address below starts one.</string>
+    <string name="no_conversations">No conversations yet. Refresh in the menu pulls from the home node; the pencil starts one.</string>
     <string name="compose_hint">Message</string>
     <string name="react">React</string>
     <string name="no_reaction_yet">This message has no id yet; react once the home node took it.</string>
@@ -53,4 +52,14 @@
     <string name="minutes_ago">%1$d min</string>
     <string name="hours_ago">%1$d h</string>
     <string name="days_ago">%1$d d</string>
+    <string name="list_hours">%1$dh</string>
+    <string name="position">Position</string>
+    <string name="reacted">reacted %1$s</string>
+    <string name="you_reacted">You reacted %1$s</string>
+    <string name="search">Search</string>
+    <string name="close_search">Close search</string>
+    <string name="new_conversation">New conversation</string>
+    <string name="address_label">The LXMF address to write to: 32 hex digits, as the other side\'s app shows it.</string>
+    <string name="paste">Paste</string>
+    <string name="stop_service">Stop the service</string>
 </resources>

@@ -16,4 +16,12 @@
         <item name="android:statusBarColor">@color/bar</item>
         <item name="android:windowLightStatusBar">false</item>
     </style>
+    <!-- The list and the new conversation (1130): their own bar on the
+         background, no action bar, the status bar in the background's colour. -->
+    <style name="Loquax.List">
+        <item name="android:windowActionBar">false</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:statusBarColor">@color/background</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
 </resources>

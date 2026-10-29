@@ -1,6 +1,6 @@
 <?xml version='1.0' encoding='utf-8'?>
-<!-- The chat's times and its icons' names in German (1129); every other
-     string falls back to values/strings.xml. -->
+<!-- The chat's and the list's times, words and icons' names in German
+     (1129, 1130); every other string falls back to values/strings.xml. -->
 <resources>
     <string name="back">Zurück</string>
     <string name="menu">Mehr</string>
@@ -11,4 +11,17 @@
     <string name="minutes_ago">%1$d Min.</string>
     <string name="hours_ago">%1$d Std.</string>
     <string name="days_ago">%1$d T.</string>
+    <string name="position">Position</string>
+    <string name="reacted">hat mit %1$s reagiert</string>
+    <string name="you_reacted">Du hast mit %1$s reagiert</string>
+    <string name="search">Suchen</string>
+    <string name="close_search">Suche schließen</string>
+    <string name="new_conversation">Neue Unterhaltung</string>
+    <string name="address_label">Die LXMF-Adresse, an die du schreibst: 32 Hex-Ziffern, wie die App des Gegenübers sie zeigt.</string>
+    <string name="paste">Einfügen</string>
+    <string name="open">Öffnen</string>
+    <string name="refresh">Aktualisieren</string>
+    <string name="map">Karte</string>
+    <string name="stop_service">Dienst beenden</string>
+    <string name="no_conversations">Noch keine Unterhaltungen. Aktualisieren im Menü holt vom Heimknoten; der Stift beginnt eine.</string>
 </resources>
