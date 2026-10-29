@@ -33,8 +33,9 @@ ADB?=adb
 # compiler is rustup's. r27 is the NDK's long-term-support line.
 NDK?=$(SDK)/ndk/27.3.13750724
 NDKBIN=$(NDK)/toolchains/llvm/prebuilt/linux-x86_64/bin
-# The ABIs in the APK; armeabi-v7a is the 32-bit one older phones need.
-ABIS?=arm64-v8a
+# The ABIs in the APK: arm64-v8a, and armeabi-v7a, the 32-bit one older
+# phones need (Lew, 2026-10-29).
+ABIS?=arm64-v8a armeabi-v7a
 REPO=$(realpath $(PROJ)/../..)
 CARGO_TARGET_DIR?=$(REPO)/target
 CARGO_HOME?=$(HOME)/.cargo
@@ -45,13 +46,19 @@ CLANG_arm64-v8a=aarch64-linux-android
 CLANG_armeabi-v7a=armv7a-linux-androideabi
 ENV_arm64-v8a=AARCH64_LINUX_ANDROID
 ENV_armeabi-v7a=ARMV7_LINUX_ANDROIDEABI
+# The cc crate's names for the C compiler, for SQLite inside the store.
+CC_ENV_arm64-v8a=aarch64_linux_android
+CC_ENV_armeabi-v7a=armv7_linux_androideabi
 # 16 KiB pages: Android 15 devices may run with them; a library aligned to
 # 4 KiB needs a compatibility mode there, and one whose RELRO segment ends
 # off a 16 KiB boundary crashes. NDK r28 aligns by default, r27 needs both
 # flags (developer.android.com/guide/practices/page-sizes). The path
-# prefixes keep the checkout and the cargo home out of the library.
+# prefixes keep the checkout and the cargo home out of the library. The
+# symbol table goes (the dynamic one, which JNI looks the native methods up
+# in, stays): it was a third of the library.
 RUSTFLAGS_ANDROID=-C link-arg=-Wl,-z,max-page-size=16384 \
 	-C link-arg=-Wl,-z,common-page-size=16384 \
+	-C strip=symbols \
 	--remap-path-prefix=$(REPO)=leviculum \
 	--remap-path-prefix=$(CARGO_HOME)=cargo
 
@@ -136,6 +143,8 @@ native: $(NATIVE_LIBS)
 # cargo knows when the library is current, so make always asks it.
 $(BIN)/lib/%/$(LIBNAME): FORCE
 	CARGO_TARGET_$(ENV_$*)_LINKER=$(NDKBIN)/$(CLANG_$*)$(MIN_API)-clang \
+	CC_$(CC_ENV_$*)=$(NDKBIN)/$(CLANG_$*)$(MIN_API)-clang \
+	AR_$(CC_ENV_$*)=$(NDKBIN)/llvm-ar \
 	CARGO_TARGET_$(ENV_$*)_RUSTFLAGS="$(RUSTFLAGS_ANDROID)" \
 	CARGO_TARGET_DIR=$(CARGO_TARGET_DIR) \
 	cargo build --manifest-path $(REPO)/Cargo.toml -p loquax-android \
