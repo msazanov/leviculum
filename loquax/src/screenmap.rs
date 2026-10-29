@@ -22,7 +22,7 @@ use embedded_graphics::pixelcolor::Rgb565;
 use leviculum_map::draw::Ink;
 use leviculum_map::labels::Rect as Box2;
 use leviculum_map::pins::{self, Mark, Metrics, Pin};
-use leviculum_map::viewport::Viewport;
+use leviculum_map::viewport::{ExactView, Viewport};
 use leviculum_mapfill::frame::rgb888;
 use leviculum_mapfill::style::{MapTheme, Style};
 use leviculum_ui::Rect;
@@ -186,7 +186,7 @@ pub fn place(
     view: &Viewport,
     selected: Option<[u8; 16]>,
     scale: f32,
-    mut measure: impl FnMut(&str, f32) -> u32,
+    measure: impl FnMut(&str, f32) -> u32,
 ) -> Vec<Placed> {
     let as_pins: Vec<Pin<'_>> = pins
         .iter()
@@ -196,14 +196,54 @@ pub fn place(
             stale: p.stale,
         })
         .collect();
-    let m = metrics(scale);
-    let landed: Vec<(&MapPin, u32, u32, String, u32)> = pins::place(view, &as_pins)
+    let landed = pins::place(view, &as_pins)
         .into_iter()
-        .filter_map(|placed| {
-            let pin = pins.get(placed.index)?;
+        .map(|p| (p.index, p.x, p.y))
+        .collect();
+    labelled(pins, landed, view.size(), selected, scale, measure)
+}
+
+/// [`place`] in a view between two zoom steps (1134): each pin where the
+/// exact scale puts it, the pixel its point lands in.
+pub fn place_exact(
+    pins: &[MapPin],
+    view: &ExactView,
+    selected: Option<[u8; 16]>,
+    scale: f32,
+    measure: impl FnMut(&str, f32) -> u32,
+) -> Vec<Placed> {
+    let (w, h) = view.size();
+    let landed = pins
+        .iter()
+        .enumerate()
+        .filter_map(|(i, p)| {
+            let (x, y) = view.to_screen(p.at);
+            let (x, y) = (x.floor(), y.floor());
+            let inside = (0.0..f64::from(w)).contains(&x) && (0.0..f64::from(h)).contains(&y);
+            inside.then_some((i, x as u32, y as u32))
+        })
+        .collect();
+    labelled(pins, landed, (w, h), selected, scale, measure)
+}
+
+/// The pins `landed` at their pixels, `(index, x, y)`, labelled by the
+/// core's rule in a view of `size`, the selected one last.
+fn labelled(
+    pins: &[MapPin],
+    landed: Vec<(usize, u32, u32)>,
+    size: (u32, u32),
+    selected: Option<[u8; 16]>,
+    scale: f32,
+    mut measure: impl FnMut(&str, f32) -> u32,
+) -> Vec<Placed> {
+    let m = metrics(scale);
+    let landed: Vec<(&MapPin, u32, u32, String, u32)> = landed
+        .into_iter()
+        .filter_map(|(index, x, y)| {
+            let pin = pins.get(index)?;
             let words = pin.words();
             let width = measure(&words, LABEL * scale);
-            Some((pin, placed.x, placed.y, words, width))
+            Some((pin, x, y, words, width))
         })
         .collect();
     // The rule takes a marker's top left corner; the core places its centre.
@@ -219,7 +259,7 @@ pub fn place(
         &marks,
         |i| landed.get(i).map_or(0, |(.., width)| *width),
         chosen,
-        view.size(),
+        size,
         m,
     );
     let mut out: Vec<Placed> = landed

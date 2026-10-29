@@ -100,5 +100,7 @@ pub mod send;
 pub mod store;
 pub mod sync;
 pub mod telemetry;
+#[cfg(feature = "picture")]
+pub mod tiles;
 pub mod ui;
 pub mod when;
