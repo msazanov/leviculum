@@ -557,6 +557,155 @@ async fn received_by(peer: &PythonPeer, body: &str, secs: u64, node: &HomeNode) 
     }
 }
 
+/// The phone's way to its home node (1113): a leaf with its own node, one
+/// TCP client interface to the home node's daemon and no shared instance
+/// (`loquax::engine::attach_leaf`), joins with an admission code, pulls a
+/// message a loquax sender delivered to the home node, and marks it read.
+/// No Python: the sender is the `loquax` CLI on the daemon's instance.
+/// Negative: an address without a port is refused before any node starts,
+/// and a leaf whose server is not there finds no path.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_leaf_with_its_own_tcp_interface_joins_pulls_and_marks() {
+    use loquax::engine::{attach_leaf, LeafConfig, Role};
+    use loquax::outbox::OutboxEvent;
+
+    let mut mesh = Mesh::start_serving(&[]).await;
+    let port = mesh.tcp_port.expect("the daemon's TCP server");
+    let home = mesh.home.path().to_path_buf();
+    let code = admit(&home, "phone");
+    let code = loquax::home::code::HomeCode::parse(&code).expect("the code parses");
+    let address = loquax::home::lxmf_address(&code.public_key).expect("the home address");
+    let node = HomeNode::start(&home, &mesh.instance).await;
+
+    // A loquax messenger on the daemon's instance sends to the home node.
+    let sender = tempfile::tempdir().expect("sender home");
+    let body = "an das Telefon";
+    let sent = mesh
+        .run(
+            "send",
+            sender.path().to_path_buf(),
+            vec![
+                loquax::address::to_hex(&address),
+                "--timeout".to_string(),
+                "40".to_string(),
+            ],
+            body.as_bytes().to_vec(),
+        )
+        .await;
+    assert_eq!(sent.code, Some(0), "{sent}\nhome node:\n{}", node.log());
+    node.wait_for("HOME archived message=", 10).await;
+
+    let leaf = |server: String, storage: std::path::PathBuf| LeafConfig {
+        server,
+        storage_dir: storage,
+        identity: leviculum_core::Identity::generate(&mut rand_core::OsRng),
+        display_name: Vec::new(),
+        notices: loquax::effects::Terminal::new(std::env::temp_dir()),
+    };
+    let phone = tempfile::tempdir().expect("phone home");
+    let storage = phone.path().join("storage");
+    std::fs::create_dir_all(&storage).expect("storage dir");
+
+    // Negative: no port.
+    let refused = attach_leaf(
+        leaf("127.0.0.1".to_string(), storage.clone()),
+        Role::Client { address },
+    )
+    .await
+    .err()
+    .expect("an address without a port is refused");
+    assert!(refused.to_string().contains("has no port"), "{refused}");
+
+    let config = leaf(format!("127.0.0.1:{port}"), storage);
+    let device = config.identity.clone();
+    let mut attached = attach_leaf(config, Role::Client { address })
+        .await
+        .expect("the leaf's node comes up");
+    let link = attached.node();
+    loquax::home::client::join(
+        &link,
+        &code.public_key,
+        &device,
+        &code.token,
+        "phone",
+        Duration::from_secs(40),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("join: {error}\nhome node:\n{}", node.log()));
+    loquax::home::client::save_client(phone.path(), &code.public_key).expect("client file");
+
+    let pull = loquax::home::client::pull_into(
+        &mut attached.outbox,
+        &link,
+        phone.path(),
+        &code.public_key,
+        &device,
+        Duration::from_secs(40),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("pull: {error}\nhome node:\n{}", node.log()));
+    let ids: Vec<[u8; 32]> = pull
+        .received
+        .iter()
+        .filter_map(|event| match event {
+            OutboxEvent::Received {
+                message_id,
+                body: b,
+                ..
+            } if b == body.as_bytes() => Some(*message_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ids.len(), 1, "{pull:?}");
+    assert!(
+        pull.cursor.is_some(),
+        "the engine took the entries: {pull:?}"
+    );
+
+    loquax::home::client::mark(
+        &link,
+        &code.public_key,
+        &device,
+        &loquax::home::wire::Mark {
+            flag: loquax::home::wire::MarkFlag::Read,
+            ids,
+        },
+        Duration::from_secs(40),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("mark: {error}\nhome node:\n{}", node.log()));
+    drop(link);
+    attached.stop().await;
+
+    // Negative: a leaf pointed at a port nobody serves finds no path.
+    let lonely = tempfile::tempdir().expect("lonely home");
+    let closed = std::net::TcpListener::bind("127.0.0.1:0")
+        .and_then(|l| l.local_addr())
+        .expect("a free port")
+        .port();
+    let config = leaf(format!("127.0.0.1:{closed}"), lonely.path().to_path_buf());
+    let device = config.identity.clone();
+    let attached = attach_leaf(config, Role::Client { address })
+        .await
+        .expect("a leaf starts without its server");
+    let link = attached.node();
+    let joined = loquax::home::client::join(
+        &link,
+        &code.public_key,
+        &device,
+        &[0; 16],
+        "lonely",
+        Duration::from_secs(3),
+    )
+    .await;
+    assert_eq!(joined, Err(loquax::home::client::HomeError::NoPath));
+    drop(link);
+    attached.stop().await;
+
+    drop(node);
+    mesh.daemon.stop().await.expect("stop the Rust daemon");
+}
+
 /// The home node's propagated leg end to end (#232, slice 2): the client
 /// sends to a recipient that is offline and was never heard, so the direct
 /// leg fails and the home node hands the same packed message to a stock

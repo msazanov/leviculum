@@ -1,0 +1,6 @@
+# The make flow's output and the files it generates (android-make-template).
+android/bin/
+android/obj/
+android/src/**/R.java
+# Signing keys never go into git, the debug key included.
+*.keystore

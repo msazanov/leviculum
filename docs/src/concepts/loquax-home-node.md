@@ -46,7 +46,9 @@ Decided by Lew on 2026-10-29:
 - **A public propagation node on the home host runs under an identity of
   its own**, never the user's. Not part of slice 1.
 - **The phone comes later**, as our own Android app. The clients of slice 1
-  are loquax on a laptop or a desktop.
+  are loquax on a laptop or a desktop. The app's shape and its first build
+  (`loquax-android/`) are the study `docs/drafts/loquax-android-2026-10.md`
+  (order 1111).
 
 Losing a client: revoke it, the identity is untouched. Losing the home node
 loses the identity, since LXMF has one key per identity; keep an offline
