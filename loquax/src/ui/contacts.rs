@@ -134,8 +134,10 @@ impl<B> UiModel<B> {
     }
 
     /// Apply the rename the palette asked for: `typed`, trimmed, is the new
-    /// petname, and nothing clears it.
-    fn rename(&mut self, peer: [u8; 16], typed: &str) -> Vec<UiEffect> {
+    /// petname, and nothing clears it. On a client of a home node the name
+    /// goes to the home node too, which hands it to the home's other
+    /// devices (1139).
+    pub(super) fn rename(&mut self, peer: [u8; 16], typed: &str) -> Vec<UiEffect> {
         let typed = typed.trim();
         let petname = match typed.is_empty() {
             true => None,
@@ -155,8 +157,11 @@ impl<B> UiModel<B> {
             return Vec::new();
         }
         let cleared = petname.is_none();
-        contact.petname = petname;
+        contact.petname = petname.clone();
         let effects = self.set_contact(contact);
+        if self.home_client {
+            self.petnames.push((peer, petname));
+        }
         let label = self.names.label(&peer);
         let text = match cleared {
             true => format!("no name of yours for {label}"),
@@ -164,6 +169,30 @@ impl<B> UiModel<B> {
         };
         self.toast(ToastKind::Info, text);
         effects
+    }
+}
+
+impl<B> UiModel<B> {
+    /// A petname one of the home's devices set, pulled (1139): taken as
+    /// the reader's word here and written to the contacts file, never
+    /// handed back. A name that sanitises to nothing clears it.
+    pub(super) fn home_petname(
+        &mut self,
+        peer: [u8; 16],
+        petname: Option<String>,
+    ) -> Vec<UiEffect> {
+        let petname = petname.as_deref().and_then(names::sanitise);
+        let mut contact = self.names.contacts.of(&peer);
+        if contact.petname == petname {
+            return Vec::new();
+        }
+        contact.petname = petname;
+        self.set_contact(contact)
+    }
+
+    /// The petnames this device set, for the shell to hand the home node.
+    pub fn take_petnames(&mut self) -> Vec<([u8; 16], Option<String>)> {
+        core::mem::take(&mut self.petnames)
     }
 }
 

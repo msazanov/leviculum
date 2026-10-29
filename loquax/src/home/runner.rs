@@ -149,6 +149,33 @@ pub async fn hand_marks(client: HomeClient, marks: Vec<super::wire::Mark>, budge
     }
 }
 
+/// The petnames a fold set, handed to the home node in order (1139): the
+/// screen and the contacts file have them already. One the home node did
+/// not take is said in the log; the other devices keep the name they had
+/// until this device sets one again.
+pub async fn hand_petnames(
+    client: HomeClient,
+    petnames: Vec<([u8; 16], Option<String>)>,
+    budget: Duration,
+) {
+    for (peer, petname) in petnames {
+        let outcome = super::client::petname(
+            &client.node,
+            &client.public_key,
+            &client.device,
+            &peer,
+            petname.as_deref(),
+            budget,
+        )
+        .await;
+        let peer = crate::address::to_hex(&peer);
+        match outcome {
+            Ok(()) => tracing::info!("HOME petname peer={peer}"),
+            Err(error) => tracing::warn!("HOME petname peer={peer} not taken: {error}"),
+        }
+    }
+}
+
 /// A received message the store already holds, which the screen drops
 /// before it folds: the mailbox copy of one that came directly, perhaps
 /// before a restart and below the window the screen loaded. A store that

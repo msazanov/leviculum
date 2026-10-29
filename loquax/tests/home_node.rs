@@ -1368,7 +1368,8 @@ fn conversation(
 /// conversation (read) and answers through the home node. B pulls again:
 /// the message is read there, and A's answer is a sent bubble B never
 /// composed. The sender's announced name, heard by the home node alone,
-/// reaches B's name table on its pull (1132).
+/// reaches B's name table on its pull (1132), and the name A gives the
+/// sender with the palette's `rename` reaches B's contacts file (1139).
 #[tokio::test(flavor = "multi_thread")]
 async fn what_one_client_reads_and_sends_shows_on_the_other() {
     let peer = PythonPeer::start();
@@ -1444,7 +1445,8 @@ async fn what_one_client_reads_and_sends_shows_on_the_other() {
         a.path(),
         elsewhere,
         "until ready 20\nuntil synced 1 40\nkey g\nkey tab\nkey tab\n\
-         type reply from A\nkey enter\nuntil synced 2 40\nkey esc\nkey q\n",
+         type reply from A\nkey enter\nuntil synced 2 40\nkey esc\n\
+         key :\ntype rename\nkey enter\ntype Mutti\nkey enter\nkey q\n",
         &node,
     )
     .await;
@@ -1458,6 +1460,8 @@ async fn what_one_client_reads_and_sends_shows_on_the_other() {
         );
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
+    node.wait_for(&format!("HOME petname peer={sender_address}"), 20)
+        .await;
     let on_a = conversation(a.path(), home_address, sender);
     assert_eq!(on_a.unread, 0);
     let answer = on_a
@@ -1482,6 +1486,14 @@ async fn what_one_client_reads_and_sends_shows_on_the_other() {
     .await;
     let on_b = conversation(b.path(), home_address, sender);
     assert_eq!(on_b.unread, 0, "read on A, read on B");
+    // A's name for the sender, which B never typed (1139).
+    let contacts = loquax::names::load_contacts(b.path()).expect("B's contacts");
+    assert_eq!(
+        contacts.petnames.get(&sender).map(String::as_str),
+        Some("Mutti"),
+        "B took A's petname: {:?}",
+        std::fs::read_to_string(b.path().join(loquax::names::CONTACTS_FILE))
+    );
     let shown: Vec<_> = on_b.messages.iter().filter(|m| m.outbound).collect();
     assert_eq!(shown.len(), 1, "{:?}", on_b.messages);
     assert_eq!(shown[0].body, "reply from A");

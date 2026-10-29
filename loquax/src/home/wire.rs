@@ -410,6 +410,23 @@ pub fn read_name_entry(data: &[u8]) -> Result<([u8; 16], alloc::string::String),
     read_join_request(data)
 }
 
+/// A petname entry's bytes, which a `/petname` request carries as they
+/// are: the peer's address and the reader's name for it, the empty string
+/// for none. Shaped as a name entry ([`name_entry_prefix`] finds a peer's).
+pub fn petname_entry(peer: &[u8; 16], petname: Option<&str>) -> Vec<u8> {
+    name_entry(peer, petname.unwrap_or_default())
+}
+
+/// A petname entry or request: the peer, and its name, `None` for an empty
+/// one. Sanitised by the client that applies it, as a petname from the
+/// contacts file is.
+pub fn read_petname_entry(
+    data: &[u8],
+) -> Result<([u8; 16], Option<alloc::string::String>), Malformed> {
+    let (peer, name) = read_join_request(data)?;
+    Ok((peer, Some(name).filter(|name| !name.is_empty())))
+}
+
 /// A `/send` answer: the message id, or the status that refused it.
 pub fn read_send_answer(data: &[u8]) -> Result<Result<[u8; 32], Status>, Malformed> {
     let status = read_status(data)?;

@@ -1130,6 +1130,71 @@ impl Store {
         Ok(seq)
     }
 
+    /// Append a petname entry ([`crate::home::KIND_PETNAME`]) a client
+    /// handed in for `peer`, at `at`, when it says something new: the same
+    /// bytes as the peer's newest petname entry append nothing (`None`).
+    /// Only the newest of a peer is kept, as for names: a client behind the
+    /// cursor needs the name the reader gave last.
+    pub fn archive_petname(
+        &mut self,
+        peer: [u8; 16],
+        packed: &[u8],
+        at: i64,
+        cap_bytes: u64,
+    ) -> Result<Option<u64>, StoreError> {
+        let identity = self.identity;
+        let path = self.path.clone();
+        let kind = i64::from(crate::home::KIND_PETNAME);
+        let prefix = crate::home::wire::name_entry_prefix(&peer);
+        let prefix_len = i64::try_from(prefix.len()).unwrap_or(i64::MAX);
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| failed(&path, e))?;
+        let newest: Option<Vec<u8>> = tx
+            .query_row(
+                "SELECT packed FROM archive WHERE identity = ?1 AND kind = ?2 \
+                 AND substr(packed, 1, ?3) = ?4 ORDER BY seq DESC LIMIT 1",
+                params![&identity[..], kind, prefix_len, &prefix[..]],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| failed(&path, e))?;
+        if newest.as_deref() == Some(packed) {
+            return Ok(None);
+        }
+        // A name may come back after another: the time makes it a new entry.
+        let mut keyed = packed.to_vec();
+        keyed.extend_from_slice(&at.to_be_bytes());
+        let id = leviculum_core::crypto::sha256(&keyed);
+        let seq = append_in(
+            &tx,
+            &identity,
+            crate::home::KIND_PETNAME,
+            &id,
+            packed,
+            at,
+            cap_bytes,
+        )
+        .map_err(|e| failed(&path, e))?;
+        if let Some(seq) = seq {
+            tx.execute(
+                "DELETE FROM archive WHERE identity = ?1 AND kind = ?2 AND seq <> ?3 \
+                 AND substr(packed, 1, ?4) = ?5",
+                params![
+                    &identity[..],
+                    kind,
+                    i64::try_from(seq).unwrap_or(i64::MAX),
+                    prefix_len,
+                    &prefix[..]
+                ],
+            )
+            .map_err(|e| failed(&path, e))?;
+        }
+        tx.commit().map_err(|e| failed(&path, e))?;
+        Ok(seq)
+    }
+
     /// The archive entries after `cursor`, oldest first, up to about
     /// `max_bytes` of packed messages but always at least one when there is
     /// one, and whether more follow. `first` is the oldest sequence still
@@ -1199,13 +1264,18 @@ impl Store {
     }
 
     /// The newest sequence a client is woken for: every entry's but a
-    /// name's, which rides along with the next pull (1136).
+    /// name's (1136) and a petname's (1139), which ride along with the next
+    /// pull.
     pub fn archive_newest_waking(&self) -> Result<u64, StoreError> {
         let newest: Option<i64> = self
             .conn
             .query_row(
-                "SELECT MAX(seq) FROM archive WHERE identity = ?1 AND kind <> ?2",
-                params![&self.identity[..], i64::from(crate::home::KIND_NAME)],
+                "SELECT MAX(seq) FROM archive WHERE identity = ?1 AND kind NOT IN (?2, ?3)",
+                params![
+                    &self.identity[..],
+                    i64::from(crate::home::KIND_NAME),
+                    i64::from(crate::home::KIND_PETNAME)
+                ],
                 |row| row.get(0),
             )
             .map_err(|e| self.failed(e))?;

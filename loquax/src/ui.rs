@@ -612,6 +612,9 @@ pub struct UiModel<B> {
     /// Marks for the home node, in the order they were made
     /// ([`UiModel::take_marks`]).
     marks: Vec<crate::home::wire::Mark>,
+    /// Petnames for the home node, in the order they were set
+    /// ([`UiModel::take_petnames`]).
+    petnames: Vec<([u8; 16], Option<String>)>,
     /// A pull a send or a wake asked for while one was running, with its
     /// reason: started when that one ends, since it may have begun before
     /// the home node had the message.
@@ -714,6 +717,7 @@ impl<B: InputBuffer + Default> UiModel<B> {
             home_client: false,
             list_apart: false,
             marks: Vec::new(),
+            petnames: Vec::new(),
             pull_owed: None,
             confirm: None,
             reveal_pending: None,
@@ -1070,6 +1074,10 @@ pub enum UiEvent {
     /// Delete the messages `keys` of `peer`'s conversation without asking,
     /// as `y` after `d` does for one: a frontend that asked already.
     Delete { peer: [u8; 16], keys: Vec<u64> },
+    /// Make `name` the reader's name for `peer`, the empty one clearing it,
+    /// as the palette's `rename` does with what was typed: a frontend with
+    /// a dialog of its own (1139).
+    Rename { peer: [u8; 16], name: String },
 }
 
 /// How a region load goes, as the shell reports it.
@@ -1213,6 +1221,7 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
             Vec::new()
         }
         UiEvent::Engine(event) => on_engine(model, event),
+        UiEvent::Rename { peer, name } => model.rename(peer, &name),
         UiEvent::Notice(line) => {
             model.toast(ToastKind::Info, line);
             Vec::new()
@@ -2802,6 +2811,10 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
             body,
             fields,
         } => home_sent(model, message_id, destination, body, fields),
+        OutboxEvent::HomePetname {
+            destination,
+            petname,
+        } => return model.home_petname(destination, petname),
         OutboxEvent::HomeMarked { mark } => match mark.flag {
             crate::home::wire::MarkFlag::Read => {
                 for id in &mark.ids {
@@ -8468,6 +8481,70 @@ mod tests {
         receive(&mut alone, OTHER, 2, "me too");
         assert_eq!(alone.conversations[alone.selected].peer, OTHER);
         assert_eq!(alone.conversations[alone.selected].unread, 0);
+    }
+
+    /// 1139: on a client of a home node a rename goes to the home node as
+    /// well, the palette's and a frontend's own alike; one pulled from the
+    /// home node is written here and never handed back. Off a home node
+    /// nothing is queued.
+    #[test]
+    fn a_petname_travels_through_the_home_node() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        announced(&mut model, PEER, "Alice");
+        update(
+            &mut model,
+            UiEvent::Rename {
+                peer: PEER,
+                name: "Mum".into(),
+            },
+        );
+        assert!(model.take_petnames().is_empty(), "no home node");
+        model.home_client = true;
+        // The palette holds "Mum" to edit: emptied first.
+        palette(&mut model, "rename");
+        update(&mut model, ctrl_key('u'));
+        typed(&mut model, "Mama");
+        update(&mut model, key(KeyCode::Enter));
+        let effects = update(
+            &mut model,
+            UiEvent::Rename {
+                peer: PEER,
+                name: " ".into(),
+            },
+        );
+        assert_eq!(
+            effects,
+            [UiEffect::Contact(Contact {
+                peer: PEER,
+                petname: None,
+                blocked: false
+            })]
+        );
+        assert_eq!(
+            model.take_petnames(),
+            [(PEER, Some("Mama".to_string())), (PEER, None)]
+        );
+        // Pulled: the reader's word here, the file told, nothing queued.
+        let pulled = |petname: Option<&str>| {
+            UiEvent::Engine(OutboxEvent::HomePetname {
+                destination: PEER,
+                petname: petname.map(str::to_string),
+            })
+        };
+        let effects = update(&mut model, pulled(Some("Mutti \u{202e}")));
+        assert_eq!(
+            effects,
+            [UiEffect::Contact(Contact {
+                peer: PEER,
+                petname: Some("Mutti".into()),
+                blocked: false
+            })]
+        );
+        assert_eq!(model.names.label(&PEER), "Mutti ·abab");
+        assert!(model.take_petnames().is_empty(), "never handed back");
+        assert!(update(&mut model, pulled(Some("Mutti"))).is_empty());
+        update(&mut model, pulled(None));
+        assert_eq!(model.names.label(&PEER), "Alice ·abab");
     }
 
     /// `rename` asks in the palette, holding the petname to edit: `Enter`

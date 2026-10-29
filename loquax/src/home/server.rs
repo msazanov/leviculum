@@ -68,6 +68,7 @@ pub fn answer(
         super::SYNC_PATH => Answer::only(sync(store, data, device)),
         super::SEND_PATH => send(store, home, data, device, now),
         super::MARK_PATH => Answer::only(mark(store, home, data, device, now_secs)),
+        super::PETNAME_PATH => Answer::only(petname(store, home, data, device, now_secs)),
         super::WATCH_PATH => watch(store, data, device),
         _ => Answer::only(wire::status_answer(Status::Malformed)),
     }
@@ -192,6 +193,32 @@ fn mark(store: &mut Store, home: &Home<'_>, data: &[u8], device: [u8; 16], now: 
         }
         Err(error) => {
             tracing::warn!("HOME mark: {error}");
+            wire::status_answer(Status::Failed)
+        }
+    }
+}
+
+/// A client's petname for a peer, kept as an archive entry: the newest of
+/// each peer, the same one again appending nothing.
+fn petname(store: &mut Store, home: &Home<'_>, data: &[u8], device: [u8; 16], now: i64) -> Vec<u8> {
+    let Ok((peer, _)) = wire::read_petname_entry(data) else {
+        return wire::status_answer(Status::Malformed);
+    };
+    if let Some(refused) = refuse_unless_admitted(store, &device, "petname") {
+        return refused;
+    }
+    match store.archive_petname(peer, data, now, home.cap_bytes) {
+        Ok(seq) => {
+            tracing::info!(
+                "HOME petname peer={} device={} seq={}",
+                crate::address::to_hex(&peer),
+                crate::address::to_hex(&device),
+                seq.map_or_else(|| "-".to_string(), |seq| seq.to_string())
+            );
+            wire::status_answer(Status::Ok)
+        }
+        Err(error) => {
+            tracing::warn!("HOME petname: {error}");
             wire::status_answer(Status::Failed)
         }
     }
@@ -534,6 +561,60 @@ mod tests {
             &mut store,
             &home(),
             crate::home::MARK_PATH,
+            &[0x90],
+            Some(LAPTOP),
+            1.0,
+        );
+        assert_eq!(read_status(&answer.bytes), Ok(Status::Malformed));
+    }
+
+    fn petname(store: &mut Store, device: [u8; 16], peer: [u8; 16], name: Option<&str>) -> Status {
+        let answer = answer(
+            store,
+            &home(),
+            crate::home::PETNAME_PATH,
+            &wire::petname_entry(&peer, name),
+            Some(device),
+            300.0,
+        );
+        read_status(&answer.bytes).expect("status")
+    }
+
+    /// A petname is an archive entry for an admitted device, only the
+    /// newest of a peer stays, the same one again appends nothing, and it
+    /// wakes nobody (1139).
+    #[test]
+    fn a_petname_is_the_newest_entry_of_its_peer_and_wakes_nobody() {
+        let (_dir, mut store) = store();
+        let (alice, bob) = ([0xa1; 16], [0xb0; 16]);
+        assert_eq!(
+            petname(&mut store, LAPTOP, alice, Some("Mum")),
+            Status::NotAdmitted
+        );
+        assert!(store
+            .archive_since(0, usize::MAX)
+            .expect("page")
+            .entries
+            .is_empty());
+        admitted(&mut store);
+        let woken = store.archive_newest_waking().expect("waking");
+        assert_eq!(petname(&mut store, LAPTOP, alice, Some("Mum")), Status::Ok);
+        assert_eq!(petname(&mut store, LAPTOP, alice, Some("Mum")), Status::Ok);
+        assert_eq!(petname(&mut store, LAPTOP, bob, Some("Bob")), Status::Ok);
+        assert_eq!(petname(&mut store, LAPTOP, alice, None), Status::Ok);
+        let page = store.archive_since(0, usize::MAX).expect("page");
+        let kept: Vec<_> = page
+            .entries
+            .iter()
+            .inspect(|e| assert_eq!(e.kind, crate::home::KIND_PETNAME))
+            .map(|e| wire::read_petname_entry(&e.packed).expect("a petname"))
+            .collect();
+        assert_eq!(kept, [(bob, Some("Bob".into())), (alice, None)]);
+        assert_eq!(store.archive_newest_waking().expect("waking"), woken);
+        let answer = answer(
+            &mut store,
+            &home(),
+            crate::home::PETNAME_PATH,
             &[0x90],
             Some(LAPTOP),
             1.0,

@@ -654,7 +654,8 @@ impl Engine {
                 | Command::HomeState { .. }
                 | Command::HomeSent { .. }
                 | Command::HomeMark { .. }
-                | Command::HomeName { .. } => {}
+                | Command::HomeName { .. }
+                | Command::HomePetname { .. } => {}
             }
         }
     }
@@ -833,6 +834,13 @@ impl Engine {
                 Command::HomeName { destination, name } => self.emit(OutboxEvent::Announced {
                     destination,
                     name: Some(name),
+                }),
+                Command::HomePetname {
+                    destination,
+                    petname,
+                } => self.emit(OutboxEvent::HomePetname {
+                    destination,
+                    petname,
                 }),
                 Command::Fetch { .. } => self.emit(OutboxEvent::SyncFailed {
                     detail: "a client of a home node pulls from the home node, not a \

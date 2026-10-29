@@ -151,14 +151,42 @@ pub async fn mark(
     mark: &wire::Mark,
     budget: Duration,
 ) -> Result<(), HomeError> {
-    let deadline = tokio::time::Instant::now() + budget;
     let data = wire::mark_request(mark);
+    ask_retrying(node, public_key, device, super::MARK_PATH, &data, budget).await
+}
+
+/// Hand the home node the reader's name for `peer`, `None` clearing it
+/// (1139), asked again as a mark is: the home node keeps the newest.
+pub async fn petname(
+    node: &ReticulumNode,
+    public_key: &[u8; 64],
+    device: &Identity,
+    peer: &[u8; 16],
+    petname: Option<&str>,
+    budget: Duration,
+) -> Result<(), HomeError> {
+    let data = wire::petname_entry(peer, petname);
+    ask_retrying(node, public_key, device, super::PETNAME_PATH, &data, budget).await
+}
+
+/// One request whose answer is a status, on a link of its own, asked again
+/// up to three times when the answer was lost: for requests the home node
+/// keeps once however often they come.
+async fn ask_retrying(
+    node: &ReticulumNode,
+    public_key: &[u8; 64],
+    device: &Identity,
+    path: &str,
+    data: &[u8],
+    budget: Duration,
+) -> Result<(), HomeError> {
+    let deadline = tokio::time::Instant::now() + budget;
     let mut attempt = 0;
     loop {
         attempt += 1;
         let answer = match open(node, public_key, device, deadline).await {
             Ok(link) => {
-                let answer = request(node, &link, super::MARK_PATH, &data, deadline).await;
+                let answer = request(node, &link, path, data, deadline).await;
                 let _ = node.close_link(&link).await;
                 answer
             }
@@ -459,6 +487,18 @@ async fn take_in(
             }
             continue;
         }
+        if entry.kind == super::KIND_PETNAME {
+            match wire::read_petname_entry(&entry.packed) {
+                Ok((destination, petname)) => outbox
+                    .submit(Command::HomePetname {
+                        destination,
+                        petname,
+                    })
+                    .map_err(gone)?,
+                Err(_) => tracing::warn!("HOME pull: entry {} is no petname", entry.seq),
+            }
+            continue;
+        }
         if entry.kind == super::KIND_NAME {
             match wire::read_name_entry(&entry.packed) {
                 Ok((destination, name)) => {
@@ -664,7 +704,8 @@ mod tests {
     }
 
     /// A sent entry goes to the engine whole, for a bubble on a device that
-    /// does not have one; a mark goes as the mark, a heard name as the name;
+    /// does not have one; a mark goes as the mark, a heard name as the name,
+    /// a petname as the petname (1139);
     /// one that does not decode is passed over and still counted into the
     /// cursor.
     #[tokio::test]
@@ -697,16 +738,27 @@ mod tests {
                     wire::name_entry(&[5; 16], "Reviewer Berlin"),
                 ),
                 entry(5, super::super::KIND_NAME, vec![0x90]),
+                entry(
+                    6,
+                    super::super::KIND_PETNAME,
+                    wire::petname_entry(&[5; 16], Some("Mum")),
+                ),
+                entry(
+                    7,
+                    super::super::KIND_PETNAME,
+                    wire::petname_entry(&[4; 16], None),
+                ),
+                entry(8, super::super::KIND_PETNAME, vec![0x90]),
             ],
             first: 1,
         };
-        let mut outbox = FakeOutbox::new(vec![OutboxEvent::Fenced { token: 5 }]);
+        let mut outbox = FakeOutbox::new(vec![OutboxEvent::Fenced { token: 8 }]);
         let pull = take_in(&mut outbox, 0, pulled).await.expect("pull");
-        assert_eq!(pull.cursor, Some(5));
+        assert_eq!(pull.cursor, Some(8));
         assert_eq!(pull.sent, [(message.message_id, super::super::KIND_SENT)]);
-        // 1136: the user's own sent message, a mark and a name are entries,
-        // and none of them is a new message or a state change.
-        assert_eq!((pull.entries, pull.messages(), pull.states()), (5, 0, 0));
+        // 1136: the user's own sent message, a mark, a name and a petname
+        // are entries, and none of them is a new message or a state change.
+        assert_eq!((pull.entries, pull.messages(), pull.states()), (8, 0, 0));
         assert_eq!(pull.names, [([5; 16], "Reviewer Berlin".to_string())]);
         assert_eq!(
             *outbox.commands.borrow(),
@@ -719,7 +771,15 @@ mod tests {
                     destination: [5; 16],
                     name: "Reviewer Berlin".to_string()
                 },
-                Command::Fence { token: 5 },
+                Command::HomePetname {
+                    destination: [5; 16],
+                    petname: Some("Mum".to_string())
+                },
+                Command::HomePetname {
+                    destination: [4; 16],
+                    petname: None
+                },
+                Command::Fence { token: 8 },
             ]
         );
     }
