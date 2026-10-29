@@ -41,6 +41,31 @@ extern crate std;
 
 extern crate alloc;
 
+#[cfg(feature = "tracing")]
+pub(crate) mod tracing {
+    pub(crate) use ::tracing::debug;
+
+    /// The first eight bytes of an id as hex, enough to follow one message
+    /// or destination through a log.
+    pub(crate) struct Short<'a>(pub &'a [u8]);
+
+    impl core::fmt::Display for Short<'_> {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            self.0
+                .iter()
+                .take(8)
+                .try_for_each(|byte| write!(f, "{byte:02x}"))
+        }
+    }
+}
+#[cfg(not(feature = "tracing"))]
+pub(crate) mod tracing {
+    macro_rules! noop {
+        ($($tt:tt)*) => {{}};
+    }
+    pub(crate) use noop as debug;
+}
+
 pub mod active_delivery;
 pub mod announce;
 pub mod attachments;

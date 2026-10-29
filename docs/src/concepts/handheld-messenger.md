@@ -63,7 +63,7 @@ map as decided on 2026-10-25, and what is open.
   still carries the fetch layer (`leviculum-std`, tokio), so a firmware
   frontend still needs the core as a `no_std` crate of its own.
 - **`leviculum-lxmf`, `no_std + alloc`** (`leviculum-lxmf/src/lib.rs:38`):
-  - delivery (`LxmfRouter`, `leviculum-lxmf/src/router.rs:462`);
+  - delivery (`LxmfRouter`, `leviculum-lxmf/src/router.rs:464`);
   - propagation nodes, both the client and the node
     (`PropagationNode`, `leviculum-lxmf/src/propagation_node.rs:889`);
   - stamps (`CooperativeStamper`, `leviculum-lxmf/src/stamp.rs:269`).

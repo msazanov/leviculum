@@ -7,7 +7,7 @@ license.workspace = true
 description = "no_std LXMF messaging protocol for leviculum"
 
 [features]
-default = ["pow", "compression"]
+default = ["pow", "compression", "tracing"]
 # Enables proof-of-work generation and validation. Embedded applications that
 # advertise a zero stamp cost can disable this to minimise code size.
 pow = ["dep:sha2"]
@@ -17,12 +17,19 @@ pow = ["dep:sha2"]
 # path, and linking a full bzip2 into a 780 KiB firmware image for it is not
 # a trade a firmware makes silently.
 compression = ["leviculum-core/compression"]
+# Debug lines on the router's delivery decisions (leviculum 1110: a hung
+# direct delivery left nothing to read under `RUST_LOG=leviculum_lxmf=debug`,
+# because the crate logged nothing at all). Optional for the reason
+# leviculum-core's is: tracing-core does not build on atomic-less MCUs, and a
+# firmware pays for every format string it links. Off, the macros are no-ops.
+tracing = ["dep:tracing"]
 
 [dependencies]
 leviculum-core = { path = "../leviculum-core", default-features = false }
 rand_core.workspace = true
 sha2 = { workspace = true, optional = true }
 rmp.workspace = true
+tracing = { workspace = true, optional = true }
 
 [dev-dependencies]
 hex = "0.4"
