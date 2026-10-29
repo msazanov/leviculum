@@ -187,8 +187,10 @@ pub fn cut_tile(raw: &[u8], layers: ZoomLayers) -> Res<(Option<Vec<u8>>, ZoomSta
 /// One tile's blob under `layers`, `None` when nothing is left, and with
 /// `names` its labels: places of the named classes, waters and parks whose
 /// anchor lies in the tile (a point in the buffer belongs to its
-/// neighbour) and whose `min_zoom` the tile reaches, and the named roads,
-/// each a reference to its own line feature in the blob.
+/// neighbour) and whose `min_zoom` the tile reaches, the named roads from
+/// [`ROAD_LABEL_ZOOM`] and the named rivers, canals and streams from their
+/// own `min_zoom`, each piece a reference to its own line feature in the
+/// blob.
 pub fn cut_tile_named(
     raw: &[u8],
     layers: ZoomLayers,
@@ -217,7 +219,7 @@ pub fn cut_tile_named(
     }
     let roads_named = names.is_some_and(|n| n.z >= ROAD_LABEL_ZOOM || n.deepest);
     // The road label of each feature pushed, by its source feature.
-    let mut named: Vec<Option<(LabelKind, Name)>> = Vec::new();
+    let mut named: Vec<Option<(LabelKind, u8, Name)>> = Vec::new();
     let k = 12 - u32::from(layers.extent_log2);
     let extent = 1i32 << layers.extent_log2;
     let tol = i64::from(layers.tolerance);
@@ -228,9 +230,17 @@ pub fn cut_tile_named(
     let mut feats: Vec<write::Feature> = Vec::new();
     for f in decoded.features {
         st.features_in += 1;
-        let label = f.label.clone().filter(|_| roads_named);
-        // The largest piece of a named line carries its label.
-        let mut largest: Option<(usize, usize)> = None;
+        let label = f
+            .label
+            .clone()
+            .and_then(|(kind, source_zoom, name)| match kind.is_road() {
+                true => roads_named.then(|| (kind, road_min_zoom(kind), name)),
+                // A river is named in every tile its own `min_zoom` reaches,
+                // and in the deepest, which deeper views overzoom.
+                false => names
+                    .is_some_and(|n| source_zoom <= n.z || n.deepest)
+                    .then_some((kind, source_zoom, name)),
+            });
         st.vertices_in += f
             .parts
             .iter()
@@ -348,11 +358,10 @@ pub fn cut_tile_named(
                 );
             }
             st.features_out += 1;
-            let n: usize = out.iter().map(Vec::len).sum();
-            if label.is_some() && largest.is_none_or(|(_, m)| n > m) {
-                largest = Some((feats.len(), n));
-            }
-            named.push(None);
+            // Every piece of a named line carries its label, so a reader
+            // joins the pieces back into the line its name goes along
+            // (`leviculum_map::labels::join_pieces`).
+            named.push(label.clone());
             feats.push(write::Feature {
                 kind: f.kind,
                 class: f.class,
@@ -360,9 +369,6 @@ pub fn cut_tile_named(
                 tile: 0,
                 rings: out,
             });
-        }
-        if let (Some((at, _)), Some(label)) = (largest, label) {
-            named[at] = Some(label);
         }
     }
     if feats.is_empty() {
@@ -375,8 +381,8 @@ pub fn cut_tile_named(
     let mut order: Vec<usize> = (0..feats.len()).collect();
     order.sort_by_key(|&i| feats[i].class);
     for (at, &i) in order.iter().enumerate() {
-        if let (Some((kind, name)), Ok(at)) = (named[i].take(), u16::try_from(at)) {
-            labels.lines.push((at, kind, road_min_zoom(kind), name));
+        if let (Some((kind, min_zoom, name)), Ok(at)) = (named[i].take(), u16::try_from(at)) {
+            labels.lines.push((at, kind, min_zoom, name));
         }
     }
     let mut slots: Vec<Option<write::Feature>> = feats.into_iter().map(Some).collect();

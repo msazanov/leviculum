@@ -279,13 +279,32 @@ offsets from the start of the file:
 **Names** (1100). The cut keeps the names of places (city, town, district,
 village, suburb, neighbourhood; not localities, hamlets, isolated
 dwellings or farms, which are 1,774 of the 1,933 places of a Frankfurt z13
-tile), of water points and parks, each where its anchor lies in the tile
-and the tile's zoom reaches its `min_zoom` (the deepest zoom keeps all, for
-the views that overzoom it), and of named roads from z14, each a line
-feature of its own. Street names show from z14 for major and secondary
-roads, from z15 for the rest. Measured on the 4.x extracts with `--locale
-de`: Frankfurt 9,878,095 to 10,270,116 bytes (+4.0 %), Berlin 35,176,663 to
-36,309,038 (+3.2 %).
+tile), of water points (the `water` layer's own from z16, and the lakes,
+ponds and harbours 4.x names as `pois` of kind `water` from z12) and parks,
+each where its anchor lies in the tile and the tile's zoom reaches its
+`min_zoom` (the deepest zoom keeps all, for the views that overzoom it),
+of named roads from z14, and of rivers, canals and streams from their own
+`min_zoom` (10 for the Main, 14 for a stream), every piece a line feature
+of its own. A river's name is on its line alone: its area has none, which
+is why the first cut named no river (1126). Street names show from z14 for
+major and secondary roads, from z15 for the rest. Measured on the 4.x
+extracts with `--locale de`: Frankfurt 9,878,095 to 10,270,116 bytes
+(+4.0 %), Berlin 35,176,663 to 36,309,038 (+3.2 %); the rivers and the
+`pois` waters add 17,589 and 54,440 bytes (+0.17 % and +0.15 %).
+
+The source cuts a street at every junction, so its pieces are often
+shorter than its name. The reader joins the pieces of one name and kind
+end to end across the view's tiles (`labels::join_pieces`) before the
+placement, not the cut: the format and the geometry stay as they are, the
+join costs a pass over the view's few hundred pieces, and it also joins
+pieces a tile edge cut. In the window, Frankfurt at z15 (1280 x 800) names
+54 streets instead of 42, its 1,215 pieces joined into 850 lines, Berlin 41
+instead of 38 (896 into 650).
+
+The name shown follows a chain: `name:<locale>`; else `name:en` where
+`name` is in a script the locale does not read and `name:en` is in one it
+does (Latin is read by every locale, so a German map of Athens says
+Athens); else `name`.
 
 A tile with nothing left under the profile has no entry; a reader draws
 the background there. Two entries may share a blob (the cut stores

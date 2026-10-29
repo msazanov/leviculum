@@ -24,8 +24,8 @@ of one build. Its output depends on the input alone, not on the thread
 count. It prints one `MAPTOOL zoom=` line per zoom (tiles, bytes, features
 and vertices in and out, point and line labels and their bytes) and a
 `MAPTOOL cut` total with the string table, then checks the file it wrote.
-It writes version 2 (LMR2), with the names of places, waters, parks and
-streets; `labels` prints those of one zoom, a line each.
+It writes version 2 (LMR2), with the names of places, waters, parks,
+rivers and streets; `labels` prints those of one zoom, a line each.
 
 The cut itself, the PMTiles reader and the MVT decoder live in
 `leviculum-mapcut`, which loquax's map autoload calls as well (1089); this

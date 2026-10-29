@@ -590,21 +590,22 @@ struct Label {
 
 /// How a name of the map is set in cells: its own cells' background is its
 /// halo, dark text on white in the light table and light on near black in
-/// the dark, waters in blue and parks in green, places in bold. At sixteen
-/// colours the ANSI ones; without colour, plain and bold alone.
+/// the dark, waters and rivers in blue, parks in green, cities and towns
+/// in bold. At sixteen colours the ANSI ones; without colour, plain and
+/// bold alone.
 fn name_style(tier: Tier, theme: MapTheme) -> impl Fn(LabelKind) -> Style {
     move |kind| {
         let dark = theme == MapTheme::Dark;
         let fg = match (tier, kind, dark) {
             (Tier::Mono, ..) => None,
-            (Tier::Ansi16, LabelKind::Water, false) => Some(Color::Indexed(4)),
-            (Tier::Ansi16, LabelKind::Water, true) => Some(Color::Indexed(12)),
+            (Tier::Ansi16, LabelKind::Water | LabelKind::River, false) => Some(Color::Indexed(4)),
+            (Tier::Ansi16, LabelKind::Water | LabelKind::River, true) => Some(Color::Indexed(12)),
             (Tier::Ansi16, LabelKind::Park, false) => Some(Color::Indexed(2)),
             (Tier::Ansi16, LabelKind::Park, true) => Some(Color::Indexed(10)),
             (Tier::Ansi16, _, false) => Some(Color::Indexed(0)),
             (Tier::Ansi16, _, true) => Some(Color::Indexed(15)),
-            (_, LabelKind::Water, false) => Some(Color::Rgb(0x1f, 0x4e, 0x8c)),
-            (_, LabelKind::Water, true) => Some(Color::Rgb(0x8c, 0xb4, 0xe6)),
+            (_, LabelKind::Water | LabelKind::River, false) => Some(Color::Rgb(0x1f, 0x4e, 0x8c)),
+            (_, LabelKind::Water | LabelKind::River, true) => Some(Color::Rgb(0x8c, 0xb4, 0xe6)),
             (_, LabelKind::Park, false) => Some(Color::Rgb(0x2e, 0x6b, 0x2e)),
             (_, LabelKind::Park, true) => Some(Color::Rgb(0x94, 0xc8, 0x8c)),
             (_, _, false) => Some(Color::Rgb(0x20, 0x20, 0x20)),

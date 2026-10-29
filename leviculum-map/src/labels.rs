@@ -63,6 +63,9 @@ pub enum LabelKind {
     /// A lake, a river, a sea: the name of a water area.
     Water,
     Park,
+    /// A river, a canal, a stream: a waterway's name, set along its line
+    /// as a street's is.
+    River,
     /// A motorway or trunk road.
     MajorRoad,
     /// A primary, secondary or tertiary road.
@@ -72,7 +75,7 @@ pub enum LabelKind {
 
 impl LabelKind {
     /// Every kind, in the order [`place`] serves them.
-    pub const ALL: [LabelKind; 11] = [
+    pub const ALL: [LabelKind; 12] = [
         LabelKind::City,
         LabelKind::Town,
         LabelKind::District,
@@ -81,6 +84,7 @@ impl LabelKind {
         LabelKind::Neighbourhood,
         LabelKind::Water,
         LabelKind::Park,
+        LabelKind::River,
         LabelKind::MajorRoad,
         LabelKind::SecondaryRoad,
         LabelKind::MinorRoad,
@@ -97,6 +101,7 @@ impl LabelKind {
             LabelKind::Neighbourhood => 6,
             LabelKind::Water => 16,
             LabelKind::Park => 17,
+            LabelKind::River => 18,
             LabelKind::MajorRoad => 32,
             LabelKind::SecondaryRoad => 33,
             LabelKind::MinorRoad => 34,
@@ -118,9 +123,15 @@ impl LabelKind {
         self >= LabelKind::MajorRoad
     }
 
+    /// A name set along a line: a street's or a river's. It comes as a
+    /// line label and repeats along its line ([`Rule::repeat`]).
+    pub fn is_line(self) -> bool {
+        self >= LabelKind::River
+    }
+
     /// The order [`place`] serves labels in, lowest first: pins come before
     /// all of them, then places by class, then waters and parks, then
-    /// streets, major roads first.
+    /// rivers, then streets, major roads first.
     pub fn priority(self) -> u8 {
         self as u8
     }
@@ -143,7 +154,7 @@ pub struct PointLabel {
     pub y: i16,
 }
 
-/// A label along a line feature of the tile: a street name.
+/// A label along a line feature of the tile: a street's or a river's name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LineLabel {
     /// Index of the line feature in the tile's geometry blob.
@@ -448,12 +459,12 @@ pub struct Candidate {
 pub struct Rule {
     /// Space every label keeps around it, in the caller's unit.
     pub margin: i32,
-    /// At most one place, water or park label per block of this size, by
-    /// the block its first box starts in (the terminal's density rule); 0
-    /// for none.
+    /// At most one label per block of this size, by the block its first
+    /// box starts in (the terminal's density rule); 0 for none.
     pub block: (i32, i32),
-    /// Two labels of one street at least this far apart (Chebyshev, first
-    /// box to first box); a place, water or park name is set once per view.
+    /// Two labels of one street or river at least this far apart
+    /// (Chebyshev, first box to first box); a place, water or park name is
+    /// set once per view.
     pub repeat: i32,
 }
 
@@ -490,7 +501,7 @@ pub fn place(candidates: &[Candidate], taken: &[Rect], rule: Rule) -> Vec<usize>
             .iter()
             .map(|&p| &candidates[p])
             .filter(|p| p.text == c.text);
-        let repeated = match c.kind.is_road() {
+        let repeated = match c.kind.is_line() {
             false => same.count() > 0,
             true => same
                 .filter_map(|p| p.boxes.first())
@@ -499,7 +510,7 @@ pub fn place(candidates: &[Candidate], taken: &[Rect], rule: Rule) -> Vec<usize>
         if repeated {
             continue;
         }
-        let block = (rule.block.0 > 0 && rule.block.1 > 0 && !c.kind.is_road()).then(|| {
+        let block = (rule.block.0 > 0 && rule.block.1 > 0).then(|| {
             (
                 first.x0.div_euclid(rule.block.0),
                 first.y0.div_euclid(rule.block.1),
@@ -539,16 +550,19 @@ pub struct ViewLabel {
     /// A point's anchor in sub-pixels from the view's top-left corner;
     /// a line's first vertex.
     pub anchor: (i64, i64),
-    /// A street's line, its pieces in sub-pixels; empty for a point.
+    /// A street's or a river's line in sub-pixels, its pieces joined
+    /// ([`join_pieces`]); empty for a point.
     pub line: Vec<Vec<(i64, i64)>>,
 }
 
 impl<S: Storage> Region<S> {
     /// The names of `view` this region holds and the view's zoom shows:
     /// the points whose anchor lands inside the region's area of the view,
-    /// and with `lines` the streets with a vertex there. Appended to `out`
-    /// in tile order; [`place`] orders them. A frontend that draws no
-    /// street names passes `lines = false` and reads no geometry.
+    /// and with `lines` the streets and rivers with a vertex there, the
+    /// pieces of one name over the view's tiles joined end to end first
+    /// ([`join_pieces`]), one label a joined line. Appended to `out` in
+    /// tile order; [`place`] orders them. A frontend that draws no line
+    /// names passes `lines = false` and reads no geometry.
     pub fn view_labels(
         &self,
         view: &Viewport,
@@ -564,6 +578,14 @@ impl<S: Storage> Region<S> {
                 && (y0..y0 + i64::from(area.size.height)).contains(&py)
         };
         let (mut sec, mut blob) = (Vec::new(), Vec::new());
+        // The pieces of each line name over the view's tiles, by kind and
+        // the strings of its names (one table for the whole region): a
+        // street is cut at its junctions and a tile's edge, so its name is
+        // placed on the pieces joined.
+        type Piece = ((u32, u32), Vec<(i64, i64)>);
+        // Kind, local name, the name shown where it differs.
+        type Name = (LabelKind, u32, Option<u32>);
+        let mut groups: Vec<(Name, Vec<Piece>)> = Vec::new();
         let strings = self.string_count();
         for tile in view.tiles(self.zooms()) {
             let Some(e) = self.find_labels(tile.id)? else {
@@ -638,38 +660,100 @@ impl<S: Storage> Region<S> {
                 let Some(f) = features.get(usize::from(l.feature)) else {
                     continue;
                 };
-                let line: Vec<Vec<(i64, i64)>> = f
-                    .rings()
-                    .map(|r| {
-                        r.points()
-                            .map(|(x, y)| (origin.0 + scale(x), origin.1 + scale(y)))
-                            .collect()
-                    })
-                    .collect();
-                let Some(&first) = line.iter().flatten().next() else {
-                    continue;
-                };
-                if !line.iter().flatten().any(|&p| inside(p)) {
-                    continue;
+                let to4096 = |v: i16| i64::from(v) << i32::from(fx.shift().max(0));
+                let key = (l.kind, l.string, s.alternate(n));
+                let at = groups.iter().position(|g| g.0 == key).unwrap_or_else(|| {
+                    groups.push((key, Vec::new()));
+                    groups.len() - 1
+                });
+                for r in f.rings() {
+                    let Some((x0, y0)) = r.points().next() else {
+                        continue;
+                    };
+                    let line: Vec<(i64, i64)> = r
+                        .points()
+                        .map(|(x, y)| (origin.0 + scale(x), origin.1 + scale(y)))
+                        .collect();
+                    groups[at].1.push((world(to4096(x0), to4096(y0)), line));
                 }
-                let (text, local) = text(n, l.string)?;
-                let (fx0, fy0) = f
-                    .rings()
-                    .next()
-                    .and_then(|r| r.points().next())
-                    .map_or((0, 0), |(x, y)| (i64::from(x), i64::from(y)));
-                let to4096 = |v: i64| v << i32::from(fx.shift().max(0));
+            }
+        }
+        for ((kind, string, alternate), pieces) in groups {
+            let joined: Vec<Piece> = join_pieces(pieces)
+                .into_iter()
+                .filter(|(_, line)| line.iter().any(|&p| inside(p)))
+                .collect();
+            if joined.is_empty() {
+                continue;
+            }
+            let mut local = String::new();
+            self.read_string(string, &mut local)?;
+            let text = match alternate {
+                Some(a) => {
+                    let mut alt = String::new();
+                    self.read_string(a, &mut alt)?;
+                    alt
+                }
+                None => local.clone(),
+            };
+            for (at, line) in joined {
                 out.push(ViewLabel {
-                    kind: l.kind,
+                    kind,
                     rank: 0,
-                    text,
-                    local,
-                    at: world(to4096(fx0), to4096(fy0)),
-                    anchor: first,
-                    line,
+                    text: text.clone(),
+                    local: local.clone(),
+                    at,
+                    anchor: line[0],
+                    line: alloc::vec![line],
                 });
             }
         }
         Ok(())
     }
+}
+
+/// Line pieces joined where one ends where another starts or ends, each
+/// with the least of its pieces' keys (the stable tie breaker of
+/// [`ViewLabel::at`]): the pieces of one street, which the source cuts at
+/// every junction, become the line its name is placed along. Greedy in the
+/// pieces' order, so the same pieces give the same lines; at a junction of
+/// three pieces of one name, two are joined and the third stays apart. A
+/// piece of fewer than two points is dropped.
+pub fn join_pieces<K: Ord + Copy>(pieces: Vec<(K, Vec<(i64, i64)>)>) -> Vec<(K, Vec<(i64, i64)>)> {
+    let mut left: Vec<(K, Vec<(i64, i64)>)> =
+        pieces.into_iter().filter(|(_, l)| l.len() >= 2).collect();
+    left.reverse();
+    let mut out = Vec::new();
+    while let Some((mut key, mut line)) = left.pop() {
+        loop {
+            let (first, last) = (line[0], line[line.len() - 1]);
+            if first == last {
+                break;
+            }
+            let Some(j) = left.iter().rposition(|(_, p)| {
+                let (a, b) = (p[0], p[p.len() - 1]);
+                a == last || b == last || a == first || b == first
+            }) else {
+                break;
+            };
+            let (k, mut p) = left.remove(j);
+            key = key.min(k);
+            let (a, b) = (p[0], p[p.len() - 1]);
+            if a == last {
+                line.extend_from_slice(&p[1..]);
+            } else if b == last {
+                p.reverse();
+                line.extend_from_slice(&p[1..]);
+            } else {
+                if a == first {
+                    p.reverse();
+                }
+                p.pop();
+                p.extend_from_slice(&line);
+                line = p;
+            }
+        }
+        out.push((key, line));
+    }
+    out
 }

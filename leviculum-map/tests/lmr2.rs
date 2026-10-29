@@ -2,11 +2,12 @@
 //! round trip through their writer and reader; the committed Florence
 //! region (cut with `--locale de`) holds the places and street names its
 //! tiles name; a version 1 file still reads, without names; and a version
-//! this reader does not know is refused, never misread.
+//! this reader does not know is refused, never misread. A street's pieces
+//! are joined end to end before its name is placed (1126).
 
 use leviculum_map::labels::{
-    encode_section, encode_strings, place, Candidate, LabelError, LabelKind, LineLabel, PointLabel,
-    Rect, Rule, Section, ViewLabel, POINT_LEN, SECTION_HEAD,
+    encode_section, encode_strings, join_pieces, place, Candidate, LabelError, LabelKind,
+    LineLabel, PointLabel, Rect, Rule, Section, ViewLabel, POINT_LEN, SECTION_HEAD,
 };
 use leviculum_map::region::{
     check_strings, Entry, Header, Region, RegionError, TileId, ENTRY_LEN, HEADER_LEN,
@@ -382,4 +383,132 @@ fn a_view_collects_the_names_its_zoom_shows() {
     let mut points = Vec::new();
     r.view_labels(&view, false, &mut points).expect("labels");
     assert!(points.iter().all(|l| !l.kind.is_road()));
+}
+
+/// The pieces of one name joined end to end (1126): one ending where the
+/// next starts, one running the other way, one before the first; a piece
+/// apart stays apart, a piece of one point is dropped, and each line keeps
+/// the least key of its pieces. The same pieces give the same lines.
+#[test]
+fn pieces_of_one_name_join_end_to_end() {
+    let pieces = vec![
+        ((5, 0), vec![(0, 0), (10, 0)]),
+        ((7, 0), vec![(10, 0), (20, 0)]),
+        // Runs the other way.
+        ((9, 0), vec![(30, 5), (20, 0)]),
+        // Ends where the first starts.
+        ((3, 0), vec![(-10, 0), (0, 0)]),
+        // Apart.
+        ((1, 0), vec![(100, 100), (110, 100)]),
+        ((0, 0), vec![(50, 50)]),
+    ];
+    let joined = join_pieces(pieces.clone());
+    assert_eq!(
+        joined,
+        [
+            ((3, 0), vec![(-10, 0), (0, 0), (10, 0), (20, 0), (30, 5)]),
+            ((1, 0), vec![(100, 100), (110, 100)]),
+        ]
+    );
+    assert_eq!(join_pieces(pieces), joined);
+    // A ring closes and takes no more.
+    let ring = vec![
+        ((0, 0), vec![(0, 0), (10, 0), (10, 10)]),
+        ((1, 0), vec![(10, 10), (0, 0)]),
+        ((2, 0), vec![(0, 0), (-10, 0)]),
+    ];
+    assert_eq!(join_pieces(ring).len(), 2);
+}
+
+/// The Florence fixture at z15: its street names come as fewer, longer
+/// lines than the pieces the tiles hold, and no two lines of one name
+/// touch end to end (1126).
+#[test]
+fn a_view_joins_the_pieces_of_a_street() {
+    use leviculum_map::mercator::{project, LatLon};
+    use leviculum_map::viewport::Viewport;
+    let r = Region::from_bytes(FLORENCE).expect("open");
+    let view = Viewport::new(
+        project(LatLon::from_degrees(43.7750, 11.2610)),
+        15,
+        1024,
+        768,
+    );
+    let mut out = Vec::new();
+    r.view_labels(&view, true, &mut out).expect("labels");
+    let streets: Vec<&ViewLabel> = out.iter().filter(|l| l.kind.is_road()).collect();
+    let shown: std::collections::BTreeSet<String> =
+        streets.iter().map(|l| l.local.clone()).collect();
+    // The pieces of those names the two z15 tiles hold, by the label
+    // sections alone.
+    let mut pieces = 0;
+    for x in [17408, 17409] {
+        let id = TileId { z: 15, x, y: 11943 };
+        let s = r.labels(id).expect("labels").expect("a section");
+        let fx = r.fixture(id).expect("tile").expect("geometry");
+        let features: Vec<_> = fx.features().collect();
+        for (_, l) in s.lines() {
+            if shown.contains(r.string(l.string).expect("name")) {
+                pieces += features[usize::from(l.feature)].rings().count();
+            }
+        }
+    }
+    assert_eq!(
+        (shown.len(), pieces, streets.len()),
+        (NAMES, PIECES, JOINED),
+        "names, pieces, lines"
+    );
+    let ends = |l: &ViewLabel| {
+        let p = &l.line[0];
+        [p[0], p[p.len() - 1]]
+    };
+    for (i, a) in streets.iter().enumerate() {
+        assert_eq!(a.line.len(), 1, "one line a label");
+        for b in &streets[i + 1..] {
+            let same = a.kind == b.kind && a.text == b.text;
+            let touch = ends(a).iter().any(|e| ends(b).contains(e));
+            let closed = ends(a)[0] == ends(a)[1] || ends(b)[0] == ends(b)[1];
+            assert!(!same || !touch || closed, "{} left apart", a.text);
+        }
+    }
+}
+
+const NAMES: usize = 75;
+const PIECES: usize = 113;
+const JOINED: usize = 96;
+
+/// Rivers repeat along their line as streets do, and the terminal's
+/// density block holds for streets and rivers as for places (1126).
+#[test]
+fn rivers_repeat_and_the_density_block_holds_for_every_kind() {
+    let rule = Rule {
+        margin: 1,
+        block: (0, 0),
+        repeat: 30,
+    };
+    let c = vec![
+        candidate(LabelKind::River, 0, "Arno", 0, 0, 4),
+        candidate(LabelKind::River, 0, "Arno", 10, 3, 4),
+        candidate(LabelKind::River, 0, "Arno", 40, 3, 4),
+    ];
+    let placed: Vec<i32> = place(&c, &[], rule)
+        .iter()
+        .map(|&i| c[i].boxes[0].x0)
+        .collect();
+    assert_eq!(placed, [0, 40]);
+    let dense = vec![
+        candidate(LabelKind::City, 12, "Firenze", 1, 1, 7),
+        candidate(LabelKind::River, 0, "Arno", 12, 4, 4),
+        candidate(LabelKind::MinorRoad, 0, "Via dei Servi", 0, 4, 13),
+        candidate(LabelKind::MinorRoad, 0, "Via Ricasoli", 22, 4, 12),
+    ];
+    let block = Rule {
+        block: (20, 6),
+        ..rule
+    };
+    let got: Vec<&str> = place(&dense, &[], block)
+        .iter()
+        .map(|&i| dense[i].text.as_str())
+        .collect();
+    assert_eq!(got, ["Firenze", "Via Ricasoli"]);
 }

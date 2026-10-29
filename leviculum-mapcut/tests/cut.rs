@@ -697,6 +697,144 @@ fn a_region_carries_its_names_and_one_string_table() {
     }
 }
 
+/// A Protomaps 4.x tile with the waters the map names (1126): a river, a
+/// canal and a stream as lines of `water` with their own `min_zoom`, a
+/// drain and an unnamed river it does not name, the river's unnamed area,
+/// and a lake named as a `pois` point of kind `water`.
+fn waters_tile() -> Vec<u8> {
+    let water = |kind: &str, name: Option<&str>, y: i32, min_zoom: i64| {
+        let mut props = vec![("kind", text(kind)), ("min_zoom", number(min_zoom))];
+        props.extend(name.map(|n| ("name", text(n))));
+        (
+            LINESTRING,
+            line(&[[0, y], [2000, y + 300], [4000, y]]),
+            props,
+        )
+    };
+    Tile {
+        layers: vec![
+            layer("earth", vec![(POLYGON, "", polygon(&[square(0, 0, 4096)]))]),
+            tagged(
+                "water",
+                vec![
+                    (
+                        POLYGON,
+                        polygon(&[square(0, 400, 4096)]),
+                        vec![("kind", text("water")), ("kind_detail", text("river"))],
+                    ),
+                    water("river", Some("Main"), 500, 10),
+                    water("canal", Some("Osthafenkanal"), 1500, 12),
+                    water("stream", Some("Luderbach"), 2500, 14),
+                    water("drain", Some("Graben"), 3000, 14),
+                    water("river", None, 3500, 10),
+                ],
+            ),
+            tagged(
+                "pois",
+                vec![(
+                    POINT,
+                    at(1000, 3800),
+                    vec![
+                        ("kind", text("water")),
+                        ("name", text("Jacobiweiher")),
+                        ("min_zoom", number(12)),
+                    ],
+                )],
+            ),
+        ],
+    }
+    .encode_to_vec()
+}
+
+/// Rivers are named (1126): the Main carried its name on the line of
+/// `water` alone, which the cut did not label, and its area has none.
+/// Rivers, canals and streams are labelled from their own `min_zoom`, also
+/// below the street names' z14, and in the deepest zoom; a drain is not;
+/// a lake named as a `pois` point is a water name.
+#[test]
+fn the_cut_names_rivers_canals_and_streams_along_their_lines() {
+    let layers = leviculum_map::profile::layers(1, 12).expect("profile");
+    for (z, deepest, want) in [
+        (11, false, vec![("Main", 10)]),
+        (12, false, vec![("Main", 10), ("Osthafenkanal", 12)]),
+        (
+            12,
+            true,
+            vec![("Main", 10), ("Osthafenkanal", 12), ("Luderbach", 14)],
+        ),
+    ] {
+        let names = Names {
+            locale: Some("de"),
+            z,
+            deepest,
+        };
+        let (blob, labels, st) = cut_tile_named(&waters_tile(), layers, Some(names)).expect("cut");
+        let blob = blob.expect("blob");
+        let fx = leviculum_mapfill::fixture::Fixture::parse(&blob).expect("parse");
+        let features: Vec<_> = fx.features().collect();
+        let lines: Vec<(&str, u8)> = labels
+            .lines
+            .iter()
+            .map(|(f, k, mz, n)| {
+                let f = &features[usize::from(*f)];
+                assert_eq!(
+                    (f.kind, f.class, *k),
+                    (Kind::Line, Class::Waterway, LabelKind::River)
+                );
+                (n.local.as_str(), *mz)
+            })
+            .collect();
+        assert_eq!(lines, want, "z{z} deepest {deepest}");
+        let points: Vec<(LabelKind, &str)> = labels
+            .points
+            .iter()
+            .map(|p| (p.0, p.3.local.as_str()))
+            .collect();
+        let lake = match z >= 12 {
+            true => vec![(LabelKind::Water, "Jacobiweiher")],
+            false => vec![],
+        };
+        assert_eq!(points, lake, "z{z}");
+        assert_eq!(st.line_labels, want.len() as u64);
+    }
+}
+
+/// A named line the device cannot hold whole is cut into pieces, and every
+/// piece carries the name, so the reader joins them back into one line
+/// (1126); before, the largest piece alone was named.
+#[test]
+fn every_piece_of_a_long_named_line_carries_its_name() {
+    let layers = leviculum_map::profile::layers(1, 15).expect("profile");
+    // A zigzag no simplification shortens, longer than the device holds.
+    let n = DEVICE_POINTS as i32 + 500;
+    let pts: Vec<[i32; 2]> = (0..n)
+        .map(|i| [i * 2 - 4000, 1000 + (i % 2) * 400])
+        .collect();
+    let tile = Tile {
+        layers: vec![tagged(
+            "roads",
+            vec![(
+                LINESTRING,
+                line(&pts),
+                vec![("kind", text("minor_road")), ("name", text("Lange Straße"))],
+            )],
+        )],
+    }
+    .encode_to_vec();
+    let names = Names {
+        locale: None,
+        z: 15,
+        deepest: true,
+    };
+    let (blob, labels, _) = cut_tile_named(&tile, layers, Some(names)).expect("cut");
+    let blob = blob.expect("blob");
+    let fx = leviculum_mapfill::fixture::Fixture::parse(&blob).expect("parse");
+    let pieces = fx.features().count();
+    assert!(pieces >= 2, "{pieces} pieces");
+    assert_eq!(labels.lines.len(), pieces);
+    assert!(labels.lines.iter().all(|l| l.3.local == "Lange Straße"));
+}
+
 /// The label language's chain (1126): `name:<locale>`; else `name:en`
 /// where `name` is in a script the locale does not read; else `name`.
 #[test]

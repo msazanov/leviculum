@@ -5,12 +5,15 @@
 //! in screen pixels, after the pins and their names, which nothing covers.
 //!
 //! Places, waters and parks are set centred on their anchor; a street's
-//! name on the middle of the longest run of its line that turns less than
-//! [`STRAIGHT_DEG`] a vertex, at the run's angle and turned to read left
-//! to right, with squares along its baseline as its boxes (the study's
-//! first step; bending text along curves is later). Every name carries a
-//! halo of the map's ground colour, its glyphs' coverage widened by
-//! [`HALO`] pixels and drawn first.
+//! or a river's name on the middle of the longest run of its line (its
+//! pieces joined by the map core) that turns less than [`STRAIGHT_DEG`] a
+//! vertex, or where that is taken further along it or on the next run, at
+//! the run's angle and turned to read left to right, with
+//! squares along its baseline as its boxes (the study's first step;
+//! bending text along curves is later). Rivers are blue and slanted, the
+//! font's own glyphs sheared, since iced embeds no italic. Every name
+//! carries a halo of the map's ground colour, its glyphs' coverage widened
+//! by [`HALO`] pixels and drawn first.
 //!
 //! The text is shaped by cosmic-text and rasterised by swash, through
 //! iced's own copy of both, in Fira Sans, the font iced embeds: one font on
@@ -48,8 +51,8 @@ pub fn size_of(kind: LabelKind) -> f32 {
 pub fn colours(kind: LabelKind, theme: MapTheme) -> ([u8; 3], [u8; 3]) {
     let dark = theme == MapTheme::Dark;
     let ink = match (kind, dark) {
-        (LabelKind::Water, false) => [0x1f, 0x4e, 0x8c],
-        (LabelKind::Water, true) => [0x8c, 0xb4, 0xe6],
+        (LabelKind::Water | LabelKind::River, false) => [0x1f, 0x4e, 0x8c],
+        (LabelKind::Water | LabelKind::River, true) => [0x8c, 0xb4, 0xe6],
         (LabelKind::Park, false) => [0x2e, 0x6b, 0x2e],
         (LabelKind::Park, true) => [0x94, 0xc8, 0x8c],
         (_, false) => [0x26, 0x26, 0x26],
@@ -141,12 +144,16 @@ impl Typesetter {
         }
     }
 
-    /// `text`'s coverage at `size` pixels, with `pad` pixels around.
-    pub fn mask(&mut self, text: &str, size: f32, pad: usize) -> Mask {
+    /// `text`'s coverage at `size` pixels, with `pad` pixels around;
+    /// slanted with `italic`.
+    pub fn mask(&mut self, text: &str, size: f32, pad: usize, italic: bool) -> Mask {
         let metrics = ct::Metrics::new(size, (size * 1.25).ceil());
         let mut buffer = Buffer::new(&mut self.fonts, metrics);
         buffer.set_size(&mut self.fonts, None, None);
-        let attrs = Attrs::new().family(Family::Name("Fira Sans"));
+        let mut attrs = Attrs::new().family(Family::Name("Fira Sans"));
+        if italic {
+            attrs = attrs.cache_key_flags(ct::CacheKeyFlags::FAKE_ITALIC);
+        }
         buffer.set_text(&mut self.fonts, text, &attrs, Shaping::Advanced, None);
         buffer.shape_until_scroll(&mut self.fonts, false);
         let (mut width, mut height) = (0f32, 0f32);
@@ -154,8 +161,14 @@ impl Typesetter {
             width = width.max(run.line_w);
             height = height.max(run.line_top + run.line_height);
         }
+        // The slant leans the glyphs' tops right by about a quarter of
+        // the size: room for it past the advance.
+        let lean = match italic {
+            true => (size * 0.25).ceil() as usize,
+            false => 0,
+        };
         let (w, h) = (
-            width.ceil() as usize + 2 * pad,
+            width.ceil() as usize + lean + 2 * pad,
             height.ceil() as usize + 2 * pad,
         );
         let mut alpha = vec![0u8; w * h];
@@ -180,11 +193,13 @@ impl Typesetter {
     }
 }
 
-/// The longest run of `line` whose vertices turn less than
-/// [`STRAIGHT_DEG`], in pixels: its middle, its angle in radians turned to
-/// read left to right, and its length. `None` for a line without a segment.
-pub fn straight_run(line: &[Vec<(f64, f64)>]) -> Option<((f64, f64), f64, f64)> {
-    let mut best: Option<((f64, f64), f64, f64)> = None;
+/// The runs of `line` whose vertices turn less than [`STRAIGHT_DEG`], in
+/// pixels, longest first (in line order where two are as long): each its
+/// middle, its angle in radians turned to read left to right, and its
+/// length. The places a name may go along its line, so a name whose best
+/// run is taken tries the next; none for a line without a segment.
+pub fn straight_runs(line: &[Vec<(f64, f64)>]) -> Vec<((f64, f64), f64, f64)> {
+    let mut runs: Vec<((f64, f64), f64, f64)> = Vec::new();
     let limit = STRAIGHT_DEG.to_radians();
     for piece in line {
         let mut start = 0;
@@ -208,19 +223,20 @@ pub fn straight_run(line: &[Vec<(f64, f64)>]) -> Option<((f64, f64), f64, f64)> 
             }
             let (a, b) = (piece[start], piece[end]);
             let len = (b.0 - a.0).hypot(b.1 - a.1);
-            if best.is_none_or(|(_, _, l)| len > l) && len > 0.0 {
+            if len > 0.0 {
                 let mut angle = (b.1 - a.1).atan2(b.0 - a.0);
                 if angle > std::f64::consts::FRAC_PI_2 {
                     angle -= std::f64::consts::PI;
                 } else if angle <= -std::f64::consts::FRAC_PI_2 {
                     angle += std::f64::consts::PI;
                 }
-                best = Some((((a.0 + b.0) / 2.0, (a.1 + b.1) / 2.0), angle, len));
+                runs.push((((a.0 + b.0) / 2.0, (a.1 + b.1) / 2.0), angle, len));
             }
             start = end;
         }
     }
-    best
+    runs.sort_by(|a, b| b.2.total_cmp(&a.2));
+    runs
 }
 
 /// One name to set: where, at which angle, its mask.
@@ -252,68 +268,48 @@ pub fn set(
     let mut settings: Vec<Setting> = Vec::new();
     let mut candidates: Vec<Candidate> = Vec::new();
     for l in names {
-        let mask = type_.mask(&l.text, size_of(l.kind) * scale, pad);
+        let river = l.kind == LabelKind::River;
+        let mask = type_.mask(&l.text, size_of(l.kind) * scale, pad, river);
         let (tw, th) = ((mask.w - 2 * pad) as f64, (mask.h - 2 * pad) as f64);
-        let (centre, angle) = match l.kind.is_road() {
-            false => (px(l.anchor), 0.0),
+        // Where the name may go, best first: a point's anchor, or each
+        // straight run of a line long enough to hold it.
+        let spots: Vec<((f64, f64), f64)> = match l.kind.is_line() {
+            false => vec![(px(l.anchor), 0.0)],
             true => {
                 let line: Vec<Vec<(f64, f64)>> = l
                     .line
                     .iter()
                     .map(|p| p.iter().map(|&v| px(v)).collect())
                     .collect();
-                match straight_run(&line) {
-                    Some((mid, angle, len)) if len >= tw + th => (mid, angle),
-                    _ => continue,
-                }
-            }
-        };
-        let boxes: Vec<Rect> = match angle == 0.0 {
-            true => vec![Rect {
-                x0: (centre.0 - tw / 2.0).floor() as i32,
-                y0: (centre.1 - th / 2.0).floor() as i32,
-                x1: (centre.0 + tw / 2.0).ceil() as i32,
-                y1: (centre.1 + th / 2.0).ceil() as i32,
-            }],
-            // Squares of the text's height along the baseline.
-            false => {
-                let n = (tw / th).ceil().max(1.0) as i32;
-                (0..n)
-                    .map(|i| {
-                        let along = -tw / 2.0 + th * (f64::from(i) + 0.5);
-                        let (cx, cy) = (
-                            centre.0 + along * angle.cos(),
-                            centre.1 + along * angle.sin(),
-                        );
-                        Rect {
-                            x0: (cx - th / 2.0).floor() as i32,
-                            y0: (cy - th / 2.0).floor() as i32,
-                            x1: (cx + th / 2.0).ceil() as i32,
-                            y1: (cy + th / 2.0).ceil() as i32,
-                        }
-                    })
+                straight_runs(&line)
+                    .into_iter()
+                    .take_while(|&(_, _, len)| len >= tw + th)
+                    .flat_map(|(mid, angle, len)| along_run(mid, angle, len, tw + th))
                     .collect()
             }
         };
-        let whole = boxes
-            .iter()
-            .all(|b| b.x0 >= 0 && b.y0 >= 0 && f64::from(b.x1) <= wf && f64::from(b.y1) <= hf);
-        if !whole {
-            continue;
+        for (centre, angle) in spots {
+            let boxes = boxes_of(centre, angle, tw, th);
+            let whole = boxes
+                .iter()
+                .all(|b| b.x0 >= 0 && b.y0 >= 0 && f64::from(b.x1) <= wf && f64::from(b.y1) <= hf);
+            if !whole {
+                continue;
+            }
+            candidates.push(Candidate {
+                kind: l.kind,
+                rank: l.rank,
+                text: l.text.clone(),
+                at: l.at,
+                boxes,
+            });
+            settings.push(Setting {
+                centre,
+                angle,
+                mask: mask.clone(),
+                kind: l.kind,
+            });
         }
-        candidates.push(Candidate {
-            kind: l.kind,
-            rank: l.rank,
-            text: l.text.clone(),
-            at: l.at,
-            boxes,
-        });
-        settings.push(Setting {
-            centre,
-            angle,
-            mask,
-            kind: l.kind,
-        });
     }
     let rule = Rule {
         margin: (MARGIN * scale).round() as i32,
@@ -329,6 +325,59 @@ pub fn set(
         paint(rgba, w, h, &s.mask, s.centre, s.angle, ink);
     }
     placed.iter().map(|&i| candidates[i].text.clone()).collect()
+}
+
+/// The middles a name `need` pixels long may take on a straight run of
+/// `len` pixels about `mid` at `angle`: the run's middle first, then half
+/// a name further each way in turn while the name stays on the run.
+fn along_run(mid: (f64, f64), angle: f64, len: f64, need: f64) -> Vec<((f64, f64), f64)> {
+    let step = need / 2.0;
+    let room = (len - need) / 2.0;
+    let mut out = vec![(mid, angle)];
+    let mut d = step;
+    while d <= room {
+        for along in [d, -d] {
+            out.push((
+                (mid.0 + along * angle.cos(), mid.1 + along * angle.sin()),
+                angle,
+            ));
+        }
+        d += step;
+    }
+    out
+}
+
+/// The boxes a name of `tw` by `th` pixels covers, its middle at `centre`,
+/// turned by `angle`: one for a level name, squares of its height along
+/// the baseline for a turned one.
+fn boxes_of(centre: (f64, f64), angle: f64, tw: f64, th: f64) -> Vec<Rect> {
+    match angle == 0.0 {
+        true => vec![Rect {
+            x0: (centre.0 - tw / 2.0).floor() as i32,
+            y0: (centre.1 - th / 2.0).floor() as i32,
+            x1: (centre.0 + tw / 2.0).ceil() as i32,
+            y1: (centre.1 + th / 2.0).ceil() as i32,
+        }],
+        // Squares of the text's height along the baseline.
+        false => {
+            let n = (tw / th).ceil().max(1.0) as i32;
+            (0..n)
+                .map(|i| {
+                    let along = -tw / 2.0 + th * (f64::from(i) + 0.5);
+                    let (cx, cy) = (
+                        centre.0 + along * angle.cos(),
+                        centre.1 + along * angle.sin(),
+                    );
+                    Rect {
+                        x0: (cx - th / 2.0).floor() as i32,
+                        y0: (cy - th / 2.0).floor() as i32,
+                        x1: (cx + th / 2.0).ceil() as i32,
+                        y1: (cy + th / 2.0).ceil() as i32,
+                    }
+                })
+                .collect()
+        }
+    }
 }
 
 /// Blend `mask` in `colour` into `rgba`, its middle at `centre`, turned by

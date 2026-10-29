@@ -54,8 +54,9 @@ pub struct SourceFeature {
     /// [`BRIDGE`] or [`TUNNEL`] for a line that runs on one or in one.
     pub flags: u8,
     pub parts: Vec<Vec<Vec<[i32; 2]>>>,
-    /// A named road's kind and name, which the cut labels.
-    pub label: Option<(LabelKind, Name)>,
+    /// A named road's or waterway's kind, the source's `min_zoom` (0 where
+    /// it has none) and name, which the cut labels.
+    pub label: Option<(LabelKind, u8, Name)>,
 }
 
 /// A decoded tile: features in tile order (layer by layer, feature by
@@ -199,6 +200,15 @@ pub fn place_kind(kind: &str, detail: &str) -> Option<LabelKind> {
         "neighbourhood" => LabelKind::Neighbourhood,
         _ => return None,
     })
+}
+
+/// The label kind of a named waterway line of Protomaps `kind`: rivers,
+/// canals and streams; drains and ditches are not named.
+pub fn waterway_kind(kind: &str) -> Option<LabelKind> {
+    match kind {
+        "river" | "canal" | "stream" => Some(LabelKind::River),
+        _ => None,
+    }
 }
 
 /// The label kind of a named road of Protomaps `kind`; paths, railways and
@@ -352,10 +362,18 @@ pub fn decode_named(raw: &[u8], locale: Option<&str>, names: bool) -> Res<Decode
                 Kind::Line => line_flags(l, f),
                 Kind::Area => 0,
             };
-            let label = match (names, k, l.name.as_str()) {
-                (true, Kind::Line, "roads") => road_kind(kind).zip(props.name(locale)),
+            // The names of lines: roads, and waterways (4.x keeps them as
+            // the lines of `water`, 3.x in `physical_line`); a river's name
+            // is on its line alone, its area is unnamed.
+            let line_kind = match (names, k, l.name.as_str()) {
+                (true, Kind::Line, "roads") => road_kind(kind),
+                (true, Kind::Line, "water" | "physical_line") => waterway_kind(kind),
                 _ => None,
             };
+            let label = line_kind.and_then(|lk| {
+                let min_zoom = props.number(&["min_zoom", "pmap:min_zoom"]);
+                Some((lk, small(min_zoom), props.name(locale)?))
+            });
             out.features.push(SourceFeature {
                 kind: k,
                 class,
@@ -366,6 +384,11 @@ pub fn decode_named(raw: &[u8], locale: Option<&str>, names: bool) -> Res<Decode
         }
     }
     Ok(out)
+}
+
+/// A source number as a byte, rounded down; 0 where there is none.
+fn small(v: Option<f64>) -> u8 {
+    v.map_or(0, |v| v.floor().clamp(0.0, 255.0) as u8)
 }
 
 /// The labelled point a feature of `layer` with `kind` is, if it is one: a
@@ -385,6 +408,9 @@ fn point(
                 .unwrap_or(""),
         ),
         "water" => Some(LabelKind::Water),
+        // 4.x names lakes, ponds and harbours as `pois` of kind `water`
+        // from z12; its `water` points start at z16.
+        "pois" if kind == "water" => Some(LabelKind::Water),
         "pois" if kind == "park" => Some(LabelKind::Park),
         _ => None,
     };
@@ -401,7 +427,6 @@ fn point(
     else {
         return Ok(None);
     };
-    let small = |v: Option<f64>| v.map_or(0, |v| v.floor().clamp(0.0, 255.0) as u8);
     Ok(Some(SourcePoint {
         kind: label,
         rank: small(props.number(&["population_rank", "pmap:population_rank"])),
