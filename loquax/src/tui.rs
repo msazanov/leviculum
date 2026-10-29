@@ -46,7 +46,9 @@ use leviculum_ui_ratatui::event::{key_event, mouse_event, step_event, EventStep}
 use leviculum_ui_ratatui::geometry::to_ratatui;
 use leviculum_ui_ratatui::images::{Between, Picker};
 use leviculum_ui_ratatui::style::downgrade_buffer;
-use leviculum_ui_ratatui::terminal::{install_panic_hook, set_mouse_capture, TerminalOps};
+use leviculum_ui_ratatui::terminal::{
+    draw_synced, install_panic_hook, set_mouse_capture, TerminalOps,
+};
 use leviculum_ui_ratatui::{help, to_ratatui_text, toast, CrosstermTerminal, TerminalGuard};
 
 use loquax::keys;
@@ -339,8 +341,14 @@ async fn run_terminal(
         let view = ui::view(&shell.model);
         // A frame that panics is skipped, not the messenger: the panic hook
         // has left the alternate screen by then, so it is entered again and
-        // the next frame drawn whole.
-        match unwound(|| terminal.draw(|frame| draw(frame, &view, Some(&mut painter)))) {
+        // the next frame drawn whole. Each frame is one synchronized update,
+        // so a terminal never shows a map picture's erase without the
+        // picture (1118).
+        match unwound(|| {
+            draw_synced(&mut terminal, |frame| {
+                draw(frame, &view, Some(&mut painter))
+            })
+        }) {
             Ok(Ok(_)) => {}
             Ok(Err(error)) => break Err(error.to_string()),
             Err(panic) => {
