@@ -32,7 +32,7 @@ fields beside id, source, title, body and the verification
 the two telemetry fields into positions (`telemetry::read`,
 `loquax/src/telemetry.rs:130`), the screen model keeps each peer's latest
 and hands every one to the store (`take_telemetry`,
-`loquax/src/ui.rs:2967`), and the store keeps the fields whole in its
+`loquax/src/ui.rs:2969`), and the store keeps the fields whole in its
 `fields` column (`loquax/src/store.rs:1962`) and the positions in a table of
 their own (`SCHEMA_V2`, `loquax/src/store.rs:173`). The sender's timestamp
 is still not carried: `OutboxEvent`, the screen's `Message` and every type
@@ -80,6 +80,20 @@ fold into the latest one when they follow each other. As built, the `14:05` is t
 block's own arrival time beside the line, as every block carries it; the
 fix's own time is in the header's age and the detail view. A run folds
 only within one day, and not across a name note or the `new` rule.
+
+**A text with a position** (1132). Sideband and a stock LXMF client can
+send a body and a telemetry field in one message. Such a message from a
+peer is drawn as its text with the report's line under it, and `Enter`
+or a click opens the map at its fix with the sender's pin selected,
+exactly as on a report: one model rule, `message_fix`
+(`loquax/src/ui.rs`), names the fix of any received message that carries
+a readable one, and every screen asks it. `v` still opens the detail
+view. One of ours with a telemetry field is our own position and opens
+nothing. On Android the bubble carries the same line under its text: a
+pin, the coordinates, the accuracy where given and the fix's age, dimmed
+once stale; a report's bubble is the line alone. A tap opens the map
+centred on the fix at the region's deepest zoom with the sender's pin
+selected, and Back returns to the conversation where it was scrolled.
 
 **The age** is always shown and always counts from the fix time
 (`Location::last_update`), not from when the message arrived: a report

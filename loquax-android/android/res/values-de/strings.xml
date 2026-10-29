@@ -9,4 +9,6 @@
     <string name="yesterday">Gestern</string>
     <string name="just_now">Jetzt</string>
     <string name="minutes_ago">%1$d Min.</string>
+    <string name="hours_ago">%1$d Std.</string>
+    <string name="days_ago">%1$d T.</string>
 </resources>

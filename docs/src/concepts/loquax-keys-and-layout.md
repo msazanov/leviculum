@@ -164,7 +164,7 @@ chord `loquax` adds to them.
 
 | Action | vi | Emacs | mail, chat | mouse | where |
 |---|---|---|---|---|---|
-| open the message: a position report the map at its fix, any other its detail view | `Enter` | | `Enter` (mutt display, Signal default action) | click a report; click a delivery mark for the detail | M |
+| open the message: one with a position (a report, or a text with telemetry) the map at its fix, any other its detail view | `Enter` | | `Enter` (mutt display, Signal default action) | click a report or a text with a position; click a delivery mark for the detail | M |
 | the message's detail view and ledger, any message | `v` | | palette `details` (Signal `Ctrl-D`, vi's half page here) | click its delivery mark | M |
 | copy the message's text | `y` | `Alt-w` | | drag selects, release copies (OSC 52) | M |
 | follow a link in the body | `f`, then its label | | | click the link, as in `lnomad` | M |
@@ -229,7 +229,9 @@ where it was. The detail view moved to `v`, which opens it for every
 message, a report too; `Enter` on any other message still opens it. `L`
 is free in L and M (vi's screen-bottom has no meaning in a list of
 blocks) and `Alt-l` is held by no compose edit, so the peer's position
-is reachable from vi and Emacs hands alike.
+is reachable from vi and Emacs hands alike. Since 1132 a text that came
+with a telemetry position opens the map the same way, its position line
+drawn under the text.
 
 ### Everywhere
 
@@ -919,7 +921,7 @@ first rung it is.
 - a palette action `theme` toggles for the session, the way `t` calls
   `toggle_theme` in lnomad (`lnomad/src/app/event.rs:697`); no key, the
   keymap is decided. Its toast names the theme it turned to
-  (`loquax/src/ui.rs:2641`).
+  (`loquax/src/ui.rs:2643`).
 
 #### 3. What colour carries and what it must not carry alone
 

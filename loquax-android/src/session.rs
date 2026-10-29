@@ -759,17 +759,7 @@ impl Inner {
         let index = self.model.conversations.iter().position(|c| c.peer == peer);
         let icon =
             index.and_then(|c| avatar::latest_appearance(&self.model.conversations[c].messages));
-        let rows = index.map_or_else(Vec::new, |c| {
-            let conversation = &self.model.conversations[c];
-            let chips = reactions::gather(conversation);
-            conversation
-                .messages
-                .iter()
-                .enumerate()
-                .filter(|(_, message)| !message.is_reaction())
-                .map(|(m, message)| row(message, &chips, self.model.report_fix(c, m)))
-                .collect()
-        });
+        let rows = index.map_or_else(Vec::new, |c| rows(&self.model, c));
         schema::Messages {
             v: VERSION,
             peer: loquax::address::to_hex(&peer),
@@ -816,7 +806,25 @@ pub fn pins_in(home: &Path, now: WallTime) -> Result<Vec<MapPin>, String> {
     Ok(model.map_pins())
 }
 
-/// One bubble as the app draws it; `fix` is a report's.
+/// The bubbles of conversation `c`, as the app draws them: a reaction is a
+/// chip on the bubble it names, not a bubble.
+pub fn rows<B>(model: &UiModel<B>, c: usize) -> Vec<schema::MessageRow> {
+    let Some(conversation) = model.conversations.get(c) else {
+        return Vec::new();
+    };
+    let chips = reactions::gather(conversation);
+    conversation
+        .messages
+        .iter()
+        .enumerate()
+        .filter(|(_, message)| !message.is_reaction())
+        .map(|(m, message)| row(message, &chips, model.message_fix(c, m)))
+        .collect()
+}
+
+/// One bubble as the app draws it; `fix` is the one the message carries.
+/// A report with a position is the position line alone, one without says
+/// so in words.
 fn row(
     message: &Message,
     chips: &std::collections::BTreeMap<[u8; 32], Vec<reactions::Chip>>,
@@ -842,9 +850,10 @@ fn row(
             .map(|id| loquax::address::to_hex(&id))
             .unwrap_or_default(),
         ours: message.outbound,
-        body: match message.is_report() {
-            true => "position report".to_string(),
-            false => message.body.clone(),
+        body: match (message.is_report(), &fix) {
+            (true, Some(_)) => String::new(),
+            (true, None) => "position report".to_string(),
+            (false, _) => message.body.clone(),
         },
         state: match message.outbound {
             true => state_word(message.delivery).to_string(),
@@ -854,6 +863,17 @@ fn row(
         chips,
         lat_e6: fix.as_ref().map(|f| f.location.latitude_e6),
         lon_e6: fix.as_ref().map(|f| f.location.longitude_e6),
+        place: fix
+            .as_ref()
+            .map(|f| loquax::telemetry::coordinates(&f.location)),
+        accuracy: fix
+            .as_ref()
+            .and_then(|f| loquax::telemetry::accuracy(&f.location)),
+        fix_at: fix.as_ref().map(|f| f.order_time()),
+        stale_at: fix.as_ref().map(|f| {
+            f.fix_time()
+                .saturating_add(loquax::telemetry::STALE_AFTER_SECS)
+        }),
     }
 }
 

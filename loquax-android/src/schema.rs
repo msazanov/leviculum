@@ -204,12 +204,27 @@ pub struct MessageRow {
     pub state: String,
     pub at: i64,
     pub chips: Vec<Chip>,
-    /// A position report's fix, degrees times a million, which a tap opens
-    /// the map on; absent for any other message.
+    /// The fix the message carries, a report's or a text's that came with
+    /// telemetry, degrees times a million, which a tap opens the map on
+    /// with the sender's pin selected; absent for any other message.
     #[serde(default)]
     pub lat_e6: Option<i32>,
     #[serde(default)]
     pub lon_e6: Option<i32>,
+    /// The bubble's position line beside the fix: the coordinates short,
+    /// `52.51627 N 13.37770 E`, and the accuracy, `±5 m`, when the sender
+    /// gave one.
+    #[serde(default)]
+    pub place: Option<String>,
+    #[serde(default)]
+    pub accuracy: Option<String>,
+    /// When the fix was taken, unix seconds (the receive time where the
+    /// sender's clock claims the future), for the line's age, and from
+    /// when the line is drawn dimmed as stale.
+    #[serde(default)]
+    pub fix_at: Option<i64>,
+    #[serde(default)]
+    pub stale_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

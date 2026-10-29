@@ -9,7 +9,11 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.text.Editable;
+import android.text.SpannableStringBuilder;
+import android.text.Spanned;
 import android.text.TextWatcher;
+import android.text.style.ForegroundColorSpan;
+import android.text.style.RelativeSizeSpan;
 import android.view.Gravity;
 import android.view.MenuItem;
 import android.view.View;
@@ -269,14 +273,54 @@ public class ChatActivity extends Activity implements Events.Listener {
         refresh();
     }
 
-    /** A position report opens the map centred on its fix, as Enter does in the terminal. */
+    /**
+     * A message that carries a position, a report or a text, opens the map
+     * centred on its fix with the sender's pin selected, as Enter does in
+     * the terminal. Back comes here again where the list was.
+     */
     private void showFix(Map<String, Object> row) {
         if (row.get("lat_e6") == null || row.get("lon_e6") == null) {
             return;
         }
         startActivity(new Intent(this, MapActivity.class)
                 .putExtra(MapActivity.LAT_E6, Core.num(row, "lat_e6"))
-                .putExtra(MapActivity.LON_E6, Core.num(row, "lon_e6")));
+                .putExtra(MapActivity.LON_E6, Core.num(row, "lon_e6"))
+                .putExtra(MapActivity.SELECTED, peer));
+    }
+
+    /**
+     * The bubble's text: the body, and under it, for a message that carries
+     * a position, its line (1132): a pin, the coordinates, the accuracy
+     * when the sender gave one, how old the fix is; dimmed once it is
+     * stale. A report has no body: its line is the bubble.
+     */
+    private CharSequence text(Map<String, Object> row, boolean ours, long now) {
+        String body = Core.str(row, "body");
+        if (row.get("place") == null) {
+            return body;
+        }
+        StringBuilder line = new StringBuilder("\uD83D\uDCCD ").append(Core.str(row, "place"));
+        String accuracy = Core.str(row, "accuracy");
+        if (!accuracy.isEmpty()) {
+            line.append(" \u00B7 ").append(accuracy);
+        }
+        if (row.get("fix_at") != null) {
+            line.append(" \u00B7 ").append(Ui.age(this, Core.num(row, "fix_at"), now));
+        }
+        SpannableStringBuilder out = new SpannableStringBuilder(body);
+        if (out.length() > 0) {
+            out.append('\n');
+        }
+        int start = out.length();
+        out.append(line);
+        int end = out.length();
+        out.setSpan(new RelativeSizeSpan(0.88f), start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        boolean stale = row.get("stale_at") != null && now > Core.num(row, "stale_at");
+        if (stale) {
+            int dim = getColor(ours ? R.color.bubble_ours_meta : R.color.bubble_theirs_meta);
+            out.setSpan(new ForegroundColorSpan(dim), start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        }
+        return out;
     }
 
     /** A message's reactions: one of loquax's quick six. */
@@ -443,7 +487,7 @@ public class ChatActivity extends Activity implements Events.Listener {
             bubble.setBackground(shape);
 
             TextView body = (TextView) view.findViewById(R.id.body);
-            body.setText(Core.str(row, "body"));
+            body.setText(text(row, ours, now));
             body.setTextColor(getColor(ours ? R.color.bubble_ours_text : R.color.bubble_theirs_text));
 
             // Only a group's last shows its time, and one of ours whose

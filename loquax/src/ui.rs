@@ -1576,12 +1576,13 @@ fn act<B: InputBuffer + Default>(
     Vec::new()
 }
 
-/// `Enter` on a message: a position report opens the map at the fix its
-/// line names, any other message (and a report without a position) its
-/// detail view. A folded run of reports is drawn as its latest, which is
+/// `Enter` on a message: one that carries a position, a report or a text
+/// with a telemetry field, opens the map at the fix its line names, any
+/// other message (and a report without a position) its detail view, which
+/// `v` opens for every message. A folded run of reports is drawn as its latest, which is
 /// where the cursor stands, so its line opens the latest fix of the run.
 fn open_message<B: InputBuffer>(model: &mut UiModel<B>) -> Vec<UiEffect> {
-    match model.report_fix(model.selected, model.message_cursor) {
+    match model.message_fix(model.selected, model.message_cursor) {
         Some(fix) => {
             open_map_at(model, &fix);
             Vec::new()
@@ -2158,8 +2159,9 @@ fn release<B: InputBuffer + Default>(model: &mut UiModel<B>, col: u16, row: u16)
     if let Some(target) = link.and_then(|link| model.laid().links.get(link).cloned()) {
         return follow(model, &target);
     }
-    // A click on a position report opens the map at its fix, as `Enter`.
-    if let Some(fix) = model.report_fix(model.selected, message) {
+    // A click on a message with a position opens the map at its fix, as
+    // `Enter`.
+    if let Some(fix) = model.message_fix(model.selected, message) {
         open_map_at(model, &fix);
     }
     Vec::new()
@@ -2992,6 +2994,19 @@ fn take_telemetry<B>(model: &mut UiModel<B>, index: usize, message_id: [u8; 32])
     effects
 }
 
+/// The fix a message from `peer` carries, the one its position line names
+/// ([`telemetry::shown_fix`]): a report's, and a text's that came with a
+/// telemetry field. `None` for one of ours, which is our position and not
+/// the peer's, and for a message without a readable position.
+pub fn message_fix(peer: [u8; 16], message: &Message) -> Option<Fix> {
+    if message.outbound || !telemetry::has_telemetry(&message.fields) {
+        return None;
+    }
+    let received = message.at.map(|at| at.unix_secs);
+    let read = telemetry::read(peer, &message.fields, received);
+    telemetry::shown_fix(&read).cloned()
+}
+
 impl<B> UiModel<B> {
     /// The map's pins in `Tab` order: every peer with a position, our own
     /// named `you`.
@@ -3012,18 +3027,10 @@ impl<B> UiModel<B> {
         )
     }
 
-    /// The fix the line of report `m` of conversation `c` names
-    /// ([`telemetry::shown_fix`]); `None` for any other message and for a
-    /// report without a position.
-    pub fn report_fix(&self, c: usize, m: usize) -> Option<Fix> {
+    /// The fix message `m` of conversation `c` carries ([`message_fix`]).
+    pub fn message_fix(&self, c: usize, m: usize) -> Option<Fix> {
         let conversation = self.conversations.get(c)?;
-        let message = conversation.messages.get(m)?;
-        if !message.is_report() {
-            return None;
-        }
-        let received = message.at.map(|at| at.unix_secs);
-        let read = telemetry::read(conversation.peer, &message.fields, received);
-        telemetry::shown_fix(&read).cloned()
+        message_fix(conversation.peer, conversation.messages.get(m)?)
     }
 
     /// The cells the map's picture covers.
@@ -7085,8 +7092,13 @@ mod tests {
             "parked at the gate",
             report_of(&fix_at(52_000_000, 13_000_000, two_pm() - 60)),
         );
-        assert!(shown(&model).contains(&"parked at the gate  14:00".to_string()));
-        assert!(!shown(&model).iter().any(|r| r.contains('◎')));
+        // The text, and under it the position line it came with (1132).
+        let rows = shown(&model);
+        let at = rows
+            .iter()
+            .position(|r| r == "parked at the gate")
+            .unwrap_or_else(|| panic!("{rows:?}"));
+        assert_eq!(rows[at + 1], "◎ position 52.00000 N 13.00000 E  14:00");
         assert_eq!(model.positions[&PEER].location.latitude_e6, 52_000_000);
         assert_eq!(
             model.toasts.last().map(|t| t.text.as_str()),
@@ -7892,6 +7904,58 @@ mod tests {
             "{:?}",
             detail.rows
         );
+    }
+
+    /// A text that came with a position (Sideband's telemetry beside a
+    /// body) shows its position line under the text, and `Enter` or a
+    /// click on it opens the map at that fix with the peer's pin selected,
+    /// as on a report; `v` still opens its detail view (1132).
+    #[test]
+    fn enter_on_a_text_with_a_position_opens_the_map_at_it() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        clock(&mut model, 26, 14, 0);
+        let fix = fix_at(43_773_100, 11_256_000, two_pm() - 240);
+        arrive(&mut model, PEER, 1, "at the bridge", report_of(&fix));
+        assert_eq!(
+            shown(&model),
+            vec![
+                layout::EARLIEST.to_string(),
+                "── Today ──".to_string(),
+                "at the bridge".to_string(),
+                "◎ position 43.77310 N 11.25600 E  14:00".to_string(),
+            ]
+        );
+        assert!(model.message_fix(0, 0).is_some());
+        update(&mut model, key(KeyCode::Tab));
+        assert_eq!(model.message_cursor, 0);
+        update(&mut model, key(KeyCode::Enter));
+        assert_eq!(model.focus, Pane::Map);
+        assert_eq!(model.detail, None);
+        let state = model.map.expect("the map is open");
+        assert_eq!(state.centre, projected(43_773_100, 11_256_000));
+        assert_eq!(state.selected, Some(PEER));
+        assert!(view(&model).map.is_some(), "the frame draws the map");
+        update(&mut model, key(KeyCode::Esc));
+        assert!(model.map.is_none());
+        update(&mut model, key(KeyCode::Char('v')));
+        assert_eq!(model.detail, Some((0, 0)));
+        update(&mut model, key(KeyCode::Esc));
+        let line = cell_of(&model, "◎ position 43.77310", 3);
+        press(&mut model, line);
+        assert_eq!(
+            model.map.expect("a click opens it too").centre,
+            projected(43_773_100, 11_256_000)
+        );
+
+        // Negative: the same text without the field is a text.
+        let mut plain = UiModel::<Field>::new(&[PEER]);
+        clock(&mut plain, 26, 14, 0);
+        arrive(&mut plain, PEER, 1, "at the bridge", Vec::new());
+        assert_eq!(plain.message_fix(0, 0), None);
+        update(&mut plain, key(KeyCode::Tab));
+        update(&mut plain, key(KeyCode::Enter));
+        assert!(plain.map.is_none());
+        assert_eq!(plain.detail, Some((0, 0)));
     }
 
     /// Outside the map, outside a fix: the map is somewhere else. Without a

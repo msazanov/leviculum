@@ -49,4 +49,6 @@
     <string name="yesterday">Yesterday</string>
     <string name="just_now">Now</string>
     <string name="minutes_ago">%1$d min</string>
+    <string name="hours_ago">%1$d h</string>
+    <string name="days_ago">%1$d d</string>
 </resources>

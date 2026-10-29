@@ -505,3 +505,101 @@ fn a_frame_with_margins_covers_them() {
     let (shown, _) = frame(&loquax_android::map::render(&tap, Some(pins), now()));
     assert_eq!(shown.tapped.as_deref(), Some("07".repeat(16).as_str()));
 }
+
+/// A text that came with a position (Sideband's telemetry beside a body,
+/// Lew's device test of 1132): its bubble carries the text and the
+/// position line's words, and the map request a tap on it makes, the fix
+/// and the sender's pin, opens the map centred there at the region's
+/// street zoom with that pin selected. The same text without the field is
+/// a plain bubble with nothing to open.
+#[test]
+fn a_tap_on_a_text_with_a_position_opens_the_map_at_it() {
+    use leviculum_lxmf::telemetry::Telemetry;
+    use loquax::outbox::OutboxEvent;
+    use loquax::ui::{update, UiEvent, UiModel};
+
+    let home = home();
+    let peer = [0x42; 16];
+    let fix = Location {
+        latitude_e6: 43_775_200,
+        longitude_e6: 11_264_000,
+        altitude_e2: 0,
+        speed_e2: 0,
+        bearing_e2: 0,
+        accuracy_e2: 500,
+        last_update: NOW - 90,
+    };
+    let telemetry = Telemetry {
+        time: Some(NOW - 90),
+        location: Some(fix),
+        ..Telemetry::default()
+    };
+    let mut model = UiModel::<loquax_android::session::Line>::new(&[]);
+    update(&mut model, UiEvent::Clock(now()));
+    for (id, fields) in [
+        (
+            1u8,
+            vec![(
+                leviculum_lxmf::constants::FIELD_TELEMETRY,
+                telemetry.encode_field_value(),
+            )],
+        ),
+        (2, Vec::new()),
+    ] {
+        update(
+            &mut model,
+            UiEvent::Engine(OutboxEvent::Received {
+                message_id: [id; 32],
+                source: peer,
+                title: Vec::new(),
+                body: b"Brandenburger Tor, Testposition".to_vec(),
+                fields,
+                verified: true,
+            }),
+        );
+    }
+    let rows = loquax_android::session::rows(&model, 0);
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    let with = &rows[0];
+    assert_eq!(with.body, "Brandenburger Tor, Testposition");
+    assert_eq!(
+        (with.lat_e6, with.lon_e6),
+        (Some(43_775_200), Some(11_264_000))
+    );
+    assert_eq!(with.place.as_deref(), Some("43.77520 N 11.26400 E"));
+    assert_eq!(with.accuracy.as_deref(), Some("±5 m"));
+    assert_eq!(with.fix_at, Some(NOW - 90));
+    assert_eq!(
+        with.stale_at,
+        Some(NOW - 90 + loquax::telemetry::STALE_AFTER_SECS)
+    );
+    let without = &rows[1];
+    assert_eq!(without.body, "Brandenburger Tor, Testposition");
+    assert_eq!((without.lat_e6, without.place.as_ref()), (None, None));
+
+    // The tap: what ChatActivity hands MapActivity, as MapView asks.
+    let tap = MapRequest {
+        x: None,
+        y: None,
+        zoom: None,
+        at_lat_e6: with.lat_e6,
+        at_lon_e6: with.lon_e6,
+        selected: Some(loquax::address::to_hex(&peer)),
+        ..request(home.path(), false)
+    };
+    let (shown, _) = frame(&loquax_android::map::render(
+        &tap,
+        Some(model.map_pins()),
+        now(),
+    ));
+    let at = project(LatLon::from_e6(43_775_200, 11_264_000));
+    assert_eq!((shown.x, shown.y), (at.x, at.y), "centred on the fix");
+    // The Florence fixture's deepest zoom, where its streets are named.
+    assert!(shown.zoom >= 15, "a street zoom: {}", shown.zoom);
+    assert_eq!(
+        shown.selected.as_deref(),
+        Some("42".repeat(16).as_str()),
+        "the sender's pin selected"
+    );
+    assert_eq!(shown.pins, 1, "{shown:?}");
+}

@@ -142,10 +142,16 @@ final class MapView extends View {
         ask();
     }
 
-    /** Centre on a place, degrees times a million, as a report's fix opens the map. */
-    synchronized void centreOn(long latE6, long lonE6) {
+    /**
+     * Centre on a place, degrees times a million, as a message's fix opens
+     * the map, with the pin of `peer` selected when it is not null.
+     */
+    synchronized void centreOn(long latE6, long lonE6, String peer) {
         atLat = latE6;
         atLon = lonE6;
+        if (peer != null) {
+            selected = peer;
+        }
     }
 
     /** Every pin in view. */

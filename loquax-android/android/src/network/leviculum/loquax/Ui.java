@@ -67,6 +67,21 @@ final class Ui {
         return context.getString(R.string.minutes_ago, (int) (secs / 60));
     }
 
+    /** How old a position is, as the terminal's header says it: now, minutes, hours, days. */
+    static String age(Context context, long unixSecs, long nowSecs) {
+        long secs = Math.max(0, nowSecs - unixSecs);
+        if (secs < 60) {
+            return context.getString(R.string.just_now);
+        }
+        if (secs < 3600) {
+            return context.getString(R.string.minutes_ago, (int) (secs / 60));
+        }
+        if (secs < 86_400) {
+            return context.getString(R.string.hours_ago, (int) (secs / 3600));
+        }
+        return context.getString(R.string.days_ago, (int) (secs / 86_400));
+    }
+
     /** The conversation list's time: ago, today's clock, yesterday, the weekday, the date. */
     static String listTime(Context context, long unixSecs, long nowSecs) {
         if (unixSecs <= 0) {

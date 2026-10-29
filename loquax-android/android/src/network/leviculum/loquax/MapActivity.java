@@ -11,12 +11,15 @@ import java.util.Map;
 /**
  * The map: the contacts' latest positions as pins over loquax's own map,
  * drawn by the library ({@link MapView}). Opened from the list on every
- * pin, or from a position report on its fix. A tap on a pin names it; the
+ * pin, or from a message that carries a position, on its fix with its
+ * sender's pin selected. A tap on a pin names it; the
  * status line carries the map's credit and what a load said.
  */
 public class MapActivity extends Activity implements Events.Listener, MapView.Listener {
     static final String LAT_E6 = "lat_e6";
     static final String LON_E6 = "lon_e6";
+    /** The pin to select where the map opens on a fix: its sender's address. */
+    static final String SELECTED = "selected";
 
     private TextView status;
     private TextView credit;
@@ -31,7 +34,8 @@ public class MapActivity extends Activity implements Events.Listener, MapView.Li
         credit = (TextView) findViewById(R.id.credit);
         map = new MapView(this, getFilesDir().getAbsolutePath(), this);
         if (getIntent().hasExtra(LAT_E6) && getIntent().hasExtra(LON_E6)) {
-            map.centreOn(getIntent().getLongExtra(LAT_E6, 0), getIntent().getLongExtra(LON_E6, 0));
+            map.centreOn(getIntent().getLongExtra(LAT_E6, 0), getIntent().getLongExtra(LON_E6, 0),
+                    getIntent().getStringExtra(SELECTED));
         }
         ((FrameLayout) findViewById(R.id.map)).addView(map);
         ((Button) findViewById(R.id.fit)).setOnClickListener(new View.OnClickListener() {
