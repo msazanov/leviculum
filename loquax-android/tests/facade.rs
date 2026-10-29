@@ -182,6 +182,63 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
         assert!(bubble.ours);
         assert_eq!(bubble.body, "hallo vom Telefon");
         assert_ne!(bubble.state, "failed", "{bubble:?}");
+        // A reply to it (1137): sent with the target's id, which the row
+        // reads back out of its own fields, and the target's text quoted.
+        let target = bubble.id.clone();
+        session
+            .request(Request::Reply {
+                peer: peer.clone(),
+                target: target.clone(),
+                body: "und die Antwort".to_string(),
+            })
+            .expect("reply");
+        let messages: schema::Messages = wait_for(
+            &session,
+            schema::Query::Messages { peer: peer.clone() },
+            60,
+            |m: &schema::Messages| m.messages.len() == 2 && !m.messages[1].id.is_empty(),
+        );
+        let reply = &messages.messages[1];
+        assert_eq!(reply.body, "und die Antwort");
+        assert_eq!(reply.quote_to.as_deref(), Some(target.as_str()));
+        assert_eq!(reply.quote.as_deref(), Some("hallo vom Telefon"));
+        assert_eq!(reply.quote_ours, Some(true));
+        assert!(messages.home_client);
+        let info: schema::Info = rmp_serde::from_slice(
+            &session
+                .query(schema::Query::Info {
+                    peer: peer.clone(),
+                    key: reply.key,
+                })
+                .expect("info"),
+        )
+        .expect("decode");
+        assert!(info.rows.iter().any(|r| r.contains(&reply.id)), "{info:?}");
+        // The reaction sent and the emoji picked are the recents, newest
+        // first, kept in the app's directory.
+        session
+            .request(Request::React {
+                peer: peer.clone(),
+                target: target.clone(),
+                content: "\u{1F44D}".to_string(),
+            })
+            .expect("react");
+        session
+            .request(Request::Used {
+                emoji: "\u{1F600}".to_string(),
+            })
+            .expect("used");
+        let recents: schema::Recents =
+            rmp_serde::from_slice(&session.query(schema::Query::Recents).expect("recents"))
+                .expect("decode");
+        assert_eq!(recents.emoji, ["\u{1F600}", "\u{1F44D}"]);
+        let messages: schema::Messages = wait_for(
+            &session,
+            schema::Query::Messages { peer: peer.clone() },
+            60,
+            |m: &schema::Messages| m.messages[0].chips.len() == 1,
+        );
+        let bubble = &messages.messages[0];
         // A peer without a name: the avatar shows its address's first byte,
         // in the app's colour since it sent no icon appearance (1129).
         assert_eq!(messages.initials, peer[..2].to_uppercase());
@@ -208,13 +265,12 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
             |c: &schema::Conversations| !c.conversations.is_empty(),
         );
         assert_eq!(list.conversations[0].peer, peer);
-        assert_eq!(list.conversations[0].last, "hallo vom Telefon");
+        assert_eq!(list.conversations[0].last, "you reacted \u{1F44D}");
         assert!(list.conversations[0].ours);
         assert_eq!(list.conversations[0].initials, peer[..2].to_uppercase());
         // The row's mark (1130): ours is last, so a delivery word, a text.
-        assert_eq!(list.conversations[0].kind, "text");
+        assert_eq!(list.conversations[0].kind, "reaction");
         assert!(!list.conversations[0].state.is_empty());
-        assert_eq!(list.conversations[0].reaction, None);
         assert_eq!(list.initials.chars().count(), 2);
         assert_eq!(list.address.len(), 32);
 
@@ -255,8 +311,13 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
                 .expect("query"),
         )
         .expect("decode");
-        assert_eq!(messages.messages.len(), 1, "{messages:?}");
+        assert_eq!(messages.messages.len(), 2, "{messages:?}");
         assert_eq!(messages.messages[0].body, "hallo vom Telefon");
+        // The reply's field came back from the store with the message.
+        assert_eq!(
+            messages.messages[1].quote_to.as_deref(),
+            Some(messages.messages[0].id.as_str())
+        );
         session.stop();
         drop(session);
 

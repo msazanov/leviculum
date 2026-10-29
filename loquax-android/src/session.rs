@@ -355,11 +355,35 @@ impl Session {
                 peer,
                 target,
                 content,
-            } => UiEvent::React {
+            } => {
+                let event = UiEvent::React {
+                    peer: parse_peer(&peer)?,
+                    target: parse_id(&target)?,
+                    content: content.clone(),
+                };
+                let mut inner = self.lock();
+                inner.used(&content);
+                inner.apply(event);
+                return Ok(());
+            }
+            schema::Request::Reply { peer, target, body } => UiEvent::Reply {
                 peer: parse_peer(&peer)?,
                 target: parse_id(&target)?,
-                content,
+                body,
             },
+            schema::Request::Forward { peer, key, to } => UiEvent::Forward {
+                from: parse_peer(&peer)?,
+                key,
+                to: parse_peer(&to)?,
+            },
+            schema::Request::Delete { peer, keys } => UiEvent::Delete {
+                peer: parse_peer(&peer)?,
+                keys,
+            },
+            schema::Request::Used { emoji } => {
+                self.lock().used(&emoji);
+                return Ok(());
+            }
             schema::Request::Close => UiEvent::Close,
             schema::Request::Pull => {
                 let mut inner = self.lock();
@@ -382,6 +406,19 @@ impl Session {
         Ok(match query {
             schema::Query::Conversations => schema::encode(&inner.conversations()),
             schema::Query::Messages { peer } => schema::encode(&inner.messages(parse_peer(&peer)?)),
+            schema::Query::Info { peer, key } => {
+                let peer = parse_peer(&peer)?;
+                let detail = loquax::ui::message_detail(&inner.model, peer, key)
+                    .ok_or_else(|| "no such message".to_string())?;
+                schema::encode(&schema::Info {
+                    v: VERSION,
+                    rows: detail.rows,
+                })
+            }
+            schema::Query::Recents => schema::encode(&schema::Recents {
+                v: VERSION,
+                emoji: loquax::emoji::load_recents(&inner.home).0,
+            }),
         })
     }
 
@@ -835,6 +872,17 @@ impl Inner {
             initials: self.initials(&peer),
             icon_fg: icon.as_ref().map(|(fg, _)| fg.clone()),
             icon_bg: icon.map(|(_, bg)| bg),
+            home_client: self.model.home_client,
+        }
+    }
+
+    /// `emoji` was used: first in the recents kept in the home. A file that
+    /// cannot be written costs the order, not the reaction.
+    fn used(&self, emoji: &str) {
+        let mut recents = loquax::emoji::load_recents(&self.home);
+        recents.used(emoji);
+        if let Err(error) = loquax::emoji::save_recents(&self.home, &recents) {
+            tracing::warn!("{error}");
         }
     }
 
@@ -885,7 +933,15 @@ pub fn rows<B>(model: &UiModel<B>, c: usize) -> Vec<schema::MessageRow> {
         .iter()
         .enumerate()
         .filter(|(_, message)| !message.is_reaction())
-        .map(|(m, message)| row(message, &chips, model.message_fix(c, m)))
+        .map(|(m, message)| {
+            let mut row = row(message, &chips, model.message_fix(c, m));
+            if let Some(quoted) = model.quoted(c, m) {
+                row.quote = Some(quoted.text);
+                row.quote_ours = quoted.ours;
+                row.quote_to = Some(loquax::address::to_hex(&quoted.to));
+            }
+            row
+        })
         .collect()
 }
 
@@ -941,6 +997,10 @@ fn row(
             f.fix_time()
                 .saturating_add(loquax::telemetry::STALE_AFTER_SECS)
         }),
+        key: message.activity,
+        quote: None,
+        quote_ours: None,
+        quote_to: None,
     }
 }
 

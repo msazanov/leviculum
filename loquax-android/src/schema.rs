@@ -11,8 +11,8 @@
 //! | call | payload |
 //! |---|---|
 //! | `start` | [`Start`] |
-//! | `command` | [`Request`], tagged by `t`: `open`, `close`, `send`, `react`, `pull`, `front` |
-//! | `query` | [`Query`], tagged by `t`: `conversations`, `messages` |
+//! | `command` | [`Request`], tagged by `t`: `open`, `close`, `send`, `react`, `reply`, `forward`, `delete`, `used`, `pull`, `front` |
+//! | `query` | [`Query`], tagged by `t`: `conversations`, `messages`, `info`, `recents` |
 //! | `renderMap` | [`MapRequest`] |
 //!
 //! Rust to Java:
@@ -21,7 +21,7 @@
 //! |---|---|
 //! | `start` | [`Started`] |
 //! | `command` | [`Done`] |
-//! | `query` | [`Conversations`] or [`Messages`], or [`Done`] with the error |
+//! | `query` | [`Conversations`], [`Messages`], [`Info`] or [`Recents`], or [`Done`] with the error |
 //! | `nextEvent` | [`Event`], tagged by `t`: `changed`, `notice`, `sync`, `link`, `stopped`; none when the wait ran out |
 //! | `renderMap` | a frame: four bytes big endian, the length of a [`MapShown`], the [`MapShown`], and its `w` times `h` RGBA pixels |
 //!
@@ -40,7 +40,9 @@
 //! A request added is none either: an older app never sends `front`, and
 //! the session then counts itself in the back, pulling on wakes and its
 //! schedule as before. The map's margins and `moving` (1131) are such
-//! fields too: an app that sends none gets the frame of the screen.
+//! fields too: an app that sends none gets the frame of the screen. The
+//! long press's requests and queries (1137) and a row's `key` and quote
+//! came the same way.
 
 use serde::{Deserialize, Serialize};
 
@@ -109,6 +111,22 @@ pub enum Request {
         target: String,
         content: String,
     },
+    /// Replied to the message `target` with `body`: sent with the target's
+    /// id and a quote of it (`loquax::ui::replies`).
+    Reply {
+        peer: String,
+        target: String,
+        body: String,
+    },
+    /// Forwarded the message `key` ([`MessageRow::key`]) of `peer`'s
+    /// conversation to `to`: its text and content fields again.
+    Forward { peer: String, key: u64, to: String },
+    /// Deleted the messages `keys` of `peer`'s conversation, the user asked
+    /// already; on a client of a home node from its every device.
+    Delete { peer: String, keys: Vec<u64> },
+    /// Picked `emoji` into a message: it joins the recents, as a reaction
+    /// sent does.
+    Used { emoji: String },
     /// Asked for a pull now: the refresh button.
     Pull,
     /// A screen of the app came to the front (`true`) or left it: while in
@@ -125,6 +143,27 @@ pub enum Query {
     Conversations,
     /// One conversation's messages, oldest first.
     Messages { peer: String },
+    /// The detail of the message `key` of `peer`'s conversation.
+    Info { peer: String, key: u64 },
+    /// The emoji the user used last, newest first.
+    Recents,
+}
+
+/// A message's detail, what the terminal's `v` shows: who, the peer, the
+/// id, the size, the delivery state or the signature, the fields read and
+/// what this device saw happen to it, one line each, an empty one between
+/// the parts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Info {
+    pub v: u32,
+    pub rows: Vec<String>,
+}
+
+/// The recent emoji, newest first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Recents {
+    pub v: u32,
+    pub emoji: Vec<String>,
 }
 
 /// The answer to a call that has nothing else to say.
@@ -245,6 +284,19 @@ pub struct MessageRow {
     pub fix_at: Option<i64>,
     #[serde(default)]
     pub stale_at: Option<i64>,
+    /// The message's key on this device, for the long press's forward,
+    /// delete and info; a send not yet queued has one too.
+    #[serde(default)]
+    pub key: u64,
+    /// A reply's quote: the target's text, or what the sender quoted when
+    /// this device lacks it; whether the target is ours, absent when
+    /// unknown; and the target's id.
+    #[serde(default)]
+    pub quote: Option<String>,
+    #[serde(default)]
+    pub quote_ours: Option<bool>,
+    #[serde(default)]
+    pub quote_to: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -260,6 +312,10 @@ pub struct Messages {
     pub icon_fg: Option<String>,
     #[serde(default)]
     pub icon_bg: Option<String>,
+    /// Whether a delete reaches the home's other devices (1137): the
+    /// question says where it deletes.
+    #[serde(default)]
+    pub home_client: bool,
 }
 
 /// What happened, for the screen.
