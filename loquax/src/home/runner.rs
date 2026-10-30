@@ -107,9 +107,56 @@ pub async fn pull(
     )
     .await
     {
-        Ok(pull) => (Ok(pull.messages()), pull.cursor),
+        Ok(pull) => {
+            if pull.imported.is_empty() {
+                return (Ok(pull.messages()), pull.cursor);
+            }
+            // Imported history goes to the store before the cursor may pass
+            // it: one that cannot be kept is pulled again next time.
+            match keep_imported(home, &client.public_key, &pull.imported) {
+                Ok(_) => (Ok(pull.messages()), pull.cursor),
+                Err(error) => (Err(error), None),
+            }
+        }
         Err(error) => (Err(error.to_string()), None),
     }
+}
+
+/// Write the imported history entries of a pull
+/// ([`crate::home::KIND_IMPORTED`]) into the store of the home identity's
+/// address under `home`, one conversation at a time, as the import on the
+/// home node wrote them: how many rows were new. An entry of another shape
+/// is passed by and said in the log. The screen shows them from its next
+/// start; the store keeps them in time order below its own rows.
+pub fn keep_imported(
+    home: &Path,
+    public_key: &[u8; 64],
+    entries: &[Vec<u8>],
+) -> Result<usize, String> {
+    let address = super::lxmf_address(public_key)?;
+    let mut groups = std::collections::BTreeMap::<_, Vec<_>>::new();
+    for bytes in entries {
+        let Some((origin, peer, row)) = crate::import::archive::read_entry(bytes) else {
+            tracing::warn!("HOME pull: an imported entry of another shape");
+            continue;
+        };
+        groups.entry((origin, peer)).or_default().push(row);
+    }
+    let mut store = Store::open_in(home, address).map_err(|e| e.to_string())?;
+    let mut new = 0;
+    for ((origin, peer), rows) in &groups {
+        let counts = store
+            .import_conversation(*peer, origin, rows)
+            .map_err(|e| e.to_string())?;
+        tracing::info!(
+            "HOME imported source={origin} conv={} new={} held={}",
+            crate::address::to_hex(peer),
+            counts.new,
+            counts.held
+        );
+        new += counts.new;
+    }
+    Ok(new)
 }
 
 /// A pull ended: what it brought is in the store by now, so the cursor may

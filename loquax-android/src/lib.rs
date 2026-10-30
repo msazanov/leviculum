@@ -22,7 +22,6 @@
 
 #![deny(unsafe_code)]
 
-pub mod avatar;
 pub mod links;
 pub mod map;
 pub mod pull_line;

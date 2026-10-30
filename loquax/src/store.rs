@@ -1373,6 +1373,56 @@ impl Store {
         Ok(peers)
     }
 
+    /// Whether this store is a home node's for our address: a device was
+    /// admitted, or the archive holds an entry. An import writes the
+    /// archive only then (1150).
+    pub fn serves_as_home_node(&self) -> Result<bool, StoreError> {
+        let found: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT 1 WHERE EXISTS (SELECT 1 FROM home_devices WHERE identity = ?1) \
+                 OR EXISTS (SELECT 1 FROM archive WHERE identity = ?1)",
+                params![&self.identity[..]],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| self.failed(e))?;
+        Ok(found.is_some())
+    }
+
+    /// Append imported rows ([`crate::home::KIND_IMPORTED`]) in the order
+    /// given, all or none, under the cap: how many were new to the archive.
+    /// The same message twice is one entry, so a second import appends
+    /// nothing.
+    pub fn archive_imported(
+        &mut self,
+        entries: &[([u8; 32], i64, Vec<u8>)],
+        cap_bytes: u64,
+    ) -> Result<usize, StoreError> {
+        let identity = self.identity;
+        let path = self.path.clone();
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| failed(&path, e))?;
+        let mut added = 0;
+        for (id, at, bytes) in entries {
+            let seq = append_in(
+                &tx,
+                &identity,
+                crate::home::KIND_IMPORTED,
+                id,
+                bytes,
+                *at,
+                cap_bytes,
+            )
+            .map_err(|e| failed(&path, e))?;
+            added += usize::from(seq.is_some());
+        }
+        tx.commit().map_err(|e| failed(&path, e))?;
+        Ok(added)
+    }
+
     /// How many bytes of packed messages the archive holds.
     pub fn archive_bytes(&self) -> Result<u64, StoreError> {
         let total: i64 = self
@@ -1895,8 +1945,15 @@ pub fn origin_name(tag: &str) -> &str {
     match tag {
         "nomadnet" => "NomadNet",
         "loquax" => "Loquax",
+        "ratspeak" => "Ratspeak",
         other => other,
     }
+}
+
+/// Whether the app an origin tag names keeps no signed bytes, so an
+/// imported row of it can never be checked: Ratspeak (1150).
+pub fn origin_keeps_no_signature(tag: &str) -> bool {
+    tag == "ratspeak"
 }
 
 fn holds_in(
@@ -2023,6 +2080,9 @@ fn import_in(
         )?;
         let name = origin_name(origin);
         let mut lines = vec![format!("imported from {name}")];
+        if origin_keeps_no_signature(origin) {
+            lines.push(format!("imported, no signature: {name} keeps none"));
+        }
         if let Some(verdict) = row.origin_verdict {
             lines.push(match verdict {
                 true => format!("{name} said: signature verified"),
@@ -2324,7 +2384,7 @@ fn wall_time(secs: Option<i64>, offset: Option<i64>) -> Option<WallTime> {
 }
 
 /// The store's number for a delivery state. Stable: these are on disk.
-fn state_code(state: DeliveryState) -> i64 {
+pub(crate) fn state_code(state: DeliveryState) -> i64 {
     match state {
         DeliveryState::Queued => 0,
         DeliveryState::Stamping => 1,
@@ -2337,7 +2397,7 @@ fn state_code(state: DeliveryState) -> i64 {
     }
 }
 
-fn state_of(code: i64) -> Option<DeliveryState> {
+pub(crate) fn state_of(code: i64) -> Option<DeliveryState> {
     Some(match code {
         0 => DeliveryState::Queued,
         1 => DeliveryState::Stamping,
