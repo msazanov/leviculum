@@ -164,6 +164,12 @@ impl Frames {
         self.motion.zoom(by_milli);
     }
 
+    /// The motion a frontend kept itself, where a pan cannot wait for
+    /// the frame being drawn (the window's worker holds the frames).
+    pub fn set_motion(&mut self, motion: Motion) {
+        self.motion = motion;
+    }
+
     /// One frame for `ask`.
     pub fn frame(&mut self, ask: &Ask<'_>) -> Shot {
         self.rest = None;
@@ -356,4 +362,15 @@ pub fn moved(rest: &ExactView, now: &ExactView, c: (f64, f64)) -> (f64, f64) {
         (c.0 - f64::from(rw) / 2.0) * k + f64::from(nw) / 2.0 + dx,
         (c.1 - f64::from(rh) / 2.0) * k + f64::from(nh) / 2.0 + dy,
     )
+}
+
+/// Where the frame `drawn` lands on the screen's view `screen`, which
+/// may have moved since it was asked for: its top left corner in the
+/// screen's pixels, and how many screen pixels one of its pixels is. A
+/// frontend shows the last frame there until the next one lands.
+pub fn onto(drawn: &ExactView, screen: &ExactView) -> (f64, f64, f64) {
+    let k = screen.scale_at(0) / drawn.scale_at(0);
+    let (cx, cy) = screen.to_screen(drawn.centre);
+    let (w, h) = drawn.size();
+    (cx - f64::from(w) / 2.0 * k, cy - f64::from(h) / 2.0 * k, k)
 }

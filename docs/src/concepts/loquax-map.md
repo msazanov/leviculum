@@ -223,9 +223,19 @@ The frontends:
   as a braille line drawing (the terminal options below). Pins and names
   are drawn as text cells over the picture, not into it, so they stay
   sharp and clickable on every backend.
-- **The iced GUI.** The same frame, at the window's size, as an iced
-  image widget; pins and labels as iced text over it. Panning by drag and
-  zoom by wheel are input mapped to the same core events.
+- **The iced GUI.** The same frame as the phone's (1144,
+  `loquax::mapframe`, below), at the window's size with an eighth of the
+  screen of margin on each side, drawn on a canvas where the view moved
+  it until the next frame lands; pins and labels as iced text over it,
+  placed by the frame with the window's font. A drag pans by whole
+  pixels; the wheel zooms about the pointer, a notch a step, a
+  touchpad's scroll 120 pixels a step, and the view keeps the zoom it
+  ends at (iced 0.14 has no pinch gesture). The frames are composed on
+  iced's executor, never on the window's thread; a drag or a turning
+  wheel asks moving frames, which keep the names, and 200 ms after the
+  wheel's last turn the frame at rest places them. At rest, with the
+  window focused, the prefetch runs a batch a job until the plan is
+  done or the view moves.
 - **Android** (1128). The same frame as the window's, drawn by the same
   functions (`loquax::screenmap`): the picture, the map's names set in
   Fira Sans by cosmic-text and swash (`loquax::mapnames`, carried in
@@ -264,8 +274,11 @@ The frontends:
   tile no frame used is evicted first, and a prefetch evicts neither a
   tile on screen nor one it drew. Only while the map is in front and
   the battery saver is off. When the ring reaches past the regions that
-  hold the frame, the autoload is asked for the ring's area. The
-  terminal and the window keep whole steps.
+  hold the frame, the autoload is asked for the ring's area. The frame
+  itself, the names kept, the prefetch's plan and the view held to one
+  world are `loquax::mapframe`, which the window calls too (1144); the
+  phone's glue keeps its requests, its fit and its autoload. The
+  terminal keeps whole steps.
 - **The M9.** The same pipeline straight into the panel's
   `embedded-graphics` target, as the measurement firmware does
   (`leviculum-mapfill/m9/`), with mousefood's cells for the labels.
@@ -607,7 +620,8 @@ stale ones dimmed; on the right the region from the same maps directory,
 the outline where none covers the view, the pins with their labels as iced
 text, the credit always in the bar below. Drag pans, the wheel zooms about
 the pointer, `+` `-` `0` as in the terminal, a click on a pin or a row
-selects it; integer zooms only. The window counts in the screen's own
+selects it; integer zooms only until 1144, when the window took the
+phone's frames and the zoom between the steps. The window counts in the screen's own
 pixels and runs the model's map functions with one pixel a cell; a dense
 screen draws its own pixels with the lines widened by its scale
 (`Look::scaled`). The picture is `loquax::picture`, which the terminal
@@ -616,6 +630,8 @@ draws through too, and the label rule moved into the core as
 with the window's font measuring each label. Pinned by
 `the_map_frame_over_the_fixture_at_three_zooms` in
 `loquax/src/gui/map.rs` (the window's own pipeline, no display needed),
+`a_drag_keeps_the_names` and `a_fractional_wheel_zoom_stays_where_it_ends`
+in `loquax/src/gui.rs`,
 the label rule's tests in `leviculum-map/tests/labels.rs`, and `just
 loquax-gui`. The binary is built for the gnu target: winit opens X11 and
 Wayland with dlopen, which a musl-static binary cannot. Left for later:

@@ -1,39 +1,11 @@
 //! The window's map (`docs/src/concepts/loquax-map.md`, slice (d)): the
-//! picture of a view as RGBA for an iced image, and the pins over it with
-//! their labels set as text. The picture, the pins' places and the names
-//! are [`loquax::screenmap`]'s, which the Android app draws through too;
-//! what is the window's own is its font measuring a label ([`measure`]),
-//! as iced sets the label on the canvas, and its one typesetter.
+//! frame of a view as RGBA for an iced image, and the pins over it with
+//! their labels set as text. The frame, the pins' places and the names
+//! are [`loquax::mapframe`]'s, which the Android app draws through too
+//! (1144); what is the window's own is its font measuring a label
+//! ([`measure`]), as iced sets the label on the canvas.
 
-use std::sync::{Mutex, OnceLock, PoisonError};
-
-use leviculum_map::labels::Rect as Box2;
-use leviculum_map::viewport::Viewport;
-use leviculum_mapfill::style::Style;
-
-use loquax::mapnames::Typesetter;
-use loquax::picture::Painter;
-pub use loquax::screenmap::{
-    area, hit, place, setup, taken, Picture, Placed, DRAG, LABEL, LINE, MARKER,
-};
-
-/// The window's one typesetter, shared by its paints.
-fn typesetter() -> &'static Mutex<Typesetter> {
-    static TYPE: OnceLock<Mutex<Typesetter>> = OnceLock::new();
-    TYPE.get_or_init(|| Mutex::new(Typesetter::new()))
-}
-
-/// [`loquax::screenmap::paint`] with the window's typesetter.
-pub fn paint(
-    painter: &mut Painter,
-    view: &Viewport,
-    style: Style,
-    scale: f32,
-    names_after: Option<Vec<Box2>>,
-) -> Picture {
-    let mut type_ = typesetter().lock().unwrap_or_else(PoisonError::into_inner);
-    loquax::screenmap::paint(painter, view, style, scale, names_after, &mut type_)
-}
+pub use loquax::screenmap::{area, hit, setup, Placed, DRAG, LABEL, LINE, MARKER};
 
 /// The width of `text` at `size` pixels as the window sets it: iced's own
 /// paragraph over its font system, with nothing drawn, so it works without
@@ -56,25 +28,33 @@ pub fn measure(text: &str, size: f32) -> u32 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use leviculum_map::mercator::{project, LatLon};
+    use leviculum_map::viewport::{ExactView, MILLI};
+    use leviculum_mapfill::style::Style;
+    use loquax::mapframe::{hold, Ask, Frames, Shot};
     use loquax::picture::Maps;
     use loquax::screenmap::metrics;
-    use loquax::ui::map::{fit, viewport, MapPin, MapState};
+    use loquax::ui::map::{fit, zoom_floor, MapPin};
     use std::path::PathBuf;
 
-    /// A painter over the committed Florence region alone.
-    fn florence() -> Painter {
+    /// The committed Florence region alone.
+    fn florence_maps() -> Maps {
         let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../leviculum-map/fixtures");
         let maps = Maps::new(Some(dir));
         let (regions, problems) = maps.load();
         assert!(problems.is_empty(), "{problems:?}");
         assert_eq!(regions.len(), 1);
-        Painter::new(maps)
+        maps
     }
 
-    fn pin(peer: u8, label: &str, lat: f64, lon: f64) -> MapPin {
+    /// The frames over the committed Florence region alone.
+    pub(crate) fn florence() -> Frames {
+        Frames::new(florence_maps())
+    }
+
+    pub(crate) fn pin(peer: u8, label: &str, lat: f64, lon: f64) -> MapPin {
         MapPin {
             peer: [peer; 16],
             at: project(LatLon::from_degrees(lat, lon)),
@@ -84,16 +64,39 @@ mod tests {
         }
     }
 
+    /// A frame of `view` at rest, without margins, the pins measured by
+    /// the window's font and left for its canvas: what the window asks.
+    fn rest(
+        frames: &mut Frames,
+        view: ExactView,
+        pins: &[MapPin],
+        selected: Option<[u8; 16]>,
+        scale: f32,
+    ) -> Shot {
+        frames.frame(&Ask {
+            view,
+            margin: (0, 0),
+            moving: false,
+            style: Style::PC,
+            scale,
+            pins,
+            selected,
+            zooms: (0, 20),
+            draw_pins: false,
+            measure: Some(measure),
+        })
+    }
+
     /// The map view's frame over the fixture region at three zooms through
     /// the window's own pipeline: the region's credit when the view is
     /// inside it, the outline's when zoomed out past it, every pixel set,
     /// and the pins that land counted. The window draws exactly this:
-    /// `paint` for the picture, `place` for the pins, `measure` for the
-    /// labels.
+    /// [`Frames::frame`] for the picture and the pins' places, `measure`
+    /// for the labels.
     #[test]
     fn the_map_frame_over_the_fixture_at_three_zooms() {
-        let mut painter = florence();
-        let setup = setup(&painter);
+        let mut frames = florence();
+        let setup = setup(frames.painter());
         // Three inside the region's box (11.2505,43.7728 to 11.2700,43.7785,
         // the fixture's README): the Duomo, San Lorenzo's market, east of
         // Piazza d'Azeglio's corner; and Pisa, far to the west.
@@ -106,6 +109,7 @@ mod tests {
         let size = (800u32, 600u32);
         let scale = 1.0;
         let (centre, fitted) = fit(&pins[..3], area(size), &setup);
+        let floor = zoom_floor(area(size), &setup);
         let cases = [
             // (zoom, credit, pins in view)
             (fitted, "© OpenStreetMap contributors", 3),
@@ -113,13 +117,9 @@ mod tests {
             (8, "Natural Earth", 4),
         ];
         for (zoom, credit, landed) in cases {
-            let state = MapState {
-                centre,
-                zoom,
-                selected: Some([2; 16]),
-            };
-            let view = viewport(&state, area(size), &setup);
-            let picture = paint(&mut painter, &view, Style::PC, scale, None);
+            let view = ExactView::new(centre, u32::from(zoom) * MILLI, size.0, size.1);
+            let view = hold(view, floor, setup.zooms.1);
+            let picture = rest(&mut frames, view, &pins, Some([2; 16]), scale);
             assert_eq!(picture.view.size(), size);
             assert_eq!(picture.rgba.len(), (size.0 * size.1 * 4) as usize);
             assert_eq!(picture.attribution, credit, "zoom {zoom}");
@@ -127,7 +127,7 @@ mod tests {
                 picture.rgba.chunks(4).all(|px| px[3] == 0xff),
                 "zoom {zoom}: every pixel opaque"
             );
-            let placed = place(&pins, &view, state.selected, scale, measure);
+            let placed = frames.placed().to_vec();
             assert_eq!(placed.len(), landed, "zoom {zoom}: {placed:?}");
             let last = placed.last().expect("a pin");
             assert!(last.selected && last.peer == [2; 16], "selected on top");
@@ -153,25 +153,22 @@ mod tests {
     }
 
     /// The window shows one world at most (1131): a window of 1280 x 800
-    /// asked for z0 is drawn at z3, the world 2048 pixels wide, and no
+    /// asked for z0 is held at z3, the world 2048 pixels wide, and no
     /// column of its picture repeats. The view as asked, the control,
     /// repeats every 256.
     #[test]
     fn the_window_never_shows_the_world_twice() {
-        let mut painter = Painter::new(Maps::new(None));
-        let setup = setup(&painter);
+        let mut frames = Frames::new(Maps::new(None));
+        let setup = setup(frames.painter());
         let size = (1280u32, 800u32);
-        let state = MapState {
-            centre: project(LatLon::from_degrees(30.0, 10.0)),
-            zoom: 0,
-            selected: None,
-        };
-        let asked = Viewport::new(state.centre, 0, size.0, size.1);
-        let control = paint(&mut painter, &asked, Style::PC, 1.0, None);
+        let centre = project(LatLon::from_degrees(30.0, 10.0));
+        let asked = ExactView::new(centre, 0, size.0, size.1);
+        let control = rest(&mut frames, asked, &[], None, 1.0);
         assert_eq!(period(&control.rgba, 1280), Some(256), "the control");
-        let view = viewport(&state, area(size), &setup);
-        assert_eq!(view.zoom(), 3);
-        let picture = paint(&mut painter, &view, Style::PC, 1.0, None);
+        let floor = zoom_floor(area(size), &setup);
+        let view = hold(asked, floor, setup.zooms.1);
+        assert_eq!(view.zoom_milli(), 3 * MILLI);
+        let picture = rest(&mut frames, view, &[], None, 1.0);
         assert_eq!(period(&picture.rgba, 1280), None);
     }
 
@@ -180,51 +177,58 @@ mod tests {
     /// than the picture scaled up.
     #[test]
     fn a_dense_screen_draws_the_same_view_at_its_own_pixels() {
-        let mut painter = florence();
+        let mut frames = florence();
         let at = project(LatLon::from_degrees(43.7731, 11.2560));
-        let one = Viewport::new(at, 14, 400, 300);
-        let two = Viewport::new(at, 15, 800, 600);
+        let one = ExactView::new(at, 14 * MILLI, 400, 300);
+        let two = ExactView::new(at, 15 * MILLI, 800, 600);
         let pins = [pin(1, "alice", 43.7700, 11.2500)];
-        let a = place(&pins, &one, None, 1.0, measure);
-        let b = place(&pins, &two, None, 2.0, measure);
+        rest(&mut frames, one, &pins, None, 1.0);
+        let a = frames.placed().to_vec();
+        let picture = rest(&mut frames, two, &pins, None, 2.0);
+        let b = frames.placed().to_vec();
         assert_eq!(a.len(), 1);
         assert_eq!(b.len(), 1);
         assert!((b[0].x - 2.0 * a[0].x).abs() <= 2.0, "{a:?} {b:?}");
-        let picture = paint(&mut painter, &two, Style::PC, 2.0, None);
         assert_eq!(picture.rgba.len(), 800 * 600 * 4);
         assert_eq!(metrics(2.0).marker, 2 * metrics(1.0).marker);
     }
 
-    /// The map's names set into the window's picture (1100): the Florence
-    /// fixture at z16 with one pin, the parks and the streets the zoom
-    /// shows, each name with its halo, none under the pin's name; the
-    /// picture the same on a second paint and pixel for pixel the golden.
-    /// A picture drawn while the view moves carries none.
+    /// The map's names set into the window's frame (1100, 1144): the
+    /// Florence fixture at z16 with one pin, the parks and the streets the
+    /// zoom shows, each name with its halo, none under the pin's name; the
+    /// frame the same on a second one and pixel for pixel the golden. A
+    /// frame drawn while the view moves, before any at rest, carries none.
     #[test]
     fn the_map_names_are_set_into_the_picture() {
-        let mut painter = florence();
         let at = project(LatLon::from_degrees(43.7752, 11.2660));
-        let view = Viewport::new(at, 16, 480, 320);
+        let view = ExactView::new(at, 16 * MILLI, 480, 320);
         let pins = [pin(1, "alice", 43.7752, 11.2640)];
-        let placed = place(&pins, &view, None, 1.0, measure);
-        let boxes = taken(&placed, 1.0);
-        let named = paint(&mut painter, &view, Style::PC, 1.0, Some(boxes.clone()));
-        let plain = paint(&mut painter, &view, Style::PC, 1.0, None);
-        assert!(plain.names.is_empty());
+        let mut plain_frames = florence();
+        let plain = plain_frames.frame(&Ask {
+            view,
+            margin: (0, 0),
+            moving: true,
+            style: Style::PC,
+            scale: 1.0,
+            pins: &pins,
+            selected: None,
+            zooms: (0, 20),
+            draw_pins: false,
+            measure: Some(measure),
+        });
+        assert!(plain_frames.names().is_empty());
+        let mut frames = florence();
+        let named = rest(&mut frames, view, &pins, None, 1.0);
+        let names = frames.names();
         assert_ne!(named.rgba, plain.rgba, "the names changed the picture");
+        assert!(names.iter().any(|n| n == "Piazza D'Azeglio"), "{names:?}");
         assert!(
-            named.names.iter().any(|n| n == "Piazza D'Azeglio"),
-            "{:?}",
-            named.names
+            names.iter().filter(|n| n.starts_with("Via ")).count() >= 2,
+            "{names:?}"
         );
-        assert!(
-            named.names.iter().filter(|n| n.starts_with("Via ")).count() >= 2,
-            "{:?}",
-            named.names
-        );
-        let again = paint(&mut painter, &view, Style::PC, 1.0, Some(boxes));
-        assert_eq!(again.rgba, named.rgba, "a second paint is the same");
-        assert_eq!(again.names, named.names);
+        let again = rest(&mut frames, view, &pins, None, 1.0);
+        assert_eq!(again.rgba, named.rgba, "a second frame is the same");
+        assert_eq!(frames.names(), names);
         let rgb: Vec<u8> = named
             .rgba
             .chunks(4)

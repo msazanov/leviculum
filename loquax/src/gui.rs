@@ -11,10 +11,14 @@
 //!   the model and its clock. [`drive`] pumps it and ticks it, and after
 //!   every change sends what the window shows ([`Seen`]).
 //! - The window runs iced on the main thread. It holds only what is the
-//!   window's: the map's centre, zoom and selected pin (the model's
-//!   [`MapState`], driven by the model's own map functions in screen
-//!   pixels, [`map`]), the picture on screen, and the painter, whose paints
-//!   run on iced's executor so a drag never waits for one.
+//!   window's: the map's view at the exact zoom a wheel or a touchpad
+//!   leaves and the selected pin, the frame on screen, and the map's
+//!   frames ([`loquax::mapframe`], the phone's pipeline, 1144), whose
+//!   frames run on iced's executor so a drag never waits for one. A frame
+//!   is composed from the tile cache with margins past the screen and
+//!   shown where the view moved it until the next lands; while a drag or
+//!   the wheel moves the view the names drawn at rest are kept, and at
+//!   rest, with the window focused, the cache prefetches around the view.
 //!
 //! The map's autoload (1089) runs in the shell: the window decides what to
 //! ask with the model's own rules ([`want_pins`] when the pins first arrive,
@@ -26,23 +30,25 @@ pub mod map;
 
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
+use iced::advanced::image::{FilterMethod, Handle};
 use iced::widget::canvas::{self, Canvas, Frame, Geometry, Path};
-use iced::widget::{button, column, container, image, row, scrollable, stack, text};
+use iced::widget::{button, column, container, row, scrollable, stack, text};
 use iced::{
     keyboard, mouse, window, Color, Element, Length, Point, Rectangle, Renderer, Size,
     Subscription, Task, Theme,
 };
 use tokio::sync::oneshot;
 
+use leviculum_map::mercator::World;
+use leviculum_map::viewport::{ExactView, MILLI};
 use leviculum_mapfill::style::Style;
-use loquax::picture::{map_theme, Painter};
-use loquax::ui::map::{
-    fit, settle, viewport, want_pins, want_view, zoom_at, MapPin, MapPress, MapSetup, MapState,
-    MapWant,
-};
+use loquax::mapframe::{hold, onto, Ask, Frames};
+use loquax::picture::map_theme;
+use loquax::tiles::Motion;
+use loquax::ui::map::{fit, want_pins, want_view, zoom_floor, MapPin, MapSetup, MapWant};
 use loquax::ui::{UiEvent, MAP_LOADED_ALREADY};
 
 use crate::shell::{self, local_now, Shell, ShellOptions, PUMP_MS, TICK_MS};
@@ -92,14 +98,14 @@ pub async fn run(options: ShellOptions) -> ExitCode {
         Ok(started) => started,
         Err(code) => return code,
     };
-    let painter = Painter::new(shell.maps.clone());
+    let frames = Frames::new(shell.maps.clone());
     let (seen_tx, seen_rx) = unbounded();
     let (asks_tx, asks_rx) = tokio::sync::mpsc::unbounded_channel();
     let (leave_tx, leave_rx) = oneshot::channel();
     let driver = tokio::spawn(drive(shell, leave_rx, seen_tx, asks_rx));
     // iced runs its own loop on this thread until the window closes; the
     // runtime's other threads drive the shell meanwhile.
-    let shown = tokio::task::block_in_place(|| window(painter, seen_rx, asks_tx));
+    let shown = tokio::task::block_in_place(|| window(frames, seen_rx, asks_tx));
     let _ = leave_tx.send(());
     let shell = match driver.await {
         Ok(shell) => shell,
@@ -149,10 +155,10 @@ async fn drive(
 }
 
 /// Open the window and run it until it is closed.
-fn window(painter: Painter, seen: UnboundedReceiver<Seen>, asks: Asks) -> iced::Result {
+fn window(frames: Frames, seen: UnboundedReceiver<Seen>, asks: Asks) -> iced::Result {
     // iced asks its boot function for the first state; it is asked once,
     // and what it needs is handed over through this slot.
-    let slot = Mutex::new(Some((painter, seen, asks)));
+    let slot = Mutex::new(Some((frames, seen, asks)));
     iced::application(
         move || {
             let taken = slot.lock().unwrap_or_else(PoisonError::into_inner).take();
@@ -173,8 +179,9 @@ pub enum Pointer {
     Down(Point),
     Move(Point),
     Up,
-    /// The wheel turned at a point: towards the reader zooms in.
-    Wheel(Point, bool),
+    /// The wheel or the touchpad turned at a point, by thousandths of a
+    /// zoom step: towards the reader zooms in.
+    Wheel(Point, i32),
 }
 
 #[derive(Clone, Debug)]
@@ -188,70 +195,169 @@ pub enum Message {
     Pointer(Pointer),
     /// A peer clicked in the list.
     Select([u8; 16]),
-    Painted(Arc<map::Picture>),
+    Painted(Arc<Shown>),
+    /// The wheel may have come to rest.
+    WheelRest,
+    /// A prefetch batch ended; whether more is to draw.
+    Prefetched(bool),
 }
+
+/// Thousandths of a step a line of the wheel zooms: a notch is a step.
+const WHEEL_LINE: f32 = 1000.0;
+/// Pixels of a touchpad's scroll a zoom step takes.
+const WHEEL_PX_PER_STEP: f32 = 120.0;
+/// The wheel is at rest this long after its last turn: the frame at rest
+/// places the names.
+const WHEEL_REST_MS: u64 = 200;
+/// The frame is drawn this part of the screen past each edge, so a drag
+/// reveals drawn map while the next frame is drawn.
+const MARGIN_PART: u32 = 8;
 
 /// Where the window sends the regions it asks the shell to load.
 type Asks = tokio::sync::mpsc::UnboundedSender<MapWant>;
+
+/// One frame the window asks for: everything the worker needs, and what
+/// tells whether the frame on screen is still the one to show.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Order {
+    /// The screen's view, held.
+    pub view: ExactView,
+    pub margin: (u32, u32),
+    pub moving: bool,
+    pub style: Style,
+    pub scale: f32,
+    pub pins: Vec<MapPin>,
+    pub selected: Option<[u8; 16]>,
+    pub zooms: (u8, u8),
+    /// The maps directory's epoch it is asked at.
+    pub epoch: u64,
+    pub motion: Motion,
+}
+
+/// A frame drawn for the window.
+#[derive(Debug)]
+pub struct Shown {
+    pub order: Order,
+    pub handle: Handle,
+    /// The frame drawn, margins included.
+    pub view: ExactView,
+    /// The pins in its pixels.
+    pub placed: Vec<map::Placed>,
+    pub attribution: String,
+    /// Tiles it owes: the window asks again.
+    pub missing: usize,
+}
+
+/// What the worker does next.
+#[derive(Debug)]
+enum Job {
+    Draw(Order),
+    Prefetch(u64),
+}
+
+/// `order` drawn through the map's frames ([`loquax::mapframe`], the
+/// phone's pipeline): the tiles composed at the exact zoom, the names
+/// placed at rest and kept while moving, the pins placed with the
+/// window's font and left for its canvas.
+pub fn draw(frames: &Mutex<Frames>, order: Order) -> Arc<Shown> {
+    let mut frames = frames.lock().unwrap_or_else(PoisonError::into_inner);
+    frames.set_motion(order.motion);
+    let shot = frames.frame(&Ask {
+        view: order.view,
+        margin: order.margin,
+        moving: order.moving,
+        style: order.style,
+        scale: order.scale,
+        pins: &order.pins,
+        selected: order.selected,
+        zooms: order.zooms,
+        draw_pins: false,
+        measure: Some(map::measure),
+    });
+    let (w, h) = shot.view.size();
+    Arc::new(Shown {
+        handle: Handle::from_rgba(w, h, shot.rgba),
+        view: shot.view,
+        placed: frames.placed().to_vec(),
+        attribution: shot.attribution,
+        missing: shot.missing,
+        order,
+    })
+}
+
+/// One prefetch batch; whether more is to draw.
+fn prefetch(frames: &Mutex<Frames>, now_ms: u64) -> bool {
+    let mut frames = frames.lock().unwrap_or_else(PoisonError::into_inner);
+    frames.prefetch(now_ms).more
+}
+
+/// A message after `ms`, from a thread that sleeps: the window's
+/// executor has no timer.
+fn after(ms: u64, message: Message) -> Task<Message> {
+    let (tx, rx) = futures::channel::oneshot::channel();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(ms));
+        let _ = tx.send(());
+    });
+    Task::perform(
+        async move {
+            let _ = rx.await;
+        },
+        move |()| message.clone(),
+    )
+}
+
+/// A press on the map, in screen pixels.
+#[derive(Clone, Copy, Debug)]
+struct Press {
+    from: (i32, i32),
+    last: (i32, i32),
+    pin: Option<[u8; 16]>,
+    dragging: bool,
+}
 
 /// The window's state.
 struct App {
     seen: Seen,
     asks: Option<Asks>,
     /// The view the last fit chose: a region landing under it fits again.
-    fitted_at: Option<(leviculum_map::mercator::World, u8)>,
-    painter: Arc<Mutex<Painter>>,
+    fitted_at: Option<(World, u32)>,
+    frames: Arc<Mutex<Frames>>,
     setup: MapSetup,
-    state: MapState,
+    /// The map's view in screen pixels, at the zoom the wheel left.
+    view: ExactView,
+    selected: Option<[u8; 16]>,
     /// The map's canvas in logical pixels, once laid out.
     size: Option<Size>,
     /// Screen pixels per logical pixel.
     scale: f32,
     /// The view fitted to the pins once they first arrived.
     fitted: bool,
-    press: Option<MapPress>,
-    /// The picture on screen, and its image.
-    picture: Option<(Arc<map::Picture>, iced::advanced::image::Handle)>,
-    /// The pins over the picture on screen.
-    placed: Vec<map::Placed>,
-    /// A paint is running; a view asked for meanwhile is painted after it.
-    painting: bool,
+    press: Option<Press>,
+    /// The frame on screen.
+    shown: Option<Arc<Shown>>,
+    /// A frame or a prefetch batch runs on the worker; what is asked
+    /// meanwhile is asked when it ends.
+    busy: bool,
+    /// The wheel's last turn, while it may still turn.
+    wheel: Option<Instant>,
+    /// A wake for the wheel's rest is set.
+    wheel_timer: bool,
+    /// The window has the focus: only then does it prefetch.
+    focused: bool,
+    /// The prefetch around the frame on screen may have more to draw.
+    prefetching: bool,
+    motion: Motion,
+    origin: Instant,
 }
 
 impl App {
-    fn boot(taken: Option<(Painter, UnboundedReceiver<Seen>, Asks)>) -> (Self, Task<Message>) {
-        let (painter, seen, asks) = match taken {
-            Some((painter, seen, asks)) => (painter, Some(seen), Some(asks)),
-            None => (Painter::new(loquax::picture::Maps::default()), None, None),
+    fn boot(taken: Option<(Frames, UnboundedReceiver<Seen>, Asks)>) -> (Self, Task<Message>) {
+        let (frames, seen, asks) = match taken {
+            Some((frames, seen, asks)) => (frames, Some(seen), Some(asks)),
+            None => (Frames::new(loquax::picture::Maps::default()), None, None),
         };
-        let setup = map::setup(&painter);
-        let state = MapState {
-            centre: fit(&[], map::area((1, 1)), &setup).0,
-            zoom: setup.zooms.0,
-            selected: None,
-        };
-        let app = Self {
-            seen: Seen {
-                pins: Vec::new(),
-                notice: None,
-                loading: None,
-                maps: 0,
-                autoload: false,
-                style: Style::PC,
-            },
-            asks,
-            fitted_at: None,
-            painter: Arc::new(Mutex::new(painter)),
-            setup,
-            state,
-            size: None,
-            scale: 1.0,
-            fitted: false,
-            press: None,
-            picture: None,
-            placed: Vec::new(),
-            painting: false,
-        };
+        let app = Self::new(frames, asks);
         let scale = window::oldest()
             .and_then(window::scale_factor)
             .map(Message::Scale);
@@ -262,11 +368,48 @@ impl App {
         (app, Task::batch([scale, seen]))
     }
 
+    fn new(frames: Frames, asks: Option<Asks>) -> Self {
+        let setup = map::setup(frames.painter());
+        let centre = fit(&[], map::area((1, 1)), &setup).0;
+        Self {
+            seen: Seen {
+                pins: Vec::new(),
+                notice: None,
+                loading: None,
+                maps: 0,
+                autoload: false,
+                style: Style::PC,
+            },
+            asks,
+            fitted_at: None,
+            frames: Arc::new(Mutex::new(frames)),
+            view: ExactView::new(centre, u32::from(setup.zooms.0) * MILLI, 1, 1),
+            setup,
+            selected: None,
+            size: None,
+            scale: 1.0,
+            fitted: false,
+            press: None,
+            shown: None,
+            busy: false,
+            wheel: None,
+            wheel_timer: false,
+            focused: true,
+            prefetching: false,
+            motion: Motion::default(),
+            origin: Instant::now(),
+        }
+    }
+
     fn subscription(&self) -> Subscription<Message> {
         Subscription::batch([
             window::events().map(|(_, event)| Message::Window(event)),
             keyboard::listen().map(Message::Key),
         ])
+    }
+
+    fn now_ms(&self) -> u64 {
+        u64::try_from(self.origin.elapsed().as_millis()).unwrap_or(u64::MAX)
     }
 
     /// The map's size in screen pixels.
@@ -276,7 +419,31 @@ impl App {
         Some((px(size.width), px(size.height)))
     }
 
+    /// The zooms the view keeps to: the screen's floor, the regions'
+    /// deepest.
+    fn zooms(&self) -> (u8, u8) {
+        let size = self.pixels().unwrap_or((1, 1));
+        (zoom_floor(map::area(size), &self.setup), self.setup.zooms.1)
+    }
+
+    /// The view at the canvas's size, held to one world and the zooms.
+    fn hold(&mut self) {
+        if let Some((w, h)) = self.pixels() {
+            self.view.resize(w, h);
+        }
+        let (floor, ceiling) = self.zooms();
+        self.view = hold(self.view, floor, ceiling);
+    }
+
     fn update(&mut self, message: Message) -> Task<Message> {
+        if !self.apply(message) {
+            return Task::none();
+        }
+        self.paint()
+    }
+
+    /// What `message` changes; whether the map may need a frame.
+    fn apply(&mut self, message: Message) -> bool {
         match message {
             Message::Seen(seen) => {
                 let landed = seen.maps != self.seen.maps;
@@ -287,35 +454,118 @@ impl App {
                 if !self.fitted {
                     self.fit();
                 }
-                self.place();
             }
             Message::MapSize(size) => {
                 self.size = Some(size);
+                self.hold();
                 if !self.fitted {
                     self.fit();
                 }
             }
-            Message::Scale(scale) => self.scale = scale.max(0.25),
-            Message::Window(window::Event::Rescaled(scale)) => self.scale = scale.max(0.25),
-            Message::Window(_) => return Task::none(),
+            Message::Scale(scale) | Message::Window(window::Event::Rescaled(scale)) => {
+                self.scale = scale.max(0.25);
+                self.hold();
+            }
+            Message::Window(window::Event::Focused) => self.focused = true,
+            Message::Window(window::Event::Unfocused) => self.focused = false,
+            Message::Window(_) => return false,
             Message::Key(event) => self.key(event),
             Message::Pointer(pointer) => self.pointer(pointer),
             Message::Select(peer) => {
-                self.state.selected = Some(peer);
+                self.selected = Some(peer);
                 if let Some(pin) = self.seen.pins.iter().find(|p| p.peer == peer) {
-                    self.state.centre = pin.at;
+                    self.view.centre = pin.at;
+                    self.hold();
                 }
-                self.place();
             }
-            Message::Painted(picture) => {
-                self.painting = false;
-                let (w, h) = picture.view.size();
-                let handle = iced::advanced::image::Handle::from_rgba(w, h, picture.rgba.clone());
-                self.picture = Some((picture, handle));
-                self.place();
+            Message::Painted(shown) => {
+                self.busy = false;
+                self.shown = Some(shown);
+                self.prefetching = true;
+            }
+            Message::WheelRest => {
+                self.wheel_timer = false;
+                let rested = self
+                    .wheel
+                    .is_some_and(|at| at.elapsed() >= Duration::from_millis(WHEEL_REST_MS));
+                if rested {
+                    self.wheel = None;
+                }
+            }
+            Message::Prefetched(more) => {
+                self.busy = false;
+                self.prefetching = more;
             }
         }
-        self.paint()
+        true
+    }
+
+    /// The worker's next job, when it is free: the frame the view asks
+    /// for unless it is on screen and owes nothing, else a prefetch batch
+    /// while the frame on screen rests and the window has the focus.
+    fn next_job(&mut self) -> Option<Job> {
+        if self.busy {
+            return None;
+        }
+        let order = self.order()?;
+        let current = self
+            .shown
+            .as_ref()
+            .is_some_and(|s| s.order == order && s.missing == 0);
+        let job = match current {
+            false => Job::Draw(order),
+            true if self.prefetching && self.focused && !order.moving => {
+                Job::Prefetch(self.now_ms())
+            }
+            true => return None,
+        };
+        self.busy = true;
+        Some(job)
+    }
+
+    /// The frame the view asks for now.
+    fn order(&self) -> Option<Order> {
+        let (w, h) = self.pixels()?;
+        Some(Order {
+            view: self.view,
+            margin: (w / MARGIN_PART, h / MARGIN_PART),
+            moving: self.moving(),
+            style: self.seen.style,
+            scale: self.scale,
+            pins: self.seen.pins.clone(),
+            selected: self.selected,
+            zooms: self.zooms(),
+            epoch: self.seen.maps,
+            motion: self.motion,
+        })
+    }
+
+    /// A drag or the wheel moves the view.
+    fn moving(&self) -> bool {
+        self.press.is_some_and(|p| p.dragging) || self.wheel.is_some()
+    }
+
+    /// Run the worker's next job on iced's executor, so a drag never
+    /// waits for a frame; and wake for the wheel's rest.
+    fn paint(&mut self) -> Task<Message> {
+        let mut tasks = Vec::new();
+        if self.wheel.is_some() && !self.wheel_timer {
+            self.wheel_timer = true;
+            tasks.push(after(WHEEL_REST_MS, Message::WheelRest));
+        }
+        let frames = self.frames.clone();
+        match self.next_job() {
+            Some(Job::Draw(order)) => tasks.push(Task::perform(
+                async move { draw(&frames, order) },
+                Message::Painted,
+            )),
+            Some(Job::Prefetch(now)) => tasks.push(Task::perform(
+                async move { prefetch(&frames, now) },
+                Message::Prefetched,
+            )),
+            None => {}
+        }
+        Task::batch(tasks)
     }
 
     /// Every pin in view, as `0` does; before the first pins and the
@@ -326,11 +576,11 @@ impl App {
             return;
         };
         let (centre, zoom) = fit(&self.seen.pins, map::area(size), &self.setup);
-        self.state.centre = centre;
-        self.state.zoom = zoom;
-        self.fitted_at = Some((centre, zoom));
-        if self.state.selected.is_none() {
-            self.state.selected = self.seen.pins.first().map(|p| p.peer);
+        self.view = ExactView::new(centre, u32::from(zoom) * MILLI, size.0, size.1);
+        self.hold();
+        self.fitted_at = Some((self.view.centre, self.view.zoom_milli()));
+        if self.selected.is_none() {
+            self.selected = self.seen.pins.first().map(|p| p.peer);
         }
         let first = !self.fitted && !self.seen.pins.is_empty();
         self.fitted = !self.seen.pins.is_empty();
@@ -349,75 +599,33 @@ impl App {
 
     /// A region landed or left: the regions read again, the setup with
     /// them, and the fit again when the reader has not moved since it.
+    /// The tiles drop themselves on the new epoch.
     fn regions_changed(&mut self) {
         {
-            let mut painter = self.painter.lock().unwrap_or_else(PoisonError::into_inner);
-            painter.refresh();
-            self.setup = map::setup(&painter);
+            let mut frames = self.frames.lock().unwrap_or_else(PoisonError::into_inner);
+            frames.refresh();
+            self.setup = map::setup(frames.painter());
         }
-        if self.fitted_at == Some((self.state.centre, self.state.zoom)) {
-            let selected = self.state.selected;
+        if self.fitted_at == Some((self.view.centre, self.view.zoom_milli())) {
+            let selected = self.selected;
             self.fit();
-            self.state.selected = selected.or(self.state.selected);
+            self.selected = selected.or(self.selected);
         }
     }
 
-    /// The pins over the picture on screen: placed for its view, so they
-    /// never stand off the streets while a newer view is painted.
-    fn place(&mut self) {
-        let Some((picture, _)) = &self.picture else {
-            return;
-        };
-        self.placed = map::place(
-            &self.seen.pins,
-            &picture.view,
-            self.state.selected,
-            self.scale,
-            map::measure,
+    /// The view zoomed to `zoom_milli`, within the zooms, about the
+    /// screen pixel `(x, y)`.
+    fn zoom_to(&mut self, zoom_milli: i64, x: f64, y: f64) {
+        let (floor, ceiling) = self.zooms();
+        let (floor, ceiling) = (
+            i64::from(floor) * 1000,
+            i64::from(ceiling.max(floor)) * 1000,
         );
-    }
-
-    /// Ask for the view the state shows, unless it is on screen or a
-    /// paint is running; the paint's end asks again.
-    fn paint(&mut self) -> Task<Message> {
-        let Some(size) = self.pixels() else {
-            return Task::none();
-        };
-        let view = viewport(&self.state, map::area(size), &self.setup);
-        // The names are laid out at rest only: while a drag moves the view
-        // the picture is drawn without them, and once it rests, again with
-        // them, placed after the pins as they then stand.
-        let names_after = match self.press.as_ref().is_some_and(|p| p.dragging) {
-            true => None,
-            false => {
-                let placed = map::place(
-                    &self.seen.pins,
-                    &view,
-                    self.state.selected,
-                    self.scale,
-                    map::measure,
-                );
-                Some(map::taken(&placed, self.scale))
-            }
-        };
-        let current = self.picture.as_ref().is_some_and(|(p, _)| {
-            p.view == view
-                && p.epoch == self.seen.maps
-                && p.style == self.seen.style
-                && p.names_after == names_after
-        });
-        if current || self.painting {
-            return Task::none();
-        }
-        self.painting = true;
-        let (painter, scale, style) = (self.painter.clone(), self.scale, self.seen.style);
-        Task::perform(
-            async move {
-                let mut painter = painter.lock().unwrap_or_else(PoisonError::into_inner);
-                Arc::new(map::paint(&mut painter, &view, style, scale, names_after))
-            },
-            Message::Painted,
-        )
+        let z = zoom_milli.clamp(floor, ceiling);
+        self.motion.zoom(z - i64::from(self.view.zoom_milli()));
+        self.view
+            .zoom_about(u32::try_from(z).unwrap_or(MILLI), x, y);
+        self.hold();
     }
 
     fn key(&mut self, event: keyboard::Event) {
@@ -427,26 +635,20 @@ impl App {
         let keyboard::Key::Character(c) = modified_key.as_ref() else {
             return;
         };
-        let zooms = self.setup.zooms;
+        let (w, h) = self.view.size();
+        let (cx, cy) = (f64::from(w) / 2.0, f64::from(h) / 2.0);
+        let z = i64::from(self.view.zoom_milli());
         match c {
-            "+" | "=" => self.state.zoom = self.state.zoom.saturating_add(1).min(zooms.1),
-            "-" => {
-                self.state.zoom = self.state.zoom.saturating_sub(1).max(zooms.0);
-                if let Some(size) = self.pixels() {
-                    settle(&mut self.state, map::area(size), &self.setup);
-                }
-            }
+            "+" | "=" => self.zoom_to(z + 1000, cx, cy),
+            "-" => self.zoom_to(z - 1000, cx, cy),
             "0" => {
-                let selected = self.state.selected;
+                let selected = self.selected;
                 self.fit();
-                self.state.selected = selected.or(self.state.selected);
+                self.selected = selected.or(self.selected);
             }
             // The visible area's region, as `d` on the terminal's map.
             "d" => {
-                let Some(size) = self.pixels() else {
-                    return;
-                };
-                let view = viewport(&self.state, map::area(size), &self.setup);
+                let view = self.view.at_zoom(self.view.tile_zoom());
                 match want_view(&view, &self.setup.regions) {
                     Some(want) => self.ask(want),
                     None => self.seen.notice = Some(MAP_LOADED_ALREADY.to_string()),
@@ -456,49 +658,73 @@ impl App {
         }
     }
 
+    /// Where the frame on screen lands on the view now: its top left
+    /// corner and its scale ([`loquax::mapframe::onto`]).
+    fn onto(&self) -> Option<(&Shown, f64, f64, f64)> {
+        let shown = self.shown.as_deref()?;
+        let (x, y, k) = onto(&shown.view, &self.view);
+        Some((shown, x, y, k))
+    }
+
+    /// The pin under the screen pixel `(x, y)`, of the frame on screen.
+    fn hit(&self, x: i32, y: i32) -> Option<[u8; 16]> {
+        let (shown, tx, ty, k) = self.onto()?;
+        let px = (f64::from(x) - tx) / k;
+        let py = (f64::from(y) - ty) / k;
+        map::hit(&shown.placed, px as f32, py as f32, self.scale)
+    }
+
     fn pointer(&mut self, pointer: Pointer) {
-        let Some(size) = self.pixels() else {
+        if self.pixels().is_none() {
             return;
-        };
+        }
         let at = |p: Point| {
-            let clamp = |v: f32| (v * self.scale).round().clamp(0.0, f32::from(u16::MAX)) as u16;
-            (clamp(p.x), clamp(p.y))
+            (
+                (p.x * self.scale).round() as i32,
+                (p.y * self.scale).round() as i32,
+            )
         };
         match pointer {
             Pointer::Down(p) => {
                 let (x, y) = at(p);
-                let pin = map::hit(&self.placed, f32::from(x), f32::from(y), self.scale);
-                self.press = Some(MapPress::new((x, y), self.state.centre, pin));
+                self.press = Some(Press {
+                    from: (x, y),
+                    last: (x, y),
+                    pin: self.hit(x, y),
+                    dragging: false,
+                });
             }
             Pointer::Move(p) => {
                 let (x, y) = at(p);
-                let Some(press) = self.press.as_mut() else {
+                let Some(mut press) = self.press else {
                     return;
                 };
-                let far = (map::DRAG * self.scale) as u16;
+                let far = (map::DRAG * self.scale) as i32;
                 press.dragging |=
-                    x.abs_diff(press.from.0) >= far || y.abs_diff(press.from.1) >= far;
-                self.state.centre = press.centre_at(x, y, &self.state, &self.setup);
-                settle(&mut self.state, map::area(size), &self.setup);
+                    (x - press.from.0).abs() >= far || (y - press.from.1).abs() >= far;
+                if press.dragging {
+                    let (dx, dy) = (press.last.0 - x, press.last.1 - y);
+                    self.view.pan(dx, dy);
+                    self.motion.pan(f64::from(dx), f64::from(dy), self.now_ms());
+                    press.last = (x, y);
+                    self.hold();
+                }
+                self.press = Some(press);
             }
             Pointer::Up => {
                 if let Some(press) = self.press.take() {
                     if !press.dragging {
                         if let Some(peer) = press.pin {
-                            self.state.selected = Some(peer);
-                            self.place();
+                            self.selected = Some(peer);
                         }
                     }
                 }
             }
-            Pointer::Wheel(p, closer) => {
+            Pointer::Wheel(p, by) => {
                 let (x, y) = at(p);
-                let zooms = self.setup.zooms;
-                let zoom = match closer {
-                    true => self.state.zoom.saturating_add(1).min(zooms.1),
-                    false => self.state.zoom.saturating_sub(1).max(zooms.0),
-                };
-                zoom_at(&mut self.state, map::area(size), &self.setup, x, y, zoom);
+                self.wheel = Some(Instant::now());
+                let z = i64::from(self.view.zoom_milli()) + i64::from(by);
+                self.zoom_to(z, f64::from(x), f64::from(y));
             }
         }
     }
@@ -512,7 +738,7 @@ impl App {
                 let alpha = if pin.stale { 0.5 } else { 1.0 };
                 let age = pin.age.clone().unwrap_or_default();
                 let entry = column![text(pin.label.clone()).size(15), text(age).size(12),];
-                let style = match Some(pin.peer) == self.state.selected {
+                let style = match Some(pin.peer) == self.selected {
                     true => button::primary,
                     false => button::text,
                 };
@@ -531,9 +757,9 @@ impl App {
             false => scrollable(list).into(),
         };
         let credit = self
-            .picture
+            .shown
             .as_ref()
-            .map_or(String::new(), |(p, _)| p.attribution.clone());
+            .map_or(String::new(), |s| s.attribution.clone());
         let bar = row![
             // Always on screen: the region's credit, or the outline's.
             text(credit).size(13),
@@ -549,25 +775,16 @@ impl App {
             )
             .width(Length::Fill)
             .align_right(Length::Fill),
-            text(format!("  z{}", self.state.zoom)).size(13),
+            text(format!("  z{:.1}", self.view.zoom())).size(13),
         ]
         .padding([2, 8]);
-        // The picture is a widget of its own under the canvas: iced draws a
-        // canvas's images above its fills, which would hide the markers.
-        let picture: Element<'_, Message> = match &self.picture {
-            Some((p, handle)) => {
-                let (w, h) = p.view.size();
-                image(handle.clone())
-                    .width(w as f32 / self.scale)
-                    .height(h as f32 / self.scale)
-                    .filter_method(iced::advanced::image::FilterMethod::Nearest)
-                    .into()
-            }
-            None => text("").into(),
-        };
-        // The stack takes its size from its first layer, so the picture
-        // sits in a layer that fills the map's place.
-        let picture = container(picture).width(Length::Fill).height(Length::Fill);
+        // The picture is a canvas of its own under the pins' canvas: iced
+        // draws a canvas's images above its fills, which would hide the
+        // markers. On a canvas it is drawn where the view moved it since
+        // it was asked for, scaled when the wheel zoomed meanwhile.
+        let picture = Canvas::new(PictureCanvas { app: self })
+            .width(Length::Fill)
+            .height(Length::Fill);
         let canvas = Canvas::new(MapCanvas { app: self })
             .width(Length::Fill)
             .height(Length::Fill);
@@ -584,6 +801,47 @@ impl App {
             column![map, bar],
         ]
         .into()
+    }
+}
+
+/// The frame on screen, where the view moved it.
+struct PictureCanvas<'a> {
+    app: &'a App,
+}
+
+impl canvas::Program<Message> for PictureCanvas<'_> {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &(),
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<Geometry> {
+        let mut frame = Frame::new(renderer, bounds.size());
+        if let Some((shown, x, y, k)) = self.app.onto() {
+            let scale = f64::from(self.app.scale);
+            let (w, h) = shown.view.size();
+            let filter = match (k - 1.0).abs() < 1e-9 {
+                true => FilterMethod::Nearest,
+                false => FilterMethod::Linear,
+            };
+            let at = Rectangle {
+                x: (x / scale) as f32,
+                y: (y / scale) as f32,
+                width: (f64::from(w) * k / scale) as f32,
+                height: (f64::from(h) * k / scale) as f32,
+            };
+            frame.draw_image(
+                at,
+                canvas::Image::new(shown.handle.clone())
+                    .filter_method(filter)
+                    .snap(true),
+            );
+        }
+        vec![frame.into_geometry()]
     }
 }
 
@@ -632,15 +890,15 @@ impl canvas::Program<Message> for MapCanvas<'_> {
                 Pointer::Up
             }
             (mouse::Event::WheelScrolled { delta }, Some(p)) => {
-                let y = match delta {
-                    mouse::ScrollDelta::Lines { y, .. } | mouse::ScrollDelta::Pixels { y, .. } => {
-                        *y
-                    }
+                let by = match delta {
+                    mouse::ScrollDelta::Lines { y, .. } => y * WHEEL_LINE,
+                    mouse::ScrollDelta::Pixels { y, .. } => y * 1000.0 / WHEEL_PX_PER_STEP,
                 };
-                if y == 0.0 {
+                let by = by.round() as i32;
+                if by == 0 {
                     return None;
                 }
-                Pointer::Wheel(p, y > 0.0)
+                Pointer::Wheel(p, by)
             }
             _ => return None,
         };
@@ -658,13 +916,24 @@ impl canvas::Program<Message> for MapCanvas<'_> {
         let mut frame = Frame::new(renderer, bounds.size());
         let app = self.app;
         let scale = app.scale;
-        for pin in &app.placed {
+        let Some((shown, tx, ty, k)) = app.onto() else {
+            return vec![frame.into_geometry()];
+        };
+        // The pins as the frame on screen placed them, moved with it.
+        let to = |x: f32, y: f32| {
+            let s = f64::from(scale);
+            Point::new(
+                ((tx + k * f64::from(x)) / s) as f32,
+                ((ty + k * f64::from(y)) / s) as f32,
+            )
+        };
+        for pin in &shown.placed {
             let ink = match (pin.selected, pin.stale) {
                 (true, _) => Color::from_rgb8(0xd0, 0x30, 0x30),
                 (false, false) => Color::from_rgb8(0x20, 0x50, 0xc0),
                 (false, true) => Color::from_rgba8(0x20, 0x50, 0xc0, 0.45),
             };
-            let centre = Point::new(pin.x / scale, pin.y / scale);
+            let centre = to(pin.x, pin.y);
             let radius = map::MARKER / 2.0;
             frame.fill(&Path::circle(centre, radius + 1.5), Color::WHITE);
             frame.fill(&Path::circle(centre, radius), ink);
@@ -673,7 +942,7 @@ impl canvas::Program<Message> for MapCanvas<'_> {
                     true => Color::from_rgba8(0x20, 0x20, 0x20, 0.55),
                     false => Color::from_rgb8(0x10, 0x10, 0x10),
                 };
-                let at = Point::new(x / scale, y / scale);
+                let at = to(*x, *y);
                 let width = pin.width / scale;
                 let line = map::LABEL * map::LINE;
                 // A light ground under the text, so a name reads on any
@@ -706,5 +975,163 @@ impl canvas::Program<Message> for MapCanvas<'_> {
             (false, true) => mouse::Interaction::Grab,
             (false, false) => mouse::Interaction::default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use leviculum_map::mercator::{project, LatLon};
+    use map::tests::{florence, pin};
+
+    /// The window over the Florence fixture, 480 x 320 at a density of
+    /// one, `pins` seen, the view at `zoom_milli` over Piazza d'Azeglio.
+    fn window_over_florence(pins: Vec<MapPin>, zoom_milli: u32) -> App {
+        let frames = florence();
+        let maps = frames.painter().epoch();
+        let mut app = App::new(frames, None);
+        app.apply(Message::MapSize(Size::new(480.0, 320.0)));
+        app.apply(Message::Seen(Seen {
+            pins,
+            notice: None,
+            loading: None,
+            maps,
+            autoload: false,
+            style: Style::PC,
+        }));
+        let at = project(LatLon::from_degrees(43.7752, 11.2660));
+        app.view = ExactView::new(at, zoom_milli, 480, 320);
+        app.hold();
+        app
+    }
+
+    /// The worker's jobs run here until it has none, as iced runs them:
+    /// the last frame drawn, and whether a prefetch was offered after it
+    /// (not run).
+    fn run(app: &mut App) -> (Option<Arc<Shown>>, bool) {
+        let mut last = None;
+        loop {
+            match app.next_job() {
+                Some(Job::Draw(order)) => {
+                    let shown = draw(&app.frames, order);
+                    app.apply(Message::Painted(shown.clone()));
+                    last = Some(shown);
+                }
+                Some(Job::Prefetch(_)) => {
+                    app.busy = false;
+                    return (last, true);
+                }
+                None => return (last, false),
+            }
+        }
+    }
+
+    fn rgba(shown: &Shown) -> Vec<u8> {
+        match &shown.handle {
+            Handle::Rgba { pixels, .. } => pixels.to_vec(),
+            other => panic!("not raw pixels: {other:?}"),
+        }
+    }
+
+    fn names(app: &App) -> Vec<String> {
+        app.frames
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .names()
+    }
+
+    /// A drag keeps the names (1144): the frame at rest places them, a
+    /// drag of 40 pixels to the left asks for a moving frame, which draws
+    /// the same names where the drag moved them, so where the two frames
+    /// overlap they are the same pixels, 40 apart. The frame on screen
+    /// moves with the pointer until the next lands, and the pins with it.
+    /// The control: the same moving frame from frames that never rested
+    /// has no names, and differs there.
+    #[test]
+    fn a_drag_keeps_the_names() {
+        let pins = vec![pin(1, "alice", 43.7752, 11.2640)];
+        let mut app = window_over_florence(pins, 16 * MILLI);
+        let (rest, _) = run(&mut app);
+        let rest = rest.expect("a frame at rest");
+        assert!(!rest.order.moving);
+        let named = names(&app);
+        assert!(named.iter().any(|n| n == "Piazza D'Azeglio"), "{named:?}");
+        // The frame sits a margin past the screen's corner, within the
+        // pixel its centre was moved to.
+        let (x0, y0, _) = onto(&rest.view, &app.view);
+        let (mx, my) = rest.order.margin;
+        assert!((x0 + f64::from(mx)).abs() < 1.0 && (y0 + f64::from(my)).abs() < 1.0);
+        app.apply(Message::Pointer(Pointer::Down(Point::new(200.0, 150.0))));
+        app.apply(Message::Pointer(Pointer::Move(Point::new(160.0, 150.0))));
+        // Before the next frame lands, the one on screen moved with it.
+        let (x, y, k) = onto(&rest.view, &app.view);
+        assert!((k - 1.0).abs() < 1e-9);
+        assert!((x - (x0 - 40.0)).abs() < 1e-6, "{x0} {x}");
+        assert!((y - y0).abs() < 1e-6, "{y0} {y}");
+        let (moved, _) = run(&mut app);
+        let moved = moved.expect("a moving frame");
+        assert!(moved.order.moving);
+        assert_eq!(names(&app), named, "the names are kept");
+        let (w, h) = rest.view.size();
+        assert_eq!(moved.view.size(), (w, h));
+        let (a, b) = (rgba(&rest), rgba(&moved));
+        let px = |v: &[u8], x: u32, y: u32| {
+            let i = ((y * w + x) * 4) as usize;
+            [v[i], v[i + 1], v[i + 2], v[i + 3]]
+        };
+        let overlap = |v: &[u8]| {
+            (0..h)
+                .flat_map(|y| (0..w - 40).map(move |x| (x, y)))
+                .filter(|&(x, y)| px(v, x, y) != px(&a, x + 40, y))
+                .count()
+        };
+        assert_eq!(overlap(&b), 0, "the moved frame is the rest frame, moved");
+        let (p0, p1) = (&rest.placed[0], &moved.placed[0]);
+        assert!((p1.x - (p0.x - 40.0)).abs() < 1e-3, "{p0:?} {p1:?}");
+        let control = draw(&Mutex::new(florence()), moved.order.clone());
+        let differ = overlap(&rgba(&control));
+        assert!(differ > 1000, "without kept names: {differ} pixels differ");
+    }
+
+    /// A fractional wheel zoom stays where it ends (1144): a touchpad's
+    /// 0.37 of a step about a point keeps the world point there and the
+    /// zoom between the steps; the frames while the wheel turns are moving
+    /// ones, and once it rests the frame at rest is drawn at that very
+    /// zoom, with its names, and nothing asks for another: the next job is
+    /// the prefetch.
+    #[test]
+    fn a_fractional_wheel_zoom_stays_where_it_ends() {
+        let mut app = window_over_florence(Vec::new(), 14 * MILLI);
+        run(&mut app);
+        let under = (100.0, 80.0);
+        let held = app.view.to_world(under.0, under.1);
+        app.apply(Message::Pointer(Pointer::Wheel(
+            Point::new(100.0, 80.0),
+            370,
+        )));
+        assert_eq!(app.view.zoom_milli(), 14_370);
+        let (x, y) = app.view.to_screen(held);
+        assert!(
+            (x - under.0).abs() < 1.0 && (y - under.1).abs() < 1.0,
+            "{x} {y}"
+        );
+        let (turning, _) = run(&mut app);
+        let turning = turning.expect("a frame while the wheel turns");
+        assert!(turning.order.moving);
+        assert_eq!(turning.view.zoom_milli(), 14_370);
+        std::thread::sleep(Duration::from_millis(WHEEL_REST_MS + 50));
+        app.apply(Message::WheelRest);
+        let (rested, prefetch) = run(&mut app);
+        let rested = rested.expect("the frame at rest");
+        assert!(!rested.order.moving);
+        assert_eq!(app.view.zoom_milli(), 14_370);
+        assert_eq!(rested.view.zoom_milli(), 14_370);
+        assert!(prefetch, "at rest the next job is the prefetch");
+        assert!(!names(&app).is_empty());
+        let (x, y) = app.view.to_screen(held);
+        assert!(
+            (x - under.0).abs() < 1.0 && (y - under.1).abs() < 1.0,
+            "{x} {y}"
+        );
     }
 }
