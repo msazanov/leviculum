@@ -121,7 +121,9 @@ impl HomeCode {
     }
 }
 
-fn base32(bytes: &[u8]) -> String {
+/// RFC 4648 base32 in lower case, unpadded: the code's, and a backup's
+/// ([`super::backup`]).
+pub(super) fn base32(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 8 / 5 + 1);
     let mut buffer = 0u32;
     let mut bits = 0u32;
@@ -139,7 +141,9 @@ fn base32(bytes: &[u8]) -> String {
     out
 }
 
-fn unbase32(text: &str) -> Option<Vec<u8>> {
+/// [`base32`] read back; `None` for a character outside the alphabet or a
+/// tail with bits set.
+pub(super) fn unbase32(text: &str) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(text.len() * 5 / 8);
     let mut buffer = 0u32;
     let mut bits = 0u32;

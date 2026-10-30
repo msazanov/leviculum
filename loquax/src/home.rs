@@ -23,6 +23,7 @@ use alloc::string::String;
 
 use leviculum_core::{Destination, DestinationType, Direction, Identity};
 
+pub mod backup;
 pub mod code;
 pub mod outgoing;
 pub mod relation;
