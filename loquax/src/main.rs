@@ -406,7 +406,7 @@ struct ImportArgs {
     key: bool,
 
     /// A NomadNet directory, a loquax export, a raw identity file, a file
-    /// with a Base32 key, or a copy of Ratspeak's `ratspeak.db` (schema 45).
+    /// with a Base32 key, or a copy of Ratspeak's `ratspeak.db` (schema 33 or 45).
     /// Without it, the apps' default places are scanned; a Ratspeak database
     /// is never looked for.
     path: Option<PathBuf>,

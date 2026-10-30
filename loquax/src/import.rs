@@ -9,7 +9,7 @@
 //! tree (`crate::export`), so the same reader takes it back.
 //!
 //! Ratspeak's history comes from a copy of its `ratspeak.db` the user names
-//! ([`ratspeak`], 1150): one schema, lossy, every row marked as imported
+//! ([`ratspeak`], 1150, 1158): two schemas, lossy, every row marked as imported
 //! with no signature. On a Loquax Mailbox the imported rows go into the
 //! archive too ([`archive`]), so its clients take them on their next pull.
 //!
@@ -86,7 +86,7 @@ pub enum Source {
     Identity([u8; key::KEY_LEN]),
     /// Ratspeak's passcode vault: found and named, not read in this slice.
     Protected,
-    /// A copy of Ratspeak's message database, schema 45.
+    /// A copy of Ratspeak's message database, schema 33 or 45.
     Ratspeak(ratspeak::Db),
 }
 
@@ -730,7 +730,7 @@ fn ratspeak_import(
     };
     report.notes.push(format!(
         "Ratspeak schema {}, {} identities:",
-        ratspeak::SCHEMA,
+        db.schema(),
         profiles.len()
     ));
     for profile in &profiles {
@@ -779,6 +779,20 @@ fn ratspeak_import(
     report.history_address = Some(address);
     let read = db.history(profile, address)?;
     report.deleted_skipped = read.deleted;
+    if read.replies_linked + read.replies_unlinked > 0 {
+        report.notes.push(format!(
+            "replies: {} linked to their message, {} whose message is not imported come as \
+             text alone",
+            read.replies_linked, read.replies_unlinked
+        ));
+    }
+    if read.reactions + read.reactions_skipped > 0 {
+        report.notes.push(format!(
+            "reactions: {} imported, {} skipped: their message is not imported, or the \
+             sender is neither side of it",
+            read.reactions, read.reactions_skipped
+        ));
+    }
     report
         .refused
         .extend(read.unreadable.iter().map(|(id, reason)| {
