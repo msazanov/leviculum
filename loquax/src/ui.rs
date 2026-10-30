@@ -2511,7 +2511,7 @@ fn step_conversation<B>(model: &mut UiModel<B>, forward: bool, unread_only: bool
 fn leg_words(leg: Leg) -> &'static str {
     match leg {
         Leg::Direct => "direct",
-        Leg::Propagated => "via mailbox",
+        Leg::Propagated => "via propagation node",
     }
 }
 
@@ -2532,7 +2532,7 @@ fn state_words(state: DeliveryState) -> &'static str {
         DeliveryState::Stamping => "stamping",
         DeliveryState::InFlight => "in flight",
         DeliveryState::Sent => "sent, no proof yet",
-        DeliveryState::InMailbox => "in the mailbox",
+        DeliveryState::InMailbox => "waiting at a propagation node",
         DeliveryState::Delivered => "delivered",
         DeliveryState::Rejected => "rejected",
         DeliveryState::Failed => "not sent",
@@ -2572,7 +2572,7 @@ fn run<B: InputBuffer + Default>(model: &mut UiModel<B>, command: PaletteCommand
             model.fetching = true;
             model.fetch_reason = Some(Reason::Key);
             model.fetch_since_ms = now;
-            model.toast(ToastKind::Info, "fetching the mailbox".to_string());
+            model.toast(ToastKind::Info, "checking the propagation node".to_string());
             vec![UiEffect::Fetch]
         }
         PaletteCommand::Quit => {
@@ -3211,7 +3211,7 @@ fn home_sent<B>(
                 None | Some(DeliveryState::Queued | DeliveryState::InFlight)
             ) {
                 message.delivery = Some(DeliveryState::Sent);
-                message.note(now, "taken by the home node");
+                message.note(now, "taken by the mailbox");
                 model.changed.insert((conversation.peer, message.activity));
             }
         }
@@ -3224,7 +3224,7 @@ fn home_sent<B>(
     let mut message = Message::ours(String::from_utf8_lossy(&body).into_owned(), now);
     message.id = Some(message_id);
     message.delivery = Some(DeliveryState::Sent);
-    message.note(now, "sent from another device, taken by the home node");
+    message.note(now, "sent from another device, taken by the mailbox");
     message.activity = activity;
     message.fields = fields;
     let conversation = &mut model.conversations[index];
@@ -3508,11 +3508,12 @@ fn fetch_shown<B>(model: &UiModel<B>) -> bool {
         && (!quiet || model.elapsed_ms.saturating_sub(model.fetch_since_ms) >= QUIET_PULL_MS)
 }
 
-/// The mailbox state in the header, longest first: the renderer takes the
-/// first that fits.
+/// The propagation node's state in the header, longest first: the renderer
+/// takes the first that fits. The word is long, so the narrower forms say
+/// `pn` (1153: "mailbox" now means the user's Loquax Mailbox).
 fn mailbox_words<B>(model: &UiModel<B>) -> Vec<String> {
     let Some(node) = model.mailbox.node else {
-        return vec!["no mailbox".to_string()];
+        return vec!["no propagation node".to_string(), "no pn".to_string()];
     };
     let node = to_hex(&node[..4]);
     let how = if model.mailbox.by_user {
@@ -3530,18 +3531,21 @@ fn mailbox_words<B>(model: &UiModel<B>) -> Vec<String> {
     let mut words = Vec::new();
     match (&sync, &next) {
         (Some(sync), Some(next)) => {
-            words.push(format!("mailbox {node} {how} · {sync} · {next}"));
-            words.push(format!("mailbox · {sync} · {next}"));
-            words.push(format!("mailbox · {next}"));
+            words.push(format!("propagation node {node} {how} · {sync} · {next}"));
+            words.push(format!("propagation node · {sync} · {next}"));
+            words.push(format!("pn · {sync} · {next}"));
+            words.push(format!("pn · {next}"));
         }
         (Some(only), None) | (None, Some(only)) => {
-            words.push(format!("mailbox {node} {how} · {only}"));
-            words.push(format!("mailbox · {only}"));
+            words.push(format!("propagation node {node} {how} · {only}"));
+            words.push(format!("propagation node · {only}"));
+            words.push(format!("pn · {only}"));
         }
-        (None, None) => words.push(format!("mailbox {node} {how}")),
+        (None, None) => words.push(format!("propagation node {node} {how}")),
     }
-    words.push(format!("mailbox {node}"));
-    words.push("mailbox".to_string());
+    words.push(format!("propagation node {node}"));
+    words.push(format!("pn {node}"));
+    words.push("pn".to_string());
     words
 }
 
@@ -4334,7 +4338,11 @@ mod tests {
         for _ in 0..8 {
             update(&mut model, UiEvent::Tick);
         }
-        assert!(text(&model) == "hi  via mailbox 2 s ○", "{}", text(&model));
+        assert!(
+            text(&model) == "hi  via propagation node 2 s ○",
+            "{}",
+            text(&model)
+        );
         engine(&mut model, OutboxEvent::Queued { message_id: ID });
         state(&mut model, ID, MessageState::AwaitingCollection);
         assert_eq!(text(&model), "hi  ⌂");
@@ -5651,12 +5659,13 @@ mod tests {
         );
     }
 
-    /// The header names the peer, its trust and the mailbox, the longest
-    /// form that fits; a wide pane gives the address and a mailbox row.
+    /// The header names the peer, its trust and the propagation node, the
+    /// longest form that fits; a wide pane gives the address and a row for
+    /// the propagation node.
     #[test]
     fn the_header_says_the_trust_and_the_mailbox_state() {
         let mut model = UiModel::<Field>::new(&[PEER]);
-        assert_eq!(view(&model).messages_title_right, "no mailbox");
+        assert_eq!(view(&model).messages_title_right, "no propagation node");
         update(
             &mut model,
             UiEvent::MailboxChosen {
@@ -5666,12 +5675,12 @@ mod tests {
         );
         assert_eq!(
             view(&model).messages_title_right,
-            "mailbox 9c9c9c9c adopted"
+            "propagation node 9c9c9c9c"
         );
         clock(&mut model, 26, 14, 3);
         update(&mut model, UiEvent::Run(PaletteCommand::Fetch));
         update(&mut model, UiEvent::FetchDone(Ok(0)));
-        assert_eq!(view(&model).messages_title_right, "mailbox · synced 14:03");
+        assert_eq!(view(&model).messages_title_right, "pn · synced 14:03");
         update(
             &mut model,
             UiEvent::Resize {
@@ -5683,7 +5692,7 @@ mod tests {
         assert_eq!(wide.messages_title_right, to_hex(&PEER));
         assert_eq!(
             text(&wide.messages[0]).trim(),
-            "mailbox 9c9c9c9c adopted · synced 14:03"
+            "propagation node 9c9c9c9c adopted · synced 14:03"
         );
         assert!(text(&wide.messages[1]).trim().chars().all(|c| c == '─'));
         assert_eq!(wide.compose_title, "to <abababab…>");
@@ -5717,7 +5726,7 @@ mod tests {
         );
         assert_eq!(effects, [UiEffect::Fetch], "start syncs");
         assert_eq!(model.fetch_reason, Some(Reason::Start));
-        assert_eq!(view(&model).messages_title_right, "mailbox · fetching");
+        assert_eq!(view(&model).messages_title_right, "pn · fetching");
         update(&mut model, UiEvent::Elapsed(1_000));
         assert!(
             update(&mut model, UiEvent::Run(PaletteCommand::Fetch)).is_empty(),
@@ -5732,7 +5741,7 @@ mod tests {
         );
         // At 80 columns only the next sync fits: it is kept before the
         // last one and the node.
-        assert_eq!(view(&model).messages_title_right, "mailbox · next 14:20");
+        assert_eq!(view(&model).messages_title_right, "pn · next 14:20");
         update(
             &mut model,
             UiEvent::Resize {
@@ -5742,7 +5751,7 @@ mod tests {
         );
         assert_eq!(
             text(&view(&model).messages[0]).trim(),
-            "mailbox 9c9c9c9c adopted · synced 14:05 · next 14:20"
+            "propagation node 9c9c9c9c adopted · synced 14:05 · next 14:20"
         );
         assert!(update(&mut model, UiEvent::Elapsed(899_999)).is_empty());
         let effects = update(&mut model, UiEvent::Elapsed(900_000));
@@ -7106,7 +7115,7 @@ mod tests {
                 "◎ position 43.77310 N 11.25600 E  14:00".to_string(),
             ]
         );
-        assert_eq!(view(&model).messages_title_right, "pos 4 min · no mailbox");
+        assert_eq!(view(&model).messages_title_right, "pos 4 min · no pn");
         let list: Vec<String> = view(&model).conversations.iter().map(text).collect();
         assert!(
             list[1].contains("◎ position"),
@@ -7129,7 +7138,7 @@ mod tests {
             row.starts_with(" at 43.77310 N 11.25600 E · ±5 m · 4 min ago "),
             "{row:?}"
         );
-        assert!(row.trim_end().ends_with("no mailbox"), "{row:?}");
+        assert!(row.trim_end().ends_with("no propagation node"), "{row:?}");
         // The age counts from the fix, not from when it arrived.
         clock(&mut model, 26, 15, 0);
         assert!(text(&view(&model).messages[0]).contains("· 1 h ago"));
@@ -7335,7 +7344,7 @@ mod tests {
             "",
             report_of(&fix_at(1_000_000, 1_000_000, two_pm() + 7200)),
         );
-        assert_eq!(view(&model).messages_title_right, "pos ahead · no mailbox");
+        assert_eq!(view(&model).messages_title_right, "pos ahead · no pn");
         assert!(shown(&model).contains(&"◎ position 1.00000 N 1.00000 E  14:00".to_string()));
         // An honest fix a minute later replaces it: the claim sorted at 14:00.
         clock(&mut model, 26, 14, 2);
@@ -7347,7 +7356,7 @@ mod tests {
             report_of(&fix_at(2_000_000, 1_000_000, two_pm() + 60)),
         );
         assert_eq!(model.positions[&PEER].location.latitude_e6, 2_000_000);
-        assert_eq!(view(&model).messages_title_right, "pos 1 min · no mailbox");
+        assert_eq!(view(&model).messages_title_right, "pos 1 min · no pn");
     }
 
     #[test]
@@ -8290,7 +8299,7 @@ mod tests {
         let wide = cells(&model, |t| *t == hit::Target::Position);
         assert_eq!(wide.len(), shown.position_len, "{wide:?}");
         let mailbox = cells(&model, |t| *t == hit::Target::Mailbox);
-        assert_eq!(mailbox.len(), "no mailbox".len(), "{mailbox:?}");
+        assert_eq!(mailbox.len(), "no propagation node".len(), "{mailbox:?}");
         let effects = press(&mut model, wide[wide.len() - 1]);
         assert!(effects.is_empty(), "no fetch: {effects:?}");
         assert_eq!(model.map.expect("open").centre, latest);

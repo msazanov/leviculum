@@ -22,7 +22,7 @@ keeps every message; the user's other devices read from it.
 
 | Role | Holds | Runs |
 |---|---|---|
-| Home node | the LXMF identity, the archive, the admitted devices | `lnsd` plus `loquax --daemon` |
+| Home node | the LXMF identity, the archive, the admitted devices | `lnsd` plus `loquax mailbox run` |
 | Client | its own RNS device identity, a copy of what it pulled | `loquax` with a home code |
 | Senders | nothing new | stock LXMF |
 
@@ -56,7 +56,7 @@ backup of `$LNMSG_HOME/identity`, made at setup.
 
 ## Admission and revocation
 
-On the home node, `loquax home admit --name laptop` opens one single-use
+On the home node, `loquax mailbox admit --name laptop` opens one single-use
 token and prints a code. The code carries the home identity's public key
 and the token, with four bytes of SHA-256 over both so a mistyped code is
 refused before anything goes on the wire, in lower-case base32 behind the
@@ -64,7 +64,7 @@ prefix `lqxh1` (140 characters). The home destination and the LXMF
 address both derive from the public key, so the code needs nothing else.
 
 A phone has no shared instance to reach the home node through, so it needs
-the home node's TCP server too. `loquax home admit --server host:port`
+the home node's TCP server too. `loquax mailbox admit --server host:port`
 writes it behind the code, `lqxh1...@host:port` (an IPv6 address in
 brackets): the base32 alphabet has no `@`, so the split is unambiguous, a
 code without the address reads as before, and a desktop's `home join`
@@ -74,7 +74,7 @@ mode (version 6 for the code alone, at error correction level M). The
 Android join screen takes the combined form pasted or shared to it from a
 QR reader and fills the address from it.
 
-On the new device, `loquax home join <code>` creates the device identity,
+On the new device, `loquax mailbox join <code>` creates the device identity,
 asks for the path to the home destination, opens a link to it, identifies
 with the device identity and sends the token. The home node admits the
 identity under the name given at `admit`, records when, and deletes the
@@ -267,7 +267,7 @@ screen names the bubble after the id the home node answered with
 (`Command::HomeAccepted`, reported as the router's `Queued` would be), and
 each pull turns the state entries into the bubble's state: the sent entry
 as sent (`Command::HomeSent`; the message left the device and the home node
-has it), and through `Command::HomeState` propagated as in the mailbox,
+has it), and through `Command::HomeState` propagated as at a propagation node,
 delivered as delivered, failed as failed. `loquax fetch` prints a line
 `message <id> <state>` for each.
 
@@ -427,11 +427,34 @@ arrives too; those senders get no direct proof from it.
 
 ## Running it
 
-The home node is `loquax --daemon` beside a running `lnsd`. It takes the
+The user sees the home node as **Loquax Mailbox** (Lew, 2026-10-30, order
+1153; the onboarding draft `docs/drafts/loquax-onboarding-2026-10.md`,
+section 1). The CLI says `loquax mailbox run|enable|disable|admit|join|
+devices|revoke|tokens|revoke-token`; `loquax home ...` and `loquax --daemon`
+stay as aliases, and the code, the destination `loquax.home`, the code
+prefix `lqxh1` and the config keys keep `home`. "Mailbox" means only this;
+somebody else's node is a propagation node.
+
+**The system service.** On a PC or server the mailbox runs as a system
+service from the package: `packaging/loquax/loquax-mailbox.service`,
+installed disabled and not started, `loquax mailbox enable` runs
+`systemctl enable --now`. It runs as the system user `loquax` (made by
+the package's postinst), with `LNMSG_HOME=/var/lib/loquax-mailbox` (0700,
+`StateDirectory=`), `After=lnsd.service`, `Restart=on-failure`, and
+`--config /etc/reticulum` for the system `lnsd`'s shared instance. The
+socket is abstract and needs no permission; the config is world-readable;
+the RPC key is not (lnsd keeps `transport_identity` at 0600 since 1119), so
+the service reads no path table and adopts no propagation node by itself,
+and the config's `propagation_node` names one. Removing the package keeps
+the state; purging deletes it, identity included. Windows and macOS come
+later; the package is built for amd64, arm64 and, since 1153, armhf.
+
+`loquax mailbox run` (or `loquax --daemon`) runs it in the foreground
+beside a running `lnsd`. It takes the
 messenger's `--instance`, `--config`, `--pn`, `--sync-interval` and
 `--timeout`. It logs to stderr (`warn,loquax=info`, `RUST_LOG` replaces
 it), one `HOME` line for each archived message, admission and refusal, and
-never logs a message's text. A systemd user unit:
+never logs a message's text. Without the package, a systemd user unit:
 
 ```ini
 # ~/.config/systemd/user/loquax-home.service
@@ -439,7 +462,7 @@ never logs a message's text. A systemd user unit:
 Description=loquax home node
 
 [Service]
-ExecStart=/usr/bin/loquax --daemon
+ExecStart=/usr/bin/loquax mailbox run
 Restart=on-failure
 RestartSec=10
 
@@ -463,8 +486,8 @@ runs while the daemon does (each refuses, naming its pid), and the daemon
 does not start under one. Beside the messenger they run unlocked, as before
 the lock existed.
 
-A client is a laptop that ran `loquax home join`. Its messenger pulls at
-start and on the mailbox schedule (`F5` and `Ctrl-r` too) and shows the
+A client is a laptop that ran `loquax mailbox join`. Its messenger pulls at
+start and on the propagation node's schedule (`F5` and `Ctrl-r` too) and shows the
 home node's address as its own, as does `loquax address`; `loquax fetch`
 pulls and prints. It sends through the home node (see "Sending through the
 home node").

@@ -22,7 +22,12 @@ use std::path::Path;
 pub const LOCK_FILE: &str = "delivery.lock";
 
 /// What the home node calls itself in the lock file.
-pub const HOME_NODE: &str = "the home node";
+pub const HOME_NODE: &str = "Loquax Mailbox";
+
+/// What it called itself before 1153. A mailbox started by an older binary
+/// still holds the lock under this name through an upgrade, and a send
+/// beside it has to be refused all the same.
+const LEGACY_HOME_NODE: &str = "the home node";
 
 /// The held lock; dropping it lets go.
 #[derive(Debug)]
@@ -87,7 +92,7 @@ impl DeliveryLock {
             Ok(()) => Ok(Some(Self { _file: file })),
             Err(TryLockError::WouldBlock) => {
                 let holder = holder(&path);
-                match holder.starts_with(HOME_NODE) {
+                match holder.starts_with(HOME_NODE) || holder.starts_with(LEGACY_HOME_NODE) {
                     true => Err(format!(
                         "{holder} runs on this Loquax home ({}) and answers for its \
                          identity; send and fetch from one of its clients, or stop it first",
@@ -145,7 +150,7 @@ mod tests {
         let node = DeliveryLock::acquire(home.path(), HOME_NODE).expect("home node");
         let refused = DeliveryLock::share(home.path()).expect_err("beside the home node");
         assert!(
-            refused.contains(&format!("the home node (pid {})", std::process::id())),
+            refused.contains(&format!("Loquax Mailbox (pid {})", std::process::id())),
             "{refused}"
         );
         drop(node);
@@ -155,5 +160,16 @@ mod tests {
             .expect("beside it")
             .is_none());
         drop(messenger);
+    }
+
+    /// 1153: a mailbox an older binary started names itself as it did then,
+    /// and a send beside it is still refused through the upgrade.
+    #[test]
+    fn a_mailbox_under_its_old_name_still_excludes_a_send() {
+        let home = tempfile::tempdir().expect("home");
+        let node = DeliveryLock::acquire(home.path(), LEGACY_HOME_NODE).expect("old mailbox");
+        let refused = DeliveryLock::share(home.path()).expect_err("beside the old mailbox");
+        assert!(refused.contains("the home node (pid"), "{refused}");
+        drop(node);
     }
 }

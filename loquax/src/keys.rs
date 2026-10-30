@@ -684,7 +684,7 @@ pub const ROWS: &[Row<Action>] = {
         .palette("help")
         .footer_droppable("help", 1),
         Row::new(
-            "fetch the mailbox",
+            "check the propagation node",
             EVERYWHERE,
             &[
                 &[key(F(5), Mods::Any, run(C::Fetch), EVERY)],

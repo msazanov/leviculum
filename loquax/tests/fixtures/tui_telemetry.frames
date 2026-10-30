@@ -1,6 +1,6 @@
 === 80x24 ===
 --- frame 1: attached ---
-┌● Loquax afbda7b3───────┐┌  <61ddb79a…>  unknown────────────────── no mailbox ┐
+┌● Loquax afbda7b3───────┐┌  <61ddb79a…>  unknown───────── no propagation node ┐
 │▌<61ddb79a…>            ││                                                    │
 │▌                       ││                                                    │
 │                        ││                                                    │
@@ -25,7 +25,7 @@
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 2: folded ---
-┌● Loquax afbda7b3───────┐┌  them ·61dd  unknown─────── pos 4 min · no mailbox ┐
+┌● Loquax afbda7b3───────┐┌  them ·61dd  unknown──────────── pos 4 min · no pn ┐
 │▌them ·61dd       14:00 ││                                                    │
 │▌◎ position             ││                                                    │
 │                        ││                                                    │
@@ -50,7 +50,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 3: detail ---
-┌  Loquax afbda7b3───────┐┌● them ·61dd  unknown─────── pos 4 min · no mailbox ┐
+┌  Loquax afbda7b3───────┐┌● them ·61dd  unknown──────────── pos 4 min · no pn ┐
 │▌them ·61dd       14:00 ││                                                    │
 │▌┌ message ─────────────────────────────────────────────────────────────────┐ │
 │ │from them ·61dd to you                                                    │ │
@@ -77,7 +77,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 === 120x40 ===
 --- frame 1: attached ---
 ┌● Loquax afbda7b3─────────────────┐┌  <61ddb79a…>  unknown────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
-│▌<61ddb79a…>                      ││                                                                       no mailbox │
+│▌<61ddb79a…>                      ││                                                              no propagation node │
 │▌                                 ││ ──────────────────────────────────────────────────────────────────────────────── │
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
@@ -118,7 +118,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 2: folded ---
 ┌● Loquax afbda7b3─────────────────┐┌  them ·61dd  unknown─────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
-│▌them ·61dd                 14:00 ││ at 43.77310 N 11.25600 E · ±5 m · 4 min ago                           no mailbox │
+│▌them ·61dd                 14:00 ││ at 43.77310 N 11.25600 E · ±5 m · 4 min ago                  no propagation node │
 │▌◎ position                       ││ ──────────────────────────────────────────────────────────────────────────────── │
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │
@@ -159,7 +159,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 3: detail ---
 ┌  Loquax afbda7b3─────────────────┐┌● them ·61dd  unknown─────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
-│▌them ·61dd                 14:00 ││ at 43.77310 N 11.25600 E · ±5 m · 4 min ago                           no mailbox │
+│▌them ·61dd                 14:00 ││ at 43.77310 N 11.25600 E · ±5 m · 4 min ago                  no propagation node │
 │▌◎ position                       ││ ──────────────────────────────────────────────────────────────────────────────── │
 │                                  ││                                                                                  │
 │                                  ││                                                                                  │

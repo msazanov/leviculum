@@ -371,8 +371,8 @@ daemon a controller without a configured BLE interface.
    default, which a configless daemon never joins.
 3. **The ceiling numbers.** Two `bootstrap_only` entries and two to three
    discovered are the starting values; a measurement moves them.
-4. **Zero-config against the mailbox's picker.** Closed 2026-10-25, Lew:
-   the picker gives way. The messenger adopts a mailbox by itself and
+4. **Zero-config against the propagation node picker.** Closed 2026-10-25, Lew:
+   the picker gives way. The messenger adopts a propagation node by itself and
    shows it, never the node on its own device; see the amendment in
    [Loquax: the mailbox](loquax-mailbox.md).
 

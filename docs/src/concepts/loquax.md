@@ -40,8 +40,11 @@ A terminal client for reading and sending LXMF messages over Reticulum,
 connected to a running `lnsd` or `rnsd` shared instance, the same way
 `lnomad` connects.
 
-It must talk to a propagation node. A propagation node is the mailbox that
-holds messages addressed to a client that was not reachable. Without it, a
+It must talk to a propagation node. A propagation node is somebody else's
+store-and-forward node that holds messages addressed to a client that was
+not reachable. (Up to 1153 the UI and these pages called it the mailbox;
+since then "mailbox" means only the user's own always-on machine, Loquax
+Mailbox, the [home node](loquax-home-node.md).) Without it, a
 laptop that is closed for eight hours simply does not receive mail, and the
 program is a toy. With it, the program is usable on hardware that is off
 most of the time, which is the actual deployment.
@@ -137,7 +140,7 @@ Non-negotiable, per the project's first priority.
 
 - **No wire-format changes.** Everything on these pages is expressible in
   LXMF as it is. The delivery ledger, the collision warning, the cost
-  estimate and the mailbox screen are all local views over data the
+  estimate and the propagation node screen are all local views over data the
   protocol already carries.
 - **No new fields.** If threading or replies are wanted, they use
   `FIELD_THREAD (0x08)`, `FIELD_REPLY_TO (0x30)` and

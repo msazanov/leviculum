@@ -32,7 +32,7 @@
   - [Loquax: the user interface](concepts/loquax-ui.md)
   - [Loquax: keys, mouse and layout](concepts/loquax-keys-and-layout.md)
   - [Loquax: conversation storage](concepts/loquax-storage.md)
-  - [Loquax: the mailbox, and who you talk to](concepts/loquax-mailbox.md)
+  - [Loquax: the propagation node, and who you talk to](concepts/loquax-mailbox.md)
   - [Loquax: the map](concepts/loquax-map.md)
   - [Loquax: the home node](concepts/loquax-home-node.md)
   - [Loquax: import and export](concepts/loquax-import.md)

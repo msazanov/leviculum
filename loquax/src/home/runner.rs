@@ -62,7 +62,7 @@ pub async fn send_home(
     .await;
     let message_id = match accepted {
         Ok(id) => id,
-        Err(error) => return UiEvent::SendDone(Err(format!("home node: {error}"))),
+        Err(error) => return UiEvent::SendDone(Err(format!("mailbox: {error}"))),
     };
     tracing::info!(
         "HOME send accepted message={}",

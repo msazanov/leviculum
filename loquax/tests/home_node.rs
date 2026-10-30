@@ -31,7 +31,8 @@ fn local(home: &std::path::Path, args: &[&str]) -> Sent {
     }
 }
 
-/// `loquax --daemon` on `home`, killed with its handle.
+/// `loquax mailbox run` on `home`, killed with its handle. The test of a
+/// second registrar below spawns it as `loquax --daemon`, the old spelling.
 struct HomeNode {
     process: std::process::Child,
     stderr: PathBuf,
@@ -61,7 +62,14 @@ impl HomeNode {
         let file = std::fs::File::create(&stderr).expect("the daemon's stderr file");
         let mut command = Command::new(LNMSG);
         command
-            .args(["--daemon", "--instance", instance, "--sync-interval", "off"])
+            .args([
+                "mailbox",
+                "run",
+                "--instance",
+                instance,
+                "--sync-interval",
+                "off",
+            ])
             .args(more)
             .env("LNMSG_HOME", home)
             .stdin(Stdio::null())
@@ -104,7 +112,7 @@ fn admit_carries_the_address_and_an_open_code_can_be_withdrawn() {
     let admitted = local(
         home,
         &[
-            "home",
+            "mailbox",
             "admit",
             "--name",
             "phone",
@@ -135,12 +143,12 @@ fn admit_carries_the_address_and_an_open_code_can_be_withdrawn() {
     assert!(
         admitted
             .stdout
-            .contains(&format!("loquax home join {}\n", code.encode())),
+            .contains(&format!("loquax mailbox join {}\n", code.encode())),
         "{admitted}"
     );
 
     // Negative: an address without a port, refused, and no token issued.
-    let refused = local(home, &["home", "admit", "--server", "homenode.example"]);
+    let refused = local(home, &["mailbox", "admit", "--server", "homenode.example"]);
     assert_eq!(refused.code, Some(2), "{refused}");
     assert!(refused.stderr.contains("has no port"), "{refused}");
 
@@ -161,6 +169,50 @@ fn admit_carries_the_address_and_an_open_code_can_be_withdrawn() {
     assert!(withdrawn.stdout.contains("withdrew") && withdrawn.stdout.contains("phone"));
     let tokens = local(home, &["home", "tokens"]);
     assert_eq!(tokens.stdout, "", "{tokens}");
+}
+
+/// 1153: `loquax mailbox` is the command group, `loquax home` the old
+/// spelling of the same one, and `loquax --daemon` the old spelling of
+/// `loquax mailbox run`; the help says "Loquax Mailbox".
+#[test]
+fn mailbox_and_home_are_one_command_group() {
+    let home = tempfile::tempdir().expect("home");
+    let home = home.path();
+    let admitted = local(home, &["mailbox", "admit", "--name", "phone"]);
+    assert_eq!(admitted.code, Some(0), "{admitted}");
+    let new = local(home, &["mailbox", "tokens"]);
+    let old = local(home, &["home", "tokens"]);
+    assert_eq!(new.code, Some(0), "{new}");
+    assert_eq!(new.stdout.lines().count(), 1, "{new}");
+    assert!(new.stdout.contains("phone  expires"), "{new}");
+    assert_eq!((old.code, &old.stdout), (new.code, &new.stdout), "{old}");
+
+    let help = local(home, &["--help"]);
+    assert_eq!(help.code, Some(0), "{help}");
+    assert!(help.stdout.contains("Loquax Mailbox"), "{help}");
+    let group = local(home, &["mailbox", "--help"]);
+    assert_eq!(group.code, Some(0), "{group}");
+    for command in [
+        "run", "enable", "disable", "admit", "join", "devices", "revoke", "tokens",
+    ] {
+        assert!(
+            group
+                .stdout
+                .lines()
+                .any(|line| line.trim_start().starts_with(command)),
+            "no {command} in {group}"
+        );
+    }
+    let run = local(home, &["home", "run", "--help"]);
+    assert_eq!(run.code, Some(0), "{run}");
+    assert!(run.stdout.contains("--sync-interval"), "{run}");
+
+    // Negative: the messenger's own options are not `run`'s, and an
+    // unknown verb under either spelling is an argument error.
+    let stray = local(home, &["mailbox", "run", "--ascii"]);
+    assert_eq!(stray.code, Some(2), "{stray}");
+    let unknown = local(home, &["home", "nonsense"]);
+    assert_eq!(unknown.code, Some(2), "{unknown}");
 }
 
 /// The home node's slice 1 end to end (#232): a stock Python LXMF sender
@@ -403,12 +455,12 @@ async fn a_client_sends_through_its_home_node_to_a_recipient_that_comes_up_later
     assert_eq!(second.status.code(), Some(1));
     let refusal = String::from_utf8_lossy(&second.stderr);
     assert!(
-        refusal.contains("the home node (pid") && refusal.contains("already runs"),
+        refusal.contains("Loquax Mailbox (pid") && refusal.contains("already runs"),
         "{refusal}"
     );
     // Negative: nor do a local send and fetch, which would register the
     // same destination beside it.
-    let pid = format!("the home node (pid {})", node.process.id());
+    let pid = format!("Loquax Mailbox (pid {})", node.process.id());
     let nobody = "00112233445566778899aabbccddeeff".to_string();
     for (command, args, stdin) in [
         ("send", vec![nobody], b"x".to_vec()),

@@ -794,7 +794,9 @@ fn parse_state(name: &str) -> Result<DeliveryState, String> {
         "stamping" => DeliveryState::Stamping,
         "inflight" => DeliveryState::InFlight,
         "sent" => DeliveryState::Sent,
-        "mailbox" => DeliveryState::InMailbox,
+        // `pn` names the state as the screen does since 1153; `mailbox`
+        // stays for the scripts written before.
+        "pn" | "mailbox" => DeliveryState::InMailbox,
         "delivered" => DeliveryState::Delivered,
         "rejected" => DeliveryState::Rejected,
         "failed" => DeliveryState::Failed,
@@ -1845,9 +1847,8 @@ mod tests {
             destination: [0xab; 16],
             waited: Duration::from_secs(30),
         };
-        let fallback = SendError::NoPropagationNode(
-            "no mailbox chosen: no propagation node has been heard".to_string(),
-        );
+        let fallback =
+            SendError::NoPropagationNode("no propagation node: none has been heard".to_string());
         update(
             &mut model,
             UiEvent::SendDone(Err(format!("direct: {direct}\npropagated: {fallback}"))),
@@ -2453,11 +2454,12 @@ mod tests {
             assert_eq!(under(&shot, &send), "send", "{width}: {shot}");
             assert!(send.iter().all(|&(_, row)| row == send[0].1));
             let mailbox = of(&|t| *t == Target::Mailbox);
-            assert_eq!(
-                under(&shot, &mailbox),
-                "mailbox 9c9c9c9c adopted",
-                "{width}: {shot}"
-            );
+            // At 80 columns the header has room for the node, not how.
+            let said = match width {
+                80 => "propagation node 9c9c9c9c",
+                _ => "propagation node 9c9c9c9c adopted",
+            };
+            assert_eq!(under(&shot, &mailbox), said, "{width}: {shot}");
             let badge = of(&|t| matches!(t, Target::Badge(_)));
             assert_eq!(under(&shot, &badge), "[1]", "{width}: {shot}");
             let marks = of(&|t| matches!(t, Target::Block { mark: true, .. }));

@@ -614,7 +614,7 @@ decision that day to start it: `loquax gui`, behind Loquax's `gui` feature,
 which no other feature enables, so the CLI, the terminal and the core carry
 no iced. The window starts the same shell as the terminal (`loquax/src/
 shell.rs`, moved out of `tui.rs`: the engine, the history, the sends and
-fetches, the mailbox's schedule, the model) and shows the map: the peers
+fetches, the propagation node's schedule, the model) and shows the map: the peers
 with a position on the left by the display rule with their fix's age, the
 stale ones dimmed; on the right the region from the same maps directory,
 the outline where none covers the view, the pins with their labels as iced

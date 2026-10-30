@@ -106,7 +106,7 @@ pub fn via(method: &str, reason: &str) {
 }
 
 /// The propagation node this run settled on. `source` is where the choice
-/// came from (`flag`, `config` or `mailbox`, the adoption rule); `cost` is the stamp cost the
+/// came from (`flag`, `config` or `adopted`, the adoption rule; `mailbox` before 1153); `cost` is the stamp cost the
 /// node announced, `-` while it has not been heard yet.
 pub fn pn(node: &[u8; 16], source: &str, cost: Option<u64>) {
     tracing::debug!(

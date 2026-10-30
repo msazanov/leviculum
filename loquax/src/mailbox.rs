@@ -87,17 +87,15 @@ impl AdoptReason {
     /// The words the `mailbox:` line shows after "adopted because".
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::NoneSelected => {
-                "no mailbox was selected; it is the most recently heard eligible node"
-            }
+            Self::NoneSelected => "none was selected; it is the most recently heard eligible node",
             Self::SelectedUnreachable => {
-                "the selected mailbox is unreachable; it is the most recently heard eligible node"
+                "the selected one is unreachable; it is the most recently heard eligible node"
             }
             Self::SelectedOnThisDevice => {
-                "the selected mailbox runs on this device and holds nothing while it is off"
+                "the selected one runs on this device and holds nothing while it is off"
             }
             Self::SelectedDidNotAnswer => {
-                "the selected mailbox did not answer; it is the most recently heard eligible node"
+                "the selected one did not answer; it is the most recently heard eligible node"
             }
         }
     }
@@ -115,17 +113,17 @@ pub enum NoneReason {
 }
 
 impl NoneReason {
-    /// The words the UI shows when there is no mailbox.
+    /// Why there is no propagation node, after the `no propagation node:`
+    /// the send and fetch errors put in front (since 1153; the words said
+    /// `no mailbox chosen:` themselves before).
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::NoCandidates => "no mailbox chosen: no propagation node has been heard",
+            Self::NoCandidates => "none has been heard",
             Self::OnlyOnThisDevice => {
-                "no mailbox chosen: the only propagation node heard runs on this device, \
+                "the only one heard runs on this device, \
                  and it holds nothing while this device is off"
             }
-            Self::NoneReachable => {
-                "no mailbox chosen: no propagation node heard has a route right now"
-            }
+            Self::NoneReachable => "none heard has a route right now",
         }
     }
 }
