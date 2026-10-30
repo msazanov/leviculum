@@ -23,6 +23,7 @@
 #![deny(unsafe_code)]
 
 pub mod links;
+pub mod mailbox;
 pub mod map;
 pub mod pull_line;
 pub mod schema;
@@ -82,6 +83,7 @@ pub fn start(request: &[u8]) -> Vec<u8> {
                         address: Some(loquax::address::to_hex(&session.address())),
                         server: Some(session.server().to_string()),
                         link: session.link(),
+                        here: session.is_here(),
                     }
                 }
                 Err(error) => Started {
@@ -92,6 +94,7 @@ pub fn start(request: &[u8]) -> Vec<u8> {
                     address: None,
                     server: None,
                     link: false,
+                    here: false,
                 },
             }
         }

@@ -74,6 +74,12 @@ pub struct Start {
     /// writes into a message's history.
     #[serde(default)]
     pub offset: i32,
+    /// Make this phone the mailbox (the first start's choice, 1152): the
+    /// session starts the home node in the app and joins it itself, with no
+    /// code and no server. A phone that chose it once keeps it without
+    /// saying it again.
+    #[serde(default)]
+    pub here: bool,
 }
 
 /// What became of [`Start`].
@@ -94,6 +100,9 @@ pub struct Started {
     /// `link` event tells each change after.
     #[serde(default)]
     pub link: bool,
+    /// Whether the mailbox is on this phone.
+    #[serde(default)]
+    pub here: bool,
 }
 
 /// What the user did.
@@ -136,6 +145,9 @@ pub enum Request {
     /// front and with the watching link down, the session pulls every
     /// minute.
     Front { front: bool },
+    /// The name recipients see, for the mailbox on this phone (the first
+    /// start's last screen, 1152).
+    Name { name: String },
     /// Linked `peer` to a contact of the address book the user picked or
     /// confirmed (1139), or the link's copy refreshed: what the contact
     /// said right then, its thumbnail's bytes among it.

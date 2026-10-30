@@ -1336,8 +1336,11 @@ async fn run_daemon(args: TuiArgs) -> ExitCode {
     };
     let outcome = loquax::home::daemon::run(loquax::home::daemon::DaemonOptions {
         home,
-        instance,
-        config_dir,
+        upstream: loquax::home::daemon::DaemonUpstream::Shared {
+            instance,
+            config_dir,
+            mailbox,
+        },
         storage_dir,
         identity,
         display_name: display_name.name.into_bytes(),
@@ -1348,8 +1351,8 @@ async fn run_daemon(args: TuiArgs) -> ExitCode {
         pn_source,
         sync_bound_ms,
         fetch_budget: Duration::from_secs(args.timeout.saturating_mul(2)),
-        mailbox,
         wake: config.home_wake.unwrap_or(true),
+        stop: None,
     })
     .await;
     match outcome {

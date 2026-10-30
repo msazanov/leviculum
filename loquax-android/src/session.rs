@@ -32,6 +32,7 @@ use loquax::ui::{chat, update, UiEffect, UiEvent, UiModel};
 use loquax::when::WallTime;
 
 use crate::links::{self, Book};
+use crate::mailbox;
 use crate::pull_line::{PullLine, Say};
 use crate::schema::{self, Event, VERSION};
 
@@ -143,6 +144,8 @@ pub struct Session {
     inner: Arc<Mutex<Inner>>,
     events: Mutex<Receiver<Event>>,
     runtime: Mutex<Option<tokio::runtime::Runtime>>,
+    /// The mailbox, when it is on this phone.
+    here: Mutex<Option<mailbox::Here>>,
     address: [u8; 16],
     server: String,
 }
@@ -154,6 +157,18 @@ impl Session {
     /// server along; a server given beside it wins.
     pub fn start(start: &schema::Start) -> Result<Self, StartError> {
         let home = PathBuf::from(&start.dir);
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .map_err(|error| StartError::other(format!("no runtime: {error}")))?;
+        let (start, here) = if start.here || mailbox::is_here(&home) {
+            let (start, here) = Self::start_here(start, &home, runtime.handle())?;
+            (start, Some(here))
+        } else {
+            (start.clone(), None)
+        };
+        let start = &start;
         let client = loquax::home::client::load_client(&home).map_err(StartError::other)?;
         let mut carried = None;
         let code = match (&client, start.code.as_deref().map(str::trim)) {
@@ -209,11 +224,6 @@ impl Session {
         std::fs::create_dir_all(&storage)
             .map_err(|error| StartError::other(format!("{}: {error}", storage.display())))?;
 
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-            .map_err(|error| StartError::other(format!("no runtime: {error}")))?;
         let attached = runtime.block_on(attach_leaf(
             LeafConfig {
                 server: server.clone(),
@@ -256,7 +266,10 @@ impl Session {
             loquax::home::client::save_client(&home, &code.public_key)
                 .map_err(StartError::other)?;
         }
-        save_server(&home, &server).map_err(StartError::other)?;
+        // The phone's own mailbox listens on another port at every start.
+        if here.is_none() {
+            save_server(&home, &server).map_err(StartError::other)?;
+        }
 
         let (events_tx, events_rx) = channel();
         let (watch_tx, watch_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -296,12 +309,88 @@ impl Session {
             inner,
             events: Mutex::new(events_rx),
             runtime: Mutex::new(Some(runtime)),
+            here: Mutex::new(here),
             address,
             server,
         };
         // What the home node holds since the last run, on open.
         session.lock().apply(UiEvent::Run(PaletteCommand::Fetch));
         Ok(session)
+    }
+
+    /// The mailbox on this phone: chosen and started on `runtime`, and the
+    /// start as the screens' client makes it, to the mailbox's loopback
+    /// server, with a code of its own while the screens are not joined.
+    fn start_here(
+        start: &schema::Start,
+        home: &Path,
+        runtime: &tokio::runtime::Handle,
+    ) -> Result<(schema::Start, mailbox::Here), StartError> {
+        let joined = loquax::home::client::load_client(home).map_err(StartError::other)?;
+        if joined.is_some() && !mailbox::is_here(home) {
+            return Err(StartError::other(
+                "This phone already reads a mailbox on a computer.",
+            ));
+        }
+        let public_key = mailbox::choose_here(home).map_err(StartError::other)?;
+        if joined.is_some_and(|key| key != public_key) {
+            return Err(StartError::other(
+                "This phone already reads another mailbox.",
+            ));
+        }
+        let code = match joined {
+            Some(_) => None,
+            None => Some(
+                mailbox::admission(home)
+                    .map_err(StartError::other)?
+                    .encode(),
+            ),
+        };
+        let here = mailbox::Here::start(home, runtime).map_err(StartError::other)?;
+        let start = schema::Start {
+            server: Some(here.server()),
+            code,
+            name: Some(
+                start
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| "this phone".to_string()),
+            ),
+            ..start.clone()
+        };
+        Ok((start, here))
+    }
+
+    /// Whether the mailbox is on this phone.
+    pub fn is_here(&self) -> bool {
+        self.here().is_some()
+    }
+
+    /// The name recipients see, when the mailbox is on this phone: kept,
+    /// and the mailbox started again so its next announce carries it.
+    pub fn rename(&self, name: &str) -> Result<(), String> {
+        let home = self.lock().home.clone();
+        mailbox::set_name(&home, name)?;
+        let handle = self.handle().ok_or("the session has ended")?;
+        let mut here = self.here();
+        match here.as_mut() {
+            Some(here) => handle.block_on(here.restart(&handle)),
+            None => Err("the mailbox is not on this phone".to_string()),
+        }
+    }
+
+    fn here(&self) -> MutexGuard<'_, Option<mailbox::Here>> {
+        self.here
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn handle(&self) -> Option<tokio::runtime::Handle> {
+        self.runtime
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .map(|runtime| runtime.handle().clone())
     }
 
     /// The home node's LXMF address, this phone's own.
@@ -322,7 +411,11 @@ impl Session {
     /// Whether the session ended by itself: the engine is gone, and only a
     /// fresh start helps.
     pub fn is_over(&self) -> bool {
-        self.lock().gone
+        let mailbox_gone = self
+            .here
+            .try_lock()
+            .is_ok_and(|here| here.as_ref().is_some_and(mailbox::Here::is_over));
+        self.lock().gone || mailbox_gone
     }
 
     /// Cut the session off its engine, as the engine's death does; the
@@ -398,6 +491,7 @@ impl Session {
                 self.lock().front = front;
                 return Ok(());
             }
+            schema::Request::Name { name } => return self.rename(&name),
             schema::Request::Link { peer, contact } => {
                 let peer = parse_peer(&peer)?;
                 return self.lock().link(peer, &contact);
@@ -576,6 +670,12 @@ impl Session {
                 v: VERSION,
                 detail: String::new(),
             });
+        }
+        // The mailbox closes its node before the runtime goes, so its lock
+        // and its store are let go of in order.
+        let here = self.here().take();
+        if let Some(mut here) = here {
+            runtime.block_on(here.stop());
         }
         runtime.shutdown_timeout(Duration::from_secs(2));
     }

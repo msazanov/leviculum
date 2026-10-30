@@ -35,7 +35,7 @@ use tokio::sync::mpsc::unbounded_channel;
 
 use crate::clock::Tokio;
 use crate::effects::{Effects, Terminal};
-use crate::engine::{attach_as, AttachConfig, HomeRequest, Role};
+use crate::engine::{attach_as, attach_mesh, AttachConfig, HomeRequest, MeshConfig, Role};
 use crate::fanout::Fanout;
 use crate::fetch::{run_fetch, FetchOptions};
 use crate::home::outgoing::{Act, Change, Leg, Outcome, Outgoing, Policy};
@@ -59,12 +59,31 @@ const PUMP: Duration = Duration::from_millis(20);
 /// counted in seconds.
 const OUTBOX_TICK: Duration = Duration::from_secs(1);
 
+/// Where the home node's node reaches the network.
+pub enum DaemonUpstream {
+    /// The device's daemon (`loquax --daemon` beside lnsd): its shared
+    /// instance, its Reticulum config directory for the RPC key, and how
+    /// each collection selects its propagation node without a preference
+    /// (`main` reads the daemon's path table for it).
+    Shared {
+        instance: String,
+        config_dir: PathBuf,
+        mailbox: MailboxSource,
+    },
+    /// A node of its own, for a device with no daemon: the phone's mailbox
+    /// (1152). It dials the entry servers, `host:port` each, and serves its
+    /// own screens on `screens`, a listener on the loopback address; a
+    /// collection selects from the node's own path table.
+    Mesh {
+        servers: Vec<String>,
+        screens: std::net::TcpListener,
+    },
+}
+
 /// What starting the home node needs.
 pub struct DaemonOptions {
     pub home: PathBuf,
-    pub instance: String,
-    /// The daemon's Reticulum config directory, for its RPC key.
-    pub config_dir: PathBuf,
+    pub upstream: DaemonUpstream,
     pub storage_dir: PathBuf,
     pub identity: leviculum_core::Identity,
     pub display_name: Vec<u8>,
@@ -82,13 +101,15 @@ pub struct DaemonOptions {
     pub sync_bound_ms: Option<u64>,
     /// One collection's budget.
     pub fetch_budget: Duration,
-    /// How each collection selects its mailbox without a preference: `main`
-    /// reads the daemon's path table for it.
-    pub mailbox: MailboxSource,
     /// Whether watching clients are woken when the archive grows
     /// (`home_wake` in the config, on by default). Off, a `/watch` is still
     /// answered, and the clients pull on their schedule.
     pub wake: bool,
+    /// What ends the home node besides SIGINT and SIGTERM. `None` for the
+    /// process of its own, which ends on the signals; `Some` for a home node
+    /// inside an app, which installs no signal handler and ends when the
+    /// sender says so or is dropped.
+    pub stop: Option<tokio::sync::oneshot::Receiver<()>>,
 }
 
 /// A source of [`MailboxRun`]s, read once per collection.
@@ -122,12 +143,11 @@ impl Effects for Quiet {
     }
 }
 
-/// Run the home node until SIGINT or SIGTERM.
+/// Run the home node until SIGINT or SIGTERM, or until `stop` says so.
 pub async fn run(options: DaemonOptions) -> Result<(), String> {
     let DaemonOptions {
         home,
-        instance,
-        config_dir,
+        upstream,
         storage_dir,
         identity,
         display_name,
@@ -138,8 +158,8 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
         pn_source,
         sync_bound_ms,
         fetch_budget,
-        mailbox,
         wake,
+        stop,
     } = options;
     let _lock = super::lock::DeliveryLock::acquire(&home, super::lock::HOME_NODE)?;
     let address = crate::engine::delivery_address(&identity)?;
@@ -157,30 +177,58 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
             kept.propagated,
         );
     }
+    let (requests_tx, mut requests) = unbounded_channel::<HomeRequest>();
+    let role = Role::Home {
+        requests: requests_tx,
+    };
+    let (instance, attached, mailbox) = match upstream {
+        DaemonUpstream::Shared {
+            instance,
+            config_dir,
+            mailbox,
+        } => {
+            let attached = attach_as(
+                AttachConfig {
+                    instance: instance.clone(),
+                    config_dir: Some(config_dir),
+                    storage_dir,
+                    identity,
+                    display_name,
+                    notices: Terminal::new(home.clone()),
+                },
+                role,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            (instance, attached, mailbox)
+        }
+        DaemonUpstream::Mesh { servers, screens } => {
+            let attached = attach_mesh(
+                MeshConfig {
+                    servers,
+                    screens,
+                    storage_dir,
+                    identity,
+                    display_name,
+                    notices: Terminal::new(home.clone()),
+                },
+                role,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            let source = own_routes_source(attached.node(), home.clone());
+            ("in-process".to_string(), attached, source)
+        }
+    };
+    let mut attached = attached;
     let collector = Collector {
         home: home.clone(),
-        instance: instance.clone(),
+        instance,
         budget: fetch_budget,
         preferred: preferred_pn,
         source: pn_source,
         mailbox,
     };
-    let (requests_tx, mut requests) = unbounded_channel::<HomeRequest>();
-    let mut attached = attach_as(
-        AttachConfig {
-            instance,
-            config_dir: Some(config_dir),
-            storage_dir,
-            identity,
-            display_name,
-            notices: Terminal::new(home),
-        },
-        Role::Home {
-            requests: requests_tx,
-        },
-    )
-    .await
-    .map_err(|e| e.to_string())?;
     let node = attached.node();
     tracing::warn!(
         "HOME up address={} home={} archive_cap={}B outbox={}",
@@ -218,8 +266,15 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
     let mut outbox_tick = tokio::time::interval(OUTBOX_TICK);
     let mut announce =
         tokio::time::interval_at(tokio::time::Instant::now() + ANNOUNCE_EVERY, ANNOUNCE_EVERY);
-    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        .map_err(|e| format!("SIGTERM handler: {e}"))?;
+    // A home node inside an app leaves the process's signals to the app.
+    let mut terminate = match stop {
+        Some(_) => None,
+        None => Some(
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .map_err(|e| format!("SIGTERM handler: {e}"))?,
+        ),
+    };
+    let mut stop = stop;
 
     let outcome = loop {
         tokio::select! {
@@ -349,8 +404,8 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
                     break Err("the message engine stopped".to_string());
                 }
             }
-            _ = tokio::signal::ctrl_c() => break Ok(()),
-            _ = terminate.recv() => break Ok(()),
+            _ = signalled(terminate.as_mut()) => break Ok(()),
+            _ = stopped(stop.as_mut()) => break Ok(()),
         }
     };
     if let Some(task) = fetch {
@@ -359,6 +414,70 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
     drop(node);
     attached.stop().await;
     outcome
+}
+
+/// SIGINT or SIGTERM, for a home node that listens for them; never for one
+/// that does not.
+async fn signalled(terminate: Option<&mut tokio::signal::unix::Signal>) {
+    match terminate {
+        Some(terminate) => {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = terminate.recv() => {}
+            }
+        }
+        None => std::future::pending().await,
+    }
+}
+
+/// The app said stop, or dropped its end; never for a home node with none.
+async fn stopped(stop: Option<&mut tokio::sync::oneshot::Receiver<()>>) {
+    match stop {
+        Some(stop) => {
+            let _ = stop.await;
+        }
+        None => std::future::pending().await,
+    }
+}
+
+/// How a home node with a node of its own selects its propagation node
+/// without a preference: from that node's path table, as `main` does from
+/// the daemon's. No route is a local client's here, since the node serves
+/// only the device's own screens.
+fn own_routes_source(node: std::sync::Arc<ReticulumNode>, home: PathBuf) -> MailboxSource {
+    Box::new(move || {
+        let now_unix_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| {
+                u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+            });
+        let routes = own_routes(&node, now_unix_ms);
+        let previous = crate::mailbox_state::load(&home);
+        Box::pin(async move {
+            MailboxRun {
+                input: Some(crate::outbox::MailboxInput {
+                    routes: Ok(routes),
+                    previous,
+                    excluded: Vec::new(),
+                }),
+            }
+        })
+    })
+}
+
+/// The node's path table as the selection rule reads it, each entry's
+/// time turned from the node's clock into Unix milliseconds at `now_unix_ms`.
+fn own_routes(node: &ReticulumNode, now_unix_ms: u64) -> Vec<crate::mailbox_state::Route> {
+    let now = node.now_ms();
+    node.path_table_entries()
+        .into_iter()
+        .map(|entry| crate::mailbox_state::Route {
+            node: entry.hash,
+            hops: entry.hops,
+            own_device: false,
+            seen_ms: now_unix_ms.saturating_sub(now.saturating_sub(entry.timestamp_ms)),
+        })
+        .collect()
 }
 
 /// The relations at start: the conversations the store holds and the

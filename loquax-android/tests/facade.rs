@@ -10,6 +10,9 @@ use leviculum_std::driver::{ReticulumNode, ReticulumNodeBuilder};
 use loquax_android::schema::{self, Event, Request, Start, Started};
 use loquax_android::session::Session;
 
+#[path = "../../loquax/tests/support/python_peer.rs"]
+mod python_peer;
+
 /// The exported facade keeps one session per process, and the tests of a
 /// binary share the process: those that go through it take turns. Tokio's
 /// lock, which the async test holds across its awaits.
@@ -161,6 +164,7 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
         code: Some(code.clone()),
         name: Some("Pixel".to_string()),
         offset: 3600,
+        here: false,
     };
     let peer = loquax::address::to_hex(&[0x5a; 16]);
     let (address, peer) = tokio::task::spawn_blocking(move || {
@@ -606,6 +610,7 @@ async fn a_new_message_shows_on_the_phone_without_a_pull() {
         code: Some(code),
         name: Some("Pixel".to_string()),
         offset: 0,
+        here: false,
     };
     let session = tokio::task::spawn_blocking(move || {
         let session = Session::start(&first).unwrap_or_else(|error| panic!("{error:?}"));
@@ -818,8 +823,13 @@ impl HomeNode {
         let daemon = tokio::spawn(loquax::home::daemon::run(
             loquax::home::daemon::DaemonOptions {
                 home: home.to_path_buf(),
-                instance: instance.to_string(),
-                config_dir: rns.to_path_buf(),
+                upstream: loquax::home::daemon::DaemonUpstream::Shared {
+                    instance: instance.to_string(),
+                    config_dir: rns.to_path_buf(),
+                    mailbox: Box::new(|| {
+                        Box::pin(async { loquax::mailbox_state::MailboxRun { input: None } })
+                    }),
+                },
                 storage_dir: daemon_storage,
                 identity,
                 display_name: b"home".to_vec(),
@@ -830,10 +840,8 @@ impl HomeNode {
                 pn_source: "none",
                 sync_bound_ms: None,
                 fetch_budget: Duration::from_secs(10),
-                mailbox: Box::new(|| {
-                    Box::pin(async { loquax::mailbox_state::MailboxRun { input: None } })
-                }),
                 wake: true,
+                stop: None,
             },
         ));
         Self { transport, daemon }
@@ -1016,4 +1024,154 @@ async fn a_phone_session_rides_out_a_dead_home_node_and_a_dead_engine() {
     .expect("the session after the engine died");
 
     node.kill().await;
+}
+
+/// The mailbox on the phone (1152): the first start that chooses it needs no
+/// code and no server, the phone's node dials its entry server (here a stock
+/// Python RNS instance), a stock Python LXMF sender delivers DIRECT to the
+/// phone's address and gets DELIVERED, and the message shows on the
+/// screens, which reach the mailbox as its client. A second start finds the
+/// choice and the same address. Negative: a phone that reads a mailbox on a
+/// computer does not become one.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_python_sender_reaches_the_mailbox_on_the_phone_and_its_screens() {
+    let peer = python_peer::PythonPeer::start();
+    peer.lxmf_init();
+    let phone = tempfile::tempdir().expect("app dir");
+    let mailbox = phone.path().join(loquax_android::mailbox::DIR);
+    std::fs::create_dir_all(&mailbox).expect("mailbox dir");
+    std::fs::write(
+        mailbox.join(loquax_android::mailbox::SERVERS_FILE),
+        format!("127.0.0.1:{}\n", peer.rns_port),
+    )
+    .expect("servers file");
+    let first = Start {
+        dir: phone.path().display().to_string(),
+        here: true,
+        ..Start::default()
+    };
+    let session = tokio::task::spawn_blocking(move || {
+        Session::start(&first).unwrap_or_else(|error| panic!("{error:?}"))
+    })
+    .await
+    .expect("the session");
+    assert!(session.is_here());
+    assert!(
+        session.server().starts_with("127.0.0.1:"),
+        "{}",
+        session.server()
+    );
+    let address = loquax::address::to_hex(&session.address());
+
+    let body = "an das Postfach im Telefon";
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(40);
+    let message_hash = loop {
+        match peer.try_rpc(
+            "lxmf_send",
+            serde_json::json!({
+                "dest_hash": address,
+                "method": "direct",
+                "content": hex(body.as_bytes()),
+            }),
+        ) {
+            Ok(result) => {
+                break result
+                    .get("message_hash")
+                    .and_then(|v| v.as_str())
+                    .expect("a message hash")
+                    .to_string()
+            }
+            Err(error) => {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "Python never learned the phone's mailbox: {error}"
+                );
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+        }
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let state = peer.rpc(
+            "lxmf_get_outbound_status",
+            serde_json::json!({ "message_hash": message_hash }),
+        );
+        match state.get("state").and_then(|v| v.as_str()) {
+            Some("DELIVERED") => break,
+            Some("FAILED") | Some("REJECTED") => panic!("the sender gave up: {state}"),
+            _ => {}
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the sender never got DELIVERED: {state}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    let session = tokio::task::spawn_blocking(move || {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let list: schema::Conversations = rmp_serde::from_slice(
+                &session
+                    .query(schema::Query::Conversations)
+                    .expect("a query"),
+            )
+            .expect("decode");
+            if list.conversations.iter().any(|c| c.last == body) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the screens never showed it: {list:?}"
+            );
+            session.next_event(Duration::from_millis(200));
+        }
+        session
+    })
+    .await
+    .expect("the screens");
+    let address_before = session.address();
+    tokio::task::spawn_blocking(move || session.stop())
+        .await
+        .expect("stopped");
+
+    // Again, as the sticky service starts it: no choice said, none needed.
+    let again = Start {
+        dir: phone.path().display().to_string(),
+        ..Start::default()
+    };
+    let session = tokio::task::spawn_blocking(move || {
+        Session::start(&again).unwrap_or_else(|error| panic!("{error:?}"))
+    })
+    .await
+    .expect("the second session");
+    assert!(session.is_here());
+    assert_eq!(session.address(), address_before);
+    tokio::task::spawn_blocking(move || session.stop())
+        .await
+        .expect("stopped");
+
+    // Negative: a client of a computer's mailbox is no mailbox.
+    let reader = tempfile::tempdir().expect("reader dir");
+    let elsewhere = leviculum_core::Identity::generate(&mut rand_core::OsRng);
+    loquax::home::client::save_client(reader.path(), &elsewhere.public_key_bytes())
+        .expect("joined elsewhere");
+    let dir = reader.path().display().to_string();
+    let refused = tokio::task::spawn_blocking(move || {
+        Session::start(&Start {
+            dir,
+            here: true,
+            ..Start::default()
+        })
+        .err()
+    })
+    .await
+    .expect("the refused start");
+    let error = refused.expect("refused");
+    assert!(error.text.contains("on a computer"), "{error:?}");
+    assert!(!loquax_android::mailbox::is_here(reader.path()));
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }

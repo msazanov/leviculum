@@ -228,6 +228,27 @@ pub struct LeafConfig<N = Terminal> {
     pub notices: N,
 }
 
+/// What attaching a mailbox that runs its own node needs: a phone's
+/// mailbox, with no daemon on the device (1152;
+/// `docs/drafts/loquax-onboarding-2026-10.md`, section 3).
+pub struct MeshConfig<N = Terminal> {
+    /// The entry servers the node dials, `host:port` each, every one a TCP
+    /// client interface of its own: the node's way into the network.
+    pub servers: Vec<String>,
+    /// The listener the device's own screens dial, bound by the caller on
+    /// the loopback address: one TCP server interface, so the screens reach
+    /// the mailbox the way a phone reaches an external one.
+    pub screens: std::net::TcpListener,
+    /// As [`LeafConfig::storage_dir`].
+    pub storage_dir: PathBuf,
+    /// The mailbox identity.
+    pub identity: Identity,
+    /// The name recipients see, as [`AttachConfig::display_name`].
+    pub display_name: Vec<u8>,
+    /// Where the stamp worker's progress lines go.
+    pub notices: N,
+}
+
 /// `host:port` as the leaf dials it: the host as written (a name, an IPv4
 /// address, or an IPv6 one in brackets, which come off) and the port. The
 /// error says what is wrong in words a user typed the address in.
@@ -266,6 +287,12 @@ enum Upstream {
     },
     /// One TCP client interface to this host and port, the node's only one.
     Tcp { host: String, port: u16 },
+    /// A TCP client interface to each entry server, and a TCP server on the
+    /// screens' listener.
+    Mesh {
+        servers: Vec<(String, u16)>,
+        screens: std::net::TcpListener,
+    },
 }
 
 /// Why attaching failed.
@@ -394,6 +421,41 @@ pub async fn attach_leaf<N: Effects + Send + 'static>(
     attach_through(joined, role, Upstream::Tcp { host, port }).await
 }
 
+/// Attach a mailbox with a node of its own: transport off, a TCP client
+/// interface to every entry server, and a TCP server on `config.screens`
+/// for the device's own screens. No daemon and no shared instance; as for
+/// a leaf, an entry server that does not answer is no error here, its
+/// interface reconnects on its own.
+pub async fn attach_mesh<N: Effects + Send + 'static>(
+    config: MeshConfig<N>,
+    role: Role,
+) -> Result<Attached, AttachError> {
+    let MeshConfig {
+        servers,
+        screens,
+        storage_dir,
+        identity,
+        display_name,
+        notices,
+    } = config;
+    let servers = servers
+        .iter()
+        .map(|server| {
+            parse_server(server).map_err(|detail| AttachError::NoServer {
+                server: server.clone(),
+                detail,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let joined = Joined {
+        storage_dir,
+        identity,
+        display_name,
+        notices,
+    };
+    attach_through(joined, role, Upstream::Mesh { servers, screens }).await
+}
+
 /// What both attaches hand the engine and the node.
 struct Joined<N> {
     storage_dir: PathBuf,
@@ -407,13 +469,27 @@ async fn attach_through<N: Effects + Send + 'static>(
     role: Role,
     upstream: Upstream,
 ) -> Result<Attached, AttachError> {
-    let fail = |detail: String| match &upstream {
-        Upstream::Shared { instance, .. } => AttachError::NoDaemon {
+    // What a failure names, taken before the build consumes the upstream.
+    let shared = match &upstream {
+        Upstream::Shared { instance, .. } => Some(instance.clone()),
+        Upstream::Tcp { .. } | Upstream::Mesh { .. } => None,
+    };
+    let dialled = match &upstream {
+        Upstream::Shared { .. } => String::new(),
+        Upstream::Tcp { host, port } => format!("{host}:{port}"),
+        Upstream::Mesh { servers, .. } => servers
+            .iter()
+            .map(|(host, port)| format!("{host}:{port}"))
+            .collect::<Vec<_>>()
+            .join(", "),
+    };
+    let fail = |detail: String| match &shared {
+        Some(instance) => AttachError::NoDaemon {
             instance: instance.clone(),
             detail,
         },
-        Upstream::Tcp { host, port } => AttachError::NoServer {
-            server: format!("{host}:{port}"),
+        None => AttachError::NoServer {
+            server: dialled.clone(),
             detail,
         },
     };
@@ -464,14 +540,14 @@ async fn attach_through<N: Effects + Send + 'static>(
     };
 
     let builder = ReticulumNodeBuilder::new().enable_transport(false);
-    let builder = match &upstream {
+    let builder = match upstream {
         Upstream::Shared {
             instance,
             config_dir,
         } => {
-            let builder = builder.connect_to_shared_instance(instance);
+            let builder = builder.connect_to_shared_instance(&instance);
             match config_dir {
-                Some(dir) => builder.shared_instance_config_dir(dir.clone()),
+                Some(dir) => builder.shared_instance_config_dir(dir),
                 None => builder,
             }
         }
@@ -488,13 +564,38 @@ async fn attach_through<N: Effects + Send + 'static>(
                 leviculum_std::config::InterfaceConfig {
                     name: "Home Node".to_string(),
                     interface_type: "TCPClientInterface".to_string(),
-                    target_host: Some(host.clone()),
-                    target_port: Some(*port),
+                    target_host: Some(host),
+                    target_port: Some(port),
                     ..Default::default()
                 },
             );
             builder
                 .config(config)
+                .share_instance(false)
+                .discover_interfaces(false)
+        }
+        // As a leaf's, the entry servers as config sections, looked up again
+        // on each reconnect; the screens' server on the listener the caller
+        // bound. Neither discovery nor a shared instance: the phone's
+        // mailbox is a destination on the network, not a transport node.
+        Upstream::Mesh { servers, screens } => {
+            let mut config = leviculum_std::Config::default();
+            for (index, (host, port)) in servers.into_iter().enumerate() {
+                let name = format!("Entry {}", index + 1);
+                config.interfaces.insert(
+                    name.clone(),
+                    leviculum_std::config::InterfaceConfig {
+                        name,
+                        interface_type: "TCPClientInterface".to_string(),
+                        target_host: Some(host),
+                        target_port: Some(port),
+                        ..Default::default()
+                    },
+                );
+            }
+            builder
+                .config(config)
+                .add_tcp_server_listener(screens)
                 .share_instance(false)
                 .discover_interfaces(false)
         }

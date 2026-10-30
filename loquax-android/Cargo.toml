@@ -39,6 +39,8 @@ leviculum-core = { path = "../leviculum-core" }
 leviculum-lxmf = { path = "../leviculum-lxmf", default-features = false, features = ["pow"] }
 leviculum-std = { path = "../leviculum-std" }
 leviculum-ui = { path = "../leviculum-ui", default-features = false }
+# The admission token the phone's own mailbox issues its screens (1152).
+rand_core = { workspace = true, features = ["getrandom"] }
 # The runtime the leaf node and the session's runners run on.
 tokio.workspace = true
 tracing.workspace = true
@@ -55,6 +57,8 @@ jni = { version = "0.22.4", default-features = false }
 tokio = { workspace = true, features = ["full"] }
 rand_core = { workspace = true, features = ["getrandom"] }
 tempfile = "3"
+# The Python LXMF peer's JSON-RPC (loquax/tests/support/python_peer.rs).
+serde_json = "1"
 # The map's golden is a PNG, and its test turns loquax's Rgb565 picture
 # into RGBA as the window does (1128); both in the lock through loquax.
 png = "0.18"
