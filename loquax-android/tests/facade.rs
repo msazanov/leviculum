@@ -841,57 +841,22 @@ async fn imported_history_shows_in_the_live_session_under_its_name() {
     // contact's name.
     let peer = [0x09; 16];
     let peer_hex = loquax::address::to_hex(&peer);
-    {
-        let identity =
-            loquax::identity::load_or_create(&home.path().join("identity")).expect("identity");
-        let address = loquax::engine::delivery_address(&identity).expect("address");
-        let mut store = loquax::store::Store::open_in(home.path(), address).expect("home store");
-        let row = |id: u8, outbound: bool, at: i64, content: &str| loquax::store::ImportRow {
-            id: [id; 32],
-            outbound,
-            timestamp: Some(at as f64),
-            received_at: Some(at),
-            title: Vec::new(),
-            content: content.to_string(),
-            fields: Vec::new(),
-            delivery: None,
-            signature: loquax::ui::Signature::Unverified,
-            origin_verdict: None,
-            held: None,
-        };
-        let entries: Vec<([u8; 32], i64, Vec<u8>)> = [
-            row(0xa1, false, 1_000, "von Ratspeak"),
-            row(0xa2, true, 2_000, "zurueck"),
-        ]
-        .iter()
-        .map(|r| {
-            let at = r.received_at.unwrap_or(0);
-            (
-                r.id,
-                at,
-                loquax::import::archive::entry("ratspeak", &peer, r),
-            )
-        })
-        .collect();
-        assert_eq!(
-            store.archive_imported(&entries, 1 << 20).expect("archive"),
-            2
-        );
-        let names = [(&peer, "Ratte")];
-        assert_eq!(
-            loquax::home::server::archive_petnames(&mut store, names, 3_000, 1 << 20)
-                .expect("the name"),
-            1
-        );
-    }
+    import_ratspeak(home.path(), &peer);
 
     tokio::task::spawn_blocking(move || {
+        // The rows and the name are two commits: a pull between them lists
+        // the conversation unnamed, and the name comes with the wake the
+        // daemon sends for the second (1164).
         pulled(&session, "the pull after the import");
         let list: schema::Conversations = wait_for(
             &session,
             schema::Query::Conversations,
             20,
-            |c: &schema::Conversations| c.conversations.iter().any(|row| row.peer == peer_hex),
+            |c: &schema::Conversations| {
+                c.conversations
+                    .iter()
+                    .any(|row| row.peer == peer_hex && row.name.starts_with("Ratte"))
+            },
         );
         let row = list
             .conversations
@@ -979,29 +944,25 @@ async fn a_nomadnet_import_on_the_mailbox_shows_in_the_live_session_with_its_blo
     assert_eq!(report.blocks_archived, Some(1));
 
     tokio::task::spawn_blocking(move || {
-        // The start's pulls (on open, the one asked for, the watch coming
-        // up) are serialised, and one may still run while the import
-        // writes: it takes the entries committed by then, the name and the
-        // block, and the history appended a moment later waits for the next
-        // pull, which the import, outside the daemon, wakes nobody for. So
-        // the test pulls until the conversation is listed, three at most.
-        let listed = |session: &Session| -> schema::Conversations {
-            rmp_serde::from_slice(&session.query(schema::Query::Conversations).expect("list"))
-                .expect("decode")
-        };
-        let mut list = listed(&session);
-        for _ in 0..3 {
-            if list.conversations.iter().any(|row| row.peer == peer_hex) {
-                break;
-            }
-            pulled(&session, "the pull after the import");
-            list = listed(&session);
-        }
+        // A pull of the start may still run while the import writes and
+        // take only part of it; the daemon sees the rest written beside it
+        // and wakes the session for it (1164). One pull, then wait.
+        pulled(&session, "the pull after the import");
+        let list: schema::Conversations = wait_for(
+            &session,
+            schema::Query::Conversations,
+            20,
+            |c: &schema::Conversations| {
+                c.conversations
+                    .iter()
+                    .any(|row| row.peer == peer_hex && row.name.starts_with(nomadnet_tree::NAME))
+            },
+        );
         let row = list
             .conversations
             .iter()
             .find(|row| row.peer == peer_hex)
-            .unwrap_or_else(|| panic!("never listed: {list:?}"));
+            .expect("listed");
         assert!(row.name.starts_with(nomadnet_tree::NAME), "{row:?}");
         assert_eq!(row.last, nomadnet_tree::RECEIVED);
         let messages: schema::Messages = rmp_serde::from_slice(
@@ -1028,6 +989,140 @@ async fn a_nomadnet_import_on_the_mailbox_shows_in_the_live_session_with_its_blo
     .expect("the imported history");
     node.kill().await;
 }
+
+/// What `loquax import` of a Ratspeak history writes on the mailbox, on a
+/// store connection of its own as the import's process has: two rows of
+/// one conversation with `peer`, and the contact's name "Ratte".
+fn import_ratspeak(home: &Path, peer: &[u8; 16]) {
+    let identity = loquax::identity::load_or_create(&home.join("identity")).expect("identity");
+    let address = loquax::engine::delivery_address(&identity).expect("address");
+    let mut store = loquax::store::Store::open_in(home, address).expect("home store");
+    let row = |id: u8, outbound: bool, at: i64, content: &str| loquax::store::ImportRow {
+        id: [id; 32],
+        outbound,
+        timestamp: Some(at as f64),
+        received_at: Some(at),
+        title: Vec::new(),
+        content: content.to_string(),
+        fields: Vec::new(),
+        delivery: None,
+        signature: loquax::ui::Signature::Unverified,
+        origin_verdict: None,
+        held: None,
+    };
+    let entries: Vec<([u8; 32], i64, Vec<u8>)> = [
+        row(0xa1, false, 1_000, "von Ratspeak"),
+        row(0xa2, true, 2_000, "zurueck"),
+    ]
+    .iter()
+    .map(|r| {
+        let at = r.received_at.unwrap_or(0);
+        (
+            r.id,
+            at,
+            loquax::import::archive::entry("ratspeak", peer, r),
+        )
+    })
+    .collect();
+    assert_eq!(
+        store.archive_imported(&entries, 1 << 20).expect("archive"),
+        2
+    );
+    let names = [(peer, "Ratte")];
+    assert_eq!(
+        loquax::home::server::archive_petnames(&mut store, names, 3_000, 1 << 20)
+            .expect("the name"),
+        1
+    );
+}
+
+/// 1164: an import on the running mailbox runs outside its daemon, on a
+/// store connection of its own. A phone that only watches, its one pull on
+/// open done and its watching link up, asks for nothing more: the daemon
+/// sees the archive move under it within a second, wakes the phone, and
+/// the phone's wake pulls list the imported conversation under its name,
+/// the name being a commit of its own.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_import_beside_the_running_mailbox_wakes_a_phone_that_only_watches() {
+    let instance = instance();
+    let rns = tempfile::tempdir().expect("transport config dir");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+    let port = listener.local_addr().expect("its address").port();
+    let home = tempfile::tempdir().expect("home node dir");
+    let code = admit(home.path());
+    let node = HomeNode::start(listener, &instance, rns.path(), home.path()).await;
+
+    let phone = tempfile::tempdir().expect("app dir");
+    let first = Start {
+        dir: phone.path().display().to_string(),
+        server: Some(format!("127.0.0.1:{port}")),
+        code: Some(code),
+        name: Some("Pixel".to_string()),
+        offset: 0,
+        ..Start::default()
+    };
+    let session = tokio::task::spawn_blocking(move || {
+        let session = Session::start(&first).unwrap_or_else(|error| panic!("{error:?}"));
+        session.request(Request::Pull).expect("pull");
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            match session.next_event(Duration::from_millis(500)) {
+                Some(Event::Sync { state, .. }) if state == "done" => break,
+                Some(Event::Sync { state, detail, .. }) if state == "failed" => {
+                    panic!("the pull on open failed: {detail}")
+                }
+                _ => assert!(std::time::Instant::now() < deadline, "no pull ended"),
+            }
+        }
+        // The start's other pulls end and the watching link comes up.
+        let settled = std::time::Instant::now() + Duration::from_secs(3);
+        while std::time::Instant::now() < settled {
+            let _ = session.next_event(Duration::from_millis(100));
+        }
+        session
+    })
+    .await
+    .expect("the session");
+
+    let peer = [0x0b; 16];
+    let peer_hex = loquax::address::to_hex(&peer);
+    import_ratspeak(home.path(), &peer);
+    let imported_at = std::time::Instant::now();
+
+    tokio::task::spawn_blocking(move || {
+        let list: schema::Conversations = wait_for(
+            &session,
+            schema::Query::Conversations,
+            WAKE_BOUND_SECS,
+            |c: &schema::Conversations| {
+                c.conversations
+                    .iter()
+                    .any(|row| row.peer == peer_hex && row.name.starts_with("Ratte"))
+            },
+        );
+        eprintln!(
+            "WAKE phone lists the import {} ms after it committed",
+            imported_at.elapsed().as_millis()
+        );
+        let row = list
+            .conversations
+            .iter()
+            .find(|row| row.peer == peer_hex)
+            .expect("listed");
+        assert!(row.name.starts_with("Ratte"), "{row:?}");
+        assert_eq!(row.last, "zurueck");
+        session.stop();
+    })
+    .await
+    .expect("the woken pull");
+    node.kill().await;
+}
+
+/// How long a phone that only watches may wait for what another process
+/// wrote on the mailbox: the daemon's look at the store (a second), the
+/// wake's spacing (half a second), and the pull over the loopback, with
+/// room for a loaded test host.
+const WAKE_BOUND_SECS: u64 = 5;
 
 /// A shared-instance name of this test process's own.
 fn instance() -> String {

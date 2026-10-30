@@ -178,6 +178,17 @@ schedule, fifteen minutes by default.
   once, the rest of the burst is one more wake 500 ms after it, per link
   (`loquax::home::wake`). A link whose device was revoked since is closed
   instead; one that is gone is forgotten.
+- **An append by another process wakes too** (1164). `loquax import` on
+  the mailbox, or any other local tool, writes the store on a connection
+  of its own, beside the running home node. The home node reads SQLite's
+  `data_version` once a second (`daemon::OUTSIDE_LOOK`,
+  `Store::data_version`): it moves for another connection's commit and
+  never for the home node's own. When it moved, the archive's newest
+  sequence of every kind is what the watching links are woken for, names
+  and blocks included, since on the mailbox no device has them yet. A
+  device that only watches therefore has an import within about a second
+  plus its pull. A look is the file's shared lock and a read of its
+  header, 7 µs on the build host, so an idle mailbox pays 7 µs a second.
 - **The client pulls on a wake past its cursor**, with the `/sync` above
   on a link of its own; the phone notifies as for any pull. A wake older
   than the cursor pulls nothing.
@@ -427,6 +438,12 @@ too, and checks them when the key comes.
   before 1162 finds a version 2 entry of another shape, says `HOME pull:
   an imported entry of another shape` in its log and passes it by.
   `loquax fetch` keeps no history and passes them by too.
+- **A running mailbox wakes its devices for an import** (1164, "The
+  wake"): the import's commits move the store's data version, so a phone
+  with the app closed, which only watches, pulls the history, the names
+  and the blocks without anything else making it pull. The import is
+  several commits; a pull between two of them brings the rest on the next
+  wake.
 
 ## The archive
 

@@ -1368,6 +1368,18 @@ impl Store {
         Ok(newest.map_or(0, |seq| seq as u64))
     }
 
+    /// SQLite's `data_version` of this connection: it moves when another
+    /// connection, in this process or another, committed to the file since
+    /// the last read, and never for this connection's own writes. The home
+    /// node reads it to learn of an archive append by `loquax import` or
+    /// another local tool (1164). One read takes the file's shared lock and
+    /// reads its header: no table is touched.
+    pub fn data_version(&self) -> Result<i64, StoreError> {
+        self.conn
+            .query_row("PRAGMA data_version", [], |row| row.get(0))
+            .map_err(|e| self.failed(e))
+    }
+
     /// The peers the archive and the outbox hold a conversation with: the
     /// source of each received message, the destination of each sent one
     /// and of each message a client handed in. The home node archives the
@@ -2504,6 +2516,26 @@ mod tests {
         store
             .write(&[StoreWrite::Message { peer, message }])
             .expect("write");
+    }
+
+    /// 1164: the data version moves for another connection's commit, an
+    /// import's, and not for this connection's own append.
+    #[test]
+    fn the_data_version_moves_for_another_connections_commit_only() {
+        let home = tempfile::tempdir().expect("home");
+        let mut daemon = Store::open_in(home.path(), US).expect("open");
+        let before = daemon.data_version().expect("version");
+        daemon
+            .archive_append(crate::home::KIND_RECEIVED, &[1; 32], b"own", 1, 1 << 20)
+            .expect("own append");
+        assert_eq!(daemon.data_version().expect("version"), before);
+        let mut import = Store::open_in(home.path(), US).expect("a second connection");
+        import
+            .archive_append(crate::home::KIND_RECEIVED, &[2; 32], b"theirs", 2, 1 << 20)
+            .expect("their append");
+        let after = daemon.data_version().expect("version");
+        assert_ne!(after, before);
+        assert_eq!(daemon.data_version().expect("version"), after);
     }
 
     #[test]
