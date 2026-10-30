@@ -372,7 +372,7 @@ pub fn save(home: &std::path::Path, key: &str, value: &str) -> std::io::Result<(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(error) => return Err(error),
     };
-    std::fs::create_dir_all(home)?;
+    leviculum_std::create_secret_dir_all(home)?;
     let next = home.join(alloc::format!(".{CONFIG_FILE}.new"));
     std::fs::write(&next, set(&text, key, value))?;
     std::fs::rename(&next, &path)

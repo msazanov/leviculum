@@ -139,7 +139,7 @@ fn free_name(dir: &Path, name: &str) -> PathBuf {
 /// the directory is made.
 pub fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let dir = path.parent().unwrap_or(Path::new("."));
-    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    leviculum_std::create_secret_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     leviculum_std::atomic_write_secret(path, bytes).map_err(|e| format!("{}: {e}", path.display()))
 }
 

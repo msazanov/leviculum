@@ -521,7 +521,7 @@ fn contacts(
         }
         report.contacts_new += 1;
         if !dry_run {
-            std::fs::create_dir_all(home).map_err(|e| ImportError::new(home, e))?;
+            leviculum_std::create_secret_dir_all(home).map_err(|e| ImportError::new(home, e))?;
             save_contact(home, &merged).map_err(|e| ImportError::new(home, e))?;
         }
     }
@@ -556,7 +556,7 @@ fn history(
     let mut store = match dry_run {
         true => None,
         false => {
-            std::fs::create_dir_all(home).map_err(|e| ImportError::new(home, e))?;
+            leviculum_std::create_secret_dir_all(home).map_err(|e| ImportError::new(home, e))?;
             Some(Store::open_in(home, address).map_err(store_error)?)
         }
     };

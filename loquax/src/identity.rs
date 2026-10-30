@@ -63,7 +63,22 @@ impl std::error::Error for IdentityError {}
 
 /// `${LNMSG_HOME:-${XDG_CONFIG_HOME:-~/.config}/loquax}`: identity and node
 /// storage, in one directory, the way `lnomad` keeps its own.
+///
+/// Made here when it is missing, owner only (0700) like any directory that
+/// holds a private key, so no file opened in it has to make it first. A
+/// first `loquax send` took the delivery lock in a home nobody had made
+/// yet and failed on it before it sent (1141). Runs after
+/// [`migrate_legacy_home`], which leaves an existing new directory alone.
 pub fn home_dir() -> Result<PathBuf, IdentityError> {
+    let home = home_path()?;
+    leviculum_std::create_secret_dir_all(&home).map_err(|e| IdentityError::Io(home.clone(), e))?;
+    Ok(home)
+}
+
+/// Where [`home_dir`] is, without making it: for the commands that only
+/// look (`import --dry-run` writes nothing, not even the directory) and
+/// make what they write themselves.
+pub fn home_path() -> Result<PathBuf, IdentityError> {
     if let Some(explicit) = std::env::var_os(HOME_ENV)
         .map(PathBuf::from)
         .filter(|p| !p.as_os_str().is_empty())
@@ -166,7 +181,8 @@ fn mint(path: &Path) -> Result<Identity, IdentityError> {
     let identity = leviculum_std::generate_identity();
     let encoded = encode_identity(&identity).ok_or(IdentityError::NotStorable)?;
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| IdentityError::Io(parent.to_owned(), e))?;
+        leviculum_std::create_secret_dir_all(parent)
+            .map_err(|e| IdentityError::Io(parent.to_owned(), e))?;
     }
     leviculum_std::atomic_write_secret(path, &encoded)
         .map_err(|e| IdentityError::Io(path.to_owned(), e))?;
@@ -235,14 +251,14 @@ mod tests {
         let previous_home = std::env::var_os(HOME_ENV);
         std::env::set_var(HOME_ENV, "/tmp/loquax-home-test");
         assert_eq!(
-            home_dir().expect("explicit home"),
+            home_path().expect("explicit home"),
             PathBuf::from("/tmp/loquax-home-test")
         );
         std::env::set_var(HOME_ENV, "");
         let xdg = std::env::var_os("XDG_CONFIG_HOME");
         std::env::set_var("XDG_CONFIG_HOME", "/tmp/loquax-xdg-test");
         assert_eq!(
-            home_dir().expect("xdg home"),
+            home_path().expect("xdg home"),
             PathBuf::from("/tmp/loquax-xdg-test/loquax")
         );
         match xdg {

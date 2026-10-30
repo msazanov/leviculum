@@ -585,3 +585,37 @@ fn config_is_taken_before_and_after_the_subcommand() {
         }
     }
 }
+
+/// A first `loquax send` or `loquax fetch` on a machine with no loquax home
+/// yet: the home is made, owner only, before anything opens a file in it.
+/// Both took the delivery lock in a directory nobody had made and failed
+/// with `delivery.lock: No such file or directory` before they sent (the
+/// nightly of 2026-10-30, four regression cells, 1141).
+#[cfg(unix)]
+#[test]
+fn a_first_send_or_fetch_makes_the_home_before_it_takes_the_lock() {
+    let instance = format!("loquax-nothing-here-{}", std::process::id());
+    for args in [
+        vec!["send", NOWHERE, "body", "--instance", &instance],
+        vec!["fetch", "--instance", &instance],
+    ] {
+        let parent = tempfile::tempdir().expect("parent");
+        let home = parent.path().join("loquax");
+        let output = Command::new("sh")
+            .args(["-c", "umask 0002 && exec \"$0\" \"$@\"", LNMSG])
+            .args(&args)
+            .env("LNMSG_HOME", &home)
+            .env_remove("LEVICULUM_EVENT_LOG")
+            .stdin(Stdio::null())
+            .output()
+            .expect("run loquax");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "{args:?}: {stderr}");
+        assert!(
+            !stderr.contains("delivery.lock"),
+            "{args:?} failed on the lock, not on the missing daemon: {stderr}"
+        );
+        assert!(stderr.contains(&instance), "{args:?}: {stderr}");
+        assert_eq!(mode(&home), 0o700, "{args:?}");
+    }
+}

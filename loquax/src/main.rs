@@ -732,7 +732,7 @@ async fn run_tui(args: TuiArgs) -> ExitCode {
 #[cfg(feature = "history")]
 fn run_import(args: ImportArgs) -> ExitCode {
     use loquax::import;
-    let home = match identity::home_dir() {
+    let home = match identity::home_path() {
         Ok(home) => home,
         Err(error) => return failure(error, "no-home"),
     };
@@ -801,7 +801,7 @@ fn run_import(args: ImportArgs) -> ExitCode {
 /// `loquax export <dir>`.
 #[cfg(feature = "history")]
 fn run_export(dir: &Path) -> ExitCode {
-    let home = match identity::home_dir() {
+    let home = match identity::home_path() {
         Ok(home) => home,
         Err(error) => return failure(error, "no-home"),
     };
@@ -828,7 +828,7 @@ fn run_export(dir: &Path) -> ExitCode {
 #[cfg(feature = "tui")]
 fn first_start_import() {
     use std::io::IsTerminal;
-    let Ok(home) = identity::home_dir() else {
+    let Ok(home) = identity::home_path() else {
         return;
     };
     if !loquax::import::first_start(&home) || !std::io::stdin().is_terminal() {
