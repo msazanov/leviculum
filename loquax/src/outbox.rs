@@ -152,6 +152,13 @@ pub enum Command {
         destination: [u8; 16],
         petname: Option<String>,
     },
+    /// On a client: the reader's word on a peer one of the home's devices
+    /// set, pulled from the archive (1146); reported as
+    /// [`OutboxEvent::HomePeerState`].
+    HomePeerState {
+        destination: [u8; 16],
+        state: crate::home::wire::PeerState,
+    },
 }
 
 /// What the mailbox rule is fed from, read by the frontend before it selects:
@@ -207,6 +214,12 @@ pub enum OutboxEvent {
     HomePetname {
         destination: [u8; 16],
         petname: Option<String>,
+    },
+    /// The reader's word on a peer, set on one of the home's devices
+    /// ([`Command::HomePeerState`]).
+    HomePeerState {
+        destination: [u8; 16],
+        state: crate::home::wire::PeerState,
     },
     /// The message left the router's outbound queue, which the router does
     /// only in a terminal state (`leviculum-lxmf/src/router.rs:771-773`).

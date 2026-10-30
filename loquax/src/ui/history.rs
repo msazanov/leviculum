@@ -43,11 +43,22 @@ pub const LOAD_WINDOW: usize = 200;
 /// The ledger line of a send the restart cut off.
 pub const RESTARTED: &str = "loquax restarted: no longer being sent";
 
+/// What a conversation keeps of the reader's word besides its pin (1146):
+/// muted until when, archived, and the peer's identity verified in person.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Flags {
+    /// Unix seconds the mute ends, `i64::MAX` for always.
+    pub muted_until: Option<i64>,
+    pub archived: bool,
+    pub verified: bool,
+}
+
 /// One conversation as the store hands it back at start.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Restored {
     pub peer: [u8; 16],
     pub pinned: bool,
+    pub flags: Flags,
     /// Received messages not yet looked at when loquax ended.
     pub unread: usize,
     /// The newest [`LOAD_WINDOW`] messages, oldest first.
@@ -66,6 +77,7 @@ pub enum StoreWrite {
         peer: [u8; 16],
         pinned: bool,
         unread: usize,
+        flags: Flags,
     },
     /// Delete the message with this key from the device.
     ForgetMessage { key: u64 },
@@ -134,13 +146,14 @@ impl<B> UiModel<B> {
         let listed = !self.conversations.is_empty();
         let now = self.now;
         for stored in restored {
-            if stored.messages.is_empty() && !stored.pinned {
+            if stored.messages.is_empty() && !stored.pinned && stored.flags == Flags::default() {
                 continue;
             }
             let index = self.conversation(stored.peer);
             let conversation = &mut self.conversations[index];
             conversation.messages = stored.messages;
             conversation.pinned = stored.pinned;
+            conversation.flags = stored.flags;
             conversation.earlier = stored.earlier;
             conversation.unread = stored.unread;
             let len = conversation.messages.len();
@@ -202,6 +215,7 @@ impl<B> UiModel<B> {
                     peer,
                     pinned: c.pinned,
                     unread: c.unread,
+                    flags: c.flags,
                 });
             }
         }
@@ -406,7 +420,7 @@ impl<B> UiModel<B> {
         }
         match confirm {
             Confirm::Message { peer, key } => self.delete_message(peer, key),
-            Confirm::Conversation { peer } => self.delete_conversation(peer),
+            Confirm::Conversation { peer } => self.delete_conversation(peer, true),
         }
     }
 
@@ -563,14 +577,16 @@ impl<B> UiModel<B> {
         Some(id)
     }
 
-    /// Delete a conversation and its messages from the device.
-    pub(super) fn delete_conversation(&mut self, peer: [u8; 16]) {
+    /// Delete a conversation and its messages from the device, and on a
+    /// client of a home node from every device of the home when
+    /// `everywhere`.
+    pub(super) fn delete_conversation(&mut self, peer: [u8; 16], everywhere: bool) {
         let Some(c) = self.conversations.iter().position(|c| c.peer == peer) else {
             return;
         };
         let label = self.names.label(&peer);
         let removed = self.conversations.remove(c);
-        let everywhere = self.home_client;
+        let everywhere = everywhere && self.home_client;
         if everywhere {
             let ids = removed.messages.iter().filter_map(|m| m.id).collect();
             self.mark_out(MarkFlag::Deleted, ids);
@@ -618,20 +634,23 @@ impl<B> UiModel<B> {
 
     /// The palette's `pin`: the open conversation goes above the rule, or
     /// back below it.
-    pub(super) fn toggle_pin(&mut self) {
-        let Some(conversation) = self.conversations.get_mut(self.selected) else {
+    /// On a client of a home node the pin reaches the home's other devices
+    /// (1146).
+    pub(super) fn toggle_pin(&mut self) -> Vec<UiEffect> {
+        let Some(peer) = self.conversations.get(self.selected).map(|c| c.peer) else {
             self.toast(ToastKind::Info, "no conversation here".to_string());
-            return;
+            return Vec::new();
         };
-        conversation.pinned = !conversation.pinned;
-        let (pinned, peer) = (conversation.pinned, conversation.peer);
-        self.changed_peers.insert(peer);
+        let mut state = self.peer_state(&peer);
+        state.pinned = !state.pinned;
+        let effects = self.set_peer_state(peer, state);
         let label = self.names.label(&peer);
-        let text = match pinned {
+        let text = match state.pinned {
             true => format!("pinned {label}"),
             false => format!("unpinned {label}"),
         };
         self.toast(ToastKind::Info, text);
+        effects
     }
 
     /// The store's search answer, kept while the field still asks it.

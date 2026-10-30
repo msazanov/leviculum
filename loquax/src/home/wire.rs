@@ -427,6 +427,58 @@ pub fn read_petname_entry(
     Ok((peer, Some(name).filter(|name| !name.is_empty())))
 }
 
+/// The reader's word on a peer and its conversation that every device of
+/// the home shares (1146): blocked, pinned, archived, and muted until a
+/// time. Sent whole each time one of them changes, so the newest entry of
+/// a peer is all there is to know.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PeerState {
+    pub blocked: bool,
+    pub pinned: bool,
+    pub archived: bool,
+    /// Unix seconds the mute ends, `i64::MAX` for always; `None` unmuted.
+    pub muted_until: Option<i64>,
+}
+
+/// A peer state entry's bytes, which a `/peerstate` request carries as
+/// they are: the peer's address and its [`PeerState`], muted until 0 for
+/// unmuted. Begins as a name entry ([`name_entry_prefix`] finds a peer's).
+pub fn peer_state_entry(peer: &[u8; 16], state: &PeerState) -> Vec<u8> {
+    let mut out = name_entry_prefix(peer);
+    msgpack::array(&mut out, 4);
+    msgpack::bool(&mut out, state.blocked);
+    msgpack::bool(&mut out, state.pinned);
+    msgpack::bool(&mut out, state.archived);
+    msgpack::int(&mut out, state.muted_until.unwrap_or(0));
+    out
+}
+
+/// A peer state entry or request. Later fields a newer client adds are
+/// passed over.
+pub fn read_peer_state_entry(data: &[u8]) -> Result<([u8; 16], PeerState), Malformed> {
+    let mut p = 0;
+    if msgpack::array_len(data, &mut p)? != 2 {
+        return Err(Malformed);
+    }
+    let peer = <[u8; 16]>::try_from(msgpack::read_bin(data, &mut p)?).map_err(|_| Malformed)?;
+    if msgpack::array_len(data, &mut p)? < 4 {
+        return Err(Malformed);
+    }
+    let blocked = msgpack::read_bool(data, &mut p)?;
+    let pinned = msgpack::read_bool(data, &mut p)?;
+    let archived = msgpack::read_bool(data, &mut p)?;
+    let muted_until = Some(msgpack::read_int(data, &mut p)?).filter(|&until| until > 0);
+    Ok((
+        peer,
+        PeerState {
+            blocked,
+            pinned,
+            archived,
+            muted_until,
+        },
+    ))
+}
+
 /// A `/send` answer: the message id, or the status that refused it.
 pub fn read_send_answer(data: &[u8]) -> Result<Result<[u8; 32], Status>, Malformed> {
     let status = read_status(data)?;
@@ -501,6 +553,34 @@ mod tests {
             ids: alloc::vec![[1; 32]],
         };
         assert_eq!(read_name_entry(&mark_request(&mark)), Err(Malformed));
+    }
+
+    /// 1146: a peer state round trips, unmuted as 0, and it is no name.
+    #[test]
+    fn a_peer_state_entry_round_trips() {
+        for state in [
+            PeerState::default(),
+            PeerState {
+                blocked: true,
+                pinned: false,
+                archived: true,
+                muted_until: Some(i64::MAX),
+            },
+            PeerState {
+                pinned: true,
+                muted_until: Some(1_800_000_000),
+                ..PeerState::default()
+            },
+        ] {
+            let data = peer_state_entry(&[9; 16], &state);
+            assert!(data.starts_with(&name_entry_prefix(&[9; 16])));
+            assert_eq!(read_peer_state_entry(&data), Ok(([9; 16], state)));
+            assert_eq!(read_name_entry(&data), Err(Malformed));
+        }
+        assert_eq!(
+            read_peer_state_entry(&name_entry(&[9; 16], "x")),
+            Err(Malformed)
+        );
     }
 
     #[test]

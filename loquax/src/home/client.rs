@@ -169,6 +169,28 @@ pub async fn petname(
     ask_retrying(node, public_key, device, super::PETNAME_PATH, &data, budget).await
 }
 
+/// Hand the home node the reader's word on `peer` (1146), asked again as a
+/// petname is: the home node keeps the newest.
+pub async fn peer_state(
+    node: &ReticulumNode,
+    public_key: &[u8; 64],
+    device: &Identity,
+    peer: &[u8; 16],
+    state: &wire::PeerState,
+    budget: Duration,
+) -> Result<(), HomeError> {
+    let data = wire::peer_state_entry(peer, state);
+    ask_retrying(
+        node,
+        public_key,
+        device,
+        super::PEERSTATE_PATH,
+        &data,
+        budget,
+    )
+    .await
+}
+
 /// One request whose answer is a status, on a link of its own, asked again
 /// up to three times when the answer was lost: for requests the home node
 /// keeps once however often they come.
@@ -499,6 +521,15 @@ async fn take_in(
             }
             continue;
         }
+        if entry.kind == super::KIND_PEERSTATE {
+            match wire::read_peer_state_entry(&entry.packed) {
+                Ok((destination, state)) => outbox
+                    .submit(Command::HomePeerState { destination, state })
+                    .map_err(gone)?,
+                Err(_) => tracing::warn!("HOME pull: entry {} is no peer state", entry.seq),
+            }
+            continue;
+        }
         if entry.kind == super::KIND_NAME {
             match wire::read_name_entry(&entry.packed) {
                 Ok((destination, name)) => {
@@ -705,7 +736,7 @@ mod tests {
 
     /// A sent entry goes to the engine whole, for a bubble on a device that
     /// does not have one; a mark goes as the mark, a heard name as the name,
-    /// a petname as the petname (1139);
+    /// a petname as the petname (1139), a peer state as the state (1146);
     /// one that does not decode is passed over and still counted into the
     /// cursor.
     #[tokio::test]
@@ -726,6 +757,10 @@ mod tests {
         let mark = wire::Mark {
             flag: wire::MarkFlag::Read,
             ids: vec![[6; 32]],
+        };
+        let blocked = wire::PeerState {
+            blocked: true,
+            ..wire::PeerState::default()
         };
         let pulled = Pulled {
             entries: vec![
@@ -749,16 +784,21 @@ mod tests {
                     wire::petname_entry(&[4; 16], None),
                 ),
                 entry(8, super::super::KIND_PETNAME, vec![0x90]),
+                entry(
+                    9,
+                    super::super::KIND_PEERSTATE,
+                    wire::peer_state_entry(&[5; 16], &blocked),
+                ),
             ],
             first: 1,
         };
-        let mut outbox = FakeOutbox::new(vec![OutboxEvent::Fenced { token: 8 }]);
+        let mut outbox = FakeOutbox::new(vec![OutboxEvent::Fenced { token: 9 }]);
         let pull = take_in(&mut outbox, 0, pulled).await.expect("pull");
-        assert_eq!(pull.cursor, Some(8));
+        assert_eq!(pull.cursor, Some(9));
         assert_eq!(pull.sent, [(message.message_id, super::super::KIND_SENT)]);
         // 1136: the user's own sent message, a mark, a name and a petname
         // are entries, and none of them is a new message or a state change.
-        assert_eq!((pull.entries, pull.messages(), pull.states()), (8, 0, 0));
+        assert_eq!((pull.entries, pull.messages(), pull.states()), (9, 0, 0));
         assert_eq!(pull.names, [([5; 16], "Reviewer Berlin".to_string())]);
         assert_eq!(
             *outbox.commands.borrow(),
@@ -779,7 +819,11 @@ mod tests {
                     destination: [4; 16],
                     petname: None
                 },
-                Command::Fence { token: 8 },
+                Command::HomePeerState {
+                    destination: [5; 16],
+                    state: blocked
+                },
+                Command::Fence { token: 9 },
             ]
         );
     }

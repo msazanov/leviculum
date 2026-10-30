@@ -367,6 +367,7 @@ impl Shell {
     fn persist(&mut self) {
         self.hand_marks();
         self.hand_petnames();
+        self.hand_peer_states();
         let writes = self.model.take_writes();
         if let Err(error) = self.store.write(&writes) {
             loquax::events::store_failed(&error.to_string());
@@ -395,6 +396,23 @@ impl Shell {
         let budget = self.context.timeout;
         self.mark_tasks.push(tokio::spawn(runner::hand_petnames(
             client, petnames, budget,
+        )));
+    }
+
+    /// The peer states the reader set (1146), handed to the home node as
+    /// petnames are.
+    fn hand_peer_states(&mut self) {
+        let states = self.model.take_peer_states();
+        let Some(client) = self.context.client.clone() else {
+            return;
+        };
+        if states.is_empty() {
+            return;
+        }
+        self.mark_tasks.retain(|task| !task.is_finished());
+        let budget = self.context.timeout;
+        self.mark_tasks.push(tokio::spawn(runner::hand_peer_states(
+            client, states, budget,
         )));
     }
 

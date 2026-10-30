@@ -70,6 +70,12 @@ pub const MARK_PATH: &str = "/mark";
 /// pull, so the reader's name for a peer is the same on each device.
 pub const PETNAME_PATH: &str = "/petname";
 
+/// A client's word on a peer and its conversation (1146): the peer and its
+/// [`wire::PeerState`] in, a status out. Kept as an archive entry
+/// ([`KIND_PEERSTATE`]) as a petname is, so every device of the home blocks,
+/// pins, archives and mutes the same people.
+pub const PEERSTATE_PATH: &str = "/peerstate";
+
 /// A client keeps its link: the cursor in, the newest sequence out, and a
 /// wake over the same link whenever the archive grows ([`wire::wake`]).
 /// A home node from before it answers nothing, and its clients pull on
@@ -106,6 +112,10 @@ pub const KIND_NAME: u8 = 7;
 /// ([`wire::petname_entry`]). Only a peer's newest is kept, and like a name
 /// it wakes nobody: it rides along with the next pull.
 pub const KIND_PETNAME: u8 = 8;
+/// A client's `/peerstate`: its bytes are the request as the client sent
+/// it ([`wire::peer_state_entry`]). Only a peer's newest is kept, and it
+/// wakes nobody, as a petname does.
+pub const KIND_PEERSTATE: u8 = 9;
 
 /// What a client shows for a state entry of a message it sent through the
 /// home node: the router state its bubble takes, `None` for an entry that

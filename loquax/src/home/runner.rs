@@ -176,6 +176,31 @@ pub async fn hand_petnames(
     }
 }
 
+/// The peer states a fold set, handed to the home node in order (1146), as
+/// petnames are.
+pub async fn hand_peer_states(
+    client: HomeClient,
+    states: Vec<([u8; 16], super::wire::PeerState)>,
+    budget: Duration,
+) {
+    for (peer, state) in states {
+        let outcome = super::client::peer_state(
+            &client.node,
+            &client.public_key,
+            &client.device,
+            &peer,
+            &state,
+            budget,
+        )
+        .await;
+        let peer = crate::address::to_hex(&peer);
+        match outcome {
+            Ok(()) => tracing::info!("HOME peerstate peer={peer}"),
+            Err(error) => tracing::warn!("HOME peerstate peer={peer} not taken: {error}"),
+        }
+    }
+}
+
 /// A received message the store already holds, which the screen drops
 /// before it folds: the mailbox copy of one that came directly, perhaps
 /// before a restart and below the window the screen loaded. A store that

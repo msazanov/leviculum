@@ -655,7 +655,8 @@ impl Engine {
                 | Command::HomeSent { .. }
                 | Command::HomeMark { .. }
                 | Command::HomeName { .. }
-                | Command::HomePetname { .. } => {}
+                | Command::HomePetname { .. }
+                | Command::HomePeerState { .. } => {}
             }
         }
     }
@@ -842,6 +843,9 @@ impl Engine {
                     destination,
                     petname,
                 }),
+                Command::HomePeerState { destination, state } => {
+                    self.emit(OutboxEvent::HomePeerState { destination, state })
+                }
                 Command::Fetch { .. } => self.emit(OutboxEvent::SyncFailed {
                     detail: "a client of a home node pulls from the home node, not a \
                              propagation node"

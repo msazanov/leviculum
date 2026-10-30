@@ -140,6 +140,7 @@ pub mod map;
 pub mod reactions;
 pub mod replies;
 pub mod search;
+pub mod state;
 
 /// How many ticks a toast stays up. The shell ticks every 250 ms, so three
 /// seconds.
@@ -409,6 +410,8 @@ pub struct Conversation {
     /// Pinned above the list's rule (the palette's `pin`), kept in the
     /// store.
     pub pinned: bool,
+    /// Muted, archived, verified (1146), kept in the store.
+    pub flags: history::Flags,
     /// How many older messages the store holds than the screen loaded: the
     /// top of the pane says so, and reaching it loads the next page.
     pub earlier: usize,
@@ -433,6 +436,7 @@ impl Conversation {
             activity: 0,
             notes: Vec::new(),
             pinned: false,
+            flags: history::Flags::default(),
             earlier: 0,
         }
     }
@@ -594,6 +598,9 @@ pub struct UiModel<B> {
     /// The palette's `blocked` view: the list holds the blocked
     /// conversations instead of the others.
     pub show_blocked: bool,
+    /// The archived view (1146): the list holds the archived conversations
+    /// instead of the others.
+    pub show_archived: bool,
     /// Messages a fold changed, by conversation and key, for the store
     /// ([`UiModel::take_writes`]).
     changed: BTreeSet<([u8; 16], u64)>,
@@ -615,6 +622,9 @@ pub struct UiModel<B> {
     /// Petnames for the home node, in the order they were set
     /// ([`UiModel::take_petnames`]).
     petnames: Vec<([u8; 16], Option<String>)>,
+    /// Peer states for the home node, in the order they were set
+    /// ([`UiModel::take_peer_states`]).
+    peer_states: Vec<([u8; 16], crate::home::wire::PeerState)>,
     /// A pull a send or a wake asked for while one was running, with its
     /// reason: started when that one ends, since it may have begun before
     /// the home node had the message.
@@ -711,6 +721,7 @@ impl<B: InputBuffer + Default> UiModel<B> {
             search: None,
             names: Names::default(),
             show_blocked: false,
+            show_archived: false,
             changed: BTreeSet::new(),
             changed_peers: BTreeSet::new(),
             forgotten: Vec::new(),
@@ -718,6 +729,7 @@ impl<B: InputBuffer + Default> UiModel<B> {
             list_apart: false,
             marks: Vec::new(),
             petnames: Vec::new(),
+            peer_states: Vec::new(),
             pull_owed: None,
             confirm: None,
             reveal_pending: None,
@@ -893,8 +905,12 @@ impl<B> UiModel<B> {
     /// one after, in the order they came. Only those the list shows
     /// ([`UiModel::shows`]): a blocked peer's outside the `blocked` view.
     pub fn order(&self) -> Vec<usize> {
+        // The blocked view lists the blocked, archived or not.
         let mut order: Vec<usize> = (0..self.conversations.len())
-            .filter(|&i| self.shows(&self.conversations[i].peer))
+            .filter(|&i| {
+                let c = &self.conversations[i];
+                self.shows(&c.peer) && (self.show_blocked || c.flags.archived == self.show_archived)
+            })
             .collect();
         order.sort_by_key(|&i| {
             let c = &self.conversations[i];
@@ -1078,6 +1094,21 @@ pub enum UiEvent {
     /// as the palette's `rename` does with what was typed: a frontend with
     /// a dialog of its own (1139).
     Rename { peer: [u8; 16], name: String },
+    /// Make `state` the reader's word on `peer`: blocked, pinned, archived,
+    /// muted (1146). A frontend changes the field it offers in
+    /// [`UiModel::peer_state`] and hands the whole back.
+    PeerState {
+        peer: [u8; 16],
+        state: crate::home::wire::PeerState,
+    },
+    /// The reader verified `peer`'s identity in person, or takes it back.
+    Verify { peer: [u8; 16], verified: bool },
+    /// Mark `peer`'s conversation unread on this device, or read as
+    /// opening it would.
+    MarkUnread { peer: [u8; 16], unread: bool },
+    /// Delete `peer`'s conversation without asking, from this device or,
+    /// on a client of a home node, from every device of the home.
+    DeleteConversation { peer: [u8; 16], everywhere: bool },
 }
 
 /// How a region load goes, as the shell reports it.
@@ -1222,6 +1253,22 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
         }
         UiEvent::Engine(event) => on_engine(model, event),
         UiEvent::Rename { peer, name } => model.rename(peer, &name),
+        UiEvent::PeerState { peer, state } => model.set_peer_state(peer, state),
+        UiEvent::Verify { peer, verified } => {
+            model.set_verified(peer, verified);
+            Vec::new()
+        }
+        UiEvent::MarkUnread { peer, unread } => {
+            match unread {
+                true => model.mark_unread(peer),
+                false => model.mark_read(peer),
+            }
+            Vec::new()
+        }
+        UiEvent::DeleteConversation { peer, everywhere } => {
+            model.delete_conversation(peer, everywhere);
+            Vec::new()
+        }
         UiEvent::Notice(line) => {
             model.toast(ToastKind::Info, line);
             Vec::new()
@@ -2634,8 +2681,10 @@ fn run<B: InputBuffer + Default>(model: &mut UiModel<B>, command: PaletteCommand
             model.ask_delete_conversation();
             Vec::new()
         }
-        PaletteCommand::Pin => {
-            model.toggle_pin();
+        PaletteCommand::Pin => model.toggle_pin(),
+        PaletteCommand::Archive => model.toggle_archive(),
+        PaletteCommand::Archived => {
+            model.toggle_archived_view();
             Vec::new()
         }
         PaletteCommand::LoadMapArea => {
@@ -2815,6 +2864,9 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
             destination,
             petname,
         } => return model.home_petname(destination, petname),
+        OutboxEvent::HomePeerState { destination, state } => {
+            return model.home_peer_state(destination, state)
+        }
         OutboxEvent::HomeMarked { mark } => match mark.flag {
             crate::home::wire::MarkFlag::Read => {
                 for id in &mark.ids {
@@ -2928,6 +2980,9 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
                 }
                 return effects;
             }
+            // Muted: counted, raised nowhere; archived and not muted: back
+            // in the list (1146).
+            let raise = model.arrived(index);
             if open && model.home_client {
                 // Read where it arrived, so read on the home's other devices.
                 model.mark_out(crate::home::wire::MarkFlag::Read, vec![message_id]);
@@ -2952,7 +3007,9 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
                 .last()
                 .is_some_and(Message::is_report);
             let what = if report { "position" } else { "message" };
-            model.toast(ToastKind::Info, format!("{what} from {from}"));
+            if raise {
+                model.toast(ToastKind::Info, format!("{what} from {from}"));
+            }
             return effects;
         }
         OutboxEvent::Verified {
@@ -3414,6 +3471,12 @@ pub const NO_BLOCKED: &str = "Nothing blocked. :blocked returns.";
 pub const BLOCKED_TITLE: &str = "Blocked";
 pub const BLOCKED_RETURNS: &str = ":blocked";
 
+/// The archived view's (1146) line while nothing is archived, its title and
+/// its right end.
+pub const NO_ARCHIVED: &str = "Nothing archived. :archived returns.";
+pub const ARCHIVED_TITLE: &str = "Archived";
+pub const ARCHIVED_RETURNS: &str = ":archived";
+
 /// The list's bottom border while no search is open: a click on it opens
 /// one (section 5, "What the mouse does").
 pub const SEARCH_HINT: &str = "/ search";
@@ -3628,9 +3691,10 @@ pub fn view<B: InputBuffer>(model: &UiModel<B>) -> View {
             (rows, (model.focus == Pane::Search).then_some(cursor))
         }
         (None, true) => {
-            let empty = match model.show_blocked {
-                true => NO_BLOCKED,
-                false => NO_CONVERSATIONS,
+            let empty = match (model.show_blocked, model.show_archived) {
+                (true, _) => NO_BLOCKED,
+                (false, true) => NO_ARCHIVED,
+                (false, false) => NO_CONVERSATIONS,
             };
             (wrap(&[plain(empty)], sizes.list.0, 0), None)
         }
@@ -3778,12 +3842,14 @@ pub fn view<B: InputBuffer>(model: &UiModel<B>) -> View {
         conversations_title: match (searching, model.address) {
             (true, _) => SEARCH_TITLE.to_string(),
             (false, _) if model.show_blocked => BLOCKED_TITLE.to_string(),
+            (false, _) if model.show_archived => ARCHIVED_TITLE.to_string(),
             (false, Some(address)) => format!("loquax {}", &to_hex(&address)[..8]),
             (false, None) => "loquax (attaching)".to_string(),
         },
         conversations_title_right: match (searching, model.show_blocked) {
             (true, _) => SEARCH_CLOSES.to_string(),
             (false, true) => BLOCKED_RETURNS.to_string(),
+            (false, false) if model.show_archived => ARCHIVED_RETURNS.to_string(),
             (false, false) => String::new(),
         },
         list_hint: match searching {
@@ -6691,6 +6757,7 @@ mod tests {
         history::Restored {
             peer,
             pinned: false,
+            flags: history::Flags::default(),
             unread: 0,
             messages,
             earlier,
@@ -6773,7 +6840,8 @@ mod tests {
         assert!(writes.contains(&StoreWrite::Conversation {
             peer: OTHER,
             pinned: false,
-            unread: 1
+            unread: 1,
+            flags: history::Flags::default()
         }));
         assert_eq!(message_writes(&writes).len(), 1);
         // Opening it reads it: the store learns the count is gone.
@@ -6783,7 +6851,8 @@ mod tests {
             [StoreWrite::Conversation {
                 peer: OTHER,
                 pinned: false,
-                unread: 0
+                unread: 0,
+                flags: history::Flags::default()
             }]
         );
     }
@@ -6875,7 +6944,8 @@ mod tests {
             [StoreWrite::Conversation {
                 peer: OTHER,
                 pinned: true,
-                unread: 0
+                unread: 0,
+                flags: history::Flags::default()
             }]
         );
         receive(&mut model, PEER, 9, "newest of all");
@@ -7362,7 +7432,7 @@ mod tests {
         };
         model.restore_positions(vec![fix(2, 200), fix(1, 100)]);
         assert_eq!(model.positions[&PEER].location.latitude_e6, 2);
-        model.delete_conversation(PEER);
+        model.delete_conversation(PEER, true);
         assert!(model.positions.is_empty());
     }
 
@@ -8481,6 +8551,242 @@ mod tests {
         receive(&mut alone, OTHER, 2, "me too");
         assert_eq!(alone.conversations[alone.selected].peer, OTHER);
         assert_eq!(alone.conversations[alone.selected].unread, 0);
+    }
+
+    /// 1146: a muted conversation counts its unread and raises no toast
+    /// until the mute ends; muted always never ends.
+    #[test]
+    fn a_muted_conversation_counts_and_raises_nothing_until_the_mute_ends() {
+        let mut model = UiModel::<Field>::new(&[PEER, OTHER]);
+        clock(&mut model, 1, 10, 0);
+        let now = model.now.expect("clock").unix_secs;
+        let state = |until| crate::home::wire::PeerState {
+            muted_until: Some(until),
+            ..crate::home::wire::PeerState::default()
+        };
+        update(
+            &mut model,
+            UiEvent::PeerState {
+                peer: OTHER,
+                state: state(now + 3600),
+            },
+        );
+        assert!(model.muted(&OTHER) && !model.muted(&PEER));
+        let toasts = model.toasts.len();
+        receive(&mut model, OTHER, 1, "quiet please");
+        assert_eq!(model.toasts.len(), toasts, "no toast while muted");
+        let other = model.conversations.iter().find(|c| c.peer == OTHER);
+        assert_eq!(other.map(|c| c.unread), Some(1), "still counted");
+        // An hour and a minute later the mute is over.
+        clock(&mut model, 1, 11, 1);
+        assert!(!model.muted(&OTHER));
+        receive(&mut model, OTHER, 2, "loud again");
+        assert_eq!(model.toasts.len(), toasts + 1);
+        update(
+            &mut model,
+            UiEvent::PeerState {
+                peer: OTHER,
+                state: state(state::MUTED_ALWAYS),
+            },
+        );
+        clock(&mut model, 30, 23, 59);
+        assert!(model.muted(&OTHER));
+        let writes = model.take_writes();
+        assert!(writes.iter().any(|w| matches!(
+            w,
+            StoreWrite::Conversation { peer: OTHER, flags, .. }
+                if flags.muted_until == Some(state::MUTED_ALWAYS)
+        )));
+    }
+
+    /// 1146: the contact facts say when the peer last wrote and how the
+    /// last message to it went.
+    #[test]
+    fn the_contact_facts_say_the_last_message_each_way() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        clock(&mut model, 1, 10, 0);
+        assert_eq!(model.contact_facts(&PEER).last_received, None);
+        receive(&mut model, PEER, 1, "hi");
+        say(&mut model, "hello back");
+        let facts = model.contact_facts(&PEER);
+        assert_eq!(facts.last_received, model.now);
+        assert_eq!(facts.last_sent.map(|(_, words)| words), Some("queued"));
+        let sent = model.conversations[0]
+            .messages
+            .iter_mut()
+            .rfind(|m| m.outbound)
+            .expect("sent");
+        sent.delivery = Some(DeliveryState::InMailbox);
+        assert_eq!(
+            model.contact_facts(&PEER).last_sent.map(|(_, words)| words),
+            Some("left at a propagation node")
+        );
+        assert!(!model.contact_facts(&PEER).verified);
+    }
+
+    /// 1146: verified is a local flag the store keeps; it goes to no home
+    /// node, and setting it twice says it once.
+    #[test]
+    fn verified_is_kept_on_this_device_only() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        model.home_client = true;
+        assert!(!model.verified(&PEER));
+        update(
+            &mut model,
+            UiEvent::Verify {
+                peer: PEER,
+                verified: true,
+            },
+        );
+        let toasts = model.toasts.len();
+        update(
+            &mut model,
+            UiEvent::Verify {
+                peer: PEER,
+                verified: true,
+            },
+        );
+        assert_eq!(model.toasts.len(), toasts);
+        assert!(model.verified(&PEER));
+        assert!(model.take_peer_states().is_empty());
+        assert!(model.take_writes().iter().any(|w| matches!(
+            w,
+            StoreWrite::Conversation { peer: PEER, flags, .. } if flags.verified
+        )));
+        update(
+            &mut model,
+            UiEvent::Verify {
+                peer: PEER,
+                verified: false,
+            },
+        );
+        assert!(!model.verified(&PEER));
+    }
+
+    /// 1146: an archived conversation leaves the list for the archived
+    /// view; a new message brings it back unless it is muted.
+    #[test]
+    fn an_archived_conversation_comes_back_with_a_message_unless_muted() {
+        let mut model = UiModel::<Field>::new(&[]);
+        receive(&mut model, PEER, 1, "one");
+        receive(&mut model, OTHER, 2, "two");
+        let archived = crate::home::wire::PeerState {
+            archived: true,
+            ..crate::home::wire::PeerState::default()
+        };
+        update(
+            &mut model,
+            UiEvent::PeerState {
+                peer: OTHER,
+                state: archived,
+            },
+        );
+        let peers = |model: &UiModel<Field>, order: Vec<usize>| -> Vec<[u8; 16]> {
+            order.iter().map(|&i| model.conversations[i].peer).collect()
+        };
+        assert_eq!(peers(&model, model.order()), [PEER]);
+        assert_eq!(peers(&model, model.archived_order()), [OTHER]);
+        palette(&mut model, "archived");
+        assert_eq!(peers(&model, model.order()), [OTHER]);
+        palette(&mut model, "archived");
+        receive(&mut model, OTHER, 3, "back");
+        assert_eq!(peers(&model, model.order()), [OTHER, PEER]);
+        assert!(model.archived_order().is_empty());
+        // Muted and archived: it stays where it is.
+        update(
+            &mut model,
+            UiEvent::PeerState {
+                peer: OTHER,
+                state: crate::home::wire::PeerState {
+                    muted_until: Some(state::MUTED_ALWAYS),
+                    ..archived
+                },
+            },
+        );
+        receive(&mut model, OTHER, 4, "still away");
+        assert_eq!(peers(&model, model.order()), [PEER]);
+        // Marked unread and read again, on this device.
+        update(
+            &mut model,
+            UiEvent::MarkUnread {
+                peer: PEER,
+                unread: true,
+            },
+        );
+        let unread = |model: &UiModel<Field>| {
+            model
+                .conversations
+                .iter()
+                .find(|c| c.peer == PEER)
+                .map_or(0, |c| c.unread)
+        };
+        assert_eq!(unread(&model), 1);
+        update(
+            &mut model,
+            UiEvent::MarkUnread {
+                peer: PEER,
+                unread: false,
+            },
+        );
+        assert_eq!(unread(&model), 0);
+    }
+
+    /// 1146: on a client of a home node pin, block, archive and mute go to
+    /// the home node whole, the palette's as well; one pulled is applied
+    /// and never handed back.
+    #[test]
+    fn a_peer_state_travels_through_the_home_node() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        receive(&mut model, PEER, 1, "hi");
+        palette(&mut model, "pin");
+        assert!(model.take_peer_states().is_empty(), "no home node");
+        model.home_client = true;
+        palette(&mut model, "pin");
+        let effects = palette(&mut model, "block");
+        assert!(matches!(
+            effects.as_slice(),
+            [UiEffect::Contact(Contact { blocked: true, .. })]
+        ));
+        let unpinned = crate::home::wire::PeerState::default();
+        assert_eq!(
+            model.take_peer_states(),
+            [
+                (PEER, unpinned),
+                (
+                    PEER,
+                    crate::home::wire::PeerState {
+                        blocked: true,
+                        ..unpinned
+                    }
+                )
+            ]
+        );
+        let pulled = crate::home::wire::PeerState {
+            pinned: true,
+            archived: true,
+            ..unpinned
+        };
+        let effects = update(
+            &mut model,
+            UiEvent::Engine(OutboxEvent::HomePeerState {
+                destination: PEER,
+                state: pulled,
+            }),
+        );
+        assert!(matches!(
+            effects.as_slice(),
+            [UiEffect::Contact(Contact { blocked: false, .. })]
+        ));
+        assert_eq!(model.peer_state(&PEER), pulled);
+        assert!(model.take_peer_states().is_empty(), "never handed back");
+        assert!(update(
+            &mut model,
+            UiEvent::Engine(OutboxEvent::HomePeerState {
+                destination: PEER,
+                state: pulled,
+            })
+        )
+        .is_empty());
     }
 
     /// 1139: on a client of a home node a rename goes to the home node as
