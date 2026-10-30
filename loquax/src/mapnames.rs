@@ -22,7 +22,9 @@
 //! same file, under the SIL Open Font License, `fonts/OFL.txt`): one font
 //! on every host and on the phone, so a picture and its golden agree.
 
+use std::collections::HashMap;
 use std::string::{String, ToString};
+use std::sync::Arc;
 use std::vec::Vec;
 
 use cosmic_text::{self as ct, fontdb, Attrs, Buffer, Family, FontSystem, Shaping, SwashCache};
@@ -92,8 +94,76 @@ impl Mask {
     }
 
     /// The coverage widened by `r` pixels: each pixel the strongest within
-    /// a disc of radius `r`, the halo's shape.
+    /// a disc of radius `r`, the halo's shape, a pixel off the mask
+    /// counting as nothing.
+    ///
+    /// The disc is a stack of row spans: on the row `dy` away it holds the
+    /// offsets `dx` with `dx * dx + dy * dy <= r * r + 0.5`, all of
+    /// `-half..=half` for one `half`. So each distinct half width gets one
+    /// plane of horizontal maxes, and a pixel is the max over the disc's
+    /// rows of the plane of that row's half width: the same bytes as the
+    /// max over the disc's pixels ([`widened_by_disc`](Self::widened_by_disc)),
+    /// at a few reads a pixel and a row instead of `(2r + 1)^2` (1154).
     fn widened(&self, r: f32) -> Mask {
+        let ri = r.ceil() as i64;
+        let (w, h) = (self.w, self.h);
+        // The disc's half width on each row from `-ri` to `ri`, none where
+        // even `dx = 0` is outside it.
+        let half: Vec<Option<usize>> = (-ri..=ri)
+            .map(|dy| {
+                (0..=ri)
+                    .rev()
+                    .find(|&dx| ((dx * dx + dy * dy) as f32) <= r * r + 0.5)
+                    .map(|dx| dx as usize)
+            })
+            .collect();
+        let mut widths: Vec<usize> = half.iter().flatten().copied().collect();
+        widths.sort_unstable();
+        widths.dedup();
+        let planes: Vec<Vec<u8>> = widths
+            .iter()
+            .map(|&hx| {
+                let mut plane = vec![0u8; self.alpha.len()];
+                for (row, out) in self.alpha.chunks_exact(w).zip(plane.chunks_exact_mut(w)) {
+                    for (x, o) in out.iter_mut().enumerate() {
+                        let span = &row[x.saturating_sub(hx)..(x + hx + 1).min(w)];
+                        *o = span.iter().copied().max().unwrap_or(0);
+                    }
+                }
+                plane
+            })
+            .collect();
+        let mut out = vec![0u8; self.alpha.len()];
+        for (k, hx) in half.iter().enumerate() {
+            let Some(hx) = hx else {
+                continue;
+            };
+            let Ok(p) = widths.binary_search(hx) else {
+                continue;
+            };
+            let dy = k as i64 - ri;
+            for y in 0..h as i64 {
+                let sy = y + dy;
+                if sy < 0 || sy >= h as i64 {
+                    continue;
+                }
+                let src = &planes[p][sy as usize * w..(sy as usize + 1) * w];
+                let dst = &mut out[y as usize * w..(y as usize + 1) * w];
+                for (d, &s) in dst.iter_mut().zip(src) {
+                    *d = (*d).max(s);
+                }
+            }
+        }
+        Mask {
+            alpha: out,
+            ..self.clone()
+        }
+    }
+
+    /// [`widened`](Self::widened) as it was written first, the max over
+    /// every pixel of the disc: the reference the span version is held to.
+    #[cfg(test)]
+    fn widened_by_disc(&self, r: f32) -> Mask {
         let ri = r.ceil() as i64;
         let mut out = vec![0u8; self.alpha.len()];
         for y in 0..self.h as i64 {
@@ -127,10 +197,40 @@ impl Mask {
     }
 }
 
+/// A name's text set one way: the text, its size's bits, the pad, slanted.
+type SetKey = (String, u32, usize, bool);
+
+/// The most masks, and the most halos, a [`Typesetter`] keeps.
+pub const MASKS_KEPT: usize = 8192;
+/// The most bytes of masks and halos together a [`Typesetter`] keeps.
+pub const MASK_BYTES_KEPT: usize = 4 << 20;
+/// The most text sizes a [`Typesetter`] keeps.
+pub const EXTENTS_KEPT: usize = 32768;
+
 /// Shapes and rasterises names in the embedded font.
+///
+/// It keeps what a frame at rest sets again in the next one (1154): every
+/// name in view is shaped for its size, but only one with a spot wholly in
+/// the picture is rasterised, and only one the rule placed gets a halo.
+/// The sizes, the masks and the halos are kept by text, size, pad and
+/// slant, and a frame that sets the same names looks them up. Each store
+/// is dropped whole when it passes its bound ([`EXTENTS_KEPT`],
+/// [`MASKS_KEPT`], [`MASK_BYTES_KEPT`]), which a pan across a city takes
+/// many frames to reach. What is kept is what would be made again, so a
+/// picture is the same bytes either way.
 pub struct Typesetter {
     fonts: FontSystem,
     cache: SwashCache,
+    extents: HashMap<SetKey, (usize, usize)>,
+    masks: HashMap<SetKey, Arc<Mask>>,
+    /// By the mask's key and the halo's width's bits.
+    halos: HashMap<(SetKey, u32), Arc<Mask>>,
+    /// The bytes of `masks` and `halos`.
+    kept: usize,
+    /// Set every name anew, the way before 1154: the reference a test
+    /// holds the kept path to.
+    #[cfg(test)]
+    pub(crate) unkept: bool,
 }
 
 impl Default for Typesetter {
@@ -148,7 +248,87 @@ impl Typesetter {
         Self {
             fonts: FontSystem::new_with_locale_and_db("en-US".to_string(), db),
             cache: SwashCache::new(),
+            extents: HashMap::new(),
+            masks: HashMap::new(),
+            halos: HashMap::new(),
+            kept: 0,
+            #[cfg(test)]
+            unkept: false,
         }
+    }
+
+    /// Masks and halos kept, and their bytes.
+    pub fn kept(&self) -> (usize, usize) {
+        (self.masks.len() + self.halos.len(), self.kept)
+    }
+
+    /// Drop every size, mask and halo kept: a measuring tool's first
+    /// frame.
+    pub fn forget(&mut self) {
+        self.extents.clear();
+        self.masks.clear();
+        self.halos.clear();
+        self.kept = 0;
+    }
+
+    /// The size [`mask`](Self::mask) makes for the same arguments, shaped
+    /// and not drawn, kept.
+    pub fn extent(&mut self, text: &str, size: f32, pad: usize, italic: bool) -> (usize, usize) {
+        let key = (text.to_string(), size.to_bits(), pad, italic);
+        if let Some(&e) = self.extents.get(&key) {
+            return e;
+        }
+        let buffer = self.shaped(text, size, italic);
+        let e = extent_of(&buffer, size, pad, italic);
+        if self.extents.len() >= EXTENTS_KEPT {
+            self.extents.clear();
+        }
+        self.extents.insert(key, e);
+        e
+    }
+
+    /// [`mask`](Self::mask), kept.
+    pub fn kept_mask(&mut self, text: &str, size: f32, pad: usize, italic: bool) -> Arc<Mask> {
+        let key = (text.to_string(), size.to_bits(), pad, italic);
+        if let Some(m) = self.masks.get(&key) {
+            return m.clone();
+        }
+        let m = Arc::new(self.mask(text, size, pad, italic));
+        self.keep(m.alpha.len());
+        self.masks.insert(key, m.clone());
+        m
+    }
+
+    /// The halo of [`kept_mask`](Self::kept_mask)'s mask, its coverage
+    /// widened by `r` pixels, kept.
+    pub fn kept_halo(
+        &mut self,
+        text: &str,
+        size: f32,
+        pad: usize,
+        italic: bool,
+        r: f32,
+    ) -> Arc<Mask> {
+        let key = ((text.to_string(), size.to_bits(), pad, italic), r.to_bits());
+        if let Some(m) = self.halos.get(&key) {
+            return m.clone();
+        }
+        let halo = Arc::new(self.kept_mask(text, size, pad, italic).widened(r));
+        self.keep(halo.alpha.len());
+        self.halos.insert(key, halo.clone());
+        halo
+    }
+
+    /// Room for `bytes` more of masks and halos: all dropped when they
+    /// would pass a bound.
+    fn keep(&mut self, bytes: usize) {
+        let full = self.masks.len().max(self.halos.len()) >= MASKS_KEPT;
+        if full || self.kept + bytes > MASK_BYTES_KEPT {
+            self.masks.clear();
+            self.halos.clear();
+            self.kept = 0;
+        }
+        self.kept += bytes;
     }
 
     /// `text`'s width at `size` pixels, shaped and not drawn: what a
@@ -178,21 +358,7 @@ impl Typesetter {
     /// slanted with `italic`.
     pub fn mask(&mut self, text: &str, size: f32, pad: usize, italic: bool) -> Mask {
         let buffer = self.shaped(text, size, italic);
-        let (mut width, mut height) = (0f32, 0f32);
-        for run in buffer.layout_runs() {
-            width = width.max(run.line_w);
-            height = height.max(run.line_top + run.line_height);
-        }
-        // The slant leans the glyphs' tops right by about a quarter of
-        // the size: room for it past the advance.
-        let lean = match italic {
-            true => (size * 0.25).ceil() as usize,
-            false => 0,
-        };
-        let (w, h) = (
-            width.ceil() as usize + lean + 2 * pad,
-            height.ceil() as usize + 2 * pad,
-        );
+        let (w, h) = extent_of(&buffer, size, pad, italic);
         let mut alpha = vec![0u8; w * h];
         let white = ct::Color::rgb(0xff, 0xff, 0xff);
         buffer.draw(
@@ -213,6 +379,26 @@ impl Typesetter {
         );
         Mask { w, h, pad, alpha }
     }
+}
+
+/// The size of the mask of the shaped `buffer`, set at `size` pixels with
+/// `pad` pixels around, slanted with `italic`.
+fn extent_of(buffer: &Buffer, size: f32, pad: usize, italic: bool) -> (usize, usize) {
+    let (mut width, mut height) = (0f32, 0f32);
+    for run in buffer.layout_runs() {
+        width = width.max(run.line_w);
+        height = height.max(run.line_top + run.line_height);
+    }
+    // The slant leans the glyphs' tops right by about a quarter of
+    // the size: room for it past the advance.
+    let lean = match italic {
+        true => (size * 0.25).ceil() as usize,
+        false => 0,
+    };
+    (
+        width.ceil() as usize + lean + 2 * pad,
+        height.ceil() as usize + 2 * pad,
+    )
 }
 
 /// The runs of `line` whose vertices turn less than [`STRAIGHT_DEG`], in
@@ -276,11 +462,13 @@ pub struct PlacedName {
     pub halo: Mask,
 }
 
-/// One name to set: where, at which angle, its mask.
+/// One name to set: where, at which angle, its text and size, and its
+/// mask once a spot made it a candidate.
 struct Setting {
     centre: (f64, f64),
     angle: f64,
-    mask: Mask,
+    mask: Arc<Mask>,
+    size: f32,
     kind: LabelKind,
 }
 
@@ -326,8 +514,20 @@ pub fn place(
     let mut candidates: Vec<Candidate> = Vec::new();
     for l in names {
         let river = l.kind == LabelKind::River;
-        let mask = type_.mask(&l.text, size_of(l.kind) * scale, pad, river);
-        let (tw, th) = ((mask.w - 2 * pad) as f64, (mask.h - 2 * pad) as f64);
+        let size = size_of(l.kind) * scale;
+        // Its spots need only its size; its glyphs are drawn once a spot
+        // lies wholly in the picture.
+        #[cfg(test)]
+        let mut mask: Option<Arc<Mask>> = type_
+            .unkept
+            .then(|| Arc::new(type_.mask(&l.text, size, pad, river)));
+        #[cfg(not(test))]
+        let mut mask: Option<Arc<Mask>> = None;
+        let (mw, mh) = match &mask {
+            Some(m) => (m.w, m.h),
+            None => type_.extent(&l.text, size, pad, river),
+        };
+        let (tw, th) = ((mw - 2 * pad) as f64, (mh - 2 * pad) as f64);
         // Where the name may go, best first: a point's anchor, or each
         // straight run of a line long enough to hold it.
         let spots: Vec<((f64, f64), f64)> = match l.kind.is_line() {
@@ -360,10 +560,14 @@ pub fn place(
                 at: l.at,
                 boxes,
             });
+            let mask = mask
+                .get_or_insert_with(|| type_.kept_mask(&l.text, size, pad, river))
+                .clone();
             settings.push(Setting {
                 centre,
                 angle,
-                mask: mask.clone(),
+                mask,
+                size,
                 kind: l.kind,
             });
         }
@@ -378,13 +582,22 @@ pub fn place(
         .iter()
         .map(|&i| {
             let s = &settings[i];
+            let text = &candidates[i].text;
+            let river = s.kind == LabelKind::River;
+            #[cfg(test)]
+            let halo = match type_.unkept {
+                true => s.mask.widened_by_disc(HALO * scale),
+                false => (*type_.kept_halo(text, s.size, pad, river, HALO * scale)).clone(),
+            };
+            #[cfg(not(test))]
+            let halo = (*type_.kept_halo(text, s.size, pad, river, HALO * scale)).clone();
             PlacedName {
-                text: candidates[i].text.clone(),
+                text: text.clone(),
                 kind: s.kind,
                 centre: s.centre,
                 angle: s.angle,
-                halo: s.mask.widened(HALO * scale),
-                mask: s.mask.clone(),
+                halo,
+                mask: (*s.mask).clone(),
             }
         })
         .collect()
@@ -509,8 +722,20 @@ fn reach(mask: &Mask, centre: (f64, f64)) -> (i64, i64, i64, i64) {
 /// turned by `angle`: the mask sampled through the inverse turn, from 0
 /// to 1.
 fn cover(mask: &Mask, centre: (f64, f64), angle: f64, x: i64, y: i64) -> f64 {
+    cover_turned(mask, centre, angle, (angle.cos(), angle.sin()), x, y)
+}
+
+/// [`cover`] with the angle's cosine and sine `(c, s)` taken once by the
+/// caller.
+fn cover_turned(
+    mask: &Mask,
+    centre: (f64, f64),
+    angle: f64,
+    (c, s): (f64, f64),
+    x: i64,
+    y: i64,
+) -> f64 {
     let (mw, mh) = (mask.w as f64, mask.h as f64);
-    let (c, s) = (angle.cos(), angle.sin());
     let (dx, dy) = (x as f64 + 0.5 - centre.0, y as f64 + 0.5 - centre.1);
     // Into the mask's frame: turn back by the angle.
     let (mx, my) = (
@@ -556,7 +781,52 @@ pub struct Sprite {
 
 impl Sprite {
     /// `name` worked out where it was placed.
+    ///
+    /// Only the pixels of the turned mask's box and two more around it are
+    /// sampled (1154): a pixel further out maps outside the mask, more
+    /// than the bilinear sample's one pixel of reach past its edge, so it
+    /// covers nothing, and the pixels kept are those of the whole
+    /// `reach`, in the same order. A halo of the mask's size is at least
+    /// the mask on every pixel (`Mask::widened` keeps each pixel's own
+    /// value in its max), and both are sampled at the same place with the
+    /// same weights, so where the halo covers nothing the glyphs cover
+    /// nothing and are not sampled.
     pub fn of(name: &PlacedName) -> Self {
+        let (x0, x1, y0, y1) = reach(&name.mask, name.centre);
+        let turn = (name.angle.cos(), name.angle.sin());
+        let (c, s) = (turn.0.abs(), turn.1.abs());
+        let (mw, mh) = (name.mask.w as f64, name.mask.h as f64);
+        let (hx, hy) = ((mw * c + mh * s) / 2.0 + 2.0, (mw * s + mh * c) / 2.0 + 2.0);
+        let same = (name.halo.w, name.halo.h) == (name.mask.w, name.mask.h);
+        let x0 = x0.max((name.centre.0 - hx).floor() as i64);
+        let x1 = x1.min((name.centre.0 + hx).ceil() as i64);
+        let y0 = y0.max((name.centre.1 - hy).floor() as i64);
+        let y1 = y1.min((name.centre.1 + hy).ceil() as i64);
+        let mut px = Vec::new();
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let halo = cover_turned(&name.halo, name.centre, name.angle, turn, x, y);
+                if same && halo <= 0.0 {
+                    continue;
+                }
+                let ink = cover_turned(&name.mask, name.centre, name.angle, turn, x, y);
+                if halo > 0.0 || ink > 0.0 {
+                    px.push((x, y, halo, ink));
+                }
+            }
+        }
+        Self {
+            text: name.text.clone(),
+            kind: name.kind,
+            centre: name.centre,
+            px,
+        }
+    }
+
+    /// [`of`](Self::of) as it was written first, every pixel of the reach
+    /// sampled: the reference the boxed loop is held to.
+    #[cfg(test)]
+    pub(crate) fn of_whole_reach(name: &PlacedName) -> Self {
         let (x0, x1, y0, y1) = reach(&name.mask, name.centre);
         let mut px = Vec::new();
         for y in y0..y1 {
@@ -576,6 +846,42 @@ impl Sprite {
         }
     }
 
+    /// The sprites of `names`, in their order, worked out on up to
+    /// `workers` threads: thread `t` takes every `workers`-th name from
+    /// the `t`-th, so a run of long street names does not land on one.
+    pub fn of_all(names: &[PlacedName], workers: usize) -> Vec<Self> {
+        let workers = workers.clamp(1, names.len().max(1));
+        if workers == 1 {
+            return names.iter().map(Self::of).collect();
+        }
+        let dealt: Vec<Vec<Self>> = std::thread::scope(|scope| {
+            let hands: Vec<_> = (0..workers)
+                .map(|t| {
+                    scope.spawn(move || {
+                        names
+                            .iter()
+                            .skip(t)
+                            .step_by(workers)
+                            .map(Self::of)
+                            .collect()
+                    })
+                })
+                .collect();
+            hands
+                .into_iter()
+                .map(|hand| {
+                    hand.join()
+                        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+                })
+                .collect()
+        });
+        // Name `i` is the `i / workers`-th of hand `i % workers`.
+        let mut hands: Vec<_> = dealt.into_iter().map(Vec::into_iter).collect();
+        (0..names.len())
+            .filter_map(|i| hands[i % workers].next())
+            .collect()
+    }
+
     /// Draw it into `rgba`, `w` by `h` pixels, in `theme`'s colours,
     /// moved by `(dx, dy)` pixels from where it was placed.
     pub fn draw(&self, rgba: &mut [u8], w: u32, h: u32, theme: MapTheme, dx: i64, dy: i64) {
@@ -589,5 +895,106 @@ impl Sprite {
             blend_at(rgba, w, x, y, halo, ha);
             blend_at(rgba, w, x, y, ink, ia);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 1154: the halo widened by row spans is the max over the whole
+    /// disc, byte for byte, at the widths the densities give and at the
+    /// edges of the mask.
+    #[test]
+    fn the_span_halo_is_the_disc_halo() {
+        let mut type_ = Typesetter::new();
+        for scale in [1.0f32, 2.0, 2.75, 3.5] {
+            let pad = (HALO * scale).ceil() as usize + 1;
+            for (text, italic) in [
+                ("Piazza della Signoria", false),
+                ("Arno", true),
+                ("Il", false),
+            ] {
+                let mask = type_.mask(text, 12.0 * scale, pad, italic);
+                for r in [HALO * scale, 0.4, 1.0, 4.1, 7.0] {
+                    assert_eq!(
+                        mask.widened(r),
+                        mask.widened_by_disc(r),
+                        "{text} {scale} {r}"
+                    );
+                }
+            }
+        }
+        // Ink against every edge, no pad: the disc's rows clipped.
+        let (w, h) = (9, 7);
+        let alpha = (0..w * h).map(|i| ((i * 37) % 11 * 23) as u8).collect();
+        let mask = Mask {
+            w,
+            h,
+            pad: 0,
+            alpha,
+        };
+        for r in [0.0, 1.5, 2.5, 6.0, 12.0] {
+            assert_eq!(mask.widened(r), mask.widened_by_disc(r), "{r}");
+        }
+    }
+
+    /// 1154: a sprite sampled over its turned box is the sprite sampled
+    /// over its whole reach, at every angle a street takes.
+    #[test]
+    fn the_boxed_sprite_is_the_whole_reach_sprite() {
+        let mut type_ = Typesetter::new();
+        let pad = (HALO * 2.75).ceil() as usize + 1;
+        let mask = type_.mask("Via dei Calzaiuoli", 11.0 * 2.75, pad, false);
+        let halo = mask.widened(HALO * 2.75);
+        for k in -8..=8 {
+            let angle = f64::from(k) * std::f64::consts::FRAC_PI_2 / 8.0;
+            for centre in [(100.0, 80.0), (100.37, 80.81), (-3.5, 2.25)] {
+                let name = PlacedName {
+                    text: "Via dei Calzaiuoli".to_string(),
+                    kind: LabelKind::MinorRoad,
+                    centre,
+                    angle,
+                    mask: mask.clone(),
+                    halo: halo.clone(),
+                };
+                assert_eq!(
+                    Sprite::of(&name),
+                    Sprite::of_whole_reach(&name),
+                    "{angle} {centre:?}"
+                );
+            }
+        }
+    }
+
+    /// 1154: what the typesetter keeps is what it makes, and it stays
+    /// within its bound.
+    #[test]
+    fn kept_masks_are_the_masks_made() {
+        let mut type_ = Typesetter::new();
+        let (text, size, pad) = ("Ponte Vecchio", 13.0 * 2.75, 6);
+        let made = type_.mask(text, size, pad, false);
+        assert_eq!(type_.extent(text, size, pad, false), (made.w, made.h));
+        assert_eq!(*type_.kept_mask(text, size, pad, false), made);
+        assert_eq!(
+            *type_.kept_halo(text, size, pad, false, HALO * 2.75),
+            made.widened_by_disc(HALO * 2.75)
+        );
+        // Asked again: the same, from the store.
+        assert_eq!(type_.kept().0, 2);
+        assert_eq!(*type_.kept_mask(text, size, pad, false), made);
+        assert_eq!(type_.kept().0, 2);
+        // Past the byte bound the store starts over.
+        for i in 0..4000 {
+            let _ = type_.kept_mask(
+                &format!("Via {i} lunghissima del centro storico"),
+                40.0,
+                6,
+                false,
+            );
+            assert!(type_.kept().1 <= MASK_BYTES_KEPT);
+        }
+        type_.forget();
+        assert_eq!(type_.kept(), (0, 0));
     }
 }

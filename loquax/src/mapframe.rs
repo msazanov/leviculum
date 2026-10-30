@@ -237,7 +237,16 @@ impl Frames {
             };
             let taken = screenmap::taken(&placed, scale);
             let names = mapnames::place(w, h, &labels, px, &taken, scale, &mut self.type_);
-            self.names = names.iter().map(Sprite::of).collect();
+            #[cfg(test)]
+            if self.type_.unkept {
+                self.names = names.iter().map(Sprite::of_whole_reach).collect();
+            } else {
+                self.names = Sprite::of_all(&names, self.tiles.workers());
+            }
+            #[cfg(not(test))]
+            {
+                self.names = Sprite::of_all(&names, self.tiles.workers());
+            }
             self.names_view = Some(drawn);
         }
         if let Some(rest) = self.names_view {
@@ -260,6 +269,17 @@ impl Frames {
             attribution: composed.attribution,
             epoch: self.painter.epoch(),
         }
+    }
+
+    /// Drop the names' sizes, masks and halos kept: a measuring tool's
+    /// first frame at rest.
+    pub fn forget_names(&mut self) {
+        self.type_.forget();
+    }
+
+    /// The names' masks and halos kept, and their bytes.
+    pub fn names_kept(&self) -> (usize, usize) {
+        self.type_.kept()
     }
 
     /// Whether the last frame was at rest and owed nothing: a prefetch
@@ -373,4 +393,92 @@ pub fn onto(drawn: &ExactView, screen: &ExactView) -> (f64, f64, f64) {
     let (cx, cy) = screen.to_screen(drawn.centre);
     let (w, h) = drawn.size();
     (cx - f64::from(w) / 2.0 * k, cy - f64::from(h) / 2.0 * k, k)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use leviculum_map::mercator::{project, LatLon};
+    use leviculum_mapfill::style::{MapTheme, Style};
+    use std::path::PathBuf;
+
+    /// The frames over the committed Florence region, which carries its
+    /// names.
+    fn florence() -> Frames {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../leviculum-map/fixtures");
+        Frames::new(crate::picture::Maps::new(Some(dir)))
+    }
+
+    /// The frames as they were before 1154: every name shaped and
+    /// rasterised anew, its halo widened over the whole disc, its sprite
+    /// sampled over its whole reach.
+    fn reference() -> Frames {
+        let mut frames = florence();
+        frames.type_.unkept = true;
+        frames
+    }
+
+    fn ask(view: ExactView, moving: bool, scale: f32, theme: MapTheme) -> Ask<'static> {
+        Ask {
+            view,
+            margin: (view.size().0 / 4, view.size().1 / 4),
+            moving,
+            style: Style { theme, ..Style::PC },
+            scale,
+            pins: &[],
+            selected: None,
+            zooms: (10, 17),
+            draw_pins: true,
+            measure: None,
+        }
+    }
+
+    /// 1154: the names pipeline (kept sizes, masks and halos, the halo
+    /// widened by spans, the sprite's boxed loop on worker threads) gives
+    /// the frames of the path before it byte for byte: at rest at a whole
+    /// step and between steps, panned while moving, through a pinch and
+    /// back, at two densities and in both themes.
+    #[test]
+    fn the_fast_paths_give_the_frames_of_the_old_ones() {
+        let centre = project(LatLon::from_degrees(43.7731, 11.2560));
+        for (scale, theme) in [(1.0, MapTheme::Light), (2.75, MapTheme::Dark)] {
+            let mut old = reference();
+            let mut new = florence();
+            new.set_workers(4);
+            let mut view = ExactView::new(centre, 15 * MILLI, 900, 700);
+            let mut steps: Vec<(ExactView, bool)> = vec![(view, false)];
+            for i in 0..4 {
+                view.pan(if i % 2 == 0 { 40 } else { -17 }, 23);
+                steps.push((view, true));
+            }
+            steps.push((view, false));
+            for z in [15_300, 15_700, 16_000] {
+                let mut v = view;
+                v.zoom_about(z, 450.0, 350.0);
+                steps.push((v, true));
+                steps.push((v, false));
+            }
+            steps.push((view, false));
+            let mut names = 0;
+            for (i, &(v, moving)) in steps.iter().enumerate() {
+                let a = ask(v, moving, scale, theme);
+                let want = old.frame(&a);
+                let got = new.frame(&a);
+                assert_eq!(got.missing, want.missing, "step {i}");
+                assert!(
+                    got.rgba == want.rgba,
+                    "step {i} at scale {scale}: the frame differs"
+                );
+                assert_eq!(new.names(), old.names(), "step {i}");
+                names = names.max(new.names().len());
+            }
+            eprintln!("scale {scale}: up to {names} names a frame");
+            assert!(names > 2, "the frames placed names ({names})");
+            let (kept, bytes) = new.names_kept();
+            assert!(
+                kept > 0 && bytes <= mapnames::MASK_BYTES_KEPT,
+                "{kept} {bytes}"
+            );
+        }
+    }
 }
