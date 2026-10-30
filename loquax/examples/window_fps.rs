@@ -13,6 +13,8 @@
 //! z15.0 to z15.9 in tenths while it turns, then at rest at z15.9. Each
 //! frame's buffer is handed back ([`Frames::recycle`]), as the phone's
 //! facade does since 1154; the window itself gives its frames to iced.
+//! While the wheel turns the frame is the tile step one to one, which
+//! the window's image scales (1155).
 //!
 //! ```sh
 //! cargo run --release -p loquax --features screenmap --example window_fps -- MAPS
@@ -95,6 +97,7 @@ fn main() {
                 zooms: (3, 18),
                 draw_pins: false,
                 measure: None,
+                scaled_while_moving: true,
             });
             std::hint::black_box(shot.rgba.len());
             let missing = shot.missing;

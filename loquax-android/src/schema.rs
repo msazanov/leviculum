@@ -13,7 +13,7 @@
 //! | `start` | [`Start`] |
 //! | `command` | [`Request`], tagged by `t`: `open`, `close`, `send`, `react`, `reply`, `forward`, `delete`, `used`, `pull`, `front`, `link`, `unlink`, `notnow`, `rename`, `relink` |
 //! | `query` | [`Query`], tagged by `t`: `conversations`, `messages`, `info`, `recents`, `suggest`, `contact`, `links` |
-//! | `renderMap` | [`MapRequest`] |
+//! | `renderMapInto` | [`MapRequest`], and the Bitmap to draw into (null for a prefetch) |
 //!
 //! Rust to Java:
 //!
@@ -23,11 +23,15 @@
 //! | `command` | [`Done`] |
 //! | `query` | [`Conversations`], [`Messages`], [`Info`], [`Recents`], [`Suggestions`], [`Addresses`] or [`Links`], or [`Done`] with the error |
 //! | `nextEvent` | [`Event`], tagged by `t`: `changed`, `notice`, `sync`, `link`, `stopped`; none when the wait ran out |
-//! | `renderMap` | a frame: four bytes big endian, the length of a [`MapShown`], the [`MapShown`], and its `w` times `h` RGBA pixels |
+//! | `renderMapInto` | [`MapShown`]; its `w` times `h` RGBA pixels are in the Bitmap |
 //!
-//! The map's pixels go raw behind the map, not as msgpack, so ten megabytes
-//! of a phone's screen are one copy into a Java `byte[]` and one into its
-//! bitmap. The map call needs no session: it draws the regions in the
+//! The map's pixels do not cross as bytes (1155): Rust composes them
+//! straight into the Bitmap Java hands over, locked through the NDK's
+//! jnigraphics, so twenty megabytes of a phone's frame are neither copied
+//! into a Java `byte[]` nor from there into the Bitmap. The host's tests
+//! read the frame as [`frame`] lays it out: four bytes big endian, the
+//! length of a [`MapShown`], the [`MapShown`], and its pixels. The map
+//! call needs no session: it draws the regions in the
 //! app's maps directory and the pins the store knows, with or without one.
 //! A change that Java cannot read is a new [`VERSION`]: every answer
 //! carries it, and Java refuses one it does not know. A field or an event
@@ -813,7 +817,9 @@ pub struct MapShown {
     pub y: u32,
     /// The zoom step nearest the view's exact zoom.
     pub zoom: u8,
-    /// The view's exact zoom in thousandths of a step (1134).
+    /// The view's exact zoom in thousandths of a step (1134). While a
+    /// pinch moves, the frame is drawn at its tile step one to one and
+    /// this is that step's: Java scales it to the fingers' zoom (1155).
     #[serde(default)]
     pub zoom_milli: u32,
     /// The zoom step whose tiles the frame is composed from.
@@ -855,8 +861,9 @@ pub struct MapShown {
     pub prefetched: u32,
 }
 
-/// A map frame for Java: the description's length, the description, the
-/// pixels.
+/// A map frame as the host's tests and tools read it: the description's
+/// length, the description, the pixels. The app gets its pixels in its
+/// Bitmap instead (1155).
 pub fn frame(shown: &MapShown, rgba: &[u8]) -> Vec<u8> {
     let head = encode(shown);
     let mut out = Vec::with_capacity(4 + head.len() + rgba.len());

@@ -296,7 +296,24 @@ The frontends:
   copy included, the host shared with other builds), the phone's frame
   at rest with the tiles cached went from 202 to 212 ms to 21 to 30 ms on
   eight workers and from 213 to 224 ms to 30 to 39 ms on one, a pan with
-  the tiles cached from 20 to 42 ms to 8 to 16 ms.
+  the tiles cached from 20 to 42 ms to 8 to 16 ms. Since 1155 the
+  phone's frame is composed straight into the Bitmap the app shows next,
+  locked through the NDK's jnigraphics
+  (`loquax-android/src/bitmap.rs`, `AndroidBitmap_lockPixels`): only the
+  frame's description crosses JNI, no `byte[]` of the frame's size and
+  no copy into the Bitmap. While a pinch or the window's wheel zooms, a
+  frame is the tile step one to one, never a step above the zoom, and
+  the phone's Canvas or the window's image scales it the rest of the way
+  (`Ask::scaled_while_moving`); a pan at the zoom at rest stays drawn at
+  that zoom. A painter keeps its filler's storage from tile to tile and
+  turns a tile to RGBA in one pass. Through `map_fps` on the coder host:
+  the facade's own frame on a warm pan from 13.9 to 16.5 ms copied out to
+  4.3 to 6.4 ms into the Bitmap, a pinch with its tiles held from 36.6 to
+  5.1 ms on one worker and from 9.7 to 4.9 ms on eight, a cold frame's
+  tile time on one worker from 71 to 56 to 58 ms. A pinch that owes tiles
+  still pays for the stand-in steps, which sample the whole frame (63 ms
+  on one worker); drawing the stand-ins only where tiles are owed is
+  the next step.
 - **The M9.** The same pipeline straight into the panel's
   `embedded-graphics` target, as the measurement firmware does
   (`leviculum-mapfill/m9/`), with mousefood's cells for the labels.

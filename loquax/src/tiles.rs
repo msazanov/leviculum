@@ -282,9 +282,6 @@ impl TileCache {
 
     /// `frame` composed from the tiles of its zoom step.
     pub fn compose(&mut self, frame: &Frame) -> Composed {
-        let percent = frame.percent();
-        self.check(frame.style, percent);
-        self.shown_from = self.tick + 1;
         let (w, h) = frame.view.size();
         let len = w as usize * h as usize * 4;
         #[cfg(test)]
@@ -296,6 +293,34 @@ impl TileCache {
             true => std::mem::take(&mut self.spare),
             false => vec![0u8; len],
         };
+        // Sized here to the view, so it is composed.
+        let (attribution, missing) = self
+            .compose_into(frame, &mut rgba, !reused)
+            .unwrap_or_else(|| (outline::ATTRIBUTION.to_string(), 0));
+        Composed {
+            rgba,
+            attribution,
+            missing,
+        }
+    }
+
+    /// [`compose`](Self::compose) into `rgba`, the view's size, which a
+    /// frontend owns (the phone's Bitmap, 1155); `blank` when it is all
+    /// zero, otherwise it may hold anything. The credit and the tiles
+    /// owed; none for a buffer of another size, which is left as it is.
+    pub fn compose_into(
+        &mut self,
+        frame: &Frame,
+        rgba: &mut [u8],
+        blank: bool,
+    ) -> Option<(String, usize)> {
+        let percent = frame.percent();
+        self.check(frame.style, percent);
+        self.shown_from = self.tick + 1;
+        let (w, h) = frame.view.size();
+        if rgba.len() != w as usize * h as usize * 4 {
+            return None;
+        }
         let grid = Grid::of(&frame.view, frame.zoom);
         let keys = grid.keys(frame.style, percent);
         let mut got: Vec<Option<Held>> = Vec::with_capacity(keys.len());
@@ -327,14 +352,14 @@ impl TileCache {
         let whole = got.iter().all(Option::is_some);
         #[cfg(test)]
         let whole = whole && !self.reference;
-        if reused && !whole {
+        if !blank && !whole {
             // Alpha zero is a pixel nothing covers yet: a tile's are opaque.
             rgba.fill(0);
         }
-        grid.sample(&frame.view, &got, &mut rgba, self.workers, whole);
+        grid.sample(&frame.view, &got, rgba, self.workers, whole);
         if !left.is_empty() {
             for z in stand_ins(frame) {
-                if covered(&rgba) {
+                if covered(rgba) {
                     break;
                 }
                 let under = Grid::of(&frame.view, z);
@@ -344,17 +369,17 @@ impl TileCache {
                 }
                 let tiles: Vec<Option<Held>> =
                     keys.iter().map(|k| k.and_then(|k| self.get(&k))).collect();
-                under.sample(&frame.view, &tiles, &mut rgba, self.workers, false);
+                under.sample(&frame.view, &tiles, rgba, self.workers, false);
             }
         }
-        if !whole && !covered(&rgba) {
+        if !whole && !covered(rgba) {
             match left.is_empty() {
                 // Only the margin off the projection is left.
                 true => {
                     let [r, g, b] = rgb888(outline::water(frame.style.theme));
-                    fill_uncovered(&mut rgba, |_| [r, g, b, 0xff]);
+                    fill_uncovered(rgba, |_| [r, g, b, 0xff]);
                 }
-                false => outline_under(&frame.view, frame.style.theme, &mut rgba, self.workers),
+                false => outline_under(&frame.view, frame.style.theme, rgba, self.workers),
             }
         }
         let attribution = got
@@ -363,11 +388,7 @@ impl TileCache {
             .map(|(_, a)| a)
             .find(|a| a.as_ref() != outline::ATTRIBUTION)
             .map_or_else(|| outline::ATTRIBUTION.to_string(), |a| a.to_string());
-        Composed {
-            rgba,
-            attribution,
-            missing: left.len(),
-        }
+        Some((attribution, left.len()))
     }
 
     fn get(&mut self, key: &TileKey) -> Option<Held> {

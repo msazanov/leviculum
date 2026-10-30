@@ -1,5 +1,7 @@
 package network.leviculum.loquax;
 
+import android.graphics.Bitmap;
+
 /**
  * The Rust library, libloquax_android.so (the crate in this directory).
  * Every method here is implemented in loquax-android/src/lib.rs; the bytes
@@ -28,10 +30,12 @@ final class Native {
     static native byte[] nextEvent(int waitMs);
 
     /**
-     * One frame of the map: its description's length (four bytes, big
-     * endian), the description, then its RGBA pixels. Not on the UI thread.
+     * One frame of the map drawn straight into `into`, an ARGB_8888 bitmap
+     * of the frame's size that nothing shows while the call runs; its
+     * description back. `into` is null for a prefetch. Not on the UI
+     * thread.
      */
-    static native byte[] renderMap(byte[] request);
+    static native byte[] renderMapInto(byte[] request, Bitmap into);
 
     /**
      * The first QR code in a camera frame's luminance plane, `height` rows

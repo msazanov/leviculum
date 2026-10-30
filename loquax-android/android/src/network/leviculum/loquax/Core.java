@@ -1,5 +1,6 @@
 package network.leviculum.loquax;
 
+import android.graphics.Bitmap;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -291,47 +292,22 @@ final class Core {
         return answer(Native.query(MsgPack.pack(map("t", "messages", "peer", peer))));
     }
 
-    /** A map frame: what it shows, and where its pixels are in the library's bytes. */
-    static final class MapFrame {
-        final Map<String, Object> shown;
-        final byte[] pixels;
-        final int offset;
-        final int length;
-
-        MapFrame(Map<String, Object> shown, byte[] pixels, int offset, int length) {
-            this.shown = shown;
-            this.pixels = pixels;
-            this.offset = offset;
-            this.length = length;
-        }
-    }
-
-    /** One frame of the map (MapView); pixels null when there is none. Not on the UI thread. */
-    @SuppressWarnings("unchecked")
-    static MapFrame renderMap(Map<String, Object> request) {
+    /**
+     * One frame of the map (MapView) drawn into `into`, a bitmap of the
+     * frame's size, or a prefetch with `into` null: what it shows. Not on
+     * the UI thread.
+     */
+    static Map<String, Object> renderMap(Map<String, Object> request, Bitmap into) {
         byte[] bytes;
         try {
-            bytes = Native.renderMap(MsgPack.pack(request));
+            bytes = Native.renderMapInto(MsgPack.pack(request), into);
         } catch (RuntimeException e) {
-            return new MapFrame(map("ok", false, "error", String.valueOf(e.getMessage())), null, 0, 0);
+            return map("ok", false, "error", String.valueOf(e.getMessage()));
         }
-        if (bytes == null || bytes.length < 4) {
-            return new MapFrame(map("ok", false, "error", "the library gave no frame"), null, 0, 0);
+        if (bytes == null) {
+            return map("ok", false, "error", "the library gave no frame");
         }
-        int head = ((bytes[0] & 0xff) << 24) | ((bytes[1] & 0xff) << 16)
-                | ((bytes[2] & 0xff) << 8) | (bytes[3] & 0xff);
-        if (head < 0 || 4 + head > bytes.length) {
-            return new MapFrame(map("ok", false, "error", "the library's frame is cut short"), null, 0, 0);
-        }
-        byte[] described = new byte[head];
-        System.arraycopy(bytes, 4, described, 0, head);
-        Map<String, Object> shown = answer(described);
-        int length = bytes.length - 4 - head;
-        long want = num(shown, "w") * num(shown, "h") * 4;
-        if (!bool(shown, "ok") || length != want || want == 0) {
-            return new MapFrame(shown, null, 0, 0);
-        }
-        return new MapFrame(shown, bytes, 4 + head, length);
+        return answer(bytes);
     }
 
     /** The next event, or null; blocks up to waitMs. */
