@@ -2309,9 +2309,9 @@ mod tests {
 
     // MAX_TRIES and Pacing MD Tests
     #[test]
-    fn test_max_tries_preserves_knothop_budget() {
-        // KnotHop deliberately retains 8 total tries; upstream/reference's
-        // value 5 is a retry-budget change that requires owner approval.
+    fn test_max_tries_keeps_budget_of_eight() {
+        // This fork deliberately retains 8 total tries; upstream/reference's
+        // value 5 is a retry-budget change that requires an explicit decision.
         let mut channel = Channel::new();
         let rtt_ms = 100;
 

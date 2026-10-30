@@ -5,7 +5,7 @@
 
 use alloc::vec::Vec;
 
-use crate::destination::{ProofBinding, ProofBindingPolicy, ProofStrategy};
+use crate::destination::ProofStrategy;
 use crate::identity::Identity;
 use crate::resource::{WindowPolicy, RESOURCE_MAX_INCOMING_PER_LINK, RESOURCE_MAX_INCOMING_SIZE};
 use crate::transport::{PathChoice, TransportConfig};
@@ -40,9 +40,7 @@ use super::NodeCore;
 pub struct NodeCoreBuilder {
     identity: Option<Identity>,
     proof_strategy: ProofStrategy,
-    proof_binding_policy: ProofBindingPolicy,
-    link_cipher: crate::LinkCipher,
-    accept_cbc_links: bool,
+    pub(super) ext: super::ext::NodeExt,
     transport_config: TransportConfig,
     respond_to_probes: bool,
     remote_management: bool,
@@ -65,9 +63,7 @@ impl NodeCoreBuilder {
         Self {
             identity: None,
             proof_strategy: ProofStrategy::None,
-            proof_binding_policy: ProofBindingPolicy::default(),
-            link_cipher: crate::LinkCipher::default(),
-            accept_cbc_links: false,
+            ext: super::ext::NodeExt::default(),
             transport_config: TransportConfig::default(),
             respond_to_probes: false,
             remote_management: false,
@@ -105,33 +101,6 @@ impl NodeCoreBuilder {
     /// Set the default proof strategy for destinations
     pub fn proof_strategy(mut self, strategy: ProofStrategy) -> Self {
         self.proof_strategy = strategy;
-        self
-    }
-
-    /// Apply one explicit proof binding to every Link. This preserves the
-    /// historical generic-node behavior; mixed CBC/vanilla profiles should
-    /// prefer [`Self::proof_binding_policy`] with `ByCipher`.
-    pub fn proof_binding(mut self, binding: ProofBinding) -> Self {
-        self.proof_binding_policy = ProofBindingPolicy::Explicit(binding);
-        self
-    }
-
-    /// Select proof binding per Link cipher (CBC → PacketHash, GCM mode 7 →
-    /// TokenTag), or explicitly override that policy. The default remains the
-    /// legacy node-wide TokenTag setting for generic API compatibility.
-    pub fn proof_binding_policy(mut self, policy: ProofBindingPolicy) -> Self {
-        self.proof_binding_policy = policy;
-        self
-    }
-
-    pub fn link_cipher(mut self, cipher: crate::LinkCipher) -> Self {
-        self.link_cipher = cipher;
-        self
-    }
-
-    /// Also accept inbound links that ask for standard CBC (see [`Node::set_accept_cbc_links`]).
-    pub fn accept_cbc_links(mut self, accept: bool) -> Self {
-        self.accept_cbc_links = accept;
         self
     }
 
@@ -385,11 +354,7 @@ impl NodeCoreBuilder {
             storage,
         );
         node.max_incoming_resources_per_link = self.max_incoming_resources_per_link;
-        node.set_proof_binding_policy(self.proof_binding_policy)
-            .expect("fresh NodeCore has no links");
-        node.set_link_cipher(self.link_cipher)
-            .expect("fresh node has no links");
-        node.set_accept_cbc_links(self.accept_cbc_links);
+        node.ext = self.ext;
 
         if self.respond_to_probes {
             node.enable_probe_responder();
@@ -464,11 +429,7 @@ impl NodeCoreBuilder {
             storage,
         ));
         node.max_incoming_resources_per_link = self.max_incoming_resources_per_link;
-        node.set_proof_binding_policy(self.proof_binding_policy)
-            .expect("fresh NodeCore has no links");
-        node.set_link_cipher(self.link_cipher)
-            .expect("fresh node has no links");
-        node.set_accept_cbc_links(self.accept_cbc_links);
+        node.ext = self.ext;
 
         if self.respond_to_probes {
             node.enable_probe_responder();

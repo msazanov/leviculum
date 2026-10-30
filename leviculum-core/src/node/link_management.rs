@@ -154,57 +154,8 @@ impl Message for RawBytesMessage<'_> {
 ///
 /// Every datum exists exactly once. Lookups are linear scans, n is bounded
 /// by channel window size × active links (realistically < 100, typically < 20).
-/// The 32 bytes a data proof is bound to.
-///
-/// This used to be SHA-256 of the packet's hashable part, which meant a second
-/// full SHA-256 pass over every payload byte at both ends of every data packet.
-/// On a CPU without SHA extensions that pass was the largest single cost on the
-/// receive path (measured: removing it alone took the bench from ~13.7 to
-/// ~21.8 MiB/s). The token's HMAC tag is already computed during encrypt and
-/// verify, is the same size, covers the same payload and is keyed with the link
-/// key — so binding proofs to it drops the pass without weakening anything: the
-/// proof is still signed with the peer's identity key, and an observer that
-/// reads a tag off the wire still cannot forge a proof with it.
-///
-/// Packets that carry no token fall back to the hash, so an unexpected packet
-/// degrades to the old behaviour instead of mis-binding a receipt.
-///
-/// `binding` selects the legacy mode explicitly; see [`crate::destination::ProofBinding`].
-fn proof_identifier(raw: &[u8], binding: ProofBinding) -> [u8; 32] {
-    match binding {
-        ProofBinding::TokenTag => {
-            crate::packet::packet_token_tag(raw).unwrap_or_else(|| packet_hash(raw))
-        }
-        ProofBinding::PacketHash => packet_hash(raw),
-    }
-}
-
-fn cipher_proof_identifier(
-    raw: &[u8],
-    binding: ProofBinding,
-    cipher: crate::LinkCipher,
-) -> [u8; 32] {
-    if binding == ProofBinding::TokenTag && cipher == crate::LinkCipher::Gcm {
-        // A signed 32-byte identifier containing the nonce and full 128-bit
-        // GCM tag. The authenticated tag binds the ciphertext, AAD and nonce.
-        let header_len = if raw.first().is_some_and(|b| b & 0x40 != 0) {
-            35
-        } else {
-            19
-        };
-        if raw.len() >= header_len + crate::crypto::link_gcm::OVERHEAD {
-            let token = &raw[header_len..];
-            let mut id = [0u8; 32];
-            // Receipt lookup truncates to 16 bytes: keep the entire GCM tag
-            // first, not a predictable counter plus a truncated tag.
-            id[..16].copy_from_slice(&token[token.len() - 16..]);
-            id[16..28].copy_from_slice(&token[..12]);
-            id[28..].copy_from_slice(b"GCM1");
-            return id;
-        }
-    }
-    proof_identifier(raw, binding)
-}
+mod ext;
+use ext::cipher_proof_identifier;
 
 pub(super) struct ReceiptTracker {
     entries: Vec<ReceiptEntry>,
@@ -239,13 +190,11 @@ impl ReceiptTracker {
         link_id: LinkId,
         sequence: u16,
         now_ms: u64,
-        binding: ProofBinding,
-        cipher: crate::LinkCipher,
     ) {
         self.entries
             .retain(|e| !(e.link_id == link_id && e.sequence == Some(sequence)));
 
-        let full_hash = cipher_proof_identifier(packet_data, binding, cipher);
+        let full_hash = packet_hash(packet_data);
         let mut truncated_hash = [0u8; TRUNCATED_HASHBYTES];
         truncated_hash.copy_from_slice(&full_hash[..TRUNCATED_HASHBYTES]);
 
@@ -271,10 +220,8 @@ impl ReceiptTracker {
         packet_data: &[u8],
         link_id: LinkId,
         deadline_ms: u64,
-        binding: ProofBinding,
-        cipher: crate::LinkCipher,
     ) -> [u8; 32] {
-        let full_hash = cipher_proof_identifier(packet_data, binding, cipher);
+        let full_hash = packet_hash(packet_data);
         let mut truncated_hash = [0u8; TRUNCATED_HASHBYTES];
         truncated_hash.copy_from_slice(&full_hash[..TRUNCATED_HASHBYTES]);
         self.entries.retain(|entry| entry.full_hash != full_hash);
@@ -399,33 +346,6 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         dest_signing_key: &[u8; 32],
         first_hop_timeout_ms: Option<u64>,
     ) -> Result<(LinkId, bool, crate::transport::TickOutput), LinkError> {
-        self.connect_with_cipher(
-            dest_hash,
-            dest_signing_key,
-            first_hop_timeout_ms,
-            self.link_cipher,
-        )
-    }
-
-    /// Whether a link request signalling `mode` is acceptable to this node as responder: its own cipher, or standard CBC when
-    /// [`Self::set_accept_cbc_links`] is on (links that cross stock Reticulum transports; those only carry CBC).
-    /// The initiator still rejects any mode other than the one it asked for, so this cannot be used to downgrade a link that asked for GCM.
-    pub(super) fn link_mode_allowed(&self, mode: u8) -> bool {
-        mode == self.link_cipher as u8
-            || (self.accept_cbc_links && mode == crate::LinkCipher::Cbc as u8)
-    }
-
-    /// [`Self::connect_with_first_hop_timeout`] with an explicit cipher for this link only.
-    ///
-    /// # Errors
-    /// As [`Self::connect`].
-    pub fn connect_with_cipher(
-        &mut self,
-        dest_hash: DestinationHash,
-        dest_signing_key: &[u8; 32],
-        first_hop_timeout_ms: Option<u64>,
-        cipher: crate::LinkCipher,
-    ) -> Result<(LinkId, bool, crate::transport::TickOutput), LinkError> {
         if let Some(max) = self.transport_config().max_links {
             if self.links.len() >= max {
                 self.log_link_refused(&dest_hash, max);
@@ -452,7 +372,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
         // Create new outgoing link
         let mut link = Link::new_outgoing(dest_hash, &mut self.rng);
-        link.set_cipher(cipher)?;
+        link.set_cipher(self.ext.outgoing_cipher())?;
         link.set_keepalive_override(self.transport_config().link_keepalive_secs);
         let packet = link.build_link_request_packet_with_transport(next_hop, hops, hw_mtu);
         link.set_hops(hops);
@@ -923,7 +843,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             .get(link_id)
             .and_then(|l| l.channel().map(|ch| (ch.last_sent_sequence(), l.cipher())))
         {
-            self.receipt_tracker.register(
+            self.receipt_tracker.register_bound(
                 &packet_bytes,
                 *link_id,
                 seq,
@@ -990,7 +910,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             .max(TRAFFIC_TIMEOUT_MIN_MS)
             .max(crate::constants::RAW_RECEIPT_TIMEOUT_FLOOR_MS);
         let deadline_ms = now_ms.saturating_add(receipt_timeout_ms);
-        let packet_hash = self.receipt_tracker.register_raw(
+        let packet_hash = self.receipt_tracker.register_raw_bound(
             &packet_bytes,
             *link_id,
             deadline_ms,
@@ -1000,32 +920,6 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         self.route_link_packet(link_id, &packet_bytes);
 
         Ok((packet_hash, self.process_events_and_actions()))
-    }
-
-    /// Send one tunnelled datagram on an established link: sealed by the link cipher, sent once.
-    ///
-    /// Unlike [`Self::send_packet_on_link`] it keeps no receipt (a receipt per packet is state and a
-    /// timer per packet, which an IP tunnel at tens of thousands of packets per second cannot afford),
-    /// and unlike [`Self::send_on_link`] it has no window, no ordering and no retransmission: the
-    /// transport underneath either delivers the packet or drops it, and the inner IP stack copes.
-    pub fn send_link_tunnel(
-        &mut self,
-        link_id: &LinkId,
-        data: &[u8],
-    ) -> Result<crate::transport::TickOutput, send::SendError> {
-        let link_id = &self.resolve_link_id(link_id);
-        let link = self.links.get(link_id).ok_or(send::SendError::NoLink)?;
-        if link.state() != LinkState::Active {
-            return Err(send::SendError::LinkFailed);
-        }
-        if data.len() > link.mdu() {
-            return Err(send::SendError::TooLarge);
-        }
-        let packet_bytes = link
-            .build_data_packet_with_context(data, PacketContext::Tunnel, &mut self.rng)
-            .map_err(|_| send::SendError::LinkFailed)?;
-        self.route_link_packet(link_id, &packet_bytes);
-        Ok(self.process_events_and_actions())
     }
 
     /// Send a proof for an application-accepted plain link data packet.
@@ -1081,35 +975,8 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             busy_rejections: ch.map(|c| c.busy_rejections()).unwrap_or(0),
             pacing_rejections: ch.map(|c| c.pacing_rejections()).unwrap_or(0),
             iface_pacing_rejections: link.iface_pacing_rejections(),
-            attached_interface: link.attached_interface(),
-            cipher: link.cipher(),
-            keepalive_ms: link.keepalive_ms(),
-            stale_time_ms: link.stale_time_ms(),
-            keepalives_sent: link.keepalives_sent(),
-            keepalives_acked: link.keepalives_acked(),
-            keepalive_rtt_ms: link.keepalive_rtt_ms(),
+            ext: super::ext::LinkStatsExt::of(link),
         })
-    }
-
-    /// Override this link's keepalive interval (seconds, clamped to the
-    /// protocol minimum), or restore the RTT-derived value with `None`.
-    ///
-    /// Both ends of a link must agree on the interval, otherwise the side
-    /// with the shorter stale window closes a quiet link. Returns `false`
-    /// for an unknown link.
-    pub fn set_link_keepalive(&mut self, link_id: &LinkId, secs: Option<u64>) -> bool {
-        let link_id = self.resolve_link_id(link_id);
-        let Some(link) = self.links.get_mut(&link_id) else {
-            return false;
-        };
-        link.set_keepalive_override(secs);
-        if secs.is_none() {
-            // Re-derive from the handshake RTT (0 when the sample is absent,
-            // which yields the protocol floor); establishment recomputes it.
-            let rtt_us = link.rtt_us().unwrap_or(0);
-            link.update_keepalive_from_rtt(rtt_us as f64 / 1_000_000.0);
-        }
-        true
     }
 
     // Internal: Link Packet Processing
@@ -1623,19 +1490,6 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         }
     }
 
-    /// Any non-LRRTT inbound Link packet confirms delivery of a mode-7 GCM
-    /// RTT. CBC remains one-shot and never enters the retry state machine.
-    fn try_confirm_rtt(&mut self, link_id: &LinkId) {
-        if let Some(link) = self.links.get_mut(link_id) {
-            if link.cipher() == crate::LinkCipher::Gcm
-                && link.is_initiator()
-                && !link.rtt_confirmed()
-            {
-                link.confirm_rtt();
-            }
-        }
-    }
-
     /// Refuse a packet for one of our links that arrived on another interface
     /// than the one the link was formed on (#658, audit D7). Returns true when
     /// the packet was dropped.
@@ -1954,7 +1808,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         rx: LinkRx<'_>,
         now_ms: u64,
     ) {
-        let proof_binding_policy = self.proof_binding_policy;
+        let proof_binding_policy = self.ext.proof_binding_policy;
         let Some(link) = self.links.get_mut(&link_id) else {
             crate::tracing::trace!(
                 link = %HexShort(link_id.as_bytes()),
@@ -2236,38 +2090,6 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
     }
 
     /// Regular data packet, decrypt, handle proof strategy, emit data event
-    /// One tunnelled datagram: authenticate, decrypt, hand the plaintext up. Nothing else.
-    ///
-    /// No proof (an unreliable datagram is never acknowledged), no receipt, no ring, no hash: the
-    /// cipher is the only integrity and replay check, and for GCM the record counter window rejects
-    /// duplicates. A failure drops exactly this packet.
-    fn handle_tunnel_packet(&mut self, link_id: LinkId, packet: &Packet, now_ms: u64) {
-        let Some(link) = self.links.get_mut(&link_id) else {
-            return;
-        };
-        if link.state() != LinkState::Active {
-            return;
-        }
-        link.record_inbound(now_ms);
-        let sealed = packet.data.as_slice();
-        let mut plaintext = alloc::vec![0u8; sealed.len()];
-        match link.decrypt_for_context(sealed, &mut plaintext, packet.context) {
-            Ok(len) => {
-                plaintext.truncate(len);
-                self.events.push(NodeEvent::LinkDataReceived {
-                    link_id,
-                    data: plaintext,
-                });
-            }
-            Err(_) => {
-                crate::tracing::trace!(
-                    link = %HexShort(link_id.as_bytes()),
-                    "Tunnel datagram refused by the link cipher"
-                );
-            }
-        }
-    }
-
     fn handle_plain_data_packet(
         &mut self,
         link_id: LinkId,
@@ -2276,7 +2098,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         rx: LinkRx<'_>,
         now_ms: u64,
     ) {
-        let proof_binding_policy = self.proof_binding_policy;
+        let proof_binding_policy = self.ext.proof_binding_policy;
         let Some(link) = self.links.get_mut(&link_id) else {
             crate::tracing::trace!(
                 link = %HexShort(link_id.as_bytes()),
@@ -4336,54 +4158,6 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         }
     }
 
-    /// Retry only the explicitly signalled mode-7 GCM LRRTT. CBC remains a
-    /// single-shot packet for Python-RNS callback/RTT parity. Retries are
-    /// bounded and use the original KnotHop interval: max(3 × RTT, 10 s).
-    pub(super) fn check_rtt_retry(&mut self, now_ms: u64) {
-        let due: Vec<LinkId> = self
-            .links
-            .iter()
-            .filter(|(_, link)| {
-                link.needs_rtt_retry()
-                    && link.rtt_sent_at_ms().is_some_and(|sent| {
-                        now_ms.saturating_sub(sent) >= link.rtt_retry_interval_ms()
-                    })
-            })
-            .map(|(link_id, _)| *link_id)
-            .collect();
-
-        for link_id in due {
-            let packet = {
-                let Some(link) = self.links.get_mut(&link_id) else {
-                    continue;
-                };
-                let rtt_seconds = link
-                    .rtt_secs()
-                    .unwrap_or(CHANNEL_DEFAULT_RTT_MS as f64 / MS_PER_SECOND as f64);
-                match link.build_rtt_packet(rtt_seconds, &mut self.rng) {
-                    Ok(packet) => {
-                        link.record_rtt_sent(now_ms);
-                        crate::tracing::debug!(
-                            link = %HexShort(link_id.as_bytes()),
-                            attempt = link.rtt_send_count(),
-                            retry_budget = RTT_RETRY_MAX_ATTEMPTS,
-                            "Resending LRRTT on explicitly negotiated GCM Link"
-                        );
-                        packet
-                    }
-                    Err(error) => {
-                        crate::tracing::warn!(
-                            link = %HexShort(link_id.as_bytes()),
-                            "GCM LRRTT retry packet build failed: {error:?}"
-                        );
-                        continue;
-                    }
-                }
-            };
-            self.route_link_packet(&link_id, &packet);
-        }
-    }
-
     /// Check if any active links need to send keepalives (initiator only)
     pub(super) fn check_keepalives(&mut self, now_ms: u64) {
         let need_keepalive: Vec<LinkId> = self
@@ -4571,26 +4345,9 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
                         if let Some(packet) = packet {
                             // Register receipt for the re-encrypted packet
-                            let Some(cipher) = self.links.get(&link_id).map(|l| l.cipher()) else {
-                                // The core is serialized, so this should only
-                                // be reachable after an invariant violation.
-                                // Never guess a node-global cipher/binding for
-                                // a receipt whose Link no longer exists.
-                                tracing::warn!(
-                                    link = %HexShort(link_id.as_bytes()),
-                                    sequence,
-                                    "channel retransmit Link vanished before receipt registration"
-                                );
+                            if !self.register_retransmit_receipt(&packet, link_id, sequence, now_ms) {
                                 continue;
-                            };
-                            self.receipt_tracker.register(
-                                &packet,
-                                link_id,
-                                sequence,
-                                now_ms,
-                                self.proof_binding_for_cipher(cipher),
-                                cipher,
-                            );
+                            }
 
                             self.events.push(NodeEvent::ChannelRetransmit {
                                 link_id,
@@ -5029,89 +4786,6 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 }
 
 #[cfg(test)]
-#[cfg(test)]
-mod proof_binding_tests {
-    use super::proof_identifier;
-    use crate::constants::{AES_BLOCK_SIZE, HMAC_SIZE};
-    use crate::destination::{ProofBinding, ProofBindingPolicy};
-    use crate::packet::packet_hash;
-
-    fn token_packet() -> alloc::vec::Vec<u8> {
-        let mut raw = alloc::vec::Vec::new();
-        raw.extend_from_slice(&[0x00, 0x00]);
-        raw.extend_from_slice(&[0x11u8; 16]);
-        raw.push(crate::packet::PacketContext::Channel.to_byte());
-        raw.extend_from_slice(&[0u8; AES_BLOCK_SIZE + AES_BLOCK_SIZE]);
-        raw.extend_from_slice(&[0xABu8; HMAC_SIZE]);
-        raw
-    }
-
-    #[test]
-    fn gcm_receipt_lookup_uses_full_tag_even_for_short_records() {
-        let mut raw = alloc::vec![0u8; 19];
-        raw[18] = crate::packet::PacketContext::Channel.to_byte();
-        raw.extend_from_slice(&[3u8; 12]);
-        raw.extend_from_slice(b"echo");
-        raw.extend_from_slice(&[7u8; 16]);
-        let id =
-            super::cipher_proof_identifier(&raw, ProofBinding::TokenTag, crate::LinkCipher::Gcm);
-        assert_eq!(&id[..16], &[7u8; 16]);
-        assert_eq!(&id[16..28], &[3u8; 12]);
-        assert_eq!(&id[28..], b"GCM1");
-        assert_eq!(
-            super::cipher_proof_identifier(&raw, ProofBinding::PacketHash, crate::LinkCipher::Gcm),
-            packet_hash(&raw)
-        );
-    }
-
-    #[test]
-    fn proof_binding_policy_resolves_per_cipher_and_preserves_explicit_override() {
-        assert_eq!(
-            ProofBindingPolicy::ByCipher.for_cipher(crate::LinkCipher::Cbc),
-            ProofBinding::PacketHash
-        );
-        assert_eq!(
-            ProofBindingPolicy::ByCipher.for_cipher(crate::LinkCipher::Gcm),
-            ProofBinding::TokenTag
-        );
-        assert_eq!(
-            ProofBindingPolicy::Explicit(ProofBinding::TokenTag).for_cipher(crate::LinkCipher::Cbc),
-            ProofBinding::TokenTag
-        );
-        assert_eq!(
-            ProofBindingPolicy::default().for_cipher(crate::LinkCipher::Cbc),
-            ProofBinding::TokenTag,
-            "generic API legacy default remains explicit TokenTag"
-        );
-    }
-
-    /// The two modes must disagree on a token packet - that is the whole point
-    /// of the switch - while both stay internally consistent, which is what
-    /// lets a legacy peer find our receipts at all.
-    #[test]
-    fn bindings_differ_and_each_matches_its_own_definition() {
-        let raw = token_packet();
-        let tag = proof_identifier(&raw, ProofBinding::TokenTag);
-        let hash = proof_identifier(&raw, ProofBinding::PacketHash);
-
-        assert_eq!(tag, crate::packet::packet_token_tag(&raw).unwrap());
-        assert_eq!(hash, packet_hash(&raw));
-        assert_ne!(tag, hash);
-    }
-
-    /// Without a token there is no tag to bind to, so both modes must land on
-    /// the hash rather than one of them binding to something meaningless.
-    #[test]
-    fn packets_without_a_token_use_the_hash_in_both_modes() {
-        let mut raw = token_packet();
-        raw[2 + 16] = crate::packet::PacketContext::LinkClose.to_byte();
-        let expected = packet_hash(&raw);
-        assert_eq!(proof_identifier(&raw, ProofBinding::TokenTag), expected);
-        assert_eq!(proof_identifier(&raw, ProofBinding::PacketHash), expected);
-    }
-}
-
-#[cfg(test)]
 mod receipt_tracker_tests {
     use super::*;
 
@@ -5128,25 +4802,11 @@ mod receipt_tracker_tests {
         let data_v1 = [0x00u8; 64];
         let data_v2 = [0xFFu8; 64];
 
-        tracker.register(
-            &data_v1,
-            link,
-            1,
-            1000,
-            ProofBinding::PacketHash,
-            crate::LinkCipher::Cbc,
-        );
+        tracker.register(&data_v1, link, 1, 1000);
         assert_eq!(tracker.len(), 1);
 
         // Re-register same (link, seq) with different data
-        tracker.register(
-            &data_v2,
-            link,
-            1,
-            2000,
-            ProofBinding::PacketHash,
-            crate::LinkCipher::Cbc,
-        );
+        tracker.register(&data_v2, link, 1, 2000);
         assert_eq!(tracker.len(), 1);
 
         // Entry should have the new hashes
@@ -5167,14 +4827,7 @@ mod receipt_tracker_tests {
         let mut tracker = ReceiptTracker::new();
         let link = make_link_id(0xBB);
 
-        tracker.register(
-            b"some_packet",
-            link,
-            5,
-            1000,
-            ProofBinding::PacketHash,
-            crate::LinkCipher::Cbc,
-        );
+        tracker.register(b"some_packet", link, 5, 1000);
         assert_eq!(tracker.len(), 1);
 
         let unknown = [0xFFu8; TRUNCATED_HASHBYTES];
@@ -5188,30 +4841,9 @@ mod receipt_tracker_tests {
         let link_a = make_link_id(0xAA);
         let link_b = make_link_id(0xBB);
 
-        tracker.register(
-            b"a1",
-            link_a,
-            1,
-            1000,
-            ProofBinding::PacketHash,
-            crate::LinkCipher::Cbc,
-        );
-        tracker.register(
-            b"a2",
-            link_a,
-            2,
-            1000,
-            ProofBinding::PacketHash,
-            crate::LinkCipher::Cbc,
-        );
-        tracker.register(
-            b"b1",
-            link_b,
-            1,
-            1000,
-            ProofBinding::PacketHash,
-            crate::LinkCipher::Cbc,
-        );
+        tracker.register(b"a1", link_a, 1, 1000);
+        tracker.register(b"a2", link_a, 2, 1000);
+        tracker.register(b"b1", link_b, 1, 1000);
         assert_eq!(tracker.count_for_link(&link_a), 2);
         assert_eq!(tracker.count_for_link(&link_b), 1);
 
@@ -5226,22 +4858,8 @@ mod receipt_tracker_tests {
         let mut tracker = ReceiptTracker::new();
         let link = make_link_id(0xCC);
 
-        tracker.register(
-            b"old_packet",
-            link,
-            1,
-            1000,
-            ProofBinding::PacketHash,
-            crate::LinkCipher::Cbc,
-        );
-        tracker.register(
-            b"new_packet",
-            link,
-            2,
-            1000 + DATA_RECEIPT_TIMEOUT_MS,
-            ProofBinding::PacketHash,
-            crate::LinkCipher::Cbc,
-        );
+        tracker.register(b"old_packet", link, 1, 1000);
+        tracker.register(b"new_packet", link, 2, 1000 + DATA_RECEIPT_TIMEOUT_MS);
 
         // Advance time so only the first has expired
         let now = 1000 + DATA_RECEIPT_TIMEOUT_MS + 1;
@@ -5261,14 +4879,7 @@ mod receipt_tracker_tests {
         let link = make_link_id(0xDD);
 
         // Register, confirm delivery, register again with same sequence
-        tracker.register(
-            b"msg_v1",
-            link,
-            1,
-            1000,
-            ProofBinding::PacketHash,
-            crate::LinkCipher::Cbc,
-        );
+        tracker.register(b"msg_v1", link, 1, 1000);
         let hash1 = packet_hash(b"msg_v1");
         let mut trunc1 = [0u8; TRUNCATED_HASHBYTES];
         trunc1.copy_from_slice(&hash1[..TRUNCATED_HASHBYTES]);
@@ -5278,14 +4889,7 @@ mod receipt_tracker_tests {
         assert_eq!(tracker.len(), 0);
 
         // Re-register same sequence (after wraparound or new message)
-        tracker.register(
-            b"msg_v2",
-            link,
-            1,
-            2000,
-            ProofBinding::PacketHash,
-            crate::LinkCipher::Cbc,
-        );
+        tracker.register(b"msg_v2", link, 1, 2000);
         assert_eq!(tracker.len(), 1);
 
         let hash2 = packet_hash(b"msg_v2");

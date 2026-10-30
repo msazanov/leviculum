@@ -210,8 +210,8 @@ pub enum ProofBinding {
 ///
 /// The generic builder keeps the historical node-wide TokenTag default via
 /// [`Explicit`](Self::Explicit). Applications that mix vanilla Reticulum and
-/// KnotHop Links should opt into [`ByCipher`](Self::ByCipher): standard CBC
-/// Links use PacketHash and explicitly negotiated KnotHop GCM mode 7 uses
+/// GCM Links should opt into [`ByCipher`](Self::ByCipher): standard CBC
+/// Links use PacketHash and explicitly negotiated GCM mode 7 uses
 /// TokenTag. `Explicit` remains available for deployments whose peers share a
 /// custom proof-binding configuration; do not use it for mixed vanilla links.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

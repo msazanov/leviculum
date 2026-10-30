@@ -108,7 +108,7 @@ fn validate_mode(mode: u8) -> Result<(), LinkError> {
     }
 }
 
-/// Link token cipher. GCM mode 7 is a knothop-specific, explicitly signalled mode.
+/// Link token cipher. GCM mode 7 is a fork-specific, explicitly signalled mode.
 /// The responder signs the mode; the initiator rejects any mode change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(u8)]

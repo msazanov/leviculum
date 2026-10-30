@@ -302,7 +302,7 @@ pub const UNKNOWN_BITRATE_ASSUMPTION_BPS: u32 = 300;
 pub const ESTABLISHMENT_RESPONDER_BONUS_MS: u64 = 54_000;
 
 /// Maximum LRRTT retransmissions after the initial packet, for explicitly
-/// negotiated KnotHop GCM mode 7 only. Vanilla CBC keeps upstream one-shot
+/// negotiated GCM mode 7 only. Vanilla CBC keeps upstream one-shot
 /// behavior so Python RNS does not process the same RTT callback repeatedly.
 pub const RTT_RETRY_MAX_ATTEMPTS: u8 = 5;
 /// Minimum delay between mode-7 LRRTT sends.
@@ -525,8 +525,8 @@ pub const CHANNEL_RX_RING_MAX: usize = 512;
 /// `_max_tries` (`Channel.py:295`), checked at `Channel.py:569`. Was 8 until
 /// the 2026-10-12 link audit (D18): three retries more than a Python sender
 /// spends before giving a struggling link up.
-// KnotHop keeps the base-branch retry budget; upstream's reference-parity
-// value of 5 is a behavioral change requiring an explicit owner decision.
+// This fork keeps the base-branch retry budget; upstream's reference-parity
+// value of 5 is a behavioral change requiring an explicit decision.
 pub const CHANNEL_MAX_TRIES: u8 = 8;
 
 /// How soon the timer looks again at a channel message held for a full host
