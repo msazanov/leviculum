@@ -1051,6 +1051,7 @@ impl Inner {
             address,
             initials,
             archived: 0,
+            home_client: self.model.home_client,
         }
     }
 
@@ -1193,6 +1194,7 @@ impl Inner {
                 .iter()
                 .map(|other| names.label(other))
                 .collect(),
+            verified: self.model.verified(&peer),
         }
     }
 

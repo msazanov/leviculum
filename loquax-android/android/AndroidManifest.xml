@@ -66,6 +66,14 @@
 
     <activity a:name='network.leviculum.loquax.MapActivity' a:exported='false'/>
 
+    <activity a:name='network.leviculum.loquax.ContactActivity'
+              a:theme='@style/Loquax.List'
+              a:exported='false'/>
+
+    <activity a:name='network.leviculum.loquax.SettingsActivity'
+              a:theme='@style/Loquax.List'
+              a:exported='false'/>
+
     <service a:name='network.leviculum.loquax.LoquaxService'
              a:exported='false'
              a:foregroundServiceType='remoteMessaging'/>

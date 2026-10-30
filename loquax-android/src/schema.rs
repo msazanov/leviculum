@@ -509,6 +509,9 @@ pub struct Conversations {
     /// How many conversations are archived: the list's last row (1146).
     #[serde(default)]
     pub archived: u32,
+    /// Whether a delete may reach every device of the home.
+    #[serde(default)]
+    pub home_client: bool,
 }
 
 /// A reaction under a message: its content, how many sent it, and whether
@@ -606,6 +609,10 @@ pub struct Messages {
     pub petname: Option<String>,
     #[serde(default)]
     pub others: Vec<String>,
+    /// The reader verified the peer's identity in person (1146): the
+    /// header's mark.
+    #[serde(default)]
+    pub verified: bool,
 }
 
 /// What happened, for the screen.

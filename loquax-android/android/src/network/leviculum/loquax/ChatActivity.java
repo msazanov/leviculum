@@ -40,6 +40,7 @@ import android.widget.TextView;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
@@ -62,6 +63,12 @@ import java.util.Set;
  * every device of the home; an unknown sender's first message asks once
  * in a banner. Picking needs no permission (Book); suggestions ask for
  * READ_CONTACTS, and only when the user taps for them.
+ *
+ * The contact screen (1146, ContactActivity) opens from a tap on the bar's
+ * avatar or name and from the menu's "Contact info", as in Signal; what it
+ * hands back runs here: the search in this conversation, which marks and
+ * jumps to the newest match and to older ones on each search again, the
+ * address book's choice, or closing a blocked or deleted conversation.
  */
 public class ChatActivity extends Activity implements Events.Listener {
     static final String PEER = "peer";
@@ -103,6 +110,11 @@ public class ChatActivity extends Activity implements Events.Listener {
     private View banner;
     /** Whether the address goes into the new contact the editor is creating. */
     private boolean insertWithAddress;
+    /** The contact screen's request code. */
+    private static final int CONTACT = 45;
+    /** The last search in this conversation and the key of its match shown, -1 for none. */
+    private String searchQuery = "";
+    private long searchHit = -1;
     private final ServiceLink link = new ServiceLink(this);
     /** Redraws the relative times of the newest group while the screen is up. */
     private final Handler ticker = new Handler(Looper.getMainLooper());
@@ -133,6 +145,14 @@ public class ChatActivity extends Activity implements Events.Listener {
                 finish();
             }
         });
+        View.OnClickListener contact = new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                openContact();
+            }
+        };
+        avatar.setOnClickListener(contact);
+        title.setOnClickListener(contact);
         final ImageButton menu = (ImageButton) findViewById(R.id.menu);
         menu.setImageDrawable(new Glyph(Glyph.Kind.MENU, text));
         menu.setOnClickListener(new View.OnClickListener() {
@@ -333,6 +353,8 @@ public class ChatActivity extends Activity implements Events.Listener {
     /** The bar's menu: pull now, the map, the address book and the name. */
     private void showMenu(View anchor) {
         PopupMenu popup = new PopupMenu(this, anchor);
+        popup.getMenu().add(0, R.string.contact_info, 0, R.string.contact_info);
+        popup.getMenu().add(0, R.string.chat_search, 0, R.string.chat_search);
         popup.getMenu().add(0, R.string.refresh, 0, R.string.refresh);
         popup.getMenu().add(0, R.string.map, 1, R.string.map);
         if (Core.bool(header, "linked")) {
@@ -350,7 +372,11 @@ public class ChatActivity extends Activity implements Events.Listener {
             @Override
             public boolean onMenuItemClick(MenuItem item) {
                 int id = item.getItemId();
-                if (id == R.string.refresh) {
+                if (id == R.string.contact_info) {
+                    openContact();
+                } else if (id == R.string.chat_search) {
+                    search();
+                } else if (id == R.string.refresh) {
                     say(Core.pull());
                 } else if (id == R.string.map) {
                     startActivity(new Intent(ChatActivity.this, MapActivity.class));
@@ -584,6 +610,18 @@ public class ChatActivity extends Activity implements Events.Listener {
     @Override
     protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
+        if (request == CONTACT) {
+            String then = result == RESULT_OK && data != null
+                    ? data.getStringExtra(ContactActivity.THEN) : null;
+            if (ContactActivity.THEN_SEARCH.equals(then)) {
+                search();
+            } else if (ContactActivity.THEN_LINK.equals(then)) {
+                choose();
+            } else if (ContactActivity.THEN_CLOSE.equals(then)) {
+                finish();
+            }
+            return;
+        }
         if (result != RESULT_OK || data == null || data.getData() == null) {
             return;
         }
@@ -602,6 +640,77 @@ public class ChatActivity extends Activity implements Events.Listener {
         String error = Core.link(peer, copy);
         line(error != null ? error : getString(R.string.linked_to, Core.str(copy, "name")));
         refresh();
+    }
+
+    /** The contact screen of this conversation's peer (1146). */
+    private void openContact() {
+        startActivityForResult(new Intent(this, ContactActivity.class)
+                .putExtra(ContactActivity.PEER, peer), CONTACT);
+    }
+
+    /**
+     * Search the messages shown for a text: the newest match is marked and
+     * scrolled to, and the same text again goes to the next older one.
+     */
+    private void search() {
+        final EditText field = new EditText(this);
+        field.setSingleLine(true);
+        field.setHint(R.string.chat_search_hint);
+        field.setText(searchQuery);
+        field.setSelection(field.getText().length());
+        LinearLayout body = new LinearLayout(this);
+        body.setPadding(dp(20), dp(8), dp(20), 0);
+        body.addView(field, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        new AlertDialog.Builder(this)
+                .setTitle(R.string.chat_search)
+                .setView(body)
+                .setPositiveButton(R.string.chat_search, new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface d, int which) {
+                        find(field.getText().toString().trim());
+                    }
+                })
+                .setNegativeButton(android.R.string.cancel, null)
+                .show();
+    }
+
+    private void find(String query) {
+        if (!query.equals(searchQuery)) {
+            searchHit = -1;
+        }
+        searchQuery = query;
+        if (query.isEmpty()) {
+            searchHit = -1;
+            adapter.notifyDataSetChanged();
+            return;
+        }
+        String needle = query.toLowerCase(Locale.getDefault());
+        List<Integer> matches = new ArrayList<>();
+        for (int i = rows.size() - 1; i >= 0; i--) {
+            if (Core.str(rows.get(i), "body").toLowerCase(Locale.getDefault()).contains(needle)) {
+                matches.add(i);
+            }
+        }
+        if (matches.isEmpty()) {
+            searchHit = -1;
+            line(getString(R.string.chat_search_none));
+            adapter.notifyDataSetChanged();
+            return;
+        }
+        // The next older match than the one shown, the newest again after the oldest.
+        int next = 0;
+        for (int m = 0; m < matches.size(); m++) {
+            if (Core.num(rows.get(matches.get(m)), "key") == searchHit) {
+                next = (m + 1) % matches.size();
+                break;
+            }
+        }
+        int index = matches.get(next);
+        searchHit = Core.num(rows.get(index), "key");
+        list.setSelection(index);
+        line(getString(R.string.chat_search_found, next + 1, matches.size()));
+        adapter.notifyDataSetChanged();
     }
 
     /** The user's own name for the peer, for every device of the home; empty clears it. */
@@ -989,7 +1098,9 @@ public class ChatActivity extends Activity implements Events.Listener {
             return;
         }
         header = answer;
-        title.setText(Core.str(answer, "name"));
+        // The verified mark after the name (1146), once the identity was compared.
+        title.setText(Core.str(answer, "name")
+                + (Core.bool(answer, "verified") ? " \u2714" : ""));
         avatar.show(peer, answer);
         banner.setVisibility(Core.bool(answer, "ask_link") ? View.VISIBLE : View.GONE);
         homeClient = Core.bool(answer, "home_client");
@@ -1096,7 +1207,8 @@ public class ChatActivity extends Activity implements Events.Listener {
             LinearLayout root = (LinearLayout) view;
             root.setGravity(ours ? Gravity.END : Gravity.START);
             boolean picked = selection != null && selection.contains(Core.num(row, "key"));
-            root.setBackgroundColor(picked ? getColor(R.color.selected_row) : 0);
+            boolean found = searchHit >= 0 && Core.num(row, "key") == searchHit;
+            root.setBackgroundColor(picked || found ? getColor(R.color.selected_row) : 0);
 
             TextView day = (TextView) view.findViewById(R.id.day);
             boolean begins = dayBegins(position);

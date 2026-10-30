@@ -199,6 +199,52 @@ final class Core {
         return list(answer(Native.query(MsgPack.pack(map("t", "links")))), "links");
     }
 
+    /** Pin `peer`'s conversation to the top, or loosen it (1146); every device of the home. */
+    static String pin(String peer, boolean on) {
+        return command(map("t", "pin", "peer", peer, "on", on));
+    }
+
+    /** Mute for `secs` from now, always when negative, unmute with 0. */
+    static String mute(String peer, long secs) {
+        return command(map("t", "mute", "peer", peer, "secs", secs));
+    }
+
+    static String archive(String peer, boolean on) {
+        return command(map("t", "archive", "peer", peer, "on", on));
+    }
+
+    static String block(String peer, boolean on) {
+        return command(map("t", "block", "peer", peer, "on", on));
+    }
+
+    /** The identity compared in person; on this phone only. */
+    static String verify(String peer, boolean on) {
+        return command(map("t", "verify", "peer", peer, "on", on));
+    }
+
+    /** Unread on this phone, or read as opening it would be. */
+    static String unread(String peer, boolean on) {
+        return command(map("t", "unread", "peer", peer, "on", on));
+    }
+
+    /** Delete the conversation here, or on every device of the home. */
+    static String forget(String peer, boolean everywhere) {
+        return command(map("t", "forget", "peer", peer, "everywhere", everywhere));
+    }
+
+    /** The contact screen of `peer`; an "error" key when there is none. */
+    static Map<String, Object> detail(String peer) {
+        return answer(Native.query(MsgPack.pack(map("t", "detail", "peer", peer))));
+    }
+
+    static Map<String, Object> archived() {
+        return answer(Native.query(MsgPack.pack(map("t", "archived"))));
+    }
+
+    static Map<String, Object> blocked() {
+        return answer(Native.query(MsgPack.pack(map("t", "blocked"))));
+    }
+
     static String pull() {
         return command(map("t", "pull"));
     }

@@ -233,7 +233,8 @@ public class LoquaxService extends Service implements Events.Listener {
             if (count == 0) {
                 manager.cancel(peer, 0);
             } else if (tell && unread != null && count > (before == null ? 0 : before)
-                    && screens == 0) {
+                    && screens == 0 && !Core.bool(row, "muted")) {
+                // A muted conversation counts, and posts nothing (1146).
                 manager.notify(peer, 0, message(row));
             }
         }
