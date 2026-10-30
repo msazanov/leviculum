@@ -72,6 +72,7 @@ mod known_destinations_age_interop_tests;
 mod lifecycle_tests;
 mod link_keepalive_close_tests;
 mod link_manager_tests;
+mod link_cipher_tests;
 mod link_packet_interop_tests;
 mod link_tests;
 mod lncp_identify_loss_interop_tests;

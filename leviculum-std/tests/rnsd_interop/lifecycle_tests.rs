@@ -59,7 +59,6 @@ async fn test_full_link_lifecycle_through_relay() {
         .enable_transport(false)
         .add_tcp_client(py_relay.rns_addr())
         .storage_path(_storage.path().to_path_buf())
-        .proof_binding_policy(leviculum_core::ProofBindingPolicy::ByCipher)
         .build()
         .await
         .expect("Failed to build Rust node");

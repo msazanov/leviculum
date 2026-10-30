@@ -1671,10 +1671,7 @@ async fn test_manager_rapid_data_exchange() {
     let mut stream = connect_to_daemon(&daemon).await;
     let mut deframer = Deframer::new();
 
-    // The Python daemon proves CBC Link data with the packet hash.
-    let mut node = NodeCoreBuilder::new()
-        .proof_binding_policy(leviculum_core::ProofBindingPolicy::ByCipher)
-        .build(OsRng, TestClock, MemoryStorage::with_defaults());
+    let mut node = NodeCoreBuilder::new().build(OsRng, TestClock, MemoryStorage::with_defaults());
 
     let (link_id, _) = establish_initiator_link(&mut node, &daemon, &mut stream, &mut deframer)
         .await

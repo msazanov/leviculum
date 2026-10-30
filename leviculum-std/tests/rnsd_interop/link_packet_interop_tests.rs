@@ -147,9 +147,7 @@ async fn test_rust_raw_link_packet_to_python_prove_all() {
     let daemon = TestDaemon::start().await.expect("Failed to start daemon");
     let mut stream = connect_to_daemon(&daemon).await;
     let mut deframer = Deframer::new();
-    let mut node = NodeCoreBuilder::new()
-        .proof_binding_policy(leviculum_core::ProofBindingPolicy::ByCipher)
-        .build(OsRng, TestClock, MemoryStorage::with_defaults());
+    let mut node = NodeCoreBuilder::new().build(OsRng, TestClock, MemoryStorage::with_defaults());
 
     let (link_id, dest_info) =
         establish_initiator_link(&mut node, &daemon, &mut stream, &mut deframer, "proveall")
@@ -243,9 +241,7 @@ async fn test_rust_raw_link_packet_prove_none_delivery_failed() {
     let daemon = TestDaemon::start().await.expect("Failed to start daemon");
     let mut stream = connect_to_daemon(&daemon).await;
     let mut deframer = Deframer::new();
-    let mut node = NodeCoreBuilder::new()
-        .proof_binding_policy(leviculum_core::ProofBindingPolicy::ByCipher)
-        .build(OsRng, TestClock, MemoryStorage::with_defaults());
+    let mut node = NodeCoreBuilder::new().build(OsRng, TestClock, MemoryStorage::with_defaults());
 
     let (link_id, dest_info) =
         establish_initiator_link(&mut node, &daemon, &mut stream, &mut deframer, "provenone")
@@ -315,30 +311,6 @@ async fn setup_python_initiated_link(
     String,
     tempfile::TempDir,
 ) {
-    setup_python_initiated_link_with_profile(
-        proof_strategy,
-        test_name,
-        leviculum_core::ProofBindingPolicy::ByCipher,
-        leviculum_core::LinkCipher::Cbc,
-        false,
-    )
-    .await
-}
-
-async fn setup_python_initiated_link_with_profile(
-    proof_strategy: ProofStrategy,
-    test_name: &str,
-    proof_binding_policy: leviculum_core::ProofBindingPolicy,
-    node_cipher: leviculum_core::LinkCipher,
-    accept_cbc_links: bool,
-) -> (
-    leviculum_std::driver::ReticulumNode,
-    leviculum_std::EventReceiver,
-    TestDaemon,
-    LinkId,
-    String,
-    tempfile::TempDir,
-) {
     let daemon = TestDaemon::start().await.expect("Failed to start daemon");
 
     let storage = temp_storage(test_name, "node");
@@ -346,9 +318,6 @@ async fn setup_python_initiated_link_with_profile(
         .enable_transport(false)
         .add_tcp_client(daemon.rns_addr())
         .storage_path(storage.path().to_path_buf())
-        .proof_binding_policy(proof_binding_policy)
-        .link_cipher(node_cipher)
-        .accept_cbc_links(accept_cbc_links)
         .build()
         .await
         .expect("Failed to build node");
@@ -421,58 +390,6 @@ async fn poll_receipt_status(daemon: &TestDaemon, receipt_id: &str, duration: Du
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
     status
-}
-
-/// The production VPN profile defaults the node to GCM, admits CBC enrollment
-/// Links, and resolves proof binding per Link. A Python initiator requests CBC;
-/// Channel payload and PacketHash proofs must work in both directions.
-#[tokio::test]
-async fn test_vpn_profile_python_channel_cbc_packet_hash_ack() {
-    let (mut rust_node, mut event_rx, daemon, link_id, python_link_hash, _storage) =
-        setup_python_initiated_link_with_profile(
-            ProofStrategy::None,
-            "vpn_profile_cbc_channel_hash",
-            leviculum_core::ProofBindingPolicy::ByCipher,
-            leviculum_core::LinkCipher::Gcm,
-            true,
-        )
-        .await;
-    assert_eq!(
-        rust_node.link_stats(&link_id).unwrap().cipher(),
-        leviculum_core::LinkCipher::Cbc
-    );
-
-    let python_payload = b"Python CBC Channel PacketHash";
-    let (_, receipt_state, python_pending, python_tries) = daemon
-        .send_channel_on_link(&python_link_hash, python_payload, Duration::from_secs(10))
-        .await
-        .expect("Python Channel send and receipt polling");
-    assert_eq!(receipt_state, "MSGSTATE_DELIVERED");
-    assert!(
-        !python_pending,
-        "Rust's proof clears Python's Channel tx ring"
-    );
-    assert_eq!(python_tries, 1, "Python used only its initial attempt");
-    assert_eq!(
-        crate::common::wait_for_data_event(&mut event_rx, &link_id, Duration::from_secs(5)).await,
-        Some(python_payload.to_vec())
-    );
-
-    let link = rust_node.link_handle(&link_id);
-    let delivered_before = rust_node.link_stats(&link_id).unwrap().bytes_delivered();
-    let rust_payload = b"Rust CBC Channel PacketHash";
-    link.send(rust_payload).await.expect("Rust Channel send");
-    let confirmations =
-        crate::common::wait_for_delivery_confirmations(&mut event_rx, 1, Duration::from_secs(10))
-            .await;
-    assert_eq!(confirmations, 1, "Python's proof clears Rust's receipt");
-    let stats = rust_node.link_stats(&link_id).unwrap();
-    assert_eq!(stats.tx_ring_size(), 0);
-    assert!(stats.bytes_delivered() > delivered_before);
-
-    let received = daemon.get_received_packets().await.unwrap();
-    assert!(received.iter().any(|packet| packet.data == rust_payload));
-    rust_node.stop().await.expect("stop node");
 }
 
 /// Python → Rust raw link packet, our destination proves (ProofStrategy::All).

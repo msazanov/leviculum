@@ -5,39 +5,16 @@
 //! `NodeCore`; the shared file only calls into it.
 use super::*;
 
-/// The 32 bytes a data proof is bound to.
+/// The 32 bytes a data proof on a Link with `cipher` is bound to.
 ///
-/// This used to be SHA-256 of the packet's hashable part, which meant a second
-/// full SHA-256 pass over every payload byte at both ends of every data packet.
-/// On a CPU without SHA extensions that pass was the largest single cost on the
-/// receive path (measured: removing it alone took the bench from ~13.7 to
-/// ~21.8 MiB/s). The token's HMAC tag is already computed during encrypt and
-/// verify, is the same size, covers the same payload and is keyed with the link
-/// key — so binding proofs to it drops the pass without weakening anything: the
-/// proof is still signed with the peer's identity key, and an observer that
-/// reads a tag off the wire still cannot forge a proof with it.
-///
-/// Packets that carry no token fall back to the hash, so an unexpected packet
-/// degrades to the old behaviour instead of mis-binding a receipt.
-///
-/// `binding` selects the legacy mode explicitly; see [`crate::destination::ProofBinding`].
-pub(super) fn proof_identifier(raw: &[u8], binding: ProofBinding) -> [u8; 32] {
-    match binding {
-        ProofBinding::TokenTag => {
-            crate::packet::packet_token_tag(raw).unwrap_or_else(|| packet_hash(raw))
-        }
-        ProofBinding::PacketHash => packet_hash(raw),
-    }
-}
-
-pub(super) fn cipher_proof_identifier(
-    raw: &[u8],
-    binding: ProofBinding,
-    cipher: crate::LinkCipher,
-) -> [u8; 32] {
-    if binding == ProofBinding::TokenTag && cipher == crate::LinkCipher::Gcm {
-        // A signed 32-byte identifier containing the nonce and full 128-bit
-        // GCM tag. The authenticated tag binds the ciphertext, AAD and nonce.
+/// CBC Links prove exactly as vanilla Reticulum: SHA-256 of the packet's hashable part.
+/// GCM mode 7 Links bind to values the AEAD already produced instead of a second full
+/// SHA-256 pass: the 16-byte GCM tag and the 12-byte nonce of the record. The tag is keyed
+/// with the link key and authenticates ciphertext, AAD and nonce, and the proof is still
+/// signed with the peer's identity key, so nothing is weakened. A GCM packet too short to
+/// hold a record falls back to the token tag or the hash rather than mis-binding a receipt.
+pub(super) fn cipher_proof_identifier(raw: &[u8], cipher: crate::LinkCipher) -> [u8; 32] {
+    if cipher == crate::LinkCipher::Gcm {
         let header_len = if raw.first().is_some_and(|b| b & 0x40 != 0) {
             35
         } else {
@@ -46,8 +23,11 @@ pub(super) fn cipher_proof_identifier(
         if raw.len() >= header_len + crate::crypto::link_gcm::OVERHEAD {
             return gcm_proof_id(&raw[header_len..]);
         }
+        if let Some(tag) = crate::packet::packet_token_tag(raw) {
+            return tag;
+        }
     }
-    proof_identifier(raw, binding)
+    packet_hash(raw)
 }
 
 /// Receive-side [`cipher_proof_identifier`]: the same value from the parsed packet, whose data is
@@ -55,12 +35,11 @@ pub(super) fn cipher_proof_identifier(
 pub(super) fn link_proof_id(
     packet: &Packet,
     raw_hash: Option<&[u8; 32]>,
-    binding: ProofBinding,
     cipher: crate::LinkCipher,
 ) -> [u8; 32] {
-    if binding == ProofBinding::TokenTag {
+    if cipher == crate::LinkCipher::Gcm {
         let token = packet.data.as_slice();
-        if cipher == crate::LinkCipher::Gcm && token.len() >= crate::crypto::link_gcm::OVERHEAD {
+        if token.len() >= crate::crypto::link_gcm::OVERHEAD {
             return gcm_proof_id(token);
         }
         if let Some(tag) = crate::packet::token_tag(packet.context, token) {
@@ -90,10 +69,9 @@ impl ReceiptTracker {
         link_id: LinkId,
         sequence: u16,
         now_ms: u64,
-        binding: ProofBinding,
         cipher: crate::LinkCipher,
     ) {
-        let id = cipher_proof_identifier(packet_data, binding, cipher);
+        let id = cipher_proof_identifier(packet_data, cipher);
         self.entries
             .retain(|e| !(e.link_id == link_id && e.sequence == Some(sequence)) && e.full_hash != id);
         self.register(packet_data, link_id, sequence, now_ms);
@@ -106,10 +84,9 @@ impl ReceiptTracker {
         packet_data: &[u8],
         link_id: LinkId,
         deadline_ms: u64,
-        binding: ProofBinding,
         cipher: crate::LinkCipher,
     ) -> [u8; 32] {
-        let id = cipher_proof_identifier(packet_data, binding, cipher);
+        let id = cipher_proof_identifier(packet_data, cipher);
         self.entries.retain(|e| e.full_hash != id);
         self.register_raw(packet_data, link_id, deadline_ms);
         self.rebind_last(packet_data, id);
@@ -171,14 +148,8 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             );
             return false;
         };
-        self.receipt_tracker.register_bound(
-            packet,
-            link_id,
-            sequence,
-            now_ms,
-            self.proof_binding_for_cipher(cipher),
-            cipher,
-        );
+        self.receipt_tracker
+            .register_bound(packet, link_id, sequence, now_ms, cipher);
         true
     }
 
@@ -304,12 +275,11 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 }
 
 #[cfg(test)]
-#[cfg(test)]
 mod proof_binding_tests {
-    use super::proof_identifier;
+    use super::{cipher_proof_identifier, link_proof_id};
     use crate::constants::{AES_BLOCK_SIZE, HMAC_SIZE};
-    use crate::destination::{ProofBinding, ProofBindingPolicy};
-    use crate::packet::packet_hash;
+    use crate::packet::{packet_hash, Packet};
+    use crate::LinkCipher::{Cbc, Gcm};
 
     fn token_packet() -> alloc::vec::Vec<u8> {
         let mut raw = alloc::vec::Vec::new();
@@ -328,76 +298,32 @@ mod proof_binding_tests {
         raw.extend_from_slice(&[3u8; 12]);
         raw.extend_from_slice(b"echo");
         raw.extend_from_slice(&[7u8; 16]);
-        let id =
-            super::cipher_proof_identifier(&raw, ProofBinding::TokenTag, crate::LinkCipher::Gcm);
+        let id = cipher_proof_identifier(&raw, Gcm);
         assert_eq!(&id[..16], &[7u8; 16]);
         assert_eq!(&id[16..28], &[3u8; 12]);
         assert_eq!(&id[28..], b"GCM1");
-        assert_eq!(
-            super::cipher_proof_identifier(&raw, ProofBinding::PacketHash, crate::LinkCipher::Gcm),
-            packet_hash(&raw)
-        );
     }
 
+    /// CBC Links prove exactly as vanilla Reticulum, token or not.
     #[test]
-    fn proof_binding_policy_resolves_per_cipher_and_preserves_explicit_override() {
-        assert_eq!(
-            ProofBindingPolicy::ByCipher.for_cipher(crate::LinkCipher::Cbc),
-            ProofBinding::PacketHash
-        );
-        assert_eq!(
-            ProofBindingPolicy::ByCipher.for_cipher(crate::LinkCipher::Gcm),
-            ProofBinding::TokenTag
-        );
-        assert_eq!(
-            ProofBindingPolicy::Explicit(ProofBinding::TokenTag).for_cipher(crate::LinkCipher::Cbc),
-            ProofBinding::TokenTag
-        );
-        assert_eq!(
-            ProofBindingPolicy::default(),
-            ProofBindingPolicy::ByCipher,
-            "by default CBC Links prove exactly as vanilla Reticulum"
-        );
-    }
-
-    /// The two modes must disagree on a token packet - that is the whole point
-    /// of the switch - while both stay internally consistent, which is what
-    /// lets a legacy peer find our receipts at all.
-    #[test]
-    fn bindings_differ_and_each_matches_its_own_definition() {
+    fn cbc_links_bind_to_the_vanilla_packet_hash() {
         let raw = token_packet();
-        let tag = proof_identifier(&raw, ProofBinding::TokenTag);
-        let hash = proof_identifier(&raw, ProofBinding::PacketHash);
-
-        assert_eq!(tag, crate::packet::packet_token_tag(&raw).unwrap());
-        assert_eq!(hash, packet_hash(&raw));
-        assert_ne!(tag, hash);
-    }
-
-    /// Without a token there is no tag to bind to, so both modes must land on
-    /// the hash rather than one of them binding to something meaningless.
-    #[test]
-    fn packets_without_a_token_use_the_hash_in_both_modes() {
-        let mut raw = token_packet();
-        raw[2 + 16] = crate::packet::PacketContext::LinkClose.to_byte();
-        let expected = packet_hash(&raw);
-        assert_eq!(proof_identifier(&raw, ProofBinding::TokenTag), expected);
-        assert_eq!(proof_identifier(&raw, ProofBinding::PacketHash), expected);
+        assert_eq!(cipher_proof_identifier(&raw, Cbc), packet_hash(&raw));
+        assert_ne!(cipher_proof_identifier(&raw, Gcm), packet_hash(&raw));
     }
 
     #[test]
-    fn receive_side_identifier_matches_the_sender_for_every_binding_and_cipher() {
-        use crate::packet::Packet;
+    fn receive_side_identifier_matches_the_sender_for_both_ciphers() {
         let raw = token_packet();
         let packet = Packet::unpack(&raw).unwrap();
-        for binding in [ProofBinding::TokenTag, ProofBinding::PacketHash] {
-            for cipher in [crate::LinkCipher::Cbc, crate::LinkCipher::Gcm] {
-                assert_eq!(
-                    super::link_proof_id(&packet, None, binding, cipher),
-                    super::cipher_proof_identifier(&raw, binding, cipher),
-                    "{binding:?}/{cipher:?}"
-                );
-            }
+        for cipher in [Cbc, Gcm] {
+            assert_eq!(
+                link_proof_id(&packet, None, cipher),
+                cipher_proof_identifier(&raw, cipher),
+                "{cipher:?}"
+            );
         }
+        let supplied = [0x5Au8; 32];
+        assert_eq!(link_proof_id(&packet, Some(&supplied), Cbc), supplied);
     }
 }

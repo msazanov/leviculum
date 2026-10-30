@@ -1479,40 +1479,8 @@ pub fn create_test_transport() -> (
 /// Build a Rust node connected to a daemon via TCP, ready for single-packet
 /// operations. Returns `(node, event_rx, storage)`; the node is started and
 /// the storage guard must outlive the test.
-///
-/// The peer is a stock Python daemon on a CBC Link, which proves data with the
-/// packet hash, so the node resolves its proof binding per cipher.
 pub async fn build_rust_node(
     daemon: &crate::harness::TestDaemon,
-) -> (
-    leviculum_std::driver::ReticulumNode,
-    EventReceiver,
-    tempfile::TempDir,
-) {
-    build_rust_node_with_proof_binding_policy(daemon, leviculum_core::ProofBindingPolicy::ByCipher)
-        .await
-}
-
-/// Build a Rust node with an explicit proof-binding policy, for interop tests
-/// that must match the production mixed CBC/GCM Link profile.
-pub async fn build_rust_node_with_proof_binding_policy(
-    daemon: &crate::harness::TestDaemon,
-    policy: leviculum_core::ProofBindingPolicy,
-) -> (
-    leviculum_std::driver::ReticulumNode,
-    EventReceiver,
-    tempfile::TempDir,
-) {
-    build_rust_node_with_link_profile(daemon, policy, leviculum_core::LinkCipher::Cbc, false).await
-}
-
-/// Build a Rust loopback peer with the same configurable cipher/admission and
-/// proof policy used by the VPN NodeBuilder.
-pub async fn build_rust_node_with_link_profile(
-    daemon: &crate::harness::TestDaemon,
-    policy: leviculum_core::ProofBindingPolicy,
-    node_cipher: leviculum_core::LinkCipher,
-    accept_cbc: bool,
 ) -> (
     leviculum_std::driver::ReticulumNode,
     EventReceiver,
@@ -1522,9 +1490,6 @@ pub async fn build_rust_node_with_link_profile(
     let mut node = leviculum_std::driver::ReticulumNodeBuilder::new()
         .add_tcp_client(daemon.rns_addr())
         .storage_path(storage.path().to_path_buf())
-        .proof_binding_policy(policy)
-        .link_cipher(node_cipher)
-        .accept_cbc_links(accept_cbc)
         .build()
         .await
         .expect("Failed to build node");

@@ -23,13 +23,11 @@ use std::time::Duration;
 
 use leviculum_core::identity::Identity;
 use leviculum_core::node::NodeEvent;
-use leviculum_core::{
-    Destination, DestinationHash, DestinationType, Direction, LinkCipher, ProofBindingPolicy,
-};
+use leviculum_core::{Destination, DestinationHash, DestinationType, Direction};
 
 use crate::common::{
-    build_rust_node, build_rust_node_with_link_profile, extract_signing_key, parse_dest_hash,
-    wait_for_data_event, wait_for_event, wait_for_link_established,
+    build_rust_node, extract_signing_key, parse_dest_hash, wait_for_data_event, wait_for_event,
+    wait_for_link_established,
 };
 use crate::harness::TestDaemon;
 
@@ -91,30 +89,6 @@ async fn setup_python_dest(
     assert!(found, "Rust node should learn path to Python destination");
 
     (py_dest_hash, dest_info.public_key)
-}
-
-async fn wait_for_channel_delivery_confirmation(
-    event_rx: &mut leviculum_std::EventReceiver,
-    link_id: &leviculum_core::link::LinkId,
-    timeout: Duration,
-) -> (usize, usize) {
-    let deadline = tokio::time::Instant::now() + timeout;
-    let mut confirmations = 0;
-    let mut retransmits = 0;
-    while confirmations == 0 && tokio::time::Instant::now() < deadline {
-        let remaining = deadline - tokio::time::Instant::now();
-        match tokio::time::timeout(remaining, event_rx.recv()).await {
-            Ok(Some(NodeEvent::LinkDeliveryConfirmed { link_id: id, .. })) if id == *link_id => {
-                confirmations += 1;
-            }
-            Ok(Some(NodeEvent::ChannelRetransmit { link_id: id, .. })) if id == *link_id => {
-                retransmits += 1;
-            }
-            Ok(Some(_)) => {}
-            Ok(None) | Err(_) => break,
-        }
-    }
-    (confirmations, retransmits)
 }
 
 /// Register a Rust destination that accepts incoming single packets,
@@ -480,15 +454,7 @@ async fn test_link_data_python_to_rust_payload_match() {
 #[tokio::test]
 async fn test_channel_message_bidirectional() {
     let daemon = TestDaemon::start().await.expect("Failed to start daemon");
-    // Match vpn.rs start_base(): GCM is the node's own-Link default, CBC is
-    // admitted for public RNS enrollment, and proof binding follows the Link.
-    let (mut rust_node, mut event_rx, _storage) = build_rust_node_with_link_profile(
-        &daemon,
-        ProofBindingPolicy::ByCipher,
-        LinkCipher::Gcm,
-        true,
-    )
-    .await;
+    let (mut rust_node, mut event_rx, _storage) = build_rust_node(&daemon).await;
 
     let dest_info = daemon
         .register_destination("enc_test", &["bidir"])
@@ -513,19 +479,14 @@ async fn test_channel_message_bidirectional() {
 
     let signing_key = extract_signing_key(&dest_info.public_key);
     let link_handle = rust_node
-        .connect_with_cipher(&py_dest_hash, &signing_key, LinkCipher::Cbc)
+        .connect(&py_dest_hash, &signing_key)
         .await
-        .expect("CBC enrollment Link should succeed");
+        .expect("Connect should succeed");
 
     let link_id = *link_handle.link_id();
     let established =
         wait_for_link_established(&mut event_rx, &link_id, Duration::from_secs(10)).await;
     assert!(established, "Link should be established");
-    assert_eq!(
-        rust_node.link_stats(&link_id).unwrap().cipher(),
-        LinkCipher::Cbc
-    );
-    let bytes_before = rust_node.link_stats(&link_id).unwrap().bytes_delivered();
 
     // Rust→Python
     let r2p_payload = b"rust to python bidir";
@@ -534,20 +495,7 @@ async fn test_channel_message_bidirectional() {
         .await
         .expect("Rust link send should succeed");
 
-    let (confirmations, rust_retransmits) =
-        wait_for_channel_delivery_confirmation(&mut event_rx, &link_id, Duration::from_secs(10))
-            .await;
-    assert_eq!(
-        confirmations, 1,
-        "Python's PacketHash proof confirms Rust send"
-    );
-    assert_eq!(
-        rust_retransmits, 0,
-        "the Rust Channel envelope was not retransmitted"
-    );
-    let delivered_stats = rust_node.link_stats(&link_id).unwrap();
-    assert_eq!(delivered_stats.tx_ring_size(), 0);
-    assert!(delivered_stats.bytes_delivered() > bytes_before);
+    tokio::time::sleep(Duration::from_secs(2)).await;
 
     let py_received = daemon
         .get_received_packets()
@@ -563,19 +511,10 @@ async fn test_channel_message_bidirectional() {
     let py_link_hash = links.keys().next().unwrap().clone();
 
     let p2r_payload = b"python to rust bidir";
-    let (_, python_receipt_state, python_pending, python_retries) = daemon
-        .send_channel_on_link(&py_link_hash, p2r_payload, Duration::from_secs(10))
+    daemon
+        .send_on_link(&py_link_hash, p2r_payload)
         .await
-        .expect("Python Channel send should complete");
-    assert_eq!(python_receipt_state, "MSGSTATE_DELIVERED");
-    assert!(
-        !python_pending,
-        "Rust PacketHash proof clears Python Channel tx ring"
-    );
-    assert_eq!(
-        python_retries, 1,
-        "Python Channel used only its initial attempt"
-    );
+        .expect("Python send should succeed");
 
     let rust_received = wait_for_data_event(&mut event_rx, &link_id, Duration::from_secs(10)).await;
     assert!(

@@ -1,15 +1,12 @@
-//! Link cipher selection, proof binding and per-link tuning for [`NodeCore`].
+//! Link cipher selection and per-link tuning for [`NodeCore`].
 //!
 //! Kept in its own module so that the shared node files carry only one-line call sites.
 //! As a child of `node` it reaches the private fields it extends.
 use super::*;
-use crate::destination::{ProofBinding, ProofBindingPolicy};
 
-/// Link cipher and proof-binding settings shared by [`NodeCore`] and its builder.
+/// Link cipher settings shared by [`NodeCore`] and its builder.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct NodeExt {
-    /// How each Link binds data proofs; see [`ProofBindingPolicy`].
-    pub(crate) proof_binding_policy: ProofBindingPolicy,
     pub(crate) link_cipher: crate::LinkCipher,
     /// Accept standard-CBC link requests besides `link_cipher` (default off).
     pub(crate) accept_cbc_links: bool,
@@ -92,22 +89,6 @@ impl LinkStats {
 }
 
 impl NodeCoreBuilder {
-    /// Apply one explicit proof binding to every Link. This preserves the
-    /// historical generic-node behavior; mixed CBC/vanilla profiles should
-    /// prefer [`Self::proof_binding_policy`] with `ByCipher`.
-    pub fn proof_binding(mut self, binding: ProofBinding) -> Self {
-        self.ext.proof_binding_policy = ProofBindingPolicy::Explicit(binding);
-        self
-    }
-
-    /// Select proof binding per Link cipher (CBC → PacketHash, GCM mode 7 →
-    /// TokenTag), or explicitly override that policy. The default remains the
-    /// legacy node-wide TokenTag setting for generic API compatibility.
-    pub fn proof_binding_policy(mut self, policy: ProofBindingPolicy) -> Self {
-        self.ext.proof_binding_policy = policy;
-        self
-    }
-
     pub fn link_cipher(mut self, cipher: crate::LinkCipher) -> Self {
         self.ext.link_cipher = cipher;
         self
@@ -121,45 +102,6 @@ impl NodeCoreBuilder {
 }
 
 impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
-    /// Choose what data proofs are bound to on this node.
-    ///
-    /// Both ends of a link must use the same binding: the sender keys its
-    /// receipts by it and the receiver signs it. `TokenTag` (the default) is
-    /// cheaper because the value already exists; `PacketHash` is the only mode
-    /// that interoperates with vanilla Reticulum.
-    pub fn set_proof_binding(&mut self, binding: ProofBinding) {
-        self.ext.proof_binding_policy = ProofBindingPolicy::Explicit(binding);
-    }
-
-    /// Set the Link proof-binding policy. The legacy `set_proof_binding()`
-    /// remains an explicit node-wide override.
-    pub fn set_proof_binding_policy(
-        &mut self,
-        policy: ProofBindingPolicy,
-    ) -> Result<(), crate::LinkError> {
-        if !self.links.is_empty() {
-            return Err(crate::LinkError::InvalidState);
-        }
-        self.ext.proof_binding_policy = policy;
-        Ok(())
-    }
-
-    /// Effective proof binding for the node's default outgoing cipher.
-    /// Inspect [`proof_binding_policy`](Self::proof_binding_policy) when the
-    /// policy is cipher-derived and links may use different ciphers.
-    pub fn proof_binding(&self) -> ProofBinding {
-        self.ext.proof_binding_policy.for_cipher(self.ext.link_cipher)
-    }
-
-    /// Configured policy used to resolve the binding for each Link.
-    pub fn proof_binding_policy(&self) -> ProofBindingPolicy {
-        self.ext.proof_binding_policy
-    }
-
-    pub(crate) fn proof_binding_for_cipher(&self, cipher: crate::LinkCipher) -> ProofBinding {
-        self.ext.proof_binding_policy.for_cipher(cipher)
-    }
-
     /// As responder also accept links that ask for standard CBC (links that cross stock Reticulum transports can only be CBC).
     /// Does not change the cipher this node asks for on its own links, and never lets an initiator's GCM request fall back to CBC.
     pub fn set_accept_cbc_links(&mut self, accept: bool) {

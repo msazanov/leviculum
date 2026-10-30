@@ -1,7 +1,6 @@
 //! Tests for per-link ciphers, proof binding, tunnel datagrams and GCM LRRTT retries.
 //! A child of `node::tests`, so it uses that module's helpers.
 use super::*;
-use crate::destination::ProofBindingPolicy;
 
 /// As `establish_link_pair_without_rtt`, with an explicit Link cipher on both ends.
 fn establish_link_pair_without_rtt_with_cipher(
@@ -71,31 +70,11 @@ fn cipher_pair(
     LinkId,
     LinkId,
 )> {
-    cipher_pair_with_policy(
-        resp_cipher,
-        accept_cbc,
-        init_cipher,
-        ProofBindingPolicy::default(),
-    )
-}
-
-fn cipher_pair_with_policy(
-    resp_cipher: crate::LinkCipher,
-    accept_cbc: bool,
-    init_cipher: crate::LinkCipher,
-    policy: ProofBindingPolicy,
-) -> Option<(
-    NodeCore<OsRng, MockClock, NoStorage>,
-    NodeCore<OsRng, MockClock, NoStorage>,
-    LinkId,
-    LinkId,
-)> {
     use crate::transport::InterfaceId;
     let resp_identity = Identity::generate(&mut OsRng);
     let resp_signing_key = resp_identity.ed25519_verifying().to_bytes();
     let mut responder = NodeCoreBuilder::new()
         .link_cipher(resp_cipher)
-        .proof_binding_policy(policy)
         .accept_cbc_links(accept_cbc)
         .build(OsRng, MockClock::new(TEST_TIME_MS), NoStorage);
     let mut resp_dest = Destination::new(
@@ -110,11 +89,8 @@ fn cipher_pair_with_policy(
     let dest_hash = *resp_dest.hash();
     responder.register_destination(resp_dest);
     // the initiator's node default is whatever; the cipher of this link is chosen per connect
-    let mut initiator = NodeCoreBuilder::new().proof_binding_policy(policy).build(
-        OsRng,
-        MockClock::new(TEST_TIME_MS),
-        NoStorage,
-    );
+    let mut initiator =
+        NodeCoreBuilder::new().build(OsRng, MockClock::new(TEST_TIME_MS), NoStorage);
     let (init_id, _, output) = initiator
         .connect_with_cipher(dest_hash, &resp_signing_key, None, init_cipher)
         .expect("connect");
@@ -194,14 +170,14 @@ fn test_cbc_link_on_a_gcm_node_carries_channel_data_with_proofs() {
 }
 
 #[test]
-fn by_cipher_policy_proves_channel_messages_in_both_directions_for_cbc_and_gcm() {
+fn channel_messages_are_proven_in_both_directions_for_cbc_and_gcm() {
     use crate::packet::{Packet, PacketContext, PacketType};
     use crate::transport::InterfaceId;
     use crate::LinkCipher::{Cbc, Gcm};
 
     for cipher in [Cbc, Gcm] {
         let (mut initiator, mut responder, init_id, resp_id) =
-            cipher_pair_with_policy(cipher, true, cipher, ProofBindingPolicy::ByCipher)
+            cipher_pair(cipher, true, cipher)
                 .expect("cipher pair establishes");
 
         let outbound = initiator

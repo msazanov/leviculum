@@ -240,22 +240,6 @@ impl ReticulumNodeBuilder {
         self
     }
 
-    /// Set the proof strategy for the node
-    /// Choose what data proofs are bound to; see
-    /// [`leviculum_core::ProofBinding`].
-    pub fn proof_binding(mut self, binding: leviculum_core::ProofBinding) -> Self {
-        self.core_builder = self.core_builder.proof_binding(binding);
-        self
-    }
-
-    /// Set how the binding is resolved per Link. The generic default remains
-    /// the historical node-wide TokenTag policy; `ByCipher` is the explicit
-    /// mixed-profile policy (CBC → PacketHash, GCM mode 7 → TokenTag).
-    pub fn proof_binding_policy(mut self, policy: leviculum_core::ProofBindingPolicy) -> Self {
-        self.core_builder = self.core_builder.proof_binding_policy(policy);
-        self
-    }
-
     pub fn link_cipher(mut self, cipher: leviculum_core::LinkCipher) -> Self {
         self.core_builder = self.core_builder.link_cipher(cipher);
         self

@@ -13,7 +13,7 @@ use crate::constants::{
     KEEPALIVE_INITIATOR_BYTE, LINK_REQUEST_MAX_RETRIES, MS_PER_SECOND, PROOF_DATA_SIZE,
     RTT_RETRY_MAX_ATTEMPTS, TRAFFIC_TIMEOUT_FACTOR, TRAFFIC_TIMEOUT_MIN_MS, TRUNCATED_HASHBYTES,
 };
-use crate::destination::{DestinationHash, ProofBinding, ProofStrategy};
+use crate::destination::{DestinationHash, ProofStrategy};
 use crate::event_scalar::MsOrNone;
 use crate::hex_fmt::{HexFmt, HexShort};
 use crate::link::channel::{ChannelAction, ChannelError, Message, ReceiveOutcome};
@@ -878,7 +878,6 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                 *link_id,
                 seq,
                 now_ms,
-                self.proof_binding_for_cipher(cipher),
                 cipher,
             );
         }
@@ -944,7 +943,6 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             &packet_bytes,
             *link_id,
             deadline_ms,
-            self.proof_binding_for_cipher(link.cipher()),
             link.cipher(),
         );
         self.route_link_packet(link_id, &packet_bytes);
@@ -1845,7 +1843,6 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         rx: LinkRx<'_>,
         now_ms: u64,
     ) {
-        let proof_binding_policy = self.ext.proof_binding_policy;
         let Some(link) = self.links.get_mut(&link_id) else {
             crate::tracing::trace!(
                 link = %HexShort(link_id.as_bytes()),
@@ -1912,12 +1909,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             let rtt_ms = link.rtt_ms();
             let link_cipher = link.cipher();
             let channel = link.ensure_channel(rtt_ms);
-            let full_packet_hash = link_proof_id(
-                packet,
-                rx.raw_hash,
-                proof_binding_policy.for_cipher(link_cipher),
-                link_cipher,
-            );
+            let full_packet_hash = link_proof_id(packet, rx.raw_hash, link_cipher);
 
             let mut proofs = Vec::new();
 
@@ -2132,7 +2124,6 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         rx: LinkRx<'_>,
         now_ms: u64,
     ) {
-        let proof_binding_policy = self.ext.proof_binding_policy;
         let Some(link) = self.links.get_mut(&link_id) else {
             crate::tracing::trace!(
                 link = %HexShort(link_id.as_bytes()),
@@ -2162,12 +2153,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
                 match link.proof_strategy() {
                     ProofStrategy::All => {
-                        let full_packet_hash = link_proof_id(
-                            packet,
-                            rx.raw_hash,
-                            proof_binding_policy.for_cipher(link.cipher()),
-                            link.cipher(),
-                        );
+                        let full_packet_hash = link_proof_id(packet, rx.raw_hash, link.cipher());
                         if let Some(signing_key) = link.proof_signing_key() {
                             if let Ok(proof_packet) = link.build_data_proof_packet_with_signing_key(
                                 &full_packet_hash,
@@ -2178,12 +2164,7 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                         }
                     }
                     ProofStrategy::App => {
-                        let full_packet_hash = link_proof_id(
-                            packet,
-                            rx.raw_hash,
-                            proof_binding_policy.for_cipher(link.cipher()),
-                            link.cipher(),
-                        );
+                        let full_packet_hash = link_proof_id(packet, rx.raw_hash, link.cipher());
                         self.events.push(NodeEvent::LinkProofRequested {
                             link_id,
                             packet_hash: full_packet_hash,
