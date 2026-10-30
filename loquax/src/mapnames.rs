@@ -766,17 +766,35 @@ fn blend_at(rgba: &mut [u8], w: u32, x: i64, y: i64, colour: [u8; 3], a: f64) {
 /// A placed name's coverage, its halo's and its glyphs', worked out once
 /// where it was placed (1134): drawing it again where the view moved it
 /// costs a blend a covered pixel, so a frame while the finger moves keeps
-/// every name of the frame at rest. Moved by whole pixels it is the same
-/// pixels [`paint_placed`] sets there.
+/// every name of the frame at rest.
+///
+/// The coverage is kept as a box of `(halo, ink)` levels out of 255 over
+/// the pixels it covers, blended in integers row by row (1156). Moved by
+/// whole pixels a level name is the same pixels [`paint_placed`] sets
+/// there: its levels are the mask's own bytes, and the integer blend
+/// rounds as the float one does. A turned name's bilinear coverage is
+/// rounded to a level, so a channel may differ from the float paint by a
+/// step, and by two where the halo's step carries into the glyphs' blend
+/// at an edge both cover partly (4 of 460800 bytes in the phone's golden;
+/// levels of 16 bits would hold it to one at twice the memory).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Sprite {
     pub text: String,
     pub kind: LabelKind,
     /// Where its middle was placed.
     pub centre: (f64, f64),
-    /// Each covered pixel where it was placed, and how much the halo and
-    /// the glyphs cover it.
-    px: Vec<(i64, i64, f64, f64)>,
+    /// The box's top left pixel where it was placed.
+    at: (i64, i64),
+    /// The box's width in pixels.
+    w: usize,
+    /// How much the halo and the glyphs cover each pixel of the box, row
+    /// by row, out of 255.
+    cover: Vec<[u8; 2]>,
+}
+
+/// A coverage from 0 to 1 as a level out of 255.
+fn level(a: f64) -> u8 {
+    (a * 255.0).round().clamp(0.0, 255.0) as u8
 }
 
 impl Sprite {
@@ -785,12 +803,11 @@ impl Sprite {
     /// Only the pixels of the turned mask's box and two more around it are
     /// sampled (1154): a pixel further out maps outside the mask, more
     /// than the bilinear sample's one pixel of reach past its edge, so it
-    /// covers nothing, and the pixels kept are those of the whole
-    /// `reach`, in the same order. A halo of the mask's size is at least
-    /// the mask on every pixel (`Mask::widened` keeps each pixel's own
-    /// value in its max), and both are sampled at the same place with the
-    /// same weights, so where the halo covers nothing the glyphs cover
-    /// nothing and are not sampled.
+    /// covers nothing, and the box kept is that of the whole `reach`. A
+    /// halo of the mask's size is at least the mask on every pixel
+    /// (`Mask::widened` keeps each pixel's own value in its max), and both
+    /// are sampled at the same place with the same weights, so where the
+    /// halo covers nothing the glyphs cover nothing and are not sampled.
     pub fn of(name: &PlacedName) -> Self {
         let (x0, x1, y0, y1) = reach(&name.mask, name.centre);
         let turn = (name.angle.cos(), name.angle.sin());
@@ -802,47 +819,61 @@ impl Sprite {
         let x1 = x1.min((name.centre.0 + hx).ceil() as i64);
         let y0 = y0.max((name.centre.1 - hy).floor() as i64);
         let y1 = y1.min((name.centre.1 + hy).ceil() as i64);
-        let mut px = Vec::new();
-        for y in y0..y1 {
-            for x in x0..x1 {
-                let halo = cover_turned(&name.halo, name.centre, name.angle, turn, x, y);
-                if same && halo <= 0.0 {
-                    continue;
-                }
-                let ink = cover_turned(&name.mask, name.centre, name.angle, turn, x, y);
-                if halo > 0.0 || ink > 0.0 {
-                    px.push((x, y, halo, ink));
-                }
+        Self::boxed(name, (x0, x1, y0, y1), |x, y| {
+            let halo = cover_turned(&name.halo, name.centre, name.angle, turn, x, y);
+            if same && halo <= 0.0 {
+                return [0, 0];
             }
-        }
-        Self {
-            text: name.text.clone(),
-            kind: name.kind,
-            centre: name.centre,
-            px,
-        }
+            let ink = cover_turned(&name.mask, name.centre, name.angle, turn, x, y);
+            [level(halo), level(ink)]
+        })
     }
 
     /// [`of`](Self::of) as it was written first, every pixel of the reach
     /// sampled: the reference the boxed loop is held to.
     #[cfg(test)]
     pub(crate) fn of_whole_reach(name: &PlacedName) -> Self {
-        let (x0, x1, y0, y1) = reach(&name.mask, name.centre);
-        let mut px = Vec::new();
-        for y in y0..y1 {
-            for x in x0..x1 {
-                let halo = cover(&name.halo, name.centre, name.angle, x, y);
-                let ink = cover(&name.mask, name.centre, name.angle, x, y);
-                if halo > 0.0 || ink > 0.0 {
-                    px.push((x, y, halo, ink));
+        Self::boxed(name, reach(&name.mask, name.centre), |x, y| {
+            let halo = cover(&name.halo, name.centre, name.angle, x, y);
+            let ink = cover(&name.mask, name.centre, name.angle, x, y);
+            [level(halo), level(ink)]
+        })
+    }
+
+    /// The sprite of `name` from the levels `cover` gives the pixels
+    /// `x0..x1` by `y0..y1`, cut to the box of those it covers.
+    fn boxed(
+        name: &PlacedName,
+        (x0, x1, y0, y1): (i64, i64, i64, i64),
+        cover: impl Fn(i64, i64) -> [u8; 2],
+    ) -> Self {
+        let (sw, sh) = ((x1 - x0).max(0) as usize, (y1 - y0).max(0) as usize);
+        let mut sampled = Vec::with_capacity(sw * sh);
+        // The covered box within the sampled one: columns, rows.
+        let (mut c0, mut c1, mut r0, mut r1) = (sw, 0, sh, 0);
+        for (r, y) in (y0..y1).enumerate() {
+            for (c, x) in (x0..x1).enumerate() {
+                let both = cover(x, y);
+                if both != [0, 0] {
+                    (c0, c1, r0, r1) = (c0.min(c), c1.max(c + 1), r0.min(r), r1.max(r + 1));
                 }
+                sampled.push(both);
             }
         }
+        let w = c1.saturating_sub(c0);
+        let cover = match w {
+            0 => Vec::new(),
+            _ => (r0..r1)
+                .flat_map(|r| sampled[r * sw + c0..r * sw + c1].iter().copied())
+                .collect(),
+        };
         Self {
             text: name.text.clone(),
             kind: name.kind,
             centre: name.centre,
-            px,
+            at: (x0 + c0 as i64, y0 + r0 as i64),
+            w,
+            cover,
         }
     }
 
@@ -884,22 +915,52 @@ impl Sprite {
 
     /// The bytes its coverage holds: the measuring tool's sprite memory.
     pub fn bytes(&self) -> usize {
-        std::mem::size_of_val(self.px.as_slice())
+        std::mem::size_of_val(self.cover.as_slice())
     }
 
     /// Draw it into `rgba`, `w` by `h` pixels, in `theme`'s colours,
-    /// moved by `(dx, dy)` pixels from where it was placed.
+    /// moved by `(dx, dy)` pixels from where it was placed: each pixel the
+    /// halo blended, then the glyphs.
     pub fn draw(&self, rgba: &mut [u8], w: u32, h: u32, theme: MapTheme, dx: i64, dy: i64) {
-        let (ink, halo) = colours(self.kind, theme);
-        let (w64, h64) = (i64::from(w), i64::from(h));
-        for &(x, y, ha, ia) in &self.px {
-            let (x, y) = (x + dx, y + dy);
-            if x < 0 || y < 0 || x >= w64 || y >= h64 {
-                continue;
-            }
-            blend_at(rgba, w, x, y, halo, ha);
-            blend_at(rgba, w, x, y, ink, ia);
+        if self.w == 0 {
+            return;
         }
+        let (ink, halo) = colours(self.kind, theme);
+        let rows = (self.cover.len() / self.w) as i64;
+        let (ox, oy) = (self.at.0 + dx, self.at.1 + dy);
+        let (xa, xb) = (ox.max(0), (ox + self.w as i64).min(i64::from(w)));
+        let (ya, yb) = (oy.max(0), (oy + rows).min(i64::from(h)));
+        if xa >= xb || ya >= yb {
+            return;
+        }
+        let n = (xb - xa) as usize;
+        for y in ya..yb {
+            let from = (y - oy) as usize * self.w + (xa - ox) as usize;
+            let at = (y as usize * w as usize + xa as usize) * 4;
+            let (Some(src), Some(row)) =
+                (self.cover.get(from..from + n), rgba.get_mut(at..at + n * 4))
+            else {
+                return;
+            };
+            for (px, &[ha, ia]) in row.chunks_exact_mut(4).zip(src) {
+                blend_level(px, halo, ha);
+                blend_level(px, ink, ia);
+            }
+        }
+    }
+}
+
+/// Blend `colour` at level `a` out of 255 into the RGBA pixel `px`: the
+/// integer form of [`blend_at`]. `(n + 127) / 255` rounds `n / 255` to
+/// the nearest, as the float blend's `round` does, since `n / 255` is
+/// never a half.
+fn blend_level(px: &mut [u8], colour: [u8; 3], a: u8) {
+    if a == 0 {
+        return;
+    }
+    let (a, na) = (u32::from(a), 255 - u32::from(a));
+    for (p, &k) in px.iter_mut().zip(colour.iter()) {
+        *p = ((u32::from(*p) * na + u32::from(k) * a + 127) / 255) as u8;
     }
 }
 
@@ -970,6 +1031,69 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// 1156: a sprite drawn where it was placed is the float paint of
+    /// its name, pixel for pixel for a level name and within two steps of
+    /// a channel for a turned one (one a blend, see [`Sprite`]), over a
+    /// ground of every shade, in both themes and moved by whole pixels.
+    #[test]
+    fn the_compact_sprite_is_the_painted_name_within_a_step() {
+        let mut type_ = Typesetter::new();
+        let scale = 2.75f32;
+        let pad = (HALO * scale).ceil() as usize + 1;
+        let (w, h) = (320u32, 200u32);
+        let ground: Vec<u8> = (0..w * h * 4).map(|i| (i * 7 % 256) as u8).collect();
+        let mut turned_differ = 0;
+        for (text, kind) in [
+            ("Via dei Calzaiuoli", LabelKind::MinorRoad),
+            ("Arno", LabelKind::River),
+            ("Firenze", LabelKind::City),
+        ] {
+            let mask = type_.mask(text, 11.0 * scale, pad, kind == LabelKind::River);
+            let halo = mask.widened(HALO * scale);
+            for k in -8..=8 {
+                let angle = f64::from(k) * std::f64::consts::FRAC_PI_2 / 8.0;
+                for centre in [(160.0, 100.0), (150.37, 90.81), (2.5, 3.25)] {
+                    let name = PlacedName {
+                        text: text.to_string(),
+                        kind,
+                        centre,
+                        angle,
+                        mask: mask.clone(),
+                        halo: halo.clone(),
+                    };
+                    let sprite = Sprite::of(&name);
+                    for theme in [MapTheme::Light, MapTheme::Dark] {
+                        for (dx, dy) in [(0i64, 0i64), (-7, 12)] {
+                            let mut want = ground.clone();
+                            let moved = PlacedName {
+                                centre: (centre.0 + dx as f64, centre.1 + dy as f64),
+                                ..name.clone()
+                            };
+                            paint_placed(&mut want, w, h, &[moved], theme);
+                            let mut got = ground.clone();
+                            sprite.draw(&mut got, w, h, theme, dx, dy);
+                            let worst = want
+                                .iter()
+                                .zip(&got)
+                                .map(|(a, b)| a.abs_diff(*b))
+                                .max()
+                                .unwrap_or(0);
+                            match angle == 0.0 {
+                                true => assert_eq!(worst, 0, "{text} {centre:?} {theme:?}"),
+                                false => {
+                                    assert!(worst <= 2, "{text} {angle} {centre:?}: {worst}");
+                                    turned_differ += usize::from(worst > 0);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // The rounding is real: some turned name moved a step.
+        assert!(turned_differ > 0);
     }
 
     /// 1154: what the typesetter keeps is what it makes, and it stays

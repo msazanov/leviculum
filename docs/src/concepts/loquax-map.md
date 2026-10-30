@@ -313,7 +313,15 @@ The frontends:
   tile time on one worker from 71 to 56 to 58 ms. A pinch that owes tiles
   still pays for the stand-in steps, which sample the whole frame (63 ms
   on one worker); drawing the stand-ins only where tiles are owed is
-  the next step.
+  the next step. Since 1156 a placed name's sprite is a box of
+  `(halo, ink)` levels out of 255 blended in integers row by row
+  (`loquax::mapnames::Sprite`): a level name is the same bytes as
+  before, a turned one's coverage is rounded to a level, so a channel
+  may move a step, or two where the halo's step carries into the
+  glyphs' blend (2159 of the 460800 bytes of each Florence golden, four
+  of them by two). Through `map_fps` on the coder host the phone's
+  sprites went from 9.19 MB to 0.89 MB and drawing them from 2.7 to
+  3.1 ms to 1.2 to 1.3 ms.
 - **The M9.** The same pipeline straight into the panel's
   `embedded-graphics` target, as the measurement firmware does
   (`leviculum-mapfill/m9/`), with mousefood's cells for the labels.

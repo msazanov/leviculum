@@ -157,11 +157,13 @@ fn the_frame_is_the_shared_renderers_with_names_and_a_pin() {
     );
     // Composed from tiles, the frame is the view drawn whole but where a
     // dashed path crosses a seam: its dashes start again at each tile's
-    // edge, as they do at a view's.
+    // edge, as they do at a view's. A turned name's sprite rounds its
+    // coverage to a level (1156), so its pixels may be a step or two of
+    // a channel off the whole view's float paint: not counted.
     let differ = rgba
         .chunks(4)
         .zip(direct.picture.rgba.chunks(4))
-        .filter(|(a, b)| a != b)
+        .filter(|(a, b)| a.iter().zip(b.iter()).any(|(x, y)| x.abs_diff(*y) > 2))
         .count();
     assert!(
         differ * 1000 < (W * H) as usize,
