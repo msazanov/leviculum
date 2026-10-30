@@ -280,6 +280,78 @@ pins one above the list's rule, and the search reaches older messages
 through the store's FTS5 index. Its section 5, "Built 2026-10-27, history",
 lists where it differs from the pages.
 
+### Built 2026-10-30, the desktop chat
+
+1145 (#232) gives `loquax gui` the chat, after the phone's design: the
+conversation list on the left (avatars with initials in the peer's LXMF
+icon colours, the name, the last line, the list's time, the unread count
+or our delivery mark, a search, a new conversation by address), the open
+conversation on the right (a top bar with the avatar and the name,
+rounded bubbles, ours right in the accent and theirs left, grouped, date
+lines, reaction pills, position lines that open the map, a pill compose
+bar with an emoji button and a round send button; `Enter` sends,
+`Shift-Enter` breaks the line). A right click on a bubble opens the quick
+reactions and reply, copy and delete. The theme follows the desktop's
+light or dark setting, which iced reads, and a toggle turns it round; the
+map keeps its own (1133). The window draws the shell's model through
+`loquax::ui::chat`, which the phone's facade draws through too: the rows,
+the bubbles, the grouping, the marks, the avatars, the tokens below.
+Pinned by model tests and one golden picture of the chat pane per theme,
+drawn off screen by iced's software renderer
+(`loquax/tests/golden/gui-chat-*.png`).
+
+Not yet in the window (the next slice): forward, select, info and pin on
+a bubble, the full emoji picker over the emoji table with the recents
+(the button offers the six quick ones), the address book's names and
+photos, and the toolbar menu beyond the map.
+
+### Pixel screens: the tokens
+
+The phone and the window draw with one table of colours and sizes,
+`loquax/src/ui/chat.rs` (`LIGHT`, `DARK`, `size`). The phone's
+`loquax-android/android/res/values*/colors.xml` holds the same colours
+name for name, and `the_phone_draws_the_same_colours` refuses a drift.
+Every text keeps 4.5:1 on its ground, a mark or a control 3:1; the
+numbers per pair are the comments in `colors.xml`.
+
+| Token | Light | Dark | Where |
+|---|---|---|---|
+| `background` | `#ffffff` | `#17181b` | the screen |
+| `text` | `#1b1b1d` | `#ececec` | names, the compose text |
+| `text_secondary` | `#5c5f66` | `#a9abb0` | last lines, times, date lines, hints |
+| `accent` | `#3a7d44` | `#81c784` | links, an unread time |
+| `bar` | `#f1f2f4` | `#26272b` | the chat's top bar, the compose pill, the search |
+| `bubble_ours` | `#2e6b38` | `#3b6b45` | our bubble |
+| `bubble_ours_text` | `#ffffff` | `#ffffff` | its body |
+| `bubble_ours_meta` | `#d6eadb` | `#dbeadd` | its time and mark |
+| `bubble_theirs` | `#e9eaed` | `#303134` | theirs |
+| `bubble_theirs_text` | `#1b1b1d` | `#ececec` | its body |
+| `bubble_theirs_meta` | `#55585e` | `#a9abb0` | its time |
+| `failed_ground`, `failed_mark` | `#ffdad6`, `#93000a` | the same | the failed mark in a bubble |
+| `send`, `on_send` | `#2e6b38`, `#ffffff` | `#4f8f5b`, `#ffffff` | the send button |
+| `badge`, `badge_text` | `#2e6b38`, `#ffffff` | `#3b6b45`, `#ffffff` | the unread count |
+| `list_failed_ground`, `list_failed_mark` | `#93000a`, `#ffffff` | `#ffdad6`, `#93000a` | the list's failed mark |
+| `dim` | `#99000000` | `#b3000000` | under the phone's long press |
+| `panel` | `#ffffff` | `#2c2d31` | the reactions and actions |
+| `failed_mark_on_panel` | `#ba1a1a` | `#ffb4ab` | delete on the panel |
+| `reaction_ours` | `#5f9a69` | `#4f8f5b` | our reaction's circle on the panel |
+| `selected_row` | `#403a7d44` | `#4081c784` | a selected message, the open conversation |
+
+The avatar without an icon appearance takes one of eight grounds by the
+address's first byte (`AVATAR_PALETTE`), white letters at 5:1 or more.
+
+Sizes, in the phone's dp and sp, which the window takes as logical
+pixels (`size`): the list's row 80 high with a 56 avatar, name 18, last
+line 15, time 13, the unread pill 22 high with a corner of 11 and text
+12; the top bar 64 with a 40 avatar and the name at 20; a bubble's body
+17, its time 12, its corner 18 and a grouped bubble's inner corner 6, at
+most 0.8 of the chat wide, 10 above a group's first and 2 above the rest;
+the date line 14; a reaction pill's text 14 and corner 14; the compose
+pill 48 high with a corner of 24 and text 17, the send button 48 round.
+Bubbles of one sender at most 180 seconds apart on one day form a group
+(`GROUP_SECS`), whose last shows its time, and one of ours whose mark
+differs from the next one's keeps its mark.
+
 The second round on the screen, the full key table (vi, Emacs, the mail
 and the chat programs side by side, per pane), the mouse, the chat layout
 in text mode and the slices after 1002, is

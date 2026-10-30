@@ -1,8 +1,10 @@
 //! `loquax gui`: the window over the same shell and model as the terminal
 //! (`docs/src/concepts/gui-toolkit.md`, option B, iced on the desktop;
-//! `docs/src/concepts/loquax-map.md`, slice (d)). Its first view is the
-//! map: the peers with a position listed on the left, by the display rule
-//! with their fix's age and dimmed when stale, and the map on the right.
+//! `docs/src/concepts/loquax-map.md`, slice (d)). It opens on the chat
+//! ([`chat`], 1145, after the phone's design): the conversations on the
+//! left, the open one on the right. The map is its other screen: the peers
+//! with a position listed on the left, by the display rule with their fix's
+//! age and dimmed when stale, and the map on the right.
 //!
 //! Two halves on two threads:
 //!
@@ -26,6 +28,7 @@
 //! loading word and the maps directory's epoch, and a new epoch reads the
 //! regions again and paints the view anew.
 
+pub mod chat;
 pub mod map;
 
 use std::process::ExitCode;
@@ -35,7 +38,7 @@ use std::time::{Duration, Instant};
 use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
 use iced::advanced::image::{FilterMethod, Handle};
 use iced::widget::canvas::{self, Canvas, Frame, Geometry, Path};
-use iced::widget::{button, column, container, row, scrollable, stack, text};
+use iced::widget::{button, column, container, row, scrollable, stack, text, text_editor};
 use iced::{
     keyboard, mouse, window, Color, Element, Length, Point, Rectangle, Renderer, Size,
     Subscription, Task, Theme,
@@ -48,8 +51,10 @@ use leviculum_mapfill::style::Style;
 use loquax::mapframe::{hold, onto, Ask, Frames};
 use loquax::picture::map_theme;
 use loquax::tiles::Motion;
+use loquax::ui::chat::{list_rows, ListRow, Open};
 use loquax::ui::map::{fit, want_pins, want_view, zoom_floor, MapPin, MapSetup, MapWant};
 use loquax::ui::{UiEvent, MAP_LOADED_ALREADY};
+use loquax::when::WallTime;
 
 use crate::shell::{self, local_now, Shell, ShellOptions, PUMP_MS, TICK_MS};
 
@@ -73,8 +78,14 @@ pub struct Seen {
     /// Whether going to a place loads its region (`map_autoload`).
     pub autoload: bool,
     /// How the map is drawn: the PC's finish in the table `map_theme`
-    /// names, light for `auto`, the window having no theme of its own.
+    /// names, light for `auto`: the map keeps its own toggle (1133).
     pub style: Style,
+    /// The conversation list, as the model orders it.
+    pub chats: Vec<ListRow>,
+    /// The open conversation.
+    pub chat: Option<Open>,
+    /// The model's wall clock, for the list's times and the date lines.
+    pub now: Option<WallTime>,
 }
 
 impl Seen {
@@ -86,8 +97,19 @@ impl Seen {
             maps: shell.maps.epoch(),
             autoload: shell.model.map_autoload,
             style: Style::PC.in_theme(map_theme(shell.model.map_theme, None)),
+            chats: list_rows(&shell.model),
+            chat: loquax::ui::chat::open(&shell.model),
+            now: shell.model.now,
         }
     }
+}
+
+/// What the window asks of the shell: a map region to load, or an event
+/// for the model, as a tap or a key on the phone hands it one.
+#[derive(Clone, Debug)]
+pub enum Want {
+    Map(MapWant),
+    Ui(UiEvent),
 }
 
 /// `loquax gui`: the shell started as the terminal starts it, driven on
@@ -121,7 +143,7 @@ async fn drive(
     mut shell: Shell,
     mut leave: oneshot::Receiver<()>,
     seen: UnboundedSender<Seen>,
-    mut asks: tokio::sync::mpsc::UnboundedReceiver<MapWant>,
+    mut asks: tokio::sync::mpsc::UnboundedReceiver<Want>,
 ) -> Shell {
     let mut tick = tokio::time::interval(Duration::from_millis(TICK_MS));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -146,7 +168,10 @@ async fn drive(
         }
         tokio::select! {
             _ = &mut leave => break,
-            Some(want) = asks.recv() => shell.map_ask(want),
+            Some(want) = asks.recv() => match want {
+                Want::Map(want) => shell.map_ask(want),
+                Want::Ui(event) => shell.apply(event),
+            },
             _ = pump.tick() => shell.poll(),
             _ = tick.tick() => shell.tick(&mut clocks),
         }
@@ -169,6 +194,7 @@ fn window(frames: Frames, seen: UnboundedReceiver<Seen>, asks: Asks) -> iced::Re
     )
     .title("Loquax")
     .subscription(App::subscription)
+    .theme(App::theme)
     .window_size(Size::new(WINDOW.0, WINDOW.1))
     .run()
 }
@@ -186,7 +212,7 @@ pub enum Pointer {
 
 #[derive(Clone, Debug)]
 pub enum Message {
-    Seen(Seen),
+    Seen(Box<Seen>),
     /// The map's canvas has this logical size.
     MapSize(Size),
     Scale(f32),
@@ -200,6 +226,62 @@ pub enum Message {
     WheelRest,
     /// A prefetch batch ended; whether more is to draw.
     Prefetched(bool),
+    /// The desktop's light or dark setting, at the start and on a change.
+    SystemTheme(iced::theme::Mode),
+    /// The list's toggle: the other theme than the one shown.
+    ToggleTheme,
+    /// A conversation clicked in the list.
+    Open([u8; 16]),
+    Search(String),
+    /// The list's new conversation: its field, what is typed, `Enter`.
+    NewConversation,
+    NewAddress(String),
+    NewGo,
+    Compose(text_editor::Action),
+    /// `Enter` in the compose field, or the send button.
+    Send,
+    ToggleEmoji,
+    /// An emoji picked into the compose field.
+    Insert(String),
+    /// The map, with this peer's pin selected; or back to the chat.
+    ShowMap(Option<[u8; 16]>),
+    ShowChats,
+    /// A right click on the bubble with this key opens its reactions and
+    /// actions; none closes them.
+    Menu(Option<u64>),
+    React([u8; 32], String),
+    Reply([u8; 32]),
+    CancelReply,
+    Copy(String),
+    /// The first click on delete asks, the second deletes.
+    AskDelete(u64),
+    Delete([u8; 16], u64),
+}
+
+impl Message {
+    /// Whether it is the chat's, which [`App::chat`] folds.
+    fn is_chat(&self) -> bool {
+        !matches!(
+            self,
+            Message::Seen(_)
+                | Message::MapSize(_)
+                | Message::Scale(_)
+                | Message::Window(_)
+                | Message::Key(_)
+                | Message::Pointer(_)
+                | Message::Select(_)
+                | Message::Painted(_)
+                | Message::WheelRest
+                | Message::Prefetched(_)
+        )
+    }
+}
+
+/// The window's two screens.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Screen {
+    Chats,
+    Map,
 }
 
 /// Thousandths of a step a line of the wheel zooms: a notch is a step.
@@ -213,8 +295,8 @@ const WHEEL_REST_MS: u64 = 200;
 /// reveals drawn map while the next frame is drawn.
 const MARGIN_PART: u32 = 8;
 
-/// Where the window sends the regions it asks the shell to load.
-type Asks = tokio::sync::mpsc::UnboundedSender<MapWant>;
+/// Where the window sends what it asks of the shell.
+type Asks = tokio::sync::mpsc::UnboundedSender<Want>;
 
 /// One frame the window asks for: everything the worker needs, and what
 /// tells whether the frame on screen is still the one to show.
@@ -349,6 +431,24 @@ struct App {
     prefetching: bool,
     motion: Motion,
     origin: Instant,
+    screen: Screen,
+    /// The window's size in logical pixels.
+    window: Size,
+    /// The desktop's setting, dark when it says so, and whether the
+    /// toggle turned it round.
+    system_dark: bool,
+    flipped: bool,
+    search: String,
+    /// The new conversation's field while it is open.
+    new_address: Option<String>,
+    compose: text_editor::Content,
+    /// The message a reply being written answers, with its first line.
+    reply: Option<([u8; 32], String)>,
+    emoji: bool,
+    /// The bubble whose reactions and actions are open, and one whose
+    /// delete was asked once.
+    menu: Option<u64>,
+    deleting: Option<u64>,
 }
 
 impl App {
@@ -362,10 +462,11 @@ impl App {
             .and_then(window::scale_factor)
             .map(Message::Scale);
         let seen = match seen {
-            Some(seen) => Task::run(seen, Message::Seen),
+            Some(seen) => Task::run(seen, |seen| Message::Seen(Box::new(seen))),
             None => Task::none(),
         };
-        (app, Task::batch([scale, seen]))
+        let theme = iced::system::theme().map(Message::SystemTheme);
+        (app, Task::batch([scale, seen, theme]))
     }
 
     fn new(frames: Frames, asks: Option<Asks>) -> Self {
@@ -379,6 +480,9 @@ impl App {
                 maps: 0,
                 autoload: false,
                 style: Style::PC,
+                chats: Vec::new(),
+                chat: None,
+                now: None,
             },
             asks,
             fitted_at: None,
@@ -398,13 +502,150 @@ impl App {
             prefetching: false,
             motion: Motion::default(),
             origin: Instant::now(),
+            screen: Screen::Chats,
+            window: Size::new(WINDOW.0, WINDOW.1),
+            system_dark: false,
+            flipped: false,
+            search: String::new(),
+            new_address: None,
+            compose: text_editor::Content::new(),
+            reply: None,
+            emoji: false,
+            menu: None,
+            deleting: None,
         }
+    }
+
+    /// Whether the window is dark: the desktop's setting, turned round by
+    /// the toggle.
+    fn dark(&self) -> bool {
+        self.system_dark != self.flipped
+    }
+
+    fn theme(&self) -> Theme {
+        match self.dark() {
+            true => Theme::Dark,
+            false => Theme::Light,
+        }
+    }
+
+    /// Hand `event` to the model.
+    fn tell(&self, event: UiEvent) {
+        if let Some(asks) = &self.asks {
+            let _ = asks.send(Want::Ui(event));
+        }
+    }
+
+    /// What a chat message changes; a task for what iced does for it.
+    fn chat(&mut self, message: Message) -> Task<Message> {
+        let open = self.seen.chat.as_ref().map(|c| c.peer);
+        match message {
+            Message::SystemTheme(mode) => self.system_dark = mode == iced::theme::Mode::Dark,
+            Message::ToggleTheme => self.flipped = !self.flipped,
+            Message::Open(peer) => {
+                self.menu = None;
+                self.reply = None;
+                self.tell(UiEvent::Open { peer });
+            }
+            Message::Search(query) => self.search = query,
+            Message::NewConversation => {
+                self.new_address = match self.new_address {
+                    Some(_) => None,
+                    None => Some(String::new()),
+                }
+            }
+            Message::NewAddress(typed) => self.new_address = Some(typed),
+            Message::NewGo => {
+                let typed = self.new_address.clone().unwrap_or_default();
+                match loquax::address::parse(typed.trim()) {
+                    Ok(peer) => {
+                        self.new_address = None;
+                        self.tell(UiEvent::Open { peer });
+                    }
+                    Err(error) => self.seen.notice = Some(format!("'{}': {error}", typed.trim())),
+                }
+            }
+            Message::Compose(action) => self.compose.perform(action),
+            Message::Send => {
+                let body = self.compose.text();
+                let body = body.trim_end_matches('\n').to_string();
+                let Some(peer) = open else {
+                    return Task::none();
+                };
+                if body.trim().is_empty() {
+                    return Task::none();
+                }
+                self.compose = text_editor::Content::new();
+                self.emoji = false;
+                match self.reply.take() {
+                    Some((target, _)) => self.tell(UiEvent::Reply { peer, target, body }),
+                    None => self.tell(UiEvent::Write { peer, body }),
+                }
+            }
+            Message::ToggleEmoji => self.emoji = !self.emoji,
+            Message::Insert(emoji) => {
+                self.compose
+                    .perform(text_editor::Action::Edit(text_editor::Edit::Paste(
+                        Arc::new(emoji),
+                    )))
+            }
+            Message::ShowMap(peer) => {
+                self.screen = Screen::Map;
+                if let Some(peer) = peer {
+                    self.apply(Message::Select(peer));
+                }
+                return self.paint();
+            }
+            Message::ShowChats => self.screen = Screen::Chats,
+            Message::Menu(key) => {
+                self.menu = key;
+                self.deleting = None;
+            }
+            Message::React(target, content) => {
+                self.menu = None;
+                if let Some(peer) = open {
+                    self.tell(UiEvent::React {
+                        peer,
+                        target,
+                        content,
+                    });
+                }
+            }
+            Message::Reply(target) => {
+                self.menu = None;
+                let quoted = self
+                    .seen
+                    .chat
+                    .as_ref()
+                    .and_then(|c| c.bubbles.iter().find(|b| b.id == Some(target)))
+                    .map(|b| b.body.lines().next().unwrap_or_default().to_string())
+                    .unwrap_or_default();
+                self.reply = Some((target, quoted));
+            }
+            Message::CancelReply => self.reply = None,
+            Message::Copy(words) => {
+                self.menu = None;
+                return iced::clipboard::write(words);
+            }
+            Message::AskDelete(key) => self.deleting = Some(key),
+            Message::Delete(peer, key) => {
+                self.menu = None;
+                self.deleting = None;
+                self.tell(UiEvent::Delete {
+                    peer,
+                    keys: vec![key],
+                });
+            }
+            _ => {}
+        }
+        Task::none()
     }
 
     fn subscription(&self) -> Subscription<Message> {
         Subscription::batch([
             window::events().map(|(_, event)| Message::Window(event)),
             keyboard::listen().map(Message::Key),
+            iced::system::theme_changes().map(Message::SystemTheme),
         ])
     }
 
@@ -436,6 +677,9 @@ impl App {
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
+        if message.is_chat() {
+            return self.chat(message);
+        }
         if !self.apply(message) {
             return Task::none();
         }
@@ -447,7 +691,7 @@ impl App {
         match message {
             Message::Seen(seen) => {
                 let landed = seen.maps != self.seen.maps;
-                self.seen = seen;
+                self.seen = *seen;
                 if landed {
                     self.regions_changed();
                 }
@@ -465,6 +709,10 @@ impl App {
             Message::Scale(scale) | Message::Window(window::Event::Rescaled(scale)) => {
                 self.scale = scale.max(0.25);
                 self.hold();
+            }
+            Message::Window(window::Event::Resized(size)) => {
+                self.window = size;
+                return false;
             }
             Message::Window(window::Event::Focused) => self.focused = true,
             Message::Window(window::Event::Unfocused) => self.focused = false,
@@ -496,6 +744,7 @@ impl App {
                 self.busy = false;
                 self.prefetching = more;
             }
+            _ => return false,
         }
         true
     }
@@ -504,7 +753,7 @@ impl App {
     /// for unless it is on screen and owes nothing, else a prefetch batch
     /// while the frame on screen rests and the window has the focus.
     fn next_job(&mut self) -> Option<Job> {
-        if self.busy {
+        if self.busy || self.screen != Screen::Map {
             return None;
         }
         let order = self.order()?;
@@ -593,7 +842,7 @@ impl App {
 
     fn ask(&self, want: MapWant) {
         if let Some(asks) = &self.asks {
-            let _ = asks.send(want);
+            let _ = asks.send(Want::Map(want));
         }
     }
 
@@ -628,10 +877,18 @@ impl App {
         self.hold();
     }
 
+    /// The map's keys, on the map alone: on the chat a key is typing.
     fn key(&mut self, event: keyboard::Event) {
+        if self.screen != Screen::Map {
+            return;
+        }
         let keyboard::Event::KeyPressed { modified_key, .. } = event else {
             return;
         };
+        if modified_key == keyboard::Key::Named(keyboard::key::Named::Escape) {
+            self.screen = Screen::Chats;
+            return;
+        }
         let keyboard::Key::Character(c) = modified_key.as_ref() else {
             return;
         };
@@ -730,6 +987,13 @@ impl App {
     }
 
     fn view(&self) -> Element<'_, Message> {
+        match self.screen {
+            Screen::Chats => row![self.list_pane(), self.chat_pane()].into(),
+            Screen::Map => self.map_view(),
+        }
+    }
+
+    fn map_view(&self) -> Element<'_, Message> {
         let list = self
             .seen
             .pins
@@ -761,6 +1025,10 @@ impl App {
             .as_ref()
             .map_or(String::new(), |s| s.attribution.clone());
         let bar = row![
+            button(text("Chats").size(13))
+                .on_press(Message::ShowChats)
+                .padding([0, 6])
+                .style(button::text),
             // Always on screen: the region's credit, or the outline's.
             text(credit).size(13),
             container(
@@ -990,15 +1258,19 @@ mod tests {
         let frames = florence();
         let maps = frames.painter().epoch();
         let mut app = App::new(frames, None);
+        app.screen = Screen::Map;
         app.apply(Message::MapSize(Size::new(480.0, 320.0)));
-        app.apply(Message::Seen(Seen {
+        app.apply(Message::Seen(Box::new(Seen {
             pins,
             notice: None,
             loading: None,
             maps,
             autoload: false,
             style: Style::PC,
-        }));
+            chats: Vec::new(),
+            chat: None,
+            now: None,
+        })));
         let at = project(LatLon::from_degrees(43.7752, 11.2660));
         app.view = ExactView::new(at, zoom_milli, 480, 320);
         app.hold();
@@ -1133,5 +1405,344 @@ mod tests {
             (x - under.0).abs() < 1.0 && (y - under.1).abs() < 1.0,
             "{x} {y}"
         );
+    }
+
+    use loquax::outbox::OutboxEvent;
+    use loquax::ui::update;
+
+    const ANNA: [u8; 16] = [0x3a; 16];
+    const BERT: [u8; 16] = [0xb7; 16];
+
+    fn at(day: u32, hour: u32, minute: u32) -> WallTime {
+        WallTime::from_civil(2026, 10, day, hour, minute, 3600)
+    }
+
+    fn received(model: &mut crate::shell::Model, from: [u8; 16], id: u8, body: &str) {
+        update(
+            model,
+            UiEvent::Engine(OutboxEvent::Received {
+                message_id: [id; 32],
+                source: from,
+                title: Vec::new(),
+                body: body.as_bytes().to_vec(),
+                fields: Vec::new(),
+                verified: true,
+            }),
+        );
+    }
+
+    /// A model as the shell holds one: Anna wrote yesterday and twice this
+    /// morning, we answered, she reacted; Bert wrote once, unread. Anna's
+    /// conversation is open.
+    fn chat_model() -> crate::shell::Model {
+        let mut model = crate::shell::Model::new(&[]);
+        model.names.remember(ANNA, "Anna Schulz");
+        model.names.remember(BERT, "Bert");
+        update(&mut model, UiEvent::Clock(at(29, 18, 40)));
+        received(
+            &mut model,
+            ANNA,
+            1,
+            "Are you coming to the market tomorrow?",
+        );
+        update(&mut model, UiEvent::Clock(at(30, 9, 12)));
+        received(&mut model, ANNA, 2, "Good morning!");
+        update(&mut model, UiEvent::Clock(at(30, 9, 13)));
+        received(
+            &mut model,
+            ANNA,
+            3,
+            "We meet at the fountain at ten, the stall with the apples.",
+        );
+        update(&mut model, UiEvent::Open { peer: ANNA });
+        update(&mut model, UiEvent::Clock(at(30, 9, 20)));
+        update(
+            &mut model,
+            UiEvent::Write {
+                peer: ANNA,
+                body: "Yes, see you there".to_string(),
+            },
+        );
+        update(
+            &mut model,
+            UiEvent::React {
+                peer: ANNA,
+                target: [3; 32],
+                content: "ok".to_string(),
+            },
+        );
+        update(&mut model, UiEvent::Clock(at(30, 9, 40)));
+        received(&mut model, BERT, 4, "The relay on the hill is up again");
+        update(&mut model, UiEvent::Open { peer: ANNA });
+        model
+    }
+
+    fn seen_of(model: &crate::shell::Model) -> Seen {
+        Seen {
+            pins: model.map_pins(),
+            notice: None,
+            loading: None,
+            maps: 0,
+            autoload: false,
+            style: Style::PC,
+            chats: list_rows(model),
+            chat: loquax::ui::chat::open(model),
+            now: model.now,
+        }
+    }
+
+    /// The window over `chat_model`, with the channel to the shell.
+    fn chat_window() -> (App, tokio::sync::mpsc::UnboundedReceiver<Want>) {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(Frames::new(loquax::picture::Maps::default()), Some(tx));
+        app.apply(Message::Seen(Box::new(seen_of(&chat_model()))));
+        (app, rx)
+    }
+
+    fn told(rx: &mut tokio::sync::mpsc::UnboundedReceiver<Want>) -> Vec<UiEvent> {
+        let mut events = Vec::new();
+        while let Ok(want) = rx.try_recv() {
+            if let Want::Ui(event) = want {
+                events.push(event);
+            }
+        }
+        events
+    }
+
+    fn type_into(app: &mut App, words: &str) {
+        for c in words.chars() {
+            let _ = app.update(Message::Compose(text_editor::Action::Edit(
+                text_editor::Edit::Insert(c),
+            )));
+        }
+    }
+
+    /// The list and the open chat are the model's, through the library's
+    /// rows ([`loquax::ui::chat`]): the newest conversation first with its
+    /// unread count, the open one's bubbles grouped as the phone groups
+    /// them, our reaction a chip on the bubble it names.
+    #[test]
+    fn the_window_shows_the_models_list_and_chat() {
+        let (app, _rx) = chat_window();
+        let names: Vec<&str> = app.seen.chats.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names.len(), 2, "{names:?}");
+        assert!(names[0].starts_with("Bert"), "{names:?}");
+        assert_eq!(app.seen.chats[0].unread, 1);
+        let open = app.seen.chat.as_ref().expect("Anna's chat is open");
+        assert_eq!(open.peer, ANNA);
+        assert_eq!(open.initials, "AS");
+        let bodies: Vec<&str> = open.bubbles.iter().map(|b| b.body.as_str()).collect();
+        assert_eq!(bodies.len(), 4, "the reaction is no bubble: {bodies:?}");
+        let days: Vec<bool> = open.placements.iter().map(|p| p.day).collect();
+        assert_eq!(days, [true, true, false, false]);
+        assert!(open.placements[2].joins_before);
+        assert_eq!(open.bubbles[2].chips.len(), 1);
+        assert!(open.bubbles[2].chips[0].ours);
+        assert!(open.bubbles[3].ours);
+        assert_eq!(open.bubbles[3].mark, Some(loquax::ui::chat::Mark::Queued));
+    }
+
+    /// `Enter` sends what was typed to the open conversation and empties
+    /// the field; a reply asked for on a bubble goes as a reply; blank
+    /// text sends nothing.
+    #[test]
+    fn enter_sends_and_a_reply_goes_as_one() {
+        let (mut app, mut rx) = chat_window();
+        let _ = app.update(Message::Send);
+        assert!(told(&mut rx).is_empty(), "nothing typed, nothing sent");
+        type_into(&mut app, "on my way");
+        let _ = app.update(Message::Send);
+        assert_eq!(
+            told(&mut rx),
+            [UiEvent::Write {
+                peer: ANNA,
+                body: "on my way".to_string()
+            }]
+        );
+        assert_eq!(app.compose.text().trim(), "");
+        let _ = app.update(Message::Menu(Some(2)));
+        let _ = app.update(Message::Reply([2; 32]));
+        assert_eq!(app.menu, None);
+        assert_eq!(app.reply, Some(([2; 32], "Good morning!".to_string())));
+        type_into(&mut app, "morning");
+        let _ = app.update(Message::Send);
+        assert_eq!(
+            told(&mut rx),
+            [UiEvent::Reply {
+                peer: ANNA,
+                target: [2; 32],
+                body: "morning".to_string()
+            }]
+        );
+        assert_eq!(app.reply, None);
+    }
+
+    /// A click on a row opens its conversation in the model; a reaction
+    /// picked on a bubble reacts; a delete asks once, then deletes.
+    #[test]
+    fn the_list_opens_and_the_actions_tell_the_model() {
+        let (mut app, mut rx) = chat_window();
+        let _ = app.update(Message::Open(BERT));
+        let _ = app.update(Message::React([1; 32], "👍".to_string()));
+        assert_eq!(
+            told(&mut rx),
+            [
+                UiEvent::Open { peer: BERT },
+                UiEvent::React {
+                    peer: ANNA,
+                    target: [1; 32],
+                    content: "👍".to_string()
+                }
+            ]
+        );
+        let _ = app.update(Message::AskDelete(7));
+        assert_eq!(app.deleting, Some(7));
+        assert!(told(&mut rx).is_empty(), "the first click only asks");
+        let _ = app.update(Message::Delete(ANNA, 7));
+        assert_eq!(
+            told(&mut rx),
+            [UiEvent::Delete {
+                peer: ANNA,
+                keys: vec![7]
+            }]
+        );
+    }
+
+    /// The new conversation's field opens what an address names and says
+    /// what is wrong with anything else.
+    #[test]
+    fn a_new_conversation_takes_an_address() {
+        let (mut app, mut rx) = chat_window();
+        let _ = app.update(Message::NewConversation);
+        let _ = app.update(Message::NewAddress("not hex".to_string()));
+        let _ = app.update(Message::NewGo);
+        assert!(told(&mut rx).is_empty());
+        assert!(app.seen.notice.is_some());
+        assert!(app.new_address.is_some(), "the field stays for a fix");
+        let hex = loquax::address::to_hex(&BERT);
+        let _ = app.update(Message::NewAddress(hex));
+        let _ = app.update(Message::NewGo);
+        assert_eq!(told(&mut rx), [UiEvent::Open { peer: BERT }]);
+        assert_eq!(app.new_address, None);
+    }
+
+    /// On the chat a key is typing: `+` does not zoom the map behind it,
+    /// and the map draws nothing until it is shown. On the map it zooms,
+    /// and `Escape` goes back.
+    #[test]
+    fn the_maps_keys_belong_to_the_map() {
+        let (mut app, _rx) = chat_window();
+        app.apply(Message::MapSize(Size::new(480.0, 320.0)));
+        let zoom = app.view.zoom_milli();
+        let plus = keyboard::Event::KeyPressed {
+            key: keyboard::Key::Character("+".into()),
+            modified_key: keyboard::Key::Character("+".into()),
+            physical_key: keyboard::key::Physical::Unidentified(
+                keyboard::key::NativeCode::Unidentified,
+            ),
+            location: keyboard::Location::Standard,
+            modifiers: keyboard::Modifiers::empty(),
+            text: None,
+            repeat: false,
+        };
+        app.apply(Message::Key(plus.clone()));
+        assert_eq!(app.view.zoom_milli(), zoom);
+        assert!(app.next_job().is_none(), "no frame for a hidden map");
+        let _ = app.update(Message::ShowMap(None));
+        app.busy = false;
+        app.apply(Message::Key(plus));
+        assert!(app.view.zoom_milli() > zoom);
+        let escape = keyboard::Event::KeyPressed {
+            key: keyboard::Key::Named(keyboard::key::Named::Escape),
+            modified_key: keyboard::Key::Named(keyboard::key::Named::Escape),
+            physical_key: keyboard::key::Physical::Unidentified(
+                keyboard::key::NativeCode::Unidentified,
+            ),
+            location: keyboard::Location::Standard,
+            modifiers: keyboard::Modifiers::empty(),
+            text: None,
+            repeat: false,
+        };
+        app.apply(Message::Key(escape));
+        assert_eq!(app.screen, Screen::Chats);
+    }
+
+    /// The window's view drawn off screen by iced's own software renderer,
+    /// `w` x `h` at a density of one, as RGB.
+    fn shoot(app: &App, w: u32, h: u32) -> Vec<u8> {
+        use iced::advanced::renderer::{self, Headless, Renderer as _};
+        use iced::advanced::widget::Tree;
+        use iced::advanced::{layout, Layout};
+        let mut renderer = futures::executor::block_on(<Renderer as Headless>::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(16.0),
+            None,
+        ))
+        .expect("the software renderer");
+        let size = Size::new(w as f32, h as f32);
+        let mut element = app.view();
+        let mut tree = Tree::new(&element);
+        let node = element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(Size::ZERO, size),
+        );
+        let viewport = Rectangle::with_size(size);
+        renderer.reset(viewport);
+        let theme = app.theme();
+        element.as_widget().draw(
+            &tree,
+            &mut renderer,
+            &theme,
+            &renderer::Style {
+                text_color: chat::colour(app.tokens().text),
+            },
+            Layout::new(&node),
+            mouse::Cursor::Unavailable,
+            &viewport,
+        );
+        let background = chat::colour(app.tokens().background);
+        renderer
+            .screenshot(iced::Size::new(w, h), 1.0, background)
+            .chunks(4)
+            .flat_map(|p| [p[0], p[1], p[2]])
+            .collect()
+    }
+
+    /// The chat pane in each theme (1145), pixel for pixel the goldens:
+    /// the list with Bert's unread count and Anna's row open, Anna's chat
+    /// with yesterday's date line, her two grouped bubbles, our reaction's
+    /// pill, our bubble right with its queued mark, the compose bar. The
+    /// two themes differ, and a second picture is the first.
+    #[test]
+    fn the_chat_pane_is_the_golden_in_both_themes() {
+        let (w, h) = (900, 560);
+        let (mut app, _rx) = chat_window();
+        app.window = Size::new(w as f32, h as f32);
+        let light = shoot(&app, w, h);
+        assert_eq!(shoot(&app, w, h), light, "a second picture is the same");
+        let _ = app.update(Message::ToggleTheme);
+        assert!(app.dark());
+        let dark = shoot(&app, w, h);
+        assert_ne!(light, dark);
+        // The ground is the token's in each.
+        assert_eq!(&light[..3], &[0xff, 0xff, 0xff]);
+        assert_eq!(&dark[..3], &[0x17, 0x18, 0x1b]);
+        map::tests::same_as("gui-chat-light.png", &light, w, h);
+        map::tests::same_as("gui-chat-dark.png", &dark, w, h);
+    }
+
+    /// The desktop's dark setting turns the window dark, and the toggle
+    /// turns it round either way.
+    #[test]
+    fn the_theme_follows_the_desktop_and_the_toggle() {
+        let (mut app, _rx) = chat_window();
+        assert!(!app.dark());
+        let _ = app.update(Message::SystemTheme(iced::theme::Mode::Dark));
+        assert!(app.dark());
+        let _ = app.update(Message::ToggleTheme);
+        assert!(!app.dark());
+        let _ = app.update(Message::SystemTheme(iced::theme::Mode::Light));
+        assert!(app.dark());
     }
 }

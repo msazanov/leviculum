@@ -18,3 +18,13 @@ fonts.
 The picture is a produced work of OpenStreetMap data: © OpenStreetMap
 contributors, <https://www.openstreetmap.org/copyright>, under the Open
 Database License (ODbL) 1.0; see `leviculum-map/fixtures/README.md`.
+
+`gui-chat-light.png`, `gui-chat-dark.png`: the window's chat pane in each
+theme (1145), drawn off screen by iced's software renderer (tiny-skia) by
+`gui::tests::the_chat_pane_is_the_golden_in_both_themes`, 900 x 560 at a
+density of one: two conversations, one open with a date line, two grouped
+bubbles of theirs, our reaction's pill and our queued bubble, the compose
+bar. Compared pixel for pixel as the map's picture is; the text is set in
+the window's default font, Fira Sans as iced embeds it, and the picture
+holds no emoji, which only a host's font would draw.
+

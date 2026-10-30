@@ -634,8 +634,11 @@ with the window's font measuring each label. Pinned by
 in `loquax/src/gui.rs`,
 the label rule's tests in `leviculum-map/tests/labels.rs`, and `just
 loquax-gui`. The binary is built for the gnu target: winit opens X11 and
-Wayland with dlopen, which a musl-static binary cannot. Left for later:
-conversations and compose in the window, the package. *1001 phase:* the
+Wayland with dlopen, which a musl-static binary cannot. Conversations
+and compose came in 1145 ([the user interface](loquax-ui.md), "Built
+2026-10-30, the desktop chat"): the window opens on the chat, the map is
+its other screen, and a position line opens it at the sender's pin.
+Left for later: the package. *1001 phase:* the
 same as (c) once the cell can drive the GUI; until then none.
 
 **(e) The M9 map.** The view on the panel with the region on flash.

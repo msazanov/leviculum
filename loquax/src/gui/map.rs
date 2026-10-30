@@ -239,7 +239,7 @@ pub(super) mod tests {
 
     /// Hold `rgb` to the PNG golden `name` under `loquax/tests/golden`,
     /// pixel for pixel; a picture that moved is left in the temp dir.
-    fn same_as(name: &str, rgb: &[u8], w: u32, h: u32) {
+    pub(in crate::gui) fn same_as(name: &str, rgb: &[u8], w: u32, h: u32) {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/golden")
             .join(name);
