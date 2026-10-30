@@ -1003,7 +1003,6 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             busy_rejections: ch.map(|c| c.busy_rejections()).unwrap_or(0),
             pacing_rejections: ch.map(|c| c.pacing_rejections()).unwrap_or(0),
             iface_pacing_rejections: link.iface_pacing_rejections(),
-            ext: super::ext::LinkStatsExt::of(link),
         })
     }
 

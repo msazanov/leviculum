@@ -1,4 +1,4 @@
-//! Link cipher selection and per-link tuning for [`NodeCore`].
+//! Link cipher selection and path recovery for [`NodeCore`].
 //!
 //! Kept in its own module so that the shared node files carry only one-line call sites.
 //! As a child of `node` it reaches the private fields it extends.
@@ -17,74 +17,6 @@ pub(crate) struct NodeExt {
 impl NodeExt {
     pub(crate) fn outgoing_cipher(&self) -> crate::LinkCipher {
         self.next_link_cipher.unwrap_or(self.link_cipher)
-    }
-}
-
-/// [`LinkStats`] fields read from the `Link` itself: attachment, cipher and keepalive telemetry.
-#[derive(Clone, Debug)]
-pub(crate) struct LinkStatsExt {
-    pub(crate) attached_interface: Option<usize>,
-    pub(crate) cipher: crate::LinkCipher,
-    // — keepalive telemetry —
-    pub(crate) keepalive_ms: u64,
-    pub(crate) stale_time_ms: u64,
-    pub(crate) keepalives_sent: u64,
-    pub(crate) keepalives_acked: u64,
-    pub(crate) keepalive_rtt_ms: Option<u64>,
-}
-
-impl LinkStatsExt {
-    pub(crate) fn of(link: &Link) -> Self {
-        Self {
-            attached_interface: link.attached_interface(),
-            cipher: link.cipher(),
-            keepalive_ms: link.keepalive_ms(),
-            stale_time_ms: link.stale_time_ms(),
-            keepalives_sent: link.keepalives_sent(),
-            keepalives_acked: link.keepalives_acked(),
-            keepalive_rtt_ms: link.keepalive_rtt_ms(),
-        }
-    }
-}
-
-impl LinkStats {
-    /// Interface the link was established on (Python `Link.attached_interface`). The path table
-    /// can flip to another interface later (every newer announce may), so this, not the path,
-    /// says which neighbour carries the link.
-    pub fn attached_interface(&self) -> Option<usize> {
-        self.ext.attached_interface
-    }
-
-    /// Cipher this link was established with. An application that only wants GCM links on some paths checks it here.
-    pub fn cipher(&self) -> crate::LinkCipher {
-        self.ext.cipher
-    }
-
-    /// Keepalive interval in force for this link (milliseconds)
-    pub fn keepalive_ms(&self) -> u64 {
-        self.ext.keepalive_ms
-    }
-
-    /// Inbound silence after which the link goes stale (milliseconds)
-    pub fn stale_time_ms(&self) -> u64 {
-        self.ext.stale_time_ms
-    }
-
-    /// Proactive keepalives sent since establishment (initiator)
-    pub fn keepalives_sent(&self) -> u64 {
-        self.ext.keepalives_sent
-    }
-
-    /// Keepalive echoes received since establishment (initiator)
-    pub fn keepalives_acked(&self) -> u64 {
-        self.ext.keepalives_acked
-    }
-
-    /// Round trip of the last acknowledged keepalive (initiator), ms.
-    /// Unlike [`rtt_ms`](Self::rtt_ms) this is refreshed during the link's
-    /// life.
-    pub fn keepalive_rtt_ms(&self) -> Option<u64> {
-        self.ext.keepalive_rtt_ms
     }
 }
 
@@ -115,53 +47,6 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         }
         self.ext.link_cipher = cipher;
         Ok(())
-    }
-
-    pub fn set_link_send_window_limit(
-        &mut self,
-        id: &crate::LinkId,
-        limit: usize,
-    ) -> Result<(), crate::LinkError> {
-        let id = self.resolve_link_id(id);
-        self.links
-            .get_mut(&id)
-            .ok_or(crate::LinkError::NotFound)?
-            .set_send_window_limit(limit);
-        Ok(())
-    }
-
-    pub fn set_link_send_pacing_enabled(
-        &mut self,
-        id: &crate::LinkId,
-        enabled: bool,
-    ) -> Result<(), crate::LinkError> {
-        let id = self.resolve_link_id(id);
-        self.links
-            .get_mut(&id)
-            .ok_or(crate::LinkError::NotFound)?
-            .set_send_pacing_enabled(enabled);
-        Ok(())
-    }
-
-    /// Override this link's keepalive interval (seconds, clamped to the
-    /// protocol minimum), or restore the RTT-derived value with `None`.
-    ///
-    /// Both ends of a link must agree on the interval, otherwise the side
-    /// with the shorter stale window closes a quiet link. Returns `false`
-    /// for an unknown link.
-    pub fn set_link_keepalive(&mut self, link_id: &LinkId, secs: Option<u64>) -> bool {
-        let link_id = self.resolve_link_id(link_id);
-        let Some(link) = self.links.get_mut(&link_id) else {
-            return false;
-        };
-        link.set_keepalive_override(secs);
-        if secs.is_none() {
-            // Re-derive from the handshake RTT (0 when the sample is absent,
-            // which yields the protocol floor); establishment recomputes it.
-            let rtt_us = link.rtt_us().unwrap_or(0);
-            link.update_keepalive_from_rtt(rtt_us as f64 / 1_000_000.0);
-        }
-        true
     }
 
     /// Request a path on the given interfaces only, ignoring the per-destination request limiter.

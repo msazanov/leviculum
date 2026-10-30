@@ -81,22 +81,6 @@ impl LinkHandle {
         &self.link_id
     }
 
-    /// Reduce the in-flight channel budget for latency-sensitive traffic.
-    pub fn set_send_window_limit(&self, limit: usize) -> Result<(), Error> {
-        self.inner
-            .lock_recover()
-            .set_link_send_window_limit(&self.link_id, limit)
-            .map_err(|_| Error::NotRunning)
-    }
-
-    /// Opt-in QUIC-underlay profile; window/retransmit reliability is retained.
-    pub fn set_send_pacing_enabled(&self, enabled: bool) -> Result<(), Error> {
-        self.inner
-            .lock_recover()
-            .set_link_send_pacing_enabled(&self.link_id, enabled)
-            .map_err(|_| Error::NotRunning)
-    }
-
     /// Check if the handle is closed
     pub fn is_closed(&self) -> bool {
         self.closed

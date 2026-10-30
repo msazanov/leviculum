@@ -383,7 +383,6 @@ pub struct LinkStats {
     pub(crate) busy_rejections: u64,
     pub(crate) pacing_rejections: u64,
     pub(crate) iface_pacing_rejections: u64,
-    pub(crate) ext: ext::LinkStatsExt,
 }
 
 impl LinkStats {

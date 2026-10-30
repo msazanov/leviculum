@@ -110,7 +110,7 @@ async fn test_channel_message_bidirectional_cbc_link_on_a_gcm_node() {
         wait_for_link_established(&mut event_rx, &link_id, Duration::from_secs(10)).await;
     assert!(established, "Link should be established");
     assert_eq!(
-        rust_node.link_stats(&link_id).unwrap().cipher(),
+        rust_node.with_link(&link_id, |l| l.cipher()).unwrap(),
         LinkCipher::Cbc
     );
     let bytes_before = rust_node.link_stats(&link_id).unwrap().bytes_delivered();
@@ -271,7 +271,7 @@ async fn test_gcm_node_python_channel_cbc_packet_hash_ack() {
         )
         .await;
     assert_eq!(
-        rust_node.link_stats(&link_id).unwrap().cipher(),
+        rust_node.with_link(&link_id, |l| l.cipher()).unwrap(),
         leviculum_core::LinkCipher::Cbc
     );
 
