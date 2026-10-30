@@ -253,6 +253,38 @@ pub fn archive_petnames<'a>(
     Ok(appended)
 }
 
+/// Keep each of `peers` as blocked, a peer state entry
+/// ([`crate::home::KIND_PEERSTATE`]) in the bytes a device's block sends
+/// (1162): an import's blocks and the contacts file of a home node that
+/// imported before blocks travelled. A peer the archive holds a peer state
+/// for keeps it: a device said its word on that peer. How many were
+/// appended.
+pub fn archive_blocks<'a>(
+    store: &mut Store,
+    peers: impl IntoIterator<Item = &'a [u8; 16]>,
+    now: i64,
+    cap_bytes: u64,
+) -> Result<usize, crate::store::StoreError> {
+    let blocked = wire::PeerState {
+        blocked: true,
+        ..wire::PeerState::default()
+    };
+    let mut appended = 0;
+    for peer in peers {
+        if store.archive_holds_peer_state(peer)? {
+            continue;
+        }
+        let entry = wire::peer_state_entry(peer, &blocked);
+        if store
+            .archive_peer_state(*peer, &entry, now, cap_bytes)?
+            .is_some()
+        {
+            appended += 1;
+        }
+    }
+    Ok(appended)
+}
+
 /// A client's word on a peer (1146), kept as an archive entry as a
 /// petname is: the newest of each peer, the same one again appending
 /// nothing.

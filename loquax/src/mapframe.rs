@@ -305,6 +305,21 @@ impl Frames {
         let mut drawn = shows.on_whole_pixel();
         let (fw, fh) = frame_size(ask);
         drawn.resize(fw, fh);
+        // Scaled up by the frontend, the step's frame shows only its middle,
+        // the screen and the margins over the scale (1163): the tiles
+        // outside it held are copied, the others not drawn nor owed.
+        let shown = (shows.zoom_milli() != view.zoom_milli()).then(|| {
+            let s = view.scale_at(tile_zoom).max(1.0);
+            let span = |n: u32| {
+                let half = f64::from(n) / 2.0;
+                let reach = (half / s).ceil() + 1.0;
+                let from = (half - reach).floor().max(0.0) as u32;
+                let to = ((half + reach).ceil() as u32).min(n);
+                (from, to)
+            };
+            let ((x0, x1), (y0, y1)) = (span(fw), span(fh));
+            [x0, y0, x1, y1]
+        });
         let asked = TileFrame {
             view: drawn,
             zoom: tile_zoom,
@@ -314,6 +329,8 @@ impl Frames {
                 .moving
                 .then(|| self.tiles.workers() * MOVING_TILES_PER_WORKER),
             fallback: self.last_zoom,
+            moving: ask.moving,
+            asked: shown,
         };
         // The frontend's pixels are the frame's size (`frame_into`).
         let (rgba, (attribution, missing)) = match target {
@@ -676,5 +693,30 @@ mod tests {
             got.rgba == want.rgba,
             "a pan at the zoom at rest is as before"
         );
+    }
+
+    /// 1163: a pinch's frame at the step below covers more than the
+    /// frontend shows of it scaled; the tiles outside the screen and the
+    /// margins are not owed. After a frame at rest at z14.3 the step's
+    /// frame owes nothing a pinch in, where it owed the tiles past them.
+    #[test]
+    fn a_pinch_owes_only_the_tiles_it_shows() {
+        let centre = project(LatLon::from_degrees(43.7731, 11.2560));
+        let theme = MapTheme::Light;
+        let at = |z: u32| {
+            let mut v = ExactView::new(centre, 15 * MILLI, 900, 700);
+            v.zoom_about(z, 450.0, 350.0);
+            v
+        };
+        let mut pinch = florence();
+        pinch.set_workers(1);
+        pinch.frame(&ask(at(14_300), false, 2.75, theme));
+        let got = pinch.frame(&Ask {
+            scaled_while_moving: true,
+            ..ask(at(14_600), true, 2.75, theme)
+        });
+        assert_eq!(got.tile_zoom, 14);
+        assert_eq!(got.missing, 0);
+        assert!(got.rgba.chunks_exact(4).all(|p| p[3] == 0xff));
     }
 }

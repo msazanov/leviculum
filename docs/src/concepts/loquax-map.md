@@ -33,7 +33,7 @@ the two telemetry fields into positions (`telemetry::read`,
 `loquax/src/telemetry.rs:130`), the screen model keeps each peer's latest
 and hands every one to the store (`take_telemetry`,
 `loquax/src/ui.rs:3070`), and the store keeps the fields whole in its
-`fields` column (`loquax/src/store.rs:2236`) and the positions in a table of
+`fields` column (`loquax/src/store.rs:2255`) and the positions in a table of
 their own (`SCHEMA_V2`, `loquax/src/store.rs:173`). The sender's timestamp
 is still not carried: `OutboxEvent`, the screen's `Message` and every type
 the model folds derive `Eq`, which an `f64` cannot, so carrying it is a
@@ -310,10 +310,20 @@ The frontends:
   the facade's own frame on a warm pan from 13.9 to 16.5 ms copied out to
   4.3 to 6.4 ms into the Bitmap, a pinch with its tiles held from 36.6 to
   5.1 ms on one worker and from 9.7 to 4.9 ms on eight, a cold frame's
-  tile time on one worker from 71 to 56 to 58 ms. A pinch that owes tiles
-  still pays for the stand-in steps, which sample the whole frame (63 ms
-  on one worker); drawing the stand-ins only where tiles are owed is
-  the next step. Since 1156 a placed name's sprite is a box of
+  tile time on one worker from 71 to 56 to 58 ms. Since 1163 a frame
+  while the view moves that owes tiles covers only the owed tiles'
+  pixels: the tiles held are copied, the stand-in steps taken nearest
+  over the owed tiles' rectangles alone, their pixels doubled or halved,
+  then the outline there; at rest the stand-ins stay scaled bilinear
+  over the frame (`loquax::tiles::Frame::moving`). A pinch's frame at
+  the step below covers more than the frontend shows of it scaled up: a
+  tile outside the screen and the margins over the scale is used when
+  held, and otherwise neither drawn nor owed, its pixels water
+  (`Frame::asked`). Frames at rest and frames with every tile held are
+  the same bytes as before. Through `map_fps` on the coder host, the
+  pinch that owes tiles from 62 ms to 6.7 ms on one worker, the tiles
+  it owes over the pinch from 7 to 4 on eight workers and from 20 to 10
+  on one. Since 1156 a placed name's sprite is a box of
   `(halo, ink)` levels out of 255 blended in integers row by row
   (`loquax::mapnames::Sprite`): a level name is the same bytes as
   before, a turned one's coverage is rounded to a level, so a channel
