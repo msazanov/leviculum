@@ -648,7 +648,7 @@ async fn the_keymap_sessions_reach_the_same_screens_in_every_spelling() {
         "{enhanced}"
     );
     assert!(
-        frame(&enhanced, "still here").contains("loquax"),
+        frame(&enhanced, "still here").contains("Loquax"),
         "{enhanced}"
     );
 
@@ -1110,12 +1110,12 @@ async fn the_mouse_clicks_wheels_and_drags_through_the_screen() {
     assert!(frame(&click, "message selected").contains("▌hello by mouse"));
     assert!(frame(&click, "detail").contains("from you to <5ec0ea2e…>"));
     assert!(!frame(&click, "closed").contains("from you to"));
-    assert!(frame(&click, "help").contains("loquax help"), "{click}");
+    assert!(frame(&click, "help").contains("Loquax help"), "{click}");
 
     // The wheel moved the conversation and nothing else.
     let up = frame(&wheel, "wheeled up");
     assert_ne!(up, frame(&wheel, "list focused"));
-    assert!(up.contains("● loquax"), "the list kept the focus: {up}");
+    assert!(up.contains("● Loquax"), "the list kept the focus: {up}");
     assert!(!up.contains("message 10  12:00"), "{up}");
     assert_eq!(frame(&wheel, "wheeled down"), frame(&wheel, "list focused"));
 
@@ -1229,7 +1229,7 @@ async fn the_search_finds_opens_and_steps_in_place_at_both_sizes() {
         // Closed: the list and its `/ search` back, nothing marked, the
         // conversation still the one the result opened.
         let closed = frame(&frames, "closed");
-        assert!(closed.contains("● loquax"), "{size}: {closed}");
+        assert!(closed.contains("● Loquax"), "{size}: {closed}");
         assert!(closed.contains(" / search "), "{size}: {closed}");
         assert!(!closed.contains('«'), "{size}: {closed}");
         assert!(closed.contains("<61ddb79a…>  unknown"), "{size}: {closed}");
@@ -1610,7 +1610,7 @@ async fn a_restart_shows_the_earlier_exchange_with_its_marks() {
         "Bob's name from the first run: {restarted}"
     );
     assert!(
-        frame(&second, "ledger").contains("loquax restarted: no longer being sent"),
+        frame(&second, "ledger").contains("Loquax restarted: no longer being sent"),
         "{second}"
     );
     let bob_frame = frame(&second, "bob");

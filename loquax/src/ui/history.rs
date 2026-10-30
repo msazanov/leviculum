@@ -41,7 +41,7 @@ use crate::when::WallTime;
 pub const LOAD_WINDOW: usize = 200;
 
 /// The ledger line of a send the restart cut off.
-pub const RESTARTED: &str = "loquax restarted: no longer being sent";
+pub const RESTARTED: &str = "Loquax restarted: no longer being sent";
 
 /// One conversation as the store hands it back at start.
 #[derive(Clone, Debug, PartialEq, Eq)]

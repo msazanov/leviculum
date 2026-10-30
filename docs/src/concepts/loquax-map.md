@@ -1,10 +1,10 @@
-# loquax: the map
+# Loquax: the map
 
-Part of the [loquax design record](loquax.md). Lew, 2026-10-27: the vector
-map is part of loquax. Messenger and map belong together because telemetry
+Part of the [Loquax design record](loquax.md). Lew, 2026-10-27: the vector
+map is part of Loquax. Messenger and map belong together because telemetry
 travels over the same LXMF channel as the messages, and the user wants to
 see the positions inside the messenger. The map comes to the desktop
-loquax, its terminal frontend and the planned iced GUI, not only to the
+Loquax, its terminal frontend and the planned iced GUI, not only to the
 board. [A messenger whose core runs anywhere](handheld-messenger.md), "The
 map", already calls the map a product of its own and a view inside the
 messenger, on the desktop and embedded. This page plans it in slices.
@@ -22,7 +22,7 @@ option B) and the vector path with our own filler (handheld-messenger.md,
 "The map", 2026-10-25). Tracked under #232 (the messenger core) and #474
 (the map).
 
-## What loquax receives of telemetry today
+## What Loquax receives of telemetry today
 
 Since slice (a), every position. The engine passes an incoming message's
 fields on (`Message::fields`, `leviculum-lxmf/src/message.rs:84`):
@@ -33,7 +33,7 @@ the two telemetry fields into positions (`telemetry::read`,
 `loquax/src/telemetry.rs:130`), the screen model keeps each peer's latest
 and hands every one to the store (`take_telemetry`,
 `loquax/src/ui.rs:3012`), and the store keeps the fields whole in its
-`fields` column (`loquax/src/store.rs:2096`) and the positions in a table of
+`fields` column (`loquax/src/store.rs:2097`) and the positions in a table of
 their own (`SCHEMA_V2`, `loquax/src/store.rs:173`). The sender's timestamp
 is still not carried: `OutboxEvent`, the screen's `Message` and every type
 the model folds derive `Eq`, which an `f64` cannot, so carrying it is a
@@ -133,7 +133,7 @@ the reader that skips a sensor it does not know (Sideband `2000d81`, cited
 by symbol for the reason [Telemetry](telemetry.md) gives). Columba's
 `TelemeterCodec.kt` reads and writes the same two sensors, time and
 location (Columba `0930293`). So a position from Sideband or Columba, and
-from one of our boards, is the same bytes, and loquax reads all three with
+from one of our boards, is the same bytes, and Loquax reads all three with
 one decoder. A SID mapped to nil is a sensor without a reading, accepted.
 
 **The cut.** The engine passes `message.fields` on in
@@ -212,7 +212,7 @@ cut" on handheld-messenger.md.
 | `leviculum-mapfill` (exists) | scanline filler, wide lines, the flat geometry reader, the render pipeline into any `DrawTarget`, and since 1062 a per-feature `Pass` that draws one feature at a placement, so several fixtures share one frame | yes, no `alloc` | the core, all three frontends |
 | `leviculum-map` (built, 1062) | the region file reader, Web Mercator projection, the viewport (centre, zoom, pan, fit), tile selection and feature culling, the layer profile per zoom, the style tables (`leviculum-mapfill`'s, re-exported), pins and labels as data, the class-by-class draw of a view's tiles | yes, `alloc` | all three frontends |
 | `leviculum-map-tool` (built, 1062, `std`) | cuts a region file from Protomaps PMTiles archives (section 4); prost and the tree's one MVT decoder live here, and `leviculum-mapfill/measure/` reads its tiles through it; no package ships it | no | the desktop, by hand |
-| loquax core | positions in the model, the map view's state (open, viewport, selected pin), the events | yes, `alloc` | all three frontends |
+| Loquax core | positions in the model, the map view's state (open, viewport, selected pin), the events | yes, `alloc` | all three frontends |
 
 The frontends:
 
@@ -237,7 +237,7 @@ The frontends:
   cell as in the window. No second map in Java. The phone's view keeps
   the zoom a pinch leaves, a real number to a thousandth of a step
   (`leviculum_map::viewport::ExactView`, 1134), and its frame is composed
-  from loquax's tile cache (`loquax::tiles`): the map without names and
+  from Loquax's tile cache (`loquax::tiles`): the map without names and
   pins, in tiles of 256 pixels of the nearest whole step, kept by last
   use up to 96 MB, missing ones drawn on up to eight threads, scaled to
   the exact zoom (one to one at a whole step). The names are placed at
@@ -400,7 +400,7 @@ locale country is not used, since nothing maps a country to its box
 cheaply yet.
 
 **Where it comes from.** The cut lives in `leviculum-mapcut`, which
-`leviculum-map-tool cut` and loquax's autoload both call (1089). It reads
+`leviculum-map-tool cut` and Loquax's autoload both call (1089). It reads
 Protomaps PMTiles archives (one, or the parts of one build downloaded
 separately, from a file or by HTTP range requests, only the directories
 and tiles of the box) for a bounding box and writes the region file; the output does not depend on the
@@ -423,7 +423,7 @@ config, #471) says the map works without a step. Decided 2026-10-27
 2. **Map data loads by itself** and is shown at once, with no further
    step: when the user goes to a place (a position report, the peer's
    position, `L` or `Alt-l`, or the map opened with pins no region holds),
-   loquax loads the region around it; a key (`d`) and the palette's `load
+   Loquax loads the region around it; a key (`d`) and the palette's `load
    map area` load the visible area. It can be switched off in the config
    (`map_autoload = off`). The first version of this point (2026-10-27)
    said nothing downloads without an explicit action; Lew revised it
@@ -438,7 +438,7 @@ config, #471) says the map works without a step. Decided 2026-10-27
   tiles of the box and the directories above them are fetched, never the
   planet. Default: the newest Protomaps daily build that answers
   (`https://build.protomaps.com/<yyyymmdd>.pmtiles`, looked for back ten
-  days, found once a session). `map_source = <url>` in loquax's config
+  days, found once a session). `map_source = <url>` in Loquax's config
   names another, for instance the project's own server later. Terms of
   the default, as Protomaps' download page (`docs.protomaps.com/basemaps/
   downloads`, read 2026-10-28) states them: the basemap is an ODbL
@@ -591,7 +591,7 @@ positioned by projection tests; clicking a pin opens the conversation.
 Bob's pin with his announced name.
 
 **(d) The iced GUI map.** Built 2026-10-28 (leviculum 1084), Lew's
-decision that day to start it: `loquax gui`, behind loquax's `gui` feature,
+decision that day to start it: `loquax gui`, behind Loquax's `gui` feature,
 which no other feature enables, so the CLI, the terminal and the core carry
 no iced. The window starts the same shell as the terminal (`loquax/src/
 shell.rs`, moved out of `tui.rs`: the engine, the history, the sends and
@@ -711,7 +711,7 @@ a mosh session that holds the tmux client is not an ancestor and is not
 seen. `GRAPHICS` names the rung and why: `reason=no-graphics,mosh`.
 
 **The text techniques, and the ladder since 1093.** Lew, 2026-10-28:
-loquax draws the most beautiful map the terminal can show, real graphics
+Loquax draws the most beautiful map the terminal can show, real graphics
 where the terminal has them, then the best text techniques in order, and
 a key cycles through every way live, the one the reader stays on
 remembered. The techniques and the measurements behind their order are
@@ -764,23 +764,23 @@ Each alternative stays as one line, rejected, so the reasoning stays.
 - **TUI graphics: the ladder of section 6.** Kitty or sixel, then
   half-blocks, then braille. Lew's terminal is foot, which draws by sixel
   and speaks no kitty graphics, so the ladder must not assume kitty.
-  *Rejected:* braille only, which needs no `ratatui-image` in loquax but
+  *Rejected:* braille only, which needs no `ratatui-image` in Loquax but
   gives no filled areas.
 - **No default region in the package.** The world outline until a region
   is there (section 4). *Rejected:* a small default region in the
   package, which would have to be chosen for someone. This decision said
-  "one explicit action to add one, no download of loquax's own" until Lew
+  "one explicit action to add one, no download of Loquax's own" until Lew
   revised that half on 2026-10-28: map data loads by itself when the user
   goes to a place, switchable off (section 4, point 2, and "The autoload";
   leviculum 1089). The reason is the 90 % rule of #471: a map that stays
   the world outline until the user learns a command is a map most users
   never see. *Rejected with it:* the explicit `loquax map add` as the only
   way in.
-- **Our own position is not sent by default.** loquax sends no position
+- **Our own position is not sent by default.** Loquax sends no position
   until the user switches it on per peer, and answers no telemetry
   request until then. A messenger that broadcasts where its user is
   because nobody changed a default is the failure this avoids; the cost
-  is that two loquax users see each other on the map only after one step
+  is that two Loquax users see each other on the map only after one step
   each. *Rejected:* sending by default.
 - **Stale threshold 2 h** (section 2): dimmed after that, never removed
   for age alone. *Rejected:* removing a fix when it ages out.
@@ -806,7 +806,7 @@ The reviewer decided three more for slice (c), 2026-10-27 (leviculum 1065):
 - **`loquax map add` is not in slice (c).** Superseded by the autoload
   (1089), which uses the cut as a library (`leviculum-mapcut`) rather than
   spawning the tool. Regions placed by hand still work:
-  loquax reads every `*.lmr` in `${XDG_DATA_HOME:-~/.local/share}/loquax/maps/`,
+  Loquax reads every `*.lmr` in `${XDG_DATA_HOME:-~/.local/share}/loquax/maps/`,
   or in `$LNMSG_HOME/maps/` when `LNMSG_HOME` is set. That variable
   replaces the whole default base for the identity and the store, so it
   replaces this one too, and a test or a second profile sees only its own
@@ -837,7 +837,7 @@ The reviewer decided three more for slice (c), 2026-10-27 (leviculum 1065):
 - [A messenger whose core runs anywhere](handheld-messenger.md), "The map"
 - [Telemetry](telemetry.md), the format and the collector exchange
 - [A GUI toolkit for the desktop and the M9](gui-toolkit.md)
-- [loquax: keys, mouse and layout](loquax-keys-and-layout.md), the slices
+- [Loquax: keys, mouse and layout](loquax-keys-and-layout.md), the slices
   this page's slices follow
-- [loquax: conversation storage](loquax-storage.md)
+- [Loquax: conversation storage](loquax-storage.md)
 - [The ThinkNode M9](thinknode-m9.md)

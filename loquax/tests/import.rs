@@ -568,7 +568,7 @@ fn the_questions_take_defaults_and_adopt_only_on_yes() {
     let reports =
         import::ask_and_import(&sources, &home, &mut &b"\n\ny\n"[..], &mut out).expect("asked");
     let text = String::from_utf8(out).expect("utf-8");
-    assert!(text.contains("Do not run NomadNet and loquax"), "{text}");
+    assert!(text.contains("Do not run NomadNet and Loquax"), "{text}");
     assert_eq!(reports.len(), 1);
     assert!(reports[0].as_ref().expect("ok").adopted.is_none());
     assert_eq!(import::current_address(&home), None, "y is not yes");
@@ -674,7 +674,7 @@ fn the_export_round_trips_through_the_import() {
 
     let b = dir.path().join("b");
     let source = import::sniff(&out).expect("the export reads as a tree");
-    assert_eq!(source.app, "loquax");
+    assert_eq!(source.app, "Loquax");
     assert_eq!(source.address, Some(me));
     let choices = Choices {
         identity: true,
@@ -713,7 +713,7 @@ fn the_export_round_trips_through_the_import() {
     let said: Vec<&str> = back[1].ledger.iter().map(|e| e.what.as_str()).collect();
     assert_eq!(
         said,
-        ["imported from loquax", "loquax said: signature verified"]
+        ["imported from Loquax", "Loquax said: signature verified"]
     );
     let store = Store::open_in(&b, me).expect("store");
     let kept = store.unverified().expect("held");
@@ -785,7 +785,7 @@ fn the_command_line_dry_run_lists_and_the_import_asks() {
         "{stdout}{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(stdout.contains("loquax now answers on"), "{stdout}");
+    assert!(stdout.contains("Loquax now answers on"), "{stdout}");
     let printed = loquax(&home).arg("address").output().expect("address");
     assert_eq!(
         String::from_utf8_lossy(&printed.stdout).trim(),

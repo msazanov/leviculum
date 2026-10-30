@@ -374,7 +374,7 @@ daemon a controller without a configured BLE interface.
 4. **Zero-config against the mailbox's picker.** Closed 2026-10-25, Lew:
    the picker gives way. The messenger adopts a mailbox by itself and
    shows it, never the node on its own device; see the amendment in
-   [loquax: the mailbox](loquax-mailbox.md).
+   [Loquax: the mailbox](loquax-mailbox.md).
 
 ## Decision record
 

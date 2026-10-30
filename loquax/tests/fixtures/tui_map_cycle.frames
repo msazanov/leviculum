@@ -1,5 +1,5 @@
 --- frame 1: attached ---
-┌● loquax afbda7b3───────┐┌  <61ddb79a…>  unknown────────────────── no mailbox ┐
+┌● Loquax afbda7b3───────┐┌  <61ddb79a…>  unknown────────────────── no mailbox ┐
 │▌<61ddb79a…>            ││                                                    │
 │▌                       ││                                                    │
 │                        ││                                                    │
@@ -24,7 +24,7 @@
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 2: octant ---
-┌  loquax afbda7b3───────┐┌● map────────────────────────────── z14 · 3 in view ┐
+┌  Loquax afbda7b3───────┐┌● map────────────────────────────── z14 · 3 in view ┐
 │▌them ·61dd       14:00 ││𜵢𜺨    ▛𜴁𜺨    𜺫𜴅𜴴𜴅𜴦𜺣    𜵰▘𜴗𜺨     𜵰𜴂▛𜺫𜺨𜴧𜺣𜴅𜴦🮅𜴦𜴂𜵩𜵀𜴘𜵄▞𜺨 ▛│
 │▌◎ position             ││𜺨    ▛▀     𜵰𜺣  𜵰▀𜴷𜴦𜺣𜵰𜴂▛𜴦𜺣𜵰🮅𜵈   𜺫𜴅𜴦🮂𜴦𜺣 𜴃🯦𜺣𜴅𜴅𜴦𜺫𜴘𜴐𜺫🮂𜴏𜵰│
 │                        ││𜴸▀🮅 𜴏𜴂     𜴗𜺨▘▛▀𜴊𜺨𜴘𜴀𜴴𜺨𜴼𜵰𜴇𜴅𜴳𜴦𜺣      𜺫𜴅𜴦🯦𜵰𜴂𜴘▀𜴅𜴴𜴅𜴦𜴦🮅𜴂▛𜴈│
@@ -49,7 +49,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 3: blocks ---
-┌  loquax afbda7b3───────┐┌● map───────────────────── blocks · z14 · 3 in view ┐
+┌  Loquax afbda7b3───────┐┌● map───────────────────── blocks · z14 · 3 in view ┐
 │▌them ·61dd       14:00 ││▛▘    ▛▛▇    ▝▀▂▅▃▁    ▛▘▀▘     ▁▘▛▇▀▅▂▅▃▃▃▊▞▅▆▃▞▘ ▂│
 │▌◎ position             ││▘    ▛▛     ▛▁  ▛▀▞▀▁▛▘▛▀▁▁▃▖   ▇▅▂▆▀▖▝▀▅▖▅▅▃▝▂▂▘▆▛▛│
 │                        ││▇▀▂ ▛▛     ▛▇▘▛▘▃▘▅▎▁▇▘▛▇▀▆▂▁      ▇▅▃▌▛▘▛▅▀▂▅▃▃▁▘▛▃│
@@ -74,7 +74,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 4: halfblocks ---
-┌  loquax afbda7b3───────┐┌● map───────────────── halfblocks · z14 · 1 in view ┐
+┌  Loquax afbda7b3───────┐┌● map───────────────── halfblocks · z14 · 1 in view ┐
 │▌them ·61dd       14:00 ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
 │▌◎ position             ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
 │                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
@@ -99,7 +99,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 5: braille-thin ---
-┌  loquax afbda7b3───────┐┌● map─────────────── braille-thin · z14 · 3 in view ┐
+┌  Loquax afbda7b3───────┐┌● map─────────────── braille-thin · z14 · 3 in view ┐
 │▌them ·61dd       14:00 ││⡿⠃    ⢠⡟      ⠙⠻⣦⣄     ⢀⣴⠏       ⣰⠏⠈⠛⠿⣷⣦⣀   ⢯⡙⠢⠤⡴⠁ ⢠│
 │▌◎ position             ││⠁    ⢠⡟         ⢀⣽⢷⣦⡀⢀⣴⠿⣅⡀       ⠉⠻⢦⣄ ⠈⠑⠿⠷⣦⣀ ⠈⠢⠔⠁ ⣰⡟│
 │                        ││⢶⣄⡀ ⣰⠏        ⢀⣔⠟⠁⣠⠛⢿⣿⡃ ⠈⠙⠶⣄        ⠉⠻⠆    ⠙⠻⣦⣄  ⣴⠟ │
@@ -124,7 +124,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 6: mosaic ---
-┌  loquax afbda7b3───────┐┌● map───────────────────── mosaic · z14 · 3 in view ┐
+┌  Loquax afbda7b3───────┐┌● map───────────────────── mosaic · z14 · 3 in view ┐
 │▌them ·61dd       14:00 ││                                                    │
 │▌◎ position             ││                                                    │
 │                        ││                                                    │
@@ -149,7 +149,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 7: braille ---
-┌  loquax afbda7b3───────┐┌● map──────────────────── braille · z14 · 3 in view ┐
+┌  Loquax afbda7b3───────┐┌● map──────────────────── braille · z14 · 3 in view ┐
 │▌them ·61dd       14:00 ││⡿⠁    ⢀⡞⠁    ⠈⠙⠿⣦⣀     ⢠⡾⠋       ⣰⠟⠈⠙⠽⡷⣦⣀   ⢎⡑⠢⠤⡴⠁ ⢀│
 │▌◎ position             ││⠁    ⢠⡟         ⢈⢝⢷⣄⡀⢀⣴⠿⣅⡀       ⠉⠻⢦⣄ ⠈⠙⠽⠷⣦⣀ ⠈⠢⠔⠁ ⢠⡾│
 │                        ││⢶⣤⡀ ⢠⡟        ⢀⣔⠕⠁⡠⠛⢿⣾⡃ ⠈⠙⠦⣄        ⠉⠻⠆    ⠙⠳⣦⣀  ⣠⡟ │
@@ -174,7 +174,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 8: back to mosaic ---
-┌  loquax afbda7b3───────┐┌● map───────────────────── mosaic · z14 · 3 in view ┐
+┌  Loquax afbda7b3───────┐┌● map───────────────────── mosaic · z14 · 3 in view ┐
 │▌them ·61dd       14:00 ││                                                    │
 │▌◎ position             ││                                                    │
 │                        ││                                                    │
@@ -199,7 +199,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 9: the name gone ---
-┌  loquax afbda7b3───────┐┌● map────────────────────────────── z14 · 3 in view ┐
+┌  Loquax afbda7b3───────┐┌● map────────────────────────────── z14 · 3 in view ┐
 │▌them ·61dd       14:00 ││                                                    │
 │▌◎ position             ││                                                    │
 │                        ││                                                    │
@@ -224,7 +224,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 10: glyph test ---
-┌  loquax afbda7b3───────┐┌● map────────────────────────────── z14 · 3 in view ┐
+┌  Loquax afbda7b3───────┐┌● map────────────────────────────── z14 · 3 in view ┐
 │▌them ·61dd       14:00 ││                                                    │
 │▌◎ position             ││                                                    │
 │                        ││                                                    │
@@ -249,7 +249,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 11: glyph test closed ---
-┌  loquax afbda7b3───────┐┌● map────────────────────────────── z14 · 3 in view ┐
+┌  Loquax afbda7b3───────┐┌● map────────────────────────────── z14 · 3 in view ┐
 │▌them ·61dd       14:00 ││                                                    │
 │▌◎ position             ││                                                    │
 │                        ││                                                    │

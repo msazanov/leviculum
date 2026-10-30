@@ -1,6 +1,6 @@
-# loquax: architecture
+# Loquax: architecture
 
-Part of the [loquax design record](loquax.md). This page carries the ground
+Part of the [Loquax design record](loquax.md). This page carries the ground
 truth the design stands on — `lnomad` and `leviculum-lxmf` — the driver
 seam that nearly forces the architecture, the process and event-loop
 decisions, scriptability, and the triage of what the library does not yet
@@ -139,7 +139,7 @@ owning link index. That IR feeds either `to_ratatui_text`
 widget scroll, because the page is pre-wrapped
 (`lnomad/src/tui.rs:317-324`), and there is one scroll rule shared by
 every scrollable window (`scrolled`, `leviculum-ui/src/keymap.rs:639-653`),
-which loquax's help and detail view scroll by too.
+which Loquax's help and detail view scroll by too.
 
 Two rendering caveats. Wrapping compares `cur.len() > width`, i.e.
 character count rather than display width (`wrap`,
@@ -592,7 +592,7 @@ headless test suite drives complete user stories through `AppEvent`s alone.
 For `loquax` the core is the library without its `std` feature, `no_std`
 plus `alloc`, and `just loquax-core-no-std` checks it for the firmware triple
 on every `just guards` (Codeberg #232, since 2026-10-25, 993; the plan is
-below under "Plan: the loquax core without std").
+below under "Plan: the Loquax core without std").
 
 For `lnomad` the same requirement holds as a future refactor: its TEA split
 already keeps the model headless-testable, but model, update and view live
@@ -621,7 +621,7 @@ arguments. `just ui-no-terminal` holds `leviculum-ui` to the same rule as
 `lnomad`'s core. So `loquax`'s TUI starts on the shared widgets rather than
 on a copy of them.
 
-### Plan: the loquax core without std (Codeberg #232)
+### Plan: the Loquax core without std (Codeberg #232)
 
 Decided 2026-10-25, Lew: std-free now; step one measured. The messenger
 core is cut `no_std` plus `alloc`, so the M9, a GUI and the terminal run the
@@ -655,7 +655,7 @@ honest, that is the moment for the crate.
 **The gate.** `just loquax-core-no-std` checks the library without the
 feature for `thumbv7em-none-eabihf`. Every dependency of the core already
 checks there (`leviculum-core`, `leviculum-lxmf` with `pow`, `tracing`,
-`serde_json` with `alloc`); the red is loquax's own code. Its first run,
+`serde_json` with `alloc`); the red is Loquax's own code. Its first run,
 after swapping the exact `std` re-exports (`fmt`, `error::Error`, `mem`,
 `iter`, `cell`, `future`, `time::Duration`, `sync::Arc`, `sync::atomic`,
 `collections::{BTreeMap, VecDeque}`) for their `core`/`alloc` paths, holds

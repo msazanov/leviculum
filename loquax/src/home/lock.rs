@@ -56,7 +56,7 @@ impl DeliveryLock {
                     Err(_) => holder(&path),
                 };
                 return Err(format!(
-                    "{holder} already runs on this loquax home ({}), and two would \
+                    "{holder} already runs on this Loquax home ({}), and two would \
                      register the same delivery destination; stop it first",
                     path.display()
                 ));
@@ -89,7 +89,7 @@ impl DeliveryLock {
                 let holder = holder(&path);
                 match holder.starts_with(HOME_NODE) {
                     true => Err(format!(
-                        "{holder} runs on this loquax home ({}) and answers for its \
+                        "{holder} runs on this Loquax home ({}) and answers for its \
                          identity; send and fetch from one of its clients, or stop it first",
                         path.display()
                     )),
@@ -105,7 +105,7 @@ impl DeliveryLock {
 fn holder(path: &Path) -> String {
     let text = std::fs::read_to_string(path).unwrap_or_default();
     match text.trim() {
-        "" => "another loquax".to_string(),
+        "" => "another Loquax".to_string(),
         said => said.to_string(),
     }
 }

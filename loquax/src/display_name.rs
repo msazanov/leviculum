@@ -45,7 +45,7 @@ pub const DISPLAY_NAME_ENV: &str = "LNMSG_DISPLAY_NAME";
 
 /// The last resort. Only reached when nothing else on the host has a name for
 /// the user running us.
-pub const FALLBACK: &str = "loquax";
+pub const FALLBACK: &str = "Loquax";
 
 /// An override was given and was empty or whitespace only.
 ///

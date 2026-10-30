@@ -202,7 +202,7 @@ impl core::fmt::Display for SendError {
             Self::NoPropagationNode(detail) => write!(
                 f,
                 "no propagation node: {detail}.\n  \
-                 Name one with --pn <hash>, or set propagation_node in loquax's config."
+                 Name one with --pn <hash>, or set propagation_node in Loquax's config."
             ),
             Self::Unproven { message_id, last } => write!(
                 f,

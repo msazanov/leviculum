@@ -1400,7 +1400,7 @@ pub fn draw(frame: &mut Frame, view: &View, painter: Option<&mut map::MapPainter
             frame,
             frame.area(),
             &help_groups(),
-            " loquax help ",
+            " Loquax help ",
             view.help_scroll,
             no_color,
             theme,
@@ -1626,7 +1626,7 @@ mod tests {
     fn the_three_panes_and_the_footer_are_drawn_with_the_focus_marked() {
         let model = Model::new(&[[0xab; 16]]);
         let screen = render(&model);
-        assert!(screen.contains("● loquax (attaching)"), "{screen}");
+        assert!(screen.contains("● Loquax (attaching)"), "{screen}");
         assert!(screen.contains("▌<abababab…>"), "{screen}");
         assert!(screen.contains(ui::layout::EARLIEST), "{screen}");
         assert!(screen.contains("  to <abababab…>"), "{screen}");
@@ -1879,7 +1879,7 @@ mod tests {
     fn the_help_and_the_palette_draw_over_the_panes() {
         let mut model = Model::new(&[[0xab; 16]]);
         update(&mut model, UiEvent::Key(parse_key("?").expect("key")));
-        assert!(render(&model).contains("loquax help"));
+        assert!(render(&model).contains("Loquax help"));
         update(&mut model, UiEvent::Key(parse_key("esc").expect("key")));
         update(&mut model, UiEvent::Key(parse_key(":").expect("key")));
         let screen = render(&model);
@@ -1897,7 +1897,7 @@ mod tests {
         let rows: Vec<&str> = frame.lines().collect();
         let title = rows
             .iter()
-            .position(|row| row.contains("loquax help"))
+            .position(|row| row.contains("Loquax help"))
             .expect("the help is drawn");
         let inner: Vec<String> = rows[title + 1..]
             .iter()

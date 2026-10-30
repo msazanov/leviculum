@@ -205,7 +205,7 @@ Enter open │ i write │ n / N next, previous │ Tab pane │ Esc back │ : 
 └──────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────┘
 Enter open │ Ctrl-s / Ctrl-r next, previous │ Tab to the results │ Esc close search │ Alt-x commands │ Ctrl-q quit
 --- frame 6: closed ---
-┌● loquax afbda7b3─────────────────┐┌  <61ddb79a…>  unknown────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
+┌● Loquax afbda7b3─────────────────┐┌  <61ddb79a…>  unknown────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
 │ <5ec0ea2e…>                14:07 ││                                                                       no mailbox │
 │ you: the tripod stays in the va… ││ ──────────────────────────────────────────────────────────────────────────────── │
 │                                  ││                                                                                  │
@@ -372,7 +372,7 @@ Enter open │ i write │ n / N next, previous │ Tab pane │ Esc back │ q 
 └────────────────────────┘└────────────────────────────────────────────────────┘
 Enter open │ Ctrl-s / Ctrl-r next, previous │ Esc close search │ Ctrl-q quit
 --- frame 6: closed ---
-┌● loquax afbda7b3───────┐┌  <61ddb79a…>  unknown────────────────── no mailbox ┐
+┌● Loquax afbda7b3───────┐┌  <61ddb79a…>  unknown────────────────── no mailbox ┐
 │ <5ec0ea2e…>      14:07 ││                                                    │
 │ you: the tripod stays… ││                                                    │
 │                        ││                                                    │

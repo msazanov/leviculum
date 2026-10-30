@@ -1,6 +1,6 @@
-# loquax: the mailbox, and who you talk to
+# Loquax: the mailbox, and who you talk to
 
-Part of the [loquax design record](loquax.md). Two decisions live here:
+Part of the [Loquax design record](loquax.md). Two decisions live here:
 when and how the client talks to a propagation node, and how it names and
 trusts the people on the other end. They belong together because the trust
 model is what gates the mailbox choice.
@@ -195,12 +195,12 @@ stationary board or host that stays on is a fine mailbox for a phone or a
 laptop messenger, so the rule is "not the node on this device", not "not
 our node". A user who names the own node explicitly keeps it.
 
-How loquax tells the node on this device apart, measured 2026-10-25 (order
+How Loquax tells the node on this device apart, measured 2026-10-25 (order
 967): a propagation node beside the daemon reaches it through a local
 client, so the daemon's path table holds it **zero hops away behind
 `LocalInterface[…]`**; a node anywhere else is at least one hop out on a
 real interface. lnsd with lnpnd and rnsd with lxmd give the same entry,
-so loquax reads the path table over the shared-instance RPC
+so Loquax reads the path table over the shared-instance RPC
 (`leviculum-std/src/daemon_rpc.rs`) and needs no new surface. The rule is
 `loquax/src/mailbox.rs`; its inputs, the persisted selection
 (`${LNMSG_HOME}/mailbox`, the hash and `adopted` or `user`) and the
@@ -208,7 +208,7 @@ so loquax reads the path table over the shared-instance RPC
 is announced while it is attached, so a first run asks the daemon to
 replay the announces of its nearest path-table entries and selects once
 they are in (`DISCOVERY_LIMIT`, `loquax/src/engine.rs`). A daemon whose
-path table loquax cannot read (another user's `transport_identity`) gets
+path table Loquax cannot read (another user's `transport_identity`) gets
 no new adoption, since nothing then tells the own node from another; a
 stored node, `adopted` or `user`, is kept and used, because it was vetted
 against the table when it was written or chosen by the user, and an

@@ -1,6 +1,6 @@
-# loquax: the user interface
+# Loquax: the user interface
 
-Part of the [loquax design record](loquax.md). Two decisions live here: how
+Part of the [Loquax design record](loquax.md). Two decisions live here: how
 keys are dispatched, and what an honest delivery display looks like. They
 share one discipline — a single table read by everything that renders from
 it — and that discipline is the reason both are on one page.
@@ -173,7 +173,7 @@ In:
   `sleep 2500` draws `me (direct 2 s):` on every run (1014, the second
   pinned session in `tui_snapshot.rs`).
 
-Not in, and open: history (loquax keeps no message store yet, so the
+Not in, and open: history (Loquax keeps no message store yet, so the
 screen holds this session's messages and says so), trust states, the
 mouse, QR codes, the per-message detail view and its ledger, the
 `send_on_enter` switch and the keyboard enhancement protocol for
@@ -426,7 +426,7 @@ uploaded it to a foreign node before this.
 While a send waits, its row names the leg and how long it has been on it,
 `me (direct 12 s):` or `me (via mailbox 40 s):`, so a spinner that turns
 for a while has its reason on screen. `$LNMSG_HOME/tui.log` holds the same
-story in words, at `info` for loquax's targets (`RUST_LOG` replaces the
+story in words, at `info` for Loquax's targets (`RUST_LOG` replaces the
 filter): one `SEND leg= to= state= elapsed_ms=` line per step of each leg
 (`path_wait`, `queued`, `sending`, `sent`, `proof`, `no_proof`, `failed`),
 `PATH found to= hops= requests= wait_ms=` or `PATH not_found`, and one

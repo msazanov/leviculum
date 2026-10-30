@@ -138,8 +138,8 @@ async fn lnmsg_send_reaches_a_python_lxmf_receiver() {
     );
     assert_ne!(
         message.get("source_display_name").and_then(|v| v.as_str()),
-        Some("loquax"),
-        "'loquax' names the program, not the person it sends for"
+        Some("Loquax"),
+        "'Loquax' names the program, not the person it sends for"
     );
 
     // And `--from` is what an operator uses when the bare account name is

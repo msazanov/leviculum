@@ -1,6 +1,6 @@
-# loquax: keys, mouse and layout
+# Loquax: keys, mouse and layout
 
-Part of the [loquax design record](loquax.md). The second decision round on
+Part of the [Loquax design record](loquax.md). The second decision round on
 the screen, after the input model of 2026-08-08 and the delivery display
 of 2026-08-10 ([the user interface](loquax-ui.md)). Those stand: focus
 follows the pane, a command palette, no modes, `Enter` in compose the one
@@ -122,7 +122,7 @@ both want `Ctrl-` letters: `Ctrl-N` (new conversation against next line),
 half page), and between vi's `?` (search back) and everybody else's `?`
 (help).
 
-## 3. The loquax keymap
+## 3. The Loquax keymap
 
 One row per action. The panes are **L** the conversation list, **M** the
 messages, **C** compose, **S** the search field, and **all** means every
@@ -318,7 +318,7 @@ the keymap slice (leviculum 1030), each pinned by a test in
 4. **The `send_on_enter` switch's email style swaps `Enter` and
    `Alt-Enter`** (`Enter` breaks the line, `Alt-Enter` sends) instead of
    sending on `Ctrl-D`, which Emacs needs as delete forward. The switch is
-   the `send_on_enter` key of loquax's config and the palette's `send on
+   the `send_on_enter` key of Loquax's config and the palette's `send on
    enter`, on by default. (`send_on_enter_off_swaps_enter_and_alt_enter`)
 
 ### What the terminal can and cannot send
@@ -582,7 +582,7 @@ daemon in `tui_chat.frames`. Where they differ from the mockups:
 - **Names are the address**, `<9c31e0a2…>`, everywhere a name stands, and
   every peer is `unknown`, until slice 5 (built since, "Built 2026-10-26,
   names", below).
-- **The list's title is our own address** (`loquax afbda7b3`), as before,
+- **The list's title is our own address** (`Loquax afbda7b3`), as before,
   not `Chats`.
 - **The header's second row at 120 columns has the mailbox half only**
   (`mailbox 9c31e0a2 adopted · synced 14:03`, right-aligned, with the rule
@@ -758,7 +758,7 @@ or fills a gap it leaves:
   the view staying on what the reader was reading. The pages say "the last
   screens" and name no number.
 - **The restart discontinuity** is the page's: a send still queued or in
-  flight at exit is `○` after the restart, with `loquax restarted: no
+  flight at exit is `○` after the restart, with `Loquax restarted: no
   longer being sent` in its ledger at the time of the start. Nothing sends
   it again, because nothing holds the router's queue across a restart
   (`loquax/src/engine.rs`, "What it deliberately does not do"); no screen
@@ -1308,7 +1308,7 @@ sees. Where it differs from the table:
   its own.
 - **Reactions beyond the field.** LXMF now specifies them
   (`FIELD_REACTION`, `reference/LXMF/LXMF/LXMF.py:25`, `:104-110`), and
-  Columba, Ratspeak and MeshChatX send it, so loquax reacts too (1104):
+  Columba, Ratspeak and MeshChatX send it, so Loquax reacts too (1104):
   `e` on a message, the reaction drawn under its target
   (`loquax/src/ui/reactions.rs`). What it does not copy is what the field
   cannot carry: no removal and no change of a reaction (Ratspeak removes

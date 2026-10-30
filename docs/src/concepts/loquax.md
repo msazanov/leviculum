@@ -1,4 +1,4 @@
-# loquax: a terminal LXMF messenger
+# Loquax: a terminal LXMF messenger
 
 **Status: design record. All ten open questions are decided.**
 
@@ -53,7 +53,7 @@ answers `/get` (`leviculum-lxmf/src/lib.rs:16-23`, leviculum#384 part 1),
 and the *node to node* direction, peer sync and the `/offer` path, in its
 `peering` module (`leviculum-lxmf/src/lib.rs:25-36`, leviculum#384 part 2).
 The crate still performs no I/O, so a host owns links, resources and
-stamp-validation scheduling, and the two client modules loquax is built on
+stamp-validation scheduling, and the two client modules Loquax is built on
 keep hosting out in their own headers
 (`leviculum-lxmf/src/router/propagation_runtime.rs:3-5`,
 `leviculum-lxmf/src/propagation_client.rs:5-8`). Hosting is a separate

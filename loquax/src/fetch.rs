@@ -126,7 +126,7 @@ impl core::fmt::Display for FetchError {
             Self::NoPropagationNode(detail) => write!(
                 f,
                 "no propagation node: {detail}.\n  \
-                 Name one with --pn <hash>, or set propagation_node in loquax's config."
+                 Name one with --pn <hash>, or set propagation_node in Loquax's config."
             ),
             Self::SyncFailed(detail) => write!(f, "the mailbox sync failed: {detail}"),
             Self::Unanswered(detail) => write!(

@@ -3778,8 +3778,8 @@ pub fn view<B: InputBuffer>(model: &UiModel<B>) -> View {
         conversations_title: match (searching, model.address) {
             (true, _) => SEARCH_TITLE.to_string(),
             (false, _) if model.show_blocked => BLOCKED_TITLE.to_string(),
-            (false, Some(address)) => format!("loquax {}", &to_hex(&address)[..8]),
-            (false, None) => "loquax (attaching)".to_string(),
+            (false, Some(address)) => format!("Loquax {}", &to_hex(&address)[..8]),
+            (false, None) => "Loquax (attaching)".to_string(),
         },
         conversations_title_right: match (searching, model.show_blocked) {
             (true, _) => SEARCH_CLOSES.to_string(),

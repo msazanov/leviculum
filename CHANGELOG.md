@@ -512,6 +512,11 @@ Toolchain: Rust 1.97.1
 
 ### Changed
 
+- The messenger's name is Loquax, with a capital L (#232, 1147): the
+  terminal's list title and help, the window title, the messages it prints
+  for people, the fallback display name and the docs say Loquax. The
+  command, package, crate, paths, config keys and variables stay `loquax`.
+  `just loquax-name` refuses a prose `loquax` in `docs/src`.
 - lnmsg is now loquax (#232): crate, binary, package (it replaces the lnmsg
   package), man page and concept pages. The config directory moves on first
   start: `~/.config/lnmsg` becomes `~/.config/loquax` when only the old one
