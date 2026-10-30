@@ -1230,7 +1230,10 @@ fn ratspeak_on_a_mailbox_the_history_goes_into_the_archive_for_the_clients() {
     let report = import::import(&found, &home, ALL, false).expect("import");
     assert_eq!(report.archived, Some(4));
     let store = Store::open_in(&home, me).expect("store");
-    let page = store.archive_since(0, usize::MAX).expect("archive");
+    let mut page = store.archive_since(0, usize::MAX).expect("archive");
+    // The contacts' names travel beside the history as petnames (1159).
+    page.entries
+        .retain(|e| e.kind != loquax::home::KIND_PETNAME);
     assert!(page
         .entries
         .iter()
@@ -1277,6 +1280,110 @@ fn ratspeak_on_a_mailbox_the_history_goes_into_the_archive_for_the_clients() {
         loquax::home::runner::keep_imported(&client, &public, &entries).expect("again"),
         0
     );
+}
+
+/// A home node, as after a device joined: one device admitted.
+fn make_mailbox(home: &Path, me: [u8; 16]) {
+    let mut store = Store::open_in(home, me).expect("store");
+    store.issue_token(&[1; 16], "phone", 10).expect("token");
+    store
+        .redeem_token(&[1; 16], &[2; 16], 11, 3_600)
+        .expect("admit");
+    assert!(store.serves_as_home_node().expect("home node"));
+}
+
+/// The petname entries the archive holds, oldest first.
+fn archived_petnames(home: &Path, me: [u8; 16]) -> Vec<([u8; 16], Option<String>)> {
+    let store = Store::open_in(home, me).expect("store");
+    store
+        .archive_since(0, usize::MAX)
+        .expect("archive")
+        .entries
+        .iter()
+        .filter(|e| e.kind == loquax::home::KIND_PETNAME)
+        .map(|e| loquax::home::wire::read_petname_entry(&e.packed).expect("a petname"))
+        .collect()
+}
+
+/// 1159: Lew's migration. The mailbox wrote the imported names into its
+/// contacts file alone, so no device ever saw them. Each imported name is a
+/// petname entry now, as a `/petname` is kept; a name a device gave that
+/// peer before stays; a second import appends nothing.
+#[test]
+fn ratspeak_on_a_mailbox_each_imported_name_is_a_petname_for_every_device() {
+    let dir = tempfile::tempdir().expect("dir");
+    let rat = ratspeak_db(dir.path(), 45);
+    let home = home_with(dir.path(), &rat.own);
+    let me = address(&rat.own);
+    let bob = address(&rat.peer);
+    make_mailbox(&home, me);
+    {
+        let mut store = Store::open_in(&home, me).expect("store");
+        let said = loquax::home::wire::petname_entry(&[0xcc; 16], Some("Caz"));
+        store
+            .archive_petname([0xcc; 16], &said, 5, u64::MAX)
+            .expect("a device named Carol");
+    }
+    let found = import::sniff(&rat.db).expect("db");
+    let dry = import::import(&found, &home, ALL, true).expect("dry run");
+    assert_eq!(dry.names_archived, Some(1), "Bob; Carol has hers");
+    let report = import::import(&found, &home, ALL, false).expect("import");
+    assert_eq!(report.names_archived, Some(1));
+    let lines = report.lines(false).join("\n");
+    assert!(
+        lines.contains("mailbox archive: 1 contact names appended"),
+        "{lines}"
+    );
+    assert_eq!(
+        archived_petnames(&home, me),
+        [
+            ([0xcc; 16], Some("Caz".to_string())),
+            (bob, Some("Bob".to_string()))
+        ]
+    );
+    let again = import::import(&found, &home, ALL, false).expect("again");
+    assert_eq!(again.names_archived, Some(0));
+    assert_eq!(archived_petnames(&home, me).len(), 2, "one entry a name");
+}
+
+/// 1159: the NomadNet import merges its contacts the same way, so on a
+/// mailbox its names travel too: one petname entry for each name the
+/// contacts file holds for an imported peer.
+#[test]
+fn nomadnet_on_a_mailbox_each_imported_name_is_a_petname_too() {
+    let dir = tempfile::tempdir().expect("dir");
+    let tree = nomadnet(dir.path());
+    let home = home_with(dir.path(), &tree.own);
+    let me = address(&tree.own);
+    make_mailbox(&home, me);
+    let choices = Choices {
+        history: false,
+        ..ALL
+    };
+    let report = import::import(&found(&tree), &home, choices, false).expect("import");
+    let contacts = loquax::names::load_contacts(&home).expect("contacts");
+    assert!(!contacts.petnames.is_empty(), "the fixture names peers");
+    assert_eq!(report.names_archived, Some(contacts.petnames.len()));
+    let mut archived = archived_petnames(&home, me);
+    archived.sort();
+    let expected: Vec<([u8; 16], Option<String>)> = contacts
+        .petnames
+        .into_iter()
+        .map(|(peer, name)| (peer, Some(name)))
+        .collect();
+    assert_eq!(archived, expected);
+}
+
+/// Not a mailbox: the names stay in the contacts file, and no store is made
+/// for them.
+#[test]
+fn ratspeak_off_a_mailbox_no_name_is_archived() {
+    let dir = tempfile::tempdir().expect("dir");
+    let rat = ratspeak_db(dir.path(), 45);
+    let home = home_with(dir.path(), &rat.own);
+    let found = import::sniff(&rat.db).expect("db");
+    let report = import::import(&found, &home, ALL, false).expect("import");
+    assert_eq!(report.names_archived, None);
 }
 
 #[test]

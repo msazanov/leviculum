@@ -225,6 +225,34 @@ fn petname(store: &mut Store, home: &Home<'_>, data: &[u8], device: [u8; 16], no
     }
 }
 
+/// Names the home node itself holds for peers, kept as petname entries the
+/// way a client's `/petname` is (1159): an import's contacts and the
+/// contacts file of a home node that imported before names travelled. A
+/// peer the archive already holds a petname entry for, cleared or not,
+/// keeps it: the reader's word on that peer was said. How many were
+/// appended.
+pub fn archive_petnames<'a>(
+    store: &mut Store,
+    names: impl IntoIterator<Item = (&'a [u8; 16], &'a str)>,
+    now: i64,
+    cap_bytes: u64,
+) -> Result<usize, crate::store::StoreError> {
+    let mut appended = 0;
+    for (peer, name) in names {
+        if name.is_empty() || store.archive_holds_petname(peer)? {
+            continue;
+        }
+        let entry = wire::petname_entry(peer, Some(name));
+        if store
+            .archive_petname(*peer, &entry, now, cap_bytes)?
+            .is_some()
+        {
+            appended += 1;
+        }
+    }
+    Ok(appended)
+}
+
 /// A client's word on a peer (1146), kept as an archive entry as a
 /// petname is: the newest of each peer, the same one again appending
 /// nothing.

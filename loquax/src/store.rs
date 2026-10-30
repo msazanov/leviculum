@@ -1181,6 +1181,29 @@ impl Store {
         self.archive_newest_of(crate::home::KIND_PETNAME, peer, packed, at, cap_bytes)
     }
 
+    /// Whether the archive holds a petname entry for `peer`, a cleared one
+    /// too: the reader said their word on that peer's name (1159).
+    pub fn archive_holds_petname(&self, peer: &[u8; 16]) -> Result<bool, StoreError> {
+        let prefix = crate::home::wire::name_entry_prefix(peer);
+        let prefix_len = i64::try_from(prefix.len()).unwrap_or(i64::MAX);
+        let found: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM archive WHERE identity = ?1 AND kind = ?2 \
+                 AND substr(packed, 1, ?3) = ?4 LIMIT 1",
+                params![
+                    &self.identity[..],
+                    i64::from(crate::home::KIND_PETNAME),
+                    prefix_len,
+                    &prefix[..]
+                ],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| self.failed(e))?;
+        Ok(found.is_some())
+    }
+
     /// Append a peer state entry ([`crate::home::KIND_PEERSTATE`]) a client
     /// handed in for `peer`, as [`Store::archive_petname`] appends a
     /// petname: only the newest of a peer is kept (1146).

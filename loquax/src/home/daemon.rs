@@ -24,7 +24,7 @@
 //!   name rides along with the next pull (1136).
 
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::time::Duration;
 
@@ -165,6 +165,7 @@ pub async fn run(options: DaemonOptions) -> Result<(), String> {
     let address = crate::engine::delivery_address(&identity)?;
     let home_destination = crate::home::destination_hash(&identity.public_key_bytes())?;
     let mut store = Store::open_in(&home, address).map_err(|e| e.to_string())?;
+    backfill_petnames(&mut store, &home, archive_cap_bytes)?;
     let mut relations = relations_at_start(&store, &home)?;
     let signer = identity.clone();
     let mut outgoing = Outgoing::new(policy);
@@ -607,6 +608,25 @@ async fn send_wake(
 }
 
 /// The unix time in seconds, the outbox's clock.
+/// The contacts file's names the archive has no petname entry for, kept
+/// as petname entries (1159): an import before names travelled wrote them
+/// to the file alone, so no device ever received them. A second start finds
+/// each one there and appends nothing.
+fn backfill_petnames(store: &mut Store, home: &Path, cap_bytes: u64) -> Result<usize, String> {
+    let contacts = crate::names::load_contacts(home).map_err(|e| e.to_string())?;
+    let names = contacts
+        .petnames
+        .iter()
+        .map(|(peer, name)| (peer, name.as_str()));
+    let appended = super::server::archive_petnames(store, names, unix_now(), cap_bytes)
+        .map_err(|e| e.to_string())?;
+    tracing::info!(
+        "HOME petnames backfilled={appended} contacts={}",
+        contacts.petnames.len()
+    );
+    Ok(appended)
+}
+
 fn unix_now() -> i64 {
     leviculum_std::local_time::unix_now_secs()
 }
@@ -870,6 +890,53 @@ mod tests {
             .filter(|entry| entry.kind == crate::home::KIND_NAME)
             .map(|entry| crate::home::wire::read_name_entry(&entry.packed).expect("a name"))
             .collect()
+    }
+
+    fn petnames_archived(store: &Store) -> Vec<([u8; 16], Option<String>)> {
+        store
+            .archive_since(0, usize::MAX)
+            .expect("page")
+            .entries
+            .iter()
+            .filter(|entry| entry.kind == crate::home::KIND_PETNAME)
+            .map(|entry| crate::home::wire::read_petname_entry(&entry.packed).expect("a petname"))
+            .collect()
+    }
+
+    /// 1159: a home node that imported before names travelled holds them in
+    /// its contacts file alone. Its start archives each one the archive has
+    /// no petname entry for; a name a device set, even a cleared one, wins;
+    /// a second start archives nothing.
+    #[test]
+    fn the_start_archives_the_contacts_names_once_and_a_name_said_wins() {
+        let home = tempfile::tempdir().expect("home");
+        std::fs::write(
+            home.path().join(crate::names::CONTACTS_FILE),
+            format!(
+                "name {} Friend\nname {} Stranger\nblock {}\n",
+                crate::address::to_hex(&FRIEND),
+                crate::address::to_hex(&STRANGER),
+                crate::address::to_hex(&[0x44; 16])
+            ),
+        )
+        .expect("contacts");
+        let mut store = Store::open_in(home.path(), US).expect("open");
+        let cleared = crate::home::wire::petname_entry(&STRANGER, None);
+        store
+            .archive_petname(STRANGER, &cleared, 1, u64::MAX)
+            .expect("a device cleared it");
+        assert_eq!(
+            backfill_petnames(&mut store, home.path(), u64::MAX).expect("first start"),
+            1
+        );
+        assert_eq!(
+            backfill_petnames(&mut store, home.path(), u64::MAX).expect("second start"),
+            0
+        );
+        assert_eq!(
+            petnames_archived(&store),
+            [(STRANGER, None), (FRIEND, Some("Friend".to_string()))]
+        );
     }
 
     /// 1136: the home node hears the whole network. A stranger's announce
