@@ -246,11 +246,17 @@ The frontends:
   none, so no name leaves the picture during a pan or a pinch. The pins
   are drawn over the tiles every frame, so a pin costs no tile. A pinch
   keeps the step it is composed from while it stays within a step of it,
-  and a frame shows the last step's cached tiles where the new step's are
-  still owed. A view at rest with every tile drawn prefetches (1135,
-  `loquax::tiles::plan`): the ring of tiles around the frame, then the
-  next step in over its central half, the step out only after a pinch
-  out, then a second ring into spare room only; each group ordered by
+  and a frame shows other steps' cached tiles where the new step's are
+  still owed (1143): the coarser steps scaled up, the nearest first, up
+  to three; where none is held the finer ones scaled down, 2x2 tiles of
+  the next or 4x4 of the one after, which is what a zoom out has. Where
+  no cached tile covers a pixel the world outline is drawn under it in
+  the theme's colours, and off the projection the theme's water: a frame
+  is never black. A view at rest with every tile drawn prefetches (1135,
+  `loquax::tiles::plan`): after a pinch out the step out over the whole
+  frame first, then the ring of tiles around the frame, then the next
+  step in over its central half, then a second ring into spare room
+  only; each group ordered by
   the pan's velocity, a moving average that fades within about two
   seconds of rest, the tiles ahead of the last movement first, nearest
   first without one. At most 128 tiles a view, a tile a worker a call,
