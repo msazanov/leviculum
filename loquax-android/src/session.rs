@@ -20,7 +20,6 @@ use std::time::Duration;
 
 use leviculum_lxmf::Field;
 use leviculum_ui::commands::Command as PaletteCommand;
-use leviculum_ui::delivery::DeliveryState;
 use leviculum_ui::input::{InputBuffer, KeyEvent};
 use loquax::engine::{attach_leaf, Attached, LeafConfig, Role};
 use loquax::fanout::Fanout;
@@ -29,10 +28,9 @@ use loquax::home::watch::{self, Fallback, WatchEvent};
 use loquax::outbox::{Command, Outbox, OutboxEvent};
 use loquax::store::Store;
 use loquax::ui::map::MapPin;
-use loquax::ui::{reactions, update, Message, UiEffect, UiEvent, UiModel};
+use loquax::ui::{chat, update, UiEffect, UiEvent, UiModel};
 use loquax::when::WallTime;
 
-use crate::avatar;
 use crate::links::{self, Book};
 use crate::pull_line::{PullLine, Say};
 use crate::schema::{self, Event, VERSION};
@@ -969,36 +967,23 @@ impl Inner {
     }
 
     fn conversations(&self) -> schema::Conversations {
-        let rows = self
-            .model
-            .order()
+        let rows = chat::list_rows(&self.model)
             .into_iter()
-            .map(|index| {
-                let conversation = &self.model.conversations[index];
-                let last = conversation.messages.last();
-                let icon = avatar::latest_appearance(&conversation.messages);
-                schema::ConversationRow {
-                    peer: loquax::address::to_hex(&conversation.peer),
-                    name: self.model.names.label(&conversation.peer),
-                    last: last.map(preview).unwrap_or_default(),
-                    ours: last.is_some_and(|m| m.outbound),
-                    at: last.and_then(|m| m.at).map_or(0, |at| at.unix_secs),
-                    unread: u32::try_from(conversation.unread).unwrap_or(u32::MAX),
-                    initials: self.initials(&conversation.peer),
-                    icon_fg: icon.as_ref().map(|(fg, _)| fg.clone()),
-                    icon_bg: icon.map(|(_, bg)| bg),
-                    kind: last.map_or("", kind).to_string(),
-                    reaction: last
-                        .filter(|m| m.is_reaction())
-                        .and_then(|m| m.reaction())
-                        .map(|(_, content)| content),
-                    state: match last {
-                        Some(m) if m.outbound => state_word(m.delivery).to_string(),
-                        _ => String::new(),
-                    },
-                    photo: self.photo(&conversation.peer),
-                    linked: self.book.links.contains_key(&conversation.peer),
-                }
+            .map(|row| schema::ConversationRow {
+                peer: loquax::address::to_hex(&row.peer),
+                name: row.name,
+                last: row.last,
+                ours: row.ours,
+                at: row.at.map_or(0, |at| at.unix_secs),
+                unread: u32::try_from(row.unread).unwrap_or(u32::MAX),
+                initials: row.initials,
+                icon_fg: row.icon.as_ref().map(|(fg, _)| fg.clone()),
+                icon_bg: row.icon.map(|(_, bg)| bg),
+                kind: row.kind.to_string(),
+                reaction: row.reaction,
+                state: row.mark.map_or("", chat::Mark::word).to_string(),
+                photo: self.photo(&row.peer),
+                linked: self.book.links.contains_key(&row.peer),
             })
             .collect();
         let (address, initials) = self.model.address.map_or_else(Default::default, |own| {
@@ -1015,7 +1000,7 @@ impl Inner {
     fn messages(&self, peer: [u8; 16]) -> schema::Messages {
         let index = self.model.conversations.iter().position(|c| c.peer == peer);
         let icon =
-            index.and_then(|c| avatar::latest_appearance(&self.model.conversations[c].messages));
+            index.and_then(|c| chat::latest_appearance(&self.model.conversations[c].messages));
         let rows = index.map_or_else(Vec::new, |c| rows(&self.model, c));
         let link = self.book.links.get(&peer);
         let heard = index.is_some_and(|c| {
@@ -1069,7 +1054,7 @@ impl Inner {
     }
 
     fn initials(&self, peer: &[u8; 16]) -> String {
-        avatar::initials(self.model.names.shown(peer), peer)
+        chat::initials(self.model.names.shown(peer), peer)
     }
 }
 
@@ -1154,121 +1139,51 @@ pub fn pins_in(home: &Path, now: WallTime) -> Result<Vec<MapPin>, String> {
     Ok(model.map_pins())
 }
 
-/// The bubbles of conversation `c`, as the app draws them: a reaction is a
-/// chip on the bubble it names, not a bubble.
+/// The bubbles of conversation `c`, as the app draws them
+/// ([`chat::bubbles`]): a reaction is a chip on the bubble it names, not a
+/// bubble, and a report with a position is the position line alone.
 pub fn rows<B>(model: &UiModel<B>, c: usize) -> Vec<schema::MessageRow> {
-    let Some(conversation) = model.conversations.get(c) else {
-        return Vec::new();
-    };
-    let chips = reactions::gather(conversation);
-    conversation
-        .messages
-        .iter()
-        .enumerate()
-        .filter(|(_, message)| !message.is_reaction())
-        .map(|(m, message)| {
-            let mut row = row(message, &chips, model.message_fix(c, m));
-            if let Some(quoted) = model.quoted(c, m) {
-                row.quote = Some(quoted.text);
-                row.quote_ours = quoted.ours;
-                row.quote_to = Some(loquax::address::to_hex(&quoted.to));
-            }
-            row
-        })
-        .collect()
+    chat::bubbles(model, c).into_iter().map(row).collect()
 }
 
-/// One bubble as the app draws it; `fix` is the one the message carries.
-/// A report with a position is the position line alone, one without says
-/// so in words.
-fn row(
-    message: &Message,
-    chips: &std::collections::BTreeMap<[u8; 32], Vec<reactions::Chip>>,
-    fix: Option<loquax::telemetry::Fix>,
-) -> schema::MessageRow {
-    let chips = message
-        .id
-        .and_then(|id| chips.get(&id))
-        .map(|chips| {
-            chips
-                .iter()
-                .map(|chip| schema::Chip {
-                    content: chip.content.clone(),
-                    count: u32::try_from(chip.count).unwrap_or(u32::MAX),
-                    ours: chip.own,
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+/// One bubble in the facade's words.
+fn row(bubble: chat::Bubble) -> schema::MessageRow {
+    let fix = bubble.fix.as_ref();
     schema::MessageRow {
-        id: message
+        id: bubble
             .id
             .map(|id| loquax::address::to_hex(&id))
             .unwrap_or_default(),
-        ours: message.outbound,
-        body: match (message.is_report(), &fix) {
-            (true, Some(_)) => String::new(),
-            (true, None) => "position report".to_string(),
-            (false, _) => message.body.clone(),
-        },
-        state: match message.outbound {
-            true => state_word(message.delivery).to_string(),
-            false => String::new(),
-        },
-        at: message.at.map_or(0, |at| at.unix_secs),
-        chips,
-        lat_e6: fix.as_ref().map(|f| f.location.latitude_e6),
-        lon_e6: fix.as_ref().map(|f| f.location.longitude_e6),
-        place: fix
-            .as_ref()
-            .map(|f| loquax::telemetry::coordinates(&f.location)),
-        accuracy: fix
-            .as_ref()
-            .and_then(|f| loquax::telemetry::accuracy(&f.location)),
-        fix_at: fix.as_ref().map(|f| f.order_time()),
-        stale_at: fix.as_ref().map(|f| {
+        ours: bubble.ours,
+        body: bubble.body,
+        state: bubble.mark.map_or("", chat::Mark::word).to_string(),
+        at: bubble.at.map_or(0, |at| at.unix_secs),
+        chips: bubble
+            .chips
+            .into_iter()
+            .map(|chip| schema::Chip {
+                content: chip.content,
+                count: u32::try_from(chip.count).unwrap_or(u32::MAX),
+                ours: chip.ours,
+            })
+            .collect(),
+        lat_e6: fix.map(|f| f.location.latitude_e6),
+        lon_e6: fix.map(|f| f.location.longitude_e6),
+        place: fix.map(|f| loquax::telemetry::coordinates(&f.location)),
+        accuracy: fix.and_then(|f| loquax::telemetry::accuracy(&f.location)),
+        fix_at: fix.map(|f| f.order_time()),
+        stale_at: fix.map(|f| {
             f.fix_time()
                 .saturating_add(loquax::telemetry::STALE_AFTER_SECS)
         }),
-        key: message.activity,
-        quote: None,
-        quote_ours: None,
-        quote_to: None,
+        key: bubble.key,
+        quote_ours: bubble.quote.as_ref().and_then(|q| q.ours),
+        quote_to: bubble
+            .quote
+            .as_ref()
+            .map(|q| loquax::address::to_hex(&q.to)),
+        quote: bubble.quote.map(|q| q.text),
     }
-}
-
-/// The five states the app draws, from the glyph table's nine.
-pub fn state_word(state: Option<DeliveryState>) -> &'static str {
-    match state {
-        None | Some(DeliveryState::Queued) | Some(DeliveryState::Stamping) => "queued",
-        Some(DeliveryState::InFlight) => "sending",
-        Some(DeliveryState::Sent) | Some(DeliveryState::InMailbox) => "sent",
-        Some(DeliveryState::Delivered) => "delivered",
-        Some(DeliveryState::Rejected) | Some(DeliveryState::Failed) => "failed",
-    }
-}
-
-/// What a conversation's last message is, for the list's words: `text`,
-/// `position` or `reaction` (1130), the same split as the English line.
-pub fn kind(message: &Message) -> &'static str {
-    if message.is_reaction() {
-        "reaction"
-    } else if message.is_report() {
-        "position"
-    } else {
-        "text"
-    }
-}
-
-/// The list's line for a conversation's last message.
-fn preview(message: &Message) -> String {
-    if let Some(text) = reactions::preview(message) {
-        return text;
-    }
-    if message.is_report() {
-        return "position report".to_string();
-    }
-    message.body.lines().next().unwrap_or_default().to_string()
 }
 
 /// A join that failed, in words for the join screen.
@@ -1322,48 +1237,4 @@ pub fn parse_peer(text: &str) -> Result<[u8; 16], String> {
 pub fn parse_id(text: &str) -> Result<[u8; 32], String> {
     let text = text.trim();
     loquax::address::parse_id(text).ok_or_else(|| format!("'{text}' is not a message id"))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use leviculum_lxmf::constants::{FIELD_REACTION, FIELD_TELEMETRY};
-    use leviculum_lxmf::reaction::Reaction;
-    use loquax::ui::Signature;
-
-    fn message(outbound: bool, body: &str, fields: Vec<Field>) -> Message {
-        Message {
-            outbound,
-            body: body.to_string(),
-            id: None,
-            delivery: outbound.then_some(DeliveryState::Delivered),
-            signature: Signature::Verified,
-            leg: None,
-            unproven: false,
-            at: None,
-            size: body.len(),
-            ledger: Vec::new(),
-            last_leg: None,
-            activity: 0,
-            fields,
-        }
-    }
-
-    #[test]
-    fn the_list_tells_a_text_a_position_and_a_reaction_apart() {
-        assert_eq!(kind(&message(false, "hallo", Vec::new())), "text");
-        let report = message(false, "", vec![(FIELD_TELEMETRY, vec![0xc0])]);
-        assert_eq!(kind(&report), "position");
-        // Text with telemetry is a text: the line shows what was written.
-        let with_fix = message(false, "bin da", vec![(FIELD_TELEMETRY, vec![0xc0])]);
-        assert_eq!(kind(&with_fix), "text");
-        let thumbs = Reaction {
-            to: [7; 32],
-            content: "👍".to_string(),
-        }
-        .encode_field_value();
-        let reaction = message(true, "", vec![(FIELD_REACTION, thumbs)]);
-        assert_eq!(kind(&reaction), "reaction");
-        assert_eq!(preview(&reaction), "you reacted 👍");
-    }
 }

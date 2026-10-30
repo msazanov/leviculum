@@ -146,7 +146,7 @@ keytool -genkeypair -keystore android/loquax.keystore \
 | Path | What |
 |---|---|
 | `Cargo.toml`, `src/lib.rs` | the JNI library, a workspace member; `cargo test -p loquax-android` runs its tests on the host, `tests/facade.rs` against an in-process home node |
-| `src/schema.rs`, `src/session.rs`, `src/avatar.rs` | the payloads, the session behind them, and a peer's avatar (initials, icon appearance) |
+| `src/schema.rs`, `src/session.rs` | the payloads and the session behind them; the rows, bubbles and avatars they carry come from `loquax::ui::chat` (1145), which the desktop window draws too |
 | `src/map.rs`, `tests/map.rs` | the map screen's frames, and their test against the shared renderer and its golden (`tests/golden/`) |
 | `Makefile` | the template's, with the `native` step and the Android settings below |
 | `android/AndroidManifest.xml` | with the template's build-time tokens |

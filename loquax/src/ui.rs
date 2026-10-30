@@ -132,6 +132,7 @@ use leviculum_lxmf::Field;
 
 use history::{Confirm, StoreRead, StoreWrite, StoredHit};
 
+pub mod chat;
 pub mod contacts;
 pub mod history;
 pub mod hit;
