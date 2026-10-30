@@ -263,3 +263,9 @@ required-features = ["picture"]
 [[example]]
 name = "outline_cost"
 required-features = ["picture"]
+
+# The window's frame time before and after it took the phone's frames
+# (1144), for the reviewer and the commit message. Never in a package.
+[[example]]
+name = "window_fps"
+required-features = ["screenmap"]
