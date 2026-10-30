@@ -34,7 +34,7 @@
 //! A frame at rest that owes no tile leaves the view to prefetch (1135):
 //! Java then asks with `prefetch` while no finger is down and nothing else
 //! is owed, and each such call draws one batch of [`loquax::tiles::plan`]'s
-//! tiles, one a worker, ordered by the pan's direction ([`Motion`]), up
+//! tiles, one a worker, ordered by the pan's direction ([`Motion`](loquax::tiles::Motion)), up
 //! to the plan's budget. Any frame drops the plan; the next frame at rest
 //! makes a new one. When the ring reaches past the regions that hold the
 //! frame, the autoload is asked for the area the ring covers.
