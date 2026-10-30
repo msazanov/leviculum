@@ -257,3 +257,9 @@ required-features = ["picture"]
 [[example]]
 name = "map_bench"
 required-features = ["picture"]
+
+# The cost of the outline under a frame no cached tile covers (1143), for
+# the reviewer and the commit message. Never in a package.
+[[example]]
+name = "outline_cost"
+required-features = ["picture"]
