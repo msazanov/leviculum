@@ -271,6 +271,13 @@ impl Frames {
         }
     }
 
+    /// Hand a shot's buffer back once it is shown (1154): the next frame
+    /// is composed into it, so its pages stay mapped and a frame of the
+    /// same size allocates nothing.
+    pub fn recycle(&mut self, rgba: Vec<u8>) {
+        self.tiles.recycle(rgba);
+    }
+
     /// Drop the names' sizes, masks and halos kept: a measuring tool's
     /// first frame at rest.
     pub fn forget_names(&mut self) {
@@ -411,9 +418,11 @@ mod tests {
 
     /// The frames as they were before 1154: every name shaped and
     /// rasterised anew, its halo widened over the whole disc, its sprite
-    /// sampled over its whole reach.
+    /// sampled over its whole reach, every frame composed into a fresh
+    /// buffer pixel by pixel.
     fn reference() -> Frames {
         let mut frames = florence();
+        frames.tiles.reference = true;
         frames.type_.unkept = true;
         frames
     }
@@ -434,10 +443,12 @@ mod tests {
     }
 
     /// 1154: the names pipeline (kept sizes, masks and halos, the halo
-    /// widened by spans, the sprite's boxed loop on worker threads) gives
-    /// the frames of the path before it byte for byte: at rest at a whole
-    /// step and between steps, panned while moving, through a pinch and
-    /// back, at two densities and in both themes.
+    /// widened by spans, the sprite's boxed loop on worker threads) and
+    /// the compose fast path (the buffer reused, whole rows copied at a
+    /// whole step, the lane bilinear between steps) give the frames of
+    /// the path before them byte for byte: at rest at a whole step and
+    /// between steps, panned while moving, through a pinch and back, at
+    /// two densities and in both themes, every buffer handed back dirty.
     #[test]
     fn the_fast_paths_give_the_frames_of_the_old_ones() {
         let centre = project(LatLon::from_degrees(43.7731, 11.2560));
@@ -471,6 +482,11 @@ mod tests {
                 );
                 assert_eq!(new.names(), old.names(), "step {i}");
                 names = names.max(new.names().len());
+                // Hand the buffer back poisoned: the next frame must not
+                // show what it held.
+                let mut spent = got.rgba;
+                spent.fill(0x5a);
+                new.recycle(spent);
             }
             eprintln!("scale {scale}: up to {names} names a frame");
             assert!(names > 2, "the frames placed names ({names})");

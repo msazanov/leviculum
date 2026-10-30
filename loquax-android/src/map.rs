@@ -350,6 +350,12 @@ impl Renderer {
         (shown, shot.rgba)
     }
 
+    /// Take a frame's pixels back once they are copied out: the next
+    /// frame is composed into them.
+    pub fn recycle(&mut self, rgba: Vec<u8>) {
+        self.frames.recycle(rgba);
+    }
+
     /// One batch of the prefetch around the last frame at rest (1135):
     /// on the first call the plan, ordered by the pan's direction now, and
     /// the region past the frame's asked for; then a tile a worker. The
@@ -454,7 +460,10 @@ pub fn render(request: &MapRequest, pins: Option<Vec<MapPin>>, now: WallTime) ->
         return crate::schema::frame(&renderer.prefetch(), &[]);
     }
     let (shown, rgba) = renderer.frame(request, &pins);
-    crate::schema::frame(&shown, &rgba)
+    let framed = crate::schema::frame(&shown, &rgba);
+    // Copied into the answer: the next frame is composed into it (1154).
+    renderer.recycle(rgba);
+    framed
 }
 
 /// What the tile cache of the renderer over `dir` did, when one runs:

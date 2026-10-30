@@ -10,7 +10,9 @@
 //! frame, the names kept), a pan with the cache dropped before each frame
 //! (at most two tiles a worker drawn, the rest owed), a frame at rest warm
 //! and cold (every tile drawn and the names placed), and a wheel zoom from
-//! z15.0 to z15.9 in tenths while it turns, then at rest at z15.9.
+//! z15.0 to z15.9 in tenths while it turns, then at rest at z15.9. Each
+//! frame's buffer is handed back ([`Frames::recycle`]), as the phone's
+//! facade does since 1154; the window itself gives its frames to iced.
 //!
 //! ```sh
 //! cargo run --release -p loquax --features screenmap --example window_fps -- MAPS
@@ -95,7 +97,9 @@ fn main() {
                 measure: None,
             });
             std::hint::black_box(shot.rgba.len());
-            shot.missing
+            let missing = shot.missing;
+            frames.recycle(shot.rgba);
+            missing
         };
         let base = ExactView::new(at, 15 * MILLI, w, h);
         let rest_cold: Vec<f64> = (0..4)

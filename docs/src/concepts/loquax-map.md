@@ -278,7 +278,25 @@ The frontends:
   itself, the names kept, the prefetch's plan and the view held to one
   world are `loquax::mapframe`, which the window calls too (1144); the
   phone's glue keeps its requests, its fit and its autoload. The
-  terminal keeps whole steps.
+  terminal keeps whole steps. Since 1154 a frame at rest sets its names
+  from what the last one set: every name in view is shaped once for its
+  size, only one with a spot in the picture is rasterised and only a
+  placed one gets its halo, all kept by text, size, pad and slant
+  (`loquax::mapnames::Typesetter`, at most 8192 masks, 8192 halos and
+  4 MB); the halo is widened by row spans, and a placed name's sprite is
+  sampled over its turned box only, the names dealt over the cache's
+  workers. A frame with every tile there is composed into the last
+  frame's buffer, which the phone's facade hands back
+  (`loquax::mapframe::Frames::recycle`), copies the tiles' rows whole at
+  a whole step and mixes two channels a `u64` between steps. Every frame
+  is the same bytes as before, which
+  `the_fast_paths_give_the_frames_of_the_old_ones` in
+  `loquax/src/mapframe.rs` holds against the old paths, kept as test
+  references. On the coder host, through `map_fps` (the facade's frame
+  copy included, the host shared with other builds), the phone's frame
+  at rest with the tiles cached went from 202 to 212 ms to 21 to 30 ms on
+  eight workers and from 213 to 224 ms to 30 to 39 ms on one, a pan with
+  the tiles cached from 20 to 42 ms to 8 to 16 ms.
 - **The M9.** The same pipeline straight into the panel's
   `embedded-graphics` target, as the measurement firmware does
   (`leviculum-mapfill/m9/`), with mousefood's cells for the labels.
