@@ -1,6 +1,7 @@
 //! What the mailbox rule ([`crate::mailbox`]) is fed from, and what it leaves
 //! behind: the daemon's path table, read once per run, and the selection
-//! persisted under `${LNMSG_HOME}/mailbox`.
+//! persisted under `${LNMSG_HOME}/propagation_node` (`mailbox` before 1153,
+//! renamed once by [`migrate`]).
 //!
 //! # Which node is on this device
 //!
@@ -29,7 +30,13 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 /// The file the selection is persisted in, beside `seen`.
-pub const MAILBOX_FILE: &str = "mailbox";
+pub const MAILBOX_FILE: &str = "propagation_node";
+
+/// The file's name before 1153, when "mailbox" still meant the propagation
+/// node and not the user's Loquax Mailbox. Read once by [`migrate`], never
+/// written; the name is not reused for anything else for a year, so a
+/// downgrade never reads a selection as something it is not.
+pub const LEGACY_MAILBOX_FILE: &str = "mailbox";
 
 /// One entry of the daemon's path table, as far as the rule needs it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,20 +130,55 @@ impl Stored {
     }
 }
 
-/// Load `home/mailbox`. A missing or unreadable file is no selection, like a
-/// damaged one ([`Stored::from_text`]).
+/// Rename the selection's file from its name before 1153, once: when
+/// `home/mailbox` exists and `home/propagation_node` does not. Both present
+/// means a newer run already wrote the new one, and the old one goes. `true`
+/// when it moved a file. An older loquax that then finds no `mailbox` adopts
+/// again, the documented behaviour for a missing file, losing nothing but
+/// the adoption.
+#[cfg(feature = "std")]
+pub fn migrate(home: &std::path::Path) -> std::io::Result<bool> {
+    let legacy = home.join(LEGACY_MAILBOX_FILE);
+    // A directory under the old name is not ours to move: since 1153 the
+    // name is free, and nothing of loquax's was ever a directory there.
+    if !legacy.is_file() {
+        return Ok(false);
+    }
+    let path = home.join(MAILBOX_FILE);
+    if path.exists() {
+        std::fs::remove_file(&legacy)?;
+        return Ok(false);
+    }
+    std::fs::rename(&legacy, &path)?;
+    Ok(true)
+}
+
+/// Load `home/propagation_node`, after [`migrate`] so a selection made
+/// before 1153 is found. A missing or unreadable file is no selection, like
+/// a damaged one ([`Stored::from_text`]).
 #[cfg(feature = "std")]
 pub fn load(home: &std::path::Path) -> Option<Stored> {
+    // A failed rename leaves the old file where it was, so read it there.
+    if migrate(home).is_err() {
+        let legacy = std::fs::read_to_string(home.join(LEGACY_MAILBOX_FILE)).ok()?;
+        return Stored::from_text(&legacy);
+    }
     Stored::from_text(&std::fs::read_to_string(home.join(MAILBOX_FILE)).ok()?)
 }
 
-/// Write `home/mailbox`, through a rename so a crash leaves the old file.
+/// Write `home/propagation_node`, through a rename so a crash leaves the old
+/// file; then drop a file under the name before 1153 that is now stale.
 #[cfg(feature = "std")]
 pub fn save(home: &std::path::Path, stored: &Stored) -> std::io::Result<()> {
     let path = home.join(MAILBOX_FILE);
     let tmp = path.with_extension("tmp");
     std::fs::write(&tmp, stored.to_text())?;
-    std::fs::rename(&tmp, &path)
+    std::fs::rename(&tmp, &path)?;
+    let legacy = home.join(LEGACY_MAILBOX_FILE);
+    if legacy.is_file() {
+        std::fs::remove_file(legacy)?;
+    }
+    Ok(())
 }
 
 /// What the engine decided, for the frontend to show and persist.
@@ -161,9 +203,12 @@ impl Decision {
     /// The one stderr line a run that adopts or keeps prints.
     pub fn line(&self, now_ms: u64) -> String {
         match self {
-            Self::Kept { node } => format!("mailbox: {} kept", short(node)),
+            Self::Kept { node } => format!("propagation node: {} kept", short(node)),
             Self::KeptWithoutTable { node } => {
-                format!("mailbox: {} kept (path table unreadable)", short(node))
+                format!(
+                    "propagation node: {} kept (path table unreadable)",
+                    short(node)
+                )
             }
             Self::Adopted {
                 node,
@@ -171,7 +216,7 @@ impl Decision {
                 seen_ms,
                 reason,
             } => format!(
-                "mailbox: {} ({hops} hop{}, seen {}) adopted: {}",
+                "propagation node: {} ({hops} hop{}, seen {}) adopted: {}",
                 short(node),
                 if *hops == 1 { "" } else { "s" },
                 age(now_ms.saturating_sub(*seen_ms)),
@@ -224,7 +269,7 @@ pub fn record_user_choice(node: [u8; 16], effects: &mut impl Effects) {
 
 fn keep(stored: &Stored, effects: &mut impl Effects) {
     if let Err(error) = effects.save_mailbox(stored) {
-        effects.notice(&format!("could not record the mailbox: {error}"));
+        effects.notice(&format!("could not record the propagation node: {error}"));
     }
 }
 
@@ -237,7 +282,7 @@ pub fn unix_now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// A node as the `mailbox:` lines name it: its first four bytes in hex.
+/// A node as the `propagation node:` lines name it: its first four bytes in hex.
 pub fn short(node: &[u8; 16]) -> String {
     crate::address::to_hex(&node[..4])
 }
@@ -341,6 +386,52 @@ mod tests {
         assert_eq!(load(dir.path()), None);
     }
 
+    /// 1153: a selection under the name before the rename is found, moved
+    /// once, and the old name is gone afterwards.
+    #[test]
+    fn a_selection_under_the_old_name_is_renamed_once() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let stored = Stored {
+            node: [0x5a; 16],
+            chosen_by_user: true,
+        };
+        let legacy = dir.path().join(LEGACY_MAILBOX_FILE);
+        std::fs::write(&legacy, stored.to_text()).expect("write the old file");
+        assert_eq!(load(dir.path()), Some(stored));
+        assert!(!legacy.exists(), "the old name is left behind");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(MAILBOX_FILE)).expect("the new file"),
+            stored.to_text()
+        );
+        assert!(!migrate(dir.path()).expect("second migrate"), "moved twice");
+        assert_eq!(load(dir.path()), Some(stored));
+    }
+
+    /// Both names present: the new one was written by a newer run and wins;
+    /// the old one goes. A save drops a stale old one too.
+    #[test]
+    fn the_new_name_wins_over_the_old_one() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let new = Stored {
+            node: [0x5a; 16],
+            chosen_by_user: false,
+        };
+        let old = Stored {
+            node: [0xa5; 16],
+            chosen_by_user: true,
+        };
+        let legacy = dir.path().join(LEGACY_MAILBOX_FILE);
+        std::fs::write(dir.path().join(MAILBOX_FILE), new.to_text()).expect("write new");
+        std::fs::write(&legacy, old.to_text()).expect("write old");
+        assert!(!migrate(dir.path()).expect("migrate"));
+        assert!(!legacy.exists());
+        assert_eq!(load(dir.path()), Some(new));
+
+        std::fs::write(&legacy, old.to_text()).expect("write old again");
+        save(dir.path(), &new).expect("save");
+        assert!(!legacy.exists(), "save left the stale old file");
+    }
+
     #[test]
     fn the_record_text_is_one_line_naming_node_and_choice() {
         let stored = Stored {
@@ -371,7 +462,10 @@ mod tests {
         report(&Decision::Kept { node: [0xab; 16] }, &mut effects);
         assert_eq!(
             effects.notices,
-            vec![adopted.line(181_000), "mailbox: abababab kept".to_string()]
+            vec![
+                adopted.line(181_000),
+                "propagation node: abababab kept".to_string()
+            ]
         );
         assert_eq!(
             effects.mailboxes,
@@ -419,19 +513,19 @@ mod tests {
         };
         assert_eq!(
             adopted.line(181_000),
-            "mailbox: abababab (2 hops, seen 3 min ago) adopted: no mailbox was selected; \
+            "propagation node: abababab (2 hops, seen 3 min ago) adopted: none was selected; \
              it is the most recently heard eligible node"
         );
         assert_eq!(
             Decision::Kept { node: [0xab; 16] }.line(0),
-            "mailbox: abababab kept"
+            "propagation node: abababab kept"
         );
         assert_eq!(adopted.to_store().map(|s| s.chosen_by_user), Some(false));
         assert_eq!(Decision::Kept { node: [0xab; 16] }.to_store(), None);
         let unreadable = Decision::KeptWithoutTable { node: [0xab; 16] };
         assert_eq!(
             unreadable.line(0),
-            "mailbox: abababab kept (path table unreadable)"
+            "propagation node: abababab kept (path table unreadable)"
         );
         assert_eq!(unreadable.to_store(), None);
     }

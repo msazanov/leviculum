@@ -3,7 +3,7 @@
 //! The send and fetch runners are core: they decide what the person running
 //! `loquax` is told along the way and what is kept for the next run. Doing it
 //! is the shell's, because it means a terminal and files: the stderr lines,
-//! the mail on stdout, `${LNMSG_HOME}/mailbox` and `${LNMSG_HOME}/seen`. [`Effects`] is that
+//! the mail on stdout, `${LNMSG_HOME}/propagation_node` and `${LNMSG_HOME}/seen`. [`Effects`] is that
 //! boundary, so a board or a GUI runs the same runners with its own screen and
 //! its own storage (`docs/src/concepts/loquax-architecture.md`, "Plan: the
 //! loquax core without std", pass 2).

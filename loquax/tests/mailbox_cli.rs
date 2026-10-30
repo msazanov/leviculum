@@ -1,6 +1,7 @@
 //! The mailbox adoption rule (`loquax/src/mailbox.rs`) through the real
 //! binary against real daemons: which node a run without `--pn` adopts, what
-//! it leaves in `${LNMSG_HOME}/mailbox`, and the one stderr line it prints.
+//! it leaves in `${LNMSG_HOME}/propagation_node` (`mailbox` before 1153),
+//! and the one stderr line it prints.
 //!
 //! Two daemons, built in-process the way `python_interop.rs` builds its one:
 //! `here`, the daemon loquax attaches to, and `elsewhere`, joined to it over
@@ -30,7 +31,7 @@ use support::{daemon, Daemon};
 const LNMSG: &str = env!("CARGO_BIN_EXE_loquax");
 
 /// The node-on-this-device text `NoneReason::OnlyOnThisDevice` carries.
-const ONLY_ON_THIS_DEVICE: &str = "the only propagation node heard runs on this device";
+const ONLY_ON_THIS_DEVICE: &str = "no propagation node: the only one heard runs on this device";
 
 /// `here` and `elsewhere`, joined over loopback TCP.
 async fn two_daemons() -> (Daemon, Daemon) {
@@ -163,7 +164,7 @@ fn hex(node: &[u8; 16]) -> String {
 }
 
 fn mailbox_file(home: &Path) -> Option<String> {
-    std::fs::read_to_string(home.join("mailbox")).ok()
+    std::fs::read_to_string(home.join("propagation_node")).ok()
 }
 
 fn home() -> tempfile::TempDir {
@@ -188,11 +189,14 @@ async fn first_run_adopts_the_node_elsewhere_and_the_second_keeps_it() {
     let home_dir = home();
     let home = home_dir.path();
     let first = fetch(&here, home, &[]).await;
-    let adopted = format!("loquax: mailbox: {} (1 hop, seen ", &hex(&remote)[..8]);
+    let adopted = format!(
+        "loquax: propagation node: {} (1 hop, seen ",
+        &hex(&remote)[..8]
+    );
     assert!(
         first.stderr.contains(&adopted)
             && first.stderr.contains(
-                "adopted: no mailbox was selected; it is the most recently heard eligible node"
+                "adopted: none was selected; it is the most recently heard eligible node"
             ),
         "the first run must adopt the node elsewhere and say so: {}",
         first.stderr
@@ -209,9 +213,10 @@ async fn first_run_adopts_the_node_elsewhere_and_the_second_keeps_it() {
 
     let second = fetch(&here, home, &[]).await;
     assert!(
-        second
-            .stderr
-            .contains(&format!("loquax: mailbox: {} kept", &hex(&remote)[..8])),
+        second.stderr.contains(&format!(
+            "loquax: propagation node: {} kept",
+            &hex(&remote)[..8]
+        )),
         "the second run must keep the stored node: {}",
         second.stderr
     );
@@ -244,9 +249,10 @@ async fn an_explicit_pn_is_recorded_as_the_users_choice_and_kept() {
 
     let later = fetch(&here, home, &[]).await;
     assert!(
-        later
-            .stderr
-            .contains(&format!("loquax: mailbox: {} kept", &hex(&local)[..8])),
+        later.stderr.contains(&format!(
+            "loquax: propagation node: {} kept",
+            &hex(&local)[..8]
+        )),
         "the user's own-device choice must be kept: {}",
         later.stderr
     );
@@ -271,7 +277,7 @@ async fn a_node_on_this_device_alone_is_not_adopted() {
         run.stderr
     );
     assert!(
-        !run.stderr.contains("mailbox: "),
+        !run.stderr.contains("loquax: propagation node: "),
         "nothing may be adopted or kept: {}",
         run.stderr
     );
@@ -339,7 +345,9 @@ async fn without_the_path_table_nothing_is_adopted() {
 
 /// Without the path table a stored node is kept: it was vetted against the
 /// table when it was written, and an identity does not move onto this device
-/// by itself. The run says so and leaves the file as it was.
+/// by itself. The run says so and leaves the selection as it was. The file
+/// is written under its name before 1153, so the run also shows the rename:
+/// found under the old name, kept under the new one, the old one gone.
 async fn a_stored_node_is_kept_without_the_table(kind: &str) {
     let (here, elsewhere) = two_daemons().await;
     let remote_node = propagation_node(&elsewhere).await;
@@ -349,22 +357,26 @@ async fn a_stored_node_is_kept_without_the_table(kind: &str) {
     let home_dir = home();
     let home = home_dir.path();
     let stored = format!("{} {kind}\n", hex(&remote));
-    std::fs::write(home.join("mailbox"), &stored).expect("write the stored mailbox");
+    std::fs::write(home.join("mailbox"), &stored).expect("write the stored selection");
     let run = fetch_without_the_table(&here, home).await;
     assert!(
         run.stderr.contains(&format!(
-            "loquax: mailbox: {} kept (path table unreadable)",
+            "loquax: propagation node: {} kept (path table unreadable)",
             &hex(&remote)[..8]
         )),
         "the stored {kind} node must be kept: {}",
         run.stderr
     );
     assert!(
-        !run.stderr.contains("no mailbox chosen"),
+        !run.stderr.contains("no propagation node:"),
         "a kept node is a chosen one: {}",
         run.stderr
     );
     assert_eq!(mailbox_file(home), Some(stored));
+    assert!(
+        !home.join("mailbox").exists(),
+        "the old name is left behind"
+    );
     drop((remote_node, here.node, elsewhere.node));
 }
 

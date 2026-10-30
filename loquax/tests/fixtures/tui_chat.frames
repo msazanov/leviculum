@@ -1,6 +1,6 @@
 === 80x24 ===
 --- frame 1: attached ---
-┌● Loquax afbda7b3───────┐┌  <61ddb79a…>  unknown────────────────── no mailbox ┐
+┌● Loquax afbda7b3───────┐┌  <61ddb79a…>  unknown───────── no propagation node ┐
 │▌<61ddb79a…>            ││                                                    │
 │▌                       ││                                                    │
 │                        ││                                                    │
@@ -25,7 +25,7 @@
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 2: reading ---
-┌  Loquax afbda7b3───────┐┌● them ·61dd  unknown─────────────────── no mailbox ┐
+┌  Loquax afbda7b3───────┐┌● them ·61dd  unknown────────── no propagation node ┐
 │▌them ·61dd       09:12 ││                                                    │
 │▌you: on my way         ││                                                    │
 │                        ││                                                    │
@@ -50,7 +50,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 3: first reply ---
-┌  Loquax afbda7b3───────┐┌● them ·61dd  unknown─────────────────── no mailbox ┐
+┌  Loquax afbda7b3───────┐┌● them ·61dd  unknown────────── no propagation node ┐
 │▌them ·61dd       14:04 ││                                                    │
 │▌ok, bring the T114.    ││                                                    │
 │                        ││                                                    │
@@ -75,7 +75,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 4: new while reading ---
-┌  Loquax afbda7b3───────┐┌● them ·61dd  unknown─────────────────── no mailbox ┐
+┌  Loquax afbda7b3───────┐┌● them ·61dd  unknown────────── no propagation node ┐
 │▌them ·61dd       14:05 ││                                                    │
 │▌and the small tripod   ││                                                    │
 │                        ││                                                    │
@@ -100,7 +100,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 5: newest ---
-┌  Loquax afbda7b3───────┐┌● them ·61dd  unknown─────────────────── no mailbox ┐
+┌  Loquax afbda7b3───────┐┌● them ·61dd  unknown────────── no propagation node ┐
 │▌them ·61dd       14:05 ││                                                    │
 │▌and the small tripod   ││                                                    │
 │                        ││                                                    │
@@ -125,7 +125,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 6: replied ---
-┌  Loquax afbda7b3───────┐┌  them ·61dd  unknown─────────────────── no mailbox ┐
+┌  Loquax afbda7b3───────┐┌  them ·61dd  unknown────────── no propagation node ┐
 │▌them ·61dd       14:06 ││                                                    │
 │▌you: the tripod fits   ││                                                    │
 │                        ││           nothing earlier on this device           │
@@ -150,7 +150,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
 --- frame 7: detail ---
-┌  Loquax afbda7b3───────┐┌● them ·61dd  unknown─────────────────── no mailbox ┐
+┌  Loquax afbda7b3───────┐┌● them ·61dd  unknown────────── no propagation node ┐
 │▌them ·61dd       14:06 ││                                                    │
 │▌you: the tripod fits   ││                                                    │
 │                        ││           nothing earlier on this device           │
@@ -177,7 +177,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 === 120x40 ===
 --- frame 1: attached ---
 ┌● Loquax afbda7b3─────────────────┐┌  <61ddb79a…>  unknown────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
-│▌<61ddb79a…>                      ││                                                                       no mailbox │
+│▌<61ddb79a…>                      ││                                                              no propagation node │
 │▌                                 ││ ──────────────────────────────────────────────────────────────────────────────── │
 │                                  ││                                                                                  │
 │ <5ec0ea2e…>                      ││                                                                                  │
@@ -218,7 +218,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 2: reading ---
 ┌  Loquax afbda7b3─────────────────┐┌● them ·61dd  unknown─────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
-│▌them ·61dd                 09:12 ││                                                                       no mailbox │
+│▌them ·61dd                 09:12 ││                                                              no propagation node │
 │▌you: on my way                   ││ ──────────────────────────────────────────────────────────────────────────────── │
 │                                  ││                                                                                  │
 │ <5ec0ea2e…>                      ││                                                                                  │
@@ -259,7 +259,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 3: first reply ---
 ┌  Loquax afbda7b3─────────────────┐┌● them ·61dd  unknown─────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
-│▌them ·61dd                 14:04 ││                                                                       no mailbox │
+│▌them ·61dd                 14:04 ││                                                              no propagation node │
 │▌ok, bring the T114.              ││ ──────────────────────────────────────────────────────────────────────────────── │
 │                                  ││                                                                                  │
 │ <5ec0ea2e…>                      ││                                                                                  │
@@ -300,7 +300,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 4: new while reading ---
 ┌  Loquax afbda7b3─────────────────┐┌● them ·61dd  unknown─────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
-│▌them ·61dd                 14:05 ││                                                                       no mailbox │
+│▌them ·61dd                 14:05 ││                                                              no propagation node │
 │▌and the small tripod             ││ ──────────────────────────────────────────────────────────────────────────────── │
 │                                  ││                                                                                  │
 │ <5ec0ea2e…>                      ││                                                                                  │
@@ -341,7 +341,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 5: newest ---
 ┌  Loquax afbda7b3─────────────────┐┌● them ·61dd  unknown─────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
-│▌them ·61dd                 14:05 ││                                                                       no mailbox │
+│▌them ·61dd                 14:05 ││                                                              no propagation node │
 │▌and the small tripod             ││ ──────────────────────────────────────────────────────────────────────────────── │
 │                                  ││                                                                                  │
 │ <5ec0ea2e…>                      ││                                                                                  │
@@ -382,7 +382,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 6: replied ---
 ┌  Loquax afbda7b3─────────────────┐┌  them ·61dd  unknown─────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
-│▌them ·61dd                 14:06 ││                                                                       no mailbox │
+│▌them ·61dd                 14:06 ││                                                              no propagation node │
 │▌you: the tripod fits             ││ ──────────────────────────────────────────────────────────────────────────────── │
 │                                  ││                                                                                  │
 │ <5ec0ea2e…>                      ││                                                                                  │
@@ -423,7 +423,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 Enter send │ Tab pane │ Esc back │ Alt-x commands │ F1 help │ Ctrl-q quit
 --- frame 7: detail ---
 ┌  Loquax afbda7b3─────────────────┐┌● them ·61dd  unknown─────────────────────────── 61ddb79ada973523799227bbaf41e204 ┐
-│▌them ·61dd                 14:06 ││                                                                       no mailbox │
+│▌them ·61dd                 14:06 ││                                                              no propagation node │
 │▌you: the tripod fits             ││ ──────────────────────────────────────────────────────────────────────────────── │
 │                                  ││                                                                                  │
 │ <5ec0ea2e…>                      ││                                                                                  │

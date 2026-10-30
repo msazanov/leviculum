@@ -164,11 +164,11 @@ impl core::fmt::Display for Status {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str(match self {
             Self::Ok => "ok",
-            Self::NotIdentified => "the home node did not learn who this device is",
-            Self::NotAdmitted => "this device is not admitted to the home node (or was revoked)",
-            Self::BadToken => "the home node does not know this admission code, or it was used",
-            Self::Malformed => "the home node could not read the request",
-            Self::Failed => "the home node could not answer",
+            Self::NotIdentified => "the mailbox did not learn who this device is",
+            Self::NotAdmitted => "this device is not admitted to the mailbox (or was revoked)",
+            Self::BadToken => "the mailbox does not know this admission code, or it was used",
+            Self::Malformed => "the mailbox could not read the request",
+            Self::Failed => "the mailbox could not answer",
         })
     }
 }

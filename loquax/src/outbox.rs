@@ -170,7 +170,7 @@ pub struct MailboxInput {
     /// node on this device can be told from one elsewhere, so nothing new is
     /// adopted; a stored node is kept.
     pub routes: Result<Vec<Route>, String>,
-    /// What an earlier run selected (`${LNMSG_HOME}/mailbox`).
+    /// What an earlier run selected (`${LNMSG_HOME}/propagation_node`).
     pub previous: Option<Stored>,
     /// Nodes that stopped answering ([`crate::mailbox::Unanswered`]): an
     /// adopted one among them is replaced, and none is adopted.

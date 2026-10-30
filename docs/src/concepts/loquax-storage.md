@@ -146,7 +146,7 @@ this page leaves, or departs from it:
 
 - **The key.** The schema above keys a message by `(id, identity)`. A
   message we write has no LXMF id until the router queues it, and a send
-  that falls back to a mailbox is queued again under a second id, so the
+  that falls back to a propagation node is queued again under a second id, so the
   key is the screen's own message counter (`seq`, `Message::activity`),
   continued at start from the largest the store holds; `id` is a column,
   indexed. `identity` (our delivery address) scopes every row, as
@@ -190,7 +190,7 @@ this page leaves, or departs from it:
   `(identity, conversation, seq)`, as "On the 2 GB Raspberry Pi question"
   argues.
 - **One row per received message** (leviculum 1070). A message that came
-  directly and comes again from the mailbox, the sender's fallback after
+  directly and comes again from the propagation node, the sender's fallback after
   a delivery it could not prove, shares its LXMF id with the first copy.
   The screen's own check sees only what it loaded, so after a restart the
   older copy is out of its sight; the shell asks the store

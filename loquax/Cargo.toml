@@ -28,12 +28,18 @@ Terminal LXMF messenger for the Reticulum network. Plain `loquax` is the
 interactive messenger with conversations and a compose line, `loquax send`
 delivers one message from a script. It attaches to a local shared RNS
 instance: leviculum's lnsd or the Python rnsd.
+
+The package also carries Loquax Mailbox, the always-on part that keeps
+your mail while your devices are off, as the system service
+loquax-mailbox.service under a dedicated 'loquax' user. It is installed
+switched off; `sudo loquax mailbox enable` switches it on.
 """
 section = "net"
 priority = "optional"
 # musl-static, and any RNS instance satisfies the runtime need, so leviculum
-# is a Recommends; `depends` stays unset for the reason lnomad's manifest
-# gives, and scripts/deb-finalize.sh strips the empty field cargo-deb emits.
+# is a Recommends. adduser because postinst creates the mailbox's service
+# user (1153), as lnpnd's does.
+depends = "adduser"
 recommends = "leviculum"
 # The package was called lnmsg until #232; these two let an install of
 # loquax take the old package's place instead of failing on it.
@@ -51,6 +57,21 @@ assets = [
     ["../THIRD-PARTY-NOTICES", "usr/share/doc/loquax/THIRD-PARTY-NOTICES", "644"],
 ]
 changelog = "../target/deb-changelog/loquax"
+maintainer-scripts = "../packaging/loquax/"
+
+# Loquax Mailbox as a system service (1153). Installed disabled and not
+# started: the mailbox answers for a person's identity, and only they decide
+# that this machine is the one. `loquax mailbox enable` runs systemctl
+# enable --now. An upgrade try-restarts it, so a running mailbox comes back
+# and a stopped one stays stopped (lnpnd/Cargo.toml has the measurement of
+# that pair against cargo-deb 3.7.0). Asserted on the built .deb in
+# scripts/verify-deb-packaging.sh.
+[package.metadata.deb.systemd-units]
+unit-name = "loquax-mailbox"
+unit-scripts = "../packaging/loquax/"
+enable = false
+start = false
+restart-after-upgrade = true
 
 [features]
 # The shell: the CLI, the daemon socket, the clock, files and the process.

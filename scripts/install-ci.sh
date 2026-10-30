@@ -343,9 +343,10 @@ echo "[install-ci] book renderer: mdbook 0.4.48 (scripts/build-docs-tarball.sh)"
 #     and publishes the nightly on the tier-2 nightly host, so the forge's
 #     build steps' tools live here now: both musl targets, cargo-deb for
 #     the packages, and cargo-zigbuild with a pip-installed ziglang as the
-#     arm64 cross linker (scripts/build-deb.sh). musl-gcc, which links the
-#     amd64 build, is the apt package musl-tools.
-rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
+#     arm64 and armhf cross linker (scripts/build-deb.sh). musl-gcc, which
+#     links the amd64 build, is the apt package musl-tools.
+rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl \
+    armv7-unknown-linux-musleabihf
 cargo install --locked cargo-deb
 cargo install --locked cargo-zigbuild
 python3 -c 'import ziglang' 2>/dev/null ||

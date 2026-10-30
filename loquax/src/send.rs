@@ -1265,7 +1265,7 @@ mod tests {
             &mut outbox,
             propagated_request(),
             None,
-            "mailbox",
+            "adopted",
             None,
             &options(),
             &mut Recorded::default(),

@@ -1,9 +1,18 @@
-# Loquax: the mailbox, and who you talk to
+# Loquax: the propagation node, and who you talk to
 
 Part of the [Loquax design record](loquax.md). Two decisions live here:
 when and how the client talks to a propagation node, and how it names and
 trusts the people on the other end. They belong together because the trust
-model is what gates the mailbox choice.
+model is what gates the choice of node.
+
+A word on the word (Lew, 2026-10-30, order 1153): "mailbox" means only the
+user's own always-on machine, Loquax Mailbox
+([the home node](loquax-home-node.md) in the code). Somebody else's
+store-and-forward node is a **propagation node** in the UI, the man page
+and this page; it was called the mailbox here and on the screen before
+1153. The file name of this page and the code's names (`loquax::mailbox`,
+`MailboxRun`, the `MAILBOX` events) keep the old word, because they are
+cited and grepped.
 
 ## 1. Decision: propagation node interaction
 
@@ -36,7 +45,7 @@ adaptivity**:
 - After activity (a sync that returned something, or an outbound send), the
   client syncs more often for a while — on the order of every two minutes —
   decaying back to the bound. This is the chat-feel half of adaptivity
-  ([the input-model decision](loquax-ui.md)), applied to the mailbox.
+  ([the input-model decision](loquax-ui.md)), applied to the propagation node.
 - The dangerous half — silently lengthening the interval when syncs come
   back empty — **does not exist**. Full adaptivity was rejected because an
   interval that quietly stretches is exactly the "why didn't I get that
@@ -68,7 +77,7 @@ clock and runs the fetch it finds due, one at a time. The constants:
   in which a reply to what was just sent is plausibly back at the node,
   since the peer has to read and answer it first; ten minutes covers a
   conversation's quick exchanges and then lets go, so a burst is five
-  syncs, about 11 s of airtime on LoRa at SF8 (loquax(1), MAILBOX). A step
+  syncs, about 11 s of airtime on LoRa at SF8 (loquax(1), PROPAGATION NODE). A step
   rather than a gradual decay, because the cadence the header shows must
   be one a reader can predict. Below the default bound both constants
   shrink with it at the same ratio, so a burst stays five syncs whatever
@@ -88,8 +97,8 @@ clock and runs the fetch it finds due, one at a time. The constants:
 
 The node's announce reaches the screen as `OutboxEvent::NodeAnnounced`,
 which the engine emits for every `lxmf.propagation` announce it sees; the
-screen compares it with the mailbox it shows. The rule "never sync while
-a direct link to the peer is up" is not built yet: a sync is per mailbox,
+screen compares it with the node it shows. The rule "never sync while
+a direct link to the peer is up" is not built yet: a sync is per node,
 not per peer, and the engine does not report its direct links to the
 screen.
 
@@ -108,7 +117,7 @@ A permanent one-line status, taking NomadNet's best idea (its
 like:
 
 ```
-mailbox  a1b2c3d4 Node-Name   3 hops   last sync 4m ago, 2 new   next in 11m
+propagation node  a1b2c3d4 Node-Name   3 hops   last sync 4m ago, 2 new   next in 11m
 ```
 
 and during a sync the same line becomes the progress display, naming the
@@ -122,11 +131,11 @@ different failures happened, because they need different fixes:
 
 | Library state | What the user must be told |
 |---|---|
-| no node selected | "no mailbox chosen"; offer the picker |
-| `NoPath` (`leviculum-lxmf/src/router/propagation_runtime.rs:96`) | "cannot find a route to the mailbox"; it may come back |
-| `LinkFailed` (`leviculum-lxmf/src/router/propagation_runtime.rs:97`) | "the mailbox did not answer" |
-| `NoAccess` (`leviculum-lxmf/src/router/propagation_runtime.rs:100`) | "the mailbox refused you"; this one will not fix itself |
-| `NoIdentity` (`leviculum-lxmf/src/router/propagation_runtime.rs:99`) | "the mailbox does not know your key" |
+| no node selected | "no propagation node chosen"; offer the picker |
+| `NoPath` (`leviculum-lxmf/src/router/propagation_runtime.rs:96`) | "cannot find a route to the propagation node"; it may come back |
+| `LinkFailed` (`leviculum-lxmf/src/router/propagation_runtime.rs:97`) | "the propagation node did not answer" |
+| `NoAccess` (`leviculum-lxmf/src/router/propagation_runtime.rs:100`) | "the propagation node refused you"; this one will not fix itself |
+| `NoIdentity` (`leviculum-lxmf/src/router/propagation_runtime.rs:99`) | "the propagation node does not know your key" |
 | `TransferFailed` (`leviculum-lxmf/src/router/propagation_runtime.rs:98`) | "the transfer broke"; will retry |
 
 A single "sync failed" for all six is the lie this section exists to
@@ -146,14 +155,14 @@ with their own rule (NomadNet by hops among trusted, columba by hops).
 Nothing is auto-adopted silently in the TUI sense: a cron job's
 operator wrote `--pn` or the config key, and the announced fallback is
 for the interactive shell where the operator reads the `LNMSG_PN`
-line (since order 967 that line's source word is `mailbox`, and a run
-whose path table cannot be read keeps a stored mailbox but adopts no new
-one, as below). What is persisted where: the identity at
+line (since order 967 that line's source word is `mailbox`, `adopted`
+since 1153, and a run whose path table cannot be read keeps a stored node
+but adopts no new one, as below). What is persisted where: the identity at
 `${LNMSG_HOME}/identity`, the node default in `${LNMSG_HOME}/config`, the cross-run seen-message
 ids in `${LNMSG_HOME}/seen`; the selection itself is per-run and never
 written back. (Superseded 2026-10-25: without `--pn` or the config
 key the adoption rule below decides, and its choice is written to
-`${LNMSG_HOME}/mailbox`.)
+`${LNMSG_HOME}/propagation_node`, `${LNMSG_HOME}/mailbox` before 1153.)
 
 ### Which node, and the trust question
 
@@ -165,7 +174,7 @@ route, hops, peering cost and stamp cost
 `leviculum-lxmf/src/router/propagation_runtime.rs:1269-1311`) with no trust
 input at all, because it has no notion of trust.
 
-Your mailbox sees the *envelope* of every message sent to you: who sent it
+Your propagation node sees the *envelope* of every message sent to you: who sent it
 and when, even though it cannot read the content. Handing that to whoever
 happens to be nearest is a real privacy decision, and neither prior-art
 program presents it as one.
@@ -188,10 +197,10 @@ where the user changes it, not a gate before it. Adoption makes a node
 *selected*, never *trusted*; the envelope argument above still stands, and
 it is why the choice is shown rather than hidden.
 
-One node is never adopted: **the one on this device**. A mailbox is where
+One node is never adopted: **the one on this device**. A propagation node is where
 others deliver while the messenger is off, and a node that is off whenever
 the messenger is holds nothing for it. The exception is the household: a
-stationary board or host that stays on is a fine mailbox for a phone or a
+stationary board or host that stays on is a fine propagation node for a phone or a
 laptop messenger, so the rule is "not the node on this device", not "not
 our node". A user who names the own node explicitly keeps it.
 
@@ -203,8 +212,9 @@ real interface. lnsd with lnpnd and rnsd with lxmd give the same entry,
 so Loquax reads the path table over the shared-instance RPC
 (`leviculum-std/src/daemon_rpc.rs`) and needs no new surface. The rule is
 `loquax/src/mailbox.rs`; its inputs, the persisted selection
-(`${LNMSG_HOME}/mailbox`, the hash and `adopted` or `user`) and the
-`mailbox:` line are `loquax/src/mailbox_state.rs`. A client hears only what
+(`${LNMSG_HOME}/propagation_node`, the hash and `adopted` or `user`;
+renamed once from `mailbox` at start) and the `propagation node:` line are
+`loquax/src/mailbox_state.rs`. A client hears only what
 is announced while it is attached, so a first run asks the daemon to
 replay the announces of its nearest path-table entries and selects once
 they are in (`DISCOVERY_LIMIT`, `loquax/src/engine.rs`). A daemon whose
@@ -213,7 +223,7 @@ no new adoption, since nothing then tells the own node from another; a
 stored node, `adopted` or `user`, is kept and used, because it was vetted
 against the table when it was written or chosen by the user, and an
 identity does not move onto this device by itself. The run then prints
-`mailbox: <8 hex> kept (path table unreadable)`.
+`propagation node: <8 hex> kept (path table unreadable)`.
 
 The replay is lnsd answering from its cache: a path request from a local
 client for a destination the path table holds is answered with the cached
@@ -257,17 +267,17 @@ most three were answered). Three in a row, at the schedule's retries of
 30 s and 60 s, is three to five minutes in which the node answered nothing.
 The node is then passed over for an hour (`UNANSWERED_EXCLUSION_MS`): the
 next selection adopts the most recently heard other candidate by the rule
-above, and the messenger shows `mailbox <new> adopted, <old> did not
-answer` as a toast and in `tui.log`. With no other candidate the silent
-node is kept; a mailbox that might answer later beats none. A node the user
-chose (`--pn`, the config, or `user` in the mailbox file) is never
+above, and the messenger shows `propagation node <new> adopted, <old> did
+not answer` as a toast and in `tui.log`. With no other candidate the silent
+node is kept; a node that might answer later beats none. A node the user
+chose (`--pn`, the config, or `user` in the selection's file) is never
 replaced; the messenger only says it did not answer. The streak lives in
 the running messenger, which syncs again and again; a single CLI run has
 no streak.
 
 Note that NomadNet's trust propagation makes this worse: trusting a person
 auto-trusts their node (its `Directory.py`, lines 198-202), which makes it
-eligible as your mailbox. Do not inherit that.
+eligible as your propagation node. Do not inherit that.
 
 ### The purge default
 
@@ -312,7 +322,7 @@ list until older ones expire.
 - Proof-of-work for `PropagationStampPending`, off the core lock.
 - Calling `persist()` on `PersistenceRequested`.
 
-### The mailbox as a visible relationship (proposal)
+### The propagation node as a visible relationship (proposal)
 
 The propagation node is currently magic in every client: something chosen
 for you, syncing on a schedule you did not set, holding mail you cannot
@@ -322,7 +332,7 @@ it is holding for you if it will say, and whether it is purging what you
 collect. columba's trick of modelling the relay as a contact with an
 `isMyRelay` flag is a cheap way to get there.
 
-The honest version of this includes telling the user what the mailbox
+The honest version of this includes telling the user what the node
 learns about them: the envelope of every message they receive. No prior
 program says this out loud.
 

@@ -853,7 +853,7 @@ impl Engine {
                     path: None,
                 }),
                 Command::SelectPn { .. } => self.emit(OutboxEvent::PnUnavailable {
-                    detail: "a client of a home node has no propagation node of its own"
+                    detail: "a client of a Loquax Mailbox has no propagation node of its own"
                         .to_string(),
                 }),
                 Command::Resolve { .. } | Command::Cancel { .. } | Command::Announce => {}
@@ -912,7 +912,7 @@ impl Engine {
             (Err(why), None) => {
                 self.emit(OutboxEvent::PnUnavailable {
                     detail: format!(
-                        "no mailbox chosen: the daemon's path table could not be read \
+                        "the daemon's path table could not be read \
                          ({why}), and without it a propagation node on this device cannot \
                          be told from one elsewhere; name one with --pn"
                     ),

@@ -128,7 +128,7 @@ impl core::fmt::Display for FetchError {
                 "no propagation node: {detail}.\n  \
                  Name one with --pn <hash>, or set propagation_node in Loquax's config."
             ),
-            Self::SyncFailed(detail) => write!(f, "the mailbox sync failed: {detail}"),
+            Self::SyncFailed(detail) => write!(f, "checking the propagation node failed: {detail}"),
             Self::Unanswered(detail) => write!(
                 f,
                 "the mailbox sync failed: {detail}.\n  \
@@ -417,7 +417,7 @@ mod tests {
         let fetched = run_fetch(
             &mut outbox,
             None,
-            "mailbox",
+            "adopted",
             &options(),
             &mut effects,
             &mut seen,
@@ -480,7 +480,7 @@ mod tests {
         let fetched = run_fetch(
             &mut outbox,
             None,
-            "mailbox",
+            "adopted",
             &options(),
             &mut effects,
             &mut seen,
@@ -525,7 +525,7 @@ mod tests {
         let fetched = run_fetch(
             &mut outbox,
             None,
-            "mailbox",
+            "adopted",
             &options(),
             &mut effects,
             &mut seen,
@@ -558,7 +558,7 @@ mod tests {
         let error = run_fetch(
             &mut outbox,
             None,
-            "mailbox",
+            "adopted",
             &options(),
             &mut effects,
             &mut seen,
@@ -591,7 +591,7 @@ mod tests {
         let error = run_fetch(
             &mut outbox,
             None,
-            "mailbox",
+            "adopted",
             &options(),
             &mut effects,
             &mut seen,
@@ -627,7 +627,7 @@ mod tests {
         let error = run_fetch(
             &mut outbox,
             None,
-            "mailbox",
+            "adopted",
             &options(),
             &mut effects,
             &mut seen,
@@ -666,7 +666,7 @@ mod tests {
         let error = run_fetch(
             &mut outbox,
             None,
-            "mailbox",
+            "adopted",
             &options(),
             &mut effects,
             &mut seen,
@@ -696,7 +696,7 @@ mod tests {
         let error = run_fetch(
             &mut outbox,
             None,
-            "mailbox",
+            "adopted",
             &options(),
             &mut effects,
             &mut seen,
@@ -730,7 +730,7 @@ mod tests {
         let error = run_fetch(
             &mut outbox,
             None,
-            "mailbox",
+            "adopted",
             &options(),
             &mut effects,
             &mut seen,
@@ -758,7 +758,7 @@ mod tests {
         let error = run_fetch(
             &mut outbox,
             None,
-            "mailbox",
+            "adopted",
             &options(),
             &mut effects,
             &mut seen,
@@ -797,7 +797,7 @@ mod tests {
         run_fetch(
             &mut outbox,
             None,
-            "mailbox",
+            "adopted",
             &options(),
             &mut effects,
             &mut seen,
@@ -843,7 +843,7 @@ mod tests {
         run_fetch(
             &mut outbox,
             None,
-            "mailbox",
+            "adopted",
             &options(),
             &mut effects,
             &mut seen,

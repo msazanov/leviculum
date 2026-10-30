@@ -135,7 +135,7 @@ renderer each pane's lines. The terminal half is the binary's
 `loquax fetch`'s, each on a tap of the one engine
 (`loquax/src/fanout.rs`) while the screen reads the same events. Sends run
 one at a time; a fetch runs alongside them, so a send never waits for a
-mailbox that does not answer (order 1072).
+propagation node that does not answer (order 1072).
 
 In:
 
@@ -205,7 +205,7 @@ section 7: the list as two rows a conversation, most recent first, with
 the last line's preview, the time and the unread badge; the conversation
 as blocks, ours right and theirs left, with a date line between days, the
 `new` rule where the unread begins and the narrow fallback below 40 cells;
-the header with the trust state and the mailbox state; and the detail view
+the header with the trust state and the propagation node's state; and the detail view
 behind `Enter` on a message, with the ledger of what this session saw
 happen to it, in place of the toast of 1030. The model hears the screen's
 size and the clock, so a page is the pane's height and a reply arriving
@@ -236,7 +236,7 @@ its badge, a message, its delivery mark, a link, the compose box at a
 cell, a footer item), the wheel scrolls the pane under the pointer, and a
 drag over the conversation selects text across lines and messages and
 copies it by OSC 52 on release. The two clicks that transmit are the
-words `send` on the compose box's border and the mailbox state, the same
+words `send` on the compose box's border and the propagation node's state, the same
 commands as `Enter` and `F5`. `--no-mouse` and the palette's `mouse` give
 the terminal its own selection back. The OSC 52 sequence and the rule a
 link is followed by are `lnomad`'s, moved to `leviculum-ui` so both
@@ -372,10 +372,10 @@ The states as they actually are, from
 | computing proof-of-work | `Outbound` + `StampPending` | nothing has been transmitted, and it may take a while |
 | link being built, or bytes going out | `Sending` | in flight, no confirmation |
 | opportunistic packet handed to Reticulum | `Sent` | transmitted once, unproven, still retryable |
-| propagation node accepted the upload | `Sent`, entry deleted | it is in a mailbox; the recipient may never collect it |
+| propagation node accepted the upload | `Sent`, entry deleted | it waits at a propagation node; the recipient may never collect it |
 | transport proof received | `Delivered` | the bytes reached the destination identity |
 | receiver cancelled the resource | `Rejected` | they refused it, or their client did |
-| node refused the upload (bad stamp) | `Rejected` | the mailbox refused it, not the recipient |
+| node refused the upload (bad stamp) | `Rejected` | the propagation node refused it, not the recipient |
 | five attempts exhausted | `Failed` | give up, keep the text |
 
 ### What a truthful UI shows
@@ -384,7 +384,7 @@ The states as they actually are, from
 three that must never be collapsed:
 
 - **handed to the network, unproven** (opportunistic `Sent`),
-- **left in a mailbox for later** (propagated `Sent`),
+- **left at a propagation node for later** (propagated `Sent`),
 - **arrived at the destination** (`Delivered`).
 
 columba collapses the first two into one check mark; NomadNet gives them
@@ -403,7 +403,7 @@ destination identity, not that a human saw them. The detail view is where
 that sentence lives.
 
 **Distinguish the two `Rejected`s** by correlating with the message's
-method before the entry disappears. "Your mailbox refused this message" and
+method before the entry disappears. "The propagation node refused this message" and
 "the recipient's client refused this message" are different problems with
 different fixes.
 
@@ -444,14 +444,14 @@ shapes are learned:
 | computing proof-of-work | braille spinner `⠋⠙⠹⠸⠼⠴` | dim yellow | animated on the tick |
 | in flight (link building, bytes out) | braille spinner | yellow | animated on the tick |
 | handed to the network, unproven (opportunistic `Sent`) | `◇` | amber | static |
-| left in a mailbox (propagated `Sent`) | `⌂` | blue | static |
+| left at a propagation node (propagated `Sent`) | `⌂` | blue | static |
 | arrived (`Delivered`) | `✓` | green | static, terminal |
 | refused (`Rejected`, either kind) | `✗` | red | static |
 | given up (`Failed`) | `✗` | dim red | static |
 
 The rules the table encodes: **green and a check mark appear only on
-proof** — the mailbox state is a blue house, deliberately not a second
-check, because "in a mailbox the recipient may never open" must not read as
+proof** — the propagation node's state is a blue house, deliberately not a second
+check, because "at a node the recipient may never collect from" must not read as
 progress toward delivered; amber `◇` (hollow) against green `✓` (solid)
 mirrors unproven-versus-proven; animation means "the machine is working
 right now" and nothing else, driven by the
@@ -480,12 +480,12 @@ queued `○`, `Sending` is in flight, `Sent` is `◇`, `AwaitingCollection` is
 `Cancelled` the dim one. The stamping row has no router state yet: the
 engine mines without saying so. While a send's runner is still working, a
 giving-up state of one of its legs is not drawn, because `--via auto`
-cancels a stranded direct leg and carries the same text to a mailbox; the
+cancels a stranded direct leg and carries the same text to a propagation node; the
 `✗` appears when the runner reports it gave up.
 
 A direct leg whose message went onto a link to the peer (`Sending`) and
 got no proof inside the leg's time is *unproven*, not failed (1002): the
-peer answered the link, so it is reachable, and a mailbox copy would reach
+peer answered the link, so it is reachable, and a propagation node's copy would reach
 it a second time. The reference never re-sends such a message through a
 propagation node on its own either; it waits for the proof and retries on
 a new link (`reference/LXMF/LXMF/LXMRouter.py:2796`,
@@ -496,7 +496,7 @@ client that receives and never proves turned a delivered message red and
 uploaded it to a foreign node before this.
 
 While a send waits, its row names the leg and how long it has been on it,
-`me (direct 12 s):` or `me (via the network 40 s):`, so a spinner that turns
+`me (direct 12 s):` or `me (via propagation node 40 s):`, so a spinner that turns
 for a while has its reason on screen. `$LNMSG_HOME/tui.log` holds the same
 story in words, at `info` for Loquax's targets (`RUST_LOG` replaces the
 filter): one `SEND leg= to= state= elapsed_ms=` line per step of each leg
@@ -565,7 +565,7 @@ An offline-first client should look deliberate rather than broken. Two
 concrete moves:
 
 - A single **posture line** that says what the program can do right now:
-  "3 peers reachable directly, mailbox 4m ago, 2 messages waiting to send".
+  "3 peers reachable directly, propagation node 4m ago, 2 messages waiting to send".
   Not a red error banner; a statement of fact.
 - **Queued messages shown in the conversation**, in place, greyed, with
   their reason ("waiting for a route", "computing proof-of-work, about a

@@ -766,7 +766,7 @@ impl Shell {
         }
         self.replacing = None;
         let line = format!(
-            "mailbox {} adopted, {} did not answer",
+            "propagation node {} adopted, {} did not answer",
             short(&stored.node),
             short(&old)
         );

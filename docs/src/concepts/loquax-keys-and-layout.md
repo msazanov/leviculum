@@ -241,7 +241,7 @@ drawn under the text.
 | back out, cancel, close | `Esc` | `Ctrl-g` | `Esc` (WhatsApp closes the chat) | click outside the overlay | all: C to M to L, and any overlay closes |
 | command palette | `:` | `Alt-x` | | | `:` L M; `Alt-x` all |
 | help | `?` | | `F1` | click `? help` in the footer | `?` L M; `F1` all |
-| fetch the mailbox **TX** | | | `F5`; `Ctrl-r` (`lnomad`'s reload) | click the mailbox state in the header | `F5` all; `Ctrl-r` L M |
+| check the propagation node **TX** | | | `F5`; `Ctrl-r` (`lnomad`'s reload) | click the propagation node's state in the header | `F5` all; `Ctrl-r` L M |
 | redraw | | `Ctrl-l` | (mutt `Ctrl-l`) | | all |
 | quit | `:q`, `q` | `Ctrl-x Ctrl-c` | `Ctrl-q` | click `quit` in the footer | `q` L M; the rest all |
 | mouse capture off and on | | | palette `mouse`, `--no-mouse` | | all |
@@ -437,7 +437,7 @@ text. Here it is in cells.
 ### 80 x 24
 
 ```text
-┌─ Chats ────────────────┐┌─ Alice ·4f2a  known ───────────── mailbox ⌂ 4 min ─┐
+┌─ Chats ────────────────┐┌─ Alice ·4f2a  known ────────────────── pn ⌂ 4 min ─┐
 │/ search                ││                                                    │
 │                        ││                                                    │
 │▌Alice ·4f2a      14:05 ││             ── Saturday 24 October ──              │
@@ -467,7 +467,7 @@ text. Here it is in cells.
 
 ```text
 ┌─ Search ──────────── esc closes ─┐┌─ Alice ·4f2a  known ────────────────────────── 4f2a91c03be8d7e15a60f2b44c9d0e71 ─┐
-│ / tripod▏                        ││ direct, 2 hops · heard 14:05             mailbox 9c31e0a2 adopted · synced 14:03 │
+│ / tripod▏                        ││ direct, 2 hops · heard 14:05    propagation node 9c31e0a2 adopted · synced 14:03 │
 │                                  ││ ──────────────────────────────────────────────────────────────────────────────── │
 │ CONVERSATIONS                  2 ││                                                                                  │
 │  Alice ·4f2a               14:06 ││                                                                                  │
@@ -523,11 +523,11 @@ the bar in the left margin; under focus it is drawn reversed.
 
 **The header** is the open conversation's title line: the peer's name and
 short hash, its trust state in words (`known`, `unknown`, `blocked`, the
-three of the mailbox page, never a glyph alone), and on the right the
-mailbox state, the same words the `mailbox:` line prints
+three of the propagation node page, never a glyph alone), and on the right the
+propagation node's state, the same words the `propagation node:` line prints
 (`loquax/src/mailbox_state.rs`). At 120 columns it gains the full address
 in the title and a second row: how the peer is reached (`direct, 2 hops`,
-from the path table) and when it was last heard, and the mailbox's node,
+from the path table) and when it was last heard, and the propagation node,
 selection and last sync.
 
 **The conversation pane.** Ours are blocks set flush right, theirs flush
@@ -584,11 +584,11 @@ daemon in `tui_chat.frames`. Where they differ from the mockups:
   names", below).
 - **The list's title is our own address** (`Loquax afbda7b3`), as before,
   not `Chats`.
-- **The header's second row at 120 columns has the mailbox half only**
-  (`mailbox 9c31e0a2 adopted · synced 14:03`, right-aligned, with the rule
+- **The header's second row at 120 columns has the propagation node half only**
+  (`propagation node 9c31e0a2 adopted · synced 14:03`, right-aligned, with the rule
   under it). How the peer is reached and when it was last heard need the
   path table read for the screen, which nothing does yet. At 80 columns
-  the mailbox state is words, the longest form that fits, never the `⌂`
+  the propagation node's state is words, the longest form that fits, never the `⌂`
   and an age.
 - **The time may reach past the three-quarter cap** when the block's last
   line has no room for it inside: the text wraps at the cap, the time and
@@ -681,9 +681,9 @@ from a session against a daemon in `loquax/tests/fixtures/tui_names.frames`
 (three correspondents: one announced name, a look-alike of it, and a peer
 the contacts file names), and the sessions that already had an announcing
 correspondent show its name since. Where it differs from the text above and
-the mailbox page's decision, or fills a gap they leave:
+the propagation node page's decision, or fills a gap they leave:
 
-- **The display rule** is the mailbox page's: the petname, else the
+- **The display rule** is the propagation node page's: the petname, else the
   announced name, then a space and the address's first four hex digits
   after a `·` (`Alice ·4f2a`); with neither, the address form
   `<9c31e0a2…>` as before. A name is cut before its hash, so the hash
@@ -718,14 +718,14 @@ the mailbox page's decision, or fills a gap they leave:
   `name <address> <petname>` or `block <address>` a line; a wrong line
   stops the start with the file and line, as `config` does. The pages say
   trust follows from naming someone and do not say where the naming
-  happens. (The palette writes it since 1082: see the mailbox page,
+  happens. (The palette writes it since 1082: see the propagation node page,
   section 2, "Blocking, and names from the palette".)
-- **Trust** is the three words of the mailbox page in the header:
+- **Trust** is the three words of the propagation node page in the header:
   `known` with a petname, `blocked` with a block (over a petname),
   `unknown` else. Beside a petname that differs from what the peer
   announces the header adds `announces Ally`, the provenance of option C.
   `blocked` was only said until Lew decided what it does on 2026-10-28
-  (1082): stored silently, see the mailbox page, section 2.
+  (1082): stored silently, see the propagation node page, section 2.
 - **Names are this session's.** The store across restarts is the history
   slice; a peer heard in an earlier run is its address until it announces
   again. (Kept across restarts since 1049, "Built 2026-10-27, history".)
@@ -851,7 +851,7 @@ mark only ever sits in an own block:
 | dim yellow (proof of work) | `#c8ad4a` | `#7d6a33` | 179 | 94 |
 | yellow (in flight) | `#f2d45c` | `#6b5200` | 221 | 58 |
 | amber (sent, unproven) | `#ffb347` | `#8a4500` | 214 | 130 |
-| blue (in a mailbox) | `#a8ccff` | `#1a46a0` | 153 | 19 |
+| blue (at a propagation node) | `#a8ccff` | `#1a46a0` | 153 | 19 |
 | green (delivered) | `#6fe39a` | `#176a35` | 121 | 22 |
 | red (refused) | `#ff8a80` | `#a3211a` | 217 | 124 |
 | dim red (given up) | `#e8a29c` | `#8a4a45` | 181 | 95 |
@@ -872,7 +872,7 @@ falls from 5.9:1 to 4.3:1.
 1. `--no-color`, or `NO_COLOR` set and not empty: monochrome.
 2. `--color truecolor|256|16`: that tier. `lnomad` had the flag with two
    values (`lnomad/src/main.rs:65`); `loquax` has it now
-   (`loquax/src/main.rs:266`), and both have `16`.
+   (`loquax/src/main.rs:308`), and both have `16`.
 3. `COLORTERM` is `truecolor` or `24bit`: truecolor (the rule
    `resolve_depth` had before 1042).
 4. `TERM` contains `256color`: 256. `xterm-256color`, `tmux-256color` and
@@ -959,7 +959,7 @@ not mapped.
 **80 x 24.**
 
 ```text
-┌─ Chats ────────────────┐┌─ Alice ·4f2a  known ───────────── mailbox ⌂ 4 min ─┐
+┌─ Chats ────────────────┐┌─ Alice ·4f2a  known ────────────────── pn ⌂ 4 min ─┐
 │/ search                ││                                                    │
 │                        ││                                                    │
 │▌Alice ·4f2a      14:05 ││             ── Saturday 24 October ──              │
@@ -1023,7 +1023,7 @@ palette, 13.3:1, 7.3:1 and 9.0:1 on the VGA one.
 
 ```text
 ┌─ Search ──────────── esc closes ─┐┌─ Alice ·4f2a  known ────────────────────────── 4f2a91c03be8d7e15a60f2b44c9d0e71 ─┐
-│ / tripod▏                        ││ direct, 2 hops · heard 14:05             mailbox 9c31e0a2 adopted · synced 14:03 │
+│ / tripod▏                        ││ direct, 2 hops · heard 14:05    propagation node 9c31e0a2 adopted · synced 14:03 │
 │                                  ││ ──────────────────────────────────────────────────────────────────────────────── │
 │ CONVERSATIONS                  2 ││                                                                                  │
 │  Alice ·4f2a               14:06 ││                                                                                  │
@@ -1117,7 +1117,7 @@ in truecolor, 3.4:1 to 9.3:1 and 3.1:1 to 8.6:1 in 256.
 #### 5. Tests the layout slice will carry
 
 - **The frames stay plain text.** The `frame` step of the key script
-  (`loquax/src/tui.rs:881`) writes characters only, and the existing
+  (`loquax/src/tui.rs:883`) writes characters only, and the existing
   snapshot frames keep pinning the monochrome look.
 - **A script step `styles <name>`** writes one frame's per-cell style as a
   map in the letters above: `.` `,` `=` for the three tints, `s` for a
@@ -1180,7 +1180,7 @@ these differences from the text above:
   for a selected block and `r` for reverse video; the build writes `^`
   for both, because a selected block in 16 colours and in monochrome is
   reverse video and a map of styles cannot tell the two apart. The
-  letters (`style_letter`, `loquax/src/tui.rs:997`): `.` ours, `,`
+  letters (`style_letter`, `loquax/src/tui.rs:999`): `.` ours, `,`
   theirs, `=` the date pill, `!` the unread rule, `^` a selected block's
   tint or reverse video, `t` the toast, `e` the error colour, blank for
   the pane. Where two tokens share their colours the earlier letter wins:
@@ -1234,7 +1234,7 @@ these differences from the text above:
 | a link in a body | follows it, as in `lnomad` | | |
 | the compose box | focuses it and places the cursor | scrolls the body | |
 | `send` on the box's border | sends (TX) | | |
-| the mailbox state in the header | fetches (TX) | | |
+| the propagation node's state in the header | fetches (TX) | | |
 | a footer item | runs its row | | hover highlights, as in `lnomad` |
 | outside an overlay | closes it | | |
 
@@ -1353,7 +1353,7 @@ layout's.
 2. **The chat layout.** Section 5 without the mouse: list rows with
    preview, time and badge; blocks aligned by side, date separators, the
    `new` line, the narrow fallback; the header with trust (every peer
-   `unknown` until slice 5) and mailbox state; the per-message detail
+   `unknown` until slice 5) and propagation node state; the per-message detail
    view with this session's ledger, behind `Enter` on a message. Depends
    on 1 (the `Enter` row). Its colours are section 5, "Colour", as Lew
    decides it: the tokens, the tier ladder, the `theme` key, and the

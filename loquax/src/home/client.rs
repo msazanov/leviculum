@@ -38,12 +38,12 @@ pub enum HomeError {
 impl core::fmt::Display for HomeError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::NoPath => write!(f, "no path to the home node"),
-            Self::NoLink(detail) => write!(f, "the home node did not answer the link: {detail}"),
+            Self::NoPath => write!(f, "no path to the mailbox"),
+            Self::NoLink(detail) => write!(f, "the mailbox did not answer the link: {detail}"),
             Self::Refused(status) => write!(f, "{status}"),
-            Self::Transfer(detail) => write!(f, "the request to the home node failed: {detail}"),
-            Self::Malformed => write!(f, "the home node's answer did not decode"),
-            Self::Timeout => write!(f, "the home node did not answer in time"),
+            Self::Transfer(detail) => write!(f, "the request to the mailbox failed: {detail}"),
+            Self::Malformed => write!(f, "the mailbox's answer did not decode"),
+            Self::Timeout => write!(f, "the mailbox did not answer in time"),
         }
     }
 }
@@ -484,7 +484,7 @@ async fn take_in(
     use crate::outbox::{Command, OutboxEvent};
     if pulled.first > cursor.saturating_add(1) && cursor > 0 {
         tracing::warn!(
-            "HOME pull: the home node no longer holds entries {}..{} (its archive cap)",
+            "HOME pull: the mailbox no longer holds entries {}..{} (its archive cap)",
             cursor + 1,
             pulled.first - 1
         );

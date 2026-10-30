@@ -647,7 +647,7 @@ honest, that is the moment for the crate.
 | `seen` | 186 | core the set, the order and the compaction rule; shell the file |
 | `mailbox_state` | 380 | core `Route`, `Stored`, `Decision`, `MailboxRun`, `routes_from_path_table`; shell `load`, `save`, `unix_now_ms` and the stderr lines |
 | `send` | 996 | core: the send and fallback loops over `Outbox` and a `clock::Clock` |
-| `fetch` | 598 | core: the mailbox drain over `Outbox` and a `clock::Clock`; messages printed through `Effects::print` |
+| `fetch` | 598 | core: the propagation node drain over `Outbox` and a `clock::Clock`; messages printed through `Effects::print` |
 | `engine` | 1828 | core `Engine` (the router glue: resolves, tracking, stamp bookkeeping, sync scheduling) and `mine`; shell `engine/shell.rs`: the `CoreProcessor` impl, `InProcessOutbox`'s channels, `attach`, the stamp worker thread and its runtime |
 | `identity` | 182 | shell: home directory, key file |
 | `main.rs` | 543 | shell: CLI, daemon RPC, process exit |
@@ -693,7 +693,7 @@ list shorter; behaviour and the CLI tests do not change.
    `seen`, `mailbox_state`, `body` and `display_name` move into a
    `std`-gated shell module; the core keeps the pure functions and returns
    what to write (the seen store as a set that answers "append this line"
-   or "rewrite with these", the mailbox record as its text). Error enums
+   or "rewrite with these", the propagation node record as its text). Error enums
    lose `io::Error` and `PathBuf`: the core error says what was wrong, the
    shell adds where. The `eprintln!` lines in `mailbox_state` and `fetch`
    become returned notices the shell prints. Done 2026-10-25 (990).
@@ -719,7 +719,7 @@ errors, all of passes 3 and 4. `Scalar` lives in `leviculum-core`'s
 `event_scalar`, and `leviculum-std` re-exports it. The shell items stayed
 in their modules behind `cfg(feature = "std")`, which kept the callers'
 paths; the send and fetch runners reach the host through
-`effects::Effects` (the notices, the mailbox record, the seen record, the
+`effects::Effects` (the notices, the propagation node record, the seen record, the
 wall clock), and the terminal's implementation is `effects::Terminal`. Two
 `std` uses outside the five modules remain on purpose: `fetch`'s
 `io::Write` output is pass 3's, and `AttachConfig::storage_dir` is a
@@ -911,7 +911,7 @@ Naming these is useful because each is a candidate issue.
 **Decision (2026-08-10) on sequencing:** triage, not either extreme. Gaps
 1, 2, 3 and 8 are closed in one library wave **before** `loquax` starts,
 because the decided design cannot be built honestly without them: gap 2
-blocks the mailbox glyph and the truthful delivery display outright, gap 1
+blocks the propagation node glyph and the truthful delivery display outright, gap 1
 blocks the naming-based trust model, gap 3 is shared infrastructure every
 client rewrites, and gap 8 is small and stops two clients wording the same
 errors differently. The remaining eight are filed as issues and met in
@@ -939,7 +939,7 @@ not a list of open work.
 2. **No "propagated, awaiting collection" state.** A propagated message
    reaches `Sent` and its queue entry is deleted
    (`leviculum-lxmf/src/router/propagation_runtime.rs:438-445`), so the
-   client cannot distinguish "in a mailbox" from "gone" without keeping its
+   client cannot distinguish "at a propagation node" from "gone" without keeping its
    own shadow record. This is the single biggest obstacle to an honest
    delivery display.
 3. **No file-backed `LxmfStorage`.** Two implementations exist, both

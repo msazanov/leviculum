@@ -84,9 +84,8 @@ const DEFAULT_FETCH_TIMEOUT_SECS: u64 = 60;
 // before a subcommand (1119), which clap's `args_conflicts_with_subcommands`
 // cannot allow: it exempts no argument, global ones included.
 struct Args {
-    /// Run as the home node, headless, until SIGINT or SIGTERM: receive for
-    /// this identity, archive every message, answer the admitted devices,
-    /// collect from the propagation node. Takes the messenger's --instance,
+    /// Run Loquax Mailbox, as `loquax mailbox run` does; kept for the
+    /// scripts and units that name it. Takes the messenger's --instance,
     /// --config, --pn, --sync-interval and --timeout.
     #[cfg(feature = "tui")]
     #[arg(long)]
@@ -130,41 +129,55 @@ enum SubCommand {
     /// first view is the map of every peer with a position.
     #[cfg(feature = "gui")]
     Gui(GuiArgs),
-    /// The home node and its devices: admit, join, devices, revoke.
+    /// Loquax Mailbox, the always-on part that receives and keeps your
+    /// mail while your devices are off: run it, enable its system service,
+    /// admit, list and revoke devices, join one from a device. `home` is
+    /// the old spelling and still works.
     #[cfg(feature = "tui")]
-    #[command(subcommand)]
-    Home(HomeCommand),
+    #[command(subcommand, alias = "home")]
+    Mailbox(MailboxCommand),
 }
 
-/// `loquax home ...`.
+/// `loquax mailbox ...` (also `loquax home ...`).
 #[cfg(feature = "tui")]
 #[derive(Subcommand, Debug)]
-enum HomeCommand {
-    /// On the home node: open a single-use admission for one device and
+enum MailboxCommand {
+    /// Run Loquax Mailbox in the foreground until SIGINT or SIGTERM:
+    /// receive for this identity, archive every message, answer the
+    /// admitted devices, collect from the propagation node. `loquax
+    /// --daemon` is the same. The packaged system service runs this.
+    Run(RunArgs),
+    /// Enable and start the packaged system service,
+    /// `loquax-mailbox.service`, through systemctl; needs root.
+    Enable,
+    /// Stop the packaged system service and disable it; needs root. Its
+    /// state under /var/lib/loquax-mailbox stays.
+    Disable,
+    /// On the mailbox: open a single-use admission for one device and
     /// print its code, as text and as a QR code.
     Admit {
         /// The name the device is listed and revoked under.
         #[arg(long)]
         name: Option<String>,
-        /// The home node's TCP server as a phone reaches it, `host:port`:
+        /// The mailbox's TCP server as a phone reaches it, `host:port`:
         /// written into the code (`lqxh1...@host:port`), so the phone needs
         /// one scan or one paste.
         #[arg(long)]
         server: Option<String>,
     },
-    /// On the new device: redeem a code from `home admit` and become a
-    /// client of that home node.
+    /// On the new device: redeem a code from `mailbox admit` and become a
+    /// client of that Loquax Mailbox.
     Join(JoinArgs),
-    /// On the home node: list the admitted devices.
+    /// On the mailbox: list the admitted devices.
     Devices,
-    /// On the home node: remove a device, by its name or its hash (four hex
+    /// On the mailbox: remove a device, by its name or its hash (four hex
     /// characters of it are enough when they are unique).
     Revoke { device: String },
-    /// On the home node: list the admission codes not yet used and not yet
+    /// On the mailbox: list the admission codes not yet used and not yet
     /// expired (`home_token_hours` in the config, 24 by default).
     Tokens,
-    /// On the home node: withdraw an admission code not yet used, by the
-    /// start of its hash as `home tokens` lists it (four hex characters
+    /// On the mailbox: withdraw an admission code not yet used, by the
+    /// start of its hash as `mailbox tokens` lists it (four hex characters
     /// are enough when they are unique).
     RevokeToken { prefix: String },
 }
@@ -172,7 +185,7 @@ enum HomeCommand {
 #[cfg(feature = "tui")]
 #[derive(clap::Args, Debug)]
 struct JoinArgs {
-    /// The code `loquax home admit` printed on the home node.
+    /// The code `loquax mailbox admit` printed on the mailbox.
     code: String,
 
     /// Shared-instance name to connect to (overrides the config file's).
@@ -186,6 +199,34 @@ struct JoinArgs {
     /// Seconds for the path, the link and the answer.
     #[arg(long, default_value_t = DEFAULT_FETCH_TIMEOUT_SECS)]
     timeout: u64,
+}
+
+/// `loquax mailbox run`, and what `loquax --daemon` takes of the
+/// messenger's options.
+#[cfg(feature = "tui")]
+#[derive(clap::Args, Debug)]
+struct RunArgs {
+    /// The propagation node to collect from, as `send --pn`.
+    #[arg(long, value_name = "HASH")]
+    pn: Option<String>,
+
+    /// Shared-instance name to connect to (overrides the config file's).
+    #[arg(long)]
+    instance: Option<String>,
+
+    /// Reticulum config directory (default: the platform default).
+    #[arg(long)]
+    config: Option<PathBuf>,
+
+    /// Seconds each send's leg may take, as `send --timeout`; a fetch gets
+    /// twice this.
+    #[arg(long, default_value_t = DEFAULT_TIMEOUT_SECS)]
+    timeout: u64,
+
+    /// The longest the propagation node goes unsynced, as the messenger's
+    /// `--sync-interval`: `15m` by default, `off` for none.
+    #[arg(long, value_name = "INTERVAL")]
+    sync_interval: Option<String>,
 }
 
 #[cfg(feature = "gui")]
@@ -233,7 +274,8 @@ struct TuiArgs {
 
     /// Reticulum config directory (default: the platform default). Taken
     /// before a subcommand too, for every subcommand: `loquax --config X
-    /// home join CODE` as well as `loquax home join CODE --config X` (1119).
+    /// mailbox join CODE` as well as `loquax mailbox join CODE --config X`
+    /// (1119).
     #[arg(long, global = true)]
     config: Option<PathBuf>,
 
@@ -480,7 +522,7 @@ fn instance_name(config_dir: &std::path::Path) -> String {
 }
 
 /// Resolve the propagation-node choice: the `--pn` flag, then loquax's own
-/// config. `None` with `"mailbox"` means "let the mailbox rule decide"
+/// config. `None` with `"adopted"` means "let the adoption rule decide"
 /// (`loquax::mailbox`). The source word is what `LNMSG_PN` logs.
 fn resolve_pn(
     flag: Option<&str>,
@@ -495,7 +537,7 @@ fn resolve_pn(
     match loquax::config::load(home) {
         Ok(config) => match config.propagation_node {
             Some(hash) => Ok((Some(hash), "config")),
-            None => Ok((None, "mailbox")),
+            None => Ok((None, "adopted")),
         },
         Err(error) => Err(error.to_string()),
     }
@@ -605,6 +647,17 @@ async fn main() -> ExitCode {
             return ExitCode::from(EXIT_FAILURE);
         }
     }
+    // The propagation node's selection under its name since 1153, once.
+    // Silent when it works, as a send that works is; not fatal when it does
+    // not, because `load` then reads the old name where it is.
+    if let Some(home) = identity::home_path().ok().filter(|home| home.is_dir()) {
+        if let Err(error) = mailbox_state::migrate(&home) {
+            eprintln!(
+                "loquax: {}: {error}",
+                home.join(mailbox_state::LEGACY_MAILBOX_FILE).display()
+            );
+        }
+    }
     // `LEVICULUM_EVENT_LOG=<path>` turns the structured events into an
     // append-only file in the documented format; without it this is the plain
     // fmt subscriber and the events cost a filtered-out call. `warn` rather
@@ -614,13 +667,25 @@ async fn main() -> ExitCode {
     // event log, which is where the message id lives.
     #[cfg(feature = "tui")]
     if args.daemon {
-        return run_daemon(args.tui).await;
+        let tui = args.tui;
+        return run_daemon(RunArgs {
+            pn: tui.pn,
+            instance: tui.instance,
+            config: tui.config,
+            timeout: tui.timeout,
+            sync_interval: tui.sync_interval,
+        })
+        .await;
     }
     let command = match args.command {
         #[cfg(feature = "gui")]
         Some(SubCommand::Gui(gui)) => return run_gui(gui).await,
         #[cfg(feature = "tui")]
         Some(SubCommand::Tui(tui)) => return run_tui(tui).await,
+        // Before the subscriber below, as `--daemon`: the mailbox installs
+        // its own, which journals its info lines.
+        #[cfg(feature = "tui")]
+        Some(SubCommand::Mailbox(MailboxCommand::Run(run))) => return run_daemon(run).await,
         #[cfg(feature = "tui")]
         None => return run_tui(args.tui).await,
         #[cfg(not(feature = "tui"))]
@@ -644,7 +709,7 @@ async fn main() -> ExitCode {
         #[cfg(feature = "history")]
         SubCommand::Export { dir } => run_export(&dir),
         #[cfg(feature = "tui")]
-        SubCommand::Home(home) => run_home(home).await,
+        SubCommand::Mailbox(mailbox) => run_mailbox(mailbox).await,
         // Dispatched above, before the subscriber writes to stderr.
         #[cfg(feature = "tui")]
         SubCommand::Tui(_) => ExitCode::SUCCESS,
@@ -1249,7 +1314,7 @@ async fn run_client_send(
         )
         .await
         {
-            eprintln!("loquax: the home node took the message; the pull after it: {error}");
+            eprintln!("loquax: the mailbox took the message; the pull after it: {error}");
         }
     }
     drop(node);
@@ -1261,16 +1326,16 @@ async fn run_client_send(
             ExitCode::SUCCESS
         }
         Err(error) => {
-            eprintln!("loquax: the home node did not take the message: {error}");
+            eprintln!("loquax: the mailbox did not take the message: {error}");
             events::done(None, "failed", EXIT_FAILURE);
             ExitCode::from(EXIT_FAILURE)
         }
     }
 }
 
-/// `loquax --daemon`: the home node.
+/// `loquax mailbox run` and `loquax --daemon`: Loquax Mailbox.
 #[cfg(feature = "tui")]
-async fn run_daemon(args: TuiArgs) -> ExitCode {
+async fn run_daemon(args: RunArgs) -> ExitCode {
     // The journal under systemd: loquax's own lines (archived, admitted,
     // refused) and every warning. `RUST_LOG` replaces the filter.
     leviculum_std::event_log::install_global_subscriber("warn,loquax=info");
@@ -1282,8 +1347,8 @@ async fn run_daemon(args: TuiArgs) -> ExitCode {
         Ok(None) => {}
         Ok(Some(_)) => {
             return failure(
-                "this device is a client of a home node, so it cannot be one; \
-                 the home node runs where the identity is",
+                "this device is a client of a Loquax Mailbox, so it cannot be one; \
+                 the mailbox runs where the identity is",
                 "client",
             )
         }
@@ -1361,9 +1426,21 @@ async fn run_daemon(args: TuiArgs) -> ExitCode {
     }
 }
 
-/// `loquax home ...`.
+/// `loquax mailbox ...` (also `loquax home ...`).
 #[cfg(feature = "tui")]
-async fn run_home(command: HomeCommand) -> ExitCode {
+async fn run_mailbox(command: MailboxCommand) -> ExitCode {
+    match command {
+        MailboxCommand::Run(args) => return run_daemon(args).await,
+        // Through systemctl, before anything is made under this user's home.
+        MailboxCommand::Enable => return systemctl(&["enable", "--now", MAILBOX_UNIT]),
+        MailboxCommand::Disable => return systemctl(&["disable", "--now", MAILBOX_UNIT]),
+        MailboxCommand::Admit { .. }
+        | MailboxCommand::Join(_)
+        | MailboxCommand::Devices
+        | MailboxCommand::Revoke { .. }
+        | MailboxCommand::Tokens
+        | MailboxCommand::RevokeToken { .. } => {}
+    }
     let home = match identity::home_dir() {
         Ok(home) => home,
         Err(error) => return failure(error, "no-home"),
@@ -1375,7 +1452,7 @@ async fn run_home(command: HomeCommand) -> ExitCode {
     let on_home_node = |store: &dyn Fn(&mut loquax::store::Store) -> ExitCode| {
         if client.is_some() {
             return failure(
-                "this device is a client of a home node; run this on the home node",
+                "this device is a client of a Loquax Mailbox; run this on the mailbox",
                 "client",
             );
         }
@@ -1394,7 +1471,7 @@ async fn run_home(command: HomeCommand) -> ExitCode {
     };
     let now = leviculum_std::local_time::unix_now_secs();
     match command {
-        HomeCommand::Admit { name, server } => on_home_node(&|store| {
+        MailboxCommand::Admit { name, server } => on_home_node(&|store| {
             let name = match &name {
                 Some(name) => name.trim().to_string(),
                 None => match store.devices() {
@@ -1440,10 +1517,10 @@ async fn run_home(command: HomeCommand) -> ExitCode {
                      code."
                 ),
             }
-            println!("On a desktop: loquax home join {}", code.encode());
+            println!("On a desktop: loquax mailbox join {}", code.encode());
             ExitCode::SUCCESS
         }),
-        HomeCommand::Devices => on_home_node(&|store| match store.devices() {
+        MailboxCommand::Devices => on_home_node(&|store| match store.devices() {
             Ok(devices) => {
                 for device in devices {
                     let at = loquax::when::WallTime {
@@ -1466,7 +1543,7 @@ async fn run_home(command: HomeCommand) -> ExitCode {
             }
             Err(error) => failure(error, "no-store"),
         }),
-        HomeCommand::Revoke { device } => on_home_node(&|store| match store.revoke(&device) {
+        MailboxCommand::Revoke { device } => on_home_node(&|store| match store.revoke(&device) {
             Ok(loquax::store::Revoked::One(gone)) => {
                 println!("revoked {}  {}", address::to_hex(&gone.device), gone.name);
                 ExitCode::SUCCESS
@@ -1487,7 +1564,7 @@ async fn run_home(command: HomeCommand) -> ExitCode {
             }
             Err(error) => failure(error, "no-store"),
         }),
-        HomeCommand::Tokens => {
+        MailboxCommand::Tokens => {
             let ttl = match loquax::config::load(&home) {
                 Ok(config) => loquax::home::token_ttl_secs(&config),
                 Err(error) => return usage(error),
@@ -1517,7 +1594,7 @@ async fn run_home(command: HomeCommand) -> ExitCode {
                 Err(error) => failure(error, "no-store"),
             })
         }
-        HomeCommand::RevokeToken { prefix } => {
+        MailboxCommand::RevokeToken { prefix } => {
             on_home_node(&|store| match store.revoke_token(&prefix) {
                 Ok(loquax::store::TokenRevoked::One(gone)) => {
                     println!(
@@ -1548,11 +1625,39 @@ async fn run_home(command: HomeCommand) -> ExitCode {
                 Err(error) => failure(error, "no-store"),
             })
         }
-        HomeCommand::Join(args) => run_join(home, client, args).await,
+        MailboxCommand::Join(args) => run_join(home, client, args).await,
+        // Dispatched above, before the state directory is made.
+        MailboxCommand::Run(_) | MailboxCommand::Enable | MailboxCommand::Disable => {
+            ExitCode::SUCCESS
+        }
     }
 }
 
-/// `loquax home join <code>`.
+/// The packaged system service that runs `loquax mailbox run`
+/// (`packaging/loquax/loquax-mailbox.service`).
+#[cfg(feature = "tui")]
+const MAILBOX_UNIT: &str = "loquax-mailbox.service";
+
+/// `loquax mailbox enable` and `disable`: systemctl does the work and says
+/// what went wrong, so its exit is ours; one that cannot start at all, on a
+/// host without systemd, is an operational failure.
+#[cfg(feature = "tui")]
+fn systemctl(args: &[&str]) -> ExitCode {
+    match std::process::Command::new("systemctl").args(args).status() {
+        Ok(status) if status.success() => ExitCode::SUCCESS,
+        Ok(status) => failure(
+            format!(
+                "systemctl {} failed ({status}); the service comes with the \
+                 loquax package, and enabling it needs root",
+                args.join(" ")
+            ),
+            "failed",
+        ),
+        Err(error) => failure(format!("systemctl: {error}"), "failed"),
+    }
+}
+
+/// `loquax mailbox join <code>`.
 #[cfg(feature = "tui")]
 async fn run_join(home: PathBuf, client: Option<[u8; 64]>, args: JoinArgs) -> ExitCode {
     let code = match loquax::home::code::HomeCode::parse(&args.code) {
@@ -1561,7 +1666,7 @@ async fn run_join(home: PathBuf, client: Option<[u8; 64]>, args: JoinArgs) -> Ex
     };
     if client.is_some_and(|key| key != code.public_key) {
         return failure(
-            "this device is already the client of another home node",
+            "this device is already the client of another Loquax Mailbox",
             "client",
         );
     }
