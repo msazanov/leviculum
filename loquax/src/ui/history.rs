@@ -144,38 +144,8 @@ impl<B> UiModel<B> {
     /// at its newest message.
     pub fn restore(&mut self, restored: Vec<Restored>) {
         let listed = !self.conversations.is_empty();
-        let now = self.now;
         for stored in restored {
-            if stored.messages.is_empty() && !stored.pinned && stored.flags == Flags::default() {
-                continue;
-            }
-            let index = self.conversation(stored.peer);
-            let conversation = &mut self.conversations[index];
-            conversation.messages = stored.messages;
-            conversation.pinned = stored.pinned;
-            conversation.flags = stored.flags;
-            conversation.earlier = stored.earlier;
-            conversation.unread = stored.unread;
-            let len = conversation.messages.len();
-            if stored.unread > 0 && len > 0 {
-                conversation.new_rule = Some(NewRule {
-                    at: len - stored.unread.min(len),
-                    count: stored.unread,
-                });
-            }
-            conversation.activity = conversation
-                .messages
-                .last()
-                .map_or(0, |message| message.activity);
-            for message in &mut conversation.messages {
-                if cut_off(message) {
-                    message.delivery = Some(DeliveryState::Queued);
-                    message.note(now, RESTARTED);
-                    self.changed.insert((stored.peer, message.activity));
-                }
-                message.leg = None;
-            }
-            self.activity = self.activity.max(conversation.activity);
+            self.restore_one(stored);
         }
         let open = match listed {
             true => 0,
@@ -189,6 +159,86 @@ impl<B> UiModel<B> {
         // A `--to` peer the reader blocked is not the one to open.
         self.settle();
         self.off_reactions();
+    }
+
+    /// One conversation the store handed back, listed as at start.
+    fn restore_one(&mut self, stored: Restored) {
+        if stored.messages.is_empty() && !stored.pinned && stored.flags == Flags::default() {
+            return;
+        }
+        let now = self.now;
+        let index = self.conversation(stored.peer);
+        let conversation = &mut self.conversations[index];
+        conversation.messages = stored.messages;
+        conversation.pinned = stored.pinned;
+        conversation.flags = stored.flags;
+        conversation.earlier = stored.earlier;
+        conversation.unread = stored.unread;
+        let len = conversation.messages.len();
+        if stored.unread > 0 && len > 0 {
+            conversation.new_rule = Some(NewRule {
+                at: len - stored.unread.min(len),
+                count: stored.unread,
+            });
+        }
+        conversation.activity = conversation
+            .messages
+            .last()
+            .map_or(0, |message| message.activity);
+        for message in &mut conversation.messages {
+            if cut_off(message) {
+                message.delivery = Some(DeliveryState::Queued);
+                message.note(now, RESTARTED);
+                self.changed.insert((stored.peer, message.activity));
+            }
+            message.leg = None;
+        }
+        self.activity = self.activity.max(conversation.activity);
+    }
+
+    /// History the store gained under the screen while it ran: the rows a
+    /// pull imported (1159), which take keys below every key the store
+    /// held. `stored` is the store's conversations as at start; `below`
+    /// answers what the store holds before a key of a conversation, as
+    /// [`StoreRead::Earlier`] is answered. A conversation the screen does
+    /// not list comes as at start. One loaded down to its oldest message
+    /// gets the rows below it above what it shows; one with more still in
+    /// the store learns how many more, and loads them as the reader
+    /// scrolls. Nothing opens, nothing is read out, the reader stays where
+    /// they were.
+    pub fn grown<E>(
+        &mut self,
+        stored: Vec<Restored>,
+        mut below: impl FnMut([u8; 16], u64) -> Result<(Vec<Message>, usize), E>,
+    ) -> Result<(), E>
+    where
+        B: InputBuffer,
+    {
+        for stored in stored {
+            let Some(c) = self
+                .conversations
+                .iter()
+                .position(|c| c.peer == stored.peer)
+            else {
+                self.restore_one(stored);
+                continue;
+            };
+            let conversation = &self.conversations[c];
+            let (Some(first), earlier) = (conversation.messages.first(), conversation.earlier)
+            else {
+                let newest = stored.messages.last().map_or(0, |m| m.activity);
+                self.prepend(stored.peer, stored.messages, stored.earlier);
+                let conversation = &mut self.conversations[c];
+                conversation.activity = conversation.activity.max(newest);
+                continue;
+            };
+            let (older, more) = below(stored.peer, first.activity)?;
+            match earlier {
+                0 => self.prepend(stored.peer, older, more),
+                _ => self.conversations[c].earlier = older.len() + more,
+            }
+        }
+        Ok(())
     }
 
     /// Everything a fold changed that the store must learn, in the order to

@@ -93,10 +93,7 @@ impl InputBuffer for Line {
 /// A runner's end, folded by the pump.
 enum Finished {
     Send(UiEvent),
-    Pull {
-        result: Result<usize, String>,
-        cursor: Option<u64>,
-    },
+    Pull(runner::PullEnd),
 }
 
 /// Everything the lock guards.
@@ -866,7 +863,7 @@ impl Inner {
                     self.sending = false;
                     self.apply(event);
                 }
-                Finished::Pull { result, cursor } => self.pulled(result, cursor),
+                Finished::Pull(end) => self.pulled(end),
             }
         }
         self.look_at_link();
@@ -1167,22 +1164,35 @@ impl Inner {
             let home = self.home.clone();
             let done = self.finished_tx.clone();
             self.runtime.spawn(async move {
-                let (result, cursor) = runner::pull(&mut tap, &client, &home, BUDGET).await;
-                let _ = done.send(Finished::Pull { result, cursor });
+                let end = runner::pull(&mut tap, &client, &home, BUDGET).await;
+                let _ = done.send(Finished::Pull(end));
             });
         }
     }
 
     /// A pull ended: what it brought is in the store by now (the pump
     /// folded it before the runner saw its fence), so the cursor may pass it.
-    /// `result` counts the new messages it brought, never entries.
-    fn pulled(&mut self, result: Result<usize, String>, cursor: Option<u64>) {
+    /// `result` counts the new messages it brought, never entries. History
+    /// it imported (1159) the runner wrote to the store itself; the model
+    /// takes it from there, as the session lives on in the service and is
+    /// never restarted by closing the app.
+    fn pulled(&mut self, end: runner::PullEnd) {
         self.pulling = false;
-        runner::settle_pull(&self.home, cursor);
-        if let Some(say) = self.pull_line.ended(&result) {
+        runner::settle_pull(&self.home, end.cursor);
+        if end.imported > 0 {
+            self.persist();
+            match runner::show_imported(&mut self.model, &self.store) {
+                Ok(()) => tracing::info!("HOME imported rows={} shown", end.imported),
+                Err(error) => {
+                    tracing::warn!("HOME imported rows={} not shown: {error}", end.imported)
+                }
+            }
+            self.dirty = true;
+        }
+        if let Some(say) = self.pull_line.ended(&end.result) {
             self.say(say);
         }
-        self.apply(UiEvent::FetchDone(result));
+        self.apply(UiEvent::FetchDone(end.result));
     }
 
     fn conversations(&self) -> schema::Conversations {

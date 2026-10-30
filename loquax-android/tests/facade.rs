@@ -784,6 +784,136 @@ async fn a_new_message_shows_on_the_phone_without_a_pull() {
     node.kill().await;
 }
 
+/// Lew's migration (1159): the mailbox imported a Ratspeak history and its
+/// contacts' names, the phone had joined and pulled before. The next pull
+/// brings the imported rows ([`loquax::home::KIND_IMPORTED`]) and the name
+/// as a petname entry, and the same live session lists the conversation
+/// under that name and shows its messages: closing the app restarts
+/// nothing, so a restart is no answer.
+#[tokio::test(flavor = "multi_thread")]
+async fn imported_history_shows_in_the_live_session_under_its_name() {
+    let instance = instance();
+    let rns = tempfile::tempdir().expect("transport config dir");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+    let port = listener.local_addr().expect("its address").port();
+    let home = tempfile::tempdir().expect("home node dir");
+    let code = admit(home.path());
+    let node = HomeNode::start(listener, &instance, rns.path(), home.path()).await;
+
+    let phone = tempfile::tempdir().expect("app dir");
+    let first = Start {
+        dir: phone.path().display().to_string(),
+        server: Some(format!("127.0.0.1:{port}")),
+        code: Some(code),
+        name: Some("Pixel".to_string()),
+        offset: 0,
+        ..Start::default()
+    };
+    let pulled = |session: &Session, what: &str| {
+        session.request(Request::Pull).expect("pull");
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            match session.next_event(Duration::from_millis(500)) {
+                Some(Event::Sync { state, .. }) if state == "done" => break,
+                Some(Event::Sync { state, detail, .. }) if state == "failed" => {
+                    panic!("{what} failed: {detail}")
+                }
+                _ => assert!(std::time::Instant::now() < deadline, "{what} never ended"),
+            }
+        }
+    };
+    let session = tokio::task::spawn_blocking(move || {
+        let session = Session::start(&first).unwrap_or_else(|error| panic!("{error:?}"));
+        pulled(&session, "the pull on open");
+        let list: schema::Conversations =
+            rmp_serde::from_slice(&session.query(schema::Query::Conversations).expect("list"))
+                .expect("decode");
+        assert!(list.conversations.is_empty(), "{list:?}");
+        session
+    })
+    .await
+    .expect("the session");
+
+    // The import on the mailbox: two rows of one conversation, and the
+    // contact's name.
+    let peer = [0x09; 16];
+    let peer_hex = loquax::address::to_hex(&peer);
+    {
+        let identity =
+            loquax::identity::load_or_create(&home.path().join("identity")).expect("identity");
+        let address = loquax::engine::delivery_address(&identity).expect("address");
+        let mut store = loquax::store::Store::open_in(home.path(), address).expect("home store");
+        let row = |id: u8, outbound: bool, at: i64, content: &str| loquax::store::ImportRow {
+            id: [id; 32],
+            outbound,
+            timestamp: Some(at as f64),
+            received_at: Some(at),
+            title: Vec::new(),
+            content: content.to_string(),
+            fields: Vec::new(),
+            delivery: None,
+            signature: loquax::ui::Signature::Unverified,
+            origin_verdict: None,
+            held: None,
+        };
+        let entries: Vec<([u8; 32], i64, Vec<u8>)> = [
+            row(0xa1, false, 1_000, "von Ratspeak"),
+            row(0xa2, true, 2_000, "zurueck"),
+        ]
+        .iter()
+        .map(|r| {
+            let at = r.received_at.unwrap_or(0);
+            (
+                r.id,
+                at,
+                loquax::import::archive::entry("ratspeak", &peer, r),
+            )
+        })
+        .collect();
+        assert_eq!(
+            store.archive_imported(&entries, 1 << 20).expect("archive"),
+            2
+        );
+        let names = [(&peer, "Ratte")];
+        assert_eq!(
+            loquax::home::server::archive_petnames(&mut store, names, 3_000, 1 << 20)
+                .expect("the name"),
+            1
+        );
+    }
+
+    tokio::task::spawn_blocking(move || {
+        pulled(&session, "the pull after the import");
+        let list: schema::Conversations = wait_for(
+            &session,
+            schema::Query::Conversations,
+            20,
+            |c: &schema::Conversations| c.conversations.iter().any(|row| row.peer == peer_hex),
+        );
+        let row = list
+            .conversations
+            .iter()
+            .find(|row| row.peer == peer_hex)
+            .expect("listed");
+        assert!(row.name.starts_with("Ratte"), "{row:?}");
+        assert_eq!(row.last, "zurueck");
+        let messages: schema::Messages = rmp_serde::from_slice(
+            &session
+                .query(schema::Query::Messages {
+                    peer: peer_hex.clone(),
+                })
+                .expect("a query"),
+        )
+        .expect("decode");
+        let bodies: Vec<&str> = messages.messages.iter().map(|m| m.body.as_str()).collect();
+        assert_eq!(bodies, ["von Ratspeak", "zurueck"]);
+        session.stop();
+    })
+    .await
+    .expect("the imported history");
+    node.kill().await;
+}
+
 /// A shared-instance name of this test process's own.
 fn instance() -> String {
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
