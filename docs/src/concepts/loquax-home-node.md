@@ -378,6 +378,24 @@ and photo a phone shows stays on that phone
   contacts file, and never hands it back. A home node from before 1139
   answers `/petname` as malformed, which the client says in its log.
 
+## Imported history
+
+1150. An import on the home node (`loquax import <ratspeak.db copy>`,
+`loquax-import.md`, "Ratspeak history") writes the imported messages into
+the home node's store and appends each as an archive entry of kind 9, all
+conversations in one time order. Ratspeak keeps no signed bytes, so the
+entry is the row as the store keeps it, origin and peer first
+(`loquax/src/import/archive.rs`), never a message anyone signed. The same
+message twice is one entry, so a second import appends nothing.
+
+- **On pull** the client keeps these entries apart from the engine's
+  (`Pull::imported`) and writes them into its store as imported history,
+  one conversation at a time, before the cursor may pass them
+  (`runner::keep_imported`). The screen shows them from its next start.
+- A client from before 1150 finds no message id in such an entry and
+  passes it by, as it passes every kind it does not know. `loquax fetch`
+  keeps no history and passes them by too.
+
 ## The archive
 
 A table of the Loquax store (`archive`, schema 4 of

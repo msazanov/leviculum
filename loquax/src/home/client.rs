@@ -398,6 +398,9 @@ pub struct Pull {
     pub sent: Vec<([u8; 32], u8)>,
     /// Each name the home node heard a peer announce, as archived.
     pub names: Vec<([u8; 16], String)>,
+    /// Each imported history entry, as archived (1150): the frontend's
+    /// store takes them before the cursor passes them.
+    pub imported: Vec<Vec<u8>>,
     /// The cursor to save once what came is kept: `None` when nothing came,
     /// or when the engine did not get through it in time, so the next pull
     /// asks for the same entries again.
@@ -511,6 +514,10 @@ async fn take_in(
             }
             continue;
         }
+        if entry.kind == super::KIND_IMPORTED {
+            pull.imported.push(entry.packed.clone());
+            continue;
+        }
         let id = match entry.kind {
             super::KIND_SENT => leviculum_lxmf::Message::unpack(
                 &entry.packed,
@@ -571,12 +578,13 @@ async fn take_in(
         }
     }
     tracing::info!(
-        "HOME pull cursor={cursor} entries={} messages={} states={} names={} through={last} \
-         settled={}",
+        "HOME pull cursor={cursor} entries={} messages={} states={} names={} imported={} \
+         through={last} settled={}",
         pull.entries,
         pull.messages(),
         pull.states(),
         pull.names.len(),
+        pull.imported.len(),
         pull.cursor.is_some()
     );
     Ok(pull)
@@ -656,6 +664,22 @@ mod tests {
             ],
             first: 1,
         }
+    }
+
+    /// An imported history entry (1150) is kept for the frontend's store,
+    /// not handed to the engine, and the cursor still waits for the fence.
+    #[tokio::test]
+    async fn an_imported_entry_is_kept_for_the_store_and_not_handed_on() {
+        let pulled = Pulled {
+            entries: vec![entry(7, super::super::KIND_IMPORTED, vec![0x9a, 1])],
+            first: 1,
+        };
+        let mut outbox = FakeOutbox::new(vec![OutboxEvent::Fenced { token: 7 }]);
+        let pull = take_in(&mut outbox, 6, pulled).await.expect("pull");
+        assert_eq!(pull.imported, [vec![0x9a, 1]]);
+        assert_eq!(pull.cursor, Some(7));
+        assert_eq!((pull.messages(), pull.states()), (0, 0));
+        assert_eq!(*outbox.commands.borrow(), [Command::Fence { token: 7 }]);
     }
 
     /// The pull hands everything on in order, fenced, and names the cursor

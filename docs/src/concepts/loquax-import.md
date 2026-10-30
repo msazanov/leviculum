@@ -1,6 +1,7 @@
 # Loquax: import and export
 
-Status: slice 1 built (order 1103, Refs #232). The survey of the other
+Status: slice 1 built (order 1103, Refs #232); the Ratspeak history
+importer built (order 1150). The survey of the other
 messengers' formats, read from their public source only, is the draft
 `docs/drafts/loquax-import-2026-10.md` (order 1091); this page keeps what
 is decided and what is built. The user's side is the manual,
@@ -21,7 +22,11 @@ Lew, 2026-10-29:
 - **Adopting a foreign identity** when Loquax already has its own: the old
   identity and its history are set aside, kept and recoverable, and Loquax
   switches. Several identities at once come later.
-- **Ratspeak**: identity only, never history.
+- **Ratspeak**: identity only, never history. Revised by Lew on
+  2026-10-30 for his own move to a Loquax Mailbox: a one-time, lossy
+  history importer for the Ratspeak version he runs, schema 45, marked as
+  imported and not maintained against every Ratspeak release (see
+  "Ratspeak history" below).
 - **`retain_synced_on_node`** is not offered at import. Loquax only warns
   not to run both apps on one identity at the same time.
 - **Attachments** are reported as skipped until Loquax has an attachment
@@ -52,6 +57,7 @@ From the draft, kept:
 | raw 64-byte identity file (NomadNet, MeshChat, MeshChatX, Sideband, Ratspeak unsealed) | identity |
 | pasted Base32 key, or a file with one | identity |
 | Ratspeak `identity.enc` | listed as protected, not read |
+| a copy of Ratspeak's `ratspeak.db`, schema 45 (order 1150) | contacts as petnames, blocks, the propagation node, the history of one identity, unsigned |
 
 The code is `loquax/src/import/` and `loquax/src/export.rs`, behind the
 `history` feature; the core sees neither files nor formats.
@@ -107,6 +113,48 @@ history stays under its address, and moving the file back switches back.
 On a client of a home node, adoption is refused: the client answers on the
 home node's address.
 
+### Ratspeak history
+
+Order 1150. `loquax import <copy of ratspeak.db>` reads a database the
+user copied out; Ratspeak's data directory is not scanned for it, and the
+file is opened read-only. The reader is written from Ratspeak's schema at
+commit 7da1fe3 (`crates/ratspeak-db/src/db.rs`, schema 45) and refuses any
+other version with both numbers: "written for Ratspeak schema 45, this db
+is 46". The citations are in `loquax/src/import/ratspeak.rs`.
+
+- **Which identity.** A Ratspeak database holds one history per profile.
+  The import takes the profile whose address is Loquax's (adopt it first
+  from Ratspeak's Base32 export with `loquax import --key`), or the only
+  profile there is; with several and none matching it refuses and says
+  how. The dry run lists every profile with its count and which one is
+  imported.
+- **What comes.** Messages in both directions, with their id, text, title
+  and, for a sent one, where it stood (still sending in Ratspeak is failed
+  in Loquax, which will never send it); contacts with Ratspeak's name as
+  the petname (Loquax's own word wins), blocks, the propagation node when
+  Loquax has none, the display name offered. A message the user deleted in
+  Ratspeak (`lxmf_user_deleted`) stays deleted and is counted.
+- **What is lost.** Ratspeak keeps no packed message, so every row is
+  unverified, and its ledger says `imported from Ratspeak` and
+  `imported, no signature: Ratspeak keeps none`. No fields: replies,
+  reactions, games and telemetry are gone. Attachments, images and voice
+  notes are counted as skipped. A received message has only Ratspeak's
+  receive time, no sender's clock. Channels (Reticulum Relay Chat) are not
+  LXMF and are not read.
+- **Time.** Ratspeak's `timestamp` is unix seconds (`SystemTime` since the
+  epoch, or the LXMF timestamp of a sent message), which is UTC already.
+  The database records no zone and the import applies none, on any
+  machine, across any change of daylight saving time. The store keeps
+  whole seconds, so within one second a received message may sort before
+  a sent one it followed.
+- **On a Loquax Mailbox** (a store with an admitted device or archive
+  entries), the imported messages are also appended to the archive as
+  entries of kind 9, all conversations in one time order, so every client
+  takes them on its next `/sync` and writes them into its own store
+  (`loquax-home-node.md`, "Imported history"). An import that would push
+  the archive past its cap appends nothing and says so, since the cap
+  evicts the oldest entries.
+
 ### The export
 
 `loquax export <dir>` writes NomadNet's tree with LXMF's
@@ -138,6 +186,10 @@ exact, and the cure is the next item below.
 - MeshChat and MeshChatX, the shared tables and the MeshChatX JSON export.
 - Columba's `.columba` (AES-GCM, PBKDF2), with the id check the draft
   names.
-- Ratspeak `identity.enc` and `.rsi` (Argon2id).
+- Ratspeak `identity.enc` and `.rsi` (Argon2id). Not in 1150: no Argon2
+  crate is in the lock, and Ratspeak exports the key as Base32 once
+  unlocked, which the existing paste path takes.
+- A NomadNet or Loquax export import on a mailbox writes the store only;
+  its archive step needs the packed bytes carried, not the rebuilt row.
 - The palette's `import` as a screen with the three questions and a
   pasted key, instead of contacts and history only.

@@ -8,6 +8,11 @@
 //! propagation node and the history. The loquax export writes NomadNet's
 //! tree (`crate::export`), so the same reader takes it back.
 //!
+//! Ratspeak's history comes from a copy of its `ratspeak.db` the user names
+//! ([`ratspeak`], 1150): one schema, lossy, every row marked as imported
+//! with no signature. On a Loquax Mailbox the imported rows go into the
+//! archive too ([`archive`]), so its clients take them on their next pull.
+//!
 //! # The boundary
 //!
 //! The scan looks only at the apps' documented default locations, one level
@@ -29,9 +34,11 @@
 //! identity, `crate::store`): it is the live history once that identity is
 //! loquax's, and waits in the store until then.
 
+pub mod archive;
 pub mod key;
 mod mpack;
 pub mod nomadnet;
+pub mod ratspeak;
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -79,6 +86,8 @@ pub enum Source {
     Identity([u8; key::KEY_LEN]),
     /// Ratspeak's passcode vault: found and named, not read in this slice.
     Protected,
+    /// A copy of Ratspeak's message database, schema 45.
+    Ratspeak(ratspeak::Db),
 }
 
 /// One source found, as the screen lists it.
@@ -98,6 +107,7 @@ impl Found {
     pub fn line(&self) -> String {
         let what = match (&self.source, self.address) {
             (Source::Protected, _) => "identity protected by a passcode, not read".to_string(),
+            (Source::Ratspeak(_), _) => format!("history of {} identities", self.contacts),
             (_, Some(address)) => format!("address <{}>", to_hex(&address)),
             (_, None) => "no identity".to_string(),
         };
@@ -105,6 +115,7 @@ impl Found {
             Source::NomadNet(_) => {
                 format!("  {} messages, {} contacts", self.messages, self.contacts)
             }
+            Source::Ratspeak(_) => format!("  {} messages", self.messages),
             _ => String::new(),
         };
         format!("{:<9} {}  {what}{counts}", self.app, self.path.display())
@@ -120,7 +131,7 @@ impl Found {
         match &self.source {
             Source::NomadNet(tree) => tree.identity(),
             Source::Identity(key) => Ok(Some(*key)),
-            Source::Protected => Ok(None),
+            Source::Protected | Source::Ratspeak(_) => Ok(None),
         }
     }
 
@@ -128,6 +139,7 @@ impl Found {
     fn origin(&self) -> &'static str {
         match self.app {
             "Loquax" => "loquax",
+            "Ratspeak" => "ratspeak",
             _ => "nomadnet",
         }
     }
@@ -299,6 +311,9 @@ pub fn sniff(path: &Path) -> Result<Found, ImportError> {
         return Ok(tree_found(app, tree));
     }
     let meta = std::fs::metadata(path).map_err(|e| ImportError::new(path, e))?;
+    if ratspeak::looks_like(path) {
+        return ratspeak_found(ratspeak::Db::open(path)?);
+    }
     if meta.len() == key::KEY_LEN as u64 {
         return raw_found("file", path)
             .ok_or_else(|| ImportError::new(path, "64 bytes, but not an identity"));
@@ -313,8 +328,23 @@ pub fn sniff(path: &Path) -> Result<Found, ImportError> {
     }
     Err(ImportError::new(
         path,
-        "not an identity file, a NomadNet tree or a Loquax export",
+        "not an identity file, a NomadNet tree, a Loquax export or a Ratspeak database",
     ))
+}
+
+/// A Ratspeak database as the list shows it: its messages, and how many
+/// identities hold them (in `contacts`, which a database source has no other
+/// use for).
+fn ratspeak_found(db: ratspeak::Db) -> Result<Found, ImportError> {
+    let profiles = db.profiles()?;
+    Ok(Found {
+        app: "Ratspeak",
+        path: db.path().to_path_buf(),
+        address: None,
+        messages: profiles.iter().map(|p| p.messages).sum(),
+        contacts: profiles.len(),
+        source: Source::Ratspeak(db),
+    })
 }
 
 /// A key the user pasted, or a file with one.
@@ -373,12 +403,20 @@ pub struct Report {
     pub adopted: Option<key::Adopted>,
     /// Files that are not readable messages, with the reason.
     pub refused: Vec<(PathBuf, String)>,
+    /// Messages the user had deleted in the source app, left deleted.
+    pub deleted_skipped: usize,
+    /// On a Loquax Mailbox: the archive entries appended (or, in a dry run,
+    /// the imported messages that would be offered to the archive).
+    pub archived: Option<usize>,
+    /// What the source says about itself: the identities a database holds
+    /// and which one is imported, and how its times were read.
+    pub notes: Vec<String>,
 }
 
 impl Report {
     /// The lines that tell the user what happened, or would.
     pub fn lines(&self, dry_run: bool) -> Vec<String> {
-        let mut out = Vec::new();
+        let mut out = self.notes.clone();
         let would = |done: &str, maybe: &str| match dry_run {
             true => maybe.to_string(),
             false => done.to_string(),
@@ -407,6 +445,24 @@ impl Report {
                 would("written", "to write"),
                 to_hex(&address)
             ));
+        }
+        if self.deleted_skipped > 0 {
+            out.push(format!(
+                "deleted: {} messages deleted there stay deleted",
+                self.deleted_skipped
+            ));
+        }
+        if let Some(archived) = self.archived {
+            out.push(match dry_run {
+                true => format!(
+                    "mailbox archive: {archived} imported messages offered, its clients take \
+                     them on their next sync"
+                ),
+                false => format!(
+                    "mailbox archive: {archived} entries appended, its clients take them on \
+                     their next sync"
+                ),
+            });
         }
         if self.attachments_skipped > 0 {
             out.push(format!(
@@ -477,6 +533,9 @@ pub fn import(
             history(found, tree, home, &key, dry_run, &mut report)?;
         }
     }
+    if let Source::Ratspeak(db) = &found.source {
+        ratspeak_import(found, db, home, choices, dry_run, &mut report)?;
+    }
     if choices.identity {
         let key = key.ok_or_else(|| ImportError::new(&found.path, "no identity to adopt"))?;
         if crate::home::client::load_client(home)
@@ -506,8 +565,27 @@ fn contacts(
     dry_run: bool,
     report: &mut Report,
 ) -> Result<(), ImportError> {
+    merge_contacts(home, tree.contacts()?, dry_run, report)?;
+    let settings = tree.settings();
+    take_settings(
+        home,
+        settings.display_name,
+        settings.propagation_node,
+        dry_run,
+        report,
+    )
+}
+
+/// Each contact the source names, merged with ours: the reader's own word
+/// wins.
+fn merge_contacts(
+    home: &Path,
+    contacts: Vec<Contact>,
+    dry_run: bool,
+    report: &mut Report,
+) -> Result<(), ImportError> {
     let have = load_contacts(home).map_err(|e| ImportError::new(home, e))?;
-    for theirs in tree.contacts()? {
+    for theirs in contacts {
         let ours = have.of(&theirs.peer);
         // The reader's own word wins: a petname loquax has stays.
         let merged = Contact {
@@ -525,9 +603,20 @@ fn contacts(
             save_contact(home, &merged).map_err(|e| ImportError::new(home, e))?;
         }
     }
-    let settings = tree.settings();
-    report.display_name = settings.display_name;
-    if let Some(pn) = settings.propagation_node {
+    Ok(())
+}
+
+/// The source's own name, offered, and its propagation node, taken only when
+/// loquax has none.
+fn take_settings(
+    home: &Path,
+    display_name: Option<String>,
+    propagation_node: Option<[u8; 16]>,
+    dry_run: bool,
+    report: &mut Report,
+) -> Result<(), ImportError> {
+    report.display_name = display_name;
+    if let Some(pn) = propagation_node {
         let config = crate::config::load(home).map_err(|e| ImportError::new(home, e))?;
         if config.propagation_node.is_none() {
             report.propagation_node = Some(pn);
@@ -567,29 +656,14 @@ fn history(
     for conversation in tree.conversations()? {
         let read = tree.read(&conversation, Some(&own), address);
         report.attachments_skipped += read.attachments;
-        let counts = match (&mut store, &peek) {
-            (Some(store), _) => store
-                .import_conversation(conversation.peer, found.origin(), &read.rows)
-                .map_err(store_error)?,
-            (None, peek) => {
-                let mut counts = ImportCounts::default();
-                let mut seen = BTreeSet::new();
-                for row in &read.rows {
-                    let held = !seen.insert((row.id, row.outbound))
-                        || match peek {
-                            Some(store) => {
-                                store.holds(&row.id, row.outbound).map_err(store_error)?
-                            }
-                            None => false,
-                        };
-                    match held {
-                        true => counts.held += 1,
-                        false => counts.new += 1,
-                    }
-                }
-                counts
-            }
-        };
+        let counts = write_conversation(
+            &mut store,
+            &peek,
+            conversation.peer,
+            found.origin(),
+            &read.rows,
+        )
+        .map_err(store_error)?;
         report.conversations.push(ConversationCounts {
             peer: conversation.peer,
             new: counts.new,
@@ -598,6 +672,217 @@ fn history(
         });
         report.refused.extend(read.unreadable);
     }
+    Ok(())
+}
+
+/// One conversation's rows into `store`, or, in a dry run (`store` is
+/// `None`), counted against what `peek` holds.
+fn write_conversation(
+    store: &mut Option<Store>,
+    peek: &Option<Store>,
+    peer: [u8; 16],
+    origin: &str,
+    rows: &[crate::store::ImportRow],
+) -> Result<ImportCounts, crate::store::StoreError> {
+    if let Some(store) = store {
+        return store.import_conversation(peer, origin, rows);
+    }
+    let mut counts = ImportCounts::default();
+    let mut seen = BTreeSet::new();
+    for row in rows {
+        let held = !seen.insert((row.id, row.outbound))
+            || match peek {
+                Some(store) => store.holds(&row.id, row.outbound)?,
+                None => false,
+            };
+        match held {
+            true => counts.held += 1,
+            false => counts.new += 1,
+        }
+    }
+    Ok(counts)
+}
+
+/// The rule the Ratspeak import reads times by, said in its report.
+pub const RATSPEAK_TIME_RULE: &str = "times: Ratspeak stores unix seconds, which are UTC; \
+     taken as they are, no zone applied";
+
+/// Ratspeak's database: the identity whose address is Loquax's, or the only
+/// one it holds, with its contacts, blocks, settings and history; on a
+/// Loquax Mailbox the history goes into the archive too.
+fn ratspeak_import(
+    found: &Found,
+    db: &ratspeak::Db,
+    home: &Path,
+    choices: Choices,
+    dry_run: bool,
+    report: &mut Report,
+) -> Result<(), ImportError> {
+    let profiles = db.profiles()?;
+    let current = current_address(home);
+    let chosen = match profiles
+        .iter()
+        .find(|p| p.address.is_some() && p.address == current)
+    {
+        Some(profile) => Some(profile),
+        None if profiles.len() == 1 && profiles[0].address.is_some() => profiles.first(),
+        None => None,
+    };
+    report.notes.push(format!(
+        "Ratspeak schema {}, {} identities:",
+        ratspeak::SCHEMA,
+        profiles.len()
+    ));
+    for profile in &profiles {
+        let line = ratspeak::profile_line(profile, Some(profile) == chosen);
+        report.notes.push(line);
+    }
+    let Some(profile) = chosen else {
+        let reason = match current {
+            Some(address) => format!(
+                "none of its identities is Loquax's <{}>; adopt the one to import first \
+                 (Ratspeak exports it as Base32: loquax import --key), then run again",
+                to_hex(&address)
+            ),
+            None => "it holds several identities and Loquax has none to match; adopt the one \
+                     to import first (Ratspeak exports it as Base32: loquax import --key), then \
+                     run again"
+                .to_string(),
+        };
+        if dry_run {
+            report.refused.push((found.path.clone(), reason));
+            return Ok(());
+        }
+        return Err(ImportError::new(&found.path, reason));
+    };
+    // `chosen` only ever names a profile with an address.
+    let Some(address) = profile.address else {
+        return Err(ImportError::new(
+            &found.path,
+            "the identity names no address",
+        ));
+    };
+    if choices.contacts {
+        merge_contacts(home, db.contacts(profile)?, dry_run, report)?;
+        take_settings(
+            home,
+            profile.display_name.clone(),
+            profile.propagation_node,
+            dry_run,
+            report,
+        )?;
+    }
+    if !choices.history {
+        return Ok(());
+    }
+    report.notes.push(RATSPEAK_TIME_RULE.to_string());
+    report.history_address = Some(address);
+    let read = db.history(profile, address)?;
+    report.deleted_skipped = read.deleted;
+    report
+        .refused
+        .extend(read.unreadable.iter().map(|(id, reason)| {
+            (
+                PathBuf::from(format!("{} message {id:?}", found.path.display())),
+                reason.clone(),
+            )
+        }));
+    let store_error = |e: crate::store::StoreError| ImportError::new(&home.join(STORE_FILE), e);
+    let mut store = match dry_run {
+        true => None,
+        false => {
+            leviculum_std::create_secret_dir_all(home).map_err(|e| ImportError::new(home, e))?;
+            Some(Store::open_in(home, address).map_err(store_error)?)
+        }
+    };
+    let peek = match dry_run {
+        true => Store::open_read_only(&home.join(STORE_FILE), address).map_err(store_error)?,
+        false => None,
+    };
+    for conversation in &read.conversations {
+        report.attachments_skipped += conversation.attachments;
+        let counts = write_conversation(
+            &mut store,
+            &peek,
+            conversation.peer,
+            found.origin(),
+            &conversation.rows,
+        )
+        .map_err(store_error)?;
+        report.conversations.push(ConversationCounts {
+            peer: conversation.peer,
+            new: counts.new,
+            held: counts.held,
+            unreadable: 0,
+        });
+    }
+    let mailbox = match (&store, &peek) {
+        (Some(store), _) | (None, Some(store)) => {
+            store.serves_as_home_node().map_err(store_error)?
+        }
+        (None, None) => false,
+    };
+    if mailbox {
+        archive_history(home, found.origin(), &read, store.as_mut(), report)?;
+    }
+    Ok(())
+}
+
+/// On a Loquax Mailbox: every imported message of `read` as an archive
+/// entry, all conversations in one time order, so the clients take them on
+/// their next pull. A message the archive holds already is not appended
+/// again. An import that would push the archive past its cap writes no
+/// entry and says so: the cap evicts the oldest entries, which may be ones a
+/// client has not pulled yet.
+fn archive_history(
+    home: &Path,
+    origin: &str,
+    read: &ratspeak::History,
+    store: Option<&mut Store>,
+    report: &mut Report,
+) -> Result<(), ImportError> {
+    let mut rows: Vec<(&[u8; 16], &crate::store::ImportRow)> = read
+        .conversations
+        .iter()
+        .flat_map(|c| c.rows.iter().map(move |row| (&c.peer, row)))
+        .collect();
+    let when = |row: &crate::store::ImportRow| {
+        row.timestamp
+            .or(row.received_at.map(|secs| secs as f64))
+            .unwrap_or(0.0)
+    };
+    rows.sort_by(|(_, a), (_, b)| when(a).total_cmp(&when(b)).then(a.id.cmp(&b.id)));
+    let Some(store) = store else {
+        report.archived = Some(rows.len());
+        return Ok(());
+    };
+    let entries: Vec<([u8; 32], i64, Vec<u8>)> = rows
+        .iter()
+        .map(|(peer, row)| {
+            let at = row.received_at.unwrap_or(0);
+            (row.id, at, archive::entry(origin, peer, row))
+        })
+        .collect();
+    let config = crate::config::load(home).map_err(|e| ImportError::new(home, e))?;
+    let cap = config
+        .archive_cap_mb
+        .unwrap_or(crate::home::DEFAULT_ARCHIVE_CAP_MB)
+        .saturating_mul(1 << 20);
+    let store_error = |e: crate::store::StoreError| ImportError::new(&home.join(STORE_FILE), e);
+    let held = store.archive_bytes().map_err(store_error)?;
+    let adding: u64 = entries.iter().map(|(_, _, bytes)| bytes.len() as u64).sum();
+    if held.saturating_add(adding) > cap {
+        report.refused.push((
+            home.join(STORE_FILE),
+            format!(
+                "the mailbox archive holds {held} bytes of its cap of {cap}; the {adding} \
+                 bytes of imported history would evict entries, so none was appended: raise \
+                 archive_cap_mb and run the import again"
+            ),
+        ));
+        return Ok(());
+    }
+    report.archived = Some(store.archive_imported(&entries, cap).map_err(store_error)?);
     Ok(())
 }
 
@@ -611,12 +896,19 @@ fn log_report(home: &Path, found: &Found, report: &Report) {
     let source = found.origin();
     let mut lines = vec![format!(
         "IMPORT source={source} path={} address={} contacts_new={} contacts_held={} \
-         attachments_skipped={} adopted={} t={t}",
+         attachments_skipped={} deleted_skipped={} archived={} adopted={} t={t}",
         found.path.display(),
-        found.address.map_or("none".to_string(), |a| to_hex(&a)),
+        found
+            .address
+            .or(report.history_address)
+            .map_or("none".to_string(), |a| to_hex(&a)),
         report.contacts_new,
         report.contacts_held,
         report.attachments_skipped,
+        report.deleted_skipped,
+        report
+            .archived
+            .map_or("none".to_string(), |n| n.to_string()),
         matches!(report.adopted, Some(key::Adopted::Switched { .. })),
     )];
     for c in &report.conversations {
@@ -687,7 +979,7 @@ pub fn ask_and_import<R: BufRead, W: Write>(
     let mut adopted = false;
     for source in found.iter().filter(|f| f.importable()) {
         writeln!(output, "\n{}", source.line())?;
-        let tree = matches!(source.source, Source::NomadNet(_));
+        let tree = matches!(source.source, Source::NomadNet(_) | Source::Ratspeak(_));
         let contacts = tree && yes_no(input, output, "Import contacts and names? [Y/n] ")?;
         let history = tree && yes_no(input, output, "Import the history? [Y/n] ")?;
         let current = current_address(home);

@@ -805,3 +805,522 @@ fn the_command_line_dry_run_lists_and_the_import_asks() {
     );
     assert_eq!(import::current_address(&home), Some(address(&key)));
 }
+
+// Ratspeak (1150): a copy of `ratspeak.db` at schema 45, written by the test
+// from the schema (`loquax::import::ratspeak`'s table), never a real one.
+
+/// 2026-10-25 00:30 UTC, 02:30 in Berlin's summer time; an hour later it is
+/// 01:30 UTC and 02:30 again, in winter time: the same wall clock twice.
+const BEFORE_DST_END: f64 = 1_792_888_200.0;
+const AFTER_DST_END: f64 = BEFORE_DST_END + 3_600.0;
+
+struct Ratspeak {
+    db: PathBuf,
+    own: Identity,
+    peer: Identity,
+    other: Identity,
+    /// Sent, received, received with a file: the peer's conversation.
+    ids: Vec<[u8; 32]>,
+    deleted: [u8; 32],
+    to_carol: [u8; 32],
+    others_message: [u8; 32],
+}
+
+fn ratspeak_db(base: &Path, version: i64) -> Ratspeak {
+    let db = base.join("ratspeak-copy.db");
+    let conn = rusqlite::Connection::open(&db).expect("db");
+    conn.execute_batch(
+        "CREATE TABLE schema_version (version INTEGER NOT NULL);
+         CREATE TABLE identities (hash TEXT PRIMARY KEY, lxmf_hash TEXT, nickname TEXT DEFAULT '',
+             display_name TEXT DEFAULT '', status TEXT NOT NULL DEFAULT '', created_at REAL NOT NULL,
+             last_used REAL, is_active INTEGER DEFAULT 0, propagation_node TEXT DEFAULT '');
+         CREATE TABLE contacts (dest_hash TEXT NOT NULL, identity_id TEXT DEFAULT '',
+             display_name TEXT, identity_pubkey TEXT, first_seen REAL, last_seen REAL,
+             trust TEXT DEFAULT 'pending', notes TEXT DEFAULT '', UNIQUE(dest_hash, identity_id));
+         CREATE TABLE messages (id TEXT NOT NULL, source TEXT NOT NULL, destination TEXT NOT NULL,
+             content TEXT DEFAULT '', title TEXT DEFAULT '', timestamp REAL NOT NULL,
+             state TEXT DEFAULT 'unknown', direction TEXT DEFAULT 'outbound', rtt_ms REAL,
+             hops INTEGER, path TEXT, identity_id TEXT NOT NULL DEFAULT '',
+             attachment_name TEXT DEFAULT '', attachment_stored_name TEXT DEFAULT '',
+             image_name TEXT DEFAULT '', image_stored_name TEXT DEFAULT '',
+             reply_to_id TEXT DEFAULT '', reply_to_preview TEXT DEFAULT '',
+             delivery_method TEXT, audio_mode INTEGER,
+             audio_stored_name TEXT NOT NULL DEFAULT '', PRIMARY KEY (id, identity_id));
+         CREATE TABLE blocked_contacts (dest_hash TEXT NOT NULL, identity_id TEXT NOT NULL DEFAULT '',
+             display_name TEXT DEFAULT '', blocked_at REAL, PRIMARY KEY (dest_hash, identity_id));
+         CREATE TABLE lxmf_user_deleted (identity_id TEXT NOT NULL, message_id BLOB NOT NULL,
+             deleted_at INTEGER NOT NULL, PRIMARY KEY(identity_id, message_id));",
+    )
+    .expect("schema");
+    conn.execute("INSERT INTO schema_version VALUES (?1)", [version])
+        .expect("version");
+    let (own, peer, other) = (identity(), identity(), identity());
+    let (me, them, theirs) = (address(&own), address(&peer), address(&other));
+    let (own_id, other_id) = (hex(own.hash()), hex(other.hash()));
+    for (hash, lxmf, name, pn) in [
+        (&own_id, me, "Rat Me", hex(&[0xee; 16])),
+        (&other_id, theirs, "Second", String::new()),
+    ] {
+        conn.execute(
+            "INSERT INTO identities (hash, lxmf_hash, display_name, created_at, propagation_node) \
+             VALUES (?1, ?2, ?3, 0.0, ?4)",
+            rusqlite::params![hash, hex(&lxmf), name, pn],
+        )
+        .expect("identity");
+    }
+    for (peer, owner, name) in [
+        (them, &own_id, Some("Bob")),
+        ([0xcc; 16], &own_id, Some("Carol")),
+        ([0xdd; 16], &other_id, Some("Zed")),
+    ] {
+        conn.execute(
+            "INSERT INTO contacts (dest_hash, identity_id, display_name, trust) \
+             VALUES (?1, ?2, ?3, 'trusted')",
+            rusqlite::params![hex(&peer), owner, name],
+        )
+        .expect("contact");
+    }
+    conn.execute(
+        "INSERT INTO blocked_contacts (dest_hash, identity_id, blocked_at) VALUES (?1, ?2, 1.0)",
+        rusqlite::params![hex(&[0xbb; 16]), own_id],
+    )
+    .expect("blocked");
+    let insert = |id: &str,
+                  source: [u8; 16],
+                  destination: [u8; 16],
+                  content: &str,
+                  ts: f64,
+                  state: &str,
+                  direction: &str,
+                  owner: &str,
+                  attachment: &str| {
+        conn.execute(
+            "INSERT INTO messages (id, source, destination, content, timestamp, state, \
+             direction, identity_id, attachment_name) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![
+                id,
+                hex(&source),
+                hex(&destination),
+                content,
+                ts,
+                state,
+                direction,
+                owner,
+                attachment
+            ],
+        )
+        .expect("message");
+    };
+    let ids = vec![[0x11; 32], [0x22; 32], [0x33; 32]];
+    let (deleted, to_carol, others_message) = ([0x44; 32], [0x55; 32], [0x66; 32]);
+    let t = BEFORE_DST_END;
+    insert(
+        &hex(&ids[0]),
+        me,
+        them,
+        "sent before",
+        t,
+        "delivered",
+        "outbound",
+        &own_id,
+        "",
+    );
+    insert(
+        &hex(&ids[1]),
+        them,
+        me,
+        "received after",
+        AFTER_DST_END,
+        "read",
+        "inbound",
+        &own_id,
+        "",
+    );
+    insert(
+        &hex(&ids[2]),
+        them,
+        me,
+        "with a file",
+        AFTER_DST_END + 60.0,
+        "received",
+        "inbound",
+        &own_id,
+        "notes.txt",
+    );
+    insert(
+        &hex(&deleted),
+        them,
+        me,
+        "deleted there",
+        AFTER_DST_END + 120.0,
+        "received",
+        "inbound",
+        &own_id,
+        "",
+    );
+    insert(
+        &hex(&to_carol),
+        me,
+        [0xcc; 16],
+        "still sending",
+        t + 30.0,
+        "sending",
+        "outbound",
+        &own_id,
+        "",
+    );
+    insert(
+        "local-1",
+        me,
+        them,
+        "not an LXMF id",
+        t + 40.0,
+        "sending",
+        "outbound",
+        &own_id,
+        "",
+    );
+    insert(
+        &hex(&others_message),
+        [0xdd; 16],
+        theirs,
+        "for the second",
+        t,
+        "received",
+        "inbound",
+        &other_id,
+        "",
+    );
+    conn.execute(
+        "INSERT INTO lxmf_user_deleted (identity_id, message_id, deleted_at) VALUES (?1, ?2, 9)",
+        rusqlite::params![own_id, &deleted[..]],
+    )
+    .expect("deleted");
+    Ratspeak {
+        db,
+        own,
+        peer,
+        other,
+        ids,
+        deleted,
+        to_carol,
+        others_message,
+    }
+}
+
+/// A loquax home that already uses `identity`, as after `import --key`.
+fn home_with(base: &Path, identity: &Identity) -> PathBuf {
+    let home = base.join("loquax");
+    std::fs::create_dir_all(&home).expect("home");
+    let found = import::pasted("pasted", Path::new("(stdin)"), raw(identity));
+    let choices = Choices {
+        contacts: false,
+        history: false,
+        identity: true,
+    };
+    import::import(&found, &home, choices, false).expect("adopt");
+    home
+}
+
+#[test]
+fn ratspeak_a_dry_run_lists_its_identities_and_counts_and_writes_nothing() {
+    let dir = tempfile::tempdir().expect("dir");
+    let rat = ratspeak_db(dir.path(), 45);
+    let home = home_with(dir.path(), &rat.own);
+    let before = files_under(&home);
+    let found = import::sniff(&rat.db).expect("a Ratspeak db");
+    assert!(matches!(found.source, Source::Ratspeak(_)));
+    assert_eq!((found.messages, found.contacts), (7, 2), "{}", found.line());
+    let report = import::import(&found, &home, ALL, true).expect("dry run");
+    assert_eq!(files_under(&home), before, "a dry run writes nothing");
+    let lines = report.lines(true).join("\n");
+    assert!(
+        lines.contains("Ratspeak schema 45, 2 identities"),
+        "{lines}"
+    );
+    let own = format!(
+        "<{}> \"Rat Me\"  6 messages  imported",
+        hex(&address(&rat.own))
+    );
+    let other = format!(
+        "<{}> \"Second\"  1 messages  not imported",
+        hex(&address(&rat.other))
+    );
+    assert!(lines.contains(&own), "{lines}");
+    assert!(lines.contains(&other), "{lines}");
+    assert!(lines.contains(import::RATSPEAK_TIME_RULE), "{lines}");
+    let counts: Vec<([u8; 16], usize)> = report
+        .conversations
+        .iter()
+        .map(|c| (c.peer, c.new))
+        .collect();
+    assert_eq!(counts, [(address(&rat.peer), 3), ([0xcc; 16], 1)]);
+    assert_eq!(report.deleted_skipped, 1);
+    assert_eq!(report.attachments_skipped, 1);
+    assert_eq!(report.refused.len(), 1, "the row with no LXMF id");
+    assert_eq!(
+        report.contacts_new, 3,
+        "Bob, Carol, the blocked peer; not Zed"
+    );
+    assert_eq!(report.propagation_node, Some([0xee; 16]));
+    assert_eq!(report.archived, None, "not a mailbox");
+}
+
+#[test]
+fn ratspeak_history_comes_over_unsigned_in_utc_and_deleted_stays_deleted() {
+    let dir = tempfile::tempdir().expect("dir");
+    let rat = ratspeak_db(dir.path(), 45);
+    let home = home_with(dir.path(), &rat.own);
+    let found = import::sniff(&rat.db).expect("db");
+    let report = import::import(&found, &home, ALL, false).expect("import");
+    let (me, them) = (address(&rat.own), address(&rat.peer));
+    assert_eq!(report.history_address, Some(me));
+    let messages = conversation(&home, me, them);
+    let bodies: Vec<&str> = messages.iter().map(|m| m.body.as_str()).collect();
+    assert_eq!(bodies, ["sent before", "received after", "with a file"]);
+    let ids: Vec<[u8; 32]> = messages.iter().filter_map(|m| m.id).collect();
+    assert_eq!(ids, rat.ids);
+    assert!(!ids.contains(&rat.deleted));
+    // The same wall clock in Berlin twice, an hour apart in UTC: the values
+    // are taken as the unix seconds they are, whatever zone this runs in.
+    let secs: Vec<i64> = messages
+        .iter()
+        .filter_map(|m| m.at.map(|at| at.unix_secs))
+        .collect();
+    assert_eq!(
+        secs,
+        [
+            BEFORE_DST_END as i64,
+            AFTER_DST_END as i64,
+            AFTER_DST_END as i64 + 60
+        ]
+    );
+    assert!(messages[0].outbound && !messages[1].outbound);
+    assert_eq!(messages[0].delivery, Some(DeliveryState::Delivered));
+    for message in &messages {
+        assert_eq!(message.signature, Signature::Unverified);
+        let ledger: Vec<&str> = message.ledger.iter().map(|e| e.what.as_str()).collect();
+        assert_eq!(
+            ledger,
+            [
+                "imported from Ratspeak",
+                "imported, no signature: Ratspeak keeps none"
+            ]
+        );
+    }
+    let carol = conversation(&home, me, [0xcc; 16]);
+    assert_eq!(carol.len(), 1);
+    assert_eq!(carol[0].id, Some(rat.to_carol));
+    assert_eq!(
+        carol[0].delivery,
+        Some(DeliveryState::Failed),
+        "Ratspeak was still sending it; Loquax never will"
+    );
+    // The second identity's history is not this one's.
+    assert!(conversation(&home, me, [0xdd; 16]).is_empty());
+    let contacts = loquax::names::load_contacts(&home).expect("contacts");
+    assert_eq!(
+        contacts.petnames.get(&them).map(String::as_str),
+        Some("Bob")
+    );
+    assert_eq!(
+        contacts.petnames.get(&[0xcc; 16]).map(String::as_str),
+        Some("Carol")
+    );
+    assert!(!contacts.petnames.contains_key(&[0xdd; 16]));
+    assert!(contacts.blocked.contains(&[0xbb; 16]));
+    let log = std::fs::read_to_string(home.join(import::LOG_FILE)).expect("log");
+    assert!(log.contains("IMPORT source=ratspeak"), "{log}");
+    assert!(log.contains("deleted_skipped=1"), "{log}");
+    assert!(!log.contains("sent before"), "no content in the log: {log}");
+}
+
+#[test]
+fn ratspeak_a_second_run_is_idempotent() {
+    let dir = tempfile::tempdir().expect("dir");
+    let rat = ratspeak_db(dir.path(), 45);
+    let home = home_with(dir.path(), &rat.own);
+    let found = import::sniff(&rat.db).expect("db");
+    import::import(&found, &home, ALL, false).expect("first");
+    let store = Store::open_in(&home, address(&rat.own)).expect("store");
+    let count = store.message_count().expect("count");
+    drop(store);
+    let again = import::import(&found, &home, ALL, false).expect("again");
+    let news: Vec<(usize, usize)> = again
+        .conversations
+        .iter()
+        .map(|c| (c.new, c.held))
+        .collect();
+    assert_eq!(news, [(0, 3), (0, 1)]);
+    assert_eq!((again.contacts_new, again.contacts_held), (0, 3));
+    let store = Store::open_in(&home, address(&rat.own)).expect("store");
+    assert_eq!(store.message_count().expect("count"), count);
+}
+
+#[test]
+fn ratspeak_another_schema_is_refused_with_both_numbers() {
+    let dir = tempfile::tempdir().expect("dir");
+    let rat = ratspeak_db(dir.path(), 46);
+    let error = match import::sniff(&rat.db) {
+        Err(error) => error,
+        Ok(_) => panic!("schema 46 was read"),
+    };
+    assert!(
+        error
+            .detail
+            .contains("written for Ratspeak schema 45, this db is 46"),
+        "{error}"
+    );
+}
+
+#[test]
+fn ratspeak_imports_the_identity_loquax_uses_and_refuses_to_guess() {
+    let dir = tempfile::tempdir().expect("dir");
+    let rat = ratspeak_db(dir.path(), 45);
+    let found = import::sniff(&rat.db).expect("db");
+    // Loquax answers on an address none of the db's identities has.
+    let stranger = identity();
+    let home = home_with(dir.path(), &stranger);
+    let error = match import::import(&found, &home, ALL, false) {
+        Err(error) => error,
+        Ok(_) => panic!("imported without a matching identity"),
+    };
+    assert!(
+        error.detail.contains("adopt the one to import first"),
+        "{error}"
+    );
+    let dry = import::import(&found, &home, ALL, true).expect("a dry run still lists");
+    assert_eq!(dry.refused.len(), 1);
+    assert!(dry.conversations.is_empty());
+    // Loquax answers on the second identity: that one's history comes.
+    let second = dir.path().join("second");
+    std::fs::create_dir_all(&second).expect("dir");
+    let home = home_with(&second, &rat.other);
+    let report = import::import(&found, &home, ALL, false).expect("import");
+    assert_eq!(report.history_address, Some(address(&rat.other)));
+    let messages = conversation(&home, address(&rat.other), [0xdd; 16]);
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].id, Some(rat.others_message));
+    let contacts = loquax::names::load_contacts(&home).expect("contacts");
+    assert_eq!(
+        contacts.petnames.get(&[0xdd; 16]).map(String::as_str),
+        Some("Zed")
+    );
+}
+
+#[test]
+fn ratspeak_on_a_mailbox_the_history_goes_into_the_archive_for_the_clients() {
+    let dir = tempfile::tempdir().expect("dir");
+    let rat = ratspeak_db(dir.path(), 45);
+    let home = home_with(dir.path(), &rat.own);
+    let me = address(&rat.own);
+    {
+        // A home node: one device admitted.
+        let mut store = Store::open_in(&home, me).expect("store");
+        store.issue_token(&[1; 16], "phone", 10).expect("token");
+        store
+            .redeem_token(&[1; 16], &[2; 16], 11, 3_600)
+            .expect("admit");
+        assert!(store.serves_as_home_node().expect("home node"));
+    }
+    let found = import::sniff(&rat.db).expect("db");
+    let dry = import::import(&found, &home, ALL, true).expect("dry run");
+    assert_eq!(dry.archived, Some(4));
+    let report = import::import(&found, &home, ALL, false).expect("import");
+    assert_eq!(report.archived, Some(4));
+    let store = Store::open_in(&home, me).expect("store");
+    let page = store.archive_since(0, usize::MAX).expect("archive");
+    assert!(page
+        .entries
+        .iter()
+        .all(|e| e.kind == loquax::home::KIND_IMPORTED));
+    let read: Vec<([u8; 16], loquax::store::ImportRow)> = page
+        .entries
+        .iter()
+        .map(|e| {
+            let (origin, peer, row) = import::archive::read_entry(&e.packed).expect("entry");
+            assert_eq!(origin, "ratspeak");
+            (peer, row)
+        })
+        .collect();
+    let order: Vec<[u8; 32]> = read.iter().map(|(_, row)| row.id).collect();
+    assert_eq!(
+        order,
+        [rat.ids[0], rat.to_carol, rat.ids[1], rat.ids[2]],
+        "one time order over all conversations"
+    );
+    drop(store);
+    // A second import appends nothing.
+    let again = import::import(&found, &home, ALL, false).expect("again");
+    assert_eq!(again.archived, Some(0));
+
+    // A client of this home node writes the pulled entries into its store.
+    let client = dir.path().join("client");
+    std::fs::create_dir_all(&client).expect("client");
+    let entries: Vec<Vec<u8>> = page.entries.iter().map(|e| e.packed.clone()).collect();
+    let public = rat.own.public_key_bytes();
+    let new = loquax::home::runner::keep_imported(&client, &public, &entries).expect("keep");
+    assert_eq!(new, 4);
+    let messages = conversation(&client, me, address(&rat.peer));
+    let bodies: Vec<&str> = messages.iter().map(|m| m.body.as_str()).collect();
+    assert_eq!(bodies, ["sent before", "received after", "with a file"]);
+    let ledger: Vec<&str> = messages[0].ledger.iter().map(|e| e.what.as_str()).collect();
+    assert_eq!(
+        ledger,
+        [
+            "imported from Ratspeak",
+            "imported, no signature: Ratspeak keeps none"
+        ]
+    );
+    assert_eq!(
+        loquax::home::runner::keep_imported(&client, &public, &entries).expect("again"),
+        0
+    );
+}
+
+#[test]
+fn ratspeak_on_the_command_line_in_another_zone_the_times_are_the_same() {
+    let dir = tempfile::tempdir().expect("dir");
+    let rat = ratspeak_db(dir.path(), 45);
+    let home = home_with(dir.path(), &rat.own);
+    let output = loquax(&home)
+        .env("TZ", "Europe/Berlin")
+        .args(["import", "--dry-run"])
+        .arg(&rat.db)
+        .output()
+        .expect("run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{stdout}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains("Ratspeak schema 45, 2 identities"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("deleted: 1 messages deleted there stay deleted"),
+        "{stdout}"
+    );
+    let mut command = loquax(&home);
+    command
+        .env("TZ", "Europe/Berlin")
+        .arg("import")
+        .arg(&rat.db);
+    let output = answered(command, b"\n\n");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{stdout}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout.contains("history: 4 messages written"), "{stdout}");
+    let messages = conversation(&home, address(&rat.own), address(&rat.peer));
+    let secs: Vec<i64> = messages
+        .iter()
+        .filter_map(|m| m.at.map(|at| at.unix_secs))
+        .collect();
+    assert_eq!(secs[..2], [BEFORE_DST_END as i64, AFTER_DST_END as i64]);
+}
