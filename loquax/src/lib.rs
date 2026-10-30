@@ -85,6 +85,8 @@ pub mod import;
 pub mod keys;
 pub mod mailbox;
 pub mod mailbox_state;
+#[cfg(feature = "screenmap")]
+pub mod mapframe;
 #[cfg(feature = "mapload")]
 pub mod mapload;
 #[cfg(feature = "screenmap")]

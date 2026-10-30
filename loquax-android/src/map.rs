@@ -28,7 +28,8 @@
 //! them, so they never leave the picture (1134). While a pinch stays
 //! within a step of the tiles it started on, it keeps them, and a frame
 //! draws at most [`MOVING_TILES_PER_WORKER`] missing tiles a worker,
-//! showing the step before where the rest are owed.
+//! showing the step before where the rest are owed. The frame itself is
+//! [`loquax::mapframe`]'s, which the window draws through too (1144).
 //!
 //! A frame at rest that owes no tile leaves the view to prefetch (1135):
 //! Java then asks with `prefetch` while no finger is down and nothing else
@@ -48,38 +49,32 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Instant;
 
-use leviculum_map::labels::SUBPIXEL;
 use leviculum_map::mercator::{project, LatLon, World};
 use leviculum_map::viewport::{ExactView, MILLI};
 use leviculum_mapfill::style::{MapTheme, Style};
 use leviculum_ui::theme::{Theme, ThemeFlag};
+use loquax::mapframe::{hold, Ask, Frames};
 use loquax::mapload::{Loader, Source, Step, CACHE_DEFAULT_MB};
-use loquax::mapnames::{self, Sprite, Typesetter};
-use loquax::picture::{map_theme, Maps, Painter};
-use loquax::screenmap::{self, Placed};
-use loquax::tiles::{self, Frame as TileFrame, Motion, Plan, Stats, TileCache, BUDGET_MB, TILE};
+use loquax::picture::{map_theme, Maps};
+use loquax::screenmap;
+use loquax::tiles::{Frame as TileFrame, Stats, TILE};
 use loquax::ui::map::{fit, fit_at, want_pins, want_place, want_view, zoom_floor, MapPin, MapWant};
 use loquax::when::WallTime;
 
 use crate::schema::{MapRequest, MapShown, VERSION};
 use crate::session::pins_in;
 
-/// Missing tiles a frame draws while the finger moves, per worker
-/// thread: the rest are shown from the step before and drawn in the
-/// frames that follow.
-pub const MOVING_TILES_PER_WORKER: usize = 2;
+pub use loquax::mapframe::MOVING_TILES_PER_WORKER;
 
 /// What the map screen says on "load this area" over a view the regions
 /// hold already: the terminal's words.
 pub const LOADED_ALREADY: &str = "map: this area is loaded already";
 
 /// The renderer of one app directory, kept from frame to frame: the
-/// painter with its regions, the typesetter, the loader, and what the
-/// last frame placed.
+/// frames with their tile cache and names, the loader, the fit.
 pub struct Renderer {
     dir: PathBuf,
-    painter: Painter,
-    type_: Typesetter,
+    frames: Frames,
     loader: Loader,
     autoload: bool,
     theme: Option<ThemeFlag>,
@@ -89,23 +84,6 @@ pub struct Renderer {
     fitted_at: Option<(World, u32)>,
     /// Whether a fit with pins asked for their places already.
     pins_asked: bool,
-    placed: Vec<Placed>,
-    /// The map without names and pins, in tiles (1134).
-    tiles: TileCache,
-    /// The zoom step the last frame was composed from.
-    last_zoom: Option<u8>,
-    /// The names the last frame at rest placed: a frame while the finger
-    /// moves draws these where the view moved them (1134).
-    names: Vec<Sprite>,
-    /// The frame they were placed in.
-    names_view: Option<ExactView>,
-    /// The pan's velocity and the last pinch's way (1135).
-    motion: Motion,
-    /// The last frame, when it was at rest and owed no tile: what a
-    /// prefetch draws around, with the zooms the regions allow.
-    rest: Option<(TileFrame, (u8, u8))>,
-    /// What the prefetch draws for that frame, made on its first call.
-    plan: Option<Plan>,
     /// A line a prefetch's region load left for the next frame.
     notice_owed: Option<String>,
 }
@@ -119,23 +97,14 @@ impl Renderer {
         let cache = config.map_cache_mb.unwrap_or(CACHE_DEFAULT_MB) << 20;
         Self {
             dir: dir.to_path_buf(),
-            painter: Painter::new(maps.clone()),
-            tiles: TileCache::new(maps.clone(), BUDGET_MB << 20),
-            last_zoom: None,
-            names: Vec::new(),
-            names_view: None,
-            motion: Motion::default(),
-            rest: None,
-            plan: None,
+            frames: Frames::new(maps.clone()),
             notice_owed: None,
-            type_: Typesetter::new(),
             loader: Loader::new(maps, source, cache),
             autoload: config.map_autoload.unwrap_or(true),
             theme: config.map_theme,
             origin: Instant::now(),
             fitted_at: None,
             pins_asked: false,
-            placed: Vec::new(),
         }
     }
 
@@ -189,7 +158,7 @@ impl Renderer {
             }
         }
         if landed {
-            self.painter.refresh();
+            self.frames.refresh();
         }
         landed
     }
@@ -224,12 +193,10 @@ impl Renderer {
     pub fn frame(&mut self, request: &MapRequest, pins: &[MapPin]) -> (MapShown, Vec<u8>) {
         let started = Instant::now();
         let mut notice = self.notice_owed.take();
-        self.rest = None;
-        self.plan = None;
         let now = self.now_ms();
         let polled = self.loader.poll(now);
         let landed = self.steps(polled, &mut notice);
-        let setup = screenmap::setup(&self.painter);
+        let setup = screenmap::setup(self.frames.painter());
         let area = screenmap::area((request.w.max(1), request.h.max(1)));
         let scale = (request.density_milli.max(100) as f32) / 1000.0;
         let mut selected = request
@@ -238,6 +205,7 @@ impl Renderer {
             .and_then(|hex| loquax::address::parse(hex).ok());
         let floor = u32::from(zoom_floor(area, &setup)) * MILLI;
         let ceiling = u32::from(setup.zooms.1) * MILLI;
+        let zooms = (zoom_floor(area, &setup), setup.zooms.1);
         let asked = request
             .zoom_milli
             .or(request.zoom.map(|z| u32::from(z) * MILLI));
@@ -284,22 +252,16 @@ impl Renderer {
                 }
             }
         }
-        let held = |v: ExactView| {
-            let mut v = v.one_world();
-            let z = v.zoom_milli().clamp(floor, ceiling.max(floor));
-            let (cx, cy) = (f64::from(v.size().0) / 2.0, f64::from(v.size().1) / 2.0);
-            v.zoom_about(z, cx, cy);
-            v.one_world()
-        };
+        let held = |v: ExactView| hold(v, zooms.0, zooms.1);
         view = held(view);
         if request.pan_x != 0 || request.pan_y != 0 {
-            self.motion
+            self.frames
                 .pan(f64::from(request.pan_x), f64::from(request.pan_y), now);
             view.pan(request.pan_x, request.pan_y);
             view = held(view);
         }
         let by = i64::from(request.zoom_by) * i64::from(MILLI) + i64::from(request.zoom_by_milli);
-        self.motion.zoom(by);
+        self.frames.zoom(by);
         if by != 0 {
             let zoom = (i64::from(view.zoom_milli()) + by)
                 .clamp(i64::from(floor), i64::from(ceiling.max(floor)));
@@ -321,7 +283,7 @@ impl Renderer {
         if let (Some(x), Some(y)) = (request.tap_x, request.tap_y) {
             // The pins were placed in the last frame, margins included.
             let (x, y) = (x as f32 + mx as f32, y as f32 + my as f32);
-            tapped = screenmap::hit(&self.placed, x, y, scale);
+            tapped = screenmap::hit(self.frames.placed(), x, y, scale);
             if tapped.is_some() {
                 selected = tapped;
             }
@@ -342,90 +304,19 @@ impl Renderer {
         let flag = self.theme.or(Some(ThemeFlag::Auto));
         let table = map_theme(flag, Some(screen));
         let style = Style::PC.in_theme(table);
-        // The screen's view with the margins drawn around it, the same
-        // centre: not held to one world itself, so a margin past the
-        // world's edge stays empty rather than moving the view.
-        // At a whole step the frame's centre sits on a whole pixel of it:
-        // the tiles are that step's pixels shown one to one, so the pins
-        // and the names land on the map as a view drawn whole puts them.
-        // The view itself keeps its centre.
-        let (sw, sh) = view.size();
-        let mut drawn = view.on_whole_pixel();
-        drawn.resize(
-            sw.saturating_add(mx.saturating_mul(2)),
-            sh.saturating_add(my.saturating_mul(2)),
-        );
-        // While a finger moves the frame keeps the step it was composed
-        // from as long as the pinch is within a step of it, the tiles
-        // scaled, and draws a few missing tiles a frame, the rest shown
-        // from the step before until they land.
-        let kept = self
-            .last_zoom
-            .filter(|&z| request.moving && (view.zoom() - f64::from(z)).abs() <= 1.0);
-        let tile_zoom = kept.unwrap_or(rest_zoom);
-        let asked = TileFrame {
-            view: drawn,
-            zoom: tile_zoom,
+        let shot = self.frames.frame(&Ask {
+            view,
+            margin: (mx, my),
+            moving: request.moving,
             style,
             scale,
-            render_limit: request
-                .moving
-                .then(|| self.tiles.workers() * MOVING_TILES_PER_WORKER),
-            fallback: self.last_zoom,
-        };
-        let composed = self.tiles.compose(&asked);
-        self.last_zoom = Some(tile_zoom);
-        if !request.moving && composed.missing == 0 {
-            self.rest = Some((asked, (zoom_floor(area, &setup), setup.zooms.1)));
-        }
-        let mut rgba = composed.rgba;
-        let (w, h) = drawn.size();
-        let placed = screenmap::place_exact(pins, &drawn, selected, scale, |text, size| {
-            self.type_.width(text, size)
+            pins,
+            selected,
+            zooms,
+            draw_pins: true,
+            measure: None,
         });
-        if !request.moving {
-            // At rest the names are placed anew over the frame, at the
-            // exact scale, after the pins, and kept in world terms.
-            let base = drawn.at_zoom(rest_zoom);
-            let labels = self.painter.labels(&base, true);
-            let (bw, bh) = base.size();
-            let s = drawn.scale_at(rest_zoom);
-            let sub = SUBPIXEL as f64;
-            let px = |v: (i64, i64)| {
-                (
-                    (v.0 as f64 / sub - f64::from(bw) / 2.0) * s + f64::from(w) / 2.0,
-                    (v.1 as f64 / sub - f64::from(bh) / 2.0) * s + f64::from(h) / 2.0,
-                )
-            };
-            let taken = screenmap::taken(&placed, scale);
-            let names = mapnames::place(w, h, &labels, px, &taken, scale, &mut self.type_);
-            self.names = names.iter().map(Sprite::of).collect();
-            self.names_view = Some(drawn);
-        }
-        if let Some(rest) = self.names_view {
-            for name in &self.names {
-                let (x, y) = moved(&rest, &drawn, name.centre);
-                let (dx, dy) = (x - name.centre.0, y - name.centre.1);
-                name.draw(
-                    &mut rgba,
-                    w,
-                    h,
-                    style.theme,
-                    dx.round() as i64,
-                    dy.round() as i64,
-                );
-            }
-        }
-        screenmap::draw_pins(
-            &mut rgba,
-            w,
-            h,
-            &placed,
-            scale,
-            style.theme,
-            &mut self.type_,
-        );
-        self.placed = placed;
+        let (w, h) = shot.view.size();
         let name = |peer: [u8; 16]| pins.iter().find(|p| p.peer == peer).map(|p| p.words());
         let shown = MapShown {
             v: VERSION,
@@ -439,13 +330,13 @@ impl Renderer {
             y: view.centre.y,
             zoom: rest_zoom,
             zoom_milli: view.zoom_milli(),
-            tile_zoom,
-            pending: composed.missing > 0,
+            tile_zoom: shot.tile_zoom,
+            pending: shot.missing > 0,
             min_zoom: zoom_floor(area, &setup),
             max_zoom: setup.zooms.1,
             selected: selected.map(|p| loquax::address::to_hex(&p)),
-            attribution: composed.attribution,
-            pins: u32::try_from(self.placed.len()).unwrap_or(u32::MAX),
+            attribution: shot.attribution,
+            pins: u32::try_from(self.frames.placed().len()).unwrap_or(u32::MAX),
             tapped: tapped.map(|p| loquax::address::to_hex(&p)),
             tapped_name: tapped.and_then(name),
             loading: self.loader.busy(),
@@ -453,10 +344,10 @@ impl Renderer {
             ms: u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX),
             dark: table == MapTheme::Dark,
             theme_chosen: matches!(self.theme, Some(ThemeFlag::Light | ThemeFlag::Dark)),
-            prefetching: self.rest.is_some(),
+            prefetching: self.frames.at_rest(),
             prefetched: 0,
         };
-        (shown, rgba)
+        (shown, shot.rgba)
     }
 
     /// One batch of the prefetch around the last frame at rest (1135):
@@ -465,29 +356,23 @@ impl Renderer {
     /// answer has no pixels; `prefetching` says whether more is to draw.
     pub fn prefetch(&mut self) -> MapShown {
         let started = Instant::now();
-        let Some((frame, zooms)) = self.rest else {
+        if !self.frames.at_rest() {
             return MapShown {
                 v: VERSION,
                 ok: true,
                 ..MapShown::default()
             };
-        };
+        }
         let now = self.now_ms();
-        if self.plan.is_none() {
-            let heading = self.motion.heading(now);
-            self.plan = Some(tiles::plan(&frame, heading, self.motion.zoomed_out, zooms));
+        let done = self.frames.prefetch(now);
+        if let Some(frame) = done.planned {
             self.ask_past(&frame);
         }
-        let workers = self.tiles.workers();
-        let (drawn, more) = match self.plan.as_mut() {
-            Some(plan) => (self.tiles.prefetch(plan, workers), !plan.done()),
-            None => (0, false),
-        };
         MapShown {
             v: VERSION,
             ok: true,
-            prefetching: more,
-            prefetched: u32::try_from(drawn).unwrap_or(u32::MAX),
+            prefetching: done.more,
+            prefetched: u32::try_from(done.drawn).unwrap_or(u32::MAX),
             loading: self.loader.busy(),
             ms: u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX),
             ..MapShown::default()
@@ -498,7 +383,7 @@ impl Renderer {
     /// autoload for the ring's area: it caps the size and backs off as for
     /// any view. A frame the regions do not hold loads nothing unasked.
     fn ask_past(&mut self, frame: &TileFrame) {
-        let setup = screenmap::setup(&self.painter);
+        let setup = screenmap::setup(self.frames.painter());
         if want_view(&frame.view.at_zoom(frame.zoom), &setup.regions).is_some() {
             return;
         }
@@ -520,40 +405,18 @@ impl Renderer {
 
     /// What the tile cache did, for a test and the measuring tool.
     pub fn tile_stats(&self) -> Stats {
-        self.tiles.stats
+        self.frames.tile_stats()
     }
 
     /// The tile cache's tiles and bytes.
     pub fn tile_memory(&self) -> (usize, usize) {
-        (self.tiles.len(), self.tiles.bytes())
+        self.frames.tile_memory()
     }
 
     /// The names the last frame at rest placed, as text.
     pub fn names(&self) -> Vec<String> {
-        self.names.iter().map(|n| n.text.clone()).collect()
+        self.frames.names()
     }
-}
-
-/// Where the point `c` of the frame `rest` is in the frame `now`: the
-/// pan and the zoom between them. A pan of whole pixels at the same zoom
-/// moves it by whole pixels, so a name drawn again is the same pixels.
-fn moved(rest: &ExactView, now: &ExactView, c: (f64, f64)) -> (f64, f64) {
-    let k = now.scale_at(0) / rest.scale_at(0);
-    let (rw, rh) = rest.size();
-    let (nw, nh) = now.size();
-    let (cx, cy) = now.to_screen(rest.centre);
-    let (mut dx, mut dy) = (cx - f64::from(nw) / 2.0, cy - f64::from(nh) / 2.0);
-    if rest.zoom_milli() == now.zoom_milli() {
-        let whole = |v: f64| match (v - v.round()).abs() < 1e-3 {
-            true => v.round(),
-            false => v,
-        };
-        (dx, dy) = (whole(dx), whole(dy));
-    }
-    (
-        (c.0 - f64::from(rw) / 2.0) * k + f64::from(nw) / 2.0 + dx,
-        (c.1 - f64::from(rh) / 2.0) * k + f64::from(nh) / 2.0 + dy,
-    )
 }
 
 /// The process's renderers, one a directory: the app has one; a test
@@ -626,10 +489,10 @@ pub fn tune_tiles(dir: &Path, n: Option<usize>, clear: bool) {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(r) = renderers.iter_mut().find(|r| r.dir == dir) {
         if let Some(n) = n {
-            r.tiles.set_workers(n);
+            r.frames.set_workers(n);
         }
         if clear {
-            r.tiles.clear();
+            r.frames.clear_tiles();
         }
     }
 }
