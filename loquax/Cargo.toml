@@ -107,8 +107,11 @@ tui = [
     "dep:futures",
     "dep:tui-input",
     "dep:open",
-    "dep:qrcodegen",
+    "qr",
 ]
+# QR codes (`loquax::home::qr`): the admission code in the terminal, and an
+# address for the phone's contact screen to show (1146).
+qr = ["dep:qrcodegen"]
 # `loquax gui`: the window (docs/src/concepts/gui-toolkit.md, option B,
 # iced on the desktop), over the same shell and model as the terminal. Off
 # by default and off in `tui`, so iced is in no graph that does not ask for

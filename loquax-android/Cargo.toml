@@ -28,7 +28,8 @@ crate-type = ["cdylib", "rlib"]
 # drawn here and hosted by Java as a bitmap, and the autoload into the
 # app's maps directory. One renderer for the terminal's pictures, the
 # window and the phone.
-loquax = { path = "../loquax", features = ["history", "screenmap", "mapload"] }
+# With `qr` for the contact screen's address code (1146).
+loquax = { path = "../loquax", features = ["history", "screenmap", "mapload", "qr"] }
 # The map's types the screen's call passes to loquax's.
 leviculum-map = { path = "../leviculum-map", features = ["std"] }
 leviculum-mapfill = { path = "../leviculum-mapfill" }

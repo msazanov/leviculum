@@ -156,6 +156,25 @@ pub enum Request {
     /// `READ_CONTACTS`): each address loquax knows and has not linked
     /// becomes a link, unless two contacts carry it.
     Relink { rows: Vec<ImRow> },
+    /// Pinned the conversation to the top of the list, or loosened it
+    /// (1146). Pin, mute, archive and block reach the home's other devices.
+    Pin { peer: String, on: bool },
+    /// Muted the conversation for `secs` from now, for always when
+    /// negative, or unmuted it with 0.
+    Mute { peer: String, secs: i64 },
+    /// Moved the conversation into the archive, or back.
+    Archive { peer: String, on: bool },
+    /// Blocked the peer, or lifted the block.
+    Block { peer: String, on: bool },
+    /// Marked the peer's identity verified after comparing it in person,
+    /// or took it back; on this device only.
+    Verify { peer: String, on: bool },
+    /// Marked the conversation unread on this device, or read as opening
+    /// it would.
+    Unread { peer: String, on: bool },
+    /// Deleted the conversation from this device, or from every device of
+    /// the home.
+    Forget { peer: String, everywhere: bool },
 }
 
 /// What a contact said when loquax read it.
@@ -245,6 +264,12 @@ pub enum Query {
     Contact { lookup: String },
     /// Every link, for the refresh that reads the contacts again.
     Links,
+    /// What the contact screen shows of `peer` (1146).
+    Detail { peer: String },
+    /// The archived conversations, as the list's rows.
+    Archived,
+    /// The blocked peers, as the list's rows, conversation or not.
+    Blocked,
 }
 
 /// One contact's name fields, for [`Query::Suggest`].
@@ -306,6 +331,66 @@ pub struct AddressRow {
 pub struct Links {
     pub v: u32,
     pub links: Vec<LinkRow>,
+}
+
+/// The contact screen (1146), after Signal's: who the peer is, the
+/// reader's word on it, its identity to compare, what this device knows of
+/// reaching it, and its positions.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Detail {
+    pub v: u32,
+    pub peer: String,
+    pub name: String,
+    pub initials: String,
+    #[serde(default)]
+    pub icon_fg: Option<String>,
+    #[serde(default)]
+    pub icon_bg: Option<String>,
+    #[serde(default)]
+    pub photo: Option<String>,
+    pub linked: bool,
+    #[serde(default)]
+    pub lookup: Option<String>,
+    #[serde(default)]
+    pub contact_id: Option<i64>,
+    #[serde(default)]
+    pub petname: Option<String>,
+    #[serde(default)]
+    pub announced: Option<String>,
+    /// The address in groups of four hex digits, to read out and compare.
+    pub fingerprint: String,
+    /// The address as a QR code: the side in modules and one byte a
+    /// module, row by row, 1 for dark, without the quiet zone.
+    pub qr_size: u32,
+    pub qr: Blob,
+    pub verified: bool,
+    pub blocked: bool,
+    pub pinned: bool,
+    pub archived: bool,
+    /// Whether it is muted now, and until when: unix seconds, -1 for
+    /// always, 0 for not.
+    pub muted: bool,
+    pub muted_until: i64,
+    /// When the newest message from the peer came, unix seconds, 0 for
+    /// none; when the newest to it was written, and how it went.
+    pub last_received: i64,
+    pub last_sent: i64,
+    #[serde(default)]
+    pub last_sent_how: String,
+    /// Whether this device is a client of a home node, which routes for
+    /// it: then no path of its own is known here.
+    pub home_client: bool,
+    /// The peer's newest positions, newest first.
+    pub positions: Vec<PositionRow>,
+}
+
+/// One position of a peer, for the contact screen.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PositionRow {
+    /// The fix time the sender claims, unix seconds.
+    pub at: i64,
+    pub lat_e6: i32,
+    pub lon_e6: i32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -403,6 +488,12 @@ pub struct ConversationRow {
     /// Whether the peer is linked to a contact of the address book.
     #[serde(default)]
     pub linked: bool,
+    /// Pinned to the top, and muted now (1146): the list's marks, and no
+    /// notification for a muted one.
+    #[serde(default)]
+    pub pinned: bool,
+    #[serde(default)]
+    pub muted: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -415,6 +506,9 @@ pub struct Conversations {
     pub address: String,
     #[serde(default)]
     pub initials: String,
+    /// How many conversations are archived: the list's last row (1146).
+    #[serde(default)]
+    pub archived: u32,
 }
 
 /// A reaction under a message: its content, how many sent it, and whether

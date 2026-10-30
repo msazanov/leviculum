@@ -387,6 +387,114 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
         .expect("decode");
         assert!(none.suggestions.is_empty());
 
+        // The contact screen (1146): every field there, then the reader's
+        // word on the peer, each change in the detail and the list.
+        let detail = |session: &Session| -> schema::Detail {
+            rmp_serde::from_slice(
+                &session
+                    .query(schema::Query::Detail { peer: peer.clone() })
+                    .expect("detail"),
+            )
+            .expect("decode")
+        };
+        let list = |session: &Session, query: schema::Query| -> schema::Conversations {
+            rmp_serde::from_slice(&session.query(query).expect("list")).expect("decode")
+        };
+        let shown = detail(&session);
+        assert_eq!(shown.peer, peer);
+        assert_eq!(shown.fingerprint.split(' ').count(), 8);
+        assert_eq!(shown.fingerprint.replace(' ', ""), peer);
+        assert_eq!((shown.qr_size, shown.qr.0.len()), (25, 625));
+        assert!(shown.home_client && shown.last_sent > 0, "{shown:?}");
+        assert!(!shown.last_sent_how.is_empty());
+        assert!(!shown.verified && !shown.muted && !shown.pinned && !shown.blocked);
+        session
+            .request(Request::Mute {
+                peer: peer.clone(),
+                secs: 3600,
+            })
+            .expect("mute");
+        session
+            .request(Request::Pin {
+                peer: peer.clone(),
+                on: true,
+            })
+            .expect("pin");
+        session
+            .request(Request::Verify {
+                peer: peer.clone(),
+                on: true,
+            })
+            .expect("verify");
+        let shown = detail(&session);
+        assert!(shown.muted && shown.pinned && shown.verified, "{shown:?}");
+        assert!(shown.muted_until > 0);
+        let row = list(&session, schema::Query::Conversations);
+        assert!(row
+            .conversations
+            .iter()
+            .any(|r| r.peer == peer && r.muted && r.pinned));
+        session
+            .request(Request::Mute {
+                peer: peer.clone(),
+                secs: -1,
+            })
+            .expect("mute always");
+        assert_eq!(detail(&session).muted_until, -1);
+        session
+            .request(Request::Mute {
+                peer: peer.clone(),
+                secs: 0,
+            })
+            .expect("unmute");
+        assert!(!detail(&session).muted);
+        session
+            .request(Request::Archive {
+                peer: peer.clone(),
+                on: true,
+            })
+            .expect("archive");
+        let main = list(&session, schema::Query::Conversations);
+        assert!(main.conversations.iter().all(|r| r.peer != peer));
+        assert_eq!(main.archived, 1);
+        let archived = list(&session, schema::Query::Archived);
+        assert_eq!(archived.conversations.len(), 1);
+        assert_eq!(archived.conversations[0].peer, peer);
+        session
+            .request(Request::Archive {
+                peer: peer.clone(),
+                on: false,
+            })
+            .expect("unarchive");
+        session
+            .request(Request::Block {
+                peer: peer.clone(),
+                on: true,
+            })
+            .expect("block");
+        let blocked = list(&session, schema::Query::Blocked);
+        assert_eq!(blocked.conversations.len(), 1);
+        assert_eq!(blocked.conversations[0].peer, peer);
+        let main = list(&session, schema::Query::Conversations);
+        assert!(main.conversations.iter().all(|r| r.peer != peer));
+        session
+            .request(Request::Block {
+                peer: peer.clone(),
+                on: false,
+            })
+            .expect("unblock");
+        assert!(list(&session, schema::Query::Blocked)
+            .conversations
+            .is_empty());
+        let main = list(&session, schema::Query::Conversations);
+        assert!(main.conversations.iter().any(|r| r.peer == peer));
+        assert!(session
+            .query(schema::Query::Detail {
+                peer: "zz".to_string()
+            })
+            .unwrap_err()
+            .contains("not an address"));
+
         // Negative: an address that is none, and a message id that is none.
         assert!(session
             .request(Request::Open {
@@ -443,6 +551,14 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
         assert_eq!(unlinked.name, format!("<{}…>", &peer[..8]));
         assert!(!unlinked.linked && unlinked.photo.is_none() && unlinked.lookup.is_none());
         assert!(!Path::new(&photo).exists());
+        // 1146: the pin and the verified mark outlived the session.
+        let shown: schema::Detail = rmp_serde::from_slice(
+            &session
+                .query(schema::Query::Detail { peer: peer.clone() })
+                .expect("detail"),
+        )
+        .expect("decode");
+        assert!(shown.pinned && shown.verified && !shown.muted, "{shown:?}");
         // The reply's field came back from the store with the message.
         assert_eq!(
             messages.messages[1].quote_to.as_deref(),

@@ -48,6 +48,8 @@ const PUMP: Duration = Duration::from_millis(100);
 const SETTLE: Duration = Duration::from_secs(5);
 /// How many pumps between two looks at the TCP interface: a second.
 const LINK_EVERY: u32 = 10;
+/// How many of a peer's newest positions the contact screen lists.
+const POSITIONS_SHOWN: usize = 10;
 
 /// Why the session did not start, and what the join screen has to ask for.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -417,6 +419,36 @@ impl Session {
                 peer: parse_peer(&peer)?,
                 name,
             },
+            schema::Request::Pin { peer, on } => {
+                return self.change_state(&peer, |state, _| state.pinned = on);
+            }
+            schema::Request::Archive { peer, on } => {
+                return self.change_state(&peer, |state, _| state.archived = on);
+            }
+            schema::Request::Block { peer, on } => {
+                return self.change_state(&peer, |state, _| state.blocked = on);
+            }
+            schema::Request::Mute { peer, secs } => {
+                return self.change_state(&peer, |state, now| {
+                    state.muted_until = match secs {
+                        0 => None,
+                        secs if secs < 0 => Some(loquax::ui::state::MUTED_ALWAYS),
+                        secs => Some(now.saturating_add(secs)),
+                    };
+                });
+            }
+            schema::Request::Verify { peer, on } => UiEvent::Verify {
+                peer: parse_peer(&peer)?,
+                verified: on,
+            },
+            schema::Request::Unread { peer, on } => UiEvent::MarkUnread {
+                peer: parse_peer(&peer)?,
+                unread: on,
+            },
+            schema::Request::Forget { peer, everywhere } => UiEvent::DeleteConversation {
+                peer: parse_peer(&peer)?,
+                everywhere,
+            },
             schema::Request::Relink { rows } => {
                 let mut inner = self.lock();
                 let linked = inner.relink(&rows)?;
@@ -430,6 +462,22 @@ impl Session {
             }
         };
         self.lock().apply(event);
+        Ok(())
+    }
+
+    /// Change one field of the reader's word on `peer`, the others as the
+    /// model holds them; `change` gets the time now in unix seconds.
+    fn change_state(
+        &self,
+        peer: &str,
+        change: impl FnOnce(&mut loquax::home::wire::PeerState, i64),
+    ) -> Result<(), String> {
+        let peer = parse_peer(peer)?;
+        let mut inner = self.lock();
+        let mut state = inner.model.peer_state(&peer);
+        change(&mut state, wall_now(inner.offset).unix_secs);
+        inner.apply(UiEvent::PeerState { peer, state });
+        inner.dirty = true;
         Ok(())
     }
 
@@ -469,6 +517,12 @@ impl Session {
                     })
                     .collect(),
             }),
+            schema::Query::Detail { peer } => schema::encode(&inner.detail(parse_peer(&peer)?)?),
+            schema::Query::Archived => {
+                let order = inner.model.archived_order();
+                schema::encode(&inner.listed(order))
+            }
+            schema::Query::Blocked => schema::encode(&inner.blocked()),
             schema::Query::Links => schema::encode(&schema::Links {
                 v: VERSION,
                 links: inner
@@ -845,6 +899,14 @@ impl Inner {
             self.runtime
                 .spawn(runner::hand_petnames(self.client.clone(), petnames, BUDGET));
         }
+        let states = self.model.take_peer_states();
+        if !states.is_empty() {
+            self.runtime.spawn(runner::hand_peer_states(
+                self.client.clone(),
+                states,
+                BUDGET,
+            ));
+        }
         let marks = self.model.take_marks();
         if marks.is_empty() {
             return;
@@ -969,37 +1031,16 @@ impl Inner {
     }
 
     fn conversations(&self) -> schema::Conversations {
-        let rows = self
-            .model
-            .order()
+        let mut listed = self.listed(self.model.order());
+        listed.archived = u32::try_from(self.model.archived_order().len()).unwrap_or(u32::MAX);
+        listed
+    }
+
+    /// The list's rows for the conversations `order` names, in its order.
+    fn listed(&self, order: Vec<usize>) -> schema::Conversations {
+        let rows = order
             .into_iter()
-            .map(|index| {
-                let conversation = &self.model.conversations[index];
-                let last = conversation.messages.last();
-                let icon = avatar::latest_appearance(&conversation.messages);
-                schema::ConversationRow {
-                    peer: loquax::address::to_hex(&conversation.peer),
-                    name: self.model.names.label(&conversation.peer),
-                    last: last.map(preview).unwrap_or_default(),
-                    ours: last.is_some_and(|m| m.outbound),
-                    at: last.and_then(|m| m.at).map_or(0, |at| at.unix_secs),
-                    unread: u32::try_from(conversation.unread).unwrap_or(u32::MAX),
-                    initials: self.initials(&conversation.peer),
-                    icon_fg: icon.as_ref().map(|(fg, _)| fg.clone()),
-                    icon_bg: icon.map(|(_, bg)| bg),
-                    kind: last.map_or("", kind).to_string(),
-                    reaction: last
-                        .filter(|m| m.is_reaction())
-                        .and_then(|m| m.reaction())
-                        .map(|(_, content)| content),
-                    state: match last {
-                        Some(m) if m.outbound => state_word(m.delivery).to_string(),
-                        _ => String::new(),
-                    },
-                    photo: self.photo(&conversation.peer),
-                    linked: self.book.links.contains_key(&conversation.peer),
-                }
-            })
+            .map(|index| self.list_row(&self.model.conversations[index].peer))
             .collect();
         let (address, initials) = self.model.address.map_or_else(Default::default, |own| {
             (loquax::address::to_hex(&own), self.initials(&own))
@@ -1009,7 +1050,113 @@ impl Inner {
             conversations: rows,
             address,
             initials,
+            archived: 0,
         }
+    }
+
+    /// Every blocked peer, with a conversation or without, as list rows
+    /// (1146): the settings screen's "Blocked contacts".
+    fn blocked(&self) -> schema::Conversations {
+        let mut listed = self.listed(Vec::new());
+        listed.conversations = self
+            .model
+            .names
+            .contacts
+            .blocked
+            .iter()
+            .map(|peer| self.list_row(peer))
+            .collect();
+        listed
+    }
+
+    /// One row of the list for `peer`, empty when it has no conversation.
+    fn list_row(&self, peer: &[u8; 16]) -> schema::ConversationRow {
+        let conversation = self.model.conversations.iter().find(|c| c.peer == *peer);
+        let messages = conversation.map_or(&[][..], |c| c.messages.as_slice());
+        let last = messages.last();
+        let icon = avatar::latest_appearance(messages);
+        schema::ConversationRow {
+            peer: loquax::address::to_hex(peer),
+            name: self.model.names.label(peer),
+            last: last.map(preview).unwrap_or_default(),
+            ours: last.is_some_and(|m| m.outbound),
+            at: last.and_then(|m| m.at).map_or(0, |at| at.unix_secs),
+            unread: conversation.map_or(0, |c| u32::try_from(c.unread).unwrap_or(u32::MAX)),
+            initials: self.initials(peer),
+            icon_fg: icon.as_ref().map(|(fg, _)| fg.clone()),
+            icon_bg: icon.map(|(_, bg)| bg),
+            kind: last.map_or("", kind).to_string(),
+            reaction: last
+                .filter(|m| m.is_reaction())
+                .and_then(|m| m.reaction())
+                .map(|(_, content)| content),
+            state: match last {
+                Some(m) if m.outbound => state_word(m.delivery).to_string(),
+                _ => String::new(),
+            },
+            photo: self.photo(peer),
+            linked: self.book.links.contains_key(peer),
+            pinned: conversation.is_some_and(|c| c.pinned),
+            muted: self.model.muted(peer),
+        }
+    }
+
+    /// The contact screen of `peer` (1146).
+    fn detail(&self, peer: [u8; 16]) -> Result<schema::Detail, String> {
+        let row = self.list_row(&peer);
+        let facts = self.model.contact_facts(&peer);
+        let (qr_size, modules) = loquax::home::qr::address_modules(&peer)?;
+        let link = self.book.links.get(&peer);
+        let names = &self.model.names;
+        let positions = self
+            .store
+            .track(peer, POSITIONS_SHOWN)
+            .map_err(|error| error.to_string())?
+            .iter()
+            .map(|fix| schema::PositionRow {
+                at: fix.fix_time(),
+                lat_e6: fix.location.latitude_e6,
+                lon_e6: fix.location.longitude_e6,
+            })
+            .collect();
+        Ok(schema::Detail {
+            v: VERSION,
+            peer: row.peer,
+            name: row.name,
+            initials: row.initials,
+            icon_fg: row.icon_fg,
+            icon_bg: row.icon_bg,
+            photo: row.photo,
+            linked: link.is_some(),
+            lookup: link.map(|link| link.lookup.clone()),
+            contact_id: link.map(|link| link.contact_id),
+            petname: names.petname(&peer).map(str::to_string),
+            announced: names.announced(&peer).map(str::to_string),
+            fingerprint: fingerprint(&peer),
+            qr_size,
+            qr: schema::Blob(modules.into_iter().map(u8::from).collect()),
+            verified: facts.verified,
+            blocked: facts.state.blocked,
+            pinned: facts.state.pinned,
+            archived: facts.state.archived,
+            muted: self.model.muted(&peer),
+            muted_until: match facts.state.muted_until {
+                None => 0,
+                Some(loquax::ui::state::MUTED_ALWAYS) => -1,
+                Some(until) => until,
+            },
+            last_received: facts.last_received.map_or(0, |at| at.unix_secs),
+            last_sent: facts
+                .last_sent
+                .and_then(|(at, _)| at)
+                .map_or(0, |at| at.unix_secs),
+            last_sent_how: facts
+                .last_sent
+                .map(|(_, how)| how.to_string())
+                .unwrap_or_default(),
+            home_client: self.model.home_client,
+            positions,
+        })
     }
 
     fn messages(&self, peer: [u8; 16]) -> schema::Messages {
@@ -1292,6 +1439,16 @@ fn link_up(node: &leviculum_std::driver::ReticulumNode) -> bool {
     node.interface_stats()
         .iter()
         .any(|interface| !interface.is_local_client && interface.online)
+}
+
+/// An address in groups of four hex digits, to read out and compare.
+pub fn fingerprint(peer: &[u8; 16]) -> String {
+    let hex = loquax::address::to_hex(peer);
+    hex.as_bytes()
+        .chunks(4)
+        .map(|group| String::from_utf8_lossy(group).into_owned())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn wall_now(offset: i32) -> WallTime {
