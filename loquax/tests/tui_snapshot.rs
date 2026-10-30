@@ -99,6 +99,9 @@ use loquax::send::{run_send, SendOptions};
 
 mod support;
 
+#[path = "support/nomadnet_tree.rs"]
+mod nomadnet_tree;
+
 use support::daemon;
 
 const LNMSG: &str = env!("CARGO_BIN_EXE_loquax");
@@ -2973,5 +2976,80 @@ async fn a_message_from_an_unheard_sender_is_verified_once_its_key_arrives() {
     assert!(
         !verified.contains("unverified") && verified.contains("them"),
         "the block did not turn verified under the sender's name:\n{verified}\ntui.log:\n{log}"
+    );
+}
+
+/// 1162: the palette's `import` reads the NomadNet tree in its default
+/// place, and the running screen lists the conversation under the imported
+/// name and shows its messages when it is opened: no restart.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_palettes_import_shows_at_once() {
+    let daemon = daemon("tui-import", |b| b).await;
+    let home = tempfile::tempdir().expect("tui home");
+    std::fs::write(
+        home.path().join("identity"),
+        encode_identity(&fixed_identity(0x11)).expect("storable"),
+    )
+    .expect("write the identity");
+    // The user's home the scan looks in, never the real one.
+    let user = tempfile::tempdir().expect("user home");
+    nomadnet_tree::write(
+        &user.path().join(".nomadnetwork"),
+        &fixed_identity(0x11),
+        &fixed_identity(0x22),
+    );
+    // The toast with the import's report covers the newest rows; the
+    // opened conversation is drawn once it is gone.
+    let script = "until ready 20\nframe empty\nkey :\ntype import\nkey enter\n\
+                  frame imported\nkey enter\nsleep 5000\nframe opened\nkey q\n";
+    let script_path = home.path().join("import.script");
+    let frames = home.path().join("import.frames");
+    std::fs::write(&script_path, script).expect("write the script");
+    let args: Vec<String> = vec![
+        "--instance".into(),
+        daemon.instance.clone(),
+        "--config".into(),
+        daemon.config_dir.path().display().to_string(),
+        "--script".into(),
+        script_path.display().to_string(),
+        "--frames".into(),
+        frames.display().to_string(),
+        "--size".into(),
+        "80x24".into(),
+    ];
+    let (child_home, user_home) = (home.path().to_path_buf(), user.path().to_path_buf());
+    let output = tokio::task::spawn_blocking(move || {
+        let mut command = Command::new(LNMSG);
+        command
+            .args(&args)
+            .env("LNMSG_HOME", &child_home)
+            .env("HOME", &user_home)
+            .env("LNMSG_DISPLAY_NAME", "tui")
+            .env_remove("LEVICULUM_EVENT_LOG")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let child = leviculum_std::process::spawn_supervised(command).expect("spawn loquax");
+        child.wait_with_output().expect("wait for loquax")
+    })
+    .await
+    .expect("the loquax child thread");
+    let got = std::fs::read_to_string(&frames).unwrap_or_default();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}\nframes:\n{got}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let (before, after) = got.split_once(": imported ---").expect("the frames");
+    assert!(!before.contains(nomadnet_tree::NAME), "{got}");
+    let (imported, opened) = after.split_once(": opened ---").expect("both frames");
+    assert!(
+        imported.contains(nomadnet_tree::NAME),
+        "the list shows the imported conversation under its name:\n{got}"
+    );
+    assert!(
+        opened.contains(nomadnet_tree::SENT) && opened.contains(nomadnet_tree::RECEIVED),
+        "the opened conversation shows the imported rows:\n{got}"
     );
 }

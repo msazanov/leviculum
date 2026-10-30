@@ -324,7 +324,8 @@ impl Shell {
     /// The palette's `import`: contacts and history from every messenger
     /// found in its default place, never the identity (`crate::import`).
     /// What it did is said on screen and kept for after it; what it wrote
-    /// shows from the next start, when the store and the contacts are read.
+    /// shows at once (1162): the model takes the contacts file again and the
+    /// store's history as a pull's imported rows ([`Self::show_imported`]).
     fn import(&mut self) -> Vec<UiEvent> {
         let Some(user_home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
             return vec![UiEvent::Notice("import: HOME is not set".to_string())];
@@ -346,14 +347,14 @@ impl Shell {
             identity: false,
         };
         let mut out = Vec::new();
+        let mut imported = 0;
         for source in trees {
             let lines = match loquax::import::import(source, &self.context.home, choices, false) {
                 Ok(report) => {
+                    imported += report.conversations.iter().map(|c| c.new).sum::<usize>();
                     let mut lines = vec![format!("imported from {}", source.path.display())];
                     lines.extend(report.lines(false));
-                    lines.push(
-                        "it shows from the next start; the identity: `loquax import`".to_string(),
-                    );
+                    lines.push("the identity: `loquax import`".to_string());
                     lines
                 }
                 Err(error) => vec![format!("import: {error}")],
@@ -361,6 +362,11 @@ impl Shell {
             self.afterwards.extend(lines.iter().cloned());
             out.push(UiEvent::Notice(lines.join("; ")));
         }
+        match loquax::names::load_contacts(&self.context.home) {
+            Ok(contacts) => self.model.names.contacts = contacts,
+            Err(error) => tracing::warn!("IMPORT contacts not shown: {error}"),
+        }
+        self.show_imported(imported);
         out
     }
 
@@ -720,8 +726,9 @@ impl Shell {
         self.apply(UiEvent::FetchDone(end.result.map_err(|e| e.to_string())));
     }
 
-    /// The history a pull imported into the store, shown now (1159): the
-    /// model's pending writes go first, so what it reads back is whole.
+    /// The history a pull or the palette's `import` wrote into the store,
+    /// shown now (1159, 1162): the model's pending writes go first, so what
+    /// it reads back is whole.
     fn show_imported(&mut self, imported: usize) {
         self.persist();
         match runner::show_imported(&mut self.model, &self.store) {

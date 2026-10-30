@@ -187,7 +187,7 @@ What **send** and **fetch** handle on the command line is not written to the his
 
 **The identity.** Adopting it makes Loquax answer on the source's address. Do not run both apps on one identity at the same time: both announce it, so a direct message reaches only one; both collect from the same propagation node, and the first to sync takes the mail. Loquax's own identity is not deleted: it moves to `$LNMSG_HOME/identity.`*address*`.bak`, its history stays in the store under its address, and moving the file back to `identity` switches back. The new `identity` is written with mode 0600. On a client of a Loquax Mailbox, adopt on the mailbox.
 
-The palette's `import` imports contacts and history from the sources found in the default places, never the identity; what it wrote shows from the next start.
+The palette's `import` imports contacts and history from the sources found in the default places, never the identity; what it wrote shows at once.
 
 On the very first start of the conversation view (no identity, no history, no config in `$LNMSG_HOME`) and on a terminal, Loquax scans the default places before it mints an identity and asks the same questions when it found something. Found nothing, it says nothing.
 
