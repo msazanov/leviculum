@@ -23,7 +23,12 @@
 //! after, which is what a zoom out has. Where no cached tile covers a
 //! pixel the world outline shows ([`outline::draw`], the theme's
 //! colours), and off the projection the theme's water: a frame never
-//! shows black.
+//! shows black. While the view moves ([`Frame::moving`], 1163) the stand
+//! ins and the outline cover only the owed tiles' own pixels, a cached
+//! step taken nearest, its pixels doubled or halved; at rest they are
+//! scaled bilinear over the frame. A tile wholly outside the pixels a
+//! frontend shows ([`Frame::asked`]) is used when held, and otherwise
+//! neither drawn nor owed: its pixels are water.
 //!
 //! The cache is dropped when the maps directory changes (its epoch) and
 //! when the style does (the light or dark table, the line widths of the
@@ -106,6 +111,38 @@ type Held = (Arc<Vec<u8>>, Arc<str>);
 /// of 256.
 type Step = ((usize, usize), (usize, usize), u32);
 
+/// The pixels a grid's tile columns and rows are sampled for,
+/// `(from, to)` each: empty for one only a neighbour reads.
+type Spans = (Vec<(u32, u32)>, Vec<(u32, u32)>);
+
+/// Pixels of a frame: the columns `x0..x1` of the rows `y0..y1`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Rect {
+    x0: u32,
+    y0: u32,
+    x1: u32,
+    y1: u32,
+}
+
+impl Rect {
+    fn has_row(&self, y: u32) -> bool {
+        (self.y0..self.y1).contains(&y)
+    }
+}
+
+/// What [`Grid::sample`] writes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Fill {
+    /// Every tile is there: every pixel, what the buffer held not read
+    /// (1154).
+    Whole,
+    /// At a scale of one, the pixels of the tiles there, whatever the
+    /// buffer held; the others left as they are (1163).
+    Held,
+    /// The pixels nothing covers yet (alpha zero) whose tile is there.
+    Under,
+}
+
 struct Entry {
     rgba: Arc<Vec<u8>>,
     attribution: Arc<str>,
@@ -154,6 +191,13 @@ pub struct Frame {
     /// the coarser and finer steps every frame looks at do, in their
     /// order however far it is.
     pub fallback: Option<u8>,
+    /// A finger or a pointer moves the view: the tiles not drawn are
+    /// stood in for over their own pixels only, nearest (1163).
+    pub moving: bool,
+    /// The pixels a frontend shows of the frame, `[x0, y0, x1, y1)`, when
+    /// not all of them: a tile wholly outside that is not held is neither
+    /// drawn nor owed, its pixels water (1163).
+    pub asked: Option<[u32; 4]>,
 }
 
 impl Frame {
@@ -323,12 +367,24 @@ impl TileCache {
         }
         let grid = Grid::of(&frame.view, frame.zoom);
         let keys = grid.keys(frame.style, percent);
+        // The pixels each tile column and row is sampled for: what a tile
+        // missing leaves to cover, and whether it is asked at all.
+        let spans = (frame.moving || frame.asked.is_some()).then(|| grid.spans(&frame.view));
+        let asked = |i: usize| match (frame.asked, &spans) {
+            (Some(a), Some(spans)) => grid
+                .rect(spans, i)
+                .is_some_and(|r| r.x0 < a[2] && a[0] < r.x1 && r.y0 < a[3] && a[1] < r.y1),
+            _ => true,
+        };
         let mut got: Vec<Option<Held>> = Vec::with_capacity(keys.len());
         let mut missing: Vec<usize> = Vec::new();
+        let mut unasked = false;
         for (i, key) in keys.iter().enumerate() {
             let found = key.and_then(|k| self.get(&k));
             match (key, &found) {
                 (Some(_), Some(_)) => self.stats.hits += 1,
+                // Outside what the frontend shows: neither drawn nor owed.
+                (Some(_), None) if !asked(i) => unasked = true,
                 (Some(_), None) => {
                     self.stats.misses += 1;
                     missing.push(i);
@@ -352,11 +408,45 @@ impl TileCache {
         let whole = got.iter().all(Option::is_some);
         #[cfg(test)]
         let whole = whole && !self.reference;
+        match (&spans, frame.moving && (!left.is_empty() || unasked)) {
+            (Some(spans), true) => {
+                self.cover_gaps(frame, percent, &grid, spans, &got, left, rgba, blank);
+            }
+            _ => self.cover_frame(frame, percent, &grid, &got, left, rgba, blank, whole),
+        }
+        let attribution = got
+            .iter()
+            .flatten()
+            .map(|(_, a)| a)
+            .find(|a| a.as_ref() != outline::ATTRIBUTION)
+            .map_or_else(|| outline::ATTRIBUTION.to_string(), |a| a.to_string());
+        Some((attribution, left.len()))
+    }
+
+    /// The tiles `got` over `rgba`, the stand ins and the outline where
+    /// one is missing, scaled over the whole frame: a frame at rest, or
+    /// one that owes nothing.
+    #[allow(clippy::too_many_arguments)]
+    fn cover_frame(
+        &mut self,
+        frame: &Frame,
+        percent: u32,
+        grid: &Grid,
+        got: &[Option<Held>],
+        left: &[usize],
+        rgba: &mut [u8],
+        blank: bool,
+        whole: bool,
+    ) {
         if !blank && !whole {
             // Alpha zero is a pixel nothing covers yet: a tile's are opaque.
             rgba.fill(0);
         }
-        grid.sample(&frame.view, &got, rgba, self.workers, whole);
+        let fill = match whole {
+            true => Fill::Whole,
+            false => Fill::Under,
+        };
+        grid.sample(&frame.view, got, rgba, self.workers, fill);
         if !left.is_empty() {
             for z in stand_ins(frame) {
                 if covered(rgba) {
@@ -369,7 +459,7 @@ impl TileCache {
                 }
                 let tiles: Vec<Option<Held>> =
                     keys.iter().map(|k| k.and_then(|k| self.get(&k))).collect();
-                under.sample(&frame.view, &tiles, rgba, self.workers, false);
+                under.sample(&frame.view, &tiles, rgba, self.workers, Fill::Under);
             }
         }
         if !whole && !covered(rgba) {
@@ -379,16 +469,101 @@ impl TileCache {
                     let [r, g, b] = rgb888(outline::water(frame.style.theme));
                     fill_uncovered(rgba, |_| [r, g, b, 0xff]);
                 }
-                false => outline_under(&frame.view, frame.style.theme, rgba, self.workers),
+                false => {
+                    outline_under(&frame.view, frame.style.theme, rgba, self.workers, None);
+                }
             }
         }
-        let attribution = got
+    }
+
+    /// A frame while the view moves that owes tiles or leaves some out
+    /// (1163): the tiles held over their pixels, the missing ones' pixels
+    /// alone covered, the owed from the cached steps taken nearest, then
+    /// the outline, those not asked and off the projection with water.
+    /// The resample of the whole frame for a few owed tiles cost a pinch
+    /// on one worker some 60 ms (1155).
+    #[allow(clippy::too_many_arguments)]
+    fn cover_gaps(
+        &mut self,
+        frame: &Frame,
+        percent: u32,
+        grid: &Grid,
+        spans: &Spans,
+        got: &[Option<Held>],
+        left: &[usize],
+        rgba: &mut [u8],
+        blank: bool,
+    ) {
+        let (w, _) = frame.view.size();
+        let owed: Vec<Rect> = left.iter().filter_map(|&i| grid.rect(spans, i)).collect();
+        let water: Vec<Rect> = got
             .iter()
-            .flatten()
-            .map(|(_, a)| a)
-            .find(|a| a.as_ref() != outline::ATTRIBUTION)
-            .map_or_else(|| outline::ATTRIBUTION.to_string(), |a| a.to_string());
-        Some((attribution, left.len()))
+            .enumerate()
+            .filter(|(i, t)| t.is_none() && !left.contains(i))
+            .filter_map(|(i, _)| grid.rect(spans, i))
+            .collect();
+        let [r, g, b] = rgb888(outline::water(frame.style.theme));
+        let sea = [r, g, b, 0xff];
+        let nearest = grid.scale == 1.0;
+        if !blank && !nearest {
+            // Between steps a pixel blends a neighbour's tile: the pixel
+            // by pixel path reads alpha zero as not covered yet.
+            rgba.fill(0);
+        }
+        by_rows(rgba, w, self.workers, |y, out| {
+            for rect in owed.iter().filter(|r| r.has_row(y)) {
+                out[rect.x0 as usize * 4..rect.x1 as usize * 4].fill(0);
+            }
+            for rect in water.iter().filter(|r| r.has_row(y)) {
+                for px in out[rect.x0 as usize * 4..rect.x1 as usize * 4].chunks_exact_mut(4) {
+                    px.copy_from_slice(&sea);
+                }
+            }
+        });
+        let fill = match nearest {
+            true => Fill::Held,
+            false => Fill::Under,
+        };
+        grid.sample(&frame.view, got, rgba, self.workers, fill);
+        for z in stand_ins(frame) {
+            if covered_in(rgba, w, &owed) {
+                return;
+            }
+            let under = Grid::of(&frame.view, z);
+            let keys = under.keys(frame.style, percent);
+            let cols: Vec<Step> = (0..w).map(|x| under.col(&frame.view, x, true)).collect();
+            let rows: Vec<Step> = (0..frame.view.size().1)
+                .map(|y| under.row(&frame.view, y, true))
+                .collect();
+            // Only the tiles of this step the owed pixels sample.
+            let mut tiles: Vec<Option<Held>> = vec![None; keys.len()];
+            let mut any = false;
+            for rect in &owed {
+                let (c0, c1) = (cols[rect.x0 as usize].0 .0, cols[rect.x1 as usize - 1].0 .0);
+                let (r0, r1) = (rows[rect.y0 as usize].0 .0, rows[rect.y1 as usize - 1].0 .0);
+                for row in r0..=r1 {
+                    for col in c0..=c1 {
+                        let i = row * under.cols + col;
+                        if tiles[i].is_none() {
+                            tiles[i] = keys[i].and_then(|k| self.get(&k));
+                            any |= tiles[i].is_some();
+                        }
+                    }
+                }
+            }
+            if any {
+                under.stand_in(&tiles, &cols, &rows, rgba, &owed, self.workers);
+            }
+        }
+        if !covered_in(rgba, w, &owed) {
+            outline_under(
+                &frame.view,
+                frame.style.theme,
+                rgba,
+                self.workers,
+                Some(&owed),
+            );
+        }
     }
 
     fn get(&mut self, key: &TileKey) -> Option<Held> {
@@ -580,6 +755,42 @@ fn covered(rgba: &[u8]) -> bool {
     rgba.chunks_exact(4).all(|p| p[3] != 0)
 }
 
+/// Whether every pixel of `rects` in `rgba`, `w` wide, is covered.
+fn covered_in(rgba: &[u8], w: u32, rects: &[Rect]) -> bool {
+    let stride = w as usize * 4;
+    rects.iter().all(|r| {
+        (r.y0..r.y1).all(|y| {
+            let row = &rgba[y as usize * stride..(y as usize + 1) * stride];
+            covered(&row[r.x0 as usize * 4..r.x1 as usize * 4])
+        })
+    })
+}
+
+/// `one_row(y, row)` over the rows of `rgba`, `w` wide, split into bands
+/// over `workers` threads; on the calling thread with one.
+fn by_rows(rgba: &mut [u8], w: u32, workers: usize, one_row: impl Fn(u32, &mut [u8]) + Sync) {
+    let stride = w as usize * 4;
+    let h = rgba.len().checked_div(stride).unwrap_or(0);
+    let bands = workers.clamp(1, h.max(1));
+    let per = h.div_ceil(bands).max(1);
+    if bands == 1 {
+        for (y, out) in rgba.chunks_exact_mut(stride).enumerate() {
+            one_row(y as u32, out);
+        }
+        return;
+    }
+    std::thread::scope(|s| {
+        for (b, band) in rgba.chunks_mut(per * stride).enumerate() {
+            let one_row = &one_row;
+            s.spawn(move || {
+                for (i, out) in band.chunks_exact_mut(stride).enumerate() {
+                    one_row((b * per + i) as u32, out);
+                }
+            });
+        }
+    });
+}
+
 /// Set every pixel not covered to `colour` of its index.
 fn fill_uncovered(rgba: &mut [u8], colour: impl Fn(usize) -> [u8; 4]) {
     for (i, px) in rgba.chunks_exact_mut(4).enumerate() {
@@ -598,8 +809,15 @@ fn opaque(px: u16) -> [u8; 4] {
 /// The world outline in `theme` under the pixels of `rgba`, `view`'s,
 /// nothing covers: drawn at the step nearest the view's zoom over its
 /// area and taken nearest, rows split over `workers` (1143). Water off
-/// the projection, as the outline clears to.
-fn outline_under(view: &ExactView, theme: MapTheme, rgba: &mut [u8], workers: usize) {
+/// the projection, as the outline clears to. With `only`, the pixels of
+/// those rectangles alone are looked at (1163).
+fn outline_under(
+    view: &ExactView,
+    theme: MapTheme,
+    rgba: &mut [u8],
+    workers: usize,
+    only: Option<&[Rect]>,
+) {
     let z = view.tile_zoom();
     let base = view.at_zoom(z);
     let (bw, bh) = base.size();
@@ -621,27 +839,28 @@ fn outline_under(view: &ExactView, theme: MapTheme, rgba: &mut [u8], workers: us
         (u.floor() as i64).clamp(0, i64::from(bn) - 1) as usize
     };
     let cols: Vec<usize> = (0..w).map(|x| at(x, w, bw)).collect();
-    let stride = w as usize * 4;
     let one_row = |y: u32, out: &mut [u8]| {
         let src = &fb[at(y, h, bh) * bw as usize..];
-        for (px, &c) in out.chunks_exact_mut(4).zip(&cols) {
-            if px[3] == 0 {
-                px.copy_from_slice(&opaque(src[c]));
+        let mut put = |from: usize, to: usize| {
+            for (px, &c) in out[from * 4..to * 4]
+                .chunks_exact_mut(4)
+                .zip(&cols[from..to])
+            {
+                if px[3] == 0 {
+                    px.copy_from_slice(&opaque(src[c]));
+                }
+            }
+        };
+        match only {
+            None => put(0, w as usize),
+            Some(rects) => {
+                for r in rects.iter().filter(|r| r.has_row(y)) {
+                    put(r.x0 as usize, r.x1 as usize);
+                }
             }
         }
     };
-    let bands = workers.clamp(1, h as usize);
-    let per = (h as usize).div_ceil(bands);
-    std::thread::scope(|s| {
-        for (b, band) in rgba.chunks_mut(per * stride).enumerate() {
-            let one_row = &one_row;
-            s.spawn(move || {
-                for (i, out) in band.chunks_exact_mut(stride).enumerate() {
-                    one_row((b * per + i) as u32, out);
-                }
-            });
-        }
-    });
+    by_rows(rgba, w, workers, one_row);
 }
 
 /// The tile of `key` drawn: RGBA and its credit.
@@ -933,6 +1152,98 @@ impl Grid {
         out
     }
 
+    /// Where pixel `p` of `n` samples along one axis, the grid's first
+    /// tile `first` of `count` and the centre `centre` in the step's
+    /// pixels: nearest, or the pixel below and the weight of the next.
+    fn step(&self, centre: f64, first: i64, count: usize, n: u32, p: u32, nearest: bool) -> Step {
+        let t = i64::from(TILE);
+        let u = centre + (f64::from(p) + 0.5 - f64::from(n) / 2.0) / self.scale - 0.5;
+        let (q, f) = match nearest {
+            true => ((u + 0.5).floor() as i64, 0),
+            false => (u.floor() as i64, ((u - u.floor()) * 256.0) as u32),
+        };
+        let at = |q: i64| {
+            let c = (q.div_euclid(t) - first) as usize;
+            (c.min(count - 1), q.rem_euclid(t) as usize)
+        };
+        (at(q), at(q + 1), f)
+    }
+
+    /// Where column `x` of `view` samples: the tile column and offset of
+    /// the sample and of its right neighbour, and the neighbour's weight
+    /// out of 256.
+    fn col(&self, view: &ExactView, x: u32, nearest: bool) -> Step {
+        self.step(self.cx, self.tx0, self.cols, view.size().0, x, nearest)
+    }
+
+    /// Where row `y` of `view` samples, as [`col`](Self::col).
+    fn row(&self, view: &ExactView, y: u32, nearest: bool) -> Step {
+        self.step(self.cy, self.ty0, self.rows, view.size().1, y, nearest)
+    }
+
+    /// The pixels of `view` each tile column and row is sampled for, as
+    /// [`sample`](Self::sample) samples them.
+    fn spans(&self, view: &ExactView) -> Spans {
+        let nearest = self.scale == 1.0;
+        let (w, h) = view.size();
+        let along = |n: u32, count: usize, step: &dyn Fn(u32) -> Step| {
+            let mut out = vec![(0u32, 0u32); count];
+            for p in 0..n {
+                let ((i, _), _, _) = step(p);
+                let span = &mut out[i];
+                match span.0 == span.1 {
+                    true => *span = (p, p + 1),
+                    false => span.1 = p + 1,
+                }
+            }
+            out
+        };
+        (
+            along(w, self.cols, &|x| self.col(view, x, nearest)),
+            along(h, self.rows, &|y| self.row(view, y, nearest)),
+        )
+    }
+
+    /// The pixels tile `i` (in [`keys`](Self::keys)' order) is sampled
+    /// for; none when it is no pixel's.
+    fn rect(&self, spans: &Spans, i: usize) -> Option<Rect> {
+        let (x0, x1) = spans.0[i % self.cols];
+        let (y0, y1) = spans.1[i / self.cols];
+        (x0 < x1 && y0 < y1).then_some(Rect { x0, y0, x1, y1 })
+    }
+
+    /// The pixels of `rects` in `rgba` nothing covers yet, from `tiles`
+    /// taken nearest at `cols` and `rows` ([`col`](Self::col)), the step's
+    /// pixels doubled or halved: the stand ins while the view moves
+    /// (1163). A pixel whose tile is absent is left as it is.
+    fn stand_in(
+        &self,
+        tiles: &[Option<Held>],
+        cols: &[Step],
+        rows: &[Step],
+        rgba: &mut [u8],
+        rects: &[Rect],
+        workers: usize,
+    ) {
+        let w = cols.len() as u32;
+        by_rows(rgba, w, workers, |y, out| {
+            let ((r, oy), _, _) = rows[y as usize];
+            for rect in rects.iter().filter(|rect| rect.has_row(y)) {
+                let (x0, x1) = (rect.x0 as usize, rect.x1 as usize);
+                let pixels = out[x0 * 4..x1 * 4].chunks_exact_mut(4);
+                for (px, &((c, ox), _, _)) in pixels.zip(&cols[x0..x1]) {
+                    if px[3] != 0 {
+                        continue;
+                    }
+                    if let Some(Some((tile, _))) = tiles.get(r * self.cols + c) {
+                        let j = (oy * TILE as usize + ox) * 4;
+                        px.copy_from_slice(&tile[j..j + 4]);
+                    }
+                }
+            }
+        });
+    }
+
     /// Sample `tiles` (in [`keys`](Self::keys)' order) into `rgba`, the
     /// view's pixels: nearest at a scale of one, so a frame at a whole
     /// step is the tiles' pixels, bilinear between steps. A pixel already
@@ -940,56 +1251,29 @@ impl Grid {
     /// neighbour whose tile is absent gives way to the nearest sample.
     /// Rows split over `workers`.
     ///
-    /// With `whole` every tile is there and every pixel is written, what
-    /// `rgba` held before not read (1154): at a scale of one a row is
-    /// copied in runs, one a tile it crosses; between steps the bilinear
-    /// sums run two channels at once in the 32-bit halves of a `u64`. The
-    /// same bytes as the pixel by pixel path, which a frame with a tile
-    /// missing takes.
+    /// With [`Fill::Whole`] every tile is there and every pixel is
+    /// written, what `rgba` held before not read (1154): at a scale of one
+    /// a row is copied in runs, one a tile it crosses; between steps the
+    /// bilinear sums run two channels at once in the 32-bit halves of a
+    /// `u64`. The same bytes as the pixel by pixel path, which a frame with
+    /// a tile missing takes. [`Fill::Held`] copies the runs of the tiles
+    /// there at a scale of one and leaves the rest (1163).
     fn sample(
         &self,
         view: &ExactView,
         tiles: &[Option<Held>],
         rgba: &mut [u8],
         workers: usize,
-        whole: bool,
+        fill: Fill,
     ) {
-        let (w, h) = view.size();
-        let t = i64::from(TILE);
+        let (w, _) = view.size();
         let nearest = self.scale == 1.0;
-        // Per column: the tile column and offset of the sample and of its
-        // right neighbour, and the neighbour's weight out of 256.
-        let col = |x: u32| {
-            let u = self.cx + (f64::from(x) + 0.5 - f64::from(w) / 2.0) / self.scale - 0.5;
-            let (p, f) = match nearest {
-                true => ((u + 0.5).floor() as i64, 0),
-                false => (u.floor() as i64, ((u - u.floor()) * 256.0) as u32),
-            };
-            let at = |p: i64| {
-                let c = (p.div_euclid(t) - self.tx0) as usize;
-                (c.min(self.cols - 1), p.rem_euclid(t) as usize)
-            };
-            (at(p), at(p + 1), f)
-        };
-        let cols: Vec<Step> = (0..w).map(col).collect();
-        let row = |y: u32| {
-            let v = self.cy + (f64::from(y) + 0.5 - f64::from(h) / 2.0) / self.scale - 0.5;
-            let (p, f) = match nearest {
-                true => ((v + 0.5).floor() as i64, 0),
-                false => (v.floor() as i64, ((v - v.floor()) * 256.0) as u32),
-            };
-            let at = |p: i64| {
-                let r = (p.div_euclid(t) - self.ty0) as usize;
-                (r.min(self.rows - 1), p.rem_euclid(t) as usize)
-            };
-            (at(p), at(p + 1), f)
-        };
-        let stride = w as usize * 4;
+        let cols: Vec<Step> = (0..w).map(|x| self.col(view, x, nearest)).collect();
         // At a scale of one, the runs of columns that read consecutive
         // pixels of one tile column: `(x, n, c, ox)`, `n` columns from `x`
         // reading tile column `c` from its pixel `ox`.
         let mut runs: Vec<(usize, usize, usize, usize)> = Vec::new();
-        if whole && nearest {
+        if fill != Fill::Under && nearest {
             for (x, &((c, ox), _, _)) in cols.iter().enumerate() {
                 match runs.last_mut() {
                     Some(run) if run.2 == c && run.3 + run.1 == ox => run.1 += 1,
@@ -1005,8 +1289,24 @@ impl Grid {
                 .map(|c| tile(r, c).and_then(|(rgba, _)| rgba.get(o * line..(o + 1) * line)))
                 .collect()
         };
+        if fill == Fill::Held && nearest {
+            // A pass of its own: in the row below, this branch slowed the
+            // bilinear rows by a fifth (1163).
+            let line = TILE as usize * 4;
+            by_rows(rgba, w, workers, |y, out| {
+                let ((r, o), _, _) = self.row(view, y, true);
+                for &(x, n, c, ox) in &runs {
+                    if let Some((rgba, _)) = tile(r, c) {
+                        let src = &rgba[o * line..(o + 1) * line];
+                        out[x * 4..(x + n) * 4].copy_from_slice(&src[ox * 4..(ox + n) * 4]);
+                    }
+                }
+            });
+            return;
+        }
+        let whole = fill == Fill::Whole;
         let one_row = |y: u32, out: &mut [u8]| {
-            let ((r0, o0), (r1, o1), fy) = row(y);
+            let ((r0, o0), (r1, o1), fy) = self.row(view, y, nearest);
             if whole && nearest {
                 if let Some(top) = tile_rows(r0, o0) {
                     for &(x, n, c, ox) in &runs {
@@ -1049,24 +1349,7 @@ impl Grid {
                 }
             }
         };
-        let bands = workers.clamp(1, h as usize);
-        let per = (h as usize).div_ceil(bands);
-        if bands == 1 {
-            for (y, out) in rgba.chunks_exact_mut(stride).enumerate() {
-                one_row(y as u32, out);
-            }
-            return;
-        }
-        std::thread::scope(|s| {
-            for (b, band) in rgba.chunks_mut(per * stride).enumerate() {
-                let one_row = &one_row;
-                s.spawn(move || {
-                    for (i, out) in band.chunks_exact_mut(stride).enumerate() {
-                        one_row((b * per + i) as u32, out);
-                    }
-                });
-            }
-        });
+        by_rows(rgba, w, workers, one_row);
     }
 }
 
@@ -1133,6 +1416,8 @@ mod tests {
             scale: 1.0,
             render_limit: None,
             fallback: None,
+            moving: false,
+            asked: None,
         }
     }
 
@@ -1361,6 +1646,132 @@ mod tests {
         assert!(shown.missing > 0);
         assert!(!shown.rgba.chunks_exact(4).any(|p| p == BLACK));
         assert!(shown.rgba.chunks_exact(4).all(|p| p[3] == 0xff));
+    }
+
+    /// The pixels of `view`'s tiles at `zoom` not held in `cache`.
+    fn not_held(cache: &TileCache, view: &ExactView, zoom: u8) -> Vec<Rect> {
+        let grid = Grid::of(view, zoom);
+        let spans = grid.spans(view);
+        let keys = grid.keys(Style::PC, 100);
+        (0..keys.len())
+            .filter(|&i| keys[i].is_some_and(|k| !cache.holds(&k)))
+            .filter_map(|i| grid.rect(&spans, i))
+            .collect()
+    }
+
+    /// Whether `rgba`'s rows, `w` wide, come in pairs of equal rows from
+    /// row 0 or from row 1: a step's pixels doubled.
+    fn rows_doubled(rgba: &[u8], w: usize) -> bool {
+        let rows: Vec<&[u8]> = rgba.chunks_exact(w * 4).collect();
+        (0..2).any(|o| {
+            (o..rows.len() - 1)
+                .step_by(2)
+                .all(|y| rows[y] == rows[y + 1])
+        })
+    }
+
+    /// The columns of `rgba` likewise.
+    fn cols_doubled(rgba: &[u8], w: usize) -> bool {
+        let rows: Vec<&[u8]> = rgba.chunks_exact(w * 4).collect();
+        (0..2).any(|o| {
+            (o..w - 1).step_by(2).all(|x| {
+                rows.iter()
+                    .all(|r| r[x * 4..x * 4 + 4] == r[x * 4 + 4..x * 4 + 8])
+            })
+        })
+    }
+
+    /// 1163: while the view moves a frame owing tiles shows the tiles held
+    /// as a frame drawn whole does, and over the owed tiles' pixels alone
+    /// the step before, its pixels doubled (nearest, not bilinear as at
+    /// rest), the very pixels a moving frame of only that step shows.
+    #[test]
+    fn a_moving_frame_stands_in_only_over_the_owed_tiles() {
+        let (_dir, maps) = maps();
+        let mut view = ExactView::new(on_pixel(duomo(), 15), 15 * MILLI, 500, 400);
+        let moving = |view: ExactView| Frame {
+            moving: true,
+            render_limit: Some(0),
+            ..frame(view, 15)
+        };
+        // Held: z14 over the frame, z15 for the view before a pan.
+        let mut cache = TileCache::new(maps.clone(), BUDGET_MB << 20);
+        cache.compose(&frame(view, 15));
+        view.pan(300, 200);
+        cache.compose(&frame(view, 14));
+        let owed = not_held(&cache, &view, 15);
+        assert!(!owed.is_empty());
+        let shown = cache.compose(&moving(view));
+        assert_eq!(shown.missing, owed.len());
+        assert!(shown.rgba.chunks_exact(4).all(|p| p[3] == 0xff));
+        // Every tile drawn: the pixels of the tiles held.
+        let full = TileCache::new(maps.clone(), BUDGET_MB << 20).compose(&frame(view, 15));
+        // Only z14 held: what stands in.
+        let mut only = TileCache::new(maps.clone(), BUDGET_MB << 20);
+        only.compose(&frame(view, 14));
+        let stood = only.compose(&moving(view));
+        assert!(rows_doubled(&stood.rgba, 500) && cols_doubled(&stood.rgba, 500));
+        let at_rest = only.compose(&Frame {
+            render_limit: Some(0),
+            ..frame(view, 15)
+        });
+        assert!(
+            at_rest.rgba != stood.rgba,
+            "at rest the step is scaled bilinear"
+        );
+        let mut stood_in = 0;
+        for (i, px) in shown.rgba.chunks_exact(4).enumerate() {
+            let (x, y) = ((i % 500) as u32, (i / 500) as u32);
+            let in_owed = owed
+                .iter()
+                .any(|r| r.has_row(y) && (r.x0..r.x1).contains(&x));
+            let want = match in_owed {
+                true => &stood.rgba[i * 4..i * 4 + 4],
+                false => &full.rgba[i * 4..i * 4 + 4],
+            };
+            assert_eq!(px, want, "pixel {x},{y}, owed {in_owed}");
+            stood_in += usize::from(in_owed);
+        }
+        assert!(stood_in > 0 && stood_in < 500 * 400);
+    }
+
+    /// 1163: a tile wholly outside the pixels a frontend shows is neither
+    /// drawn nor owed, its pixels water; one held there is used.
+    #[test]
+    fn tiles_outside_the_asked_pixels_are_neither_drawn_nor_owed() {
+        let (_dir, maps) = maps();
+        let view = ExactView::new(on_pixel(duomo(), 15), 15 * MILLI, 900, 900);
+        let asked = Frame {
+            moving: true,
+            asked: Some([400, 400, 500, 500]),
+            ..frame(view, 15)
+        };
+        let grid = Grid::of(&view, 15);
+        let spans = grid.spans(&view);
+        let inside = (0..grid.cols * grid.rows)
+            .filter_map(|i| grid.rect(&spans, i))
+            .filter(|r| r.x0 < 500 && 400 < r.x1 && r.y0 < 500 && 400 < r.y1)
+            .count();
+        assert!(inside < grid.cols * grid.rows);
+        let mut cache = TileCache::new(maps.clone(), BUDGET_MB << 20);
+        let owed = cache.compose(&Frame {
+            render_limit: Some(0),
+            ..asked
+        });
+        assert_eq!(owed.missing, inside, "only the tiles asked are owed");
+        let shown = cache.compose(&asked);
+        assert_eq!(shown.missing, 0);
+        assert_eq!(cache.stats.rendered, inside as u64, "only those drawn");
+        let [r, g, b] = rgb888(outline::water(Style::PC.theme));
+        assert_eq!(&shown.rgba[..4], &[r, g, b, 0xff], "water outside");
+        let full = TileCache::new(maps.clone(), BUDGET_MB << 20).compose(&frame(view, 15));
+        let mid = (450 * 900 + 450) * 4;
+        assert_eq!(&shown.rgba[mid..mid + 4], &full.rgba[mid..mid + 4]);
+        // Every tile held: the frame drawn whole.
+        let mut held = TileCache::new(maps, BUDGET_MB << 20);
+        held.compose(&frame(view, 15));
+        let shown = held.compose(&asked);
+        assert!(shown.rgba == full.rgba, "the tiles held outside are used");
     }
 
     /// The steps a frame not drawn takes its stand ins from, in order.

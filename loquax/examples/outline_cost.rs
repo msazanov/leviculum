@@ -50,6 +50,8 @@ fn main() {
                 scale: 2.75,
                 render_limit: Some(0),
                 fallback: None,
+                moving: false,
+                asked: None,
             };
             let time = |cache: &mut TileCache, frame: &Frame| {
                 let mut ms = Vec::new();
