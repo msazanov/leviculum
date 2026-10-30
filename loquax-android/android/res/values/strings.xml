@@ -1,6 +1,6 @@
 <?xml version='1.0' encoding='utf-8'?>
 <resources>
-    <string name="app_name">loquax</string>
+    <string name="app_name">Loquax</string>
     <string name="starting">Starting…</string>
     <string name="joining">Joining the home node…</string>
     <string name="code_label">Home code, from `loquax home admit` on the home node (with --server it brings the address along)</string>
@@ -32,7 +32,7 @@
     <string name="not_connected">Not connected: %1$s</string>
     <string name="stop">Stop</string>
     <string name="battery_title">Stay connected in the background?</string>
-    <string name="battery_text">loquax keeps a connection to your home node so new messages arrive while the app is closed. Android\'s battery optimisation may cut that connection when the phone lies still. You can leave loquax out of it; you can change this later in the system settings.</string>
+    <string name="battery_text">Loquax keeps a connection to your home node so new messages arrive while the app is closed. Android\'s battery optimisation may cut that connection when the phone lies still. You can leave Loquax out of it; you can change this later in the system settings.</string>
     <string name="battery_yes">Leave it out</string>
     <string name="battery_no">Not now</string>
     <string name="map">Map</string>
@@ -116,7 +116,7 @@
     <string name="link">Link</string>
     <string name="create">Create</string>
     <string name="save_address">Also save the address in the contact</string>
-    <string name="save_address_why">Your contacts app saves it. If that contact is synced with Google or another account, the address goes there with it, as a phone number would. Leave it off to keep the address only in loquax.</string>
+    <string name="save_address_why">Your contacts app saves it. If that contact is synced with Google or another account, the address goes there with it, as a phone number would. Leave it off to keep the address only in Loquax.</string>
     <string name="contact_unreadable">That contact could not be read.</string>
     <string name="linked_to">Linked to %1$s.</string>
     <string name="no_contacts_app">No contacts app answered.</string>

@@ -79,7 +79,7 @@
     <string name="link">Verknüpfen</string>
     <string name="create">Anlegen</string>
     <string name="save_address">Adresse auch im Kontakt speichern</string>
-    <string name="save_address_why">Deine Kontakte-App speichert sie. Wird der Kontakt mit Google oder einem anderen Konto synchronisiert, geht die Adresse dorthin mit, wie eine Telefonnummer. Lass es aus, damit die Adresse nur in loquax bleibt.</string>
+    <string name="save_address_why">Deine Kontakte-App speichert sie. Wird der Kontakt mit Google oder einem anderen Konto synchronisiert, geht die Adresse dorthin mit, wie eine Telefonnummer. Lass es aus, damit die Adresse nur in Loquax bleibt.</string>
     <string name="contact_unreadable">Dieser Kontakt war nicht lesbar.</string>
     <string name="linked_to">Mit %1$s verknüpft.</string>
     <string name="no_contacts_app">Keine Kontakte-App hat geantwortet.</string>

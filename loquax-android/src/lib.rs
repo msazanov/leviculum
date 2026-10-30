@@ -198,7 +198,7 @@ pub fn stop() {
     }
 }
 
-/// What the app's first screen says about this device: the loquax version,
+/// What the app's first screen says about this device: the Loquax version,
 /// and whether `home` (the app's files directory, which is its loquax home)
 /// makes it a client of a home node, with the home node's LXMF address and
 /// the last archive entry pulled.
@@ -215,7 +215,7 @@ pub fn describe(home: &Path) -> String {
         },
         Err(error) => error,
     };
-    format!("loquax {}\n{state}", loquax::VERSION)
+    format!("Loquax {}\n{state}", loquax::VERSION)
 }
 
 /// `static native String describe(String home)` of `Native`: [`describe`].
@@ -353,7 +353,7 @@ mod tests {
     fn a_fresh_home_is_no_client() {
         let home = tempfile::tempdir().expect("tempdir");
         let text = describe(home.path());
-        assert!(text.starts_with(&format!("loquax {}\n", loquax::VERSION)));
+        assert!(text.starts_with(&format!("Loquax {}\n", loquax::VERSION)));
         assert!(text.ends_with("Not a client of a home node."), "{text}");
     }
 

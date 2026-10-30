@@ -1,7 +1,7 @@
-# loquax for Android
+# Loquax for Android
 
-The phone side of the loquax home node (`docs/src/concepts/loquax-home-node.md`):
-an Android app with a Java UI on Android's own views and the loquax core
+The phone side of the Loquax home node (`docs/src/concepts/loquax-home-node.md`):
+an Android app with a Java UI on Android's own views and the Loquax core
 in a Rust library behind JNI. Why this shape and not another is the study
 `docs/drafts/loquax-android-2026-10.md`.
 
@@ -13,10 +13,10 @@ What it does today:
   files directory; later starts need neither. What went wrong is said in
   plain words, and the field it concerns is focused.
 - **Conversations.** After a modern messenger's overview: a bar with our
-  own avatar, "loquax", a search (by name and last line) and a menu
+  own avatar, "Loquax", a search (by name and last line) and a menu
   (pull now, the map, stop the service). Each row a large avatar circle
   (initials on a colour from the address, or the peer's own colours when
-  it sent an LXMF icon appearance), the name as every loquax screen gives
+  it sent an LXMF icon appearance), the name as every Loquax screen gives
   it, up to two lines of the last message ("Position" for a report,
   "reacted 👍" for a reaction), the time ("Now", minutes, hours under a
   day, the weekday within the week, then the date; German on a German
@@ -26,7 +26,7 @@ What it does today:
   of a new conversation.
 - **Chat.** After a modern messenger's layout: a bar with back, the
   peer's avatar and name and a menu (pull now, the map). Rounded bubbles,
-  ours right in loquax's green and theirs left in a grey a step lighter
+  ours right in Loquax's green and theirs left in a grey a step lighter
   than the screen, at most 80 % of its width. Inside a bubble's bottom
   right its time and for ours the mark from the home node's archive: a
   clock queued or sending, a tick sent, two ticks in a filled circle
@@ -62,7 +62,7 @@ What it does today:
 - **Asked once.** On the first conversation list: notifications (Android
   13 and later), and on a later look the battery optimisation exemption,
   with a plain reason. Neither is forced, neither is asked again.
-- **Map.** The contacts' latest positions as pins over loquax's own map
+- **Map.** The contacts' latest positions as pins over Loquax's own map
   (the list's menu), drawn by the library with the window's
   renderer: the regions in the app's `maps/`, the world outline, the
   names, the pins, stale ones dimmed, in the map's dark colours when the
@@ -92,7 +92,7 @@ Not yet: the battery measurement (study, section 3), UnifiedPush.
 
 ## How it is built
 
-One Rust library holds the node, the engine, the store and loquax's screen
+One Rust library holds the node, the engine, the store and Loquax's screen
 model; Java only draws. The library's node is a leaf: transport off, one
 TCP client interface to the home node, no lnsd and no shared instance on
 the phone (`loquax::engine::attach_leaf`). Its session
