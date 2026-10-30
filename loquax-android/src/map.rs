@@ -572,6 +572,23 @@ pub fn tile_memory(dir: &Path) -> Option<(usize, usize)> {
         .map(Renderer::tile_memory)
 }
 
+/// The bytes the names of the last frame at rest of the renderer over
+/// `dir` hold as sprites, and the milliseconds drawing them again into a
+/// frame of `w` by `h` pixels takes: the measuring tool's sprite row.
+pub fn sprite_cost(dir: &Path, w: u32, h: u32) -> Option<(usize, f64)> {
+    let renderers = RENDERERS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let r = renderers.iter().find(|r| r.dir == dir)?;
+    // Written before the clock starts, so its pages are mapped.
+    let mut rgba = vec![255u8; w as usize * h as usize * 4];
+    let started = Instant::now();
+    r.frames.draw_names(&mut rgba, w, h, MapTheme::Light);
+    let ms = started.elapsed().as_secs_f64() * 1e3;
+    std::hint::black_box(&rgba);
+    Some((r.frames.sprite_bytes(), ms))
+}
+
 /// Draw the tiles of the renderer over `dir` on `n` threads at most, and
 /// with `clear` drop the tiles it holds: the measuring tool's one-core
 /// row and its cold frames.

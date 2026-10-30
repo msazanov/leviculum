@@ -6,7 +6,8 @@
 //!
 //! Rows: a pan with the tile cache warm (each frame 40 pixels from the
 //! last, the finger down), the frame at rest where that pan started (the
-//! names placed), a pan that uncovers a new tile column every frame (256
+//! names placed), its names drawn again from their sprites with the bytes
+//! the sprites hold (1156), a pan that uncovers a new tile column every frame (256
 //! pixels a frame), a cold frame at rest (the cache dropped, every tile
 //! drawn and the names placed), a cold frame while the finger is down (at
 //! most two tiles a worker drawn, the rest owed), and a pinch from z14.3
@@ -142,6 +143,24 @@ fn main() {
         };
         let ms: Vec<f64> = (0..5).map(|_| timed(&rest).0).collect();
         row("at rest, cache warm, names placed", median(ms), 0.0, 0);
+        // Its names drawn again from their sprites, as a moving frame
+        // draws them, and the bytes the sprites hold.
+        let (fw, fh) = (w + 2 * base.margin_x, h + 2 * base.margin_y);
+        let mut draws = Vec::new();
+        let mut bytes = 0;
+        for _ in 0..11 {
+            if let Some((b, ms)) = loquax_android::map::sprite_cost(&home, fw, fh) {
+                bytes = b;
+                draws.push(ms);
+            }
+        }
+        if !draws.is_empty() {
+            println!(
+                "| names drawn from their sprites, {:.2} MB of sprites | {threads} | {:.2} | | | |",
+                bytes as f64 / 1e6,
+                median(draws)
+            );
+        }
         // A pan that uncovers a tile column a frame.
         let before = stats().rendered;
         let (mut ms, mut owed) = (Vec::new(), 0);

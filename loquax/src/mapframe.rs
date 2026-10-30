@@ -31,7 +31,7 @@
 
 use leviculum_map::labels::SUBPIXEL;
 use leviculum_map::viewport::{ExactView, MILLI};
-use leviculum_mapfill::style::Style;
+use leviculum_mapfill::style::{MapTheme, Style};
 
 use crate::mapnames::{self, Sprite, Typesetter};
 use crate::picture::{Maps, Painter};
@@ -406,6 +406,19 @@ impl Frames {
     /// The names' masks and halos kept, and their bytes.
     pub fn names_kept(&self) -> (usize, usize) {
         self.type_.kept()
+    }
+
+    /// The bytes the names of the last frame at rest hold as sprites.
+    pub fn sprite_bytes(&self) -> usize {
+        self.names.iter().map(Sprite::bytes).sum()
+    }
+
+    /// Draw the names of the last frame at rest again into `rgba`, `w` by
+    /// `h` pixels, where they were placed: a measuring tool's sprite draw.
+    pub fn draw_names(&self, rgba: &mut [u8], w: u32, h: u32, theme: MapTheme) {
+        for name in &self.names {
+            name.draw(rgba, w, h, theme, 0, 0);
+        }
     }
 
     /// Whether the last frame was at rest and owed nothing: a prefetch

@@ -882,6 +882,11 @@ impl Sprite {
             .collect()
     }
 
+    /// The bytes its coverage holds: the measuring tool's sprite memory.
+    pub fn bytes(&self) -> usize {
+        std::mem::size_of_val(self.px.as_slice())
+    }
+
     /// Draw it into `rgba`, `w` by `h` pixels, in `theme`'s colours,
     /// moved by `(dx, dy)` pixels from where it was placed.
     pub fn draw(&self, rgba: &mut [u8], w: u32, h: u32, theme: MapTheme, dx: i64, dy: i64) {
