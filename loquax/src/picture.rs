@@ -204,8 +204,36 @@ pub struct Painter {
     epoch: u64,
     regions: Vec<Installed>,
     read: Vec<(ViewTile, Vec<u8>)>,
+    /// The filler's storage, kept from draw to draw: a tile cache's
+    /// painter draws hundreds of tiles, and allocating this for each cost
+    /// about a tenth of a cold frame's tile time (the render study of
+    /// 2026-10-30).
+    scratch: FillScratch,
     /// When each autoloaded region was last marked viewed.
     viewed: HashMap<String, Instant>,
+}
+
+/// The filler's storage for one region drawn ([`region_into`]). The filler
+/// sets up what it reads before each fill (every bucket head of the clip
+/// is reset as a fill begins), so what an earlier draw left is never seen.
+struct FillScratch {
+    edges: Vec<Edge>,
+    active: Vec<u16>,
+    heads: Vec<u16>,
+    points: Vec<Point>,
+    ring_ends: Vec<u16>,
+}
+
+impl FillScratch {
+    fn new() -> Self {
+        Self {
+            edges: vec![Edge::default(); 8192],
+            active: vec![0u16; 8192],
+            heads: Vec::new(),
+            points: vec![Point::zero(); 8192],
+            ring_ends: vec![0u16; 2048],
+        }
+    }
 }
 
 impl Painter {
@@ -218,6 +246,7 @@ impl Painter {
             epoch,
             regions,
             read: Vec::new(),
+            scratch: FillScratch::new(),
             viewed: HashMap::new(),
         }
     }
@@ -302,6 +331,7 @@ impl Painter {
                     style,
                     percent,
                     &mut self.read,
+                    &mut self.scratch,
                     &mut frame,
                 ) {
                     attribution = installed.region.attribution().to_string();
@@ -380,6 +410,7 @@ fn region_into(
     style: Style,
     percent: u32,
     read: &mut Vec<(ViewTile, Vec<u8>)>,
+    fill: &mut FillScratch,
     frame: &mut Frame<'_>,
 ) -> bool {
     if region.read_view(view, read).is_err() {
@@ -389,19 +420,16 @@ fn region_into(
         return false;
     };
     let (_, h) = view.size();
-    let mut edges = vec![Edge::default(); 8192];
-    let mut active = vec![0u16; 8192];
-    let mut heads = vec![0u16; h as usize];
-    let mut points = vec![Point::zero(); 8192];
-    let mut ring_ends = vec![0u16; 2048];
+    // A bucket head a row of the view.
+    fill.heads.resize(h as usize, 0);
     let mut scratch = Scratch {
-        edges: &mut edges,
-        heads: &mut heads,
-        active: &mut active,
+        edges: &mut fill.edges,
+        heads: &mut fill.heads,
+        active: &mut fill.active,
     };
     let mut work = Work {
-        points: &mut points,
-        ring_ends: &mut ring_ends,
+        points: &mut fill.points,
+        ring_ends: &mut fill.ring_ends,
     };
     let Ok(_) = draw_in_scaled(
         &tiles,

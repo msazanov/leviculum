@@ -15,7 +15,8 @@
 //! the prefetch calls the app makes while idle (tiles drawn, a call's
 //! time, which is what a gesture waits at most), and the first frame of a
 //! further pan north by a tile row, with and without the prefetch before
-//! it. The cache's memory after the run is printed last.
+//! it. The cache's memory after the run is printed last. The cold rows
+//! also say the time the workers spent drawing tiles, summed.
 //!
 //! ```sh
 //! cargo run --release -p loquax-android --example map_fps -- HOME
@@ -130,7 +131,7 @@ fn main() {
                 moving,
                 ..base.clone()
             };
-            let before = stats().rendered;
+            let before = stats();
             let (mut ms, mut owed) = (Vec::new(), 0);
             for _ in 0..7 {
                 loquax_android::map::tune_tiles(&home, None, true);
@@ -138,12 +139,14 @@ fn main() {
                 owed = owed.max(u32::from(shown.pending));
                 ms.push(t);
             }
-            let drawn = (stats().rendered - before) as f64 / 7.0;
+            let drawn = (stats().rendered - before.rendered) as f64 / 7.0;
+            let cpu = (stats().render_us - before.render_us) as f64 / 7e3;
             let name = match moving {
                 false => "cold, at rest, names placed",
                 true => "cold, finger down",
             };
             row(name, median(ms), drawn, owed);
+            println!("| {name}: tile time, workers summed | {threads} | {cpu:.1} | | | |");
         }
         // A pinch from z14.3 to z15.7, the finger down, then at rest.
         let start = MapRequest {

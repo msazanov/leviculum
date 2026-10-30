@@ -42,6 +42,7 @@
 use std::collections::HashMap;
 use std::string::{String, ToString};
 use std::sync::Arc;
+use std::time::Instant;
 use std::vec::Vec;
 
 use leviculum_map::draw::Ink;
@@ -131,6 +132,10 @@ pub struct Stats {
     pub evicted: u64,
     /// Times the whole cache was dropped: a new epoch or style.
     pub cleared: u64,
+    /// Microseconds the workers spent drawing tiles, each worker's own
+    /// time summed: on one worker the CPU a cold frame's tiles cost; on
+    /// more it is that or above, as the workers share cores.
+    pub render_us: u64,
 }
 
 /// One frame asked of the cache.
@@ -495,29 +500,35 @@ impl TileCache {
         while self.painters.len() < n {
             self.painters.push(Painter::new(self.maps.clone()));
         }
-        if n == 1 {
-            let painter = &mut self.painters[0];
-            return keys.iter().map(|k| draw_tile(painter, k)).collect();
-        }
-        let per = keys.len().div_ceil(n);
-        std::thread::scope(|s| {
-            let jobs: Vec<_> = self
-                .painters
-                .iter_mut()
-                .zip(keys.chunks(per))
-                .map(|(painter, chunk)| {
-                    s.spawn(move || {
-                        chunk
-                            .iter()
-                            .map(|k| draw_tile(painter, k))
-                            .collect::<Vec<_>>()
-                    })
-                })
-                .collect();
-            jobs.into_iter()
-                .flat_map(|j| j.join().unwrap_or_default())
-                .collect()
-        })
+        // Each worker's own time drawing: its share of the CPU.
+        let timed = |painter: &mut Painter, chunk: &[TileKey]| {
+            let started = Instant::now();
+            let drawn: Vec<_> = chunk.iter().map(|k| draw_tile(painter, k)).collect();
+            let us = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+            (drawn, us)
+        };
+        let (drawn, us) = if n == 1 {
+            timed(&mut self.painters[0], keys)
+        } else {
+            let per = keys.len().div_ceil(n);
+            std::thread::scope(|s| {
+                let jobs: Vec<_> = self
+                    .painters
+                    .iter_mut()
+                    .zip(keys.chunks(per))
+                    .map(|(painter, chunk)| s.spawn(move || timed(painter, chunk)))
+                    .collect();
+                jobs.into_iter().map(|j| j.join().unwrap_or_default()).fold(
+                    (Vec::new(), 0u64),
+                    |(mut all, us), (drawn, t)| {
+                        all.extend(drawn);
+                        (all, us.saturating_add(t))
+                    },
+                )
+            })
+        };
+        self.stats.render_us = self.stats.render_us.saturating_add(us);
+        drawn
     }
 }
 
@@ -626,11 +637,26 @@ fn draw_tile(painter: &mut Painter, key: &TileKey) -> (TileKey, Vec<u8>, String)
         TILE,
     );
     let drawn = painter.draw(&view, Ink::Colour, key.style, key.percent);
-    let mut rgba = Vec::with_capacity(drawn.fb.len() * 4);
-    for &px in &drawn.fb {
-        rgba.extend_from_slice(&opaque(px));
+    (*key, to_rgba(&drawn.fb), drawn.attribution)
+}
+
+/// A drawn tile's big endian Rgb565 pixels as opaque RGBA, the bytes
+/// [`opaque`] gives each, in one pass over a buffer of the final size: a
+/// pixel pushed at a time through the colour types cost about a fifth of
+/// a cold frame's tile time (the render study of 2026-10-30).
+fn to_rgba(fb: &[u16]) -> Vec<u8> {
+    let mut rgba = vec![0u8; fb.len() * 4];
+    for (out, &px) in rgba.chunks_exact_mut(4).zip(fb) {
+        let v = u16::from_be(px);
+        let (r, g, b) = ((v >> 11) & 31, (v >> 5) & 63, v & 31);
+        out.copy_from_slice(&[
+            ((r << 3) | (r >> 2)) as u8,
+            ((g << 2) | (g >> 4)) as u8,
+            ((b << 3) | (b >> 2)) as u8,
+            0xff,
+        ]);
     }
-    (*key, rgba, drawn.attribution)
+    rgba
 }
 
 /// The pan's velocity, a moving average in screen pixels a second that
@@ -1541,5 +1567,36 @@ mod tests {
         assert_eq!(cache.stats.prefetched as usize, first + 2);
         assert_eq!(cache.stats.evicted, 0);
         assert!(cache.bytes() <= room * TILE_BYTES);
+    }
+
+    /// The one pass to RGBA is [`opaque`]'s bytes for every colour.
+    #[test]
+    fn the_direct_rgba_loop_gives_every_colour_as_opaque_does() {
+        let all: Vec<u16> = (0..=u16::MAX).collect();
+        let want: Vec<u8> = all.iter().flat_map(|&p| opaque(p)).collect();
+        assert!(to_rgba(&all) == want, "a colour differs");
+    }
+
+    /// A painter that kept its filler's storage from tile to tile, after a
+    /// taller view too, draws the bytes a fresh painter draws for each
+    /// (1155): what an earlier fill left is never read.
+    #[test]
+    fn a_painter_that_kept_its_scratch_draws_as_a_fresh_one() {
+        let (_dir, maps) = maps();
+        let mut kept = Painter::new(maps.clone());
+        let tall = Viewport::new(duomo(), 15, 300, 700);
+        let _ = kept.draw(&tall, Ink::Colour, Style::PC, 100);
+        let mut keys = Vec::new();
+        for z in [13u8, 15, 16] {
+            let view = ExactView::new(duomo(), u32::from(z) * MILLI, 700, 700);
+            let grid = Grid::of(&view, z);
+            keys.extend(grid.keys(Style::PC, 100).into_iter().flatten());
+        }
+        assert!(keys.len() > 20, "{} tiles", keys.len());
+        for key in &keys {
+            let again = draw_tile(&mut kept, key);
+            let fresh = draw_tile(&mut Painter::new(maps.clone()), key);
+            assert!(again == fresh, "tile {key:?} differs");
+        }
     }
 }
