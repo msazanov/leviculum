@@ -7,11 +7,30 @@ in a Rust library behind JNI. Why this shape and not another is the study
 
 What it does today:
 
-- **Join.** The first start asks for the home code (`lqxh1...`, printed by
-  `loquax home admit` on the home node) and the home node's address,
-  `host:port` of its lnsd TCP server, and joins. Both are kept in the app's
-  files directory; later starts need neither. What went wrong is said in
-  plain words, and the field it concerns is focused.
+- **First start** (1152, `docs/drafts/loquax-onboarding-2026-10.md`,
+  section 2). A phone that holds no mailbox and reads none opens on
+  "Where should your mailbox be?", "On this phone" preselected and its
+  three warnings below it (background, offline mail waits in the network,
+  back up your address). The background screen explains notifications
+  and the battery exemption once, then Android asks twice. "Your address"
+  ends it: the QR code, share, write a message, the name for others and,
+  for a phone mailbox, the backup. "I already have a Loquax address"
+  restores from a backup file or a scanned paper backup.
+- **The mailbox on the phone.** `loquax --daemon`'s code
+  (`loquax::home::daemon`) runs inside the app with a node of its own:
+  TCP to the entry servers (`leviculum.network:4242`, or the lines of
+  `mailbox/servers` in the app's files directory) and a TCP server on a
+  loopback port for the app's own screens, which join it with a token it
+  issues itself and stay its client, as of a mailbox on a computer. Its
+  files are under `mailbox/`; `mailbox-here` marks the choice.
+- **Join a mailbox on a computer.** Scan the code `loquax home admit
+  --server` shows, paste it, or share it from another app
+  (`lqxh1...@host:port`); a code without the address asks for `host:port`
+  of the computer's lnsd TCP server. What went wrong is said in plain
+  words, and the field it concerns is focused.
+- **Backup.** "Back up your mailbox" in the settings seals the address
+  with a passphrase (`loquax::home::backup`) into a file saved through the
+  system's file picker and a paper code to print; both hold one line.
 - **Conversations.** After a modern messenger's overview: a bar with our
   own avatar, "Loquax", a search (by name and last line) and a menu
   (pull now, the map, stop the service). Each row a large avatar circle
@@ -59,9 +78,10 @@ What it does today:
   which opens the chat; none while a screen of the app is visible. When
   the system ends the process, the service comes back and starts the
   session from the saved code and address.
-- **Asked once.** On the first conversation list: notifications (Android
-  13 and later), and on a later look the battery optimisation exemption,
-  with a plain reason. Neither is forced, neither is asked again.
+- **Asked once.** On the first start's background screen, or for a phone
+  that joined without it on the first conversation list: notifications
+  (Android 13 and later) and the battery optimisation exemption, with a
+  plain reason. Neither is forced, neither is asked again.
 - **Map.** The contacts' latest positions as pins over Loquax's own map
   (the list's menu), drawn by the library with the window's
   renderer: the regions in the app's `maps/`, the world outline, the
@@ -88,7 +108,8 @@ What it does today:
   Switching while a screen is open recreates it, as a rotation does; the
   session in the service goes on untouched.
 
-Not yet: the battery measurement (study, section 3), UnifiedPush.
+Not yet: the battery measurement (study, section 3), UnifiedPush, moving
+the mailbox between devices, AutoInterface on the phone's WLAN.
 
 ## How it is built
 

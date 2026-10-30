@@ -463,6 +463,15 @@ runs while the daemon does (each refuses, naming its pid), and the daemon
 does not start under one. Beside the messenger they run unlocked, as before
 the lock existed.
 
+On a phone the home node runs inside the app (1152): the same
+`home::daemon::run`, with `DaemonUpstream::Mesh` instead of a shared
+instance, because a phone has no lnsd. Its node dials the entry servers
+and serves the app's own screens on a loopback port; the screens join it
+with a token it issues itself and stay its client, so the local and the
+external case are one code path. A `stop` channel ends it in place of
+SIGTERM, which belongs to the app's process, and its propagation node is
+selected from its own node's path table (`loquax-android/src/mailbox.rs`).
+
 A client is a laptop that ran `loquax home join`. Its messenger pulls at
 start and on the mailbox schedule (`F5` and `Ctrl-r` too) and shows the
 home node's address as its own, as does `loquax address`; `loquax fetch`
