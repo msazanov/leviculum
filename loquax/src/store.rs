@@ -315,15 +315,15 @@ impl fmt::Display for StoreError {
         match self {
             Self::Corrupt { path, detail } => write!(
                 f,
-                "the message store {} is damaged ({detail}). loquax will not start over it, \
+                "the message store {} is damaged ({detail}). Loquax will not start over it, \
                  because an empty history would be written where the old one was. Move the \
                  file aside to start with an empty history, or put a backup in its place",
                 path.display()
             ),
             Self::Newer { path, version } => write!(
                 f,
-                "the message store {} was written by a later loquax (schema {version}, this one \
-                 knows {SCHEMA_VERSION}); update loquax",
+                "the message store {} was written by a later Loquax (schema {version}, this one \
+                 knows {SCHEMA_VERSION}); update Loquax",
                 path.display()
             ),
             Self::Failed { path, detail } => {
@@ -402,7 +402,7 @@ impl Store {
         if version < SCHEMA_VERSION {
             return Err(failed(
                 path,
-                format!("schema {version}; start loquax once to bring it to {SCHEMA_VERSION}"),
+                format!("schema {version}; start Loquax once to bring it to {SCHEMA_VERSION}"),
             ));
         }
         Ok(Some(Self {
@@ -460,7 +460,7 @@ impl Store {
         }
         if !(1..=SCHEMA_VERSION).contains(&version) {
             return Err(corrupt(format!(
-                "not a loquax store: schema version {version}"
+                "not a Loquax store: schema version {version}"
             )));
         }
         let missing = |want: &[&'static str]| -> Option<&'static str> {
@@ -1894,6 +1894,7 @@ impl Store {
 pub fn origin_name(tag: &str) -> &str {
     match tag {
         "nomadnet" => "NomadNet",
+        "loquax" => "Loquax",
         other => other,
     }
 }
@@ -2772,7 +2773,7 @@ mod tests {
             .expect("foreign schema");
         drop(foreign);
         let text = refused(home.path());
-        assert!(text.contains("not a loquax store"), "{text}");
+        assert!(text.contains("not a Loquax store"), "{text}");
     }
 
     #[test]

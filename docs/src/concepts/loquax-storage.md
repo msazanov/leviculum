@@ -1,6 +1,6 @@
-# loquax: conversation storage
+# Loquax: conversation storage
 
-Part of the [loquax design record](loquax.md).
+Part of the [Loquax design record](loquax.md).
 
 The library stores one key (`ROUTER_STATE_KEY`, `b"lxmf/router-state"`,
 `leviculum-lxmf/src/router.rs:67`) and hands each received message to the
@@ -177,7 +177,7 @@ this page leaves, or departs from it:
   file shorter than the page count its header gives, "database disk image
   is malformed", and one that is not SQLite at all), the schema version
   must be this program's (`PRAGMA user_version`, a later one is refused as
-  newer, version 0 as not a loquax store, which covers an empty file), and
+  newer, version 0 as not a Loquax store, which covers an empty file), and
   all its tables must be there. Any of these stops `loquax` with the
   file's path and what to do (move it aside, or restore a backup); nothing
   is written over it. The tests cut a real store by its last page and by
@@ -206,7 +206,7 @@ this page leaves, or departs from it:
   in `unverified` until then, so a later run hands it back to the engine
   and the check survives a restart. `messages.verification` is 0
   unverified, 1 verified, 2 invalid (schemas 1 and 2 wrote it as a
-  boolean, which reads the same). A message stored unverified by a loquax
+  boolean, which reads the same). A message stored unverified by a Loquax
   before schema 3 has no bytes kept, so it stays unverified: the signature
   was never stored.
 - **Retention** is as decided: text and its ledger are kept until the

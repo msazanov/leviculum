@@ -466,7 +466,7 @@ pub fn choose_start(
         }
         None => {
             let line = format!(
-                "map: {name} was remembered for {context}, a drawing this loquax does not \
+                "map: {name} was remembered for {context}, a drawing this Loquax does not \
                  know; drawn as {} instead",
                 ladder.graphics.name()
             );

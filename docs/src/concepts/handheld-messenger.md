@@ -37,20 +37,20 @@ map as decided on 2026-10-25, and what is open.
 - **`loquax`, the terminal messenger.** It sends (direct, propagated, or
   `auto` with the fallback to a propagation node) and drains the
   mailbox, and since 2026-10-25 (994) plain `loquax` opens its terminal
-  frontend (`loquax tui` under its old name), slice one ([loquax: the user interface](loquax-ui.md), "Built
+  frontend (`loquax tui` under its old name), slice one ([Loquax: the user interface](loquax-ui.md), "Built
   2026-10-25"): the first frontend on the shared widgets, over a screen
   model that lives in the `no_std` core. Its frontend already
   talks to the backend only through `Outbox` (`loquax/src/outbox.rs:339`),
   but the crate is `std`. It depends on `leviculum-std` and tokio
   (`loquax/Cargo.toml:140`, `loquax/Cargo.toml:144`), since 2026-10-25 behind its `std` feature,
   and `just loquax-core-no-std` holds the core to `no_std` (green since
-  993; the pass order is in [loquax: architecture](loquax-architecture.md),
-  "Plan: the loquax core without std").
+  993; the pass order is in [Loquax: architecture](loquax-architecture.md),
+  "Plan: the Loquax core without std").
 - **#232's rule:** the messenger's core must be `std`-free, not merely
   terminal-free, because the next frontend after the TUI is firmware. The
   shape #232 asks for is a `no_std + alloc` core crate, a store behind a
   trait the core owns, effects as data, and a cross-compile gate. That
-  core crate does not exist yet. [loquax:
+  core crate does not exist yet. [Loquax:
   architecture](loquax-architecture.md), section 4, has the terminal-free
   requirement it extends.
 - **`lnomad`'s core/frontend boundary (#219).** It is the same
@@ -115,13 +115,13 @@ inside the messenger: OpenStreetMap vector data, on the desktop and on
 the M9, showing received telemetry positions. The device measurement
 below decides whether the vector path holds or the PNG fallback is
 taken, not whether the map exists. (Decided 2026-10-27, Lew: the vector
-path holds, the PNG fallback is dropped; [loquax: the map](loquax-map.md),
+path holds, the PNG fallback is dropped; [Loquax: the map](loquax-map.md),
 section 7.)
 
-2026-10-27, Lew: the map is part of loquax, on the desktop (the terminal
+2026-10-27, Lew: the map is part of Loquax, on the desktop (the terminal
 and the iced GUI) as well as on the board, because the positions arrive
 over the same LXMF channel as the messages. The plan, the renderer split
-and the slices are on [loquax: the map](loquax-map.md), decided by Lew on
+and the slices are on [Loquax: the map](loquax-map.md), decided by Lew on
 2026-10-27.
 
 2026-10-25, Lew: the embedded map is vector, drawn with a minimal
@@ -149,7 +149,7 @@ GNSS position, and the telemetry positions of other nodes.
 precedent: Meshtastic's device UI on the M9 reads PNG raster tiles from
 the microSD card at `/maps/<style>/{z}/{x}/{y}.png` ([The ThinkNode
 M9](thinknode-m9.md), "Storage"). That layout is not our plan; the one
-format for the desktop and the board is the region file of [loquax: the
+format for the desktop and the board is the region file of [Loquax: the
 map](loquax-map.md), section 4.
 
 **The first step is the device measurement, not product code.** For one
@@ -180,7 +180,7 @@ the reviewer's proposal of 2026-10-21, steps 1, 2 and 4 to 7 below.*
 
 2026-10-25, Lew: `lnomad` is the terminal frontend of a browser whose
 core (fetch, micron model, layout) also drives a desktop GUI and the
-M9's display. The `lxmf@` handoff (browser to messenger, [loquax:
+M9's display. The `lxmf@` handoff (browser to messenger, [Loquax:
 architecture](loquax-architecture.md)) becomes an in-process call once
 both share a shell. #219's core/frontend boundary ("What exists today")
 is the refactor this needs; its first step, the module boundary, landed
@@ -190,7 +190,7 @@ on 2026-10-25.
 
 2026-10-25, Lew: one interaction concept across the terminal, the
 desktop GUI and the M9: the same commands, the same names in the
-palette, the same delivery glyph table ([loquax: the user
+palette, the same delivery glyph table ([Loquax: the user
 interface](loquax-ui.md), section 2); each frontend maps them to its
 input. Code is shared where it is the same problem (model, update,
 layout), not for its own sake (rendering, input).
@@ -229,7 +229,7 @@ surface, the tile tool, the tile format, and the map view. Since
 ## See also
 
 - [The ThinkNode M9](thinknode-m9.md), the first device this is for.
-- [loquax: a terminal LXMF messenger](loquax.md) and [loquax:
+- [Loquax: a terminal LXMF messenger](loquax.md) and [Loquax:
   architecture](loquax-architecture.md).
 - [Telemetry](telemetry.md), for the positions on the map.
 - [A GUI toolkit for the desktop and the M9](gui-toolkit.md), the

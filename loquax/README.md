@@ -1,4 +1,4 @@
-# loquax
+# Loquax
 
 A terminal LXMF messenger for Reticulum. Plain `loquax` opens the
 interactive messenger, with conversations, messages and a compose line
@@ -7,7 +7,7 @@ scripts: `loquax send` queues one message for an LXMF address; `loquax
 fetch` drains the propagation node's mailbox; `loquax address` prints this
 machine's own address.
 
-loquax attaches to a Reticulum shared instance that is already running,
+Loquax attaches to a Reticulum shared instance that is already running,
 `lnsd` from the `leviculum` package or Python's `rnsd`, the way `lnomad`
 does. It runs its own LXMF router but never a Reticulum stack of its own, so
 a daemon has to be running.

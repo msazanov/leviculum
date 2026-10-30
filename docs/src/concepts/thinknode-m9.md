@@ -383,7 +383,7 @@ and `leviculum-esp/README.md` on that branch.
   anywhere](handheld-messenger.md). If the measurements on that page
   allow it, the M9 also gets **a vector map**. (They do: decided
   2026-10-27, Lew, the vector path holds and the PNG fallback is
-  dropped; [loquax: the map](loquax-map.md), section 7.)
+  dropped; [Loquax: the map](loquax-map.md), section 7.)
 - **The one-button grammar in stage one, the menu grammar in stage
   two.** [One button](one-button.md) applies in stage one, on one
   designated key (2026-10-25, below). The menu grammar, in which the mode

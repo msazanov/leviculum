@@ -378,7 +378,7 @@ fn with_no_environment_at_all_the_name_still_comes_from_the_password_database() 
         source, "passwd",
         "with USER and LOGNAME gone, only the password database can have answered"
     );
-    assert_ne!(from, "loquax", "the tool's name is not the sender's name");
+    assert_ne!(from, "Loquax", "the tool's name is not the sender's name");
 }
 
 /// `--from` beats `LNMSG_DISPLAY_NAME`, through the real binary.

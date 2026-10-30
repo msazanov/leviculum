@@ -66,7 +66,7 @@ const DEFAULT_FETCH_TIMEOUT_SECS: u64 = 60;
     about = "the Leviculum messenger; with no arguments it opens the conversation view",
     long_about = "the Leviculum messenger; with no arguments it opens the conversation view\n\n\
                   `send`, `fetch` and `address` are the commands for scripts. \
-                  loquax attaches to a daemon that is already running (lnsd, or \
+                  Loquax attaches to a daemon that is already running (lnsd, or \
                   Python's rnsd) the same way lnomad does. It does not start a \
                   Reticulum stack of its own, so a daemon has to be running.\n\n\
                   A send that worked prints nothing and exits 0, which means \
@@ -841,7 +841,7 @@ fn first_start_import() {
     if !found.iter().any(|f| f.importable()) {
         return;
     }
-    println!("loquax starts for the first time here, and found another messenger's data:");
+    println!("Loquax starts for the first time here, and found another messenger's data:");
     for source in &found {
         println!("{}", source.line());
     }
@@ -1427,8 +1427,8 @@ async fn run_home(command: HomeCommand) -> ExitCode {
             }
             match server {
                 Some(_) => println!(
-                    "On a phone: scan it with a QR reader and share it to loquax, or paste it \
-                     into loquax's join screen."
+                    "On a phone: scan it with a QR reader and share it to Loquax, or paste it \
+                     into Loquax's join screen."
                 ),
                 None => println!(
                     "On a phone: paste it, with this node's address; --server puts that in the \

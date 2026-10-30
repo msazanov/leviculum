@@ -1,5 +1,5 @@
 --- frame 1: attached ---
-┌● loquax afbda7b3───────┐┌  <61ddb79a…>  unknown────────────────── no mailbox ┐
+┌● Loquax afbda7b3───────┐┌  <61ddb79a…>  unknown────────────────── no mailbox ┐
 │▌<61ddb79a…>            ││                                                    │
 │▌                       ││                                                    │
 │                        ││                                                    │
@@ -24,7 +24,7 @@
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 2: before the load ---
-┌  loquax afbda7b3───────┐┌● map──────────────── z10 · 1 in view · loading map ┐
+┌  Loquax afbda7b3───────┐┌● map──────────────── z10 · 1 in view · loading map ┐
 │▌them ·61dd       14:00 ││                                                    │
 │▌◎ position             ││                                                    │
 │                        ││                                                    │
@@ -49,7 +49,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 3: after the load ---
-┌  loquax afbda7b3───────┐┌● map────────────────────────────── z15 · 1 in view ┐
+┌  Loquax afbda7b3───────┐┌● map────────────────────────────── z15 · 1 in view ┐
 │▌them ·61dd       14:00 ││ ⠈⠷⣄⡀                   ⢠⠃        ⠹⣧                │
 │▌◎ position             ││    ⠙⠓⠶⠤⣄⣀             ⢀⠎          ⠹⣧⡀              │
 │                        ││         ⠈⠉⠳⣄          ⡜            ⠹⣷⡀             │
@@ -74,7 +74,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 4: held already ---
-┌  loquax afbda7b3───────┐┌● map────────────────────────────── z15 · 1 in view ┐
+┌  Loquax afbda7b3───────┐┌● map────────────────────────────── z15 · 1 in view ┐
 │▌them ·61dd       14:00 ││ ⠈⠷⣄⡀                   ⢠⠃        ⠹⣧                │
 │▌◎ position             ││    ⠙⠓⠶⠤⣄⣀             ⢀⠎          ⠹⣧⡀              │
 │                        ││         ⠈⠉⠳⣄          ⡜            ⠹⣷⡀             │
@@ -99,7 +99,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 5: loading the area ---
-┌  loquax afbda7b3───────┐┌● map───────────────── z9 · 1 in view · loading map ┐
+┌  Loquax afbda7b3───────┐┌● map───────────────── z9 · 1 in view · loading map ┐
 │▌them ·61dd       14:00 ││                                                    │
 │▌◎ position             ││                                                    │
 │                        ││                                                    │
@@ -124,7 +124,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 6: the area loaded ---
-┌  loquax afbda7b3───────┐┌● map─────────────────────────────── z9 · 1 in view ┐
+┌  Loquax afbda7b3───────┐┌● map─────────────────────────────── z9 · 1 in view ┐
 │▌them ·61dd       14:00 ││                                                    │
 │▌◎ position             ││                                                    │
 │                        ││                                                    │

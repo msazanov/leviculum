@@ -161,7 +161,7 @@ fn window(painter: Painter, seen: UnboundedReceiver<Seen>, asks: Asks) -> iced::
         App::update,
         App::view,
     )
-    .title("loquax")
+    .title("Loquax")
     .subscription(App::subscription)
     .window_size(Size::new(WINDOW.0, WINDOW.1))
     .run()

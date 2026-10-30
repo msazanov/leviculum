@@ -41,7 +41,7 @@ use crate::when::WallTime;
 pub const LOAD_WINDOW: usize = 200;
 
 /// The ledger line of a send the restart cut off.
-pub const RESTARTED: &str = "loquax restarted: no longer being sent";
+pub const RESTARTED: &str = "Loquax restarted: no longer being sent";
 
 /// What a conversation keeps of the reader's word besides its pin (1146):
 /// muted until when, archived, and the peer's identity verified in person.

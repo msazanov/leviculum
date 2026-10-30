@@ -127,7 +127,7 @@ impl Found {
     /// The tag its imported rows carry (`messages.origin`).
     fn origin(&self) -> &'static str {
         match self.app {
-            "loquax" => "loquax",
+            "Loquax" => "loquax",
             _ => "nomadnet",
         }
     }
@@ -291,9 +291,9 @@ fn raw_found(app: &'static str, path: &Path) -> Option<Found> {
 pub fn sniff(path: &Path) -> Result<Found, ImportError> {
     if path.is_dir() {
         let tree = nomadnet::Tree::at(path)
-            .ok_or_else(|| ImportError::new(path, "not a NomadNet tree or a loquax export"))?;
+            .ok_or_else(|| ImportError::new(path, "not a NomadNet tree or a Loquax export"))?;
         let app = match path.join("storage").join(crate::export::MARKER).is_file() {
-            true => "loquax",
+            true => "Loquax",
             false => "NomadNet",
         };
         return Ok(tree_found(app, tree));
@@ -313,7 +313,7 @@ pub fn sniff(path: &Path) -> Result<Found, ImportError> {
     }
     Err(ImportError::new(
         path,
-        "not an identity file, a NomadNet tree or a loquax export",
+        "not an identity file, a NomadNet tree or a Loquax export",
     ))
 }
 
@@ -410,7 +410,7 @@ impl Report {
         }
         if self.attachments_skipped > 0 {
             out.push(format!(
-                "attachments: {} skipped, loquax has no attachment store yet",
+                "attachments: {} skipped, Loquax has no attachment store yet",
                 self.attachments_skipped
             ));
         }
@@ -421,21 +421,21 @@ impl Report {
             out.push(format!(
                 "propagation node: <{}> {}",
                 to_hex(&pn),
-                would("set, loquax had none", "to set, loquax has none")
+                would("set, Loquax had none", "to set, Loquax has none")
             ));
         }
         if let Some(name) = &self.display_name {
             out.push(format!(
-                "display name there: {name} (loquax takes its own from --from or LNMSG_DISPLAY_NAME)"
+                "display name there: {name} (Loquax takes its own from --from or LNMSG_DISPLAY_NAME)"
             ));
         }
         match &self.adopted {
             Some(key::Adopted::Already) => {
-                out.push("identity: loquax already uses this identity".to_string());
+                out.push("identity: Loquax already uses this identity".to_string());
             }
             Some(key::Adopted::Switched { address, set_aside }) => {
                 out.push(format!(
-                    "identity: loquax now answers on <{}>",
+                    "identity: Loquax now answers on <{}>",
                     to_hex(address)
                 ));
                 if let Some((path, old)) = set_aside {
@@ -485,7 +485,7 @@ pub fn import(
         {
             return Err(ImportError::new(
                 home,
-                "this loquax is a client of a home node and answers on its address; \
+                "this Loquax is a client of a home node and answers on its address; \
                  an identity is adopted on the home node",
             ));
         }
@@ -656,8 +656,8 @@ pub fn identity_warning(found: &Found, current: Option<[u8; 16]>) -> String {
         .address
         .map_or("?".to_string(), |a| format!("<{}>", to_hex(&a)));
     let mut text = format!(
-        "Adopting this identity makes loquax answer on {address}, the address {} uses.\n\
-         Do not run {} and loquax on this identity at the same time:\n\
+        "Adopting this identity makes Loquax answer on {address}, the address {} uses.\n\
+         Do not run {} and Loquax on this identity at the same time:\n\
          - both announce it, so peers' paths flap between the two and a direct message\n  \
            reaches only one of them;\n\
          - both collect from the same propagation node, and the first to sync takes the mail;\n\
@@ -666,7 +666,7 @@ pub fn identity_warning(found: &Found, current: Option<[u8; 16]>) -> String {
     );
     if let Some(current) = current {
         text.push_str(&format!(
-            "loquax's current identity <{}> is set aside, not deleted; its history stays.\n",
+            "Loquax's current identity <{}> is set aside, not deleted; its history stays.\n",
             to_hex(&current)
         ));
     }
@@ -696,7 +696,7 @@ pub fn ask_and_import<R: BufRead, W: Write>(
             write!(output, "\n{}", identity_warning(source, current))?;
             write!(
                 output,
-                "Type yes to adopt this identity, anything else keeps loquax's: "
+                "Type yes to adopt this identity, anything else keeps Loquax's: "
             )?;
             output.flush()?;
             read_line(input)?.trim() == "yes"

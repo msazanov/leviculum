@@ -1,4 +1,4 @@
-# loquax: the home node
+# Loquax: the home node
 
 Status: slices 1 and 2 built (orders 1101 and 1106, Refs #232). The research and the
 critique behind it are the draft `docs/drafts/home-node-2026-10.md` (order
@@ -15,7 +15,7 @@ other, and is deleted there all the same. The draft lists seven ways a
 message disappears; most of them hit hardest when two devices share an
 identity.
 
-The home node ends the sharing. One always-on loquax holds the identity and
+The home node ends the sharing. One always-on Loquax holds the identity and
 keeps every message; the user's other devices read from it.
 
 ## Roles and keys
@@ -46,7 +46,7 @@ Decided by Lew on 2026-10-29:
 - **A public propagation node on the home host runs under an identity of
   its own**, never the user's. Not part of slice 1.
 - **The phone comes later**, as our own Android app. The clients of slice 1
-  are loquax on a laptop or a desktop. The app's shape and its first build
+  are Loquax on a laptop or a desktop. The app's shape and its first build
   (`loquax-android/`) are the study `docs/drafts/loquax-android-2026-10.md`
   (order 1111).
 
@@ -380,7 +380,7 @@ and photo a phone shows stays on that phone
 
 ## The archive
 
-A table of the loquax store (`archive`, schema 4 of
+A table of the Loquax store (`archive`, schema 4 of
 `docs/src/concepts/loquax-storage.md`'s store): one entry a received
 message, with a sequence that only grows (`AUTOINCREMENT`, so a number is
 never handed out twice, even after the newest entry was evicted), the kind

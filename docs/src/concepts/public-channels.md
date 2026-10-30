@@ -12,7 +12,7 @@ the existing Reticulum or LXMF infrastructure, why that is possible at
 all, and where the sharp edges are.
 
 Two crates are involved, neither of which exists yet: a propagation node
-server, and channel support in `loquax`. The loquax design record currently
+server, and channel support in `loquax`. The Loquax design record currently
 states that hosting a propagation node is out of scope. That changes here:
 the channel feature only works if we host nodes, because the retrieval
 side is ours.

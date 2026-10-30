@@ -1,6 +1,6 @@
 === braille ===
 --- frame 1: attached ---
-┌● loquax afbda7b3───────┐┌  <61ddb79a…>  unknown────────────────── no mailbox ┐
+┌● Loquax afbda7b3───────┐┌  <61ddb79a…>  unknown────────────────── no mailbox ┐
 │▌<61ddb79a…>            ││                                                    │
 │▌                       ││                                                    │
 │                        ││                                                    │
@@ -25,7 +25,7 @@
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 2: map ---
-┌  loquax afbda7b3───────┐┌● map────────────────────────────── z14 · 3 in view ┐
+┌  Loquax afbda7b3───────┐┌● map────────────────────────────── z14 · 3 in view ┐
 │▌them ·61dd       14:00 ││⡿⠁    ⢀⡞⠁    ⠈⠙⠿⣦⣀     ⢠⡾⠋       ⣰⠟⠈⠙⠽⡷⣦⣀   ⢎⡑⠢⠤⡴⠁ ⢀│
 │▌◎ position             ││⠁    ⢠⡟         ⢈⢝⢷⣄⡀⢀⣴⠿⣅⡀       ⠉⠻⢦⣄ ⠈⠙⠽⠷⣦⣀ ⠈⠢⠔⠁ ⢠⡾│
 │                        ││⢶⣤⡀ ⢠⡟        ⢀⣔⠕⠁⡠⠛⢿⣾⡃ ⠈⠙⠦⣄        ⠉⠻⠆    ⠙⠳⣦⣀  ⣠⡟ │
@@ -50,7 +50,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 3: next pin ---
-┌  loquax afbda7b3───────┐┌● map────────────────────────────── z14 · 3 in view ┐
+┌  Loquax afbda7b3───────┐┌● map────────────────────────────── z14 · 3 in view ┐
 │▌them ·61dd       14:00 ││⡿⠁    ⢀⡞⠁    ⠈⠙⠿⣦⣀     ⢠⡾⠋       ⣰⠟⠈⠙⠽⡷⣦⣀   ⢎⡑⠢⠤⡴⠁ ⢀│
 │▌◎ position             ││⠁    ⢠⡟         ⢈⢝⢷⣄⡀⢀⣴⠿⣅⡀       ⠉⠻⢦⣄ ⠈⠙⠽⠷⣦⣀ ⠈⠢⠔⠁ ⢠⡾│
 │                        ││⢶⣤⡀ ⢠⡟        ⢀⣔⠕⠁⡠⠛⢿⣾⡃ ⠈⠙⠦⣄        ⠉⠻⠆    ⠙⠳⣦⣀  ⣠⡟ │
@@ -75,7 +75,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 4: dragged ---
-┌  loquax afbda7b3───────┐┌● map────────────────────────────── z14 · 2 in view ┐
+┌  Loquax afbda7b3───────┐┌● map────────────────────────────── z14 · 2 in view ┐
 │▌them ·61dd       14:00 ││    ⠐⢅⢀⠞⠁⣰⠗⠉⠙⢷⣄⡀ ⠈⠙⢦⣄               ⠙⠻⣶⣏            │
 │▌◎ position             ││    ⢀⡼⠛⢦⠞⠋    ⠈⠛⢶⣄  ⠈<33333333…> · 3 h ●⢷⣦⣄        ⣰│
 │                        ││⠶⣤⣀⣴⠏ ⡴⠋         ⠉⠻⢦⣄  ⠈⠳⣦⣀        ⢠⡾⠁   ⠈⠙⠿⣦⣄   ⢀⣴⡟│
@@ -100,7 +100,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 5: outline ---
-┌  loquax afbda7b3───────┐┌● map─────────────────────────────── z5 · 3 in view ┐
+┌  Loquax afbda7b3───────┐┌● map─────────────────────────────── z5 · 3 in view ┐
 │▌them ·61dd       14:00 ││                                     ⡠⢄⠼⠁           │
 │▌◎ position             ││                                     ⡇              │
 │                        ││                                     ⢣              │
@@ -125,7 +125,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 6: opened ---
-┌  loquax afbda7b3───────┐┌● them ·61dd  unknown─────── pos 4 min · no mailbox ┐
+┌  Loquax afbda7b3───────┐┌● them ·61dd  unknown─────── pos 4 min · no mailbox ┐
 │▌them ·61dd       14:00 ││                                                    │
 │▌◎ position             ││                                                    │
 │                        ││                                                    │
@@ -150,7 +150,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 7: back ---
-┌  loquax afbda7b3───────┐┌● them ·61dd  unknown─────── pos 4 min · no mailbox ┐
+┌  Loquax afbda7b3───────┐┌● them ·61dd  unknown─────── pos 4 min · no mailbox ┐
 │▌them ·61dd       14:00 ││                                                    │
 │▌◎ position             ││                                                    │
 │                        ││                                                    │
@@ -175,7 +175,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 8: from the report ---
-┌  loquax afbda7b3───────┐┌● map────────────────────────────── z15 · 1 in view ┐
+┌  Loquax afbda7b3───────┐┌● map────────────────────────────── z15 · 1 in view ┐
 │▌them ·61dd       14:00 ││⠻⢷⣤⣀          ⢀⣼⠟⠁  ⢹⡟               ⠈⠛⢷⣦⣀       ⠈⠛⢶│
 │▌◎ position             ││  ⠈⠛⠿⣦⣄⡀    ⢀⣴⡿⠃   ⣴⠏                   ⠈⠻⢷⣤⡀       │
 │                        ││     ⠈⠙⠻⢶⣤⡀⣠⣿⠋   ⢠⡾⠁                       ⠉⠻⢷⣤⡀    │
@@ -200,7 +200,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 9: report closed ---
-┌  loquax afbda7b3───────┐┌● them ·61dd  unknown─────── pos 4 min · no mailbox ┐
+┌  Loquax afbda7b3───────┐┌● them ·61dd  unknown─────── pos 4 min · no mailbox ┐
 │▌them ·61dd       14:00 ││                                                    │
 │▌◎ position             ││                                                    │
 │                        ││                                                    │
@@ -226,7 +226,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 === halfblocks ===
 --- frame 1: attached ---
-┌● loquax afbda7b3───────┐┌  <61ddb79a…>  unknown────────────────── no mailbox ┐
+┌● Loquax afbda7b3───────┐┌  <61ddb79a…>  unknown────────────────── no mailbox ┐
 │▌<61ddb79a…>            ││                                                    │
 │▌                       ││                                                    │
 │                        ││                                                    │
@@ -251,7 +251,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 --- frame 2: map ---
-┌  loquax afbda7b3───────┐┌● map────────────────────────────── z13 · 3 in view ┐
+┌  Loquax afbda7b3───────┐┌● map────────────────────────────── z13 · 3 in view ┐
 │▌them ·61dd       14:00 ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
 │▌◎ position             ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
 │                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
@@ -276,7 +276,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 3: next pin ---
-┌  loquax afbda7b3───────┐┌● map────────────────────────────── z13 · 3 in view ┐
+┌  Loquax afbda7b3───────┐┌● map────────────────────────────── z13 · 3 in view ┐
 │▌them ·61dd       14:00 ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
 │▌◎ position             ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
 │                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
@@ -301,7 +301,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 4: dragged ---
-┌  loquax afbda7b3───────┐┌● map────────────────────────────── z13 · 2 in view ┐
+┌  Loquax afbda7b3───────┐┌● map────────────────────────────── z13 · 2 in view ┐
 │▌them ·61dd       14:00 ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
 │▌◎ position             ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀<33333333…> · 3 h ●▀▀▀▀▀▀▀▀▀▀▀▀│
 │                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
@@ -326,7 +326,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 5: outline ---
-┌  loquax afbda7b3───────┐┌● map─────────────────────────────── z4 · 3 in view ┐
+┌  Loquax afbda7b3───────┐┌● map─────────────────────────────── z4 · 3 in view ┐
 │▌them ·61dd       14:00 ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
 │▌◎ position             ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
 │                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
@@ -351,7 +351,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 6: opened ---
-┌  loquax afbda7b3───────┐┌● them ·61dd  unknown─────── pos 4 min · no mailbox ┐
+┌  Loquax afbda7b3───────┐┌● them ·61dd  unknown─────── pos 4 min · no mailbox ┐
 │▌them ·61dd       14:00 ││                                                    │
 │▌◎ position             ││                                                    │
 │                        ││                                                    │
@@ -376,7 +376,7 @@ Enter open │ i write │ Tab pane │ : commands │ ? help │ q quit
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 7: back ---
-┌  loquax afbda7b3───────┐┌● them ·61dd  unknown─────── pos 4 min · no mailbox ┐
+┌  Loquax afbda7b3───────┐┌● them ·61dd  unknown─────── pos 4 min · no mailbox ┐
 │▌them ·61dd       14:00 ││                                                    │
 │▌◎ position             ││                                                    │
 │                        ││                                                    │
@@ -401,7 +401,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q quit
 --- frame 8: from the report ---
-┌  loquax afbda7b3───────┐┌● map────────────────────────────── z15 · 1 in view ┐
+┌  Loquax afbda7b3───────┐┌● map────────────────────────────── z15 · 1 in view ┐
 │▌them ·61dd       14:00 ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
 │▌◎ position             ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
 │                        ││▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
@@ -426,7 +426,7 @@ Enter open │ i write │ Tab pane │ Esc back │ : commands │ ? help │ q
 └────────────── / search ┘└────────────────────────────────────────────────────┘
 + zoom │ 0 fit │ Tab pin │ Enter open │ Esc close │ : commands │ Ctrl-q quit
 --- frame 9: report closed ---
-┌  loquax afbda7b3───────┐┌● them ·61dd  unknown─────── pos 4 min · no mailbox ┐
+┌  Loquax afbda7b3───────┐┌● them ·61dd  unknown─────── pos 4 min · no mailbox ┐
 │▌them ·61dd       14:00 ││                                                    │
 │▌◎ position             ││                                                    │
 │                        ││                                                    │
