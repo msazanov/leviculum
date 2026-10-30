@@ -23,7 +23,15 @@ crate-type = ["cdylib", "rlib"]
 # The messenger core and shell with the store (`history`, SQLite built by
 # the NDK's clang), without a terminal: what a home node client needs
 # (docs/drafts/loquax-android-2026-10.md, option A).
-loquax = { path = "../loquax", features = ["history"] }
+# With `screenmap` and `mapload` for the map screen (1128): loquax's own
+# map on a pixel screen, the picture, its names in Fira Sans and the pins,
+# drawn here and hosted by Java as a bitmap, and the autoload into the
+# app's maps directory. One renderer for the terminal's pictures, the
+# window and the phone.
+loquax = { path = "../loquax", features = ["history", "screenmap", "mapload"] }
+# The map's types the screen's call passes to loquax's.
+leviculum-map = { path = "../leviculum-map", features = ["std"] }
+leviculum-mapfill = { path = "../leviculum-mapfill" }
 # The types the session hands loquax's model and engine, at the versions
 # loquax uses.
 leviculum-core = { path = "../leviculum-core" }
@@ -46,3 +54,7 @@ jni = { version = "0.22.4", default-features = false }
 tokio = { workspace = true, features = ["full"] }
 rand_core = { workspace = true, features = ["getrandom"] }
 tempfile = "3"
+# The map's golden is a PNG, and its test turns loquax's Rgb565 picture
+# into RGBA as the window does (1128); both in the lock through loquax.
+png = "0.18"
+embedded-graphics = "0.8"

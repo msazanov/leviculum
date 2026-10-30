@@ -15,9 +15,18 @@
   <uses-permission a:name='android.permission.POST_NOTIFICATIONS'/>
   <!-- The battery optimisation exemption, asked once and never forced (Asks). -->
   <uses-permission a:name='android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS'/>
+  <!-- The address book (1139): asked only when the user asks for
+       suggestions; without it a picked contact is read once by the
+       picker's own grant (Book). Nothing of it leaves the phone. -->
+  <uses-permission a:name='android.permission.READ_CONTACTS'/>
 
   <application a:label='@string/app_name'
-               a:icon='@android:drawable/sym_def_app_icon'>
+               a:icon='@android:drawable/sym_def_app_icon'
+               a:theme='@style/Loquax'>
+    <!-- Light or dark by the phone's setting (res/values-night). A change
+         while a screen is open recreates it, as a rotation does; the
+         session lives in LoquaxService and the library, not in a screen,
+         so no configChanges='uiMode' is declared. -->
 
     <activity a:name='network.leviculum.loquax.MainActivity' a:exported='true'>
       <intent-filter>
@@ -30,13 +39,32 @@
         <category a:name='android.intent.category.DEFAULT'/>
         <data a:mimeType='text/plain'/>
       </intent-filter>
+      <!-- A contact card's IM row of protocol LXMF: AOSP's contacts app
+           sends SENDTO imto://lxmf/<address> (ContactsUtils.java:162-180);
+           VIEW for a contacts app that views instead. -->
+      <intent-filter>
+        <action a:name='android.intent.action.SENDTO'/>
+        <action a:name='android.intent.action.VIEW'/>
+        <category a:name='android.intent.category.DEFAULT'/>
+        <data a:scheme='imto' a:host='lxmf'/>
+      </intent-filter>
     </activity>
 
-    <activity a:name='network.leviculum.loquax.ConversationsActivity' a:exported='false'/>
+    <activity a:name='network.leviculum.loquax.ConversationsActivity'
+              a:theme='@style/Loquax.List'
+              a:exported='false'/>
+
+    <activity a:name='network.leviculum.loquax.NewConversationActivity'
+              a:theme='@style/Loquax.List'
+              a:exported='false'
+              a:windowSoftInputMode='stateVisible'/>
 
     <activity a:name='network.leviculum.loquax.ChatActivity'
+              a:theme='@style/Loquax.Chat'
               a:exported='false'
               a:windowSoftInputMode='adjustResize'/>
+
+    <activity a:name='network.leviculum.loquax.MapActivity' a:exported='false'/>
 
     <service a:name='network.leviculum.loquax.LoquaxService'
              a:exported='false'

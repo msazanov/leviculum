@@ -789,38 +789,27 @@ async fn a_leaf_with_its_own_tcp_interface_joins_pulls_and_marks() {
     mesh.daemon.stop().await.expect("stop the Rust daemon");
 }
 
-/// What one run of [`wake_run`] saw: how long after the home node archived
-/// the message its wake reached the watching client, `None` when none came
-/// within the wait.
-struct Woken {
-    latency: Option<Duration>,
+/// A leaf client of the home node, joined and keeping its watching link,
+/// as the phone is.
+struct Leaf {
+    phone: tempfile::TempDir,
+    device: leviculum_core::Identity,
+    attached: loquax::engine::Attached,
+    link: std::sync::Arc<leviculum_std::ReticulumNode>,
+    events: tokio::sync::mpsc::UnboundedReceiver<loquax::home::watch::WatchEvent>,
+    watching: tokio::task::JoinHandle<()>,
 }
 
-/// The wake end to end (1123): a leaf joins, keeps its watching link
-/// (`loquax::home::watch`), and a loquax sender on the daemon's instance
-/// delivers to the home node. With wakes on, the leaf hears one past its
-/// cursor within 2 s of the home node's archive line, without any fetch,
-/// and the pull it then makes brings the message. A client without the
-/// link, as every client was before, still gets it with `loquax fetch`.
-/// With `home_wake = off` in the home node's config, the positive control,
-/// the same wait runs out.
-async fn wake_run(wake: bool) -> Woken {
+/// A leaf dialling the home node's TCP server on `port`, joined with
+/// `code`, its watching link up.
+async fn watching_leaf(
+    port: u16,
+    code: &loquax::home::code::HomeCode,
+    address: [u8; 16],
+    node: &HomeNode,
+) -> Leaf {
     use loquax::engine::{attach_leaf, LeafConfig, Role};
     use loquax::home::watch::{self, WatchEvent};
-    use loquax::outbox::OutboxEvent;
-
-    let mut mesh = Mesh::start_serving(&[]).await;
-    let port = mesh.tcp_port.expect("the daemon's TCP server");
-    let home = mesh.home.path().to_path_buf();
-    if !wake {
-        std::fs::write(home.join(loquax::config::CONFIG_FILE), "home_wake = off\n")
-            .expect("the home node's config");
-    }
-    let code = admit(&home, "phone");
-    let old = admit(&home, "old");
-    let code = loquax::home::code::HomeCode::parse(&code).expect("the code parses");
-    let address = loquax::home::lxmf_address(&code.public_key).expect("the home address");
-    let node = HomeNode::start(&home, &mesh.instance).await;
 
     let phone = tempfile::tempdir().expect("phone home");
     let storage = phone.path().join("storage");
@@ -833,7 +822,7 @@ async fn wake_run(wake: bool) -> Woken {
         notices: loquax::effects::Terminal::new(std::env::temp_dir()),
     };
     let device = config.identity.clone();
-    let mut attached = attach_leaf(config, Role::Client { address })
+    let attached = attach_leaf(config, Role::Client { address })
         .await
         .expect("the leaf's node comes up");
     let link = attached.node();
@@ -868,6 +857,56 @@ async fn wake_run(wake: bool) -> Woken {
         }
     }
     node.wait_for("HOME watch device=", 5).await;
+    Leaf {
+        phone,
+        device,
+        attached,
+        link,
+        events,
+        watching,
+    }
+}
+
+/// What one run of [`wake_run`] saw: how long after the home node archived
+/// the message its wake reached the watching client, `None` when none came
+/// within the wait.
+struct Woken {
+    latency: Option<Duration>,
+}
+
+/// The wake end to end (1123): a leaf joins, keeps its watching link
+/// (`loquax::home::watch`), and a loquax sender on the daemon's instance
+/// delivers to the home node. With wakes on, the leaf hears one past its
+/// cursor within 2 s of the home node's archive line, without any fetch,
+/// and the pull it then makes brings the message. A client without the
+/// link, as every client was before, still gets it with `loquax fetch`.
+/// With `home_wake = off` in the home node's config, the positive control,
+/// the same wait runs out.
+async fn wake_run(wake: bool) -> Woken {
+    use loquax::home::watch::{self, WatchEvent};
+    use loquax::outbox::OutboxEvent;
+
+    let mut mesh = Mesh::start_serving(&[]).await;
+    let port = mesh.tcp_port.expect("the daemon's TCP server");
+    let home = mesh.home.path().to_path_buf();
+    if !wake {
+        std::fs::write(home.join(loquax::config::CONFIG_FILE), "home_wake = off\n")
+            .expect("the home node's config");
+    }
+    let code = admit(&home, "phone");
+    let old = admit(&home, "old");
+    let code = loquax::home::code::HomeCode::parse(&code).expect("the code parses");
+    let address = loquax::home::lxmf_address(&code.public_key).expect("the home address");
+    let node = HomeNode::start(&home, &mesh.instance).await;
+
+    let Leaf {
+        phone,
+        device,
+        mut attached,
+        link,
+        mut events,
+        watching,
+    } = watching_leaf(port, &code, address, &node).await;
 
     // A loquax messenger on the daemon's instance sends to the home node;
     // meanwhile the archive line and the wake are timed as they come.
@@ -945,6 +984,159 @@ async fn wake_run(wake: bool) -> Woken {
     drop(node);
     mesh.daemon.stop().await.expect("stop the Rust daemon");
     Woken { latency }
+}
+
+/// How often `needle` is in the home node's log.
+fn count(node: &HomeNode, needle: &str) -> usize {
+    node.log().matches(needle).count()
+}
+
+/// Announce `identity`'s LXMF delivery destination with `name`, from
+/// `announcer`.
+async fn announce_name(
+    announcer: &leviculum_std::ReticulumNode,
+    identity: leviculum_core::Identity,
+    name: &str,
+) {
+    use leviculum_core::{Destination, DestinationType, Direction};
+    let destination = Destination::new(
+        Some(identity),
+        Direction::In,
+        DestinationType::Single,
+        "lxmf",
+        &["delivery"],
+    )
+    .expect("a delivery destination");
+    let hash = *destination.hash();
+    announcer.register_destination(destination);
+    let app_data = leviculum_lxmf::announce::delivery(Some(name.as_bytes()), None);
+    announcer
+        .announce_destination(&hash, Some(&app_data))
+        .await
+        .expect("announce");
+}
+
+/// 1136: the home node hears the whole network's announces. A burst of 50
+/// strangers' announces wakes no client and appends nothing; a rename of
+/// a peer who wrote to the home node appends one name entry, wakes no
+/// client, and reaches the watching client with its next pull, the only
+/// name there.
+#[tokio::test(flavor = "multi_thread")]
+async fn strangers_names_wake_nobody_and_a_conversation_peers_rename_rides_the_next_pull() {
+    let mut mesh = Mesh::start_serving(&[]).await;
+    let port = mesh.tcp_port.expect("the daemon's TCP server");
+    let home = mesh.home.path().to_path_buf();
+    let code = admit(&home, "phone");
+    let code = loquax::home::code::HomeCode::parse(&code).expect("the code parses");
+    let address = loquax::home::lxmf_address(&code.public_key).expect("the home address");
+    let node = HomeNode::start(&home, &mesh.instance).await;
+    let Leaf {
+        phone,
+        device,
+        mut attached,
+        link,
+        events: _events,
+        watching,
+    } = watching_leaf(port, &code, address, &node).await;
+
+    // A peer writes to the home node: a conversation, and its first wake.
+    let sender = tempfile::tempdir().expect("sender home");
+    let sender_identity =
+        loquax::identity::load_or_create(&sender.path().join("identity")).expect("identity");
+    let sender_address = loquax::address::to_hex(
+        &loquax::engine::delivery_address(&sender_identity).expect("the sender's address"),
+    );
+    let sent = mesh
+        .run(
+            "send",
+            sender.path().to_path_buf(),
+            vec![
+                loquax::address::to_hex(&address),
+                "--timeout".to_string(),
+                "40".to_string(),
+            ],
+            b"hallo".to_vec(),
+        )
+        .await;
+    assert_eq!(sent.code, Some(0), "{sent}\nhome node:\n{}", node.log());
+    node.wait_for("HOME archived message=", 30).await;
+    node.wait_for("HOME wake device=", 10).await;
+    // Past the wake's spacing, so a second one would show.
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    let wakes = count(&node, "HOME wake device=");
+    let names = count(&node, "HOME name archived");
+    let renamed = format!("HOME name archived peer={sender_address}");
+    let renames = count(&node, &renamed);
+
+    // Fifty strangers, then the peer under a new name, from one node on
+    // the shared instance: its rename is heard after the burst.
+    let storage = tempfile::tempdir().expect("announcer storage");
+    let mut announcer = leviculum_std::driver::ReticulumNodeBuilder::new()
+        .enable_transport(false)
+        .connect_to_shared_instance(&mesh.instance)
+        .storage_path(storage.path().to_path_buf())
+        .build_sync()
+        .expect("build the announcer");
+    announcer.start().await.expect("attach the announcer");
+    for n in 0..50 {
+        announce_name(
+            &announcer,
+            leviculum_std::generate_identity(),
+            &format!("Stranger {n}"),
+        )
+        .await;
+    }
+    announce_name(&announcer, sender_identity, "Renamed Peer").await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while count(&node, &renamed) == renames {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the rename was never archived:\n{}",
+            node.log()
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    let log = node.log();
+    assert_eq!(
+        count(&node, "HOME name archived") - names,
+        1,
+        "one name entry, the rename's, none of a stranger:\n{log}"
+    );
+    assert_eq!(
+        count(&node, "HOME wake device="),
+        wakes,
+        "no wake for a name:\n{log}"
+    );
+
+    // The next pull brings it, and only it.
+    let pull = loquax::home::client::pull_into(
+        &mut attached.outbox,
+        &link,
+        phone.path(),
+        &code.public_key,
+        &device,
+        Duration::from_secs(40),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("pull: {error}\nhome node:\n{}", node.log()));
+    let sender_bytes: [u8; 16] = hex::decode(&sender_address)
+        .expect("hex")
+        .try_into()
+        .expect("16 bytes");
+    assert_eq!(
+        pull.names,
+        [(sender_bytes, "Renamed Peer".to_string())],
+        "{pull:?}"
+    );
+    assert_eq!(pull.messages(), 1, "the message, counted; the name is not");
+
+    watching.abort();
+    drop(link);
+    attached.stop().await;
+    announcer.stop().await.expect("stop the announcer");
+    drop(node);
+    mesh.daemon.stop().await.expect("stop the Rust daemon");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1175,7 +1367,9 @@ fn conversation(
 /// it unread, with another conversation open. Client A pulls it, opens its
 /// conversation (read) and answers through the home node. B pulls again:
 /// the message is read there, and A's answer is a sent bubble B never
-/// composed.
+/// composed. The sender's announced name, heard by the home node alone,
+/// reaches B's name table on its pull (1132), and the name A gives the
+/// sender with the palette's `rename` reaches B's contacts file (1139).
 #[tokio::test(flavor = "multi_thread")]
 async fn what_one_client_reads_and_sends_shows_on_the_other() {
     let peer = PythonPeer::start();
@@ -1208,6 +1402,11 @@ async fn what_one_client_reads_and_sends_shows_on_the_other() {
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
     node.wait_for("HOME archived message=", 40).await;
+    // The sender announces its display name, which only the home node
+    // hears; it goes into the archive once.
+    peer.lxmf_announce();
+    node.wait_for(&format!("HOME name archived peer={sender_address}"), 30)
+        .await;
 
     let parse = |hex_address: &str| -> [u8; 16] {
         hex::decode(hex_address)
@@ -1229,6 +1428,16 @@ async fn what_one_client_reads_and_sends_shows_on_the_other() {
     .await;
     let seen = conversation(b.path(), home_address, sender);
     assert_eq!(seen.unread, 1, "B pulled it unread");
+    // The sender's name, which B never heard announced: the home node
+    // heard it and B took it from the archive (1132).
+    let names = loquax::store::Store::open_in(b.path(), home_address)
+        .expect("B's store")
+        .names()
+        .expect("B's names");
+    assert!(
+        names.contains(&(sender, "test-daemon".to_string())),
+        "B knows the sender by name: {names:?}"
+    );
 
     // A opens the sender's conversation, the newest on the list, and answers.
     tui(
@@ -1236,7 +1445,8 @@ async fn what_one_client_reads_and_sends_shows_on_the_other() {
         a.path(),
         elsewhere,
         "until ready 20\nuntil synced 1 40\nkey g\nkey tab\nkey tab\n\
-         type reply from A\nkey enter\nuntil synced 2 40\nkey esc\nkey q\n",
+         type reply from A\nkey enter\nuntil synced 2 40\nkey esc\n\
+         key :\ntype rename\nkey enter\ntype Mutti\nkey enter\nkey q\n",
         &node,
     )
     .await;
@@ -1250,6 +1460,8 @@ async fn what_one_client_reads_and_sends_shows_on_the_other() {
         );
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
+    node.wait_for(&format!("HOME petname peer={sender_address}"), 20)
+        .await;
     let on_a = conversation(a.path(), home_address, sender);
     assert_eq!(on_a.unread, 0);
     let answer = on_a
@@ -1274,6 +1486,14 @@ async fn what_one_client_reads_and_sends_shows_on_the_other() {
     .await;
     let on_b = conversation(b.path(), home_address, sender);
     assert_eq!(on_b.unread, 0, "read on A, read on B");
+    // A's name for the sender, which B never typed (1139).
+    let contacts = loquax::names::load_contacts(b.path()).expect("B's contacts");
+    assert_eq!(
+        contacts.petnames.get(&sender).map(String::as_str),
+        Some("Mutti"),
+        "B took A's petname: {:?}",
+        std::fs::read_to_string(b.path().join(loquax::names::CONTACTS_FILE))
+    );
     let shown: Vec<_> = on_b.messages.iter().filter(|m| m.outbound).collect();
     assert_eq!(shown.len(), 1, "{:?}", on_b.messages);
     assert_eq!(shown[0].body, "reply from A");

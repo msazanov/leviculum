@@ -1055,6 +1055,146 @@ impl Store {
         Ok(seq)
     }
 
+    /// Append a name entry ([`crate::home::KIND_NAME`]) for the display
+    /// name `peer` announced, heard at `at`, when it says something new: a
+    /// name that sanitises to nothing, or to the name kept for `peer`
+    /// already, appends nothing (`None`). The entry carries the name as
+    /// announced, which each client sanitises as it does an announce; the
+    /// names table keeps the sanitised one, as on any device.
+    pub fn archive_name(
+        &mut self,
+        peer: [u8; 16],
+        name: &str,
+        at: i64,
+        cap_bytes: u64,
+    ) -> Result<Option<u64>, StoreError> {
+        let Some(shown) = crate::names::sanitise(name) else {
+            return Ok(None);
+        };
+        let identity = self.identity;
+        let path = self.path.clone();
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| failed(&path, e))?;
+        let kept: Option<String> = tx
+            .query_row(
+                "SELECT name FROM names WHERE identity = ?1 AND peer = ?2",
+                params![&identity[..], &peer[..]],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| failed(&path, e))?;
+        if kept.as_deref() == Some(shown.as_str()) {
+            return Ok(None);
+        }
+        let packed = crate::home::wire::name_entry(&peer, name);
+        // A name may come back after another: the time makes it a new entry.
+        let mut keyed = packed.clone();
+        keyed.extend_from_slice(&at.to_be_bytes());
+        let id = leviculum_core::crypto::sha256(&keyed);
+        let seq = append_in(
+            &tx,
+            &identity,
+            crate::home::KIND_NAME,
+            &id,
+            &packed,
+            at,
+            cap_bytes,
+        )
+        .map_err(|e| failed(&path, e))?;
+        if let Some(seq) = seq {
+            tx.execute(
+                "INSERT INTO names(identity, peer, name) VALUES (?1, ?2, ?3) \
+                 ON CONFLICT(identity, peer) DO UPDATE SET name = excluded.name",
+                params![&identity[..], &peer[..], shown],
+            )
+            .map_err(|e| failed(&path, e))?;
+            // Only the newest name of a peer is kept: a client behind the
+            // cursor needs the name it shows, not each one before it.
+            let prefix = crate::home::wire::name_entry_prefix(&peer);
+            tx.execute(
+                "DELETE FROM archive WHERE identity = ?1 AND kind = ?2 AND seq <> ?3 \
+                 AND substr(packed, 1, ?4) = ?5",
+                params![
+                    &identity[..],
+                    i64::from(crate::home::KIND_NAME),
+                    i64::try_from(seq).unwrap_or(i64::MAX),
+                    i64::try_from(prefix.len()).unwrap_or(i64::MAX),
+                    &prefix[..]
+                ],
+            )
+            .map_err(|e| failed(&path, e))?;
+        }
+        tx.commit().map_err(|e| failed(&path, e))?;
+        Ok(seq)
+    }
+
+    /// Append a petname entry ([`crate::home::KIND_PETNAME`]) a client
+    /// handed in for `peer`, at `at`, when it says something new: the same
+    /// bytes as the peer's newest petname entry append nothing (`None`).
+    /// Only the newest of a peer is kept, as for names: a client behind the
+    /// cursor needs the name the reader gave last.
+    pub fn archive_petname(
+        &mut self,
+        peer: [u8; 16],
+        packed: &[u8],
+        at: i64,
+        cap_bytes: u64,
+    ) -> Result<Option<u64>, StoreError> {
+        let identity = self.identity;
+        let path = self.path.clone();
+        let kind = i64::from(crate::home::KIND_PETNAME);
+        let prefix = crate::home::wire::name_entry_prefix(&peer);
+        let prefix_len = i64::try_from(prefix.len()).unwrap_or(i64::MAX);
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| failed(&path, e))?;
+        let newest: Option<Vec<u8>> = tx
+            .query_row(
+                "SELECT packed FROM archive WHERE identity = ?1 AND kind = ?2 \
+                 AND substr(packed, 1, ?3) = ?4 ORDER BY seq DESC LIMIT 1",
+                params![&identity[..], kind, prefix_len, &prefix[..]],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| failed(&path, e))?;
+        if newest.as_deref() == Some(packed) {
+            return Ok(None);
+        }
+        // A name may come back after another: the time makes it a new entry.
+        let mut keyed = packed.to_vec();
+        keyed.extend_from_slice(&at.to_be_bytes());
+        let id = leviculum_core::crypto::sha256(&keyed);
+        let seq = append_in(
+            &tx,
+            &identity,
+            crate::home::KIND_PETNAME,
+            &id,
+            packed,
+            at,
+            cap_bytes,
+        )
+        .map_err(|e| failed(&path, e))?;
+        if let Some(seq) = seq {
+            tx.execute(
+                "DELETE FROM archive WHERE identity = ?1 AND kind = ?2 AND seq <> ?3 \
+                 AND substr(packed, 1, ?4) = ?5",
+                params![
+                    &identity[..],
+                    kind,
+                    i64::try_from(seq).unwrap_or(i64::MAX),
+                    prefix_len,
+                    &prefix[..]
+                ],
+            )
+            .map_err(|e| failed(&path, e))?;
+        }
+        tx.commit().map_err(|e| failed(&path, e))?;
+        Ok(seq)
+    }
+
     /// The archive entries after `cursor`, oldest first, up to about
     /// `max_bytes` of packed messages but always at least one when there is
     /// one, and whether more follow. `first` is the oldest sequence still
@@ -1121,6 +1261,60 @@ impl Store {
             )
             .map_err(|e| self.failed(e))?;
         Ok(newest.map_or(0, |seq| seq as u64))
+    }
+
+    /// The newest sequence a client is woken for: every entry's but a
+    /// name's (1136) and a petname's (1139), which ride along with the next
+    /// pull.
+    pub fn archive_newest_waking(&self) -> Result<u64, StoreError> {
+        let newest: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT MAX(seq) FROM archive WHERE identity = ?1 AND kind NOT IN (?2, ?3)",
+                params![
+                    &self.identity[..],
+                    i64::from(crate::home::KIND_NAME),
+                    i64::from(crate::home::KIND_PETNAME)
+                ],
+                |row| row.get(0),
+            )
+            .map_err(|e| self.failed(e))?;
+        Ok(newest.map_or(0, |seq| seq as u64))
+    }
+
+    /// The peers the archive and the outbox hold a conversation with: the
+    /// source of each received message, the destination of each sent one
+    /// and of each message a client handed in. The home node archives the
+    /// names of these alone ([`crate::home::relation`]).
+    pub fn archive_peers(&self) -> Result<std::collections::BTreeSet<[u8; 16]>, StoreError> {
+        let mut peers = std::collections::BTreeSet::new();
+        // An LXMF message packs its destination, then its source.
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT CASE kind WHEN ?2 THEN substr(packed, 17, 16) ELSE substr(packed, 1, 16) END \
+                 FROM archive WHERE identity = ?1 AND kind IN (?2, ?3) \
+                 UNION SELECT destination FROM home_outbox WHERE identity = ?1 \
+                 UNION SELECT peer FROM conversations WHERE identity = ?1",
+            )
+            .map_err(|e| self.failed(e))?;
+        let rows = statement
+            .query_map(
+                params![
+                    &self.identity[..],
+                    i64::from(crate::home::KIND_RECEIVED),
+                    i64::from(crate::home::KIND_SENT)
+                ],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .map_err(|e| self.failed(e))?;
+        for row in rows {
+            let bytes = row.map_err(|e| self.failed(e))?;
+            if let Ok(peer) = <[u8; 16]>::try_from(bytes.as_slice()) {
+                peers.insert(peer);
+            }
+        }
+        Ok(peers)
     }
 
     /// How many bytes of packed messages the archive holds.
@@ -2361,6 +2555,62 @@ mod tests {
         assert_eq!(
             names,
             vec![(ALICE, "Ally".to_string()), (BOB, "Bob".to_string())]
+        );
+    }
+
+    #[test]
+    fn a_heard_name_is_archived_once_until_it_changes() {
+        let home = tempfile::tempdir().expect("home");
+        let mut store = Store::open_in(home.path(), US).expect("open");
+        store
+            .archive_name(BOB, "Bob", 5, u64::MAX)
+            .expect("append")
+            .expect("Bob's name is news");
+        let first = store
+            .archive_name(ALICE, "Alice", 10, u64::MAX)
+            .expect("append");
+        assert!(first.is_some(), "a first name is news");
+        assert_eq!(
+            store
+                .archive_name(ALICE, " Alice ", 20, u64::MAX)
+                .expect("ask"),
+            None,
+            "the same name, as the clients will read it, appends nothing"
+        );
+        let blank = store
+            .archive_name(ALICE, "\u{200b}", 25, u64::MAX)
+            .expect("ask");
+        assert_eq!(blank, None, "a name that sanitises to nothing says nothing");
+        let renamed = store
+            .archive_name(ALICE, "Ally", 30, u64::MAX)
+            .expect("append");
+        assert!(renamed > first, "a new name is a new entry");
+        let back = store
+            .archive_name(ALICE, "Alice", 40, u64::MAX)
+            .expect("append");
+        assert!(back > renamed, "and the old name again is one too");
+        let page = store.archive_since(0, usize::MAX).expect("page");
+        let names: Vec<_> = page
+            .entries
+            .iter()
+            .map(|entry| {
+                assert_eq!(entry.kind, crate::home::KIND_NAME);
+                crate::home::wire::read_name_entry(&entry.packed).expect("a name entry")
+            })
+            .collect();
+        // 1136: only the newest name entry of a peer is kept, and another
+        // peer's stays.
+        assert_eq!(
+            names,
+            [(BOB, "Bob".to_string()), (ALICE, "Alice".to_string())]
+        );
+        assert_eq!(
+            page.entries[1].at, 40,
+            "the entry's time is when it was heard"
+        );
+        assert_eq!(
+            store.names().expect("names"),
+            [(ALICE, "Alice".to_string()), (BOB, "Bob".to_string())]
         );
     }
 

@@ -427,6 +427,16 @@ fn block(
         (false, Some(query)) => super::search::mark_first(&message.body, query),
         (false, None) => message.body.clone(),
     };
+    // A text that came with a position says so under it, in a report's
+    // words: `Enter` on it opens the map there.
+    let body = match (message.is_report(), super::message_fix(peer, message)) {
+        (false, Some(_)) => {
+            let received = message.at.map(|at| at.unix_secs);
+            let read = telemetry::read(peer, &message.fields, received);
+            format!("{body}\n{}", telemetry::report_line(&read))
+        }
+        _ => body,
+    };
     // A reaction drawn as a block, its signature broken: what it claims.
     let body = match (body.trim().is_empty(), message.reaction()) {
         (true, Some((_, content))) => format!("reacted {content}"),

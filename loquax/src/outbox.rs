@@ -141,6 +141,17 @@ pub enum Command {
     /// On a client: a mark one of the home's devices set, pulled from the
     /// archive; reported as [`OutboxEvent::HomeMarked`].
     HomeMark { mark: crate::home::wire::Mark },
+    /// On a client: a name the home node heard a peer announce, pulled from
+    /// the archive; reported as [`OutboxEvent::Announced`], as an announce
+    /// the client heard itself would be.
+    HomeName { destination: [u8; 16], name: String },
+    /// On a client: the reader's name for a peer one of the home's devices
+    /// set, `None` for none, pulled from the archive (1139); reported as
+    /// [`OutboxEvent::HomePetname`].
+    HomePetname {
+        destination: [u8; 16],
+        petname: Option<String>,
+    },
 }
 
 /// What the mailbox rule is fed from, read by the frontend before it selects:
@@ -191,6 +202,12 @@ pub enum OutboxEvent {
     },
     /// A mark one of the home's devices set ([`Command::HomeMark`]).
     HomeMarked { mark: crate::home::wire::Mark },
+    /// The reader's name for a peer, set on one of the home's devices
+    /// ([`Command::HomePetname`]).
+    HomePetname {
+        destination: [u8; 16],
+        petname: Option<String>,
+    },
     /// The message left the router's outbound queue, which the router does
     /// only in a terminal state (`leviculum-lxmf/src/router.rs:771-773`).
     /// `last` is the last state seen for it, when there was one.

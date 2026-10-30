@@ -151,6 +151,7 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
     let home = tempfile::tempdir().expect("home node dir");
     let code = admit(home.path());
     let node = HomeNode::start(listener, &instance, rns.path(), home.path()).await;
+    let home_dir = home.path().to_path_buf();
 
     let phone = tempfile::tempdir().expect("app dir");
     let dir = phone.path().display().to_string();
@@ -182,6 +183,71 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
         assert!(bubble.ours);
         assert_eq!(bubble.body, "hallo vom Telefon");
         assert_ne!(bubble.state, "failed", "{bubble:?}");
+        // A reply to it (1137): sent with the target's id, which the row
+        // reads back out of its own fields, and the target's text quoted.
+        let target = bubble.id.clone();
+        session
+            .request(Request::Reply {
+                peer: peer.clone(),
+                target: target.clone(),
+                body: "und die Antwort".to_string(),
+            })
+            .expect("reply");
+        let messages: schema::Messages = wait_for(
+            &session,
+            schema::Query::Messages { peer: peer.clone() },
+            60,
+            |m: &schema::Messages| m.messages.len() == 2 && !m.messages[1].id.is_empty(),
+        );
+        let reply = &messages.messages[1];
+        assert_eq!(reply.body, "und die Antwort");
+        assert_eq!(reply.quote_to.as_deref(), Some(target.as_str()));
+        assert_eq!(reply.quote.as_deref(), Some("hallo vom Telefon"));
+        assert_eq!(reply.quote_ours, Some(true));
+        assert!(messages.home_client);
+        let info: schema::Info = rmp_serde::from_slice(
+            &session
+                .query(schema::Query::Info {
+                    peer: peer.clone(),
+                    key: reply.key,
+                })
+                .expect("info"),
+        )
+        .expect("decode");
+        assert!(info.rows.iter().any(|r| r.contains(&reply.id)), "{info:?}");
+        // The reaction sent and the emoji picked are the recents, newest
+        // first, kept in the app's directory.
+        session
+            .request(Request::React {
+                peer: peer.clone(),
+                target: target.clone(),
+                content: "\u{1F44D}".to_string(),
+            })
+            .expect("react");
+        session
+            .request(Request::Used {
+                emoji: "\u{1F600}".to_string(),
+            })
+            .expect("used");
+        let recents: schema::Recents =
+            rmp_serde::from_slice(&session.query(schema::Query::Recents).expect("recents"))
+                .expect("decode");
+        assert_eq!(recents.emoji, ["\u{1F600}", "\u{1F44D}"]);
+        let messages: schema::Messages = wait_for(
+            &session,
+            schema::Query::Messages { peer: peer.clone() },
+            60,
+            |m: &schema::Messages| m.messages[0].chips.len() == 1,
+        );
+        let chip = &messages.messages[0].chips[0];
+        assert_eq!((chip.content.as_str(), chip.ours), ("\u{1F44D}", true));
+        // A peer without a name: the avatar shows its address's first byte,
+        // in the app's colour since it sent no icon appearance (1129).
+        assert_eq!(messages.initials, peer[..2].to_uppercase());
+        assert_eq!(
+            (messages.icon_fg.as_deref(), messages.icon_bg.as_deref()),
+            (None, None)
+        );
 
         session.request(Request::Pull).expect("pull");
         let deadline = std::time::Instant::now() + Duration::from_secs(60);
@@ -201,8 +267,125 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
             |c: &schema::Conversations| !c.conversations.is_empty(),
         );
         assert_eq!(list.conversations[0].peer, peer);
-        assert_eq!(list.conversations[0].last, "hallo vom Telefon");
+        assert_eq!(list.conversations[0].last, "you reacted \u{1F44D}");
         assert!(list.conversations[0].ours);
+        assert_eq!(list.conversations[0].initials, peer[..2].to_uppercase());
+        // The row's mark (1130): ours is last, so a delivery word, a text.
+        assert_eq!(list.conversations[0].kind, "reaction");
+        assert!(!list.conversations[0].state.is_empty());
+        assert_eq!(list.initials.chars().count(), 2);
+        assert_eq!(list.address.len(), 32);
+
+        // The address book (1139): linked with what the picker gave, the
+        // contact's name shows and its photo, under the user's own name,
+        // which the home node keeps for the home's other devices.
+        let lookup = "0r1-ALICE".to_string();
+        let thumbnail = vec![0x89, b'P', b'N', b'G', 1, 2, 3];
+        assert!(
+            !messages.linked && !messages.ask_link,
+            "only ours: no banner"
+        );
+        session
+            .request(Request::Rename {
+                peer: peer.clone(),
+                name: "Mum".to_string(),
+            })
+            .expect("rename");
+        session
+            .request(Request::Link {
+                peer: peer.clone(),
+                contact: schema::ContactCopy {
+                    lookup: lookup.clone(),
+                    contact_id: 17,
+                    name: "Alice Schmidt".to_string(),
+                    photo: Some(schema::Blob(thumbnail.clone())),
+                },
+            })
+            .expect("link");
+        let short = &peer[..4];
+        let shown: schema::Messages = rmp_serde::from_slice(
+            &session
+                .query(schema::Query::Messages { peer: peer.clone() })
+                .expect("query"),
+        )
+        .expect("decode");
+        assert_eq!(shown.name, format!("Mum ·{short}"), "the petname first");
+        assert!(shown.linked);
+        assert_eq!(
+            (shown.lookup.as_deref(), shown.contact_id),
+            (Some(lookup.as_str()), Some(17))
+        );
+        assert_eq!(shown.petname.as_deref(), Some("Mum"));
+        let photo = shown.photo.clone().expect("the photo");
+        assert_eq!(std::fs::read(&photo).expect("the copy"), thumbnail);
+        // The petname at the home node: an archive entry of its own.
+        let home_store = loquax::store::Store::open_read_only(
+            &home_dir.join(loquax::store::STORE_FILE),
+            session.address(),
+        )
+        .expect("the home store")
+        .expect("there");
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            let page = home_store.archive_since(0, usize::MAX).expect("page");
+            let petnames: Vec<_> = page
+                .entries
+                .iter()
+                .filter(|e| e.kind == loquax::home::KIND_PETNAME)
+                .map(|e| loquax::home::wire::read_petname_entry(&e.packed).expect("petname"))
+                .collect();
+            if !petnames.is_empty() {
+                assert_eq!(petnames, [([0x5a; 16], Some("Mum".to_string()))]);
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no petname reached home"
+            );
+            let _ = session.next_event(Duration::from_millis(200));
+        }
+        // The petname cleared, the contact's name; the list says it too.
+        session
+            .request(Request::Rename {
+                peer: peer.clone(),
+                name: String::new(),
+            })
+            .expect("clear");
+        let list: schema::Conversations =
+            rmp_serde::from_slice(&session.query(schema::Query::Conversations).expect("list"))
+                .expect("decode");
+        let row = &list.conversations[0];
+        assert_eq!(row.name, format!("Alice Schmidt ·{short}"));
+        assert_eq!(row.initials, "AS");
+        assert_eq!(
+            (row.linked, row.photo.as_deref()),
+            (true, Some(photo.as_str()))
+        );
+        let detail: schema::Addresses = rmp_serde::from_slice(
+            &session
+                .query(schema::Query::Contact {
+                    lookup: lookup.clone(),
+                })
+                .expect("detail"),
+        )
+        .expect("decode");
+        assert_eq!(detail.addresses.len(), 1);
+        assert_eq!(detail.addresses[0].peer, peer);
+        // A peer that announced nothing gets no suggestion.
+        let none: schema::Suggestions = rmp_serde::from_slice(
+            &session
+                .query(schema::Query::Suggest {
+                    peer: peer.clone(),
+                    candidates: vec![schema::CandidateRow {
+                        key: lookup.clone(),
+                        display: "Alice Schmidt".to_string(),
+                        ..schema::CandidateRow::default()
+                    }],
+                })
+                .expect("suggest"),
+        )
+        .expect("decode");
+        assert!(none.suggestions.is_empty());
 
         // Negative: an address that is none, and a message id that is none.
         assert!(session
@@ -241,8 +424,30 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
                 .expect("query"),
         )
         .expect("decode");
-        assert_eq!(messages.messages.len(), 1, "{messages:?}");
+        assert_eq!(messages.messages.len(), 2, "{messages:?}");
         assert_eq!(messages.messages[0].body, "hallo vom Telefon");
+        // The link outlived the session; unlinked, the address again and
+        // no photo kept.
+        let short = &peer[..4];
+        assert_eq!(messages.name, format!("Alice Schmidt ·{short}"));
+        let photo = messages.photo.clone().expect("the photo kept");
+        session
+            .request(Request::Unlink { peer: peer.clone() })
+            .expect("unlink");
+        let unlinked: schema::Messages = rmp_serde::from_slice(
+            &session
+                .query(schema::Query::Messages { peer: peer.clone() })
+                .expect("query"),
+        )
+        .expect("decode");
+        assert_eq!(unlinked.name, format!("<{}…>", &peer[..8]));
+        assert!(!unlinked.linked && unlinked.photo.is_none() && unlinked.lookup.is_none());
+        assert!(!Path::new(&photo).exists());
+        // The reply's field came back from the store with the message.
+        assert_eq!(
+            messages.messages[1].quote_to.as_deref(),
+            Some(messages.messages[0].id.as_str())
+        );
         session.stop();
         drop(session);
 
@@ -265,6 +470,9 @@ async fn a_phone_joins_sends_pulls_and_comes_back() {
 /// then a loquax messenger on the home node's instance sends to the home
 /// address. The session pulls on the home node's wake, with no `pull`
 /// asked, says `changed`, and the conversation list shows the message.
+/// Then the sender renames itself (1136): the status line hears nothing,
+/// neither a wake's pull nor a count, and opening the conversation pulls
+/// quietly and brings the new name.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_new_message_shows_on_the_phone_without_a_pull() {
     let instance = instance();
@@ -285,7 +493,9 @@ async fn a_new_message_shows_on_the_phone_without_a_pull() {
     };
     let session = tokio::task::spawn_blocking(move || {
         let session = Session::start(&first).unwrap_or_else(|error| panic!("{error:?}"));
-        // The pull on open, and the watching link's first word, settle.
+        // The pull on open is quiet; a Refresh says its end, and the
+        // watching link's first word settles.
+        session.request(Request::Pull).expect("pull");
         let deadline = std::time::Instant::now() + Duration::from_secs(60);
         loop {
             match session.next_event(Duration::from_millis(500)) {
@@ -307,11 +517,15 @@ async fn a_new_message_shows_on_the_phone_without_a_pull() {
     let sender = tempfile::tempdir().expect("sender dir");
     let storage = sender.path().join("storage");
     std::fs::create_dir_all(&storage).expect("sender storage");
+    let sender_identity = leviculum_core::Identity::generate(&mut rand_core::OsRng);
+    let sender_address = loquax::address::to_hex(
+        &loquax::engine::delivery_address(&sender_identity).expect("address"),
+    );
     let mut attached = loquax::engine::attach(loquax::engine::AttachConfig {
         instance: instance.clone(),
         config_dir: Some(rns.path().to_path_buf()),
-        storage_dir: storage,
-        identity: leviculum_core::Identity::generate(&mut rand_core::OsRng),
+        storage_dir: storage.clone(),
+        identity: sender_identity.clone(),
         display_name: b"sender".to_vec(),
         notices: loquax::effects::Terminal::new(sender.path().to_path_buf()),
     })
@@ -334,8 +548,18 @@ async fn a_new_message_shows_on_the_phone_without_a_pull() {
     .expect("the sender hands it on");
     let sent_at = std::time::Instant::now();
 
-    tokio::task::spawn_blocking(move || {
+    let session = tokio::task::spawn_blocking(move || {
         let mut changed = false;
+        // The wake's pull is quiet but for its result: one new message.
+        let mut said_one = false;
+        let mut look = |event: Option<Event>, changed: &mut bool| match event {
+            Some(Event::Changed { .. }) => *changed = true,
+            Some(Event::Sync { state, detail, .. }) => {
+                assert_eq!((state.as_str(), detail.as_str()), ("done", "1"));
+                said_one = true;
+            }
+            _ => {}
+        };
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
         loop {
             let list: schema::Conversations = rmp_serde::from_slice(
@@ -355,15 +579,84 @@ async fn a_new_message_shows_on_the_phone_without_a_pull() {
                 std::time::Instant::now() < deadline,
                 "the message never showed without a pull: {list:?}"
             );
-            if let Some(Event::Changed { .. }) = session.next_event(Duration::from_millis(100)) {
-                changed = true;
-            }
+            look(session.next_event(Duration::from_millis(100)), &mut changed);
         }
-        session.stop();
+        // The pull's end comes in the pump that showed the message, or the
+        // next; nothing of this pull is left for the rename below.
+        let settled = std::time::Instant::now() + Duration::from_secs(3);
+        while std::time::Instant::now() < settled {
+            look(session.next_event(Duration::from_millis(100)), &mut changed);
+        }
+        assert!(said_one, "the wake's pull said its one new message");
+        session
     })
     .await
     .expect("the wait for the wake");
     attached.stop().await;
+
+    // The sender comes back under another name and announces it.
+    let renamed = loquax::engine::attach(loquax::engine::AttachConfig {
+        instance: instance.clone(),
+        config_dir: Some(rns.path().to_path_buf()),
+        storage_dir: storage,
+        identity: sender_identity,
+        display_name: b"renamed".to_vec(),
+        notices: loquax::effects::Terminal::new(sender.path().to_path_buf()),
+    })
+    .await
+    .expect("the sender attaches again");
+    loquax::outbox::Outbox::submit(&renamed.outbox, loquax::outbox::Command::Announce)
+        .expect("announce");
+    tokio::task::spawn_blocking(move || {
+        // Whatever pulls run meanwhile: a name says nothing on the line.
+        let silent = |event: Option<Event>| {
+            assert!(
+                !matches!(event, Some(Event::Sync { .. } | Event::Notice { .. })),
+                "a name made the status line speak: {event:?}"
+            );
+        };
+        let quiet_until = std::time::Instant::now() + Duration::from_secs(4);
+        while std::time::Instant::now() < quiet_until {
+            silent(session.next_event(Duration::from_millis(100)));
+        }
+        // Opening the conversation pulls, quietly, and the name comes. It
+        // is opened again every two seconds, in case its pull found one
+        // running that began before the name was archived.
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        let mut opened = std::time::Instant::now() - Duration::from_secs(2);
+        loop {
+            if opened.elapsed() >= Duration::from_secs(2) {
+                session
+                    .request(Request::Open {
+                        peer: sender_address.clone(),
+                    })
+                    .expect("open");
+                opened = std::time::Instant::now();
+            }
+            let messages: schema::Messages = rmp_serde::from_slice(
+                &session
+                    .query(schema::Query::Messages {
+                        peer: sender_address.clone(),
+                    })
+                    .expect("a query"),
+            )
+            .expect("decode");
+            // The label is the name with the screen's short-hash mark.
+            if messages.name.starts_with("renamed") {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the new name never came: {:?}",
+                messages.name
+            );
+            silent(session.next_event(Duration::from_millis(100)));
+        }
+        session.stop();
+    })
+    .await
+    .expect("the rename");
+    renamed.stop().await;
     node.kill().await;
 }
 

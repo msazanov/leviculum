@@ -11,8 +11,9 @@
 //! | call | payload |
 //! |---|---|
 //! | `start` | [`Start`] |
-//! | `command` | [`Request`], tagged by `t`: `open`, `close`, `send`, `react`, `pull`, `front` |
-//! | `query` | [`Query`], tagged by `t`: `conversations`, `messages` |
+//! | `command` | [`Request`], tagged by `t`: `open`, `close`, `send`, `react`, `reply`, `forward`, `delete`, `used`, `pull`, `front`, `link`, `unlink`, `notnow`, `rename`, `relink` |
+//! | `query` | [`Query`], tagged by `t`: `conversations`, `messages`, `info`, `recents`, `suggest`, `contact`, `links` |
+//! | `renderMap` | [`MapRequest`] |
 //!
 //! Rust to Java:
 //!
@@ -20,17 +21,31 @@
 //! |---|---|
 //! | `start` | [`Started`] |
 //! | `command` | [`Done`] |
-//! | `query` | [`Conversations`] or [`Messages`], or [`Done`] with the error |
+//! | `query` | [`Conversations`], [`Messages`], [`Info`], [`Recents`], [`Suggestions`], [`Addresses`] or [`Links`], or [`Done`] with the error |
 //! | `nextEvent` | [`Event`], tagged by `t`: `changed`, `notice`, `sync`, `link`, `stopped`; none when the wait ran out |
+//! | `renderMap` | a frame: four bytes big endian, the length of a [`MapShown`], the [`MapShown`], and its `w` times `h` RGBA pixels |
 //!
+//! The map's pixels go raw behind the map, not as msgpack, so ten megabytes
+//! of a phone's screen are one copy into a Java `byte[]` and one into its
+//! bitmap. The map call needs no session: it draws the regions in the
+//! app's maps directory and the pins the store knows, with or without one.
 //! A change that Java cannot read is a new [`VERSION`]: every answer
 //! carries it, and Java refuses one it does not know. A field or an event
 //! added is no such change: Java reads keys by name and skips an event it
 //! does not know, so `link` (event and field) came within version 1, and a
-//! code with the address behind it in [`Start::code`] is still a string.
+//! code with the address behind it in [`Start::code`] is still a string,
+//! and the avatar's `initials`, `icon_fg` and `icon_bg` (1129) are fields,
+//! as are the list row's `kind`, `reaction` and `state` and the list's
+//! own `address` and `initials` (1130).
 //! A request added is none either: an older app never sends `front`, and
 //! the session then counts itself in the back, pulling on wakes and its
-//! schedule as before.
+//! schedule as before. The map's margins and `moving` (1131) are such
+//! fields too: an app that sends none gets the frame of the screen. The
+//! long press's requests and queries (1137) and a row's `key` and quote
+//! came the same way, and so did the address book's (1139): the link
+//! requests and queries, a row's `photo` and `linked`, and the header's
+//! link fields; and the map's `prefetch` with its answer's `prefetching`
+//! and `prefetched` (1135).
 
 use serde::{Deserialize, Serialize};
 
@@ -99,12 +114,113 @@ pub enum Request {
         target: String,
         content: String,
     },
+    /// Replied to the message `target` with `body`: sent with the target's
+    /// id and a quote of it (`loquax::ui::replies`).
+    Reply {
+        peer: String,
+        target: String,
+        body: String,
+    },
+    /// Forwarded the message `key` ([`MessageRow::key`]) of `peer`'s
+    /// conversation to `to`: its text and content fields again.
+    Forward { peer: String, key: u64, to: String },
+    /// Deleted the messages `keys` of `peer`'s conversation, the user asked
+    /// already; on a client of a home node from its every device.
+    Delete { peer: String, keys: Vec<u64> },
+    /// Picked `emoji` into a message: it joins the recents, as a reaction
+    /// sent does.
+    Used { emoji: String },
     /// Asked for a pull now: the refresh button.
     Pull,
     /// A screen of the app came to the front (`true`) or left it: while in
     /// front and with the watching link down, the session pulls every
     /// minute.
     Front { front: bool },
+    /// Linked `peer` to a contact of the address book the user picked or
+    /// confirmed (1139), or the link's copy refreshed: what the contact
+    /// said right then, its thumbnail's bytes among it.
+    Link {
+        peer: String,
+        #[serde(flatten)]
+        contact: ContactCopy,
+    },
+    /// Took `peer`'s link away; its copied name and photo go with it.
+    Unlink { peer: String },
+    /// "Not now" on `peer`'s banner: it does not ask again.
+    #[serde(rename = "notnow")]
+    NotNow { peer: String },
+    /// The user's own name for `peer`, the empty one clearing it: kept
+    /// here and handed to the home node for the home's other devices.
+    Rename { peer: String, name: String },
+    /// The address book's IM rows with protocol LXMF (with
+    /// `READ_CONTACTS`): each address loquax knows and has not linked
+    /// becomes a link, unless two contacts carry it.
+    Relink { rows: Vec<ImRow> },
+}
+
+/// What a contact said when loquax read it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContactCopy {
+    /// Its `LOOKUP_KEY` and `_ID`.
+    pub lookup: String,
+    #[serde(default)]
+    pub contact_id: i64,
+    /// Its display name.
+    pub name: String,
+    /// Its thumbnail's bytes, as the provider gave them; none for none.
+    #[serde(default)]
+    pub photo: Option<Blob>,
+}
+
+/// One IM row of protocol LXMF, and the contact it belongs to.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImRow {
+    /// The row's data: the address, as the user or loquax wrote it.
+    pub address: String,
+    #[serde(flatten)]
+    pub contact: ContactCopy,
+}
+
+/// Bytes that cross as msgpack `bin`, as Java's codec writes a `byte[]`.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct Blob(pub Vec<u8>);
+
+impl std::fmt::Debug for Blob {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Blob({} bytes)", self.0.len())
+    }
+}
+
+impl Serialize for Blob {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_bytes(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for Blob {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = Blob;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("bytes")
+            }
+            fn visit_bytes<E: serde::de::Error>(self, bytes: &[u8]) -> Result<Blob, E> {
+                Ok(Blob(bytes.to_vec()))
+            }
+            fn visit_byte_buf<E: serde::de::Error>(self, bytes: Vec<u8>) -> Result<Blob, E> {
+                Ok(Blob(bytes))
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Blob, A::Error> {
+                let mut out = Vec::new();
+                while let Some(byte) = seq.next_element::<u8>()? {
+                    out.push(byte);
+                }
+                Ok(Blob(out))
+            }
+        }
+        deserializer.deserialize_bytes(Visitor)
+    }
 }
 
 /// What the screen wants to show.
@@ -115,6 +231,106 @@ pub enum Query {
     Conversations,
     /// One conversation's messages, oldest first.
     Messages { peer: String },
+    /// The detail of the message `key` of `peer`'s conversation.
+    Info { peer: String, key: u64 },
+    /// The emoji the user used last, newest first.
+    Recents,
+    /// Which of `candidates`, contacts of the address book, `peer`'s
+    /// announced name may be, best first (`loquax::name_match`).
+    Suggest {
+        peer: String,
+        candidates: Vec<CandidateRow>,
+    },
+    /// Every address linked to the contact `lookup`: its detail screen.
+    Contact { lookup: String },
+    /// Every link, for the refresh that reads the contacts again.
+    Links,
+}
+
+/// One contact's name fields, for [`Query::Suggest`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CandidateRow {
+    /// The app's handle on it, handed back: the lookup key.
+    pub key: String,
+    #[serde(default)]
+    pub display: String,
+    #[serde(default)]
+    pub given: String,
+    #[serde(default)]
+    pub middle: String,
+    #[serde(default)]
+    pub family: String,
+    #[serde(default)]
+    pub nicknames: Vec<String>,
+    #[serde(default)]
+    pub last_contacted: i64,
+}
+
+/// The suggestions, best first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Suggestions {
+    pub v: u32,
+    pub suggestions: Vec<SuggestionRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SuggestionRow {
+    pub key: String,
+    pub score: u32,
+    /// What matched: `display`, `nickname`, `name`, `given`, `words` or
+    /// `prefix`; and the nickname when it was one.
+    pub field: String,
+    #[serde(default)]
+    pub nickname: Option<String>,
+}
+
+/// The addresses of one contact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Addresses {
+    pub v: u32,
+    pub addresses: Vec<AddressRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AddressRow {
+    pub peer: String,
+    /// As every screen names it.
+    pub name: String,
+    /// The announced name, when one was heard.
+    #[serde(default)]
+    pub announced: Option<String>,
+}
+
+/// Every link.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Links {
+    pub v: u32,
+    pub links: Vec<LinkRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkRow {
+    pub peer: String,
+    pub lookup: String,
+    pub contact_id: i64,
+    pub name: String,
+}
+
+/// A message's detail, what the terminal's `v` shows: who, the peer, the
+/// id, the size, the delivery state or the signature, the fields read and
+/// what this device saw happen to it, one line each, an empty one between
+/// the parts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Info {
+    pub v: u32,
+    pub rows: Vec<String>,
+}
+
+/// The recent emoji, newest first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Recents {
+    pub v: u32,
+    pub emoji: Vec<String>,
 }
 
 /// The answer to a call that has nothing else to say.
@@ -157,12 +373,48 @@ pub struct ConversationRow {
     /// When it was written or came, seconds since 1970 UTC; 0 for none.
     pub at: i64,
     pub unread: u32,
+    /// The avatar's letters (1129): from the name, or the address's first
+    /// two hex digits for a peer without one.
+    #[serde(default)]
+    pub initials: String,
+    /// The peer's own avatar colours, `rrggbb`, from the icon appearance of
+    /// its latest message that carried one; absent, the app picks a colour
+    /// from the address.
+    #[serde(default)]
+    pub icon_fg: Option<String>,
+    #[serde(default)]
+    pub icon_bg: Option<String>,
+    /// What the last message is (1130): `text`, `position` for a report
+    /// without text, `reaction`; the app words the last two in the phone's
+    /// language, `last` stays the English line for an app that does not.
+    #[serde(default)]
+    pub kind: String,
+    /// The reaction's content when `kind` is `reaction`.
+    #[serde(default)]
+    pub reaction: Option<String>,
+    /// Ours only: the last message's delivery, as [`MessageRow::state`];
+    /// the list draws its mark where an unread count would be.
+    #[serde(default)]
+    pub state: String,
+    /// The linked contact's thumbnail as loquax copied it, a file the app
+    /// decodes (1139); absent, the avatar is the initials.
+    #[serde(default)]
+    pub photo: Option<String>,
+    /// Whether the peer is linked to a contact of the address book.
+    #[serde(default)]
+    pub linked: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Conversations {
     pub v: u32,
     pub conversations: Vec<ConversationRow>,
+    /// Our own address, the home node's, and its avatar's letters, for
+    /// the list's bar (1130).
+    #[serde(default)]
+    pub address: String,
+    #[serde(default)]
+    pub initials: String,
 }
 
 /// A reaction under a message: its content, how many sent it, and whether
@@ -185,6 +437,40 @@ pub struct MessageRow {
     pub state: String,
     pub at: i64,
     pub chips: Vec<Chip>,
+    /// The fix the message carries, a report's or a text's that came with
+    /// telemetry, degrees times a million, which a tap opens the map on
+    /// with the sender's pin selected; absent for any other message.
+    #[serde(default)]
+    pub lat_e6: Option<i32>,
+    #[serde(default)]
+    pub lon_e6: Option<i32>,
+    /// The bubble's position line beside the fix: the coordinates short,
+    /// `52.51627 N 13.37770 E`, and the accuracy, `±5 m`, when the sender
+    /// gave one.
+    #[serde(default)]
+    pub place: Option<String>,
+    #[serde(default)]
+    pub accuracy: Option<String>,
+    /// When the fix was taken, unix seconds (the receive time where the
+    /// sender's clock claims the future), for the line's age, and from
+    /// when the line is drawn dimmed as stale.
+    #[serde(default)]
+    pub fix_at: Option<i64>,
+    #[serde(default)]
+    pub stale_at: Option<i64>,
+    /// The message's key on this device, for the long press's forward,
+    /// delete and info; a send not yet queued has one too.
+    #[serde(default)]
+    pub key: u64,
+    /// A reply's quote: the target's text, or what the sender quoted when
+    /// this device lacks it; whether the target is ours, absent when
+    /// unknown; and the target's id.
+    #[serde(default)]
+    pub quote: Option<String>,
+    #[serde(default)]
+    pub quote_ours: Option<bool>,
+    #[serde(default)]
+    pub quote_to: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -193,6 +479,39 @@ pub struct Messages {
     pub peer: String,
     pub name: String,
     pub messages: Vec<MessageRow>,
+    /// The header's avatar, as in [`ConversationRow`].
+    #[serde(default)]
+    pub initials: String,
+    #[serde(default)]
+    pub icon_fg: Option<String>,
+    #[serde(default)]
+    pub icon_bg: Option<String>,
+    /// Whether a delete reaches the home's other devices (1137): the
+    /// question says where it deletes.
+    #[serde(default)]
+    pub home_client: bool,
+    /// The address book (1139): the photo and whether it is linked, as in
+    /// [`ConversationRow`]; the contact's lookup key and `_ID` for "Open
+    /// contact"; whether the banner asks to add the peer (unlinked, not
+    /// answered "Not now", a message came from it); the announced name for
+    /// a new contact; the user's own name for the rename dialog; the
+    /// contact's other addresses as every screen names them.
+    #[serde(default)]
+    pub photo: Option<String>,
+    #[serde(default)]
+    pub linked: bool,
+    #[serde(default)]
+    pub lookup: Option<String>,
+    #[serde(default)]
+    pub contact_id: Option<i64>,
+    #[serde(default)]
+    pub ask_link: bool,
+    #[serde(default)]
+    pub announced: Option<String>,
+    #[serde(default)]
+    pub petname: Option<String>,
+    #[serde(default)]
+    pub others: Vec<String>,
 }
 
 /// What happened, for the screen.
@@ -203,8 +522,10 @@ pub enum Event {
     Changed { v: u32 },
     /// A line for the user: what the terminal shows as a toast.
     Notice { v: u32, text: String },
-    /// A pull began (`running`), ended (`done`, with how many entries
-    /// came), or failed (`failed`, with why).
+    /// A pull began (`running`), ended (`done`, with how many new
+    /// messages came), or failed (`failed`, with why). A pull the user did
+    /// not ask for says it runs only once it is slow, and ends only when
+    /// it said so or brought a message (`crate::pull_line`).
     Sync {
         v: u32,
         state: String,
@@ -217,6 +538,194 @@ pub enum Event {
     /// that ended by itself is gone from the library then: the next
     /// `start` makes a fresh one.
     Stopped { v: u32, detail: String },
+}
+
+/// One frame of the map screen, and what the user did to the last one
+/// (1128). Java keeps only the view it got back ([`MapShown`]'s centre,
+/// zoom and selection) and hands it in again with the gestures since; the
+/// rules of the view are loquax's (`loquax::ui::map`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MapRequest {
+    /// The app's files directory: the maps under `maps/`, the store and
+    /// the config beside them.
+    pub dir: String,
+    /// The view's size in the screen's pixels.
+    pub w: u32,
+    pub h: u32,
+    /// The screen's density times a thousand: 2750 on a phone of 2.75.
+    pub density_milli: u32,
+    /// Whether the phone is in its dark setting.
+    #[serde(default)]
+    pub dark: bool,
+    /// The last frame's centre in world units and its zoom; absent on the
+    /// first frame, which fits the pins.
+    #[serde(default)]
+    pub x: Option<u32>,
+    #[serde(default)]
+    pub y: Option<u32>,
+    #[serde(default)]
+    pub zoom: Option<u8>,
+    /// The last frame's exact zoom in thousandths of a step (1134): where
+    /// a pinch left it. Wins over `zoom` when given.
+    #[serde(default)]
+    pub zoom_milli: Option<u32>,
+    /// The selected pin's peer, hex.
+    #[serde(default)]
+    pub selected: Option<String>,
+    /// Moves the view by this many pixels, after the centre above: what a
+    /// finger dragged the content by is the negative of it.
+    #[serde(default)]
+    pub pan_x: i32,
+    #[serde(default)]
+    pub pan_y: i32,
+    /// Zooms by this many steps about the pixel `(about_x, about_y)` of the
+    /// view, after the pan.
+    #[serde(default)]
+    pub zoom_by: i32,
+    /// Zooms by this many thousandths of a step about the same pixel,
+    /// after `zoom_by`: a pinch's live scale, `1000 * log2(scale)`, which
+    /// the view keeps exactly (1134).
+    #[serde(default)]
+    pub zoom_by_milli: i32,
+    #[serde(default)]
+    pub about_x: i32,
+    #[serde(default)]
+    pub about_y: i32,
+    /// A tap at this pixel of the last frame: the pin there is selected
+    /// and named.
+    #[serde(default)]
+    pub tap_x: Option<i32>,
+    #[serde(default)]
+    pub tap_y: Option<i32>,
+    /// Fit every pin, as `0` does in the terminal.
+    #[serde(default)]
+    pub fit: bool,
+    /// Centre on this place, degrees times a million, as a report's fix
+    /// opens the map in the terminal (1076); its region is loaded when no
+    /// region holds it.
+    #[serde(default)]
+    pub at_lat_e6: Option<i32>,
+    #[serde(default)]
+    pub at_lon_e6: Option<i32>,
+    /// Load the region of the view: "load this area", `d` in the terminal.
+    #[serde(default)]
+    pub load: bool,
+    /// Pixels drawn past the view on each side, left and right, top and
+    /// bottom (1131): a finger that pans first reveals drawn map, and a
+    /// pinch that zooms out shrinks a bitmap that still fills the screen.
+    /// The view's rules (fit, the one-world floor, a tap) are the `w` x
+    /// `h` screen's; the frame is that much larger about the same centre.
+    #[serde(default)]
+    pub margin_x: u32,
+    #[serde(default)]
+    pub margin_y: u32,
+    /// A finger is on the map: the frame shows the names its last frame at
+    /// rest placed, where the view moved them, and places none anew; it
+    /// keeps the zoom step it was composed from within a step of the
+    /// pinch, scaled, and draws only a few missing tiles (1134).
+    #[serde(default)]
+    pub moving: bool,
+    /// Switch the map, and only the map, to the other table than the one
+    /// it shows (1133): the choice is stored as the config's `map_theme`
+    /// and wins over the phone's setting from then on.
+    #[serde(default)]
+    pub toggle_theme: bool,
+    /// Drop that choice: the map follows the phone again, `map_theme =
+    /// auto`.
+    #[serde(default)]
+    pub follow_phone: bool,
+    /// Draw a batch of the tiles around the last frame at rest instead of
+    /// a frame (1135): the answer has no pixels. Java asks while the view
+    /// is idle, the app in front and the battery saver off.
+    #[serde(default)]
+    pub prefetch: bool,
+}
+
+/// The map frame's description; its pixels follow it (see the table
+/// above).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MapShown {
+    pub v: u32,
+    pub ok: bool,
+    pub error: Option<String>,
+    /// The frame's size: the view's and the margins on both sides.
+    pub w: u32,
+    pub h: u32,
+    /// The margins drawn past the view on each side, the request's: the
+    /// view's top left corner is this pixel of the frame.
+    #[serde(default)]
+    pub margin_x: u32,
+    #[serde(default)]
+    pub margin_y: u32,
+    /// The view drawn, for the next request.
+    pub x: u32,
+    pub y: u32,
+    /// The zoom step nearest the view's exact zoom.
+    pub zoom: u8,
+    /// The view's exact zoom in thousandths of a step (1134).
+    #[serde(default)]
+    pub zoom_milli: u32,
+    /// The zoom step whose tiles the frame is composed from.
+    #[serde(default)]
+    pub tile_zoom: u8,
+    /// The frame still owes tiles it showed another step's tiles for:
+    /// ask again.
+    #[serde(default)]
+    pub pending: bool,
+    /// The shallowest and the deepest zoom the regions allow.
+    pub min_zoom: u8,
+    pub max_zoom: u8,
+    pub selected: Option<String>,
+    /// The credit the frame carries.
+    pub attribution: String,
+    /// The pins drawn, and the one a tap found, with its name.
+    pub pins: u32,
+    pub tapped: Option<String>,
+    pub tapped_name: Option<String>,
+    /// A region is loading: ask for the frame again in a while.
+    pub loading: bool,
+    /// A line for the user: a load that failed, a view loaded already.
+    pub notice: Option<String>,
+    /// How long the frame took to draw, milliseconds.
+    pub ms: u32,
+    /// The frame is in the map's dark table, and whether a stored choice
+    /// put it there rather than the phone's setting.
+    #[serde(default)]
+    pub dark: bool,
+    #[serde(default)]
+    pub theme_chosen: bool,
+    /// Tiles around the view are still to prefetch (1135): a frame at
+    /// rest that owes none says so, a prefetch answer until its plan is
+    /// done.
+    #[serde(default)]
+    pub prefetching: bool,
+    /// Tiles a prefetch answer drew.
+    #[serde(default)]
+    pub prefetched: u32,
+}
+
+/// A map frame for Java: the description's length, the description, the
+/// pixels.
+pub fn frame(shown: &MapShown, rgba: &[u8]) -> Vec<u8> {
+    let head = encode(shown);
+    let mut out = Vec::with_capacity(4 + head.len() + rgba.len());
+    out.extend_from_slice(&u32::try_from(head.len()).unwrap_or(0).to_be_bytes());
+    out.extend_from_slice(&head);
+    out.extend_from_slice(rgba);
+    out
+}
+
+/// Split a frame into its description and its pixels.
+pub fn unframe(frame: &[u8]) -> Result<(MapShown, &[u8]), String> {
+    let (len, rest) = frame
+        .split_first_chunk::<4>()
+        .ok_or_else(|| "a frame without its length".to_string())?;
+    let len = u32::from_be_bytes(*len) as usize;
+    if rest.len() < len {
+        return Err("a frame cut short".to_string());
+    }
+    let (head, pixels) = rest.split_at(len);
+    Ok((decode(head)?, pixels))
 }
 
 /// Encode an answer.
@@ -257,6 +766,33 @@ mod tests {
         );
     }
 
+    /// A link carries the thumbnail as `bin`, Java's `byte[]`, and decodes
+    /// from the flat map Java sends.
+    #[test]
+    fn a_link_carries_its_photo_as_bin() {
+        let link = Request::Link {
+            peer: "ab".repeat(16),
+            contact: ContactCopy {
+                lookup: "0r1-2C".to_string(),
+                contact_id: 7,
+                name: "Alice".to_string(),
+                photo: Some(Blob(vec![0x89, b'P', b'N', b'G'])),
+            },
+        };
+        let bytes = encode(&link);
+        assert!(
+            bytes
+                .windows(6)
+                .any(|w| w == [0xc4, 4, 0x89, b'P', b'N', b'G']),
+            "{bytes:02x?}"
+        );
+        assert_eq!(decode::<Request>(&bytes), Ok(link));
+        let bare = encode(&Request::NotNow {
+            peer: "ab".repeat(16),
+        });
+        assert_eq!(&bare[3..10], b"\xa6notnow");
+    }
+
     #[test]
     fn a_start_without_code_or_server_decodes() {
         #[derive(Serialize)]
@@ -269,6 +805,26 @@ mod tests {
         let start: Start = decode(&bytes).expect("a bare start");
         assert_eq!(start.dir, "/data");
         assert_eq!((start.server, start.code, start.offset), (None, None, 0));
+    }
+
+    #[test]
+    fn a_map_frame_is_its_length_its_description_and_its_pixels() {
+        let shown = MapShown {
+            v: VERSION,
+            ok: true,
+            w: 2,
+            h: 1,
+            attribution: "© OpenStreetMap contributors".to_string(),
+            ..MapShown::default()
+        };
+        let pixels = [1u8, 2, 3, 255, 4, 5, 6, 255];
+        let bytes = frame(&shown, &pixels);
+        let head = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+        assert_eq!(bytes.len(), 4 + head + pixels.len());
+        assert_eq!(&bytes[4 + head..], &pixels);
+        assert_eq!(unframe(&bytes), Ok((shown, &pixels[..])));
+        assert!(unframe(&bytes[..3]).is_err());
+        assert!(unframe(&bytes[..4 + head - 1]).is_err());
     }
 
     #[test]

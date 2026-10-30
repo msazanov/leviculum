@@ -102,7 +102,7 @@ registered locally, as the reference answers for any local destination
 (`reference/Reticulum/RNS/Transport.py:2936-2941`). Peers other than the
 user's own devices never see it.
 
-Its five request handlers admit every link at the RNS level; the home node
+Its six request handlers admit every link at the RNS level; the home node
 reads the identity the link was identified with and decides itself. A
 request on a link that was not identified is answered with a refusal.
 
@@ -117,6 +117,7 @@ Link requests on `loquax.home`, msgpack on the wire:
 /send  [client_id: bin16, destination: bin16, title: bin, content: bin,
         [[key: int, value: bin], ...]] -> [status, id: bin32]
 /mark  [flag: uint, [id: bin32, ...]] -> [status]
+/petname [address: bin16, name: str] -> [status]
 /watch [cursor: uint]              -> [status, newest: uint]
 ```
 
@@ -165,7 +166,8 @@ schedule, fifteen minutes by default.
   doubling to five minutes, and after 2 s again once one stood
   (`loquax::home::watch::Backoff`).
 - **The home node wakes every watching link** when the archive grows: a
-  received message, a state change of a sent one, a mark. The wake is a
+  received message, a state change of a sent one, a mark. A name entry
+  wakes nobody; it rides along with the next pull (1136). The wake is a
   channel message on that link, no content, only the newest sequence:
 
   ```text
@@ -179,6 +181,16 @@ schedule, fifteen minutes by default.
 - **The client pulls on a wake past its cursor**, with the `/sync` above
   on a link of its own; the phone notifies as for any pull. A wake older
   than the cursor pulls nothing.
+- **A wake's pull is quiet** (1136). A pull counts the received messages
+  it brought (`Pull::messages`), never entries: the user's own sent
+  message coming back, a state change, a mark and a name are entries,
+  and none is a new message. The status line says "pulling" only for a
+  pull the user asked for (Refresh) or one that runs longer than a second
+  (`loquax_android::pull_line`, `QUIET_PULL_MS` on the terminal); a quiet
+  pull says its end only when it brought a message, and a result hides
+  after four seconds. Before 1136 every heard name woke the phone, which
+  pulled one entry and said "1 new message(s)" and "pulling" in turn
+  without end.
 - **The fallback stays**: pulls on open, on Refresh and on the schedule.
   While a screen of the app is in front (the `front` request of the
   phone's facade; the terminal is in front whenever it runs) and the
@@ -301,6 +313,70 @@ A mark goes on a task of its own once the fold made it; the screen does not
 wait for it, and at the end waits for it up to a send's budget. A mark the
 home node did not take is said in `tui.log` and not retried in this slice:
 the other devices keep the message unread until the reader marks it again.
+
+## Names the home node heard
+
+1132. A client is a leaf with one interface, to the home node: it hears no
+announces, so on its own it would never learn a display name and would
+name every peer by its hash. The home node hears them, as the messenger
+engine on the shared instance it is.
+
+- **Only names that matter** (1136). The home node hangs on a transport
+  that hears the whole network's LXMF announces; it archives the name of
+  a peer the user has a relation to and of no other
+  (`loquax::home::relation`): the sender of a message in the archive, the
+  recipient of one sent, a destination a client handed in with `/send`,
+  or a petname in the home node's contacts file (read at start). Every
+  name heard is remembered, so when a conversation with a new peer
+  starts, the peer's newest name goes into the archive at once. On the
+  hamster home node before 1136, nine minutes brought 184 name entries of
+  strangers and 167 wakes.
+- **A name entry**, kind 7, is appended when such a peer announces a display
+  name that differs from the last one the home node appended for it:
+  `[address: bin16, name: str]`, the name as announced, and the entry's
+  time is when the home node heard it. The home node compares the name
+  sanitised as every screen sanitises it (`loquax::names::sanitise`) and
+  keeps that in its own names table, so an unchanged announce, or one
+  whose name sanitises to nothing, appends nothing, and a peer that goes
+  back to an earlier name gets an entry again (`Store::archive_name`).
+  Only a peer's newest name entry is kept: a new one removes those before
+  it. The home node's own announce, echoed back, appends nothing.
+- **On pull** the client hands each name entry to its engine
+  (`Command::HomeName`), which reports it as `OutboxEvent::Announced`,
+  exactly as an announce the client heard itself: the screen's `Names`
+  sanitise it, mark a collision and note a change in the conversation as
+  for any announce (1047), and the runner keeps it in the client's store.
+- **Appearance.** An LXMF announce carries the display name, the stamp
+  cost and the supported functions
+  (`reference/LXMF/LXMF/LXMRouter.py:1048`), no icon; a peer's icon appearance comes in its messages' fields,
+  which the archive already carries whole, so the avatars of 1129 need no
+  entry of their own.
+- **Before 1132** the archive has no name entries: a client learns a
+  peer's name from the first announce the home node hears after it runs
+  this version.
+
+## The reader's names on every device
+
+1139. A petname, the reader's own name for a peer, is the same on every
+device of the home. The phone's address book link is not: which contact
+and photo a phone shows stays on that phone
+(`docs/drafts/loquax-android-contacts-2026-10.md`, section 6).
+
+- **`/petname`** hands the home node the peer's address and the name, the
+  empty string clearing it. The palette's `rename` in the terminal and the
+  phone's Rename dialog send it on a client, after the contacts file took
+  the name, on a task of its own, as a mark goes (`runner::hand_petnames`).
+- **A petname entry**, kind 8, keeps the request's bytes. The same bytes
+  as the peer's newest petname entry append nothing; a new one removes
+  the peer's older ones, so a client behind the cursor gets only the name
+  given last (`Store::archive_petname`). Like a name entry it wakes no
+  client (`Store::archive_newest_waking`): it rides along with the next
+  pull.
+- **On pull** the client hands it to its engine (`Command::HomePetname`,
+  `OutboxEvent::HomePetname`); the screen sanitises it as a petname from
+  the contacts file, takes it as the reader's word and writes the
+  contacts file, and never hands it back. A home node from before 1139
+  answers `/petname` as malformed, which the client says in its log.
 
 ## The archive
 

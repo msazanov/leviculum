@@ -427,6 +427,54 @@ impl<B> UiModel<B> {
         self.toast(ToastKind::Info, text.to_string());
     }
 
+    /// Delete the messages `keys` of `peer`'s conversation, asked already:
+    /// as [`Self::delete_message`] each, one mark for the home's other
+    /// devices and one line for all. One still being sent is kept, as `d`
+    /// keeps it.
+    pub(super) fn delete_messages(&mut self, peer: [u8; 16], keys: &[u64]) {
+        let Some(c) = self.conversations.iter().position(|c| c.peer == peer) else {
+            return;
+        };
+        let mut ids = Vec::new();
+        let (mut deleted, mut kept) = (0usize, 0usize);
+        for &key in keys {
+            let at = self.conversations[c]
+                .messages
+                .iter()
+                .position(|m| m.activity == key);
+            let Some(m) = at else {
+                continue;
+            };
+            if self.sending.contains(&(c, m)) {
+                kept += 1;
+                continue;
+            }
+            if let Some(id) = self.remove_message(peer, key) {
+                self.forgotten.push(StoreWrite::ForgetMessage { key });
+                ids.extend(id);
+                deleted += 1;
+            }
+        }
+        if deleted == 0 && kept == 0 {
+            return;
+        }
+        let place = match self.home_client && !ids.is_empty() {
+            true => "every device of this home",
+            false => "this device",
+        };
+        if self.home_client && !ids.is_empty() {
+            self.mark_out(MarkFlag::Deleted, ids);
+        }
+        let mut text = match deleted {
+            1 => format!("message deleted from {place}"),
+            n => format!("{n} messages deleted from {place}"),
+        };
+        if kept > 0 {
+            text = format!("{text}; {kept} still being sent, kept");
+        }
+        self.toast(ToastKind::Info, text);
+    }
+
     /// Another device of the home deleted the message `id`: gone here too,
     /// from the screen if it shows it and from the store either way.
     pub(super) fn forget_by_id(&mut self, id: &[u8; 32]) {

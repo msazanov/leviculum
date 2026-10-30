@@ -474,10 +474,29 @@ pub fn picture_area(pane: Rect) -> Rect {
     )
 }
 
-/// The view of `state` over `area` at `setup`'s cell size.
+/// The view of `state` over `area` at `setup`'s cell size, as every
+/// frontend shows it: one world at most ([`Viewport::one_world`]), however
+/// far the state was zoomed out or panned north or south.
 pub fn viewport(state: &MapState, area: Rect, setup: &MapSetup) -> Viewport {
     let (w, h) = pixels(area, setup);
-    Viewport::new(state.centre, state.zoom, w, h)
+    Viewport::new(state.centre, state.zoom, w, h).one_world()
+}
+
+/// `state` moved to the view it shows ([`viewport`]): a zoom out past the
+/// one-world floor stops there, a pan past the north or south edge stops
+/// at it, and the next step starts from what the reader sees.
+pub fn settle(state: &mut MapState, area: Rect, setup: &MapSetup) {
+    let view = viewport(state, area, setup);
+    state.centre = view.centre;
+    state.zoom = view.zoom();
+}
+
+/// The shallowest zoom the reader may go to over `area`: `setup`'s, or
+/// deeper where the area is wider than the world there
+/// ([`Viewport::min_zoom`]); never past `setup`'s deepest.
+pub fn zoom_floor(area: Rect, setup: &MapSetup) -> u8 {
+    let (w, _) = pixels(area, setup);
+    Viewport::min_zoom(w).max(setup.zooms.0).min(setup.zooms.1)
 }
 
 fn pixels(area: Rect, setup: &MapSetup) -> (u32, u32) {
@@ -490,10 +509,24 @@ fn pixels(area: Rect, setup: &MapSetup) -> (u32, u32) {
 /// The view that shows every pin, at the deepest zoom of `setup` that
 /// does, but no deeper than the region under its centre has data for
 /// ([`fit_ceiling`]): one pin fits at that region's max zoom, or at the
-/// outline's, and `+` goes on into the overzoom. The whole world at the
-/// shallowest when there is no pin.
+/// outline's, and `+` goes on into the overzoom. With no pin, the first of
+/// `setup`'s regions, which the shells list newest first; with none of
+/// those either, the world at the [`zoom_floor`].
 pub fn fit(pins: &[MapPin], area: Rect, setup: &MapSetup) -> (World, u8) {
-    let points: Vec<World> = pins.iter().map(|p| p.at).collect();
+    let mut points: Vec<World> = pins.iter().map(|p| p.at).collect();
+    if points.is_empty() {
+        if let Some(region) = setup.regions.first() {
+            let b = region.bounds;
+            points.push(project(LatLon {
+                lat_e7: b.north,
+                lon_e7: b.west,
+            }));
+            points.push(project(LatLon {
+                lat_e7: b.south,
+                lon_e7: b.east,
+            }));
+        }
+    }
     fit_points(&points, area, setup)
 }
 
@@ -507,9 +540,10 @@ pub fn fit_at(at: World, area: Rect, setup: &MapSetup) -> (World, u8) {
 fn fit_points(points: &[World], area: Rect, setup: &MapSetup) -> (World, u8) {
     let (w, h) = pixels(area, setup);
     let margin = FIT_MARGIN_CELLS * u32::from(setup.cell_px.0.max(1));
-    match Viewport::fit(points, w, h, margin, setup.zooms.0..=setup.zooms.1) {
+    let floor = zoom_floor(area, setup);
+    let (centre, zoom) = match Viewport::fit(points, w, h, margin, floor..=setup.zooms.1) {
         Some(view) => {
-            let ceiling = fit_ceiling(&setup.regions, view.centre).max(setup.zooms.0);
+            let ceiling = fit_ceiling(&setup.regions, view.centre).max(floor);
             (view.centre, view.zoom().min(ceiling))
         }
         None => (
@@ -517,9 +551,11 @@ fn fit_points(points: &[World], area: Rect, setup: &MapSetup) -> (World, u8) {
                 x: 1 << 31,
                 y: 1 << 31,
             },
-            setup.zooms.0,
+            floor,
         ),
-    }
+    };
+    let view = Viewport::new(centre, zoom, w, h).one_world();
+    (view.centre, view.zoom())
 }
 
 /// The pins of `pins` that land in `view` drawn over `area`, as cells,
@@ -671,12 +707,13 @@ impl MapPress {
 /// `state` at `zoom`, about the cell `(col, row)` when it is on the
 /// picture `area`: the point at the centre of that cell stays under it,
 /// as the wheel under the pointer expects. Off the picture, about the
-/// centre.
+/// centre. Never past one world ([`settle`]).
 pub fn zoom_at(state: &mut MapState, area: Rect, setup: &MapSetup, col: u16, row: u16, zoom: u8) {
     let on = (area.x..area.x + area.width).contains(&col)
         && (area.y..area.y + area.height).contains(&row);
     if !on {
         state.zoom = zoom;
+        settle(state, area, setup);
         return;
     }
     let (cw, ch) = (
@@ -687,6 +724,7 @@ pub fn zoom_at(state: &mut MapState, area: Rect, setup: &MapSetup, col: u16, row
     let y = i32::from(row - area.y) * ch + ch / 2;
     let mut view = viewport(state, area, setup);
     view.zoom_about(zoom, x, y);
+    let view = view.one_world();
     state.centre = view.centre;
     state.zoom = view.zoom();
 }
@@ -975,5 +1013,92 @@ mod tests {
         };
         let (_, zoom) = fit(&[pin(43.7731, 11.2560)], area, &none);
         assert_eq!(zoom, leviculum_map::outline::MAX_ZOOM);
+    }
+
+    /// The first view without pins (1131): the first region of the setup,
+    /// which the shells list newest first, fitted whole; with no region,
+    /// the world at the one-world floor, which on a portrait phone is z3
+    /// and not the z0 that showed the world five times.
+    #[test]
+    fn the_first_view_without_pins_is_the_newest_region_else_one_world() {
+        use leviculum_map::region::Region;
+        const FLORENCE: &[u8] = include_bytes!("../../../leviculum-map/fixtures/firenze.lmr");
+        let florence = *Region::from_bytes(FLORENCE).expect("open").header();
+        let mut elsewhere = florence;
+        elsewhere.bounds = Bounds {
+            west: 85_000_000,
+            south: 500_000_000,
+            east: 87_000_000,
+            north: 502_000_000,
+        };
+        let phone = Rect::new(0, 0, 1080, 2400);
+        let setup = MapSetup {
+            cell_px: (1, 1),
+            zooms: (0, 20),
+            regions: vec![florence, elsewhere],
+            ..MapSetup::default()
+        };
+        let (centre, zoom) = fit(&[], phone, &setup);
+        let view = viewport(
+            &MapState {
+                centre,
+                zoom,
+                selected: None,
+            },
+            phone,
+            &setup,
+        );
+        let b = florence.bounds;
+        for (lat, lon) in [(b.north, b.west), (b.south, b.east)] {
+            let corner = project(LatLon {
+                lat_e7: lat,
+                lon_e7: lon,
+            });
+            assert!(view.contains(corner), "the box at z{zoom}");
+        }
+        assert!(zoom >= 14, "fitted to the region, not the world: z{zoom}");
+        // The second region first: the view goes there.
+        let swapped = MapSetup {
+            regions: vec![elsewhere, florence],
+            ..setup.clone()
+        };
+        let (centre, _) = fit(&[], phone, &swapped);
+        let at = unproject(centre);
+        assert!((at.lon_e7 - 86_000_000).abs() < 1_000_000, "{at:?}");
+        // No region: one world on the phone, centred.
+        let bare = MapSetup {
+            regions: Vec::new(),
+            ..setup
+        };
+        let (centre, zoom) = fit(&[], phone, &bare);
+        assert_eq!(zoom, 3);
+        assert_eq!(centre.y, 1 << 31);
+        assert_eq!(zoom_floor(phone, &bare), 3);
+    }
+
+    /// A zoom out past the floor stops there, and a pan past the north
+    /// edge stops at it: the state is what the reader sees.
+    #[test]
+    fn settle_stops_the_zoom_and_the_pan_at_one_world() {
+        let setup = MapSetup {
+            cell_px: (1, 1),
+            zooms: (0, 20),
+            ..MapSetup::default()
+        };
+        let phone = Rect::new(0, 0, 1080, 2400);
+        let mut state = MapState {
+            centre: project(LatLon::from_degrees(84.0, 0.0)),
+            zoom: 0,
+            selected: None,
+        };
+        settle(&mut state, phone, &setup);
+        assert_eq!(state.zoom, 3);
+        assert_eq!(state.centre.y, 1 << 31, "shorter than the view: centred");
+        state.zoom = 6;
+        state.centre = project(LatLon::from_degrees(84.0, 0.0));
+        settle(&mut state, phone, &setup);
+        let view = viewport(&state, phone, &setup);
+        assert_eq!(view.top_left_sub().1, 0, "stopped at the north edge");
+        assert_eq!(view.centre, state.centre);
     }
 }

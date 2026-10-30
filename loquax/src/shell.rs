@@ -366,6 +366,7 @@ impl Shell {
     /// but the reader must know it will not be there after a restart.
     fn persist(&mut self) {
         self.hand_marks();
+        self.hand_petnames();
         let writes = self.model.take_writes();
         if let Err(error) = self.store.write(&writes) {
             loquax::events::store_failed(&error.to_string());
@@ -378,6 +379,23 @@ impl Shell {
                 UiEvent::Notice(format!("not saved: {error}")),
             );
         }
+    }
+
+    /// The petnames the reader set, handed to the home node in order on a
+    /// task of their own, as marks are (1139).
+    fn hand_petnames(&mut self) {
+        let petnames = self.model.take_petnames();
+        let Some(client) = self.context.client.clone() else {
+            return;
+        };
+        if petnames.is_empty() {
+            return;
+        }
+        self.mark_tasks.retain(|task| !task.is_finished());
+        let budget = self.context.timeout;
+        self.mark_tasks.push(tokio::spawn(runner::hand_petnames(
+            client, petnames, budget,
+        )));
     }
 
     /// The marks a fold made, handed to the home node in order, on a task

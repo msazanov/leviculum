@@ -27,6 +27,12 @@ final class Native {
     /** The next event, or null when none came within waitMs. */
     static native byte[] nextEvent(int waitMs);
 
+    /**
+     * One frame of the map: its description's length (four bytes, big
+     * endian), the description, then its RGBA pixels. Not on the UI thread.
+     */
+    static native byte[] renderMap(byte[] request);
+
     /** Stop the session. */
     static native void stop();
 }

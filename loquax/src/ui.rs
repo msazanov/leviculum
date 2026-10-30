@@ -138,6 +138,7 @@ pub mod hit;
 pub mod layout;
 pub mod map;
 pub mod reactions;
+pub mod replies;
 pub mod search;
 
 /// How many ticks a toast stays up. The shell ticks every 250 ms, so three
@@ -533,6 +534,8 @@ pub struct UiModel<B> {
     pub fetching: bool,
     /// What started the running fetch, or the last one.
     pub fetch_reason: Option<Reason>,
+    /// When the running fetch, or the last one, began, on `elapsed_ms`.
+    pub fetch_since_ms: u64,
     /// How many fetches ended, either way, for a key script's `until
     /// synced`.
     pub fetches_done: usize,
@@ -609,6 +612,9 @@ pub struct UiModel<B> {
     /// Marks for the home node, in the order they were made
     /// ([`UiModel::take_marks`]).
     marks: Vec<crate::home::wire::Mark>,
+    /// Petnames for the home node, in the order they were set
+    /// ([`UiModel::take_petnames`]).
+    petnames: Vec<([u8; 16], Option<String>)>,
     /// A pull a send or a wake asked for while one was running, with its
     /// reason: started when that one ends, since it may have begun before
     /// the home node had the message.
@@ -683,6 +689,7 @@ impl<B: InputBuffer + Default> UiModel<B> {
             sending: VecDeque::new(),
             fetching: false,
             fetch_reason: None,
+            fetch_since_ms: 0,
             fetches_done: 0,
             sync: None,
             elapsed_ms: 0,
@@ -710,6 +717,7 @@ impl<B: InputBuffer + Default> UiModel<B> {
             home_client: false,
             list_apart: false,
             marks: Vec::new(),
+            petnames: Vec::new(),
             pull_owed: None,
             confirm: None,
             reveal_pending: None,
@@ -1049,6 +1057,27 @@ pub enum UiEvent {
         target: [u8; 32],
         content: String,
     },
+    /// Send `body` to `peer` as a reply to the message `target`
+    /// ([`replies`]).
+    Reply {
+        peer: [u8; 16],
+        target: [u8; 32],
+        body: String,
+    },
+    /// Send a copy of the message `key` (its [`Message::activity`]) of
+    /// `from`'s conversation to `to` ([`replies`]).
+    Forward {
+        from: [u8; 16],
+        key: u64,
+        to: [u8; 16],
+    },
+    /// Delete the messages `keys` of `peer`'s conversation without asking,
+    /// as `y` after `d` does for one: a frontend that asked already.
+    Delete { peer: [u8; 16], keys: Vec<u64> },
+    /// Make `name` the reader's name for `peer`, the empty one clearing it,
+    /// as the palette's `rename` does with what was typed: a frontend with
+    /// a dialog of its own (1139).
+    Rename { peer: [u8; 16], name: String },
 }
 
 /// How a region load goes, as the shell reports it.
@@ -1192,6 +1221,7 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
             Vec::new()
         }
         UiEvent::Engine(event) => on_engine(model, event),
+        UiEvent::Rename { peer, name } => model.rename(peer, &name),
         UiEvent::Notice(line) => {
             model.toast(ToastKind::Info, line);
             Vec::new()
@@ -1247,6 +1277,12 @@ fn fold<B: InputBuffer + Default>(model: &mut UiModel<B>, event: UiEvent) -> Vec
             target,
             content,
         } => model.react(peer, target, &content),
+        UiEvent::Reply { peer, target, body } => model.reply_to(peer, target, body),
+        UiEvent::Forward { from, key, to } => model.forward(from, key, to),
+        UiEvent::Delete { peer, keys } => {
+            model.delete_messages(peer, &keys);
+            Vec::new()
+        }
     }
 }
 
@@ -1315,6 +1351,7 @@ fn start_pull<B>(model: &mut UiModel<B>, reason: Reason) -> Vec<UiEffect> {
     }
     model.fetching = true;
     model.fetch_reason = Some(reason);
+    model.fetch_since_ms = now;
     vec![UiEffect::Fetch]
 }
 
@@ -1345,6 +1382,7 @@ fn auto_sync<B>(model: &mut UiModel<B>) -> Vec<UiEffect> {
     sync.begin(now);
     model.fetching = true;
     model.fetch_reason = Some(reason);
+    model.fetch_since_ms = now;
     vec![UiEffect::Fetch]
 }
 
@@ -1576,12 +1614,13 @@ fn act<B: InputBuffer + Default>(
     Vec::new()
 }
 
-/// `Enter` on a message: a position report opens the map at the fix its
-/// line names, any other message (and a report without a position) its
-/// detail view. A folded run of reports is drawn as its latest, which is
+/// `Enter` on a message: one that carries a position, a report or a text
+/// with a telemetry field, opens the map at the fix its line names, any
+/// other message (and a report without a position) its detail view, which
+/// `v` opens for every message. A folded run of reports is drawn as its latest, which is
 /// where the cursor stands, so its line opens the latest fix of the run.
 fn open_message<B: InputBuffer>(model: &mut UiModel<B>) -> Vec<UiEffect> {
-    match model.report_fix(model.selected, model.message_cursor) {
+    match model.message_fix(model.selected, model.message_cursor) {
         Some(fix) => {
             open_map_at(model, &fix);
             Vec::new()
@@ -1702,6 +1741,7 @@ fn pan_map(state: &mut map::MapState, area: Rect, setup: &map::MapSetup, dx: i8,
     let step = |n: i8, of: u32| i32::from(n) * (of / 8).max(1) as i32;
     view.pan(step(dx, w), step(dy, h));
     state.centre = view.centre;
+    map::settle(state, area, setup);
 }
 
 /// A key on the open map.
@@ -1715,7 +1755,10 @@ fn map_key<B: InputBuffer>(model: &mut UiModel<B>, cmd: keys::MapCmd) -> Vec<UiE
     };
     match cmd {
         MapCmd::ZoomIn => state.zoom = state.zoom.saturating_add(1).min(setup.zooms.1),
-        MapCmd::ZoomOut => state.zoom = state.zoom.saturating_sub(1).max(setup.zooms.0),
+        MapCmd::ZoomOut => {
+            state.zoom = state.zoom.saturating_sub(1).max(setup.zooms.0);
+            map::settle(state, area, &setup);
+        }
         MapCmd::Pan(dx, dy) => pan_map(state, area, &setup, dx, dy),
         MapCmd::Fit => {
             let (centre, zoom) = map::fit(&pins, area, &setup);
@@ -2103,11 +2146,13 @@ fn drag<B: InputBuffer>(model: &mut UiModel<B>, col: u16, row: u16) {
 /// press is a drag ([`map::DRAG_CELLS`]).
 fn map_drag<B: InputBuffer>(model: &mut UiModel<B>, col: u16, row: u16) {
     let setup = model.map_setup.clone();
+    let area = model.map_area();
     let (Some(press), Some(state)) = (model.map_press.as_mut(), model.map.as_mut()) else {
         return;
     };
     press.reach(col, row);
     state.centre = press.centre_at(col, row, state, &setup);
+    map::settle(state, area, &setup);
 }
 
 /// The left button came up: on the map a drag ends where the pointer is
@@ -2152,8 +2197,9 @@ fn release<B: InputBuffer + Default>(model: &mut UiModel<B>, col: u16, row: u16)
     if let Some(target) = link.and_then(|link| model.laid().links.get(link).cloned()) {
         return follow(model, &target);
     }
-    // A click on a position report opens the map at its fix, as `Enter`.
-    if let Some(fix) = model.report_fix(model.selected, message) {
+    // A click on a message with a position opens the map at its fix, as
+    // `Enter`.
+    if let Some(fix) = model.message_fix(model.selected, message) {
         open_map_at(model, &fix);
     }
     Vec::new()
@@ -2524,6 +2570,7 @@ fn run<B: InputBuffer + Default>(model: &mut UiModel<B>, command: PaletteCommand
             }
             model.fetching = true;
             model.fetch_reason = Some(Reason::Key);
+            model.fetch_since_ms = now;
             model.toast(ToastKind::Info, "fetching the mailbox".to_string());
             vec![UiEffect::Fetch]
         }
@@ -2764,6 +2811,10 @@ fn on_engine<B>(model: &mut UiModel<B>, event: OutboxEvent) -> Vec<UiEffect> {
             body,
             fields,
         } => home_sent(model, message_id, destination, body, fields),
+        OutboxEvent::HomePetname {
+            destination,
+            petname,
+        } => return model.home_petname(destination, petname),
         OutboxEvent::HomeMarked { mark } => match mark.flag {
             crate::home::wire::MarkFlag::Read => {
                 for id in &mark.ids {
@@ -2986,6 +3037,19 @@ fn take_telemetry<B>(model: &mut UiModel<B>, index: usize, message_id: [u8; 32])
     effects
 }
 
+/// The fix a message from `peer` carries, the one its position line names
+/// ([`telemetry::shown_fix`]): a report's, and a text's that came with a
+/// telemetry field. `None` for one of ours, which is our position and not
+/// the peer's, and for a message without a readable position.
+pub fn message_fix(peer: [u8; 16], message: &Message) -> Option<Fix> {
+    if message.outbound || !telemetry::has_telemetry(&message.fields) {
+        return None;
+    }
+    let received = message.at.map(|at| at.unix_secs);
+    let read = telemetry::read(peer, &message.fields, received);
+    telemetry::shown_fix(&read).cloned()
+}
+
 impl<B> UiModel<B> {
     /// The map's pins in `Tab` order: every peer with a position, our own
     /// named `you`.
@@ -3006,18 +3070,10 @@ impl<B> UiModel<B> {
         )
     }
 
-    /// The fix the line of report `m` of conversation `c` names
-    /// ([`telemetry::shown_fix`]); `None` for any other message and for a
-    /// report without a position.
-    pub fn report_fix(&self, c: usize, m: usize) -> Option<Fix> {
+    /// The fix message `m` of conversation `c` carries ([`message_fix`]).
+    pub fn message_fix(&self, c: usize, m: usize) -> Option<Fix> {
         let conversation = self.conversations.get(c)?;
-        let message = conversation.messages.get(m)?;
-        if !message.is_report() {
-            return None;
-        }
-        let received = message.at.map(|at| at.unix_secs);
-        let read = telemetry::read(conversation.peer, &message.fields, received);
-        telemetry::shown_fix(&read).cloned()
+        message_fix(conversation.peer, conversation.messages.get(m)?)
     }
 
     /// The cells the map's picture covers.
@@ -3437,6 +3493,20 @@ fn bold() -> RStyle {
     }
 }
 
+/// How long a client's quiet pull runs before the header says so.
+pub const QUIET_PULL_MS: u64 = 1_000;
+
+/// Whether the header says a fetch runs: one the reader asked for or the
+/// schedule started, at once; a client's quiet pull, for a wake or after a
+/// send, only once it took longer than [`QUIET_PULL_MS`]. A wake comes for
+/// every message, state and mark, and a line that said each pull would
+/// flicker (1136).
+fn fetch_shown<B>(model: &UiModel<B>) -> bool {
+    let quiet = matches!(model.fetch_reason, Some(Reason::Wake | Reason::Sent));
+    model.fetching
+        && (!quiet || model.elapsed_ms.saturating_sub(model.fetch_since_ms) >= QUIET_PULL_MS)
+}
+
 /// The mailbox state in the header, longest first: the renderer takes the
 /// first that fits.
 fn mailbox_words<B>(model: &UiModel<B>) -> Vec<String> {
@@ -3449,7 +3519,7 @@ fn mailbox_words<B>(model: &UiModel<B>) -> Vec<String> {
     } else {
         "adopted"
     };
-    let sync = match (model.fetching, model.mailbox.synced, model.now) {
+    let sync = match (fetch_shown(model), model.mailbox.synced, model.now) {
         (true, _, _) => Some("fetching".to_string()),
         (false, Some(at), Some(now)) => Some(format!("synced {}", list_time(&at, &now))),
         (false, Some(at), None) => Some(format!("synced {}", at.hh_mm())),
@@ -3490,6 +3560,18 @@ fn next_sync<B>(model: &UiModel<B>) -> Option<WallTime> {
         unix_secs: at.saturating_add(59).div_euclid(60).saturating_mul(60),
         offset_secs: now.offset_secs,
     })
+}
+
+/// The detail view of the message `key` (its [`Message::activity`]) in
+/// `peer`'s conversation, what `v` opens in the terminal: for a frontend
+/// that shows it its own way.
+pub fn message_detail<B>(model: &UiModel<B>, peer: [u8; 16], key: u64) -> Option<DetailView> {
+    let c = model.conversations.iter().position(|c| c.peer == peer)?;
+    let m = model.conversations[c]
+        .messages
+        .iter()
+        .position(|m| m.activity == key)?;
+    detail_view(model, c, m)
 }
 
 /// The detail view of message `m` of conversation `c`.
@@ -4595,6 +4677,40 @@ mod tests {
         );
         assert_eq!(model.fetch_reason, Some(Reason::Wake));
         assert!(update(&mut model, UiEvent::FetchDone(Ok(0))).is_empty());
+    }
+
+    /// 1136: a wake's pull is quiet. The header says "fetching" for it
+    /// only past a second, a pull with nothing new raises no toast, and
+    /// one asked for says so at once.
+    #[test]
+    fn a_wake_pull_is_silent_unless_it_is_slow_or_brings_a_message() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        model.home_client = true;
+        update(
+            &mut model,
+            UiEvent::MailboxChosen {
+                node: [0x9c; 16],
+                by_user: false,
+            },
+        );
+        let toasts = model.toasts.len();
+        update(&mut model, UiEvent::Elapsed(10_000));
+        assert_eq!(update(&mut model, UiEvent::HomeWake), [UiEffect::Fetch]);
+        assert!(!view(&model).messages_title_right.contains("fetching"));
+        update(&mut model, UiEvent::Elapsed(10_000 + QUIET_PULL_MS - 1));
+        assert!(!view(&model).messages_title_right.contains("fetching"));
+        update(&mut model, UiEvent::Elapsed(10_000 + QUIET_PULL_MS));
+        assert!(view(&model).messages_title_right.contains("fetching"));
+        update(&mut model, UiEvent::FetchDone(Ok(0)));
+        assert_eq!(model.toasts.len(), toasts, "names only: nothing said");
+        update(&mut model, UiEvent::HomeWake);
+        update(&mut model, UiEvent::FetchDone(Ok(1)));
+        assert_eq!(
+            model.toasts.last().map(|t| t.text.as_str()),
+            Some("1 new message(s)")
+        );
+        update(&mut model, UiEvent::Run(PaletteCommand::Fetch));
+        assert!(view(&model).messages_title_right.contains("fetching"));
     }
 
     #[test]
@@ -7079,8 +7195,13 @@ mod tests {
             "parked at the gate",
             report_of(&fix_at(52_000_000, 13_000_000, two_pm() - 60)),
         );
-        assert!(shown(&model).contains(&"parked at the gate  14:00".to_string()));
-        assert!(!shown(&model).iter().any(|r| r.contains('◎')));
+        // The text, and under it the position line it came with (1132).
+        let rows = shown(&model);
+        let at = rows
+            .iter()
+            .position(|r| r == "parked at the gate")
+            .unwrap_or_else(|| panic!("{rows:?}"));
+        assert_eq!(rows[at + 1], "◎ position 52.00000 N 13.00000 E  14:00");
         assert_eq!(model.positions[&PEER].location.latitude_e6, 52_000_000);
         assert_eq!(
             model.toasts.last().map(|t| t.text.as_str()),
@@ -7888,6 +8009,58 @@ mod tests {
         );
     }
 
+    /// A text that came with a position (Sideband's telemetry beside a
+    /// body) shows its position line under the text, and `Enter` or a
+    /// click on it opens the map at that fix with the peer's pin selected,
+    /// as on a report; `v` still opens its detail view (1132).
+    #[test]
+    fn enter_on_a_text_with_a_position_opens_the_map_at_it() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        clock(&mut model, 26, 14, 0);
+        let fix = fix_at(43_773_100, 11_256_000, two_pm() - 240);
+        arrive(&mut model, PEER, 1, "at the bridge", report_of(&fix));
+        assert_eq!(
+            shown(&model),
+            vec![
+                layout::EARLIEST.to_string(),
+                "── Today ──".to_string(),
+                "at the bridge".to_string(),
+                "◎ position 43.77310 N 11.25600 E  14:00".to_string(),
+            ]
+        );
+        assert!(model.message_fix(0, 0).is_some());
+        update(&mut model, key(KeyCode::Tab));
+        assert_eq!(model.message_cursor, 0);
+        update(&mut model, key(KeyCode::Enter));
+        assert_eq!(model.focus, Pane::Map);
+        assert_eq!(model.detail, None);
+        let state = model.map.expect("the map is open");
+        assert_eq!(state.centre, projected(43_773_100, 11_256_000));
+        assert_eq!(state.selected, Some(PEER));
+        assert!(view(&model).map.is_some(), "the frame draws the map");
+        update(&mut model, key(KeyCode::Esc));
+        assert!(model.map.is_none());
+        update(&mut model, key(KeyCode::Char('v')));
+        assert_eq!(model.detail, Some((0, 0)));
+        update(&mut model, key(KeyCode::Esc));
+        let line = cell_of(&model, "◎ position 43.77310", 3);
+        press(&mut model, line);
+        assert_eq!(
+            model.map.expect("a click opens it too").centre,
+            projected(43_773_100, 11_256_000)
+        );
+
+        // Negative: the same text without the field is a text.
+        let mut plain = UiModel::<Field>::new(&[PEER]);
+        clock(&mut plain, 26, 14, 0);
+        arrive(&mut plain, PEER, 1, "at the bridge", Vec::new());
+        assert_eq!(plain.message_fix(0, 0), None);
+        update(&mut plain, key(KeyCode::Tab));
+        update(&mut plain, key(KeyCode::Enter));
+        assert!(plain.map.is_none());
+        assert_eq!(plain.detail, Some((0, 0)));
+    }
+
     /// Outside the map, outside a fix: the map is somewhere else. Without a
     /// region the zoom is the outline's deepest.
     #[test]
@@ -8310,6 +8483,70 @@ mod tests {
         assert_eq!(alone.conversations[alone.selected].unread, 0);
     }
 
+    /// 1139: on a client of a home node a rename goes to the home node as
+    /// well, the palette's and a frontend's own alike; one pulled from the
+    /// home node is written here and never handed back. Off a home node
+    /// nothing is queued.
+    #[test]
+    fn a_petname_travels_through_the_home_node() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        announced(&mut model, PEER, "Alice");
+        update(
+            &mut model,
+            UiEvent::Rename {
+                peer: PEER,
+                name: "Mum".into(),
+            },
+        );
+        assert!(model.take_petnames().is_empty(), "no home node");
+        model.home_client = true;
+        // The palette holds "Mum" to edit: emptied first.
+        palette(&mut model, "rename");
+        update(&mut model, ctrl_key('u'));
+        typed(&mut model, "Mama");
+        update(&mut model, key(KeyCode::Enter));
+        let effects = update(
+            &mut model,
+            UiEvent::Rename {
+                peer: PEER,
+                name: " ".into(),
+            },
+        );
+        assert_eq!(
+            effects,
+            [UiEffect::Contact(Contact {
+                peer: PEER,
+                petname: None,
+                blocked: false
+            })]
+        );
+        assert_eq!(
+            model.take_petnames(),
+            [(PEER, Some("Mama".to_string())), (PEER, None)]
+        );
+        // Pulled: the reader's word here, the file told, nothing queued.
+        let pulled = |petname: Option<&str>| {
+            UiEvent::Engine(OutboxEvent::HomePetname {
+                destination: PEER,
+                petname: petname.map(str::to_string),
+            })
+        };
+        let effects = update(&mut model, pulled(Some("Mutti \u{202e}")));
+        assert_eq!(
+            effects,
+            [UiEffect::Contact(Contact {
+                peer: PEER,
+                petname: Some("Mutti".into()),
+                blocked: false
+            })]
+        );
+        assert_eq!(model.names.label(&PEER), "Mutti ·abab");
+        assert!(model.take_petnames().is_empty(), "never handed back");
+        assert!(update(&mut model, pulled(Some("Mutti"))).is_empty());
+        update(&mut model, pulled(None));
+        assert_eq!(model.names.label(&PEER), "Alice ·abab");
+    }
+
     /// `rename` asks in the palette, holding the petname to edit: `Enter`
     /// sets the typed one, sanitised, and an empty line clears it.
     #[test]
@@ -8605,5 +8842,186 @@ mod tests {
         update(&mut model, key(KeyCode::BackTab));
         update(&mut model, UiEvent::Run(PaletteCommand::React));
         assert!(model.palette.is_none());
+    }
+
+    // Replies, forwards and a frontend's delete (1137).
+
+    /// A reply goes out with the target's id and its quote, the shape the
+    /// deployed clients read, the text as content; the bubble above it
+    /// shows the target's text, ours or theirs. One whose target this
+    /// device lacks shows the quote the sender put in.
+    #[test]
+    fn a_reply_carries_its_target_and_quote() {
+        use leviculum_lxmf::reply::Reply;
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        received(&mut model, ID, "lunch at noon?\nor later");
+        let effects = update(
+            &mut model,
+            UiEvent::Reply {
+                peer: PEER,
+                target: ID,
+                body: "noon".to_string(),
+            },
+        );
+        let [UiEffect::Send { to, body, fields }] = effects.as_slice() else {
+            panic!("{effects:?}");
+        };
+        assert_eq!((*to, body.as_str()), (PEER, "noon"));
+        assert_eq!(
+            Reply::from_fields(fields),
+            Some(Reply {
+                to: ID,
+                quote: Some("lunch at noon?".to_string())
+            })
+        );
+        let c = 0;
+        let m = model.conversations[c].messages.len() - 1;
+        let quoted = model.quoted(c, m).expect("quoted");
+        assert_eq!(
+            (quoted.text.as_str(), quoted.ours),
+            ("lunch at noon?", Some(false))
+        );
+        assert_eq!(model.message_cursor, m);
+
+        let elsewhere = Reply {
+            to: [0x77; 32],
+            quote: Some("an old one".to_string()),
+        };
+        engine(
+            &mut model,
+            OutboxEvent::Received {
+                message_id: ID2,
+                source: PEER,
+                title: Vec::new(),
+                body: b"yes".to_vec(),
+                fields: elsewhere.fields(),
+                verified: true,
+            },
+        );
+        let m = model.conversations[c].messages.len() - 1;
+        let quoted = model.quoted(c, m).expect("quoted");
+        assert_eq!((quoted.text.as_str(), quoted.ours), ("an old one", None));
+        assert!(update(
+            &mut model,
+            UiEvent::Reply {
+                peer: PEER,
+                target: ID,
+                body: " ".to_string()
+            }
+        )
+        .is_empty());
+    }
+
+    /// A forward is the text and the content fields again, in the other
+    /// conversation, made if new; not the first sender's telemetry.
+    #[test]
+    fn a_forward_copies_text_and_content_fields() {
+        use leviculum_lxmf::constants::{FIELD_IMAGE, FIELD_TELEMETRY};
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        engine(
+            &mut model,
+            OutboxEvent::Received {
+                message_id: ID,
+                source: PEER,
+                title: Vec::new(),
+                body: b"look".to_vec(),
+                fields: vec![(FIELD_TELEMETRY, vec![0xc0]), (FIELD_IMAGE, vec![0x01])],
+                verified: true,
+            },
+        );
+        let key = model.conversations[0].messages[0].activity;
+        let effects = update(
+            &mut model,
+            UiEvent::Forward {
+                from: PEER,
+                key,
+                to: OTHER,
+            },
+        );
+        assert_eq!(
+            effects,
+            [UiEffect::Send {
+                to: OTHER,
+                body: "look".to_string(),
+                fields: vec![(FIELD_IMAGE, vec![0x01])],
+            }]
+        );
+        let other = model.conversations.iter().position(|c| c.peer == OTHER);
+        let other = &model.conversations[other.expect("made")];
+        assert_eq!(other.messages.last().map(|m| m.body.as_str()), Some("look"));
+        assert!(other.messages.last().is_some_and(|m| m.outbound));
+        assert!(update(
+            &mut model,
+            UiEvent::Forward {
+                from: PEER,
+                key: 999,
+                to: OTHER
+            }
+        )
+        .is_empty());
+    }
+
+    /// A frontend's delete of several: each gone from the screen and the
+    /// store, one mark for the home's devices; one still sending is kept.
+    #[test]
+    fn a_frontend_deletes_several_and_keeps_a_send_in_flight() {
+        use crate::home::wire::{Mark, MarkFlag};
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        model.home_client = true;
+        received(&mut model, ID, "one");
+        received(&mut model, ID2, "two");
+        update(
+            &mut model,
+            UiEvent::Write {
+                peer: PEER,
+                body: "three".to_string(),
+            },
+        );
+        model.take_writes();
+        model.take_marks();
+        model.toasts.clear();
+        let keys: Vec<u64> = model.conversations[0]
+            .messages
+            .iter()
+            .map(|m| m.activity)
+            .collect();
+        update(&mut model, UiEvent::Delete { peer: PEER, keys });
+        let left: Vec<&str> = model.conversations[0]
+            .messages
+            .iter()
+            .map(|m| m.body.as_str())
+            .collect();
+        assert_eq!(left, ["three"]);
+        assert_eq!(
+            model.take_marks(),
+            [Mark {
+                flag: MarkFlag::Deleted,
+                ids: vec![ID, ID2],
+            }]
+        );
+        assert_eq!(model.take_writes().len(), 2);
+        assert_eq!(
+            model.current_toast().map(|t| t.text.clone()),
+            Some(
+                "2 messages deleted from every device of this home; 1 still being sent, kept"
+                    .to_string()
+            )
+        );
+    }
+
+    /// The detail a frontend shows is the terminal's `v` view.
+    #[test]
+    fn a_frontend_gets_the_detail_view_by_key() {
+        let mut model = UiModel::<Field>::new(&[PEER]);
+        received(&mut model, ID, "one");
+        let key = model.conversations[0].messages[0].activity;
+        let detail = message_detail(&model, PEER, key).expect("detail");
+        assert!(
+            detail.rows.iter().any(|r| r.contains(&to_hex(&ID))),
+            "{:?}",
+            detail.rows
+        );
+        assert!(detail.rows.iter().any(|r| r == "signature verified"));
+        assert!(message_detail(&model, PEER, 999).is_none());
     }
 }

@@ -84,7 +84,10 @@ pub async fn send_home(
 }
 
 /// A client's fetch: one pull from its home node, with twice a send's
-/// `budget`, as on the command line. The cursor comes back for
+/// `budget`, as on the command line. It counts the received messages that
+/// came ([`super::client::Pull::messages`]), never entries: a pull that
+/// brought only names, marks, states or the user's own sent message
+/// brought nothing new (1136). The cursor comes back for
 /// [`settle_pull`]: the runner sees the fence on its tap in the same pump
 /// that hands the screen the pulled messages, and the frontend writes those
 /// to the store before it takes the runner's end.
@@ -104,7 +107,7 @@ pub async fn pull(
     )
     .await
     {
-        Ok(pull) => (Ok(pull.entries), pull.cursor),
+        Ok(pull) => (Ok(pull.messages()), pull.cursor),
         Err(error) => (Err(error.to_string()), None),
     }
 }
@@ -142,6 +145,33 @@ pub async fn hand_marks(client: HomeClient, marks: Vec<super::wire::Mark>, budge
                 mark.flag.word(),
                 mark.ids.len()
             ),
+        }
+    }
+}
+
+/// The petnames a fold set, handed to the home node in order (1139): the
+/// screen and the contacts file have them already. One the home node did
+/// not take is said in the log; the other devices keep the name they had
+/// until this device sets one again.
+pub async fn hand_petnames(
+    client: HomeClient,
+    petnames: Vec<([u8; 16], Option<String>)>,
+    budget: Duration,
+) {
+    for (peer, petname) in petnames {
+        let outcome = super::client::petname(
+            &client.node,
+            &client.public_key,
+            &client.device,
+            &peer,
+            petname.as_deref(),
+            budget,
+        )
+        .await;
+        let peer = crate::address::to_hex(&peer);
+        match outcome {
+            Ok(()) => tracing::info!("HOME petname peer={peer}"),
+            Err(error) => tracing::warn!("HOME petname peer={peer} not taken: {error}"),
         }
     }
 }

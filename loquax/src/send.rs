@@ -432,7 +432,8 @@ async fn run_send_steps<O: Outbox>(
                 | OutboxEvent::Fenced { .. }
                 | OutboxEvent::Packed { .. }
                 | OutboxEvent::HomeSent { .. }
-                | OutboxEvent::HomeMarked { .. } => {}
+                | OutboxEvent::HomeMarked { .. }
+                | OutboxEvent::HomePetname { .. } => {}
             }
         }
 

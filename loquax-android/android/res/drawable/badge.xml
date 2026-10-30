@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- The unread count: a round pill, a circle for one digit. -->
 <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
-    <solid android:color="#3a7d44" />
-    <corners android:radius="9dp" />
+    <solid android:color="@color/badge" />
+    <corners android:radius="11dp" />
 </shape>

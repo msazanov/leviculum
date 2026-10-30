@@ -28,9 +28,13 @@ use loquax::home::runner::{self, HomeClient};
 use loquax::home::watch::{self, Fallback, WatchEvent};
 use loquax::outbox::{Command, Outbox, OutboxEvent};
 use loquax::store::Store;
+use loquax::ui::map::MapPin;
 use loquax::ui::{reactions, update, Message, UiEffect, UiEvent, UiModel};
 use loquax::when::WallTime;
 
+use crate::avatar;
+use crate::links::{self, Book};
+use crate::pull_line::{PullLine, Say};
 use crate::schema::{self, Event, VERSION};
 
 /// The file under the app's directory that keeps the home node's address.
@@ -107,6 +111,10 @@ struct Inner {
     sending: bool,
     pull_owed: bool,
     pulling: bool,
+    /// Whether the user asked for the pull owed (Refresh), and what the
+    /// status line is told of the running one (1136).
+    pull_asked: bool,
+    pull_line: PullLine,
     finished_tx: Sender<Finished>,
     finished_rx: Receiver<Finished>,
     events: Sender<Event>,
@@ -126,6 +134,8 @@ struct Inner {
     watching: bool,
     front: bool,
     fallback: Fallback,
+    /// loquax's links to the phone's address book (1139).
+    book: Book,
 }
 
 /// A running session.
@@ -348,15 +358,74 @@ impl Session {
                 peer,
                 target,
                 content,
-            } => UiEvent::React {
+            } => {
+                let event = UiEvent::React {
+                    peer: parse_peer(&peer)?,
+                    target: parse_id(&target)?,
+                    content: content.clone(),
+                };
+                let mut inner = self.lock();
+                inner.used(&content);
+                inner.apply(event);
+                return Ok(());
+            }
+            schema::Request::Reply { peer, target, body } => UiEvent::Reply {
                 peer: parse_peer(&peer)?,
                 target: parse_id(&target)?,
-                content,
+                body,
             },
+            schema::Request::Forward { peer, key, to } => UiEvent::Forward {
+                from: parse_peer(&peer)?,
+                key,
+                to: parse_peer(&to)?,
+            },
+            schema::Request::Delete { peer, keys } => UiEvent::Delete {
+                peer: parse_peer(&peer)?,
+                keys,
+            },
+            schema::Request::Used { emoji } => {
+                self.lock().used(&emoji);
+                return Ok(());
+            }
             schema::Request::Close => UiEvent::Close,
-            schema::Request::Pull => UiEvent::Run(PaletteCommand::Fetch),
+            schema::Request::Pull => {
+                let mut inner = self.lock();
+                inner.asked_to_pull();
+                inner.apply(UiEvent::Run(PaletteCommand::Fetch));
+                return Ok(());
+            }
             schema::Request::Front { front } => {
                 self.lock().front = front;
+                return Ok(());
+            }
+            schema::Request::Link { peer, contact } => {
+                let peer = parse_peer(&peer)?;
+                return self.lock().link(peer, &contact);
+            }
+            schema::Request::Unlink { peer } => {
+                let peer = parse_peer(&peer)?;
+                return self.lock().unlink(peer);
+            }
+            schema::Request::NotNow { peer } => {
+                let peer = parse_peer(&peer)?;
+                let mut inner = self.lock();
+                inner.book.not_now.insert(peer);
+                inner.dirty = true;
+                return links::save(&inner.home, &inner.book);
+            }
+            schema::Request::Rename { peer, name } => UiEvent::Rename {
+                peer: parse_peer(&peer)?,
+                name,
+            },
+            schema::Request::Relink { rows } => {
+                let mut inner = self.lock();
+                let linked = inner.relink(&rows)?;
+                if linked > 0 {
+                    let _ = inner.events.send(Event::Notice {
+                        v: VERSION,
+                        text: format!("linked {linked} from your contacts"),
+                    });
+                }
                 return Ok(());
             }
         };
@@ -370,7 +439,56 @@ impl Session {
         Ok(match query {
             schema::Query::Conversations => schema::encode(&inner.conversations()),
             schema::Query::Messages { peer } => schema::encode(&inner.messages(parse_peer(&peer)?)),
+            schema::Query::Info { peer, key } => {
+                let peer = parse_peer(&peer)?;
+                let detail = loquax::ui::message_detail(&inner.model, peer, key)
+                    .ok_or_else(|| "no such message".to_string())?;
+                schema::encode(&schema::Info {
+                    v: VERSION,
+                    rows: detail.rows,
+                })
+            }
+            schema::Query::Recents => schema::encode(&schema::Recents {
+                v: VERSION,
+                emoji: loquax::emoji::load_recents(&inner.home).0,
+            }),
+            schema::Query::Suggest { peer, candidates } => {
+                let peer = parse_peer(&peer)?;
+                schema::encode(&suggest(&inner.model.names, &peer, &candidates))
+            }
+            schema::Query::Contact { lookup } => schema::encode(&schema::Addresses {
+                v: VERSION,
+                addresses: inner
+                    .book
+                    .of_contact(&lookup)
+                    .iter()
+                    .map(|peer| schema::AddressRow {
+                        peer: loquax::address::to_hex(peer),
+                        name: inner.model.names.label(peer),
+                        announced: inner.model.names.announced(peer).map(str::to_string),
+                    })
+                    .collect(),
+            }),
+            schema::Query::Links => schema::encode(&schema::Links {
+                v: VERSION,
+                links: inner
+                    .book
+                    .links
+                    .iter()
+                    .map(|(peer, link)| schema::LinkRow {
+                        peer: loquax::address::to_hex(peer),
+                        lookup: link.lookup.clone(),
+                        contact_id: link.contact_id,
+                        name: link.name.clone(),
+                    })
+                    .collect(),
+            }),
         })
+    }
+
+    /// The map's pins as the session's model knows them now.
+    pub fn map_pins(&self) -> Vec<MapPin> {
+        self.lock().model.map_pins()
     }
 
     /// The next event, waiting at most `wait`.
@@ -431,14 +549,9 @@ impl Inner {
     ) -> Result<Self, String> {
         let store = Store::open_in(home, address).map_err(|error| error.to_string())?;
         let config = loquax::config::load(home).map_err(|error| error.to_string())?;
-        let contacts = loquax::names::load_contacts(home).map_err(|error| error.to_string())?;
-        let mut model = UiModel::<Line>::new(&[]);
+        let mut model = known(home, &store)?;
         model.home_client = true;
         model.list_apart = true;
-        model.names = loquax::names::Names::new(contacts);
-        for (peer, name) in store.names().map_err(|error| error.to_string())? {
-            model.names.remember(peer, &name);
-        }
         for (message_id, source, packed) in store.unverified().map_err(|e| e.to_string())? {
             let verify = Command::Verify {
                 message_id,
@@ -478,6 +591,8 @@ impl Inner {
             sending: false,
             pull_owed: false,
             pulling: false,
+            pull_asked: false,
+            pull_line: PullLine::default(),
             finished_tx,
             finished_rx,
             events,
@@ -492,6 +607,7 @@ impl Inner {
             watching: false,
             front: false,
             fallback: Fallback::default(),
+            book: links::load(home),
         })
     }
 
@@ -545,7 +661,10 @@ impl Inner {
             }
         }
         self.look_at_link();
-        let elapsed = u64::try_from(self.origin.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let elapsed = self.elapsed_ms();
+        if let Some(say) = self.pull_line.tick(elapsed) {
+            self.say(say);
+        }
         self.watched(elapsed);
         self.quiet(UiEvent::Clock(wall_now(self.offset)));
         self.quiet(UiEvent::Tick);
@@ -621,8 +740,46 @@ impl Inner {
         let _ = update(&mut self.model, event);
     }
 
+    fn elapsed_ms(&self) -> u64 {
+        u64::try_from(self.origin.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+
+    /// The user asked for a pull (Refresh): the next one is theirs, or the
+    /// running one when one runs.
+    fn asked_to_pull(&mut self) {
+        match self.pulling {
+            true => {
+                if let Some(say) = self.pull_line.asked() {
+                    self.say(say);
+                }
+            }
+            false => self.pull_asked = true,
+        }
+    }
+
+    /// Tell the status line about a pull.
+    fn say(&self, say: Say) {
+        let (state, detail) = match say {
+            Say::Running => ("running", String::new()),
+            Say::Done(new) => ("done", new.to_string()),
+            Say::Failed(error) => ("failed", error),
+        };
+        let _ = self.events.send(Event::Sync {
+            v: VERSION,
+            state: state.to_string(),
+            detail,
+        });
+    }
+
     /// Fold one event, keep what it changed, run what it asks for.
     fn apply(&mut self, event: UiEvent) {
+        // What a fetch starts and ends with goes to the line as a `sync`
+        // event ([`PullLine`]), so the terminal's toasts for it ("fetching
+        // the mailbox", "no new messages") would only say it twice.
+        let pull_words = matches!(
+            event,
+            UiEvent::FetchDone(_) | UiEvent::Run(PaletteCommand::Fetch)
+        );
         let shown = matches!(
             event,
             UiEvent::Engine(_)
@@ -636,7 +793,13 @@ impl Inner {
         );
         let toasts = self.model.toasts.len();
         let effects = update(&mut self.model, event);
-        for toast in self.model.toasts.iter().skip(toasts) {
+        for toast in self
+            .model
+            .toasts
+            .iter()
+            .skip(toasts)
+            .filter(|_| !pull_words)
+        {
             let _ = self.events.send(Event::Notice {
                 v: VERSION,
                 text: toast.text.clone(),
@@ -649,8 +812,19 @@ impl Inner {
                 UiEffect::Send { to, body, fields } => self.sends.push_back((to, body, fields)),
                 UiEffect::Fetch => self.pull_owed = true,
                 UiEffect::Log(line) | UiEffect::Notice(line) => tracing::info!("{line}"),
-                // What the terminal does with its screen, its contacts file
-                // and its maps has no place here yet.
+                // A petname set here or pulled (1139): the contacts file
+                // in the app's directory, which the next start reads.
+                UiEffect::Contact(contact) => {
+                    if let Err(error) = loquax::names::save_contact(&self.home, &contact) {
+                        let _ = self.events.send(Event::Notice {
+                            v: VERSION,
+                            text: format!("name not saved: {error}"),
+                        });
+                    }
+                    self.dirty = true;
+                }
+                // What the terminal does with its screen and its maps has
+                // no place here yet.
                 _ => {}
             }
         }
@@ -666,12 +840,87 @@ impl Inner {
                 text: format!("not saved: {error}"),
             });
         }
+        let petnames = self.model.take_petnames();
+        if !petnames.is_empty() {
+            self.runtime
+                .spawn(runner::hand_petnames(self.client.clone(), petnames, BUDGET));
+        }
         let marks = self.model.take_marks();
         if marks.is_empty() {
             return;
         }
         self.runtime
             .spawn(runner::hand_marks(self.client.clone(), marks, BUDGET));
+    }
+
+    /// Link `peer` to the contact `contact` describes, or refresh the
+    /// link's copy: the table, the photo, the name every screen shows.
+    fn link(&mut self, peer: [u8; 16], contact: &schema::ContactCopy) -> Result<(), String> {
+        let name = loquax::names::sanitise(&contact.name)
+            .ok_or_else(|| "the contact has no name to show".to_string())?;
+        if contact.lookup.trim().is_empty() || contact.lookup.contains('\n') {
+            return Err("the contact has no lookup key".to_string());
+        }
+        links::keep_photo(
+            &self.home,
+            &peer,
+            contact.photo.as_ref().map(|photo| photo.0.as_slice()),
+        )?;
+        self.book.links.insert(
+            peer,
+            links::Link {
+                contact_id: contact.contact_id,
+                lookup: contact.lookup.clone(),
+                name: name.clone(),
+            },
+        );
+        links::save(&self.home, &self.book)?;
+        self.model.names.link(peer, &name, &contact.lookup);
+        self.dirty = true;
+        Ok(())
+    }
+
+    fn unlink(&mut self, peer: [u8; 16]) -> Result<(), String> {
+        if self.book.links.remove(&peer).is_none() {
+            return Ok(());
+        }
+        links::save(&self.home, &self.book)?;
+        self.model.names.unlink(&peer);
+        self.dirty = true;
+        links::keep_photo(&self.home, &peer, None)
+    }
+
+    /// The IM rows of protocol LXMF the address book holds: those of an
+    /// address loquax knows and has not linked become links. An address
+    /// two contacts carry is left for the user to choose. How many were
+    /// linked.
+    fn relink(&mut self, rows: &[schema::ImRow]) -> Result<usize, String> {
+        let mut by_address: std::collections::BTreeMap<[u8; 16], Vec<&schema::ImRow>> =
+            std::collections::BTreeMap::new();
+        for row in rows {
+            if let Ok(peer) = loquax::address::parse(row.address.trim()) {
+                by_address.entry(peer).or_default().push(row);
+            }
+        }
+        let mut linked = 0;
+        for (peer, rows) in by_address {
+            let first = rows[0];
+            let one_contact = rows
+                .iter()
+                .all(|r| r.contact.lookup == first.contact.lookup);
+            if !one_contact || self.book.links.contains_key(&peer) || !self.knows(&peer) {
+                continue;
+            }
+            self.link(peer, &first.contact)?;
+            linked += 1;
+        }
+        Ok(linked)
+    }
+
+    /// Whether loquax knows `peer`: a conversation, a name heard or given.
+    fn knows(&self, peer: &[u8; 16]) -> bool {
+        self.model.conversations.iter().any(|c| c.peer == *peer)
+            || self.model.names.shown(peer).is_some()
     }
 
     /// The oldest send, if none runs; the owed pull, if none runs.
@@ -692,11 +941,10 @@ impl Inner {
         }
         if !self.pulling && std::mem::take(&mut self.pull_owed) {
             self.pulling = true;
-            let _ = self.events.send(Event::Sync {
-                v: VERSION,
-                state: "running".to_string(),
-                detail: String::new(),
-            });
+            let asked = std::mem::take(&mut self.pull_asked);
+            if let Some(say) = self.pull_line.began(self.elapsed_ms(), asked) {
+                self.say(say);
+            }
             let mut tap = self.fanout.tap();
             let client = self.client.clone();
             let home = self.home.clone();
@@ -710,18 +958,13 @@ impl Inner {
 
     /// A pull ended: what it brought is in the store by now (the pump
     /// folded it before the runner saw its fence), so the cursor may pass it.
+    /// `result` counts the new messages it brought, never entries.
     fn pulled(&mut self, result: Result<usize, String>, cursor: Option<u64>) {
         self.pulling = false;
         runner::settle_pull(&self.home, cursor);
-        let (state, detail) = match &result {
-            Ok(entries) => ("done", entries.to_string()),
-            Err(error) => ("failed", error.clone()),
-        };
-        let _ = self.events.send(Event::Sync {
-            v: VERSION,
-            state: state.to_string(),
-            detail,
-        });
+        if let Some(say) = self.pull_line.ended(&result) {
+            self.say(say);
+        }
         self.apply(UiEvent::FetchDone(result));
     }
 
@@ -733,6 +976,7 @@ impl Inner {
             .map(|index| {
                 let conversation = &self.model.conversations[index];
                 let last = conversation.messages.last();
+                let icon = avatar::latest_appearance(&conversation.messages);
                 schema::ConversationRow {
                     peer: loquax::address::to_hex(&conversation.peer),
                     name: self.model.names.label(&conversation.peer),
@@ -740,39 +984,207 @@ impl Inner {
                     ours: last.is_some_and(|m| m.outbound),
                     at: last.and_then(|m| m.at).map_or(0, |at| at.unix_secs),
                     unread: u32::try_from(conversation.unread).unwrap_or(u32::MAX),
+                    initials: self.initials(&conversation.peer),
+                    icon_fg: icon.as_ref().map(|(fg, _)| fg.clone()),
+                    icon_bg: icon.map(|(_, bg)| bg),
+                    kind: last.map_or("", kind).to_string(),
+                    reaction: last
+                        .filter(|m| m.is_reaction())
+                        .and_then(|m| m.reaction())
+                        .map(|(_, content)| content),
+                    state: match last {
+                        Some(m) if m.outbound => state_word(m.delivery).to_string(),
+                        _ => String::new(),
+                    },
+                    photo: self.photo(&conversation.peer),
+                    linked: self.book.links.contains_key(&conversation.peer),
                 }
             })
             .collect();
+        let (address, initials) = self.model.address.map_or_else(Default::default, |own| {
+            (loquax::address::to_hex(&own), self.initials(&own))
+        });
         schema::Conversations {
             v: VERSION,
             conversations: rows,
+            address,
+            initials,
         }
     }
 
     fn messages(&self, peer: [u8; 16]) -> schema::Messages {
-        let conversation = self.model.conversations.iter().find(|c| c.peer == peer);
-        let rows = conversation.map_or_else(Vec::new, |conversation| {
-            let chips = reactions::gather(conversation);
-            conversation
+        let index = self.model.conversations.iter().position(|c| c.peer == peer);
+        let icon =
+            index.and_then(|c| avatar::latest_appearance(&self.model.conversations[c].messages));
+        let rows = index.map_or_else(Vec::new, |c| rows(&self.model, c));
+        let link = self.book.links.get(&peer);
+        let heard = index.is_some_and(|c| {
+            self.model.conversations[c]
                 .messages
                 .iter()
-                .filter(|message| !message.is_reaction())
-                .map(|message| row(message, &chips))
-                .collect()
+                .any(|m| !m.outbound)
         });
+        let names = &self.model.names;
         schema::Messages {
             v: VERSION,
             peer: loquax::address::to_hex(&peer),
             name: self.model.names.label(&peer),
             messages: rows,
+            initials: self.initials(&peer),
+            icon_fg: icon.as_ref().map(|(fg, _)| fg.clone()),
+            icon_bg: icon.map(|(_, bg)| bg),
+            home_client: self.model.home_client,
+            photo: self.photo(&peer),
+            linked: link.is_some(),
+            lookup: link.map(|link| link.lookup.clone()),
+            contact_id: link.map(|link| link.contact_id),
+            ask_link: link.is_none() && heard && !self.book.not_now.contains(&peer),
+            announced: names.announced(&peer).map(str::to_string),
+            petname: names.petname(&peer).map(str::to_string),
+            others: names
+                .same_contact(&peer)
+                .iter()
+                .map(|other| names.label(other))
+                .collect(),
         }
+    }
+
+    /// A linked peer's copied thumbnail.
+    fn photo(&self, peer: &[u8; 16]) -> Option<String> {
+        self.book
+            .links
+            .contains_key(peer)
+            .then(|| links::photo(&self.home, peer))
+            .flatten()
+    }
+
+    /// `emoji` was used: first in the recents kept in the home. A file that
+    /// cannot be written costs the order, not the reaction.
+    fn used(&self, emoji: &str) {
+        let mut recents = loquax::emoji::load_recents(&self.home);
+        recents.used(emoji);
+        if let Err(error) = loquax::emoji::save_recents(&self.home, &recents) {
+            tracing::warn!("{error}");
+        }
+    }
+
+    fn initials(&self, peer: &[u8; 16]) -> String {
+        avatar::initials(self.model.names.shown(peer), peer)
     }
 }
 
-/// One bubble as the app draws it.
+/// A model that knows what the store and the contacts file know of the
+/// peers: their names and their latest positions. The session's starts so,
+/// and the map draws its pins from one when no session runs.
+pub fn known(home: &Path, store: &Store) -> Result<UiModel<Line>, String> {
+    let contacts = loquax::names::load_contacts(home).map_err(|error| error.to_string())?;
+    let mut model = UiModel::<Line>::new(&[]);
+    model.names = loquax::names::Names::new(contacts);
+    for (peer, name) in store.names().map_err(|error| error.to_string())? {
+        model.names.remember(peer, &name);
+    }
+    for (peer, link) in links::load(home).links {
+        model.names.link(peer, &link.name, &link.lookup);
+    }
+    model.restore_positions(store.positions().map_err(|error| error.to_string())?);
+    Ok(model)
+}
+
+/// The candidates `peer`'s announced name may be, best first; none for a
+/// peer that announced none.
+pub fn suggest(
+    names: &loquax::names::Names,
+    peer: &[u8; 16],
+    rows: &[schema::CandidateRow],
+) -> schema::Suggestions {
+    use loquax::name_match::{rank, Candidate, Field};
+    let candidates: Vec<Candidate> = rows
+        .iter()
+        .map(|row| Candidate {
+            key: row.key.clone(),
+            display: row.display.clone(),
+            given: row.given.clone(),
+            middle: row.middle.clone(),
+            family: row.family.clone(),
+            nicknames: row.nicknames.clone(),
+            last_contacted: row.last_contacted,
+        })
+        .collect();
+    let ranked = names
+        .announced(peer)
+        .map(|announced| rank(announced, &candidates))
+        .unwrap_or_default();
+    schema::Suggestions {
+        v: VERSION,
+        suggestions: ranked
+            .into_iter()
+            .map(|s| {
+                let (field, nickname) = match s.field {
+                    Field::Display => ("display", None),
+                    Field::Nickname(nick) => ("nickname", Some(nick)),
+                    Field::Name => ("name", None),
+                    Field::Given => ("given", None),
+                    Field::Words => ("words", None),
+                    Field::Prefix => ("prefix", None),
+                };
+                schema::SuggestionRow {
+                    key: s.key,
+                    score: u32::from(s.score),
+                    field: field.to_string(),
+                    nickname,
+                }
+            })
+            .collect(),
+    }
+}
+
+/// The map's pins as a model `known` from `home`'s store names them, at
+/// the wall clock `now`; none when the phone is no client yet.
+pub fn pins_in(home: &Path, now: WallTime) -> Result<Vec<MapPin>, String> {
+    let Some(key) = loquax::home::client::load_client(home)? else {
+        return Ok(Vec::new());
+    };
+    let address = loquax::home::lxmf_address(&key)?;
+    let path = home.join(loquax::store::STORE_FILE);
+    let Some(store) = Store::open_read_only(&path, address).map_err(|e| e.to_string())? else {
+        return Ok(Vec::new());
+    };
+    let mut model = known(home, &store)?;
+    update(&mut model, UiEvent::Clock(now));
+    Ok(model.map_pins())
+}
+
+/// The bubbles of conversation `c`, as the app draws them: a reaction is a
+/// chip on the bubble it names, not a bubble.
+pub fn rows<B>(model: &UiModel<B>, c: usize) -> Vec<schema::MessageRow> {
+    let Some(conversation) = model.conversations.get(c) else {
+        return Vec::new();
+    };
+    let chips = reactions::gather(conversation);
+    conversation
+        .messages
+        .iter()
+        .enumerate()
+        .filter(|(_, message)| !message.is_reaction())
+        .map(|(m, message)| {
+            let mut row = row(message, &chips, model.message_fix(c, m));
+            if let Some(quoted) = model.quoted(c, m) {
+                row.quote = Some(quoted.text);
+                row.quote_ours = quoted.ours;
+                row.quote_to = Some(loquax::address::to_hex(&quoted.to));
+            }
+            row
+        })
+        .collect()
+}
+
+/// One bubble as the app draws it; `fix` is the one the message carries.
+/// A report with a position is the position line alone, one without says
+/// so in words.
 fn row(
     message: &Message,
     chips: &std::collections::BTreeMap<[u8; 32], Vec<reactions::Chip>>,
+    fix: Option<loquax::telemetry::Fix>,
 ) -> schema::MessageRow {
     let chips = message
         .id
@@ -794,9 +1206,10 @@ fn row(
             .map(|id| loquax::address::to_hex(&id))
             .unwrap_or_default(),
         ours: message.outbound,
-        body: match message.is_report() {
-            true => "position report".to_string(),
-            false => message.body.clone(),
+        body: match (message.is_report(), &fix) {
+            (true, Some(_)) => String::new(),
+            (true, None) => "position report".to_string(),
+            (false, _) => message.body.clone(),
         },
         state: match message.outbound {
             true => state_word(message.delivery).to_string(),
@@ -804,6 +1217,23 @@ fn row(
         },
         at: message.at.map_or(0, |at| at.unix_secs),
         chips,
+        lat_e6: fix.as_ref().map(|f| f.location.latitude_e6),
+        lon_e6: fix.as_ref().map(|f| f.location.longitude_e6),
+        place: fix
+            .as_ref()
+            .map(|f| loquax::telemetry::coordinates(&f.location)),
+        accuracy: fix
+            .as_ref()
+            .and_then(|f| loquax::telemetry::accuracy(&f.location)),
+        fix_at: fix.as_ref().map(|f| f.order_time()),
+        stale_at: fix.as_ref().map(|f| {
+            f.fix_time()
+                .saturating_add(loquax::telemetry::STALE_AFTER_SECS)
+        }),
+        key: message.activity,
+        quote: None,
+        quote_ours: None,
+        quote_to: None,
     }
 }
 
@@ -815,6 +1245,18 @@ pub fn state_word(state: Option<DeliveryState>) -> &'static str {
         Some(DeliveryState::Sent) | Some(DeliveryState::InMailbox) => "sent",
         Some(DeliveryState::Delivered) => "delivered",
         Some(DeliveryState::Rejected) | Some(DeliveryState::Failed) => "failed",
+    }
+}
+
+/// What a conversation's last message is, for the list's words: `text`,
+/// `position` or `reaction` (1130), the same split as the English line.
+pub fn kind(message: &Message) -> &'static str {
+    if message.is_reaction() {
+        "reaction"
+    } else if message.is_report() {
+        "position"
+    } else {
+        "text"
     }
 }
 
@@ -880,4 +1322,48 @@ pub fn parse_peer(text: &str) -> Result<[u8; 16], String> {
 pub fn parse_id(text: &str) -> Result<[u8; 32], String> {
     let text = text.trim();
     loquax::address::parse_id(text).ok_or_else(|| format!("'{text}' is not a message id"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use leviculum_lxmf::constants::{FIELD_REACTION, FIELD_TELEMETRY};
+    use leviculum_lxmf::reaction::Reaction;
+    use loquax::ui::Signature;
+
+    fn message(outbound: bool, body: &str, fields: Vec<Field>) -> Message {
+        Message {
+            outbound,
+            body: body.to_string(),
+            id: None,
+            delivery: outbound.then_some(DeliveryState::Delivered),
+            signature: Signature::Verified,
+            leg: None,
+            unproven: false,
+            at: None,
+            size: body.len(),
+            ledger: Vec::new(),
+            last_leg: None,
+            activity: 0,
+            fields,
+        }
+    }
+
+    #[test]
+    fn the_list_tells_a_text_a_position_and_a_reaction_apart() {
+        assert_eq!(kind(&message(false, "hallo", Vec::new())), "text");
+        let report = message(false, "", vec![(FIELD_TELEMETRY, vec![0xc0])]);
+        assert_eq!(kind(&report), "position");
+        // Text with telemetry is a text: the line shows what was written.
+        let with_fix = message(false, "bin da", vec![(FIELD_TELEMETRY, vec![0xc0])]);
+        assert_eq!(kind(&with_fix), "text");
+        let thumbs = Reaction {
+            to: [7; 32],
+            content: "👍".to_string(),
+        }
+        .encode_field_value();
+        let reaction = message(true, "", vec![(FIELD_REACTION, thumbs)]);
+        assert_eq!(kind(&reaction), "reaction");
+        assert_eq!(preview(&reaction), "you reacted 👍");
+    }
 }

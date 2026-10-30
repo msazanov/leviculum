@@ -28,12 +28,12 @@ Since slice (a), every position. The engine passes an incoming message's
 fields on (`Message::fields`, `leviculum-lxmf/src/message.rs:84`):
 `RouterEvent::MessageReceived` becomes `OutboxEvent::Received` with the
 fields beside id, source, title, body and the verification
-(`loquax/src/engine.rs:460`, `loquax/src/outbox.rs:215`). The core reads
+(`loquax/src/engine.rs:460`, `loquax/src/outbox.rs:232`). The core reads
 the two telemetry fields into positions (`telemetry::read`,
 `loquax/src/telemetry.rs:130`), the screen model keeps each peer's latest
 and hands every one to the store (`take_telemetry`,
-`loquax/src/ui.rs:2961`), and the store keeps the fields whole in its
-`fields` column (`loquax/src/store.rs:1902`) and the positions in a table of
+`loquax/src/ui.rs:3012`), and the store keeps the fields whole in its
+`fields` column (`loquax/src/store.rs:2096`) and the positions in a table of
 their own (`SCHEMA_V2`, `loquax/src/store.rs:173`). The sender's timestamp
 is still not carried: `OutboxEvent`, the screen's `Message` and every type
 the model folds derive `Eq`, which an `f64` cannot, so carrying it is a
@@ -80,6 +80,20 @@ fold into the latest one when they follow each other. As built, the `14:05` is t
 block's own arrival time beside the line, as every block carries it; the
 fix's own time is in the header's age and the detail view. A run folds
 only within one day, and not across a name note or the `new` rule.
+
+**A text with a position** (1132). Sideband and a stock LXMF client can
+send a body and a telemetry field in one message. Such a message from a
+peer is drawn as its text with the report's line under it, and `Enter`
+or a click opens the map at its fix with the sender's pin selected,
+exactly as on a report: one model rule, `message_fix`
+(`loquax/src/ui.rs`), names the fix of any received message that carries
+a readable one, and every screen asks it. `v` still opens the detail
+view. One of ours with a telemetry field is our own position and opens
+nothing. On Android the bubble carries the same line under its text: a
+pin, the coordinates, the accuracy where given and the fix's age, dimmed
+once stale; a report's bubble is the line alone. A tap opens the map
+centred on the fix at the region's deepest zoom with the sender's pin
+selected, and Back returns to the conversation where it was scrolled.
 
 **The age** is always shown and always counts from the fix time
 (`Location::last_update`), not from when the message arrived: a report
@@ -212,6 +226,40 @@ The frontends:
 - **The iced GUI.** The same frame, at the window's size, as an iced
   image widget; pins and labels as iced text over it. Panning by drag and
   zoom by wheel are input mapped to the same core events.
+- **Android** (1128). The same frame as the window's, drawn by the same
+  functions (`loquax::screenmap`): the picture, the map's names set in
+  Fira Sans by cosmic-text and swash (`loquax::mapnames`, carried in
+  `loquax/fonts/`), and here the pins and their labels too, all into one
+  RGBA buffer that Java blits into a bitmap in a plain View. Java does
+  the gestures (a finger pans and shifts the last bitmap, a pinch or a
+  double tap zooms and scales it, a tap names a pin) and hands them back
+  with the last view; the view's rules stay the model's, one pixel a
+  cell as in the window. No second map in Java. The phone's view keeps
+  the zoom a pinch leaves, a real number to a thousandth of a step
+  (`leviculum_map::viewport::ExactView`, 1134), and its frame is composed
+  from loquax's tile cache (`loquax::tiles`): the map without names and
+  pins, in tiles of 256 pixels of the nearest whole step, kept by last
+  use up to 96 MB, missing ones drawn on up to eight threads, scaled to
+  the exact zoom (one to one at a whole step). The names are placed at
+  rest over the frame at the exact scale and kept; a frame while the
+  finger moves draws those names where the view moved them and places
+  none, so no name leaves the picture during a pan or a pinch. The pins
+  are drawn over the tiles every frame, so a pin costs no tile. A pinch
+  keeps the step it is composed from while it stays within a step of it,
+  and a frame shows the last step's cached tiles where the new step's are
+  still owed. A view at rest with every tile drawn prefetches (1135,
+  `loquax::tiles::plan`): the ring of tiles around the frame, then the
+  next step in over its central half, the step out only after a pinch
+  out, then a second ring into spare room only; each group ordered by
+  the pan's velocity, a moving average that fades within about two
+  seconds of rest, the tiles ahead of the last movement first, nearest
+  first without one. At most 128 tiles a view, a tile a worker a call,
+  so a gesture waits one tile at most and drops the plan; a prefetched
+  tile no frame used is evicted first, and a prefetch evicts neither a
+  tile on screen nor one it drew. Only while the map is in front and
+  the battery saver is off. When the ring reaches past the regions that
+  hold the frame, the autoload is asked for the ring's area. The
+  terminal and the window keep whole steps.
 - **The M9.** The same pipeline straight into the panel's
   `embedded-graphics` target, as the measurement firmware does
   (`leviculum-mapfill/m9/`), with mousefood's cells for the labels.
@@ -335,6 +383,21 @@ to y uses `f64` through `libm` (software on the M9's single-precision FPU),
 once per pin and per viewport change, never per vertex, since the region
 holds geometry already projected. Both round-trip to the same 10^-7 degree
 step. x wraps, so the antimeridian is wrapping arithmetic.
+
+**One world at most** (Lew 2026-10-29, 1131). No frontend shows the
+world twice. `Viewport::min_zoom` is the shallowest zoom at which the
+world, 256 x 2^z pixels, is at least as wide as the view, so no copy
+stands beside another; zooming out stops there. `Viewport::one_world`
+holds a view to it: the zoom at least that, y inside the projection
+(85.05 degrees north and south), and a world shorter than the view, as
+on a portrait phone at its floor, centred in it. x still wraps, by moving
+the one world. The terminal, the window and the phone get their view
+through `loquax::ui::map::viewport`, which applies it, and `settle` writes
+it back into the state after a zoom or a pan. The first view without pins
+fits the newest installed or cached region (by file time, which a view of
+an autoloaded region renews), else the world at that floor; the phone's
+locale country is not used, since nothing maps a country to its box
+cheaply yet.
 
 **Where it comes from.** The cut lives in `leviculum-mapcut`, which
 `leviculum-map-tool cut` and loquax's autoload both call (1089). It reads

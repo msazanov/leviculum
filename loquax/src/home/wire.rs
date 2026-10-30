@@ -384,6 +384,49 @@ pub fn read_mark(data: &[u8]) -> Result<Mark, Malformed> {
     Ok(Mark { flag, ids })
 }
 
+/// A name entry's bytes: the peer's address and the display name it
+/// announced, not yet sanitised; every client sanitises it as it does an
+/// announce it heard itself.
+pub fn name_entry(peer: &[u8; 16], name: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    msgpack::array(&mut out, 2);
+    msgpack::bin(&mut out, peer);
+    msgpack::string(&mut out, name);
+    out
+}
+
+/// The bytes every name entry of `peer` begins with, whatever its name:
+/// the store finds a peer's older entries by them.
+pub fn name_entry_prefix(peer: &[u8; 16]) -> Vec<u8> {
+    let mut out = Vec::new();
+    msgpack::array(&mut out, 2);
+    msgpack::bin(&mut out, peer);
+    out
+}
+
+/// A name entry, which has a join request's shape: sixteen bytes and a
+/// string.
+pub fn read_name_entry(data: &[u8]) -> Result<([u8; 16], alloc::string::String), Malformed> {
+    read_join_request(data)
+}
+
+/// A petname entry's bytes, which a `/petname` request carries as they
+/// are: the peer's address and the reader's name for it, the empty string
+/// for none. Shaped as a name entry ([`name_entry_prefix`] finds a peer's).
+pub fn petname_entry(peer: &[u8; 16], petname: Option<&str>) -> Vec<u8> {
+    name_entry(peer, petname.unwrap_or_default())
+}
+
+/// A petname entry or request: the peer, and its name, `None` for an empty
+/// one. Sanitised by the client that applies it, as a petname from the
+/// contacts file is.
+pub fn read_petname_entry(
+    data: &[u8],
+) -> Result<([u8; 16], Option<alloc::string::String>), Malformed> {
+    let (peer, name) = read_join_request(data)?;
+    Ok((peer, Some(name).filter(|name| !name.is_empty())))
+}
+
 /// A `/send` answer: the message id, or the status that refused it.
 pub fn read_send_answer(data: &[u8]) -> Result<Result<[u8; 32], Status>, Malformed> {
     let status = read_status(data)?;
@@ -444,6 +487,20 @@ mod tests {
     fn a_join_request_round_trips() {
         let data = join_request(&[7; 16], "laptop");
         assert_eq!(read_join_request(&data), Ok(([7; 16], "laptop".into())));
+    }
+
+    #[test]
+    fn a_name_entry_round_trips_and_a_mark_is_none() {
+        let data = name_entry(&[5; 16], "Reviewer Berlin");
+        assert_eq!(
+            read_name_entry(&data),
+            Ok(([5; 16], "Reviewer Berlin".into()))
+        );
+        let mark = Mark {
+            flag: MarkFlag::Read,
+            ids: alloc::vec![[1; 32]],
+        };
+        assert_eq!(read_name_entry(&mark_request(&mark)), Err(Malformed));
     }
 
     #[test]

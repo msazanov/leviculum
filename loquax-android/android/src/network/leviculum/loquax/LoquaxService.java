@@ -127,6 +127,7 @@ public class LoquaxService extends Service implements Events.Listener {
             linkUp = Core.bool(answer, "link");
             Events.start();
             look(false);
+            Book.observe(this);
             return;
         }
         if (!Core.str(answer, "need").isEmpty()) {
@@ -291,13 +292,19 @@ public class LoquaxService extends Service implements Events.Listener {
         PendingIntent opening = PendingIntent.getActivities(this, peer.hashCode(),
                 new Intent[] {list, chat},
                 PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
-        return new Notification.Builder(this, MESSAGES_CHANNEL)
+        Notification.Builder builder = new Notification.Builder(this, MESSAGES_CHANNEL)
                 .setSmallIcon(android.R.drawable.stat_notify_chat)
                 .setContentTitle(Core.str(row, "name"))
                 .setContentText(Core.str(row, "last"))
                 .setNumber((int) Math.min(Integer.MAX_VALUE, Core.num(row, "unread")))
                 .setContentIntent(opening)
-                .setAutoCancel(true)
-                .build();
+                .setAutoCancel(true);
+        // The linked contact's photo, loquax's own copy: it needs no
+        // permission that may have been taken back since (1139).
+        android.graphics.Bitmap photo = AvatarView.photo(Core.str(row, "photo"));
+        if (photo != null) {
+            builder.setLargeIcon(photo);
+        }
+        return builder.build();
     }
 }

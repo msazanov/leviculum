@@ -151,14 +151,42 @@ pub async fn mark(
     mark: &wire::Mark,
     budget: Duration,
 ) -> Result<(), HomeError> {
-    let deadline = tokio::time::Instant::now() + budget;
     let data = wire::mark_request(mark);
+    ask_retrying(node, public_key, device, super::MARK_PATH, &data, budget).await
+}
+
+/// Hand the home node the reader's name for `peer`, `None` clearing it
+/// (1139), asked again as a mark is: the home node keeps the newest.
+pub async fn petname(
+    node: &ReticulumNode,
+    public_key: &[u8; 64],
+    device: &Identity,
+    peer: &[u8; 16],
+    petname: Option<&str>,
+    budget: Duration,
+) -> Result<(), HomeError> {
+    let data = wire::petname_entry(peer, petname);
+    ask_retrying(node, public_key, device, super::PETNAME_PATH, &data, budget).await
+}
+
+/// One request whose answer is a status, on a link of its own, asked again
+/// up to three times when the answer was lost: for requests the home node
+/// keeps once however often they come.
+async fn ask_retrying(
+    node: &ReticulumNode,
+    public_key: &[u8; 64],
+    device: &Identity,
+    path: &str,
+    data: &[u8],
+    budget: Duration,
+) -> Result<(), HomeError> {
+    let deadline = tokio::time::Instant::now() + budget;
     let mut attempt = 0;
     loop {
         attempt += 1;
         let answer = match open(node, public_key, device, deadline).await {
             Ok(link) => {
-                let answer = request(node, &link, super::MARK_PATH, &data, deadline).await;
+                let answer = request(node, &link, path, data, deadline).await;
                 let _ = node.close_link(&link).await;
                 answer
             }
@@ -368,10 +396,29 @@ pub struct Pull {
     /// Each entry of a message sent through the home node: its id and its
     /// archive kind.
     pub sent: Vec<([u8; 32], u8)>,
+    /// Each name the home node heard a peer announce, as archived.
+    pub names: Vec<([u8; 16], String)>,
     /// The cursor to save once what came is kept: `None` when nothing came,
     /// or when the engine did not get through it in time, so the next pull
     /// asks for the same entries again.
     pub cursor: Option<u64>,
+}
+
+impl Pull {
+    /// How many received messages came: what a status line calls new. An
+    /// entry of the user's own sent message, a state change, a mark and a
+    /// name are entries, not messages (1136).
+    pub fn messages(&self) -> usize {
+        self.received.len()
+    }
+
+    /// How many state changes of messages sent through the home node came.
+    pub fn states(&self) -> usize {
+        self.sent
+            .iter()
+            .filter(|(_, kind)| *kind != super::KIND_SENT)
+            .count()
+    }
 }
 
 /// How long a pull waits for the engine to take the entries it was handed:
@@ -440,6 +487,30 @@ async fn take_in(
             }
             continue;
         }
+        if entry.kind == super::KIND_PETNAME {
+            match wire::read_petname_entry(&entry.packed) {
+                Ok((destination, petname)) => outbox
+                    .submit(Command::HomePetname {
+                        destination,
+                        petname,
+                    })
+                    .map_err(gone)?,
+                Err(_) => tracing::warn!("HOME pull: entry {} is no petname", entry.seq),
+            }
+            continue;
+        }
+        if entry.kind == super::KIND_NAME {
+            match wire::read_name_entry(&entry.packed) {
+                Ok((destination, name)) => {
+                    pull.names.push((destination, name.clone()));
+                    outbox
+                        .submit(Command::HomeName { destination, name })
+                        .map_err(gone)?
+                }
+                Err(_) => tracing::warn!("HOME pull: entry {} is no name", entry.seq),
+            }
+            continue;
+        }
         let id = match entry.kind {
             super::KIND_SENT => leviculum_lxmf::Message::unpack(
                 &entry.packed,
@@ -500,8 +571,12 @@ async fn take_in(
         }
     }
     tracing::info!(
-        "HOME pull cursor={cursor} entries={} through={last} settled={}",
+        "HOME pull cursor={cursor} entries={} messages={} states={} names={} through={last} \
+         settled={}",
         pull.entries,
+        pull.messages(),
+        pull.states(),
+        pull.names.len(),
         pull.cursor.is_some()
     );
     Ok(pull)
@@ -603,6 +678,7 @@ mod tests {
         assert_eq!(pull.cursor, Some(6));
         assert_eq!(pull.entries, 3);
         assert_eq!(pull.received, [received]);
+        assert_eq!((pull.messages(), pull.states()), (1, 2));
         assert_eq!(
             pull.sent,
             [
@@ -628,10 +704,12 @@ mod tests {
     }
 
     /// A sent entry goes to the engine whole, for a bubble on a device that
-    /// does not have one; a mark goes as the mark; one that does not decode
-    /// is passed over and still counted into the cursor.
+    /// does not have one; a mark goes as the mark, a heard name as the name,
+    /// a petname as the petname (1139);
+    /// one that does not decode is passed over and still counted into the
+    /// cursor.
     #[tokio::test]
-    async fn sent_and_mark_entries_reach_the_engine() {
+    async fn sent_mark_and_name_entries_reach_the_engine() {
         use leviculum_core::Identity;
         let home = Identity::generate(&mut rand_core::OsRng);
         let message = leviculum_lxmf::Message::create(
@@ -654,13 +732,34 @@ mod tests {
                 entry(1, super::super::KIND_SENT, message.pack()),
                 entry(2, super::super::KIND_MARK, wire::mark_request(&mark)),
                 entry(3, super::super::KIND_MARK, vec![0x90]),
+                entry(
+                    4,
+                    super::super::KIND_NAME,
+                    wire::name_entry(&[5; 16], "Reviewer Berlin"),
+                ),
+                entry(5, super::super::KIND_NAME, vec![0x90]),
+                entry(
+                    6,
+                    super::super::KIND_PETNAME,
+                    wire::petname_entry(&[5; 16], Some("Mum")),
+                ),
+                entry(
+                    7,
+                    super::super::KIND_PETNAME,
+                    wire::petname_entry(&[4; 16], None),
+                ),
+                entry(8, super::super::KIND_PETNAME, vec![0x90]),
             ],
             first: 1,
         };
-        let mut outbox = FakeOutbox::new(vec![OutboxEvent::Fenced { token: 3 }]);
+        let mut outbox = FakeOutbox::new(vec![OutboxEvent::Fenced { token: 8 }]);
         let pull = take_in(&mut outbox, 0, pulled).await.expect("pull");
-        assert_eq!(pull.cursor, Some(3));
+        assert_eq!(pull.cursor, Some(8));
         assert_eq!(pull.sent, [(message.message_id, super::super::KIND_SENT)]);
+        // 1136: the user's own sent message, a mark, a name and a petname
+        // are entries, and none of them is a new message or a state change.
+        assert_eq!((pull.entries, pull.messages(), pull.states()), (8, 0, 0));
+        assert_eq!(pull.names, [([5; 16], "Reviewer Berlin".to_string())]);
         assert_eq!(
             *outbox.commands.borrow(),
             [
@@ -668,7 +767,19 @@ mod tests {
                     packed: message.pack()
                 },
                 Command::HomeMark { mark },
-                Command::Fence { token: 3 },
+                Command::HomeName {
+                    destination: [5; 16],
+                    name: "Reviewer Berlin".to_string()
+                },
+                Command::HomePetname {
+                    destination: [5; 16],
+                    petname: Some("Mum".to_string())
+                },
+                Command::HomePetname {
+                    destination: [4; 16],
+                    petname: None
+                },
+                Command::Fence { token: 8 },
             ]
         );
     }

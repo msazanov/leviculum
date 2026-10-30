@@ -159,6 +159,16 @@ pack:
 	$(AAPT) package -f -m $(AAPT_EXTRA_FLAGS) -F $(UNALIGNED_PACKAGE) -M $(GENMANIFEST) -S $(PROJ)/res -I $(ANDJAR)
 	cd $(BIN) && $(AAPT) add $(UNALIGNED_PACKAGE) classes.dex
 	cd $(BIN) && $(AAPT) add $(UNALIGNED_PACKAGE) $(foreach abi,$(ABIS),lib/$(abi)/$(LIBNAME))
+	# The map's names are set in Fira Sans (loquax/fonts/), whose OFL
+	# asks every copy to carry its licence: beside it in the APK.
+	mkdir -p $(BIN)/assets
+	cp $(REPO)/loquax/fonts/OFL.txt $(BIN)/assets/FiraSans-OFL.txt
+	cd $(BIN) && $(AAPT) add $(UNALIGNED_PACKAGE) assets/FiraSans-OFL.txt
+	# The emoji picker's table (1137), Unicode data under the Unicode
+	# Licence V3, which asks every copy to carry its notice: beside it.
+	cp $(REPO)/loquax/emoji/emoji.tsv $(BIN)/assets/emoji.tsv
+	cp $(REPO)/loquax/emoji/LICENSE-UNICODE.txt $(BIN)/assets/emoji-LICENSE-UNICODE.txt
+	cd $(BIN) && $(AAPT) add $(UNALIGNED_PACKAGE) assets/emoji.tsv assets/emoji-LICENSE-UNICODE.txt
 	$(ZIPALIGN) -f 4 $(UNALIGNED_PACKAGE) $(PACKAGE)
 	$(APKSIGNER) sign --ks $(KEYSTORE) --ks-pass $(KSPASS_ARG) $(PACKAGE)
 
