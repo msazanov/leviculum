@@ -4562,14 +4562,15 @@ mod rx_class_tests {
     /// Only link Channel data skips the payload hash in the driver; every other
     /// class keeps the precomputed hash the dedup path expects.
     #[test]
-    fn only_link_channel_data_is_prepared_without_a_hash() {
-        let channel = wire(PacketType::Data, DestinationType::Link, PacketContext::Channel);
-        assert!(matches!(classify_rx(&channel), RxClass::HashFreeLinkData));
-        let prepared = prepare_hash_free(InterfaceId(0), channel.clone());
+    fn only_link_tunnel_data_is_prepared_without_a_hash() {
+        let tunnel = wire(PacketType::Data, DestinationType::Link, PacketContext::Tunnel);
+        assert!(matches!(classify_rx(&tunnel), RxClass::HashFreeLinkData));
+        let prepared = prepare_hash_free(InterfaceId(0), tunnel.clone());
         assert_eq!(prepared.pre.packet_hash, None);
-        assert_eq!(prepared.data, channel);
+        assert_eq!(prepared.data, tunnel);
 
         for (ty, dest, ctx) in [
+            (PacketType::Data, DestinationType::Link, PacketContext::Channel),
             (PacketType::Data, DestinationType::Link, PacketContext::Resource),
             (PacketType::Data, DestinationType::Link, PacketContext::Keepalive),
             (PacketType::Data, DestinationType::Link, PacketContext::None),

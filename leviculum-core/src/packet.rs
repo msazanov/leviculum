@@ -605,7 +605,7 @@ pub fn get_hashable_part(raw: &[u8]) -> alloc::vec::Vec<u8> {
 }
 
 mod ext;
-pub use ext::{is_hash_free_link_data, packet_token_tag, token_tag};
+pub use ext::is_hash_free_link_data;
 
 /// Compute the packet hash (matching Python Reticulum)
 ///

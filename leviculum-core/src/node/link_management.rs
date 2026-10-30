@@ -155,7 +155,6 @@ impl Message for RawBytesMessage<'_> {
 /// Every datum exists exactly once. Lookups are linear scans, n is bounded
 /// by channel window size × active links (realistically < 100, typically < 20).
 mod ext;
-use ext::link_proof_id;
 
 pub(super) struct ReceiptTracker {
     entries: Vec<ReceiptEntry>,
@@ -868,18 +867,14 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             .map_err(|_| send::SendError::LinkFailed)?;
 
         // Register receipt for channel delivery tracking (Python Channel.py:631)
-        if let Some((seq, cipher)) = self
+        if let Some(seq) = self
             .links
             .get(link_id)
-            .and_then(|l| l.channel().map(|ch| (ch.last_sent_sequence(), l.cipher())))
+            .and_then(|l| l.channel())
+            .map(|ch| ch.last_sent_sequence())
         {
-            self.receipt_tracker.register_bound(
-                &packet_bytes,
-                *link_id,
-                seq,
-                now_ms,
-                cipher,
-            );
+            self.receipt_tracker
+                .register(&packet_bytes, *link_id, seq, now_ms);
         }
 
         // Route via attached interface
@@ -939,12 +934,9 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
             .max(TRAFFIC_TIMEOUT_MIN_MS)
             .max(crate::constants::RAW_RECEIPT_TIMEOUT_FLOOR_MS);
         let deadline_ms = now_ms.saturating_add(receipt_timeout_ms);
-        let packet_hash = self.receipt_tracker.register_raw_bound(
-            &packet_bytes,
-            *link_id,
-            deadline_ms,
-            link.cipher(),
-        );
+        let packet_hash = self
+            .receipt_tracker
+            .register_raw(&packet_bytes, *link_id, deadline_ms);
         self.route_link_packet(link_id, &packet_bytes);
 
         Ok((packet_hash, self.process_events_and_actions()))
@@ -1906,9 +1898,11 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
         let mut rx_ring_full = false;
         let proof_packets: Vec<Vec<u8>> = {
             let rtt_ms = link.rtt_ms();
-            let link_cipher = link.cipher();
             let channel = link.ensure_channel(rtt_ms);
-            let full_packet_hash = link_proof_id(packet, rx.raw_hash, link_cipher);
+            let full_packet_hash = rx
+                .raw_hash
+                .copied()
+                .unwrap_or_else(|| packet_hash_from_packet(packet));
 
             let mut proofs = Vec::new();
 
@@ -2152,7 +2146,10 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
                 match link.proof_strategy() {
                     ProofStrategy::All => {
-                        let full_packet_hash = link_proof_id(packet, rx.raw_hash, link.cipher());
+                        let full_packet_hash = rx
+                            .raw_hash
+                            .copied()
+                            .unwrap_or_else(|| packet_hash_from_packet(packet));
                         if let Some(signing_key) = link.proof_signing_key() {
                             if let Ok(proof_packet) = link.build_data_proof_packet_with_signing_key(
                                 &full_packet_hash,
@@ -2163,7 +2160,10 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
                         }
                     }
                     ProofStrategy::App => {
-                        let full_packet_hash = link_proof_id(packet, rx.raw_hash, link.cipher());
+                        let full_packet_hash = rx
+                            .raw_hash
+                            .copied()
+                            .unwrap_or_else(|| packet_hash_from_packet(packet));
                         self.events.push(NodeEvent::LinkProofRequested {
                             link_id,
                             packet_hash: full_packet_hash,
@@ -4353,9 +4353,8 @@ impl<R: CryptoRngCore, C: Clock, S: Storage> NodeCore<R, C, S> {
 
                         if let Some(packet) = packet {
                             // Register receipt for the re-encrypted packet
-                            if !self.register_retransmit_receipt(&packet, link_id, sequence, now_ms) {
-                                continue;
-                            }
+                            self.receipt_tracker
+                                .register(&packet, link_id, sequence, now_ms);
 
                             self.events.push(NodeEvent::ChannelRetransmit {
                                 link_id,

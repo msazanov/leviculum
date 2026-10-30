@@ -1,4 +1,4 @@
-//! Tests for per-link ciphers, proof binding, tunnel datagrams and GCM LRRTT retries.
+//! Tests for per-link ciphers, tunnel datagrams and GCM LRRTT retries.
 //! A child of `node::tests`, so it uses that module's helpers.
 use super::*;
 

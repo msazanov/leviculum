@@ -9091,8 +9091,8 @@ impl<C: Clock, S: Storage> Transport<C, S> {
             // Always emit ProofRequested. NodeCore decides based on strategy.
             // Not for hash-free link data: the destination here is a link id,
             // which is never one of `NodeCore::destinations`, so the strategy
-            // lookup there is always `None` and the event is a no-op; the link
-            // layer proves Channel records itself, bound to the AEAD tag.
+            // lookup there is always `None` and the event is a no-op; tunnel
+            // datagrams are never proven.
             if !hash_free {
                 self.events.push(TransportEvent::ProofRequested {
                     packet_hash: full_packet_hash,
@@ -9196,8 +9196,7 @@ impl<C: Clock, S: Storage> Transport<C, S> {
                 };
 
                 // Populate reverse table for link-routed data packets. Not for
-                // hash-free Channel data: its proofs are addressed to the link
-                // id and found in the link table (`handle_proof`), so a reverse
+                // hash-free tunnel data: it is never proven, so a reverse
                 // entry keyed by the packet hash would never be read.
                 let now = self.clock.now_ms();
                 if !hash_free {
@@ -27791,15 +27790,15 @@ mod tests {
             out
         }
 
-        /// The bulk-link hot path: a relay forwards Channel records without
+        /// The bulk-link hot path: a relay forwards tunnel datagrams without
         /// hashing the payload, leaves no table entry keyed by a hash, and a
         /// byte-identical retransmission is forwarded again, as before.
         #[test]
-        fn test_channel_data_relay_forwards_without_hashing() {
+        fn test_tunnel_data_relay_forwards_without_hashing() {
             let _journey_off = journey_override::JourneyOff::new();
             let link_id = [0xC1; TRUNCATED_HASHBYTES];
             let mut transport = relay_with_link(link_id);
-            let raw = link_packet_with_context(link_id, PacketContext::Channel);
+            let raw = link_packet_with_context(link_id, PacketContext::Tunnel);
 
             for round in 0..2 {
                 transport.process_incoming(0, &raw).unwrap();
@@ -27808,21 +27807,21 @@ mod tests {
                     .iter()
                     .filter(|a| matches!(a, Action::SendPacket { iface, .. } if iface.0 == 1))
                     .count();
-                assert_eq!(sent, 1, "round {round}: Channel record must be forwarded");
+                assert_eq!(sent, 1, "round {round}: tunnel datagram must be forwarded");
             }
             assert_eq!(transport.storage().packet_hash_count(), 0, "no hash may be inserted");
             assert!(
                 transport.storage().get_reverse(&truncated_packet_hash_of(&raw)).is_none(),
-                "no reverse entry: Channel proofs ride the link table"
+                "no reverse entry: tunnel datagrams are never proven"
             );
             assert_eq!(transport.stats().packets_forwarded, 2);
         }
 
         /// The neighbouring classes must keep their hash bookkeeping exactly.
         #[test]
-        fn test_non_channel_link_data_relay_still_hashes() {
+        fn test_non_tunnel_link_data_relay_still_hashes() {
             let _journey_off = journey_override::JourneyOff::new();
-            for context in [PacketContext::Resource, PacketContext::Keepalive, PacketContext::None] {
+            for context in [PacketContext::Channel, PacketContext::Resource, PacketContext::Keepalive, PacketContext::None] {
                 let link_id = [0xC2; TRUNCATED_HASHBYTES];
                 let mut transport = relay_with_link(link_id);
                 let raw = link_packet_with_context(link_id, context);
@@ -27836,14 +27835,15 @@ mod tests {
             }
         }
 
-        /// Local delivery of a Channel record carries no hash and requests no
+        /// Local delivery of a tunnel datagram carries no hash and requests no
         /// proof from the destination layer; any other link context still does.
         #[test]
-        fn test_channel_data_local_delivery_carries_no_hash() {
+        fn test_tunnel_data_local_delivery_carries_no_hash() {
             let _journey_off = journey_override::JourneyOff::new();
             let link_id = [0xC3; TRUNCATED_HASHBYTES];
             for (context, hash_free) in [
-                (PacketContext::Channel, true),
+                (PacketContext::Tunnel, true),
+                (PacketContext::Channel, false),
                 (PacketContext::Resource, false),
                 (PacketContext::None, false),
             ] {
@@ -27870,16 +27870,16 @@ mod tests {
             }
         }
 
-        /// A Channel record for a link nobody here holds is handed up unhashed
+        /// A tunnel datagram for a link nobody here holds is handed up unhashed
         /// (the node layer drops it as `link-data-no-link`), not cached.
         #[test]
-        fn test_channel_data_for_unknown_link_is_handed_up_unhashed() {
+        fn test_tunnel_data_for_unknown_link_is_handed_up_unhashed() {
             let _journey_off = journey_override::JourneyOff::new();
             // A non-transport node: link-addressed data it neither relays nor owns.
             let mut transport = make_transport_enabled();
             transport.config.enable_transport = false;
             let _ = transport.register_interface(Box::new(MockInterface::new("if0", 1)));
-            let raw = link_packet_with_context([0xC4; TRUNCATED_HASHBYTES], PacketContext::Channel);
+            let raw = link_packet_with_context([0xC4; TRUNCATED_HASHBYTES], PacketContext::Tunnel);
             transport.process_incoming(0, &raw).unwrap();
             let events: Vec<_> = transport.drain_events().collect();
             assert!(events.iter().any(|e| matches!(
@@ -27893,14 +27893,14 @@ mod tests {
         /// correlator needs it), so it is used exactly as before: still no extra
         /// hashing, and nothing downstream sees a placeholder.
         #[test]
-        fn test_channel_data_keeps_its_hash_while_the_journey_target_is_on() {
+        fn test_tunnel_data_keeps_its_hash_while_the_journey_target_is_on() {
             // No JourneyOff here: the process-global capture subscriber (or the
             // real one in production) is what turns the target on.
             crate::test_log_capture::with_captured_logs(|| {
                 let link_id = [0xC5; TRUNCATED_HASHBYTES];
                 let mut transport = relay_with_link(link_id);
                 assert!(transport.pkt_journey_enabled(), "capture subscriber must enable it");
-                let raw = link_packet_with_context(link_id, PacketContext::Channel);
+                let raw = link_packet_with_context(link_id, PacketContext::Tunnel);
                 transport.process_incoming(0, &raw).unwrap();
                 assert_eq!(transport.stats().packets_forwarded, 1);
                 assert_eq!(transport.storage().packet_hash_count(), 1);
